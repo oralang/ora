@@ -26,10 +26,27 @@ const diagnosticMessagesContain = h.diagnosticMessagesContain;
 const countDiagnosticMessages = h.countDiagnosticMessages;
 const DiagnosticProbePhase = h.DiagnosticProbePhase;
 const expectDiagnosticProbeContains = h.expectDiagnosticProbeContains;
+const containsEffectSlot = h.containsEffectSlot;
 const containsFieldEffectSlot = h.containsFieldEffectSlot;
 const containsKeyedEffectSlot = h.containsKeyedEffectSlot;
 const nthDescendantNodeOfKind = h.nthDescendantNodeOfKind;
 const nthDescendantNodeOfKindInner = h.nthDescendantNodeOfKindInner;
+
+fn expectEffectSlotPath(slot: compiler.sema.EffectSlot, expected: []const u8) !void {
+    const path = try compiler.sema.formatEffectSlotPath(testing.allocator, slot);
+    defer testing.allocator.free(path);
+    try testing.expectEqualStrings(expected, path);
+}
+
+fn firstContract(ast_file: *const compiler.ast.AstFile) !compiler.ast.ContractItem {
+    for (ast_file.root_items) |item_id| {
+        switch (ast_file.item(item_id).*) {
+            .Contract => |contract| return contract,
+            else => {},
+        }
+    }
+    return error.TestUnexpectedResult;
+}
 
 test "compiler lowers ensures on implicit void returns" {
     const source_text =
@@ -56,6 +73,8 @@ test "compiler lowers ensures on implicit void returns" {
 
 test "compiler accepts v1 modifies storage paths" {
     const source_text =
+        \\comptime const std_storage = @import("std/storage");
+        \\
         \\contract Vault {
         \\    struct Config {
         \\        owner: address,
@@ -75,6 +94,7 @@ test "compiler accepts v1 modifies storage paths" {
         \\        modifies balances[tx.origin]
         \\        modifies buckets[42]
         \\        modifies allowances[owner][spender]
+        \\        modifies std_storage.range(std_storage.derive("ora.test.modifies.computed", msg.sender, value), 4)
         \\        ensures total == value
         \\    {
         \\        total = value;
@@ -209,7 +229,7 @@ test "compiler enforces modifies declarations against storage writes" {
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     const ast_file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
-    const contract = ast_file.item(ast_file.root_items[0]).Contract;
+    const contract = try firstContract(ast_file);
     var wrong_param: ?compiler.ast.ItemId = null;
     var wrong_sender_origin: ?compiler.ast.ItemId = null;
     var wrong_field: ?compiler.ast.ItemId = null;
@@ -245,7 +265,7 @@ test "compiler enforces modifies declarations against storage writes" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to 'config.admin' is not covered by this function's `modifies` clause"));
 }
 
-test "compiler matches modifies environment keys through direct uses and immutable local aliases" {
+test "compiler matches modifies environment keys through direct uses and stable let or const local aliases" {
     const source_text =
         \\contract Vault {
         \\    storage balances: map<address, u256>;
@@ -287,6 +307,144 @@ test "compiler matches modifies environment keys through direct uses and immutab
     try testing.expect(typecheck.diagnostics.isEmpty());
 }
 
+test "compiler rejects assignment to let and const local bindings" {
+    const source_text =
+        \\contract Vault {
+        \\    pub fn bad_let() -> u256 {
+        \\        let fixed: u256 = 1;
+        \\        fixed = 2;
+        \\        return fixed;
+        \\    }
+        \\
+        \\    pub fn bad_const() -> u256 {
+        \\        const fixed: u256 = 1;
+        \\        fixed += 2;
+        \\        return fixed;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot assign to local 'fixed' declared with 'let'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot assign to local 'fixed' declared with 'const'"));
+}
+
+test "compiler permits var local reassignment" {
+    const source_text =
+        \\contract Vault {
+        \\    pub fn ok() -> u256 {
+        \\        var mutable: u256 = 1;
+        \\        mutable = 2;
+        \\        mutable += 1;
+        \\        return mutable;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
+test "compiler rejects assignment to non-var storage fields" {
+    const source_text =
+        \\struct Config {
+        \\    value: u256,
+        \\}
+        \\
+        \\contract Vault {
+        \\    storage let fixed: u256;
+        \\    storage const capped: u256 = 1;
+        \\    storage let config: Config;
+        \\    storage let balances: map<address, u256>;
+        \\    tstore let scratch: u256;
+        \\
+        \\    pub fn bad_direct(next: u256) {
+        \\        fixed = next;
+        \\    }
+        \\
+        \\    pub fn bad_const(next: u256) {
+        \\        capped = next;
+        \\    }
+        \\
+        \\    pub fn bad_field(next: u256) {
+        \\        config.value = next;
+        \\    }
+        \\
+        \\    pub fn bad_index(who: address, next: u256) {
+        \\        balances[who] = next;
+        \\    }
+        \\
+        \\    pub fn bad_transient(next: u256) {
+        \\        scratch = next;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot assign to storage variable 'fixed' declared with 'let'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot assign to storage variable 'capped' declared with 'const'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot assign to storage variable 'config' declared with 'let'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot assign to storage variable 'balances' declared with 'let'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot assign to transient variable 'scratch' declared with 'let'"));
+}
+
+test "compiler permits storage var assignment" {
+    const source_text =
+        \\struct Config {
+        \\    value: u256,
+        \\}
+        \\
+        \\contract Vault {
+        \\    storage var fixed: u256;
+        \\    storage var config: Config;
+        \\    storage var balances: map<address, u256>;
+        \\
+        \\    pub fn ok(who: address, next: u256) {
+        \\        fixed = next;
+        \\        config.value = next;
+        \\        balances[who] = next;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
+test "compiler rejects reassigned stable modifies aliases" {
+    const source_text =
+        \\contract Vault {
+        \\    storage balances: map<address, u256>;
+        \\
+        \\    pub fn bad(other: address, value: u256)
+        \\        modifies balances[msg.sender]
+        \\    {
+        \\        let sender: address = std.msg.sender();
+        \\        sender = other;
+        \\        balances[sender] = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot assign to local 'sender' declared with 'let'"));
+}
+
 test "compiler does not match modifies environment keys through mutable local aliases" {
     const source_text =
         \\contract Vault {
@@ -306,6 +464,456 @@ test "compiler does not match modifies environment keys through mutable local al
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to 'balances[?]' is not covered by this function's `modifies` clause"));
+}
+
+test "compiler records computed storage builtins as read and write effects" {
+    const source_text =
+        \\contract Vault {
+        \\    pub fn load(owner: address, offset: u256) -> u256 {
+        \\        let slot: StorageSlot = @storageDerive("fixed.v1", owner);
+        \\        return @storageWordLoad(slot, offset);
+        \\    }
+        \\
+        \\    pub fn store(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("fixed.v1", owner), 3)
+        \\    {
+        \\        let slot: StorageSlot = @storageDerive("fixed.v1", owner);
+        \\        @storageWordStore(slot, 1, value);
+        \\    }
+        \\
+        \\    pub fn clear(owner: address)
+        \\        modifies @storageRange(@storageDerive("fixed.v1", owner), 3)
+        \\    {
+        \\        let slot: StorageSlot = @storageDerive("fixed.v1", owner);
+        \\        let range: StorageRange = @storageRange(slot, 3);
+        \\        @storageRangeErase(range);
+        \\    }
+        \\
+        \\    fn opaque(slot: StorageSlot, value: u256) {
+        \\        @storageWordStore(slot, 0, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+    const ast_file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+    const contract = try firstContract(ast_file);
+
+    var load: ?compiler.ast.ItemId = null;
+    var store: ?compiler.ast.ItemId = null;
+    var clear: ?compiler.ast.ItemId = null;
+    var opaque_fn: ?compiler.ast.ItemId = null;
+    for (contract.members) |member_id| {
+        switch (ast_file.item(member_id).*) {
+            .Function => |function| {
+                if (std.mem.eql(u8, function.name, "load")) load = member_id;
+                if (std.mem.eql(u8, function.name, "store")) store = member_id;
+                if (std.mem.eql(u8, function.name, "clear")) clear = member_id;
+                if (std.mem.eql(u8, function.name, "opaque")) opaque_fn = member_id;
+            },
+            else => {},
+        }
+    }
+
+    switch (typecheck.itemEffect(load.?)) {
+        .reads => |effect| {
+            try testing.expectEqual(@as(usize, 1), effect.slots.len);
+            try expectEffectSlotPath(effect.slots[0], "$computed_storage[fixed.v1][param#0][param#1]");
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (typecheck.itemEffect(store.?)) {
+        .writes => |effect| {
+            try testing.expectEqual(@as(usize, 1), effect.slots.len);
+            try expectEffectSlotPath(effect.slots[0], "$computed_storage[fixed.v1][param#0][1]");
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (typecheck.itemEffect(clear.?)) {
+        .writes => |effect| {
+            try testing.expectEqual(@as(usize, 1), effect.slots.len);
+            try expectEffectSlotPath(effect.slots[0], "$computed_storage[fixed.v1][param#0][0..3]");
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (typecheck.itemEffect(opaque_fn.?)) {
+        .writes => |effect| {
+            try testing.expect(containsEffectSlot(effect.slots, "$computed_storage", .storage));
+            try testing.expectEqual(@as(usize, 1), effect.slots.len);
+            try expectEffectSlotPath(effect.slots[0], "$computed_storage[param#0][0]");
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "compiler rejects computed storage writes not covered by modifies" {
+    const source_text =
+        \\contract Vault {
+        \\    storage total: u256 = 0;
+        \\
+        \\    pub fn wrong(owner: address, value: u256)
+        \\        modifies total
+        \\    {
+        \\        let slot: StorageSlot = @storageDerive("fixed.v1", owner);
+        \\        @storageWordStore(slot, 0, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to '$computed_storage"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "is not covered by this function's `modifies` clause"));
+}
+
+test "compiler rejects public computed storage writes without modifies" {
+    const source_text =
+        \\contract Vault {
+        \\    pub fn missing(owner: address, value: u256) {
+        \\        let slot: StorageSlot = @storageDerive("fixed.v1", owner);
+        \\        @storageWordStore(slot, 0, value);
+        \\    }
+        \\
+        \\    fn private_helper(owner: address, value: u256) {
+        \\        let slot: StorageSlot = @storageDerive("fixed.v1", owner);
+        \\        @storageWordStore(slot, 0, value);
+        \\    }
+        \\
+        \\    pub fn ok(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("fixed.v1", owner), 1)
+        \\    {
+        \\        private_helper(owner, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "computed storage write to '$computed_storage"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "requires a `modifies` computed storage range"));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(&typecheck.diagnostics, "computed storage write to '$computed_storage[fixed.v1][owner][0]' requires a `modifies` computed storage range"));
+}
+
+test "compiler supports bounded computed storage modifies ranges" {
+    const source_text =
+        \\comptime const std_storage = @import("std/storage");
+        \\
+        \\contract Vault {
+        \\    pub fn ok(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("fixed.v1", owner), 1)
+        \\    {
+        \\        let slot: StorageSlot = @storageDerive("fixed.v1", owner);
+        \\        @storageWordStore(slot, 0, value);
+        \\    }
+        \\
+        \\    pub fn ok_std(owner: address, value: u256)
+        \\        modifies std_storage.range(std_storage.derive("fixed.std", owner), 2)
+        \\    {
+        \\        let slot: StorageSlot = std_storage.derive("fixed.std", owner);
+        \\        std_storage.words.store(slot, 1, value);
+        \\    }
+        \\
+        \\    pub fn wrong_namespace(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("fixed.other", owner), 1)
+        \\    {
+        \\        let slot: StorageSlot = @storageDerive("fixed.v1", owner);
+        \\        @storageWordStore(slot, 0, value);
+        \\    }
+        \\
+        \\    pub fn unbounded(owner: address, len: u256, value: u256)
+        \\        modifies @storageRange(@storageDerive("fixed.v1", owner), len)
+        \\    {
+        \\        let slot: StorageSlot = @storageDerive("fixed.v1", owner);
+        \\        @storageWordStore(slot, 0, value);
+        \\    }
+        \\
+        \\    pub fn unbounded_std(owner: address, len: u256, value: u256)
+        \\        modifies std_storage.range(std_storage.derive("fixed.std", owner), len)
+        \\    {
+        \\        let slot: StorageSlot = std_storage.derive("fixed.std", owner);
+        \\        std_storage.words.store(slot, 0, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+    const contract = try firstContract(ast_file);
+
+    var ok: ?compiler.ast.ItemId = null;
+    var ok_std: ?compiler.ast.ItemId = null;
+    for (contract.members) |member_id| {
+        switch (ast_file.item(member_id).*) {
+            .Function => |function| {
+                if (std.mem.eql(u8, function.name, "ok")) ok = member_id;
+                if (std.mem.eql(u8, function.name, "ok_std")) ok_std = member_id;
+            },
+            else => {},
+        }
+    }
+
+    switch (typecheck.itemEffect(ok.?)) {
+        .writes => |effect| {
+            try testing.expectEqual(@as(usize, 1), effect.slots.len);
+            try expectEffectSlotPath(effect.slots[0], "$computed_storage[fixed.v1][param#0][0]");
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (typecheck.itemEffect(ok_std.?)) {
+        .writes => |effect| {
+            try testing.expectEqual(@as(usize, 1), effect.slots.len);
+            try expectEffectSlotPath(effect.slots[0], "$computed_storage[fixed.std][param#0][1]");
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to '$computed_storage"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "is not covered by this function's `modifies` clause"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`modifies` computed storage ranges require a literal bounded word count in v1"));
+}
+
+test "compiler rejects computed storage writes outside declared bounded range" {
+    const source_text =
+        \\contract Vault {
+        \\    pub fn wrong(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("fixed.v1", owner), 1)
+        \\    {
+        \\        let slot: StorageSlot = @storageDerive("fixed.v1", owner);
+        \\        @storageWordStore(slot, 1, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to '$computed_storage"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "[1]' is not covered by this function's `modifies` clause"));
+}
+
+test "compiler rejects computed storage writes with unknown offsets under bounded ranges" {
+    const source_text =
+        \\contract Vault {
+        \\    pub fn wrong(owner: address, offset: u256, value: u256)
+        \\        modifies @storageRange(@storageDerive("fixed.v1", owner), 1)
+        \\    {
+        \\        let slot: StorageSlot = @storageDerive("fixed.v1", owner);
+        \\        @storageWordStore(slot, offset + 1, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to '$computed_storage"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "[?]' is not covered by this function's `modifies` clause"));
+}
+
+test "compiler rejects fixed size data helper writes outside declared bounded range" {
+    const source_text =
+        \\comptime const std_storage = @import("std/storage");
+        \\comptime const fixed = @import("std/storage/fixed_size_data");
+        \\
+        \\contract Vault {
+        \\    pub fn wrong(owner: address, first: u256, second: u256, third: u256)
+        \\        modifies std_storage.range(std_storage.derive("fixed.v1", owner), 2)
+        \\    {
+        \\        let slot: StorageSlot = std_storage.derive("fixed.v1", owner);
+        \\        let data: [u256; 3] = [first, second, third];
+        \\        fixed.store(slot, data);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to '$computed_storage"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "[0..3]' is not covered by this function's `modifies` clause"));
+}
+
+test "compiler substitutes computed storage slot arguments through helper effects" {
+    const source_text =
+        \\contract Vault {
+        \\    fn write(slot: StorageSlot, value: u256) {
+        \\        @storageWordStore(slot, 0, value);
+        \\    }
+        \\
+        \\    pub fn ok(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("fixed.v1", owner), 1)
+        \\    {
+        \\        let slot: StorageSlot = @storageDerive("fixed.v1", owner);
+        \\        write(slot, value);
+        \\    }
+        \\
+        \\    pub fn wrong(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("fixed.other", owner), 1)
+        \\    {
+        \\        let slot: StorageSlot = @storageDerive("fixed.v1", owner);
+        \\        write(slot, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+    const contract = try firstContract(ast_file);
+
+    var ok: ?compiler.ast.ItemId = null;
+    for (contract.members) |member_id| {
+        switch (ast_file.item(member_id).*) {
+            .Function => |function| {
+                if (std.mem.eql(u8, function.name, "ok")) ok = member_id;
+            },
+            else => {},
+        }
+    }
+
+    switch (typecheck.itemEffect(ok.?)) {
+        .writes => |effect| {
+            try testing.expectEqual(@as(usize, 1), effect.slots.len);
+            try expectEffectSlotPath(effect.slots[0], "$computed_storage[fixed.v1][param#0][0]");
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to '$computed_storage"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "is not covered by this function's `modifies` clause"));
+}
+
+test "compiler substitutes imported computed storage helper effects" {
+    const source_text =
+        \\comptime const std_storage = @import("std/storage");
+        \\
+        \\contract Vault {
+        \\    pub fn ok(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("fixed.v1", owner), 1)
+        \\    {
+        \\        let slot: StorageSlot = @storageDerive("fixed.v1", owner);
+        \\        std_storage.words.store(slot, 0, value);
+        \\    }
+        \\
+        \\    pub fn clear(owner: address)
+        \\        modifies @storageRange(@storageDerive("fixed.v1", owner), 2)
+        \\    {
+        \\        let slot: StorageSlot = @storageDerive("fixed.v1", owner);
+        \\        let range: StorageRange = std_storage.range(slot, 2);
+        \\        std_storage.words.erase(range);
+        \\    }
+        \\
+        \\    pub fn wrong(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("fixed.other", owner), 1)
+        \\    {
+        \\        let slot: StorageSlot = @storageDerive("fixed.v1", owner);
+        \\        std_storage.words.store(slot, 0, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+    const contract = try firstContract(ast_file);
+
+    var ok: ?compiler.ast.ItemId = null;
+    var clear: ?compiler.ast.ItemId = null;
+    for (contract.members) |member_id| {
+        switch (ast_file.item(member_id).*) {
+            .Function => |function| {
+                if (std.mem.eql(u8, function.name, "ok")) ok = member_id;
+                if (std.mem.eql(u8, function.name, "clear")) clear = member_id;
+            },
+            else => {},
+        }
+    }
+
+    switch (typecheck.itemEffect(ok.?)) {
+        .writes => |effect| {
+            try testing.expectEqual(@as(usize, 1), effect.slots.len);
+            try expectEffectSlotPath(effect.slots[0], "$computed_storage[fixed.v1][param#0][0]");
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (typecheck.itemEffect(clear.?)) {
+        .writes => |effect| {
+            try testing.expectEqual(@as(usize, 1), effect.slots.len);
+            try expectEffectSlotPath(effect.slots[0], "$computed_storage[fixed.v1][param#0][0..2]");
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to '$computed_storage"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "is not covered by this function's `modifies` clause"));
+}
+
+test "compiler preserves computed storage slots returned by private helpers in effects" {
+    const source_text =
+        \\contract Vault {
+        \\    fn slotFor(owner: address) -> StorageSlot {
+        \\        let slot: StorageSlot = @storageDerive("fixed.helper", owner);
+        \\        return slot;
+        \\    }
+        \\
+        \\    pub fn ok(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("fixed.helper", owner), 1)
+        \\    {
+        \\        let slot: StorageSlot = slotFor(owner);
+        \\        @storageWordStore(slot, 0, value);
+        \\    }
+        \\
+        \\    pub fn wrong(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("fixed.other", owner), 1)
+        \\    {
+        \\        let slot: StorageSlot = slotFor(owner);
+        \\        @storageWordStore(slot, 0, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+    const contract = try firstContract(ast_file);
+
+    var ok: ?compiler.ast.ItemId = null;
+    for (contract.members) |member_id| {
+        switch (ast_file.item(member_id).*) {
+            .Function => |function| {
+                if (std.mem.eql(u8, function.name, "ok")) ok = member_id;
+            },
+            else => {},
+        }
+    }
+
+    switch (typecheck.itemEffect(ok.?)) {
+        .writes => |effect| {
+            try testing.expectEqual(@as(usize, 1), effect.slots.len);
+            try expectEffectSlotPath(effect.slots[0], "$computed_storage[fixed.helper][param#0][0]");
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to '$computed_storage"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "is not covered by this function's `modifies` clause"));
 }
 
 test "compiler treats modifies empty form as no storage writes" {
@@ -333,6 +941,52 @@ test "compiler treats modifies empty form as no storage writes" {
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to 'total' is not covered by this function's `modifies` clause"));
+}
+
+test "compiler propagates inline storage writes into caller modifies checks" {
+    const accepted_source =
+        \\contract Vault {
+        \\    storage total: u256 = 0;
+        \\
+        \\    inline fn writeTotal(value: u256) {
+        \\        total = value;
+        \\    }
+        \\
+        \\    pub fn ok(value: u256)
+        \\        modifies total
+        \\    {
+        \\        writeTotal(value);
+        \\    }
+        \\}
+    ;
+
+    var accepted = try compileText(accepted_source);
+    defer accepted.deinit();
+
+    const accepted_typecheck = try accepted.db.moduleTypeCheck(accepted.root_module_id);
+    try testing.expect(accepted_typecheck.diagnostics.isEmpty());
+
+    const rejected_source =
+        \\contract Vault {
+        \\    storage total: u256 = 0;
+        \\
+        \\    inline fn writeTotal(value: u256) {
+        \\        total = value;
+        \\    }
+        \\
+        \\    pub fn missing(value: u256)
+        \\        modifies()
+        \\    {
+        \\        writeTotal(value);
+        \\    }
+        \\}
+    ;
+
+    var rejected = try compileText(rejected_source);
+    defer rejected.deinit();
+
+    const rejected_typecheck = try rejected.db.moduleTypeCheck(rejected.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&rejected_typecheck.diagnostics, "storage write to 'total' is not covered by this function's `modifies` clause"));
 }
 
 test "compiler rejects modifies empty form combined with non-empty clauses" {
@@ -965,7 +1619,7 @@ test "compiler lowers ghost items into ghost AST nodes" {
 
     const module = compilation.db.sources.module(compilation.root_module_id);
     const ast_file = try compilation.db.astFile(module.file_id);
-    const contract = ast_file.item(ast_file.root_items[0]).Contract;
+    const contract = try firstContract(ast_file);
     try testing.expectEqual(@as(usize, 4), contract.members.len);
 
     const ghost_const = ast_file.item(contract.members[0]).Constant;

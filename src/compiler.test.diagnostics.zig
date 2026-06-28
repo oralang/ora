@@ -37,6 +37,43 @@ fn pathFromTmpAlloc(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, rel_p
     return std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, rel_path });
 }
 
+fn runOraProcess(allocator: std.mem.Allocator, argv: []const []const u8) !std.process.RunResult {
+    var io_thread = std.Io.Threaded.init(allocator, .{
+        .async_limit = .nothing,
+        .concurrent_limit = .nothing,
+    });
+    defer io_thread.deinit();
+
+    return std.process.run(allocator, io_thread.io(), .{
+        .argv = argv,
+        .stdout_limit = std.Io.Limit.limited(1024 * 1024),
+        .stderr_limit = std.Io.Limit.limited(1024 * 1024),
+    });
+}
+
+fn expectOraCommandFailsWithoutArtifacts(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    expected_message: []const u8,
+    tmp: *std.testing.TmpDir,
+    missing_artifacts: []const []const u8,
+) !void {
+    const result = try runOraProcess(allocator, argv);
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| try testing.expect(code != 0),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, expected_message) or
+        std.mem.containsAtLeast(u8, result.stderr, 1, expected_message));
+
+    for (missing_artifacts) |artifact_path| {
+        try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, artifact_path, .{}));
+    }
+}
+
 fn expectSingleUndefinedBogusTypeDiagnostic(source_text: []const u8) !void {
     var compilation = try compileText(source_text);
     defer compilation.deinit();
@@ -580,8 +617,653 @@ test "compiler reports unsupported storage Result payload shapes" {
     );
 }
 
-test "compiler abi emit barrier rejects undefined types without artifacts" {
-    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+test "compiler rejects opaque computed-storage capability types at unsafe boundaries" {
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn leak(slot: StorageSlot) {}
+        \\}
+    , .typecheck, "public function parameter 'slot' cannot expose opaque runtime capability type 'StorageSlot'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn leak() -> StorageRange {}
+        \\}
+    , .typecheck, "public function 'leak' cannot expose opaque runtime capability return type 'StorageRange'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    storage var slot: StorageSlot;
+        \\}
+    , .typecheck, "storage declarations cannot use opaque storage capability type 'StorageSlot'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    storage var indexed: map<StorageSlot, u256>;
+        \\}
+    , .typecheck, "storage declarations cannot use opaque storage capability type 'map<StorageSlot, u256>'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(raw: u256) {
+        \\        let slot: StorageSlot = @cast(StorageSlot, raw);
+        \\    }
+        \\}
+    , .typecheck, "@cast cannot construct opaque runtime capability type 'StorageSlot'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(raw: u256) {
+        \\        let slot: StorageSlot = @bitCast(StorageSlot, raw);
+        \\    }
+        \\}
+    , .typecheck, "@bitCast cannot construct opaque runtime capability type 'StorageSlot'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(owner: address) -> u256 {
+        \\        let slot: StorageSlot = @storageDerive("vault.payload", owner);
+        \\        return @cast(u256, slot);
+        \\    }
+        \\}
+    , .typecheck, "@cast cannot reinterpret opaque runtime capability type 'StorageSlot'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(owner: address) -> u256 {
+        \\        let slot: StorageSlot = @storageDerive("vault.payload", owner);
+        \\        return @truncate(u256, slot);
+        \\    }
+        \\}
+    , .typecheck, "@truncate cannot reinterpret opaque runtime capability type 'StorageSlot'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(owner: address) -> u256 {
+        \\        let slot: StorageSlot = @storageDerive("vault.payload", owner);
+        \\        let next = slot + 1;
+        \\        return 0;
+        \\    }
+        \\}
+    , .typecheck, "invalid binary operator '+' for types 'StorageSlot' and 'integer'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(owner: address) -> bool {
+        \\        let slot: StorageSlot = @storageDerive("vault.payload", owner);
+        \\        return slot == slot;
+        \\    }
+        \\}
+    , .typecheck, "invalid binary operator '==' for types 'StorageSlot' and 'StorageSlot'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(owner: address) {
+        \\        let ns = "vault.dynamic";
+        \\        let slot: StorageSlot = @storageDerive(ns, owner);
+        \\    }
+        \\}
+    , .typecheck, "@storageDerive namespace must be a string literal");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(key: string) {
+        \\        let slot: StorageSlot = @storageDerive("vault.dynamic", key);
+        \\    }
+        \\}
+    , .typecheck, "@storageDerive key type 'string' is not supported");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(raw: u256) -> u256 {
+        \\        return @storageWordLoad(raw, 0);
+        \\    }
+        \\}
+    , .typecheck, "@storageWordLoad expects StorageSlot as its first argument, found 'u256'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(raw: u256) {
+        \\        @storageWordStore(raw, 0, 1);
+        \\    }
+        \\}
+    , .typecheck, "@storageWordStore expects StorageSlot as its first argument, found 'u256'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(raw: u256) {
+        \\        let range: StorageRange = @storageRange(raw, 2);
+        \\    }
+        \\}
+    , .typecheck, "@storageRange expects StorageSlot as its first argument, found 'u256'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(raw: u256) {
+        \\        @storageRangeErase(raw);
+        \\    }
+        \\}
+    , .typecheck, "@storageRangeErase expects StorageRange, found 'u256'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(owner: address, len: u256) {
+        \\        let slot: StorageSlot = @storageDerive("vault.dynamic", owner);
+        \\        let range: StorageRange = @storageRange(slot, len);
+        \\        @storageRangeErase(range);
+        \\    }
+        \\}
+    , .typecheck, "@storageRange length must be a compile-time integer literal or comptime integer parameter");
+
+    try expectDiagnosticProbeContains(
+        \\comptime const std_storage = @import("std/storage");
+        \\
+        \\contract Vault {
+        \\    pub fn bad(owner: address, len: u256) {
+        \\        let slot: StorageSlot = std_storage.derive("vault.dynamic", owner);
+        \\        let range: StorageRange = std_storage.range(slot, len);
+        \\        @storageRangeErase(range);
+        \\    }
+        \\}
+    , .typecheck, "std.storage.range length must be a compile-time integer literal or comptime integer parameter");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    struct Payload { value: u256 }
+        \\
+        \\    pub fn bad(owner: address, payload: Payload) {
+        \\        let slot: StorageSlot = @storageDerive("vault.payload", owner);
+        \\        @storageWordStore(slot, 0, payload);
+        \\    }
+        \\}
+    , .typecheck, "@storageWordStore value must be an integer-compatible word");
+}
+
+test "compiler accepts resource domains and storage resource places" {
+    const source_text =
+        \\resource TokenUnit = u256;
+        \\resource ShareUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\    storage var reserve: Resource<TokenUnit>;
+        \\    log Transfer(to: address, amount: TokenUnit);
+        \\
+        \\    pub fn identity(amount: TokenUnit) -> TokenUnit {
+        \\        return amount;
+        \\    }
+        \\
+        \\    pub fn literal() -> TokenUnit {
+        \\        return 10;
+        \\    }
+        \\
+        \\    pub fn balanceOf(owner: address) -> TokenUnit {
+        \\        return balances[owner];
+        \\    }
+        \\
+        \\    pub fn reserveBalance() -> TokenUnit {
+        \\        return reserve;
+        \\    }
+        \\
+        \\    fn addSameDomain(lhs: TokenUnit, rhs: TokenUnit) -> TokenUnit {
+        \\        let one: TokenUnit = 1;
+        \\        return lhs + rhs + one;
+        \\    }
+        \\
+        \\    pub fn announce(to: address, amount: TokenUnit) {
+        \\        log Transfer(to, amount);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
+test "compiler rejects invalid resource declarations and first-class resource places" {
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = bool;
+    , .typecheck, "resource carrier for 'TokenUnit' must be an integer type, found 'bool'");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = TokenUnit;
+    , .typecheck, "recursive resource declaration 'TokenUnit' is not supported");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<u256>>;
+        \\}
+    , .typecheck, "Resource<T> expects a resource-domain type argument, found 'u256'");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<Resource<TokenUnit>>>;
+        \\}
+    , .typecheck, "Resource<T> expects a resource-domain type argument, found 'Resource<TokenUnit>'");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    pub fn expose(place: Resource<TokenUnit>) {}
+        \\}
+    , .typecheck, "public function parameter 'place' cannot expose opaque runtime capability type 'Resource<TokenUnit>'");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    fn local(place: Resource<TokenUnit>) {}
+        \\}
+    , .typecheck, "function parameter 'place' cannot have resource place type 'Resource<TokenUnit>' as a runtime value");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    log Bad(place: Resource<TokenUnit>);
+        \\}
+    , .typecheck, "log field 'place' cannot expose opaque runtime capability type 'Resource<TokenUnit>'");
+
+    try expectDiagnosticProbeContains(
+        \\resource USDC = u256;
+        \\resource DAI = u256;
+        \\
+        \\fn bad(lhs: USDC, rhs: DAI) -> USDC {
+        \\    return lhs + rhs;
+        \\}
+    , .typecheck, "invalid binary operator '+' for types 'USDC' and 'DAI'");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\fn bad(lhs: TokenUnit, rhs: u256) -> TokenUnit {
+        \\    return lhs + rhs;
+        \\}
+    , .typecheck, "invalid binary operator '+' for types 'TokenUnit' and 'u256'");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\fn bad(raw: u256) -> TokenUnit {
+        \\    let amount: TokenUnit = raw;
+        \\    return amount;
+        \\}
+    , .typecheck, "declaration expects type 'TokenUnit', found 'u256'");
+}
+
+test "compiler validates resource move create and destroy builtins" {
+    const source_text =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn transfer(from: address, to: address, amount: TokenUnit) {
+        \\        @move(balances[from], balances[to], amount);
+        \\    }
+        \\
+        \\    pub fn issue(to: address, amount: TokenUnit) {
+        \\        @create(balances[to], amount);
+        \\    }
+        \\
+        \\    pub fn retire(from: address, amount: TokenUnit) {
+        \\        @destroy(balances[from], amount);
+        \\    }
+        \\
+        \\    pub fn balanceOf(owner: address) -> TokenUnit {
+        \\        return balances[owner];
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
+test "compiler rejects invalid resource builtin calls" {
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(from: address, to: address) {
+        \\        @move(balances[from], balances[to]);
+        \\    }
+        \\}
+    , .typecheck, "@move expects 3 arguments");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(to: address, amount: TokenUnit) {
+        \\        @move(amount, balances[to], amount);
+        \\    }
+        \\}
+    , .typecheck, "@move expects Resource<T> places as its first two arguments");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    pub fn bad(amount: TokenUnit) {
+        \\        @create(amount, amount);
+        \\    }
+        \\}
+    , .typecheck, "@create expects a Resource<T> place as its first argument");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    pub fn bad(amount: TokenUnit) {
+        \\        @destroy(amount, amount);
+        \\    }
+        \\}
+    , .typecheck, "@destroy expects a Resource<T> place as its first argument");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\struct Bucket {
+        \\    balance: Resource<TokenUnit>;
+        \\}
+        \\
+        \\contract Vault {
+        \\    storage var buckets: map<address, Bucket>;
+        \\
+        \\    pub fn bad(owner: address, amount: TokenUnit) {
+        \\        @create(buckets[owner].balance, amount);
+        \\    }
+        \\}
+    , .typecheck, "resource struct-field places inside maps are not supported yet; use a direct storage Resource<T> root, direct struct field, or map value resource place");
+
+    try expectDiagnosticProbeContains(
+        \\resource USDC = u256;
+        \\resource DAI = u256;
+        \\
+        \\contract Vault {
+        \\    storage var usdc: map<address, Resource<USDC>>;
+        \\    storage var dai: map<address, Resource<DAI>>;
+        \\
+        \\    pub fn bad(from: address, to: address, amount: USDC) {
+        \\        @move(usdc[from], dai[to], amount);
+        \\    }
+        \\}
+    , .typecheck, "cannot move between Resource<USDC> and Resource<DAI>");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(from: address, to: address, amount: u256) {
+        \\        @move(balances[from], balances[to], amount);
+        \\    }
+        \\}
+    , .typecheck, "resource amount must have type TokenUnit");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    fn dynamicKey() -> address {
+        \\        return msg.sender;
+        \\    }
+        \\
+        \\    pub fn bad(to: address, amount: TokenUnit) {
+        \\        @move(balances[dynamicKey()], balances[to], amount);
+        \\    }
+        \\}
+    , .typecheck, "resource place key expression must be side-effect-free");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var nested: map<address, map<address, Resource<TokenUnit>>>;
+        \\
+        \\    fn dynamicKey() -> address {
+        \\        return msg.sender;
+        \\    }
+        \\
+        \\    pub fn bad(to: address, amount: TokenUnit) {
+        \\        @create(nested[dynamicKey()][to], amount);
+        \\    }
+        \\}
+    , .typecheck, "resource place key expression must be side-effect-free");
+
+    try expectDiagnosticProbeContains(
+        \\resource DebtUnit = i256;
+        \\
+        \\contract Vault {
+        \\    storage var debts: map<address, Resource<DebtUnit>>;
+        \\
+        \\    pub fn bad(to: address) {
+        \\        @create(debts[to], -1);
+        \\    }
+        \\}
+    , .typecheck, "resource amount must be non-negative");
+}
+
+test "compiler rejects direct mutation of resource places" {
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(to: address, amount: TokenUnit) {
+        \\        balances[to] = amount;
+        \\    }
+        \\}
+    , .typecheck, "resource places can only be mutated with @move, @create, or @destroy");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(to: address, amount: TokenUnit) {
+        \\        balances[to] += amount;
+        \\    }
+        \\}
+    , .typecheck, "resource places can only be mutated with @move, @create, or @destroy");
+}
+
+test "compiler rejects resource boundary builtins in value positions" {
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(from: address, to: address, amount: TokenUnit) {
+        \\        let output = @move(balances[from], balances[to], amount);
+        \\    }
+        \\}
+    , .typecheck, "@move is statement-only and cannot be used in expression position");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(to: address, amount: TokenUnit) {
+        \\        let output = @create(balances[to], amount);
+        \\    }
+        \\}
+    , .typecheck, "@create is statement-only and cannot be used in expression position");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(from: address, amount: TokenUnit) {
+        \\        let output = @destroy(balances[from], amount);
+        \\    }
+        \\}
+    , .typecheck, "@destroy is statement-only and cannot be used in expression position");
+}
+
+test "compiler tracks resource builtin effects for modifies and locks" {
+    const covered_source =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn transfer(from: address, to: address, amount: TokenUnit)
+        \\        modifies balances[from], balances[to]
+        \\    {
+        \\        @move(balances[from], balances[to], amount);
+        \\    }
+        \\}
+    ;
+    var covered = try compileText(covered_source);
+    defer covered.deinit();
+    const covered_typecheck = try covered.db.moduleTypeCheck(covered.root_module_id);
+    try testing.expect(covered_typecheck.diagnostics.isEmpty());
+
+    const environment_key_source =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\    storage var allowances: map<address, map<address, TokenUnit>>;
+        \\
+        \\    inline fn caller() -> NonZeroAddress {
+        \\        return std.msg.sender();
+        \\    }
+        \\
+        \\    pub fn direct(to: address, amount: TokenUnit)
+        \\        modifies balances[msg.sender], balances[to]
+        \\    {
+        \\        @move(balances[std.msg.sender()], balances[to], amount);
+        \\    }
+        \\
+        \\    pub fn aliased(to: address, amount: TokenUnit)
+        \\        modifies balances[msg.sender], balances[to]
+        \\    {
+        \\        let sender: address = std.msg.sender();
+        \\        @move(balances[sender], balances[to], amount);
+        \\    }
+        \\
+        \\    pub fn inline_aliased(to: address, amount: TokenUnit)
+        \\        modifies balances[msg.sender], balances[to]
+        \\    {
+        \\        let sender: NonZeroAddress = caller();
+        \\        @move(balances[sender], balances[to], amount);
+        \\    }
+        \\
+        \\    pub fn nested(spender: address, amount: TokenUnit)
+        \\        modifies allowances[msg.sender][spender]
+        \\    {
+        \\        let owner: address = std.msg.sender();
+        \\        allowances[owner][spender] = amount;
+        \\    }
+        \\}
+    ;
+    var environment_key = try compileText(environment_key_source);
+    defer environment_key.deinit();
+    const environment_key_typecheck = try environment_key.db.moduleTypeCheck(environment_key.root_module_id);
+    try testing.expect(environment_key_typecheck.diagnostics.isEmpty());
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn transfer(from: address, to: address, amount: TokenUnit)
+        \\        modifies balances[from]
+        \\    {
+        \\        @move(balances[from], balances[to], amount);
+        \\    }
+        \\}
+    , .typecheck, "is not covered by this function's `modifies` clause");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(user: address, amount: TokenUnit) {
+        \\        @lock(balances[user]);
+        \\        @create(balances[user], amount);
+        \\    }
+        \\}
+    , .typecheck, "cannot write locked storage slot 'balances'");
+
+    const direct_storage_source =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var reserve: Resource<TokenUnit>;
+        \\    storage var treasury: Resource<TokenUnit>;
+        \\
+        \\    pub fn sweep(amount: TokenUnit)
+        \\        modifies reserve, treasury
+        \\    {
+        \\        @move(reserve, treasury, amount);
+        \\    }
+        \\}
+    ;
+    var direct_storage = try compileText(direct_storage_source);
+    defer direct_storage.deinit();
+    const direct_storage_typecheck = try direct_storage.db.moduleTypeCheck(direct_storage.root_module_id);
+    try testing.expect(direct_storage_typecheck.diagnostics.isEmpty());
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var reserve: Resource<TokenUnit>;
+        \\    storage var treasury: Resource<TokenUnit>;
+        \\
+        \\    pub fn sweep(amount: TokenUnit)
+        \\        modifies reserve
+        \\    {
+        \\        @move(reserve, treasury, amount);
+        \\    }
+        \\}
+    , .typecheck, "is not covered by this function's `modifies` clause");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var reserve: Resource<TokenUnit>;
+        \\
+        \\    pub fn bad(amount: TokenUnit) {
+        \\        @lock(reserve);
+        \\        @destroy(reserve, amount);
+        \\    }
+        \\}
+    , .typecheck, "cannot write locked storage slot 'reserve'");
+}
+
+test "compiler build rejects unbounded computed storage ranges without artifacts" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -589,7 +1271,57 @@ test "compiler abi emit barrier rejects undefined types without artifacts" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "main.ora",
+        .data =
+        \\comptime const std_storage = @import("std/storage");
+        \\
+        \\contract Vault {
+        \\    pub fn bad(owner: address, len: u256, value: u256)
+        \\        modifies std_storage.range(std_storage.derive("vault.unbounded", owner), len)
+        \\    {
+        \\        let slot: StorageSlot = std_storage.derive("vault.unbounded", owner);
+        \\        std_storage.words.store(slot, 0, value);
+        \\    }
+        \\}
+        ,
+    });
+    try tmp.dir.createDirPath(std.testing.io, "out");
+
+    const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
+    defer testing.allocator.free(root_path);
+    const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
+    defer testing.allocator.free(out_path);
+
+    const result = try runOraProcess(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "build",
+        "-o",
+        out_path,
+        root_path,
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| try testing.expect(code != 0),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "`modifies` computed storage ranges require a literal bounded word count in v1") or
+        std.mem.containsAtLeast(u8, result.stderr, 1, "`modifies` computed storage ranges require a literal bounded word count in v1"));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/bin/main.hex", .{}));
+}
+
+test "compiler abi emit barrier rejects undefined types without artifacts" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\contract Vault {
@@ -601,43 +1333,39 @@ test "compiler abi emit barrier rejects undefined types without artifacts" {
         \\}
         ,
     });
-    try tmp.dir.makeDir("out");
+    try tmp.dir.createDirPath(std.testing.io, "out");
 
     const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
     defer testing.allocator.free(root_path);
     const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
     defer testing.allocator.free(out_path);
 
-    const result = try std.process.Child.run(.{
-        .allocator = testing.allocator,
-        .argv = &[_][]const u8{
-            ORA_BINARY_REL,
-            "emit",
-            "--emit=abi:extras",
-            "-o",
-            out_path,
-            root_path,
-        },
-        .max_output_bytes = 1024 * 1024,
+    const result = try runOraProcess(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=abi:extras",
+        "-o",
+        out_path,
+        root_path,
     });
     defer testing.allocator.free(result.stdout);
     defer testing.allocator.free(result.stderr);
 
     switch (result.term) {
-        .Exited => |code| try testing.expect(code != 0),
+        .exited => |code| try testing.expect(code != 0),
         else => return error.TestUnexpectedResult,
     }
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "undefined type 'Bogus'") or
         std.mem.containsAtLeast(u8, result.stderr, 1, "undefined type 'Bogus'"));
 
-    var out_dir = try tmp.dir.openDir("out", .{ .iterate = true });
-    defer out_dir.close();
+    var out_dir = try tmp.dir.openDir(std.testing.io, "out", .{ .iterate = true });
+    defer out_dir.close(std.testing.io);
     var iter = out_dir.iterate();
-    try testing.expect((try iter.next()) == null);
+    try testing.expect((try iter.next(std.testing.io)) == null);
 }
 
 test "compiler abi emit barrier rejects undefined error-union errors without artifacts" {
-    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -645,7 +1373,7 @@ test "compiler abi emit barrier rejects undefined error-union errors without art
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\contract Vault {
@@ -655,43 +1383,39 @@ test "compiler abi emit barrier rejects undefined error-union errors without art
         \\}
         ,
     });
-    try tmp.dir.makeDir("out");
+    try tmp.dir.createDirPath(std.testing.io, "out");
 
     const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
     defer testing.allocator.free(root_path);
     const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
     defer testing.allocator.free(out_path);
 
-    const result = try std.process.Child.run(.{
-        .allocator = testing.allocator,
-        .argv = &[_][]const u8{
-            ORA_BINARY_REL,
-            "emit",
-            "--emit=abi",
-            "-o",
-            out_path,
-            root_path,
-        },
-        .max_output_bytes = 1024 * 1024,
+    const result = try runOraProcess(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=abi",
+        "-o",
+        out_path,
+        root_path,
     });
     defer testing.allocator.free(result.stdout);
     defer testing.allocator.free(result.stderr);
 
     switch (result.term) {
-        .Exited => |code| try testing.expect(code != 0),
+        .exited => |code| try testing.expect(code != 0),
         else => return error.TestUnexpectedResult,
     }
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "undefined error 'BadErr'") or
         std.mem.containsAtLeast(u8, result.stderr, 1, "undefined error 'BadErr'"));
 
-    var out_dir = try tmp.dir.openDir("out", .{ .iterate = true });
-    defer out_dir.close();
+    var out_dir = try tmp.dir.openDir(std.testing.io, "out", .{ .iterate = true });
+    defer out_dir.close(std.testing.io);
     var iter = out_dir.iterate();
-    try testing.expect((try iter.next()) == null);
+    try testing.expect((try iter.next(std.testing.io)) == null);
 }
 
 test "compiler abi emit barrier rejects error-union pipes without bang without artifacts" {
-    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -699,7 +1423,7 @@ test "compiler abi emit barrier rejects error-union pipes without bang without a
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\contract Vault {
@@ -709,43 +1433,39 @@ test "compiler abi emit barrier rejects error-union pipes without bang without a
         \\}
         ,
     });
-    try tmp.dir.makeDir("out");
+    try tmp.dir.createDirPath(std.testing.io, "out");
 
     const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
     defer testing.allocator.free(root_path);
     const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
     defer testing.allocator.free(out_path);
 
-    const result = try std.process.Child.run(.{
-        .allocator = testing.allocator,
-        .argv = &[_][]const u8{
-            ORA_BINARY_REL,
-            "emit",
-            "--emit=abi",
-            "-o",
-            out_path,
-            root_path,
-        },
-        .max_output_bytes = 1024 * 1024,
+    const result = try runOraProcess(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=abi",
+        "-o",
+        out_path,
+        root_path,
     });
     defer testing.allocator.free(result.stdout);
     defer testing.allocator.free(result.stderr);
 
     switch (result.term) {
-        .Exited => |code| try testing.expect(code != 0),
+        .exited => |code| try testing.expect(code != 0),
         else => return error.TestUnexpectedResult,
     }
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "error-union types must start with '!'") or
         std.mem.containsAtLeast(u8, result.stderr, 1, "error-union types must start with '!'"));
 
-    var out_dir = try tmp.dir.openDir("out", .{ .iterate = true });
-    defer out_dir.close();
+    var out_dir = try tmp.dir.openDir(std.testing.io, "out", .{ .iterate = true });
+    defer out_dir.close(std.testing.io);
     var iter = out_dir.iterate();
-    try testing.expect((try iter.next()) == null);
+    try testing.expect((try iter.next(std.testing.io)) == null);
 }
 
-test "compiler build rejects unsupported local Result aggregate carriers before bytecode artifacts" {
-    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+test "compiler artifact policy blocks explicit emit and debug artifact bypasses" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -753,7 +1473,205 @@ test "compiler build rejects unsupported local Result aggregate carriers before 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "main.ora",
+        .data =
+        \\resource TokenUnit =;
+        \\
+        \\contract Entry {
+        \\    pub fn run() -> u256 {
+        \\        return 0;
+        \\    }
+        \\}
+        ,
+    });
+    try tmp.dir.createDirPath(std.testing.io, "out");
+
+    const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
+    defer testing.allocator.free(root_path);
+    const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
+    defer testing.allocator.free(out_path);
+    const bytecode_file_path = try pathFromTmpAlloc(testing.allocator, tmp, "bytecode.hex");
+    defer testing.allocator.free(bytecode_file_path);
+
+    const expected = "expected carrier type in resource declaration";
+
+    try expectOraCommandFailsWithoutArtifacts(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=abi",
+        "-o",
+        out_path,
+        root_path,
+    }, expected, &tmp, &.{
+        "out/main.abi.json",
+        "out/main.abi.sol.json",
+        "out/main.abi.extras.json",
+    });
+
+    try expectOraCommandFailsWithoutArtifacts(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=bytecode",
+        "-o",
+        out_path,
+        root_path,
+    }, expected, &tmp, &.{
+        "out/main.hex",
+        "out/main.sourcemap.json",
+        "out/main.debug.json",
+    });
+
+    try expectOraCommandFailsWithoutArtifacts(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=bytecode",
+        "--out-file",
+        bytecode_file_path,
+        root_path,
+    }, expected, &tmp, &.{
+        "bytecode.hex",
+    });
+
+    try expectOraCommandFailsWithoutArtifacts(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=mlir:ora",
+        "-o",
+        out_path,
+        root_path,
+    }, expected, &tmp, &.{
+        "out/main.ora.mlir",
+    });
+
+    try expectOraCommandFailsWithoutArtifacts(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=mlir:sir",
+        "-o",
+        out_path,
+        root_path,
+    }, expected, &tmp, &.{
+        "out/main.sir.mlir",
+    });
+
+    try expectOraCommandFailsWithoutArtifacts(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=smt-report",
+        "--verify",
+        "-o",
+        out_path,
+        root_path,
+    }, expected, &tmp, &.{
+        "out/main.smt.report.md",
+        "out/main.smt.report.json",
+        "out/main.proof.json",
+    });
+
+    try expectOraCommandFailsWithoutArtifacts(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=cfg:ora",
+        "-o",
+        out_path,
+        root_path,
+    }, expected, &tmp, &.{
+        "out/main.ora.dot",
+    });
+
+    try expectOraCommandFailsWithoutArtifacts(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=cfg:sir-diff",
+        "-o",
+        out_path,
+        root_path,
+    }, expected, &tmp, &.{
+        "out/main.sir.pre-opt.dot",
+        "out/main.sir.post-opt.dot",
+    });
+
+    try expectOraCommandFailsWithoutArtifacts(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "debug",
+        "--no-tui",
+        "-o",
+        out_path,
+        root_path,
+    }, expected, &tmp, &.{
+        "out/main.hex",
+        "out/main.sir",
+        "out/main.sourcemap.json",
+        "out/main.debug.json",
+        "out/main.sir.dot",
+        "out/abi/main.abi.json",
+        "out/abi/main.abi.sol.json",
+        "out/abi/main.abi.extras.json",
+    });
+}
+
+test "compiler writes SMT diagnostic report when verification fails" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "main.ora",
+        .data =
+        \\contract Entry {
+        \\    pub fn bump(value: u256) -> u256 {
+        \\        return value + 1;
+        \\    }
+        \\}
+        ,
+    });
+    try tmp.dir.createDirPath(std.testing.io, "out");
+
+    const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
+    defer testing.allocator.free(root_path);
+    const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
+    defer testing.allocator.free(out_path);
+
+    const result = try runOraProcess(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=bytecode,smt-report",
+        "--verify",
+        "-o",
+        out_path,
+        root_path,
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| try testing.expect(code != 0),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Verification failed") or
+        std.mem.containsAtLeast(u8, result.stderr, 1, "Verification failed"));
+
+    try tmp.dir.access(std.testing.io, "out/main.smt.report.md", .{});
+    try tmp.dir.access(std.testing.io, "out/main.smt.report.json", .{});
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/main.proof.json", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/main.hex", .{}));
+}
+
+test "compiler build rejects unsupported local Result aggregate carriers before bytecode artifacts" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\error Failure;
@@ -767,39 +1685,35 @@ test "compiler build rejects unsupported local Result aggregate carriers before 
         \\}
         ,
     });
-    try tmp.dir.makeDir("out");
+    try tmp.dir.createDirPath(std.testing.io, "out");
 
     const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
     defer testing.allocator.free(root_path);
     const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
     defer testing.allocator.free(out_path);
 
-    const result = try std.process.Child.run(.{
-        .allocator = testing.allocator,
-        .argv = &[_][]const u8{
-            ORA_BINARY_REL,
-            "build",
-            "-o",
-            out_path,
-            root_path,
-        },
-        .max_output_bytes = 1024 * 1024,
+    const result = try runOraProcess(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "build",
+        "-o",
+        out_path,
+        root_path,
     });
     defer testing.allocator.free(result.stdout);
     defer testing.allocator.free(result.stderr);
 
     switch (result.term) {
-        .Exited => |code| try testing.expect(code != 0),
+        .exited => |code| try testing.expect(code != 0),
         else => return error.TestUnexpectedResult,
     }
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "local Result aggregate values currently require a scalar success payload") or
         std.mem.containsAtLeast(u8, result.stderr, 1, "local Result aggregate values currently require a scalar success payload"));
 
-    try testing.expectError(error.FileNotFound, tmp.dir.access("out/bin/main.hex", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/bin/main.hex", .{}));
 }
 
 test "compiler build removes partial artifacts when native SIR lowering fails" {
-    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -807,7 +1721,7 @@ test "compiler build removes partial artifacts when native SIR lowering fails" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\contract Entry {
@@ -823,22 +1737,28 @@ test "compiler build removes partial artifacts when native SIR lowering fails" {
     const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
     defer testing.allocator.free(out_path);
 
-    const result = try std.process.Child.run(.{
-        .allocator = testing.allocator,
-        .argv = &[_][]const u8{
-            ORA_BINARY_REL,
-            "build",
-            "-o",
-            out_path,
-            root_path,
-        },
-        .max_output_bytes = 1024 * 1024,
+    try tmp.dir.createDirPath(std.testing.io, "out/abi");
+    try tmp.dir.createDirPath(std.testing.io, "out/bin");
+    try tmp.dir.createDirPath(std.testing.io, "out/mlir");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "out/abi/main.abi.json", .data = "{\"stale\":true}\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "out/abi/main.abi.sol.json", .data = "{\"stale\":true}\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "out/abi/main.abi.extras.json", .data = "{\"stale\":true}\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "out/bin/main.hex", .data = "0x6000\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "out/bin/main.sourcemap.json", .data = "{\"stale\":true}\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "out/mlir/main.ora.mlir", .data = "// stale\n" });
+
+    const result = try runOraProcess(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "build",
+        "-o",
+        out_path,
+        root_path,
     });
     defer testing.allocator.free(result.stdout);
     defer testing.allocator.free(result.stderr);
 
     switch (result.term) {
-        .Exited => |code| try testing.expect(code != 0),
+        .exited => |code| try testing.expect(code != 0),
         else => return error.TestUnexpectedResult,
     }
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "unsupported dynamic ABI type for dispatcher") or
@@ -846,8 +1766,55 @@ test "compiler build removes partial artifacts when native SIR lowering fails" {
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "SIR dispatcher build failed") or
         std.mem.containsAtLeast(u8, result.stderr, 1, "SIR dispatcher build failed"));
 
-    try tmp.dir.access("out", .{});
-    try testing.expectError(error.FileNotFound, tmp.dir.access("out/bin/main.hex", .{}));
+    try tmp.dir.access(std.testing.io, "out", .{});
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/abi/main.abi.json", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/abi/main.abi.sol.json", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/abi/main.abi.extras.json", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/bin/main.hex", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/bin/main.sourcemap.json", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/mlir/main.ora.mlir", .{}));
+}
+
+test "compiler build accepts public fallible returns with no declared custom errors" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "main.ora",
+        .data =
+        \\contract Entry {
+        \\    pub fn ok() -> !bool {
+        \\        return true;
+        \\    }
+        \\}
+        ,
+    });
+
+    const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
+    defer testing.allocator.free(root_path);
+    const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
+    defer testing.allocator.free(out_path);
+
+    const result = try runOraProcess(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "build",
+        "-o",
+        out_path,
+        root_path,
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| try testing.expectEqual(@as(u8, 0), code),
+        else => return error.TestUnexpectedResult,
+    }
+    try tmp.dir.access(std.testing.io, "out/bin/main.hex", .{});
 }
 
 test "compiler reports undefined type names at value resolution positions once" {
@@ -1429,6 +2396,20 @@ test "compiler rejects dynamic indexed log fields until topic hashing is support
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "indexed log field 'label' has unsupported type 'string'"));
 }
 
+test "compiler rejects opaque storage capability log fields" {
+    try expectDiagnosticProbeContains(
+        \\contract C {
+        \\    log Bad(slot: StorageSlot);
+        \\}
+    , .typecheck, "log field 'slot' cannot expose opaque runtime capability type 'StorageSlot'");
+
+    try expectDiagnosticProbeContains(
+        \\contract C {
+        \\    log Bad(indexed range: StorageRange);
+        \\}
+    , .typecheck, "log field 'range' cannot expose opaque runtime capability type 'StorageRange'");
+}
+
 test "compiler reports invalid constant shift amounts" {
     const source_text =
         \\pub fn shift(v: u8) -> u8 {
@@ -1464,7 +2445,7 @@ test "compiler reports integer constant overflow against declared widths" {
         \\const LIMIT: u8 = 256;
         \\pub fn narrow() -> u8 {
         \\    let a: u8 = 256;
-        \\    let b: u8 = 1;
+        \\    var b: u8 = 1;
         \\    b = 256;
         \\    return 256;
         \\}
@@ -1704,7 +2685,7 @@ test "compiler package driver surfaces payload enum ABI diagnostics before HIR l
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\enum Event {

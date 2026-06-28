@@ -1,0 +1,85 @@
+fn init:
+    entry {
+        v0 = runtime_start_offset
+        v1 = runtime_length
+        v2 = malloc v1
+        codecopy v2 v0 v1
+        return v2 v1
+    }
+
+fn testCalldataTypes:
+    entry v0 v1 {
+        iret
+    }
+
+fn main:
+    main_entry {
+        zero = const 0x0
+        selector_offset = const 0x4
+        word_size = const 0x20
+        min_cdsize_1arg = const 0x23
+        arg1_offset = const 0x24
+        min_cdsize_2args = const 0x43
+        arg2_offset = const 0x44
+        min_cdsize_3args = const 0x63
+        selector_shift = const 0xE0
+        v0 = codesize
+        v1 = const 0x20
+        v2 = add v0 v1
+        v3 = mload256 word_size
+        v4 = lt v3 v2
+        sel_zero = const 0x0
+        sel_mask = sub sel_zero v4
+        sel_t = and sel_mask v2
+        sel_inv = not sel_mask
+        sel_f = and sel_inv v3
+        v5 = or sel_t sel_f
+        mstore256 word_size v5
+        cv = callvalue
+        cv_nonzero = iszero cv
+        => cv_nonzero ? @load_selector : @revert_error
+    }
+    load_selector {
+        zero_0 = const 0x0
+        selector_shift_0 = const 0xE0
+        selector_word = calldataload zero_0
+        selector = shr selector_shift_0 selector_word
+        switch selector {
+        0x114B5BA7 => @testCalldataTypes_
+        default => @revert_error
+    }
+    }
+    revert_error {
+        zero_1 = const 0x0
+        revert zero_1 zero_1
+    }
+    testCalldataTypes_ {
+        cdsize_testCalldataTypes = calldatasize
+        min_cdsize_2args_0 = const 0x43
+        valid_testCalldataTypes = lt min_cdsize_2args_0 cdsize_testCalldataTypes
+        => valid_testCalldataTypes ? @bb0 : @revert_error
+    }
+    bb0 {
+        selector_offset_0 = const 0x4
+        a_testCalldataTypes = calldataload selector_offset_0
+        arg1_offset_0 = const 0x24
+        b_testCalldataTypes = calldataload arg1_offset_0
+        v6 = const 0x0
+        v7 = const 0x1
+        v8 = eq b_testCalldataTypes v6
+        v9 = eq b_testCalldataTypes v7
+        v10 = or v8 v9
+        => v10 ? @testCalldataTypes_exec : @abi_decode_revert_4
+    }
+    testCalldataTypes_exec {
+        icall @testCalldataTypes a_testCalldataTypes b_testCalldataTypes
+        v11 = const 0x0
+        return v11 v11
+    }
+    abi_decode_revert_4 {
+        word_size_0 = const 0x20
+        v12 = const 0x4
+        v13 = sallocany 0x20
+        mstore256 v13 v12
+        revert v13 word_size_0
+    }

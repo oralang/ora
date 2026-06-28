@@ -13,15 +13,41 @@
 //===----------------------------------------------------------------------===//
 
 const std = @import("std");
-const z3 = @import("c.zig");
+pub const z3_c = @import("c.zig");
+pub const Z3Context = @import("context.zig").Context;
+pub const Z3Solver = @import("solver.zig").Solver;
+
+const z3 = z3_c;
 const mlir = @import("mlir_c_api").c;
-const Context = @import("context.zig").Context;
-const Solver = @import("solver.zig").Solver;
+const Context = Z3Context;
+const Solver = Z3Solver;
 const Encoder = @import("encoder.zig").Encoder;
 const errors = @import("errors.zig");
 const mlir_helpers = @import("mlir_helpers.zig");
 const refinements = @import("ora_types").refinement_semantics;
 const ManagedArrayList = std.array_list.Managed;
+
+fn libcEnv(comptime name: [:0]const u8) ?[]const u8 {
+    if (!@import("builtin").link_libc) return null;
+    return if (std.c.getenv(name)) |value| std.mem.span(value) else null;
+}
+
+fn nowTimestamp() std.Io.Clock.Timestamp {
+    return std.Io.Clock.Timestamp.now(std.Io.Threaded.global_single_threaded.io(), .awake);
+}
+
+fn unixTimestampSeconds() i64 {
+    const timestamp = std.Io.Clock.Timestamp.now(std.Io.Threaded.global_single_threaded.io(), .real);
+    const seconds = @divFloor(timestamp.raw.nanoseconds, std.time.ns_per_s);
+    return std.math.cast(i64, seconds) orelse if (seconds < 0) std.math.minInt(i64) else std.math.maxInt(i64);
+}
+
+fn elapsedNs(start: std.Io.Clock.Timestamp) u64 {
+    const end = nowTimestamp();
+    const elapsed = std.Io.Clock.Timestamp.durationTo(start, end);
+    if (elapsed.raw.nanoseconds <= 0) return 0;
+    return std.math.cast(u64, elapsed.raw.nanoseconds) orelse std.math.maxInt(u64);
+}
 
 pub const AnnotationKind = enum {
     Requires, // Function precondition
@@ -67,12 +93,12 @@ const ImportedObligationSource = struct {
     kind: Encoder.PendingObligationSourceKind,
 };
 
-const QuerySolverLogic = enum {
+pub const QuerySolverLogic = enum(u8) {
     all,
     qf_aufbv,
 };
 
-const QueryFragment = enum {
+pub const QueryFragment = enum(u8) {
     unknown,
     qf_bv,
     qf_bv_array,
@@ -80,6 +106,9 @@ const QueryFragment = enum {
     aufbv_quantifiers,
     other,
 };
+
+pub const PendingObligationSourceKind = Encoder.PendingObligationSourceKind;
+pub const PendingConstraintSourceKind = Encoder.PendingConstraintSourceKind;
 
 const TrackedAssumption = struct {
     proxy: ?z3.Z3_ast = null,
@@ -97,10 +126,15 @@ fn cloneAssumptionTagSlice(
 pub const SmtReportArtifacts = struct {
     markdown: []u8,
     json: []u8,
+    trusted_artifacts_allowed: bool,
 
     pub fn deinit(self: *SmtReportArtifacts, allocator: std.mem.Allocator) void {
         allocator.free(self.markdown);
         allocator.free(self.json);
+    }
+
+    pub fn blocksTrustedArtifacts(self: SmtReportArtifacts) bool {
+        return !self.trusted_artifacts_allowed;
     }
 };
 
@@ -185,6 +219,8 @@ pub const VerificationPass = struct {
     guard_id_storage: ManagedArrayList([]const u8),
     /// Storage for duplicated annotation labels/messages
     label_storage: ManagedArrayList([]const u8),
+    /// Resource operation events surfaced in SMT reports.
+    report_resource_events: ManagedArrayList(ResourceEffectEvent),
     /// Semantic constraint provenance recorded while extracting prepared queries.
     semantic_constraint_tags: std.AutoHashMap(usize, AssumptionTag),
 
@@ -211,32 +247,28 @@ pub const VerificationPass = struct {
         errdefer qf_solver.deinit();
 
         var encoder = Encoder.init(context, allocator);
-        const debug_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_DEBUG") catch null;
+        const debug_env = libcEnv("ORA_Z3_DEBUG");
         const debug_options = if (debug_env) |val| blk: {
-            defer allocator.free(val);
             break :blk try parseZ3DebugEnv(val);
         } else Z3DebugEnvOptions{};
         encoder.setDebugAssertSimplify(debug_options.assert_simplify);
 
-        const timeout_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_TIMEOUT_MS") catch null;
+        const timeout_env = libcEnv("ORA_Z3_TIMEOUT_MS");
         var timeout_ms: ?u32 = 60_000;
         if (timeout_env) |val| {
             timeout_ms = std.fmt.parseInt(u32, val, 10) catch null;
-            allocator.free(val);
         }
 
-        const seed_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_SEED") catch null;
+        const seed_env = libcEnv("ORA_Z3_SEED");
         var random_seed: u32 = 0;
         if (seed_env) |val| {
             random_seed = std.fmt.parseInt(u32, val, 10) catch random_seed;
-            allocator.free(val);
         }
 
-        const summary_depth_env = std.process.getEnvVarOwned(allocator, "ORA_VERIFY_MAX_SUMMARY_INLINE_DEPTH") catch null;
+        const summary_depth_env = libcEnv("ORA_VERIFY_MAX_SUMMARY_INLINE_DEPTH");
         const max_summary_inline_depth = if (options.max_summary_inline_depth) |depth|
             depth
         else if (summary_depth_env) |val| blk: {
-            defer allocator.free(val);
             break :blk try std.fmt.parseInt(u32, val, 10);
         } else encoder.max_summary_inline_depth;
 
@@ -275,6 +307,7 @@ pub const VerificationPass = struct {
             .location_storage = ManagedArrayList([]const u8).init(allocator),
             .guard_id_storage = ManagedArrayList([]const u8).init(allocator),
             .label_storage = ManagedArrayList([]const u8).init(allocator),
+            .report_resource_events = ManagedArrayList(ResourceEffectEvent).init(allocator),
             .semantic_constraint_tags = std.AutoHashMap(usize, AssumptionTag).init(allocator),
         };
         return pass;
@@ -335,6 +368,7 @@ pub const VerificationPass = struct {
             self.allocator.free(label);
         }
         self.label_storage.deinit();
+        self.report_resource_events.deinit();
         self.semantic_constraint_tags.deinit();
         self.runtime_reachable_function_names.deinit();
         for (self.encoded_annotations.items) |ann| {
@@ -647,7 +681,7 @@ pub const VerificationPass = struct {
                 }
             }
 
-            var block_arg_bindings = std.ArrayList(SavedValueBinding){};
+            var block_arg_bindings = std.ArrayList(SavedValueBinding).empty;
             defer {
                 for (block_arg_bindings.items) |saved| {
                     if (saved.had_binding) {
@@ -660,7 +694,7 @@ pub const VerificationPass = struct {
             }
             try self.bindRegionBlockArguments(current_block, &block_arg_bindings);
 
-            var block_loop_invariant_annotations = std.ArrayList(usize){};
+            var block_loop_invariant_annotations = std.ArrayList(usize).empty;
             defer block_loop_invariant_annotations.deinit(self.allocator);
 
             // walk operations in this block
@@ -1169,7 +1203,7 @@ pub const VerificationPass = struct {
     ) !void {
         // Globals: merge per-slot as ite(condition, then, else), defaulting to base.
         self.clearEncoderGlobalMap();
-        var global_names = std.ArrayList([]const u8){};
+        var global_names = std.ArrayList([]const u8).empty;
         defer global_names.deinit(self.allocator);
 
         var base_g_it = base.global_map.iterator();
@@ -1273,7 +1307,7 @@ pub const VerificationPass = struct {
         branch_states: []const EncoderBranchState,
     ) !void {
         self.clearEncoderGlobalMap();
-        var global_names = std.ArrayList([]const u8){};
+        var global_names = std.ArrayList([]const u8).empty;
         defer global_names.deinit(self.allocator);
 
         var base_g_it = base.global_map.iterator();
@@ -2091,7 +2125,12 @@ pub const VerificationPass = struct {
             std.mem.eql(u8, op_name, "call") or
             std.mem.eql(u8, op_name, "ora.sstore") or
             std.mem.eql(u8, op_name, "ora.tstore") or
-            std.mem.eql(u8, op_name, "ora.map_store");
+            std.mem.eql(u8, op_name, "ora.map_store") or
+            std.mem.eql(u8, op_name, "ora.create") or
+            std.mem.eql(u8, op_name, "ora.destroy") or
+            std.mem.eql(u8, op_name, "ora.move") or
+            std.mem.eql(u8, op_name, "ora.storage.word_store") or
+            std.mem.eql(u8, op_name, "ora.storage.range_erase");
         if (!should_observe) return;
 
         const function_name = self.current_function_name orelse "unknown";
@@ -3138,6 +3177,65 @@ pub const VerificationPass = struct {
         return try self.executePreparedQueriesSequential(queries.items);
     }
 
+    pub fn collectPreparedQuerySummary(self: *VerificationPass, mlir_module: mlir.MlirModule) !PreparedQuerySummary {
+        self.encoder.clearDegradation();
+        try self.extractAnnotationsFromMLIR(mlir_module);
+        if (self.encoder.isDegraded()) return error.VerificationEncodingDegraded;
+
+        var queries = try self.buildPreparedQueries();
+        defer {
+            for (queries.items) |*query| {
+                query.deinit(self.allocator);
+            }
+            queries.deinit();
+        }
+        if (self.encoder.isDegraded()) return error.VerificationEncodingDegraded;
+
+        return PreparedQuerySummary.fromPreparedQueries(queries.items);
+    }
+
+    pub fn collectPreparedQueryManifest(self: *VerificationPass, mlir_module: mlir.MlirModule) !PreparedQueryManifest {
+        self.encoder.clearDegradation();
+        try self.extractAnnotationsFromMLIR(mlir_module);
+        if (self.encoder.isDegraded()) return error.VerificationEncodingDegraded;
+
+        var queries = try self.buildPreparedQueries();
+        defer {
+            for (queries.items) |*query| {
+                query.deinit(self.allocator);
+            }
+            queries.deinit();
+        }
+        if (self.encoder.isDegraded()) return error.VerificationEncodingDegraded;
+
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        errdefer arena.deinit();
+        const arena_allocator = arena.allocator();
+
+        const rows = try arena_allocator.alloc(PreparedQueryManifestRow, queries.items.len);
+        for (queries.items, rows) |query, *row| {
+            row.* = .{
+                .kind = query.kind,
+                .fragment = query.fragment,
+                .solver_logic = query.solver_logic,
+                .function_name = try arena_allocator.dupe(u8, query.function_name),
+                .guard_id = if (query.guard_id) |guard_id| try arena_allocator.dupe(u8, guard_id) else null,
+                .obligation_kind = query.obligation_kind,
+                .file = try arena_allocator.dupe(u8, query.file),
+                .line = query.line,
+                .column = query.column,
+                .constraint_count = std.math.cast(u32, query.constraint_count) orelse std.math.maxInt(u32),
+                .smtlib_hash = query.smtlib_hash,
+                .references_loop_post_state = query.references_loop_post_state,
+            };
+        }
+
+        return .{
+            .arena = arena,
+            .rows = rows,
+        };
+    }
+
     fn executePreparedQueriesSequential(self: *VerificationPass, queries: []const PreparedQuery) !errors.VerificationResult {
         const results = try self.allocator.alloc(PreparedQueryResult, queries.len);
         defer self.allocator.free(results);
@@ -3173,7 +3271,7 @@ pub const VerificationPass = struct {
             }
 
             std.debug.print("{s} start\n", .{query.log_prefix});
-            var timer = try std.time.Timer.start();
+            const timer = nowTimestamp();
             var vacuity_explain_copy: ?[]u8 = null;
             var vacuity_tags_copy: []const AssumptionTag = &.{};
             errdefer if (vacuity_explain_copy) |core| self.allocator.free(core);
@@ -3223,7 +3321,7 @@ pub const VerificationPass = struct {
             results[idx].explain_tags = vacuity_tags_copy;
             vacuity_explain_copy = null;
             vacuity_tags_copy = &.{};
-            const elapsed_ms = timer.read() / std.time.ns_per_ms;
+            const elapsed_ms = elapsedNs(timer) / std.time.ns_per_ms;
 
             std.debug.print("{s} -> {s} ({d}ms)\n", .{
                 query.log_prefix,
@@ -3621,12 +3719,70 @@ pub const VerificationPass = struct {
         return combined;
     }
 
+    fn collectResourceEffectEvents(self: *VerificationPass, mlir_module: mlir.MlirModule) !void {
+        const module_op = mlir.oraModuleGetOperation(mlir_module);
+        const num_regions = mlir.oraOperationGetNumRegions(module_op);
+        for (0..@intCast(num_regions)) |region_idx| {
+            const region = mlir.oraOperationGetRegion(module_op, @intCast(region_idx));
+            try self.collectResourceEffectEventsInRegion(region, null);
+        }
+    }
+
+    fn collectResourceEffectEventsInRegion(
+        self: *VerificationPass,
+        region: mlir.MlirRegion,
+        current_function: ?[]const u8,
+    ) !void {
+        var current_block = mlir.oraRegionGetFirstBlock(region);
+        while (!mlir.oraBlockIsNull(current_block)) {
+            var current_op = mlir.oraBlockGetFirstOperation(current_block);
+            while (!mlir.oraOperationIsNull(current_op)) {
+                const op_name_ref = mlir.oraOperationGetName(current_op);
+                defer @import("mlir_c_api").freeStringRef(op_name_ref);
+                const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
+                    ""
+                else
+                    op_name_ref.data[0..op_name_ref.length];
+
+                const nested_function = if (std.mem.eql(u8, op_name, "func.func"))
+                    (try self.getFunctionNameFromOp(current_op)) orelse current_function
+                else
+                    current_function;
+
+                if (resourceEffectKindFromOpName(op_name)) |kind| {
+                    const loc = try self.getLocationInfo(current_op);
+                    const domain = (try self.getStringAttr(current_op, "domain", &self.label_storage)) orelse "unknown";
+                    try self.report_resource_events.append(.{
+                        .kind = kind,
+                        .function_name = nested_function orelse "unknown",
+                        .domain = domain,
+                        .file = loc.file,
+                        .line = loc.line,
+                        .column = loc.column,
+                    });
+                }
+
+                const num_regions = mlir.oraOperationGetNumRegions(current_op);
+                for (0..@intCast(num_regions)) |region_idx| {
+                    const nested_region = mlir.oraOperationGetRegion(current_op, @intCast(region_idx));
+                    try self.collectResourceEffectEventsInRegion(nested_region, nested_function);
+                }
+
+                current_op = mlir.oraOperationGetNextInBlock(current_op);
+            }
+            current_block = mlir.oraBlockGetNextInRegion(current_block);
+        }
+    }
+
     pub fn buildSmtReport(
         self: *VerificationPass,
         mlir_module: mlir.MlirModule,
         source_file: []const u8,
         verification_result: ?*const errors.VerificationResult,
     ) !SmtReportArtifacts {
+        self.report_resource_events.clearRetainingCapacity();
+        try self.collectResourceEffectEvents(mlir_module);
+
         if (self.encoded_annotations.items.len == 0) {
             self.phaseLog("report extract-annotations begin", .{});
             self.extractAnnotationsFromMLIR(mlir_module) catch |err| {
@@ -3705,7 +3861,7 @@ pub const VerificationPass = struct {
             if (self.trace_smt) {
                 self.traceSmt("Q{d} report check-start", .{idx + 1});
             }
-            var timer = try std.time.Timer.start();
+            const timer = nowTimestamp();
             var explain_copy: ?[]u8 = null;
             var explain_tags_copy: []const AssumptionTag = &.{};
             var core_minimized = false;
@@ -3742,7 +3898,7 @@ pub const VerificationPass = struct {
                 try assertPreparedQueryConstraints(&self.solver, query.constraints);
                 break :blk try self.solver.checkChecked();
             };
-            const elapsed_ms = timer.read() / std.time.ns_per_ms;
+            const elapsed_ms = elapsedNs(timer) / std.time.ns_per_ms;
             if (self.trace_smt) {
                 self.traceSmt(
                     "Q{d} report check-done status={s} elapsed_ms={d}",
@@ -3844,7 +4000,9 @@ pub const VerificationPass = struct {
                 .Obligation => {
                     kind_counts.obligation += 1;
                     if (run.status == z3.Z3_L_TRUE) {
-                        summary.failed_obligations += 1;
+                        if (!loopPostDischargesReportObligation(query, queries.items, report_runs)) {
+                            summary.failed_obligations += 1;
+                        }
                     }
                 },
                 .LoopInvariantStep => {
@@ -3911,7 +4069,7 @@ pub const VerificationPass = struct {
             summary.violatable_guards = @intCast(violatable_guard_ids.count());
         }
 
-        const generated_at_unix = std.time.timestamp();
+        const generated_at_unix = unixTimestampSeconds();
         const markdown = try self.renderSmtReportMarkdown(
             source_file,
             generated_at_unix,
@@ -3935,6 +4093,7 @@ pub const VerificationPass = struct {
         return .{
             .markdown = markdown,
             .json = json,
+            .trusted_artifacts_allowed = summary.verification_success,
         };
     }
 
@@ -3943,7 +4102,7 @@ pub const VerificationPass = struct {
         source_file: []const u8,
         verification_result: *const errors.VerificationResult,
     ) !SmtReportArtifacts {
-        const generated_at_unix = std.time.timestamp();
+        const generated_at_unix = unixTimestampSeconds();
         const summary = ReportSummary{
             .verification_success = false,
             .verification_errors = @intCast(verification_result.errors.items.len),
@@ -3980,6 +4139,7 @@ pub const VerificationPass = struct {
         return .{
             .markdown = markdown,
             .json = json,
+            .trusted_artifacts_allowed = false,
         };
     }
 
@@ -3988,7 +4148,7 @@ pub const VerificationPass = struct {
         source_file: []const u8,
         verification_result: ?*const errors.VerificationResult,
     ) !SmtReportArtifacts {
-        const generated_at_unix = std.time.timestamp();
+        const generated_at_unix = unixTimestampSeconds();
         const summary = ReportSummary{
             .verification_success = false,
             .verification_errors = if (verification_result) |vr| @intCast(vr.errors.items.len) else 0,
@@ -4026,6 +4186,7 @@ pub const VerificationPass = struct {
         return .{
             .markdown = markdown,
             .json = json,
+            .trusted_artifacts_allowed = false,
         };
     }
 
@@ -4039,9 +4200,9 @@ pub const VerificationPass = struct {
         kind_counts: ReportKindCounts,
         verification_result: ?*const errors.VerificationResult,
     ) ![]u8 {
-        var buffer = std.ArrayList(u8){};
-        defer buffer.deinit(self.allocator);
-        const writer = buffer.writer(self.allocator);
+        var buffer = std.Io.Writer.Allocating.init(self.allocator);
+        defer buffer.deinit();
+        const writer = &buffer.writer;
 
         try writer.writeAll("# SMT Encoding Report\n\n");
 
@@ -4120,6 +4281,34 @@ pub const VerificationPass = struct {
         try writer.print("- AUFBV: `{d}`\n", .{summary.fragment_counts.aufbv});
         try writer.print("- AUFBV+Quantifiers: `{d}`\n", .{summary.fragment_counts.aufbv_quantifiers});
         try writer.print("- other: `{d}`\n", .{summary.fragment_counts.other});
+        try writer.writeAll("\n");
+
+        const resource_summary = resourceEffectSummary(self.report_resource_events.items);
+        try writer.writeAll("## Resource Effects\n");
+        try writer.print("- Conserved moves: `{d}`\n", .{resource_summary.conserved_moves});
+        try writer.print("- Explicit creates: `{d}`\n", .{resource_summary.explicit_creates});
+        try writer.print("- Explicit destroys: `{d}`\n", .{resource_summary.explicit_destroys});
+        try writer.print("- Runtime guards: `{d}`\n", .{summary.violatable_guards});
+        try writer.print("- Proof-elided guards: `{d}`\n", .{summary.proven_guards});
+        if (self.report_resource_events.items.len == 0) {
+            try writer.writeAll("- No resource operations observed.\n");
+        } else {
+            try writer.writeAll("- Resource operation events:\n");
+            for (self.report_resource_events.items) |event| {
+                try writer.print(
+                    "  - `{s}` in `{s}` domain `{s}` at `{s}:{d}:{d}` ({s})\n",
+                    .{
+                        resourceEffectKindMarkdownLabel(event.kind),
+                        event.function_name,
+                        event.domain,
+                        event.file,
+                        event.line,
+                        event.column,
+                        resourceEffectDescription(event.kind),
+                    },
+                );
+            }
+        }
         try writer.writeAll("\n");
 
         try writer.writeAll("## 5. Findings\n");
@@ -4234,7 +4423,7 @@ pub const VerificationPass = struct {
             try writer.writeAll("\n```\n\n");
         }
 
-        return buffer.toOwnedSlice(self.allocator);
+        return buffer.toOwnedSlice();
     }
 
     fn renderSmtReportJson(
@@ -4247,9 +4436,9 @@ pub const VerificationPass = struct {
         kind_counts: ReportKindCounts,
         verification_result: ?*const errors.VerificationResult,
     ) ![]u8 {
-        var buffer = std.ArrayList(u8){};
-        defer buffer.deinit(self.allocator);
-        const writer = buffer.writer(self.allocator);
+        var buffer = std.Io.Writer.Allocating.init(self.allocator);
+        defer buffer.deinit();
+        const writer = &buffer.writer;
 
         try writer.writeByte('{');
         try writer.writeAll("\"schema\":\"ora.smt.report.v1\",");
@@ -4345,6 +4534,24 @@ pub const VerificationPass = struct {
         try writer.print(",\"other\":{d}", .{summary.fragment_counts.other});
         try writer.print(",\"unknown\":{d}", .{summary.fragment_counts.unknown});
         try writer.writeByte('}');
+        try writer.writeByte(',');
+
+        const resource_summary = resourceEffectSummary(self.report_resource_events.items);
+        try writer.writeAll("\"resource_effect_summary\":{");
+        try writer.print("\"conserved_moves\":{d}", .{resource_summary.conserved_moves});
+        try writer.print(",\"explicit_creates\":{d}", .{resource_summary.explicit_creates});
+        try writer.print(",\"explicit_destroys\":{d}", .{resource_summary.explicit_destroys});
+        try writer.print(",\"runtime_guards\":{d}", .{summary.violatable_guards});
+        try writer.print(",\"proof_elided_guards\":{d}", .{summary.proven_guards});
+        try writer.writeByte('}');
+        try writer.writeByte(',');
+
+        try writer.writeAll("\"resource_effects\":[");
+        for (self.report_resource_events.items, 0..) |event, idx| {
+            if (idx != 0) try writer.writeByte(',');
+            try writeResourceEffectEventJson(writer, event);
+        }
+        try writer.writeByte(']');
         try writer.writeByte(',');
 
         try writer.writeAll("\"verification\":{");
@@ -4602,7 +4809,7 @@ pub const VerificationPass = struct {
         try writer.writeByte(']');
 
         try writer.writeByte('}');
-        return buffer.toOwnedSlice(self.allocator);
+        return buffer.toOwnedSlice();
     }
 
     fn buildPreparedQueries(self: *VerificationPass) !ManagedArrayList(PreparedQuery) {
@@ -5344,7 +5551,12 @@ pub const VerificationPass = struct {
         if (ann.kind != .ContractInvariant and ann.kind != .LoopInvariant) return null;
         if (std.mem.startsWith(u8, ann.file, "embedded://")) return null;
 
-        const source_text = std.fs.cwd().readFileAlloc(self.allocator, ann.file, 1 << 20) catch return null;
+        const source_text = std.Io.Dir.cwd().readFileAlloc(
+            std.Io.Threaded.global_single_threaded.io(),
+            ann.file,
+            self.allocator,
+            std.Io.Limit.limited(1 << 20),
+        ) catch return null;
         defer self.allocator.free(source_text);
 
         var current_line: u32 = 1;
@@ -5395,7 +5607,7 @@ pub const VerificationPass = struct {
             return try self.allocator.dupe(u8, reasons[0]);
         }
 
-        var list = std.ArrayList(u8){};
+        var list = std.ArrayList(u8).empty;
         defer list.deinit(self.allocator);
         try list.appendSlice(self.allocator, reasons[0]);
         try list.appendSlice(self.allocator, " [all reasons: ");
@@ -5931,7 +6143,7 @@ fn obligationKindLabel(kind: AnnotationKind) []const u8 {
 
 fn inferInvariantLabelFromLine(line: []const u8) ?[]const u8 {
     if (!std.mem.startsWith(u8, line, "invariant ")) return null;
-    const rest = std.mem.trimLeft(u8, line["invariant ".len..], " \t");
+    const rest = std.mem.trimStart(u8, line["invariant ".len..], " \t");
     const open_paren = std.mem.indexOfScalar(u8, rest, '(') orelse return null;
     const candidate = std.mem.trim(u8, rest[0..open_paren], " \t");
     if (candidate.len == 0) return null;
@@ -6042,7 +6254,7 @@ fn collectSortedFunctionNames(
     allocator: std.mem.Allocator,
     by_function: *const std.StringHashMap(ManagedArrayList(EncodedAnnotation)),
 ) !std.ArrayList([]const u8) {
-    var names = std.ArrayList([]const u8){};
+    var names = std.ArrayList([]const u8).empty;
     errdefer names.deinit(allocator);
 
     var it = by_function.iterator();
@@ -6479,7 +6691,7 @@ fn sameLoopInvariantGroup(self: *VerificationPass, reference: EncodedAnnotation,
     return constraintSlicesEquivalent(self, reference.path_constraints, candidate.path_constraints);
 }
 
-const QueryKind = enum {
+pub const QueryKind = enum(u8) {
     Base,
     Obligation,
     LoopInvariantStep,
@@ -6487,6 +6699,90 @@ const QueryKind = enum {
     LoopInvariantPost,
     GuardSatisfy,
     GuardViolate,
+};
+
+pub const PreparedQuerySummary = struct {
+    total: u64 = 0,
+    base: u64 = 0,
+    obligation: u64 = 0,
+    loop_invariant_step: u64 = 0,
+    loop_body_safety: u64 = 0,
+    loop_invariant_post: u64 = 0,
+    guard_satisfy: u64 = 0,
+    guard_violate: u64 = 0,
+
+    fn add(self: *PreparedQuerySummary, kind: QueryKind) void {
+        self.total += 1;
+        switch (kind) {
+            .Base => self.base += 1,
+            .Obligation => self.obligation += 1,
+            .LoopInvariantStep => self.loop_invariant_step += 1,
+            .LoopBodySafety => self.loop_body_safety += 1,
+            .LoopInvariantPost => self.loop_invariant_post += 1,
+            .GuardSatisfy => self.guard_satisfy += 1,
+            .GuardViolate => self.guard_violate += 1,
+        }
+    }
+
+    fn fromPreparedQueries(queries: []const PreparedQuery) PreparedQuerySummary {
+        var summary: PreparedQuerySummary = .{};
+        for (queries) |query| summary.add(query.kind);
+        return summary;
+    }
+};
+
+pub const PreparedQueryManifestRow = struct {
+    kind: QueryKind,
+    fragment: QueryFragment = .unknown,
+    solver_logic: QuerySolverLogic = .all,
+    function_name: []const u8,
+    guard_id: ?[]const u8 = null,
+    obligation_kind: ?AnnotationKind = null,
+    file: []const u8,
+    line: u32,
+    column: u32,
+    constraint_count: u32 = 0,
+    smtlib_hash: u64 = 0,
+    references_loop_post_state: bool = false,
+};
+
+pub const PreparedQueryManifest = struct {
+    arena: std.heap.ArenaAllocator,
+    rows: []const PreparedQueryManifestRow,
+
+    pub fn deinit(self: *PreparedQueryManifest) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+const ResourceEffectKind = enum {
+    conserved_move,
+    explicit_create,
+    explicit_destroy,
+};
+
+const ResourceEffectEvent = struct {
+    kind: ResourceEffectKind,
+    function_name: []const u8,
+    domain: []const u8,
+    file: []const u8,
+    line: u32,
+    column: u32,
+};
+
+const ResourceEffectSummary = struct {
+    conserved_moves: u64 = 0,
+    explicit_creates: u64 = 0,
+    explicit_destroys: u64 = 0,
+
+    fn add(self: *ResourceEffectSummary, kind: ResourceEffectKind) void {
+        switch (kind) {
+            .conserved_move => self.conserved_moves += 1,
+            .explicit_create => self.explicit_creates += 1,
+            .explicit_destroy => self.explicit_destroys += 1,
+        }
+    }
 };
 
 const ReportQueryRun = struct {
@@ -6575,6 +6871,10 @@ fn verificationTrustLabel(
 }
 
 fn queryKindLabel(kind: QueryKind) []const u8 {
+    return formalQueryKindLabel(kind);
+}
+
+pub fn formalQueryKindLabel(kind: QueryKind) []const u8 {
     return switch (kind) {
         .Base => "base",
         .Obligation => "obligation",
@@ -6583,6 +6883,73 @@ fn queryKindLabel(kind: QueryKind) []const u8 {
         .LoopInvariantPost => "loop_invariant_post",
         .GuardSatisfy => "guard_satisfy",
         .GuardViolate => "guard_violate",
+    };
+}
+
+pub fn formalQueryFragmentLabel(fragment: QueryFragment) []const u8 {
+    return switch (fragment) {
+        .unknown => "unknown",
+        .qf_bv => "qf_bv",
+        .qf_bv_array => "qf_bv_array",
+        .aufbv => "aufbv",
+        .aufbv_quantifiers => "aufbv_quantifiers",
+        .other => "other",
+    };
+}
+
+pub fn formalQuerySolverLogicLabel(logic: QuerySolverLogic) []const u8 {
+    return switch (logic) {
+        .all => "all",
+        .qf_aufbv => "qf_aufbv",
+    };
+}
+
+pub fn formalLogicalRoleLabel(kind: AnnotationKind) ?[]const u8 {
+    return switch (kind) {
+        .Requires => "requires",
+        .CalleePrecondition => "callee_precondition",
+        .Ensures => "ensures",
+        .Guard => "guard",
+        .LoopInvariant => "loop_invariant",
+        .ContractInvariant => "contract_invariant",
+        .RefinementGuard => "refinement",
+        .Assume, .PathAssume => null,
+    };
+}
+
+pub fn formalAssumptionKindLabel(kind: AnnotationKind) ?[]const u8 {
+    return switch (kind) {
+        .Requires => "requires",
+        .Assume => "assume",
+        .PathAssume => "path_assume",
+        .CalleePrecondition,
+        .Ensures,
+        .Guard,
+        .LoopInvariant,
+        .ContractInvariant,
+        .RefinementGuard,
+        => null,
+    };
+}
+
+pub fn formalPendingObligationRoleLabel(kind: PendingObligationSourceKind) ?[]const u8 {
+    return switch (kind) {
+        .local => null,
+        .callee_precondition => "callee_precondition",
+        .imported_callee_obligation => "imported_callee_obligation",
+        .imported_callee_ensures => "imported_callee_ensures",
+    };
+}
+
+pub fn formalPendingConstraintAssumptionKindLabel(kind: PendingConstraintSourceKind) ?[]const u8 {
+    return switch (kind) {
+        .generic => null,
+        .assume => "assume",
+        .path_assume => "path_assume",
+        .binding => "binding",
+        .two_state_linkage => "two_state_linkage",
+        .env_assume => "env_assume",
+        .frame => "frame",
     };
 }
 
@@ -6911,6 +7278,29 @@ fn writePrecisionNoteEventJson(writer: anytype, event: Encoder.PrecisionNoteEven
     try writer.writeByte('}');
 }
 
+fn resourceEffectSummary(events: []const ResourceEffectEvent) ResourceEffectSummary {
+    var summary = ResourceEffectSummary{};
+    for (events) |event| summary.add(event.kind);
+    return summary;
+}
+
+fn writeResourceEffectEventJson(writer: anytype, event: ResourceEffectEvent) !void {
+    try writer.writeByte('{');
+    try writer.writeAll("\"kind\":");
+    try writeJsonStringEscaped(writer, resourceEffectKindLabel(event.kind));
+    try writer.writeAll(",\"description\":");
+    try writeJsonStringEscaped(writer, resourceEffectDescription(event.kind));
+    try writer.writeAll(",\"function_name\":");
+    try writeJsonStringEscaped(writer, event.function_name);
+    try writer.writeAll(",\"domain\":");
+    try writeJsonStringEscaped(writer, event.domain);
+    try writer.writeAll(",\"file\":");
+    try writeJsonStringEscaped(writer, event.file);
+    try writer.print(",\"line\":{d}", .{event.line});
+    try writer.print(",\"column\":{d}", .{event.column});
+    try writer.writeByte('}');
+}
+
 fn writeJsonStringEscaped(writer: anytype, value: []const u8) !void {
     try writer.writeByte('"');
     for (value) |ch| {
@@ -6969,7 +7359,7 @@ fn collectSortedStringKeys(
     allocator: std.mem.Allocator,
     map: anytype,
 ) !std.ArrayList([]const u8) {
-    var keys = std.ArrayList([]const u8){};
+    var keys = std.ArrayList([]const u8).empty;
     errdefer keys.deinit(allocator);
 
     var it = map.iterator();
@@ -7072,19 +7462,46 @@ fn loopPostDischargesObligation(
     queries: []const PreparedQuery,
     results: []const PreparedQueryResult,
 ) bool {
+    std.debug.assert(queries.len == results.len);
     if (obligation_query.kind != .Obligation) return false;
     if (obligation_query.obligation_kind != .Ensures) return false;
     if (!obligation_query.references_loop_post_state) return false;
 
     for (queries, results) |query, result| {
-        if (query.kind != .LoopInvariantPost) continue;
-        if (result.status != z3.Z3_L_FALSE) continue;
-        if (!std.mem.eql(u8, query.function_name, obligation_query.function_name)) continue;
-        if (!std.mem.eql(u8, query.file, obligation_query.file)) continue;
-        if (query.line != obligation_query.line or query.column != obligation_query.column) continue;
+        if (!loopPostQueryProvesObligation(obligation_query, query, result.status)) continue;
         return true;
     }
     return false;
+}
+
+fn loopPostDischargesReportObligation(
+    obligation_query: PreparedQuery,
+    queries: []const PreparedQuery,
+    runs: []const ReportQueryRun,
+) bool {
+    std.debug.assert(queries.len == runs.len);
+    if (obligation_query.kind != .Obligation) return false;
+    if (obligation_query.obligation_kind != .Ensures) return false;
+    if (!obligation_query.references_loop_post_state) return false;
+
+    for (queries, runs) |query, run| {
+        if (!loopPostQueryProvesObligation(obligation_query, query, run.status)) continue;
+        return true;
+    }
+    return false;
+}
+
+fn loopPostQueryProvesObligation(
+    obligation_query: PreparedQuery,
+    loop_post_query: PreparedQuery,
+    loop_post_status: z3.Z3_lbool,
+) bool {
+    return loop_post_query.kind == .LoopInvariantPost and
+        loop_post_status == z3.Z3_L_FALSE and
+        std.mem.eql(u8, loop_post_query.function_name, obligation_query.function_name) and
+        std.mem.eql(u8, loop_post_query.file, obligation_query.file) and
+        loop_post_query.line == obligation_query.line and
+        loop_post_query.column == obligation_query.column;
 }
 
 const PreparedQueryResult = struct {
@@ -7158,7 +7575,9 @@ fn inferReportVerificationSuccess(
     if (!verify_state) return false;
     if (summary.vacuous != 0) return false;
     if (summary.vacuity_unknown != 0) return false;
-    if (verification_result) |vr| return vr.success;
+    if (verification_result) |vr| {
+        if (!vr.success) return false;
+    }
     return summary.failed_obligations == 0 and
         summary.inconsistent_bases == 0 and
         summary.unknown == 0;
@@ -7322,6 +7741,37 @@ fn collectFunctionNamesInRegion(
         }
         current_block = mlir.oraBlockGetNextInRegion(current_block);
     }
+}
+
+fn resourceEffectKindFromOpName(op_name: []const u8) ?ResourceEffectKind {
+    if (std.mem.eql(u8, op_name, "ora.move")) return .conserved_move;
+    if (std.mem.eql(u8, op_name, "ora.create")) return .explicit_create;
+    if (std.mem.eql(u8, op_name, "ora.destroy")) return .explicit_destroy;
+    return null;
+}
+
+fn resourceEffectKindLabel(kind: ResourceEffectKind) []const u8 {
+    return switch (kind) {
+        .conserved_move => "conserved_move",
+        .explicit_create => "explicit_create",
+        .explicit_destroy => "explicit_destroy",
+    };
+}
+
+fn resourceEffectKindMarkdownLabel(kind: ResourceEffectKind) []const u8 {
+    return switch (kind) {
+        .conserved_move => "conserved move",
+        .explicit_create => "explicit create",
+        .explicit_destroy => "explicit destroy",
+    };
+}
+
+fn resourceEffectDescription(kind: ResourceEffectKind) []const u8 {
+    return switch (kind) {
+        .conserved_move => "net domain delta is zero",
+        .explicit_create => "domain boundary delta is positive",
+        .explicit_destroy => "domain boundary delta is negative",
+    };
 }
 
 fn addConstraintSlice(list: *ManagedArrayList(z3.Z3_ast), constraints: []const z3.Z3_ast) !void {
@@ -7677,9 +8127,9 @@ fn formatUnsatCoreSummary(
         return .{ .explain_str = null, .explain_tags = &.{} };
     }
 
-    var buffer = ManagedArrayList(u8).init(allocator);
+    var buffer = std.Io.Writer.Allocating.init(allocator);
     errdefer buffer.deinit();
-    const writer = buffer.writer();
+    const writer = &buffer.writer;
     for (parts.items, 0..) |part, idx| {
         if (idx != 0) try writer.writeAll("; ");
         try writer.writeAll(part);
@@ -8029,7 +8479,7 @@ fn buildSmtlibForConstraints(
 
     const raw = z3.Z3_solver_to_string(solver.context.ctx, temp_solver.solver);
     const text = if (raw == null) "" else std.mem.span(raw);
-    var out: std.ArrayList(u8) = .{};
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
     try out.appendSlice(allocator, text);
     if (!std.mem.endsWith(u8, text, "\n")) {
@@ -12134,6 +12584,7 @@ test "SMT report fails closed on real query-build degradation" {
     defer artifacts.deinit(testing.allocator);
 
     try testing.expect(pass.encoder.isDegraded());
+    try testing.expect(artifacts.blocksTrustedArtifacts());
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"encoding_degraded\":true") != null);
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"degradation_reason\":\"struct_field_extract requires exact product metadata\"") != null);
     try testing.expect(std.mem.indexOf(u8, artifacts.markdown, "Encoding degraded: `true`") != null);
@@ -12424,7 +12875,7 @@ test "report success is false without verification result when queries are unkno
     try testing.expect(!inferReportVerificationSuccess(summary, null, false, .Full, true, true));
 }
 
-test "report success follows verification result when present" {
+test "report success requires successful verification result when present" {
     var result = errors.VerificationResult.init(testing.allocator);
     defer result.deinit();
     result.success = false;
@@ -12434,6 +12885,66 @@ test "report success follows verification result when present" {
         .unknown = 0,
     };
     try testing.expect(!inferReportVerificationSuccess(summary, &result, false, .Full, true, true));
+}
+
+test "report success checks report counters even when verification result succeeded" {
+    var result = errors.VerificationResult.init(testing.allocator);
+    defer result.deinit();
+    result.success = true;
+
+    try testing.expect(!inferReportVerificationSuccess(.{
+        .total_queries = 1,
+        .unknown = 1,
+    }, &result, false, .Full, true, true));
+    try testing.expect(!inferReportVerificationSuccess(.{
+        .total_queries = 1,
+        .failed_obligations = 1,
+    }, &result, false, .Full, true, true));
+    try testing.expect(!inferReportVerificationSuccess(.{
+        .total_queries = 1,
+        .inconsistent_bases = 1,
+    }, &result, false, .Full, true, true));
+}
+
+test "report loop-post discharge matches verifier result collection" {
+    var queries = [_]PreparedQuery{
+        .{
+            .kind = .Obligation,
+            .function_name = "countTo",
+            .obligation_kind = .Ensures,
+            .file = "/tmp/loop.ora",
+            .line = 7,
+            .column = 9,
+            .references_loop_post_state = true,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try testing.allocator.dupe(u8, "countTo [ensures]"),
+        },
+        .{
+            .kind = .LoopInvariantPost,
+            .function_name = "countTo",
+            .obligation_kind = .Ensures,
+            .file = "/tmp/loop.ora",
+            .line = 7,
+            .column = 9,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try testing.allocator.dupe(u8, "countTo [invariant-post]"),
+        },
+    };
+    defer {
+        for (&queries) |*query| query.deinit(testing.allocator);
+    }
+
+    const verification_results = [_]PreparedQueryResult{
+        .{ .status = z3.Z3_L_TRUE },
+        .{ .status = z3.Z3_L_FALSE },
+    };
+    const report_runs = [_]ReportQueryRun{
+        .{ .status = z3.Z3_L_TRUE },
+        .{ .status = z3.Z3_L_FALSE },
+    };
+
+    try testing.expect(loopPostDischargesObligation(queries[0], queries[0..], verification_results[0..]));
+    try testing.expect(loopPostDischargesReportObligation(queries[0], queries[0..], report_runs[0..]));
 }
 
 test "report success is false when encoder degraded" {
@@ -12652,6 +13163,80 @@ test "rendered SMT report omits markdown precision context when there are no pre
     defer testing.allocator.free(markdown);
 
     try testing.expect(std.mem.indexOf(u8, markdown, "- Precision context:") == null);
+}
+
+test "rendered SMT report includes resource effect summary and events" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    try pass.report_resource_events.append(.{
+        .kind = .conserved_move,
+        .function_name = "transfer",
+        .domain = "TokenUnit",
+        .file = "/tmp/resource.ora",
+        .line = 12,
+        .column = 9,
+    });
+    try pass.report_resource_events.append(.{
+        .kind = .explicit_create,
+        .function_name = "issue",
+        .domain = "TokenUnit",
+        .file = "/tmp/resource.ora",
+        .line = 18,
+        .column = 9,
+    });
+    try pass.report_resource_events.append(.{
+        .kind = .explicit_destroy,
+        .function_name = "retire",
+        .domain = "TokenUnit",
+        .file = "/tmp/resource.ora",
+        .line = 24,
+        .column = 9,
+    });
+
+    const summary = ReportSummary{
+        .proven_guards = 2,
+        .violatable_guards = 1,
+    };
+    const kind_counts = ReportKindCounts{};
+
+    const markdown = try pass.renderSmtReportMarkdown(
+        "/tmp/resource.ora",
+        0,
+        &.{},
+        &.{},
+        summary,
+        kind_counts,
+        null,
+    );
+    defer testing.allocator.free(markdown);
+
+    try testing.expect(std.mem.indexOf(u8, markdown, "## Resource Effects") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "- Conserved moves: `1`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "- Explicit creates: `1`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "- Explicit destroys: `1`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "- Runtime guards: `1`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "- Proof-elided guards: `2`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "`conserved move` in `transfer` domain `TokenUnit`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "net domain delta is zero") != null);
+
+    const json = try pass.renderSmtReportJson(
+        "/tmp/resource.ora",
+        0,
+        &.{},
+        &.{},
+        summary,
+        kind_counts,
+        null,
+    );
+    defer testing.allocator.free(json);
+
+    try testing.expect(std.mem.indexOf(u8, json, "\"resource_effect_summary\":{\"conserved_moves\":1,\"explicit_creates\":1,\"explicit_destroys\":1,\"runtime_guards\":1,\"proof_elided_guards\":2}") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"resource_effects\":[") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"kind\":\"conserved_move\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"description\":\"net domain delta is zero\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"function_name\":\"transfer\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"domain\":\"TokenUnit\"") != null);
 }
 
 test "rendered SMT report attributes precision events to matching proof errors" {
@@ -13261,6 +13846,7 @@ test "explain mode reports contradictory requires as vacuous" {
     defer testing.allocator.free(artifacts.markdown);
     defer testing.allocator.free(artifacts.json);
 
+    try testing.expect(artifacts.blocksTrustedArtifacts());
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"vacuous\":true") != null);
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"vacuity_unknown\":false") != null);
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"kind\":\"requires\"") != null);
@@ -13290,6 +13876,7 @@ test "runVerificationPass explain mode remains on canonical prepared-query path"
     defer testing.allocator.free(artifacts.markdown);
     defer testing.allocator.free(artifacts.json);
 
+    try testing.expect(artifacts.blocksTrustedArtifacts());
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"vacuous\":true") != null);
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"explain_core\":\"requires requires\"") != null);
 }

@@ -1,6 +1,6 @@
 const std = @import("std");
 const evm_mod = @import("ora_evm");
-const primitives = @import("voltaire");
+const primitives = evm_mod.primitives;
 
 pub const ORA_BINARY_REL = "zig-out/bin/ora";
 pub const CONFORMANCE_DIR_REL = "tests/conformance";

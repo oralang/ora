@@ -1,0 +1,1 @@
+expect_error = "@create expects a Resource<T> place as its first argument"

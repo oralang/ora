@@ -72,7 +72,7 @@ pub const ConstEvalOptions = struct {
 ///
 /// The immediate goal is architectural:
 /// - compiler DB should query comptime through `src/comptime/`
-/// - legacy AST walker remains isolated in `ast_eval.zig`
+/// - the AST walker remains isolated in `ast_eval.zig`
 /// - the lightweight compiler walker can later be upgraded to use the full
 ///   shared environment/value engine without moving the compiler call sites again
 pub fn constEval(allocator: std.mem.Allocator, file: *const ast.AstFile, options: ConstEvalOptions) !ConstEvalResult {
@@ -299,7 +299,14 @@ const ConstEvaluator = struct {
                     self.visitBody(try_stmt.try_body);
                     if (try_stmt.catch_clause) |catch_clause| self.visitBody(catch_clause.body);
                 },
-                .Expr => |expr_stmt| _ = self.evalExpr(expr_stmt.expr) catch null,
+                .Expr => |expr_stmt| switch (self.file.expression(expr_stmt.expr).*) {
+                    .Comptime => |comptime_expr| {
+                        self.required_comptime_depth += 1;
+                        defer self.required_comptime_depth -= 1;
+                        _ = self.evalComptimeBody(comptime_expr.body) catch null;
+                    },
+                    else => _ = self.evalExpr(expr_stmt.expr) catch null,
+                },
                 .Assign => |assign| _ = self.evalComptimeAssign(assign, true) catch null,
                 .Log => |log_stmt| {
                     for (log_stmt.args) |arg| _ = self.evalExpr(arg) catch null;
@@ -456,7 +463,7 @@ const ConstEvaluator = struct {
             },
             .Result => null,
             .Unary => |unary| try evalUnary(self.allocator, unary.op, try self.evalExprImpl(unary.operand, use_cache)),
-            .Binary => |binary| try evalBinary(self.allocator, binary.op, try self.evalExprImpl(binary.lhs, use_cache), try self.evalExprImpl(binary.rhs, use_cache)),
+            .Binary => |binary| try self.evalBinaryExpr(binary, use_cache),
             .Call => |call| blk: {
                 if (try self.evalCallCtValue(call, use_cache)) |ct_value| {
                     break :blk try ctValueToConstValue(self.allocator, &self.env.heap, ct_value);
@@ -516,6 +523,109 @@ const ConstEvaluator = struct {
         };
         if (use_cache) self.values[expr_id.index()] = value;
         return value;
+    }
+
+    fn evalBinaryExpr(self: *ConstEvaluator, binary: ast.BinaryExpr, comptime use_cache: bool) anyerror!?ConstValue {
+        const lhs = try self.evalExprImpl(binary.lhs, use_cache);
+        const rhs = try self.evalExprImpl(binary.rhs, use_cache);
+        if (self.rejectInvalidBinaryComptime(binary.op, lhs, rhs, binary.range)) return null;
+        return try evalBinary(self.allocator, binary.op, lhs, rhs);
+    }
+
+    fn evalBinaryValue(
+        self: *ConstEvaluator,
+        op: ast.BinaryOp,
+        lhs: ?ConstValue,
+        rhs: ?ConstValue,
+        range: source.TextRange,
+    ) anyerror!?ConstValue {
+        if (self.rejectInvalidBinaryComptime(op, lhs, rhs, range)) return null;
+        return try evalBinary(self.allocator, op, lhs, rhs);
+    }
+
+    fn rejectInvalidBinaryComptime(
+        self: *ConstEvaluator,
+        op: ast.BinaryOp,
+        lhs: ?ConstValue,
+        rhs: ?ConstValue,
+        range: source.TextRange,
+    ) bool {
+        const left = lhs orelse return false;
+        const right = rhs orelse return false;
+        const left_integer = switch (left) {
+            .integer => true,
+            else => false,
+        };
+        const right_integer = switch (right) {
+            .integer => |integer| integer,
+            else => return false,
+        };
+        if (!left_integer) return false;
+
+        switch (op) {
+            .div, .mod => {
+                if (right_integer.eqlZero()) {
+                    self.recordRequiredBinaryError(
+                        .division_by_zero,
+                        range,
+                        "comptime division by zero",
+                        "division and modulo by zero are invalid in required comptime evaluation",
+                    );
+                    return true;
+                }
+            },
+            .shl, .wrapping_shl, .shr, .wrapping_shr => {
+                if (bridge.positiveShiftAmount(right_integer) == null) {
+                    self.recordRequiredBinaryError(
+                        .invalid_cast,
+                        range,
+                        "invalid comptime shift amount",
+                        "shift amount must be non-negative and fit in usize",
+                    );
+                    return true;
+                }
+            },
+            .pow, .wrapping_pow => {
+                const amount = bridge.positiveShiftAmount(right_integer) orelse {
+                    self.recordRequiredBinaryError(
+                        .invalid_cast,
+                        range,
+                        "invalid comptime exponent",
+                        "exponent must be non-negative and fit in usize",
+                    );
+                    return true;
+                };
+                const amount_u64: u64 = @intCast(amount);
+                if (amount_u64 > self.env.config.max_loop_iterations or
+                    amount_u64 > LimitCheck.init(self.env.config, &self.env.stats).remainingSteps())
+                {
+                    self.recordRequiredBinaryError(
+                        .step_limit,
+                        range,
+                        "comptime exponentiation exceeds evaluation step budget",
+                        "exponent exceeds the configured comptime evaluation budget",
+                    );
+                    return true;
+                }
+            },
+            else => {},
+        }
+        return false;
+    }
+
+    fn recordRequiredBinaryError(
+        self: *ConstEvaluator,
+        kind: error_mod.CtErrorKind,
+        range: source.TextRange,
+        message: []const u8,
+        reason: []const u8,
+    ) void {
+        self.recordCtError(error_mod.CtError.withReason(
+            kind,
+            self.sourceSpan(range),
+            message,
+            reason,
+        ));
     }
 
     fn evalExprCtValue(self: *ConstEvaluator, expr_id: ast.ExprId) anyerror!?CtValue {
@@ -1268,7 +1378,7 @@ const ConstEvaluator = struct {
             .Generic => |generic| blk: {
                 if (!refinements.isKnownName(generic.name) or generic.args.len == 0 or generic.args[0] != .Type) break :blk null;
                 const base_type = (try self.modelTypeFromTypeExpr(generic.args[0].Type)) orelse break :blk null;
-                const args = try type_descriptors.refinementArgsFromAst(self.allocator, generic.args);
+                const args = try type_descriptors.refinementArgsFromAst(self.allocator, self.file, generic.args);
                 break :blk try refinements.refinementType(self.allocator, generic.name, base_type, args);
             },
             else => null,
@@ -1432,7 +1542,7 @@ const ConstEvaluator = struct {
     };
 
     fn signatureForTraitMethod(self: *ConstEvaluator, method: anytype) !?[]const u8 {
-        var abi_types: std.ArrayList([]const u8) = .{};
+        var abi_types: std.ArrayList([]const u8) = .empty;
         defer abi_types.deinit(self.allocator);
 
         for (method.parameters) |parameter| {
@@ -1444,7 +1554,7 @@ const ConstEvaluator = struct {
     }
 
     fn signatureForLogDecl(self: *ConstEvaluator, log_decl: ast.LogDeclItem) !?[]const u8 {
-        var abi_types: std.ArrayList([]const u8) = .{};
+        var abi_types: std.ArrayList([]const u8) = .empty;
         defer abi_types.deinit(self.allocator);
 
         for (log_decl.fields) |field| {
@@ -1645,7 +1755,7 @@ const ConstEvaluator = struct {
                 if (refinements.isKnownName(generic.name)) {
                     if (generic.args.len > 0 and generic.args[0] == .Type) break :blk self.typeExprAbiName(generic.args[0].Type);
                 }
-                var rendered_args: std.ArrayList([]const u8) = .{};
+                var rendered_args: std.ArrayList([]const u8) = .empty;
                 defer rendered_args.deinit(self.allocator);
                 for (generic.args) |arg| switch (arg) {
                     .Type => |nested| {
@@ -1661,7 +1771,7 @@ const ConstEvaluator = struct {
                     try std.fmt.allocPrint(self.allocator, "{s}<{s}>", .{ generic.name, joined });
             },
             .Tuple => |tuple| blk: {
-                var rendered_elements: std.ArrayList([]const u8) = .{};
+                var rendered_elements: std.ArrayList([]const u8) = .empty;
                 defer rendered_elements.deinit(self.allocator);
                 for (tuple.elements) |element| {
                     const name = (try self.typeExprAbiName(element)) orelse break :blk null;
@@ -1671,7 +1781,7 @@ const ConstEvaluator = struct {
                 break :blk try std.fmt.allocPrint(self.allocator, "({s})", .{joined});
             },
             .AnonymousStruct => |struct_type| blk: {
-                var rendered_fields: std.ArrayList([]const u8) = .{};
+                var rendered_fields: std.ArrayList([]const u8) = .empty;
                 defer rendered_fields.deinit(self.allocator);
                 for (struct_type.fields) |field| {
                     const name = (try self.typeExprAbiName(field.type_expr)) orelse break :blk null;
@@ -2715,7 +2825,15 @@ const ConstEvaluator = struct {
             return switch (lhs.?) {
                 .integer => |a| switch (rhs.?) {
                     .integer => |b| blk: {
-                        if (b.eqlZero()) break :blk null;
+                        if (b.eqlZero()) {
+                            self.recordRequiredBinaryError(
+                                .division_by_zero,
+                                builtin.range,
+                                "comptime division by zero",
+                                "division builtin divisor must be nonzero in required comptime evaluation",
+                            );
+                            break :blk null;
+                        }
                         var quotient = try std.math.big.int.Managed.init(self.allocator);
                         var remainder = try std.math.big.int.Managed.init(self.allocator);
                         if (std.mem.eql(u8, builtin.name, "divFloor")) {
@@ -2728,6 +2846,12 @@ const ConstEvaluator = struct {
                                     try quotient.addScalar(&quotient, 1);
                                 }
                             } else if (std.mem.eql(u8, builtin.name, "divExact") and !remainder.eqlZero()) {
+                                self.recordRequiredBinaryError(
+                                    .invalid_cast,
+                                    builtin.range,
+                                    "comptime exact division has nonzero remainder",
+                                    "@divExact requires an exactly divisible numerator and denominator in required comptime evaluation",
+                                );
                                 break :blk null;
                             }
                         }
@@ -4031,7 +4155,7 @@ const ConstEvaluator = struct {
                 }
                 const rhs = rhs_const orelse (try ctValueToConstValue(self.allocator, &self.env.heap, rhs_ct)) orelse return null;
                 const op = compoundAssignBinaryOp(assign.op) orelse return null;
-                const value = (try evalBinary(self.allocator, op, try self.readBoundName(name.name), rhs)) orelse return null;
+                const value = (try self.evalBinaryValue(op, try self.readBoundName(name.name), rhs, assign.range)) orelse return null;
                 const ct_value = (try self.constValueToCtValue(value)) orelse return null;
                 try self.env.set(name.name, ct_value);
                 return value;
@@ -4070,7 +4194,7 @@ const ConstEvaluator = struct {
                             else => blk_op: {
                                 const current = (try ctValueToConstValue(self.allocator, &self.env.heap, elems[idx])) orelse break :blk_op null;
                                 const op = compoundAssignBinaryOp(assign.op) orelse break :blk_op null;
-                                const computed = (try evalBinary(self.allocator, op, current, rhs)) orelse break :blk_op null;
+                                const computed = (try self.evalBinaryValue(op, current, rhs, assign.range)) orelse break :blk_op null;
                                 break :blk_op (try constToCtValue(computed)) orelse break :blk_op null;
                             },
                         } orelse return null;
@@ -4085,7 +4209,7 @@ const ConstEvaluator = struct {
                             else => blk_op: {
                                 const current = (try ctValueToConstValue(self.allocator, &self.env.heap, elems[idx])) orelse break :blk_op null;
                                 const op = compoundAssignBinaryOp(assign.op) orelse break :blk_op null;
-                                const computed = (try evalBinary(self.allocator, op, current, rhs)) orelse break :blk_op null;
+                                const computed = (try self.evalBinaryValue(op, current, rhs, assign.range)) orelse break :blk_op null;
                                 break :blk_op (try constToCtValue(computed)) orelse break :blk_op null;
                             },
                         } orelse return null;
@@ -4105,7 +4229,7 @@ const ConstEvaluator = struct {
                             else => blk_op: {
                                 const current_value = current orelse break :blk_op null;
                                 const op = compoundAssignBinaryOp(assign.op) orelse break :blk_op null;
-                                const computed = (try evalBinary(self.allocator, op, current_value, rhs)) orelse break :blk_op null;
+                                const computed = (try self.evalBinaryValue(op, current_value, rhs, assign.range)) orelse break :blk_op null;
                                 break :blk_op (try constToCtValue(computed)) orelse break :blk_op null;
                             },
                         } orelse return null;
@@ -4141,7 +4265,7 @@ const ConstEvaluator = struct {
                         const rhs = rhs_const orelse break :blk_op null;
                         const current = (try ctValueToConstValue(self.allocator, &self.env.heap, current_field)) orelse break :blk_op null;
                         const op = compoundAssignBinaryOp(assign.op) orelse break :blk_op null;
-                        const computed = (try evalBinary(self.allocator, op, current, rhs)) orelse break :blk_op null;
+                        const computed = (try self.evalBinaryValue(op, current, rhs, assign.range)) orelse break :blk_op null;
                         break :blk_op (try constToCtValue(computed)) orelse break :blk_op null;
                     },
                 } orelse return null;

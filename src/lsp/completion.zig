@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin_docs = @import("builtin_docs.zig");
 const frontend = @import("frontend.zig");
 const lexer = @import("ora_lexer");
 const refinements = @import("ora_refinements");
@@ -60,7 +61,7 @@ pub fn completionAtIndex(
     var seen = std.StringHashMap(void).init(allocator);
     defer seen.deinit();
 
-    var items = std.ArrayList(Item){};
+    var items = std.ArrayList(Item).empty;
     errdefer {
         for (items.items) |*item| item.deinit(allocator);
         items.deinit(allocator);
@@ -72,6 +73,10 @@ pub fn completionAtIndex(
     }
     for (keyword_docs.contextual_keywords) |keyword| {
         try appendKeywordCompletion(allocator, &items, &seen, prefix, keyword);
+    }
+    try appendResourceTypeCompletion(allocator, &items, &seen, prefix);
+    for (builtin_docs.entries) |entry| {
+        try appendBuiltinCompletion(allocator, &items, &seen, prefix, entry);
     }
 
     for (refinements.entries) |entry| {
@@ -95,7 +100,7 @@ pub fn completionAtIndex(
         try seen.put(symbol.name, {});
         try items.append(allocator, .{
             .label = try allocator.dupe(u8, symbol.name),
-            .detail = if (symbol.detail) |detail| try allocator.dupe(u8, detail) else null,
+            .detail = try symbolDetailAlloc(allocator, symbol),
             .documentation = if (symbol.doc_comment) |doc| try allocator.dupe(u8, doc) else null,
             .kind = symbolKindToCompletionKind(symbol.kind),
         });
@@ -104,6 +109,44 @@ pub fn completionAtIndex(
     std.sort.heap(Item, items.items, {}, lessItemByLabel);
 
     return items.toOwnedSlice(allocator);
+}
+
+fn appendBuiltinCompletion(
+    allocator: Allocator,
+    items: *std.ArrayList(Item),
+    seen: *std.StringHashMap(void),
+    prefix: []const u8,
+    entry: builtin_docs.Entry,
+) !void {
+    if (!matchesPrefix(entry.name, prefix)) return;
+    if (seen.contains(entry.name)) return;
+
+    try seen.put(entry.name, {});
+    try items.append(allocator, .{
+        .label = try allocator.dupe(u8, entry.name),
+        .detail = try allocator.dupe(u8, entry.signature),
+        .documentation = try builtin_docs.markdownAlloc(allocator, entry),
+        .kind = .function,
+    });
+}
+
+fn appendResourceTypeCompletion(
+    allocator: Allocator,
+    items: *std.ArrayList(Item),
+    seen: *std.StringHashMap(void),
+    prefix: []const u8,
+) !void {
+    const label = "Resource";
+    if (!matchesPrefix(label, prefix)) return;
+    if (seen.contains(label)) return;
+
+    try seen.put(label, {});
+    try items.append(allocator, .{
+        .label = try allocator.dupe(u8, label),
+        .detail = try allocator.dupe(u8, "Resource<T>"),
+        .documentation = try allocator.dupe(u8, "Opaque storage or transient resource place for a declared `resource` domain. Mutate resource places with `@create`, `@destroy`, and `@move`."),
+        .kind = .type_alias,
+    });
 }
 
 fn appendKeywordCompletion(
@@ -124,6 +167,22 @@ fn appendKeywordCompletion(
     });
 }
 
+fn symbolDetailAlloc(allocator: Allocator, symbol: semantic_index.Symbol) !?[]u8 {
+    const detail = symbol.detail orelse return if (isInlineFunction(symbol))
+        try allocator.dupe(u8, "inline")
+    else
+        null;
+
+    if (isInlineFunction(symbol)) {
+        return try std.fmt.allocPrint(allocator, "inline {s}", .{detail});
+    }
+    return try allocator.dupe(u8, detail);
+}
+
+fn isInlineFunction(symbol: semantic_index.Symbol) bool {
+    return symbol.is_inline and (symbol.kind == .function or symbol.kind == .method);
+}
+
 pub fn isDotTrigger(trigger_char: ?[]const u8, source: []const u8, position: frontend.Position) bool {
     if (trigger_char) |tc| {
         if (std.mem.eql(u8, tc, ".")) return true;
@@ -140,7 +199,7 @@ fn memberCompletion(
     position: frontend.Position,
     index: *const semantic_index.SemanticIndex,
 ) ![]Item {
-    var items = std.ArrayList(Item){};
+    var items = std.ArrayList(Item).empty;
     errdefer {
         for (items.items) |*item| item.deinit(allocator);
         items.deinit(allocator);
@@ -166,7 +225,7 @@ fn memberCompletion(
 
                 try items.append(allocator, .{
                     .label = try allocator.dupe(u8, symbol.name),
-                    .detail = if (symbol.detail) |detail| try allocator.dupe(u8, detail) else null,
+                    .detail = try symbolDetailAlloc(allocator, symbol),
                     .documentation = if (symbol.doc_comment) |doc| try allocator.dupe(u8, doc) else null,
                     .kind = symbolKindToCompletionKind(symbol.kind),
                 });
@@ -182,7 +241,7 @@ fn memberCompletion(
 
                         try items.append(allocator, .{
                             .label = try allocator.dupe(u8, symbol.name),
-                            .detail = if (symbol.detail) |detail| try allocator.dupe(u8, detail) else null,
+                            .detail = try symbolDetailAlloc(allocator, symbol),
                             .documentation = if (symbol.doc_comment) |doc| try allocator.dupe(u8, doc) else null,
                             .kind = symbolKindToCompletionKind(symbol.kind),
                         });

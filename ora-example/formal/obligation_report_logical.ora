@@ -1,0 +1,9 @@
+contract ObligationReportLogical {
+    pub fn checked_sub(x: u256, y: u256) -> u256
+        requires x >= y
+        ensures result == x - y
+    {
+        assert(x >= y, "source-level assert should be reported");
+        return x - y;
+    }
+}

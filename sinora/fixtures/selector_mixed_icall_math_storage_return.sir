@@ -1,0 +1,151 @@
+fn init:
+    entry {
+        v0 = runtime_start_offset
+        v1 = runtime_length
+        v2 = malloc v1
+        codecopy v2 v0 v1
+        return v2 v1
+    }
+
+fn add:
+    entry v0 v1 -> v4 v2 {
+        v2 = const 0x20
+        v3 = add v0 v1
+        v4 = malloc v2
+        mstore256 v4 v3
+        iret
+    }
+
+fn multiply:
+    entry v0 v1 -> v4 v2 {
+        v2 = const 0x20
+        v3 = mul v0 v1
+        v4 = malloc v2
+        mstore256 v4 v3
+        iret
+    }
+
+fn incrementCounter:
+    entry {
+        slot_counter = const 0x0
+        c1 = const 0x1
+        value = sload slot_counter
+        v0 = add value c1
+        sstore slot_counter v0
+        iret
+    }
+
+fn getCounter:
+    entry -> v1 v0 {
+        v0 = const 0x20
+        slot_counter = const 0x0
+        value = sload slot_counter
+        v1 = malloc v0
+        mstore256 v1 value
+        iret
+    }
+
+fn accumulate:
+    entry v0 {
+        slot_total = const 0x1
+        value = sload slot_total
+        v1 = add value v0
+        sstore slot_total v1
+        iret
+    }
+
+fn main:
+    main_entry {
+        zero = const 0x0
+        selector_offset = const 0x4
+        word_size = const 0x20
+        min_cdsize_1arg = const 0x23
+        arg1_offset = const 0x24
+        min_cdsize_2args = const 0x43
+        arg2_offset = const 0x44
+        min_cdsize_3args = const 0x63
+        selector_shift = const 0xE0
+        v0 = codesize
+        v1 = const 0x40
+        v2 = add v0 v1
+        v3 = mload256 word_size
+        v4 = lt v3 v2
+        sel_zero = const 0x0
+        sel_mask = sub sel_zero v4
+        sel_t = and sel_mask v2
+        sel_inv = not sel_mask
+        sel_f = and sel_inv v3
+        v5 = or sel_t sel_f
+        mstore256 word_size v5
+        cv = callvalue
+        cv_nonzero = iszero cv
+        => cv_nonzero ? @load_selector : @revert_error
+    }
+    load_selector {
+        zero_0 = const 0x0
+        selector_shift_0 = const 0xE0
+        selector_word = calldataload zero_0
+        selector = shr selector_shift_0 selector_word
+        switch selector {
+        0x771602F7 => @add_
+        0x165C4A16 => @multiply_
+        0x5B34B966 => @incrementCounter_
+        0x8ADA066E => @getCounter_
+        0xB4E7D02A => @accumulate_
+        default => @revert_error
+    }
+    }
+    revert_error {
+        zero_1 = const 0x0
+        revert zero_1 zero_1
+    }
+    add_ {
+        cdsize_add = calldatasize
+        min_cdsize_2args_0 = const 0x43
+        valid_add = lt min_cdsize_2args_0 cdsize_add
+        => valid_add ? @add_exec : @revert_error
+    }
+    add_exec {
+        selector_offset_0 = const 0x4
+        a_add = calldataload selector_offset_0
+        arg1_offset_0 = const 0x24
+        b_add = calldataload arg1_offset_0
+        v9 v10 = icall @add a_add b_add
+        return v9 v10
+    }
+    multiply_ {
+        cdsize_multiply = calldatasize
+        min_cdsize_2args_1 = const 0x43
+        valid_multiply = lt min_cdsize_2args_1 cdsize_multiply
+        => valid_multiply ? @multiply_exec : @revert_error
+    }
+    multiply_exec {
+        selector_offset_1 = const 0x4
+        a_multiply = calldataload selector_offset_1
+        arg1_offset_1 = const 0x24
+        b_multiply = calldataload arg1_offset_1
+        v11 v12 = icall @multiply a_multiply b_multiply
+        return v11 v12
+    }
+    incrementCounter_ {
+        icall @incrementCounter
+        v6 = const 0x0
+        return v6 v6
+    }
+    getCounter_ {
+        v7 v8 = icall @getCounter
+        return v7 v8
+    }
+    accumulate_ {
+        cdsize_accumulate = calldatasize
+        min_cdsize_1arg_0 = const 0x23
+        valid_accumulate = lt min_cdsize_1arg_0 cdsize_accumulate
+        => valid_accumulate ? @accumulate_exec : @revert_error
+    }
+    accumulate_exec {
+        selector_offset_2 = const 0x4
+        a_accumulate = calldataload selector_offset_2
+        icall @accumulate a_accumulate
+        v13 = const 0x0
+        return v13 v13
+    }

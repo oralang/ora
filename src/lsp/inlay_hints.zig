@@ -33,7 +33,7 @@ pub fn hintsInRangeCached(
     file: *const compiler.ast.AstFile,
     index: *const semantic_index.SemanticIndex,
 ) ![]InlayHint {
-    var hints = std.ArrayList(InlayHint){};
+    var hints = std.ArrayList(InlayHint).empty;
     errdefer {
         for (hints.items) |*h| h.deinit(allocator);
         hints.deinit(allocator);

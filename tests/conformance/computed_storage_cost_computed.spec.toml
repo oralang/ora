@@ -1,0 +1,84 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "store_one(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", 77]
+returns = {}
+gas_max = 70000
+
+[[call]]
+fn = "load_one(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 77 }
+gas_max = 50000
+
+[[call]]
+fn = "erase_one(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = {}
+gas_max = 70000
+
+[[call]]
+fn = "load_one(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 0 }
+gas_max = 50000
+
+[[call]]
+fn = "store_four(address,uint256,uint256,uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", 1, 2, 3, 4]
+returns = {}
+gas_max = 140000
+
+[[call]]
+fn = "sum_four(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 10 }
+gas_max = 60000
+
+[[call]]
+fn = "erase_four(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = {}
+gas_max = 120000
+
+[[call]]
+fn = "store_sixteen(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = {}
+gas_max = 600000
+
+[[call]]
+fn = "sum_sixteen(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 136 }
+gas_max = 120000
+
+[[call]]
+fn = "erase_sixteen(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = {}
+gas_max = 300000

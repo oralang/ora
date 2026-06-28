@@ -1,0 +1,39 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "issue(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000000", 40]
+returns = {}
+
+[[call]]
+fn = "transfer(address,address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000000", "0x2000000000000000000000000000000000000000", 25]
+returns = {}
+
+[[call]]
+fn = "balanceOf(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000000"]
+returns = { u256 = 40 }
+
+[[call]]
+fn = "transfer(address,address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000000", "0x2000000000000000000000000000000000000000", 41]
+reverts = { any = true }
+
+[[call]]
+fn = "balanceOf(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000000"]
+returns = { u256 = 40 }

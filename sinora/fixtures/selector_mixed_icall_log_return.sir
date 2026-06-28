@@ -1,0 +1,109 @@
+fn init:
+    entry {
+        v0 = runtime_start_offset
+        v1 = runtime_length
+        v2 = malloc v1
+        codecopy v2 v0 v1
+        return v2 v1
+    }
+
+fn emitTransfer:
+    entry v0 v1 {
+        v2 = large_const 0xDDF252AD1BE2C89B69C2B068FC378DAA952BA7F163C4A11628F55A4DF523B3EF
+        v3 = const 0x40
+        v4 = const 0x20
+        v5 = const 0x0
+        v6 = const 0x60
+        v7 = caller
+        v8 = malloc v6
+        v9 = add v8 v5
+        mstore256 v9 v7
+        v10 = add v8 v4
+        mstore256 v10 v0
+        v11 = add v8 v3
+        mstore256 v11 v1
+        log1 v8 v6 v2
+        iret
+    }
+
+fn emitPing:
+    entry {
+        v0 = large_const 0xCA6E822DF923F741DFE968D15D80A18ABD25BD1E748BCB9AD81FEA5BBB7386AF
+        v1 = const 0x0
+        log1 v1 v1 v0
+        iret
+    }
+
+fn main:
+    main_entry {
+        zero = const 0x0
+        selector_offset = const 0x4
+        word_size = const 0x20
+        min_cdsize_1arg = const 0x23
+        arg1_offset = const 0x24
+        min_cdsize_2args = const 0x43
+        arg2_offset = const 0x44
+        min_cdsize_3args = const 0x63
+        selector_shift = const 0xE0
+        v0 = codesize
+        v1 = mload256 word_size
+        v2 = lt v1 v0
+        sel_zero = const 0x0
+        sel_mask = sub sel_zero v2
+        sel_t = and sel_mask v0
+        sel_inv = not sel_mask
+        sel_f = and sel_inv v1
+        v3 = or sel_t sel_f
+        mstore256 word_size v3
+        cv = callvalue
+        cv_nonzero = iszero cv
+        => cv_nonzero ? @load_selector : @revert_error
+    }
+    load_selector {
+        zero_0 = const 0x0
+        selector_shift_0 = const 0xE0
+        selector_word = calldataload zero_0
+        selector = shr selector_shift_0 selector_word
+        switch selector {
+        0xB8BE6222 => @emitTransfer_
+        0x5BF03663 => @emitPing_
+        default => @revert_error
+    }
+    }
+    revert_error {
+        zero_1 = const 0x0
+        revert zero_1 zero_1
+    }
+    emitTransfer_ {
+        cdsize_emitTransfer = calldatasize
+        min_cdsize_2args_0 = const 0x43
+        valid_emitTransfer = lt min_cdsize_2args_0 cdsize_emitTransfer
+        => valid_emitTransfer ? @bb0 : @revert_error
+    }
+    emitTransfer_exec {
+        arg1_offset_0 = const 0x24
+        b_emitTransfer = calldataload arg1_offset_0
+        icall @emitTransfer v6 b_emitTransfer
+        v8 = const 0x0
+        return v8 v8
+    }
+    emitPing_ {
+        icall @emitPing
+        v4 = const 0x0
+        return v4 v4
+    }
+    bb0 {
+        selector_offset_0 = const 0x4
+        a_emitTransfer = calldataload selector_offset_0
+        v5 = large_const 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+        v6 = and a_emitTransfer v5
+        v7 = eq a_emitTransfer v6
+        => v7 ? @emitTransfer_exec : @abi_decode_revert_5
+    }
+    abi_decode_revert_5 {
+        word_size_0 = const 0x20
+        v9 = const 0x5
+        v10 = sallocany 0x20
+        mstore256 v10 v9
+        revert v10 word_size_0
+    }

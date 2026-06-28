@@ -85,9 +85,9 @@ pub const SourceStore = struct {
     pub fn init(allocator: std.mem.Allocator) SourceStore {
         return .{
             .allocator = allocator,
-            .files = .{},
-            .packages = .{},
-            .modules = .{},
+            .files = .empty,
+            .packages = .empty,
+            .modules = .empty,
         };
     }
 
@@ -168,7 +168,7 @@ pub const SourceStore = struct {
         try self.packages.append(self.allocator, .{
             .id = id,
             .name = owned_name,
-            .modules = .{},
+            .modules = .empty,
         });
         return id;
     }
@@ -262,7 +262,7 @@ pub fn rangeOf(value: anytype) TextRange {
 }
 
 fn buildLineStarts(allocator: std.mem.Allocator, text: []const u8) ![]u32 {
-    var starts: std.ArrayList(u32) = .{};
+    var starts: std.ArrayList(u32) = .empty;
     defer starts.deinit(allocator);
 
     try starts.append(allocator, 0);

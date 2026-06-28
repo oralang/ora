@@ -1,8 +1,8 @@
 /// Test host implementation for execution-specs tests
 /// This maintains multi-account state (balances, code, storage) for testing
 const std = @import("std");
-const primitives = @import("voltaire");
 const evm_mod = @import("evm");
+const primitives = evm_mod.primitives;
 const Address = primitives.Address.Address;
 const HostInterface = evm_mod.HostInterface;
 const CallResult = evm_mod.CallResult;

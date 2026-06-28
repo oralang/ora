@@ -222,30 +222,38 @@ pub fn build(b: *std.Build) void {
     mlir_helpers_mod.addImport("mlir_c_api", mlir_c_mod);
     mlir_helpers_mod.addImport("ora_types", ora_types_mod);
 
-    const voltaire_dep = b.dependency("voltaire", .{
+    const evm_blst_lib = createEvmBlstLibrary(b, target, optimize);
+    const evm_c_kzg_lib = createEvmCKzgLibrary(b, target, optimize, evm_blst_lib);
+    const evm_c_kzg_mod = b.addModule("c_kzg", .{
+        .root_source_file = b.path("lib/evm/vendor/c-kzg-4844/bindings/zig/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const evm_primitives_mod = voltaire_dep.module("primitives");
-    const evm_crypto_mod = voltaire_dep.module("crypto");
-    const evm_precompiles_mod = voltaire_dep.module("precompiles");
-    const bootstrap_voltaire_crypto = b.addSystemCommand(&.{
+    evm_c_kzg_mod.linkLibrary(evm_c_kzg_lib);
+    evm_c_kzg_mod.linkLibrary(evm_blst_lib);
+    evm_c_kzg_mod.addIncludePath(b.path("lib/evm/vendor/c-kzg-4844/src"));
+    evm_c_kzg_mod.addIncludePath(b.path("lib/evm/vendor/c-kzg-4844/blst/bindings"));
+    const evm_rust_crypto_lib_path = b.path("lib/evm/target/release/libora_evm_crypto_wrappers.a");
+
+    const bootstrap_ora_evm_crypto = b.addSystemCommand(&.{
         "cargo",
         "build",
         "--manifest-path",
-        b.pathJoin(&.{ "vendor/voltaire", "Cargo.toml" }),
+        b.path("lib/evm/Cargo.toml").getPath(b),
         "--release",
     });
-    bootstrap_voltaire_crypto.setName("bootstrap-voltaire-crypto");
+    bootstrap_ora_evm_crypto.setName("bootstrap-ora-evm-crypto");
 
     const ora_evm_mod = b.createModule(.{
         .root_source_file = b.path("lib/evm/src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "c_kzg", .module = evm_c_kzg_mod },
+        },
     });
-    ora_evm_mod.addImport("voltaire", evm_primitives_mod);
-    ora_evm_mod.addImport("crypto", evm_crypto_mod);
-    ora_evm_mod.addImport("precompiles", evm_precompiles_mod);
+    ora_evm_mod.addObjectFile(evm_rust_crypto_lib_path);
+    ora_evm_mod.link_libc = true;
 
     // modules can depend on one another using the `std.Build.Module.addImport` function.
     // this is what allows Zig source code to use `@import("foo")` where 'foo' is not a
@@ -412,16 +420,16 @@ pub fn build(b: *std.Build) void {
     lsp_release_lib_mod.addOptions("build_options", mlir_options);
 
     // add include paths
-    exe.addIncludePath(b.path("src"));
-    lib.addIncludePath(b.path("src"));
+    exe.root_module.addIncludePath(b.path("src"));
+    lib.root_module.addIncludePath(b.path("src"));
 
     // add Ora dialect include path (for OraCAPI.h)
     const ora_dialect_include_path = b.path("src/mlir/ora/include");
-    exe.addIncludePath(ora_dialect_include_path);
+    exe.root_module.addIncludePath(ora_dialect_include_path);
 
     // add SIR dialect include path
     const sir_dialect_include_path = b.path("src/mlir/IR/include");
-    exe.addIncludePath(sir_dialect_include_path);
+    exe.root_module.addIncludePath(sir_dialect_include_path);
 
     // build and link MLIR (required) - only for executable, not library
     const mlir_step = if (skip_mlir_build) null else buildMlirLibraries(b, target, optimize);
@@ -517,43 +525,19 @@ pub fn build(b: *std.Build) void {
     const evm_debug_dap_step = b.step("debug-dap", "Run the Ora EVM debugger DAP server (Content-Length-framed JSON-RPC over stdio)");
     evm_debug_dap_step.dependOn(&evm_debug_dap_cmd.step);
 
-    // Sensei SIR CLI integration (vendored Rust tool)
-    const sensei_root = "vendor/sensei/senseic";
-    const sensei_cargo = b.fmt("{s}/Cargo.toml", .{sensei_root});
-    var sensei_build_dependency: ?*std.Build.Step = null;
-    if (std.fs.cwd().access(sensei_cargo, .{}) catch null) |_| {
-        const sensei_build_cmd = b.addSystemCommand(&[_][]const u8{
-            "cargo",
-            "build",
-            "-p",
-            "sir-cli",
-            "--release",
-        });
-        sensei_build_cmd.setCwd(b.path(sensei_root));
-        sensei_build_dependency = &sensei_build_cmd.step;
+    // Sinora: Ora's owned Zig SIR->EVM backend. Build it by default so Ora can
+    // emit bytecode with no external SIR backend.
+    const sinora_root = "sinora";
+    var sinora_build_dependency: ?*std.Build.Step = null;
+    if (std.Io.Dir.cwd().access(b.graph.io, b.fmt("{s}/build.zig", .{sinora_root}), .{}) catch null) |_| {
+        const sinora_build_cmd = b.addSystemCommand(&[_][]const u8{ "zig", "build" });
+        sinora_build_cmd.setCwd(b.path(sinora_root));
+        sinora_build_dependency = &sinora_build_cmd.step;
 
-        const sensei_build_step = b.step("sensei-sir", "Build Sensei SIR CLI");
-        sensei_build_step.dependOn(&sensei_build_cmd.step);
-
-        if (@import("builtin").os.tag != .windows) {
-            const sir_bin = b.fmt("{s}/target/release/sir", .{sensei_root});
-            const sample_input = "tests/sensei/sample.sir";
-            const e2e_script = b.fmt(
-                "out=$({s} {s}); test \"${{out#0x}}\" != \"$out\" -a ${{#out}} -gt 2",
-                .{ sir_bin, sample_input },
-            );
-
-            const sensei_e2e_cmd = b.addSystemCommand(&[_][]const u8{
-                "bash",
-                "-lc",
-                e2e_script,
-            });
-            sensei_e2e_cmd.step.dependOn(&sensei_build_cmd.step);
-
-            const sensei_e2e_step = b.step("sensei-e2e", "Run Sensei SIR -> bytecode smoke test");
-            sensei_e2e_step.dependOn(&sensei_e2e_cmd.step);
-        }
+        const sinora_build_step = b.step("sinora", "Build the Sinora SIR -> EVM backend binary");
+        sinora_build_step.dependOn(&sinora_build_cmd.step);
     }
+    if (sinora_build_dependency) |dep| b.getInstallStep().dependOn(dep);
 
     // create optimization demo executable
     const optimization_demo_mod = b.createModule(.{
@@ -619,15 +603,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     conformance_test_mod.addImport("ora_evm", ora_evm_mod);
-    conformance_test_mod.addImport("voltaire", evm_primitives_mod);
     const conformance_tests = b.addTest(.{
         .name = "ora-conformance-tests",
         .root_module = conformance_test_mod,
     });
-    conformance_tests.step.dependOn(&bootstrap_voltaire_crypto.step);
+    conformance_tests.step.dependOn(&bootstrap_ora_evm_crypto.step);
     const conformance_tests_run = b.addRunArtifact(conformance_tests);
     conformance_tests_run.step.dependOn(b.getInstallStep());
-    if (sensei_build_dependency) |dep| conformance_tests_run.step.dependOn(dep);
 
     const test_conformance_step = b.step("test-conformance", "Run Ora bytecode conformance tests on lib/evm");
     test_conformance_step.dependOn(&conformance_tests_run.step);
@@ -640,12 +622,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     conformance_one_mod.addImport("ora_evm", ora_evm_mod);
-    conformance_one_mod.addImport("voltaire", evm_primitives_mod);
     const conformance_one_exe = b.addExecutable(.{
         .name = "conformance-one",
         .root_module = conformance_one_mod,
     });
-    conformance_one_exe.step.dependOn(&bootstrap_voltaire_crypto.step);
+    conformance_one_exe.step.dependOn(&bootstrap_ora_evm_crypto.step);
     const conformance_one_install = b.addInstallArtifact(conformance_one_exe, .{});
     const conformance_one_step = b.step("conformance-one", "Build the single-spec lib/evm runner");
     conformance_one_step.dependOn(&conformance_one_install.step);
@@ -670,15 +651,50 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     metrics_snapshot_mod.addImport("ora_evm", ora_evm_mod);
-    metrics_snapshot_mod.addImport("voltaire", evm_primitives_mod);
     const metrics_snapshot_exe = b.addExecutable(.{
         .name = "metrics-snapshot",
         .root_module = metrics_snapshot_mod,
     });
-    metrics_snapshot_exe.step.dependOn(&bootstrap_voltaire_crypto.step);
+    metrics_snapshot_exe.step.dependOn(&bootstrap_ora_evm_crypto.step);
     const metrics_snapshot_install = b.addInstallArtifact(metrics_snapshot_exe, .{});
     const metrics_snapshot_step = b.step("metrics-snapshot", "Build the gas + bytecode-size metrics harness");
     metrics_snapshot_step.dependOn(&metrics_snapshot_install.step);
+    const check_conformance_bytecode_size_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/metrics-check.py",
+        "--check-size",
+        "--report-dir",
+        "zig-out/metrics/conformance-size",
+    });
+    check_conformance_bytecode_size_cmd.step.dependOn(b.getInstallStep());
+    check_conformance_bytecode_size_cmd.step.dependOn(&metrics_snapshot_install.step);
+    const check_conformance_bytecode_size_step = b.step("check-conformance-bytecode-size", "Check conformance bytecode-size metrics against the deterministic baseline");
+    check_conformance_bytecode_size_step.dependOn(&check_conformance_bytecode_size_cmd.step);
+    const check_metrics_report_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/check-metrics-report.sh",
+    });
+    const check_metrics_report_step = b.step("check-metrics-report", "Check metrics report and size-gate script behavior");
+    check_metrics_report_step.dependOn(&check_metrics_report_cmd.step);
+    test_step.dependOn(&check_metrics_report_cmd.step);
+    const sir_framework_spike_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/run-sir-framework-canonicalizer-spike.sh",
+    });
+    sir_framework_spike_cmd.step.dependOn(b.getInstallStep());
+    const sir_framework_spike_step = b.step("sir-framework-canonicalizer-spike", "Run the default SIR framework canonicalizer over the Ora example corpus");
+    sir_framework_spike_step.dependOn(&sir_framework_spike_cmd.step);
+    const sir_framework_metrics_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/metrics-check.py",
+        "--diff",
+        "--report-dir",
+        "zig-out/metrics/sir-framework-canonicalizer-size",
+    });
+    sir_framework_metrics_cmd.step.dependOn(b.getInstallStep());
+    sir_framework_metrics_cmd.step.dependOn(&metrics_snapshot_install.step);
+    const sir_framework_metrics_step = b.step("sir-framework-canonicalizer-metrics", "Write size/gas report for the default SIR framework canonicalizer pipeline");
+    sir_framework_metrics_step.dependOn(&sir_framework_metrics_cmd.step);
 
     // Compiler frontend metrics harness — prints deterministic compile-time
     // allocation/work-count metrics for package-mode Ora examples.
@@ -1343,7 +1359,6 @@ pub fn build(b: *std.Build) void {
 
     const compiler_tests_run = b.addRunArtifact(compiler_tests);
     compiler_tests_run.step.dependOn(b.getInstallStep());
-    if (sensei_build_dependency) |dep| compiler_tests_run.step.dependOn(dep);
     const evm_debug_probe_install_cmd = b.addSystemCommand(&[_][]const u8{
         "zig",
         "build",
@@ -1480,6 +1495,14 @@ pub fn build(b: *std.Build) void {
     const check_refinement_registry_sync_step = b.step("check-refinement-registry-sync", "Run refinement registry/docs sync checks");
     check_refinement_registry_sync_step.dependOn(&refinement_registry_sync_cmd.step);
 
+    // zig build check-formal-sync
+    const formal_sync_cmd = b.addSystemCommand(&[_][]const u8{
+        "bash",
+        "scripts/check-formal-sync.sh",
+    });
+    const check_formal_sync_step = b.step("check-formal-sync", "Regenerate formal snapshots and run Lean verification checks");
+    check_formal_sync_step.dependOn(&formal_sync_cmd.step);
+
     // zig build check-lock-guarding
     const lock_guarding_cmd = b.addSystemCommand(&[_][]const u8{
         "sh",
@@ -1524,6 +1547,15 @@ pub fn build(b: *std.Build) void {
     check_no_hir_op_null_fallbacks_step.dependOn(&no_hir_op_null_fallbacks_cmd.step);
     test_step.dependOn(&no_hir_op_null_fallbacks_cmd.step);
 
+    // zig build check-no-scattered-process-exit
+    const no_scattered_process_exit_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/check-no-scattered-process-exit.sh",
+    });
+    const check_no_scattered_process_exit_step = b.step("check-no-scattered-process-exit", "Run process-exit boundary static checks");
+    check_no_scattered_process_exit_step.dependOn(&no_scattered_process_exit_cmd.step);
+    test_step.dependOn(&no_scattered_process_exit_cmd.step);
+
     // zig build check-query-view-ownership
     const query_view_ownership_cmd = b.addSystemCommand(&[_][]const u8{
         "sh",
@@ -1542,6 +1574,15 @@ pub fn build(b: *std.Build) void {
     const check_oratosir_coverage_step = b.step("check-oratosir-coverage", "Validate the OraToSIR coverage manifest");
     check_oratosir_coverage_step.dependOn(&oratosir_coverage_cmd.step);
     test_step.dependOn(&oratosir_coverage_cmd.step);
+
+    // zig build check-resource-mutation-tripwires
+    const resource_mutation_tripwires_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/check-resource-mutation-tripwires.py",
+    });
+    const check_resource_mutation_tripwires_step = b.step("check-resource-mutation-tripwires", "Validate resource lowering mutation tripwires");
+    check_resource_mutation_tripwires_step.dependOn(&resource_mutation_tripwires_cmd.step);
+    test_step.dependOn(&resource_mutation_tripwires_cmd.step);
 
     // zig build check-feature-execution-coverage
     const feature_coverage_cmd = b.addSystemCommand(&[_][]const u8{
@@ -1613,6 +1654,7 @@ pub fn build(b: *std.Build) void {
     // zig build gate-oratosir-debloat
     const oratosir_debloat_gate_step = b.step("gate-oratosir-debloat", "Run the OraToSIR regression gate");
     oratosir_debloat_gate_step.dependOn(check_oratosir_coverage_step);
+    oratosir_debloat_gate_step.dependOn(check_mlir_ora_step);
     oratosir_debloat_gate_step.dependOn(check_mlir_sir_step);
     oratosir_debloat_gate_step.dependOn(check_sir_text_step);
     oratosir_debloat_gate_step.dependOn(test_conformance_step);
@@ -1636,15 +1678,29 @@ pub fn build(b: *std.Build) void {
     smt_modifies_corpus_cmd.step.dependOn(b.getInstallStep());
     check_smt_modifies_corpus_step.dependOn(&smt_modifies_corpus_cmd.step);
 
+    // zig build check-smt-resource-corpus
+    const smt_resource_corpus_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/check-smt-resource-corpus.sh",
+    });
+    const check_smt_resource_corpus_step = b.step("check-smt-resource-corpus", "Run SMT resource corpus checks");
+    smt_resource_corpus_cmd.step.dependOn(b.getInstallStep());
+    check_smt_resource_corpus_step.dependOn(&smt_resource_corpus_cmd.step);
+
     // zig build gate — the full pre-push bar; every commit must pass this on the committed state.
     const gate_step = b.step("gate", "Run the full pre-push bar (test + OraToSIR gate + Ora MLIR checks + SMT corpus + LSP smoke)");
     gate_step.dependOn(test_step);
     gate_step.dependOn(oratosir_debloat_gate_step);
+    gate_step.dependOn(check_resource_mutation_tripwires_step);
     gate_step.dependOn(check_mlir_ora_step);
     gate_step.dependOn(check_negative_corpus_step);
+    gate_step.dependOn(check_no_width_defaults_step);
+    gate_step.dependOn(check_no_hir_op_null_fallbacks_step);
+    gate_step.dependOn(check_no_scattered_process_exit_step);
     gate_step.dependOn(check_findings_ledger_step);
     gate_step.dependOn(check_verifier_mutations_step);
     gate_step.dependOn(check_smt_modifies_corpus_step);
+    gate_step.dependOn(check_smt_resource_corpus_step);
     gate_step.dependOn(lsp_smoke_step);
 }
 
@@ -1664,23 +1720,22 @@ fn runLexerVerbose(step: *std.Build.Step, options: std.Build.Step.MakeOptions) a
     _ = options;
     const b = step.owner;
     const allocator = b.allocator;
-    const res = std.process.Child.run(.{
-        .allocator = allocator,
+    const res = std.process.run(allocator, b.graph.io, .{
         .argv = &[_][]const u8{ "./zig-out/bin/lexer_test_suite", "--verbose" },
-        .cwd = ".",
+        .cwd = .{ .path = "." },
     }) catch |err| {
         std.log.err("Failed to run lexer_test_suite: {}", .{err});
         return err;
     };
     switch (res.term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code != 0) {
                 std.log.err("lexer_test_suite failed with exit code {}", .{code});
                 std.log.err("stderr: {s}", .{res.stderr});
                 return error.LexerSuiteFailed;
             }
         },
-        .Signal => |sig| {
+        .signal => |sig| {
             std.log.err("lexer_test_suite terminated by signal {}", .{sig});
             std.log.err("stderr: {s}", .{res.stderr});
             return error.LexerSuiteFailed;
@@ -1704,6 +1759,18 @@ fn buildMlirLibraries(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
     return step;
 }
 
+fn runInheritedProcess(b: *std.Build, argv: []const []const u8, cwd: []const u8) !std.process.Child.Term {
+    var child = try std.process.spawn(b.graph.io, .{
+        .argv = argv,
+        .cwd = .{ .path = cwd },
+        .environ_map = &b.graph.environ_map,
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
+    return try child.wait(b.graph.io);
+}
+
 /// Implementation of CMake build for MLIR libraries
 fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptions) anyerror!void {
     _ = options;
@@ -1716,13 +1783,13 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
 
     // skip if MLIR C API library is already installed
     const mlir_c_lib = if (@import("builtin").os.tag == .macos) "vendor/mlir/lib/libMLIR-C.dylib" else "vendor/mlir/lib/libMLIR-C.so";
-    if (root.access(mlir_c_lib, .{}) catch null) |_| {
+    if (root.access(b.graph.io, mlir_c_lib, .{}) catch null) |_| {
         std.log.info("MLIR libraries already installed, skipping build (delete vendor/mlir to force rebuild)", .{});
         return;
     }
 
     // CMake is configured against llvm-project/llvm, not just the checkout root.
-    _ = root.openDir("vendor/llvm-project/llvm", .{ .iterate = false }) catch {
+    _ = root.openDir(b.graph.io, "vendor/llvm-project/llvm", .{ .iterate = false }) catch {
         std.log.err("Missing LLVM source tree: vendor/llvm-project/llvm", .{});
         std.log.err("Build root: {s}", .{build_root});
         std.log.err("Run: cd {s} && ./setup.sh --skip-deps --skip-build", .{build_root});
@@ -1737,10 +1804,10 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
 
     // create build and install directories
     const build_dir = "vendor/llvm-project/build-mlir";
-    try root.makePath(build_dir);
+    try root.createDirPath(b.graph.io, build_dir);
 
     const install_prefix = "vendor/mlir";
-    try root.makePath(install_prefix);
+    try root.createDirPath(b.graph.io, install_prefix);
 
     const builtin = @import("builtin");
     var cmake_args = std.array_list.Managed([]const u8).init(allocator);
@@ -1749,20 +1816,20 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
     // prefer Ninja generator when available for faster, more parallel builds
     var use_ninja: bool = false;
     {
-        const probe = std.process.Child.run(.{ .allocator = allocator, .argv = &[_][]const u8{ "ninja", "--version" }, .cwd = "." }) catch null;
+        const probe = std.process.run(allocator, b.graph.io, .{ .argv = &[_][]const u8{ "ninja", "--version" }, .cwd = .{ .path = "." } }) catch null;
         if (probe) |res| {
             switch (res.term) {
-                .Exited => |code| {
+                .exited => |code| {
                     if (code == 0) use_ninja = true;
                 },
                 else => {},
             }
         }
         if (!use_ninja) {
-            const probe_alt = std.process.Child.run(.{ .allocator = allocator, .argv = &[_][]const u8{ "ninja-build", "--version" }, .cwd = "." }) catch null;
+            const probe_alt = std.process.run(allocator, b.graph.io, .{ .argv = &[_][]const u8{ "ninja-build", "--version" }, .cwd = .{ .path = "." } }) catch null;
             if (probe_alt) |res2| {
                 switch (res2.term) {
-                    .Exited => |code| {
+                    .exited => |code| {
                         if (code == 0) use_ninja = true;
                     },
                     else => {},
@@ -1827,13 +1894,12 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
 
         // fix SDK path issue after macOS/Xcode update
         // use xcrun to get the actual SDK path and set it explicitly
-        const sdk_path_result = std.process.Child.run(.{
-            .allocator = allocator,
+        const sdk_path_result = std.process.run(allocator, b.graph.io, .{
             .argv = &[_][]const u8{ "xcrun", "--show-sdk-path" },
-            .cwd = ".",
+            .cwd = .{ .path = "." },
         }) catch null;
         if (sdk_path_result) |result| {
-            if (result.term.Exited == 0) {
+            if (result.term == .exited and result.term.exited == 0) {
                 const sdk_path = std.mem.trim(u8, result.stdout, " \n\r\t");
                 if (sdk_path.len > 0) {
                     const sysroot_flag = try std.fmt.allocPrint(allocator, "-DCMAKE_OSX_SYSROOT={s}", .{sdk_path});
@@ -1844,8 +1910,7 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
             }
         }
 
-        if (std.process.getEnvVarOwned(allocator, "ORA_CMAKE_OSX_ARCH") catch null) |arch| {
-            defer allocator.free(arch);
+        if (b.graph.environ_map.get("ORA_CMAKE_OSX_ARCH")) |arch| {
             const flag = b.fmt("-DCMAKE_OSX_ARCHITECTURES={s}", .{arch});
             try cmake_args.append(flag);
             std.log.info("Using CMAKE_OSX_ARCHITECTURES={s}", .{arch});
@@ -1854,17 +1919,12 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
         try cmake_args.append("-DCMAKE_CXX_FLAGS=/std:c++20");
     }
 
-    var cfg_child = std.process.Child.init(cmake_args.items, allocator);
-    cfg_child.cwd = build_root;
-    cfg_child.stdin_behavior = .Inherit;
-    cfg_child.stdout_behavior = .Inherit;
-    cfg_child.stderr_behavior = .Inherit;
-    const cfg_term = cfg_child.spawnAndWait() catch |err| {
+    const cfg_term = runInheritedProcess(b, cmake_args.items, build_root) catch |err| {
         std.log.err("Failed to configure MLIR CMake: {}", .{err});
         return err;
     };
     switch (cfg_term) {
-        .Exited => |code| if (code != 0) {
+        .exited => |code| if (code != 0) {
             std.log.err("MLIR CMake configure failed with exit code: {}", .{code});
             return error.CMakeConfigureFailed;
         },
@@ -1876,17 +1936,12 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
 
     // build and install MLIR (with sparse checkout and minimal flags above this is lightweight)
     var build_args = [_][]const u8{ "cmake", "--build", build_dir, "--parallel", "--target", "install" };
-    var build_child = std.process.Child.init(&build_args, allocator);
-    build_child.cwd = build_root;
-    build_child.stdin_behavior = .Inherit;
-    build_child.stdout_behavior = .Inherit;
-    build_child.stderr_behavior = .Inherit;
-    const build_term = build_child.spawnAndWait() catch |err| {
+    const build_term = runInheritedProcess(b, &build_args, build_root) catch |err| {
         std.log.err("Failed to build MLIR with CMake: {}", .{err});
         return err;
     };
     switch (build_term) {
-        .Exited => |code| if (code != 0) {
+        .exited => |code| if (code != 0) {
             std.log.err("MLIR CMake build failed with exit code: {}", .{code});
             return error.CMakeBuildFailed;
         },
@@ -1939,7 +1994,7 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     const sanitizer = native_step.sanitizer;
 
     const build_dir = nativeDialectBuildDir(b, "vendor/ora-dialect-build", sanitizer);
-    try root.makePath(build_dir);
+    try root.createDirPath(b.graph.io, build_dir);
 
     const install_prefix = nativeMlirInstallPrefix(b, sanitizer);
     const install_prefix_abs = b.fmt("{s}/{s}", .{ build_root, install_prefix });
@@ -1951,10 +2006,10 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     // prefer Ninja generator when available
     var use_ninja: bool = false;
     {
-        const probe = std.process.Child.run(.{ .allocator = allocator, .argv = &[_][]const u8{ "ninja", "--version" }, .cwd = "." }) catch null;
+        const probe = std.process.run(allocator, b.graph.io, .{ .argv = &[_][]const u8{ "ninja", "--version" }, .cwd = .{ .path = "." } }) catch null;
         if (probe) |res| {
             switch (res.term) {
-                .Exited => |code| {
+                .exited => |code| {
                     if (code == 0) use_ninja = true;
                 },
                 else => {},
@@ -1980,17 +2035,12 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
 
     try appendNativeCmakeToolchainFlags(&cmake_args, b, sanitizer);
 
-    var cfg_child = std.process.Child.init(cmake_args.items, allocator);
-    cfg_child.cwd = build_root;
-    cfg_child.stdin_behavior = .Inherit;
-    cfg_child.stdout_behavior = .Inherit;
-    cfg_child.stderr_behavior = .Inherit;
-    const cfg_term = cfg_child.spawnAndWait() catch |err| {
+    const cfg_term = runInheritedProcess(b, cmake_args.items, build_root) catch |err| {
         std.log.err("Failed to configure Ora dialect CMake: {}", .{err});
         return err;
     };
     switch (cfg_term) {
-        .Exited => |code| if (code != 0) {
+        .exited => |code| if (code != 0) {
             std.log.err("Ora dialect CMake configure failed with exit code: {}", .{code});
             return error.CMakeConfigureFailed;
         },
@@ -2002,17 +2052,12 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
 
     // build and install
     var build_args = [_][]const u8{ "cmake", "--build", build_dir, "--parallel", "--target", "install" };
-    var build_child = std.process.Child.init(&build_args, allocator);
-    build_child.cwd = build_root;
-    build_child.stdin_behavior = .Inherit;
-    build_child.stdout_behavior = .Inherit;
-    build_child.stderr_behavior = .Inherit;
-    const build_term = build_child.spawnAndWait() catch |err| {
+    const build_term = runInheritedProcess(b, &build_args, build_root) catch |err| {
         std.log.err("Failed to build Ora dialect with CMake: {}", .{err});
         return err;
     };
     switch (build_term) {
-        .Exited => |code| if (code != 0) {
+        .exited => |code| if (code != 0) {
             std.log.err("Ora dialect CMake build failed with exit code: {}", .{code});
             return error.CMakeBuildFailed;
         },
@@ -2063,7 +2108,7 @@ fn buildSIRDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     const sanitizer = native_step.sanitizer;
 
     const build_dir = nativeDialectBuildDir(b, "vendor/sir-dialect-build", sanitizer);
-    try root.makePath(build_dir);
+    try root.createDirPath(b.graph.io, build_dir);
 
     const install_prefix = nativeMlirInstallPrefix(b, sanitizer);
     const install_prefix_abs = b.fmt("{s}/{s}", .{ build_root, install_prefix });
@@ -2075,10 +2120,10 @@ fn buildSIRDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     // prefer Ninja generator when available
     var use_ninja: bool = false;
     {
-        const probe = std.process.Child.run(.{ .allocator = allocator, .argv = &[_][]const u8{ "ninja", "--version" }, .cwd = "." }) catch null;
+        const probe = std.process.run(allocator, b.graph.io, .{ .argv = &[_][]const u8{ "ninja", "--version" }, .cwd = .{ .path = "." } }) catch null;
         if (probe) |res| {
             switch (res.term) {
-                .Exited => |code| {
+                .exited => |code| {
                     if (code == 0) use_ninja = true;
                 },
                 else => {},
@@ -2104,17 +2149,12 @@ fn buildSIRDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
 
     try appendNativeCmakeToolchainFlags(&cmake_args, b, sanitizer);
 
-    var cfg_child = std.process.Child.init(cmake_args.items, allocator);
-    cfg_child.cwd = build_root;
-    cfg_child.stdin_behavior = .Inherit;
-    cfg_child.stdout_behavior = .Inherit;
-    cfg_child.stderr_behavior = .Inherit;
-    const cfg_term = cfg_child.spawnAndWait() catch |err| {
+    const cfg_term = runInheritedProcess(b, cmake_args.items, build_root) catch |err| {
         std.log.err("Failed to configure SIR dialect CMake: {}", .{err});
         return err;
     };
     switch (cfg_term) {
-        .Exited => |code| if (code != 0) {
+        .exited => |code| if (code != 0) {
             std.log.err("SIR dialect CMake configure failed with exit code: {}", .{code});
             return error.CMakeConfigureFailed;
         },
@@ -2126,17 +2166,12 @@ fn buildSIRDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
 
     // build and install
     var build_args = [_][]const u8{ "cmake", "--build", build_dir, "--parallel", "--target", "install" };
-    var build_child = std.process.Child.init(&build_args, allocator);
-    build_child.cwd = build_root;
-    build_child.stdin_behavior = .Inherit;
-    build_child.stdout_behavior = .Inherit;
-    build_child.stderr_behavior = .Inherit;
-    const build_term = build_child.spawnAndWait() catch |err| {
+    const build_term = runInheritedProcess(b, &build_args, build_root) catch |err| {
         std.log.err("Failed to build SIR dialect with CMake: {}", .{err});
         return err;
     };
     switch (build_term) {
-        .Exited => |code| if (code != 0) {
+        .exited => |code| if (code != 0) {
             std.log.err("SIR dialect CMake build failed with exit code: {}", .{code});
             return error.CMakeBuildFailed;
         },
@@ -2173,32 +2208,32 @@ fn linkMlirLibraries(
     const sir_dialect_include_path = b.path("src/mlir/IR/include");
 
     if (sanitizer.enabled()) {
-        exe.addIncludePath(native_include_path);
-        exe.addLibraryPath(native_lib_path);
-        exe.addRPath(native_lib_path);
+        exe.root_module.addIncludePath(native_include_path);
+        exe.root_module.addLibraryPath(native_lib_path);
+        exe.root_module.addRPath(native_lib_path);
     }
-    exe.addIncludePath(include_path);
-    exe.addIncludePath(ora_dialect_include_path);
-    exe.addIncludePath(sir_dialect_include_path);
-    exe.addLibraryPath(lib_path);
-    exe.addRPath(lib_path);
+    exe.root_module.addIncludePath(include_path);
+    exe.root_module.addIncludePath(ora_dialect_include_path);
+    exe.root_module.addIncludePath(sir_dialect_include_path);
+    exe.root_module.addLibraryPath(lib_path);
+    exe.root_module.addRPath(lib_path);
 
     // Link only top-level C API/dialect libraries.
     // Their transitive MLIR/LLVM dependencies are resolved by CMake shared-library linkage.
-    exe.linkSystemLibrary("MLIR-C");
-    exe.linkSystemLibrary("MLIROraDialectC");
-    exe.linkSystemLibrary("MLIRSIRDialect");
+    exe.root_module.linkSystemLibrary("MLIR-C", .{});
+    exe.root_module.linkSystemLibrary("MLIROraDialectC", .{});
+    exe.root_module.linkSystemLibrary("MLIRSIRDialect", .{});
 
     switch (target.result.os.tag) {
         .linux => {
-            exe.linkLibCpp();
-            exe.linkSystemLibrary("c++abi");
+            exe.root_module.link_libcpp = true;
+            exe.root_module.linkSystemLibrary("c++abi", .{});
         },
         .macos => {
-            exe.linkLibCpp();
+            exe.root_module.link_libcpp = true;
         },
         else => {
-            exe.linkLibCpp();
+            exe.root_module.link_libcpp = true;
         },
     }
 }
@@ -2229,11 +2264,11 @@ fn runExampleTests(step: *std.Build.Step, options: std.Build.Step.MakeOptions) a
     std.log.info("Testing all .ora example files...", .{});
 
     // get examples directory
-    var examples_dir = std.fs.cwd().openDir("ora-example", .{ .iterate = true }) catch |err| {
+    var examples_dir = std.Io.Dir.cwd().openDir(b.graph.io, "ora-example", .{ .iterate = true }) catch |err| {
         std.log.err("Failed to open examples directory: {}", .{err});
         return err;
     };
-    defer examples_dir.close();
+    defer examples_dir.close(b.graph.io);
 
     // iterate through all .ora files
     var walker = examples_dir.walk(allocator) catch |err| {
@@ -2245,7 +2280,7 @@ fn runExampleTests(step: *std.Build.Step, options: std.Build.Step.MakeOptions) a
     var tested_count: u32 = 0;
     var failed_count: u32 = 0;
 
-    while (walker.next() catch |err| {
+    while (walker.next(b.graph.io) catch |err| {
         std.log.err("Failed to get next file: {}", .{err});
         return err;
     }) |entry| {
@@ -2260,14 +2295,13 @@ fn runExampleTests(step: *std.Build.Step, options: std.Build.Step.MakeOptions) a
         const phases = [_][]const u8{ "lex", "parse", "analyze", "compile" };
 
         for (phases) |phase| {
-            const result = std.process.Child.run(.{
-                .allocator = allocator,
+            const result = std.process.run(allocator, b.graph.io, .{
                 .argv = &[_][]const u8{
                     "./zig-out/bin/ora",
                     phase,
                     file_path,
                 },
-                .cwd = ".",
+                .cwd = .{ .path = "." },
             }) catch |err| {
                 std.log.err("Failed to run test for {s} with phase {s}: {}", .{ file_path, phase, err });
                 failed_count += 1;
@@ -2275,7 +2309,7 @@ fn runExampleTests(step: *std.Build.Step, options: std.Build.Step.MakeOptions) a
             };
 
             switch (result.term) {
-                .Exited => |code| {
+                .exited => |code| {
                     if (code != 0) {
                         std.log.err("FAILED: {s} (phase: {s}) with exit code {}", .{ file_path, phase, code });
                         std.log.err("Error output: {s}", .{result.stderr});
@@ -2283,7 +2317,7 @@ fn runExampleTests(step: *std.Build.Step, options: std.Build.Step.MakeOptions) a
                         break; // Don't test further phases if one fails
                     }
                 },
-                .Signal => |sig| {
+                .signal => |sig| {
                     std.log.err("FAILED: {s} (phase: {s}) terminated by signal {}", .{ file_path, phase, sig });
                     std.log.err("Error output: {s}", .{result.stderr});
                     failed_count += 1;
@@ -2324,19 +2358,19 @@ fn buildZ3Libraries(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     return step;
 }
 
-fn pathExists(path: []const u8) bool {
-    std.fs.cwd().access(path, .{}) catch return false;
+fn pathExists(b: *std.Build, path: []const u8) bool {
+    std.Io.Dir.cwd().access(b.graph.io, path, .{}) catch return false;
     return true;
 }
 
-fn anyPathExists(paths: []const []const u8) bool {
+fn anyPathExists(b: *std.Build, paths: []const []const u8) bool {
     for (paths) |path| {
-        if (pathExists(path)) return true;
+        if (pathExists(b, path)) return true;
     }
     return false;
 }
 
-fn hostHasSystemZ3() bool {
+fn hostHasSystemZ3(b: *std.Build) bool {
     const builtin = @import("builtin");
 
     const header_paths = switch (builtin.os.tag) {
@@ -2388,7 +2422,7 @@ fn hostHasSystemZ3() bool {
         },
     };
 
-    return anyPathExists(&header_paths) and anyPathExists(&lib_paths);
+    return anyPathExists(b, &header_paths) and anyPathExists(b, &lib_paths);
 }
 
 /// Implementation of CMake build for Z3 libraries
@@ -2398,7 +2432,7 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
     const b = step.owner;
     const allocator = b.allocator;
 
-    if (hostHasSystemZ3()) {
+    if (hostHasSystemZ3(b)) {
         std.log.info("System Z3 headers and library detected; skipping vendored Z3 build", .{});
         return;
     }
@@ -2406,25 +2440,25 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
     // system Z3 headers/libraries not found, try to build from vendor
     std.log.info("System Z3 not fully available, checking vendor/z3...", .{});
 
-    const cwd = std.fs.cwd();
-    _ = cwd.openDir("vendor/z3", .{ .iterate = false }) catch {
-        std.log.warn("Z3 not found! Please install Z3 or add it as a submodule:", .{});
-        std.log.warn("  System install (recommended): brew install z3  (macOS)", .{});
-        std.log.warn("  System install (recommended): sudo apt install z3  (Linux)", .{});
-        std.log.warn("  Or add as submodule: git submodule add https://github.com/Z3Prover/z3.git vendor/z3", .{});
-        std.log.warn("Z3 is optional for now - continuing without formal verification support", .{});
-        return;
+    const cwd = std.Io.Dir.cwd();
+    _ = cwd.openDir(b.graph.io, "vendor/z3", .{ .iterate = false }) catch {
+        std.log.err("Z3 is required for compiler verification tests and no usable Z3 installation was found.", .{});
+        std.log.err("Install Z3 or provide the vendored submodule:", .{});
+        std.log.err("  macOS: brew install z3", .{});
+        std.log.err("  Linux: sudo apt install z3 libz3-dev", .{});
+        std.log.err("  vendor: git submodule update --init --recursive vendor/z3", .{});
+        return error.Z3Unavailable;
     };
 
     // create build and install directories
     const build_dir = "vendor/z3/build-release";
-    cwd.makeDir(build_dir) catch |err| switch (err) {
+    cwd.createDirPath(b.graph.io, build_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
     const install_prefix = "vendor/z3-install";
-    cwd.makeDir(install_prefix) catch |err| switch (err) {
+    cwd.createDirPath(b.graph.io, install_prefix) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
@@ -2437,10 +2471,10 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
     // prefer Ninja generator when available
     var use_ninja: bool = false;
     {
-        const probe = std.process.Child.run(.{ .allocator = allocator, .argv = &[_][]const u8{ "ninja", "--version" }, .cwd = "." }) catch null;
+        const probe = std.process.run(allocator, b.graph.io, .{ .argv = &[_][]const u8{ "ninja", "--version" }, .cwd = .{ .path = "." } }) catch null;
         if (probe) |res| {
             switch (res.term) {
-                .Exited => |code| {
+                .exited => |code| {
                     if (code == 0) use_ninja = true;
                 },
                 else => {},
@@ -2481,13 +2515,12 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
 
         // fix SDK path issue after macOS/Xcode update
         // use xcrun to get the actual SDK path and set it explicitly
-        const sdk_path_result = std.process.Child.run(.{
-            .allocator = allocator,
+        const sdk_path_result = std.process.run(allocator, b.graph.io, .{
             .argv = &[_][]const u8{ "xcrun", "--show-sdk-path" },
-            .cwd = ".",
+            .cwd = .{ .path = "." },
         }) catch null;
         if (sdk_path_result) |result| {
-            if (result.term.Exited == 0) {
+            if (result.term == .exited and result.term.exited == 0) {
                 const sdk_path = std.mem.trim(u8, result.stdout, " \n\r\t");
                 if (sdk_path.len > 0) {
                     const sysroot_flag = try std.fmt.allocPrint(allocator, "-DCMAKE_OSX_SYSROOT={s}", .{sdk_path});
@@ -2499,17 +2532,12 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
         }
     }
 
-    var cfg_child = std.process.Child.init(cmake_args.items, allocator);
-    cfg_child.cwd = ".";
-    cfg_child.stdin_behavior = .Inherit;
-    cfg_child.stdout_behavior = .Inherit;
-    cfg_child.stderr_behavior = .Inherit;
-    const cfg_term = cfg_child.spawnAndWait() catch |err| {
+    const cfg_term = runInheritedProcess(b, cmake_args.items, ".") catch |err| {
         std.log.err("Failed to configure Z3 CMake: {}", .{err});
         return err;
     };
     switch (cfg_term) {
-        .Exited => |code| if (code != 0) {
+        .exited => |code| if (code != 0) {
             std.log.err("Z3 CMake configure failed with exit code: {}", .{code});
             return error.CMakeConfigureFailed;
         },
@@ -2521,17 +2549,12 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
 
     // build and install Z3
     var build_args = [_][]const u8{ "cmake", "--build", build_dir, "--parallel", "--target", "install" };
-    var build_child = std.process.Child.init(&build_args, allocator);
-    build_child.cwd = ".";
-    build_child.stdin_behavior = .Inherit;
-    build_child.stdout_behavior = .Inherit;
-    build_child.stderr_behavior = .Inherit;
-    const build_term = build_child.spawnAndWait() catch |err| {
+    const build_term = runInheritedProcess(b, &build_args, ".") catch |err| {
         std.log.err("Failed to build Z3 with CMake: {}", .{err});
         return err;
     };
     switch (build_term) {
-        .Exited => |code| if (code != 0) {
+        .exited => |code| if (code != 0) {
             std.log.err("Z3 CMake build failed with exit code: {}", .{code});
             return error.CMakeBuildFailed;
         },
@@ -2548,17 +2571,17 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
 fn linkZ3Libraries(b: *std.Build, exe: *std.Build.Step.Compile, z3_step: *std.Build.Step, target: std.Build.ResolvedTarget) void {
     // depend on Z3 build
     exe.step.dependOn(z3_step);
-    const using_system_z3 = hostHasSystemZ3();
+    const using_system_z3 = hostHasSystemZ3(b);
 
     // Ensure vendored search paths exist to avoid hard failures when Zig checks
     // linker search directories before the z3 custom step populates them.
-    std.fs.cwd().makePath("vendor/z3-install/include") catch {};
-    std.fs.cwd().makePath("vendor/z3-install/lib") catch {};
+    std.Io.Dir.cwd().createDirPath(b.graph.io, "vendor/z3-install/include") catch {};
+    std.Io.Dir.cwd().createDirPath(b.graph.io, "vendor/z3-install/lib") catch {};
 
     // Always expose vendored include/lib paths. The custom z3_step may populate
     // these directories later in the build graph.
-    exe.addIncludePath(b.path("vendor/z3-install/include"));
-    exe.addLibraryPath(b.path("vendor/z3-install/lib"));
+    exe.root_module.addIncludePath(b.path("vendor/z3-install/include"));
+    exe.root_module.addLibraryPath(b.path("vendor/z3-install/lib"));
 
     if (using_system_z3) {
         // add system Z3 paths based on platform
@@ -2566,44 +2589,46 @@ fn linkZ3Libraries(b: *std.Build, exe: *std.Build.Step.Compile, z3_step: *std.Bu
             .macos => {
                 // homebrew paths
                 if (target.result.cpu.arch == .aarch64) {
-                    exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
-                    exe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+                    exe.root_module.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+                    exe.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
                 } else {
-                    exe.addIncludePath(.{ .cwd_relative = "/usr/local/include" });
-                    exe.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
+                    exe.root_module.addIncludePath(.{ .cwd_relative = "/usr/local/include" });
+                    exe.root_module.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
                 }
             },
             .linux => {
-                exe.addIncludePath(.{ .cwd_relative = "/usr/include" });
-                exe.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
-                exe.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
+                exe.root_module.addIncludePath(.{ .cwd_relative = "/usr/include" });
+                exe.root_module.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+                exe.root_module.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
                 if (target.result.cpu.arch == .x86_64) {
-                    exe.addLibraryPath(.{ .cwd_relative = "/usr/lib/x86_64-linux-gnu" });
+                    exe.root_module.addLibraryPath(.{ .cwd_relative = "/usr/lib/x86_64-linux-gnu" });
                 }
             },
             else => {
-                exe.addIncludePath(.{ .cwd_relative = "/usr/include" });
-                exe.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+                exe.root_module.addIncludePath(.{ .cwd_relative = "/usr/include" });
+                exe.root_module.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
             },
         }
     } else {
         // vendored Z3 — paths already set above
     }
 
-    // link Z3 library
-    exe.linkSystemLibrary("z3");
+    // Link Z3 without pkg-config. We add the stable system/vendored include
+    // and library paths above; letting pkg-config inject Homebrew Cellar paths
+    // makes CI sensitive to stale Zig caches and old absolute Z3 versions.
+    exe.root_module.linkSystemLibrary("z3", .{ .use_pkg_config = .no });
 
     // link C++ standard library (Z3 is C++)
     switch (target.result.os.tag) {
         .linux => {
-            exe.linkLibCpp();
-            exe.linkSystemLibrary("c++abi");
+            exe.root_module.link_libcpp = true;
+            exe.root_module.linkSystemLibrary("c++abi", .{});
         },
         .macos => {
-            exe.linkLibCpp();
+            exe.root_module.link_libcpp = true;
         },
         else => {
-            exe.linkLibCpp();
+            exe.root_module.link_libcpp = true;
         },
     }
 }
@@ -2633,26 +2658,26 @@ fn addBoostPaths(b: *std.Build, compile_step: *std.Build.Step.Compile, target: s
             if (arch_to_use == .aarch64) {
                 // apple Silicon - Homebrew installs to /opt/homebrew
                 std.log.info("Adding Boost paths for Apple Silicon Mac", .{});
-                compile_step.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
-                compile_step.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+                compile_step.root_module.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+                compile_step.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
             } else {
                 // intel Mac - Homebrew installs to /usr/local
                 std.log.info("Adding Boost paths for Intel Mac", .{});
-                compile_step.addSystemIncludePath(.{ .cwd_relative = "/usr/local/include" });
-                compile_step.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
+                compile_step.root_module.addSystemIncludePath(.{ .cwd_relative = "/usr/local/include" });
+                compile_step.root_module.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
             }
         },
         .linux => {
             // linux - check common package manager locations
             std.log.info("Adding Boost paths for Linux", .{});
-            compile_step.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
-            compile_step.addSystemIncludePath(.{ .cwd_relative = "/usr/local/include" });
-            compile_step.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
-            compile_step.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
+            compile_step.root_module.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
+            compile_step.root_module.addSystemIncludePath(.{ .cwd_relative = "/usr/local/include" });
+            compile_step.root_module.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+            compile_step.root_module.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
 
             // also check for x86_64-linux-gnu paths (common on Ubuntu)
             if (arch_to_use == .x86_64) {
-                compile_step.addLibraryPath(.{ .cwd_relative = "/usr/lib/x86_64-linux-gnu" });
+                compile_step.root_module.addLibraryPath(.{ .cwd_relative = "/usr/lib/x86_64-linux-gnu" });
             }
         },
         .windows => {
@@ -2660,21 +2685,21 @@ fn addBoostPaths(b: *std.Build, compile_step: *std.Build.Step.Compile, target: s
             std.log.info("Adding Boost paths for Windows", .{});
             // check for vcpkg installation
             if (std.process.hasEnvVarConstant("VCPKG_ROOT")) {
-                compile_step.addSystemIncludePath(.{ .cwd_relative = "C:/vcpkg/installed/x64-windows/include" });
-                compile_step.addLibraryPath(.{ .cwd_relative = "C:/vcpkg/installed/x64-windows/lib" });
+                compile_step.root_module.addSystemIncludePath(.{ .cwd_relative = "C:/vcpkg/installed/x64-windows/include" });
+                compile_step.root_module.addLibraryPath(.{ .cwd_relative = "C:/vcpkg/installed/x64-windows/lib" });
             } else {
                 // default paths for manual installation
-                compile_step.addSystemIncludePath(.{ .cwd_relative = "C:/boost/include" });
-                compile_step.addLibraryPath(.{ .cwd_relative = "C:/boost/lib" });
+                compile_step.root_module.addSystemIncludePath(.{ .cwd_relative = "C:/boost/include" });
+                compile_step.root_module.addLibraryPath(.{ .cwd_relative = "C:/boost/lib" });
             }
         },
         else => {
             // fallback for other platforms
             std.log.warn("Unknown platform for Boost paths - using default system paths", .{});
-            compile_step.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
-            compile_step.addSystemIncludePath(.{ .cwd_relative = "/usr/local/include" });
-            compile_step.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
-            compile_step.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
+            compile_step.root_module.addSystemIncludePath(.{ .cwd_relative = "/usr/include" });
+            compile_step.root_module.addSystemIncludePath(.{ .cwd_relative = "/usr/local/include" });
+            compile_step.root_module.addLibraryPath(.{ .cwd_relative = "/usr/lib" });
+            compile_step.root_module.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
         },
     }
 
@@ -2687,9 +2712,79 @@ fn addBoostPaths(b: *std.Build, compile_step: *std.Build.Step.Compile, target: s
         const lib_path = std.fmt.allocPrint(b.allocator, "{s}/lib", .{root}) catch @panic("OOM");
         defer b.allocator.free(include_path);
         defer b.allocator.free(lib_path);
-        compile_step.addSystemIncludePath(.{ .cwd_relative = include_path });
-        compile_step.addLibraryPath(.{ .cwd_relative = lib_path });
+        compile_step.root_module.addSystemIncludePath(.{ .cwd_relative = include_path });
+        compile_step.root_module.addLibraryPath(.{ .cwd_relative = lib_path });
     }
+}
+
+fn createEvmBlstLibrary(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const is_wasm = target.result.cpu.arch == .wasm32 or target.result.cpu.arch == .wasm64;
+    const lib = b.addLibrary(.{
+        .name = "blst",
+        .linkage = .static,
+        .use_llvm = true,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    lib.root_module.link_libc = true;
+
+    if (!is_wasm) {
+        const blst_build_cmd = if (target.result.os.tag == .windows)
+            b.addSystemCommand(&.{ "bash", "./build.sh" })
+        else
+            b.addSystemCommand(&.{"./build.sh"});
+        blst_build_cmd.setCwd(b.path("lib/evm/vendor/c-kzg-4844/blst"));
+        lib.step.dependOn(&blst_build_cmd.step);
+        lib.root_module.addAssemblyFile(b.path("lib/evm/vendor/c-kzg-4844/blst/build/assembly.S"));
+    }
+
+    const c_flags = if (is_wasm)
+        &[_][]const u8{ "-std=c99", "-D__BLST_PORTABLE__", "-D__BLST_NO_ASM__", "-fno-sanitize=undefined" }
+    else
+        &[_][]const u8{ "-std=c99", "-fPIC", "-D__BLST_PORTABLE__", "-fno-sanitize=undefined" };
+
+    lib.root_module.addCSourceFiles(.{
+        .files = &.{
+            "lib/evm/vendor/c-kzg-4844/blst/src/server.c",
+        },
+        .flags = c_flags,
+    });
+    lib.root_module.addIncludePath(b.path("lib/evm/vendor/c-kzg-4844/blst/bindings"));
+    return lib;
+}
+
+fn createEvmCKzgLibrary(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    blst_lib: *std.Build.Step.Compile,
+) *std.Build.Step.Compile {
+    const lib = b.addLibrary(.{
+        .name = "c-kzg-4844",
+        .linkage = .static,
+        .use_llvm = true,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    lib.root_module.link_libc = true;
+    lib.root_module.linkLibrary(blst_lib);
+    lib.root_module.addCSourceFiles(.{
+        .files = &.{
+            "lib/evm/vendor/c-kzg-4844/src/ckzg.c",
+        },
+        .flags = &.{ "-std=c99", "-fPIC", "-fno-sanitize=undefined" },
+    });
+    lib.root_module.addIncludePath(b.path("lib/evm/vendor/c-kzg-4844/src"));
+    lib.root_module.addIncludePath(b.path("lib/evm/vendor/c-kzg-4844/blst/bindings"));
+    return lib;
 }
 
 fn optimizeModeName(optimize: std.builtin.OptimizeMode) []const u8 {
@@ -2702,7 +2797,7 @@ fn optimizeModeName(optimize: std.builtin.OptimizeMode) []const u8 {
 }
 
 fn compilerTestFilters(b: *std.Build, option_filter: ?[]const u8) []const []const u8 {
-    var filters = std.ArrayList([]const u8){};
+    var filters: std.ArrayList([]const u8) = .empty;
     if (option_filter) |filter| {
         filters.append(b.allocator, filter) catch @panic("OOM");
     }

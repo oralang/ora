@@ -84,6 +84,25 @@ test "lsp completion: includes symbols from semantic index" {
     try testing.expect(hasLabel(items, "helper"));
 }
 
+test "lsp completion: marks inline function details" {
+    const source =
+        \\contract Math {
+        \\    inline fn choose(mode: u256) -> u256 { return mode; }
+        \\    pub fn run(mode: u256) -> u256 { return cho; }
+        \\}
+    ;
+
+    const position = try positionAfterNth(source, "cho", 1);
+
+    const items = try completionItems(source, position, null);
+    defer completion.deinitItems(testing.allocator, items);
+
+    const choose = itemWithLabel(items, "choose") orelse return error.TestExpectedEqual;
+    try testing.expectEqual(completion.Kind.method, choose.kind);
+    try testing.expect(choose.detail != null);
+    try testing.expectEqualStrings("inline (mode: u256) -> u256", choose.detail.?);
+}
+
 test "lsp completion: indexed path uses caller-owned semantic index" {
     const source =
         \\pub fn helper(x: u256) -> u256 { return x; }
@@ -118,11 +137,11 @@ test "lsp completion: non-matching prefix returns empty" {
 test "lsp completion: includes current language keywords and types" {
     const source =
         \\pub fn run() {
-        \\    
+        \\
         \\}
     ;
 
-    const position = try positionAfterNth(source, "    ", 0);
+    const position: frontend.Position = .{ .line = 1, .character = 0 };
 
     const items = try completionItems(source, position, null);
     defer completion.deinitItems(testing.allocator, items);
@@ -135,6 +154,47 @@ test "lsp completion: includes current language keywords and types" {
     try testing.expect(hasLabel(items, "bytes"));
     try testing.expect(hasLabel(items, "slice"));
     try testing.expect(hasLabel(items, "result"));
+}
+
+test "lsp completion: includes builtin functions and Resource type" {
+    const source =
+        \\pub fn run(value: u64) -> u256 {
+        \\    return @cast(u256, value);
+        \\}
+    ;
+
+    const position = try positionAfterNth(source, "@c", 0);
+
+    const items = try completionItems(source, position, null);
+    defer completion.deinitItems(testing.allocator, items);
+
+    const cast = itemWithLabel(items, "cast") orelse return error.TestExpectedEqual;
+    try testing.expectEqual(completion.Kind.function, cast.kind);
+    try testing.expect(cast.detail != null);
+    try testing.expectEqualStrings("@cast(T, value) -> T", cast.detail.?);
+    try testing.expect(cast.documentation != null);
+    try testing.expect(std.mem.indexOf(u8, cast.documentation.?, "checked conversion rules") != null);
+}
+
+test "lsp completion: includes resource boundary builtins and Resource type" {
+    const source =
+        "pub fn run() {\n" ++
+        "    \n" ++
+        "}\n";
+
+    const position: frontend.Position = .{ .line = 1, .character = 4 };
+
+    const items = try completionItems(source, position, null);
+    defer completion.deinitItems(testing.allocator, items);
+
+    inline for (.{ "move", "create", "destroy", "Resource" }) |label| {
+        try testing.expect(hasLabel(items, label));
+    }
+
+    const resource = itemWithLabel(items, "Resource") orelse return error.TestExpectedEqual;
+    try testing.expectEqual(completion.Kind.type_alias, resource.kind);
+    try testing.expect(resource.documentation != null);
+    try testing.expect(std.mem.indexOf(u8, resource.documentation.?, "@move") != null);
 }
 
 test "lsp completion: offers every lexer and contextual keyword" {

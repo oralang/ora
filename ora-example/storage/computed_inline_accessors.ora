@@ -1,0 +1,46 @@
+comptime const std_storage = @import("std/storage");
+
+contract ComputedInlineAccessors {
+    inline fn entrySlot(owner: address, entry_id: u256) -> StorageSlot {
+        return std_storage.derive("ora.example.computed.inline.entry", owner, entry_id);
+    }
+
+    inline fn entryRange(owner: address, entry_id: u256) -> StorageRange {
+        return std_storage.range(entrySlot(owner, entry_id), 3);
+    }
+
+    inline fn writeHeader(slot: StorageSlot, amount: u256, status: u256) {
+        std_storage.words.store(slot, 0, amount);
+        std_storage.words.store(slot, 1, status);
+    }
+
+    inline fn readWord(slot: StorageSlot, offset: u256) -> u256 {
+        return std_storage.words.load(slot, offset);
+    }
+
+    pub fn save(owner: address, entry_id: u256, amount: u256, status: u256, checksum: u256)
+        modifies std_storage.range(std_storage.derive("ora.example.computed.inline.entry", owner, entry_id), 3)
+    {
+        let slot: StorageSlot = entrySlot(owner, entry_id);
+        writeHeader(slot, amount, status);
+        std_storage.words.store(slot, 2, checksum);
+    }
+
+    pub fn clear(owner: address, entry_id: u256)
+        modifies std_storage.range(std_storage.derive("ora.example.computed.inline.entry", owner, entry_id), 3)
+    {
+        std_storage.words.erase(entryRange(owner, entry_id));
+    }
+
+    pub fn amount(owner: address, entry_id: u256) -> u256 {
+        return readWord(entrySlot(owner, entry_id), 0);
+    }
+
+    pub fn status(owner: address, entry_id: u256) -> u256 {
+        return readWord(entrySlot(owner, entry_id), 1);
+    }
+
+    pub fn checksum(owner: address, entry_id: u256) -> u256 {
+        return readWord(entrySlot(owner, entry_id), 2);
+    }
+}

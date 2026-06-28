@@ -1,0 +1,15 @@
+resource DebtUnit = i256;
+
+contract ResourceSmtSignedAmountGuard {
+    storage var debt: Resource<DebtUnit>;
+
+    pub fn credit(amount: DebtUnit)
+        modifies debt
+        requires amount >= 0
+        requires amount <= 100
+        requires debt <= 100
+        ensures debt == old(debt) + amount
+    {
+        @create(debt, amount);
+    }
+}

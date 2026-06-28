@@ -1,0 +1,8 @@
+contract ComptimeStatementReturn {
+    pub fn run() -> u256 {
+        comptime {
+            return 1;
+        }
+        return 2;
+    }
+}

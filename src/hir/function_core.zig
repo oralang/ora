@@ -3,6 +3,7 @@ const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
 const ora_types = @import("ora_types");
+const integer_constants = ora_types.integer_constants;
 const refinements = ora_types.refinement_semantics;
 const type_descriptors = @import("../sema/type_descriptors.zig");
 const source = @import("../source/mod.zig");
@@ -55,7 +56,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 value: mlir.MlirValue,
             };
 
-            entries: std.ArrayList(Entry) = .{},
+            entries: std.ArrayList(Entry) = .empty,
 
             fn deinit(self: *PatternValueCache, allocator: std.mem.Allocator) void {
                 self.entries.deinit(allocator);
@@ -108,7 +109,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                                 parent.lowerSemaType(parent.typecheck.pattern_types[parameter.pattern.index()].type, parameter.range)
                             else
                                 parent.lowerTypeExpr(parameter.type_expr);
-                            const value = if (support.parseUnsignedIntegerLiteral(u256, integer_text)) |parsed|
+                            const parsed_integer = support.parseUnsignedIntegerLiteral(u256, integer_text);
+                            const value = if (parsed_integer) |parsed|
                                 @This().createTypedIntegerConstant(&self, param_type, parsed, parent.location(parameter.range)) catch blk: {
                                     parent.emitLoweringError(parameter.range, "failed to materialize integer literal '{s}' during HIR lowering", .{integer_text}) catch {};
                                     const placeholder = self.createAggregatePlaceholder("ora.lowering_error", parameter.range, &.{}, param_type) catch continue;
@@ -121,11 +123,29 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             };
                             @This().annotatePatternValue(&self, parameter.pattern, value);
                             self.locals.bindPattern(parent.file, parameter.pattern, value) catch {};
+                            if (parsed_integer) |parsed| {
+                                if (std.math.cast(i64, parsed)) |known_integer| {
+                                    self.locals.setPatternKnownInt(parent.file, parameter.pattern, known_integer) catch {};
+                                }
+                            }
                         }
                     }
                     continue;
                 }
                 self.locals.bindPattern(parent.file, parameter.pattern, mlir.oraBlockGetArgument(block, runtime_index)) catch {};
+                if (parent.patternName(parameter.pattern)) |name| {
+                    if (parent.inlineKnownArg(name)) |known| switch (known) {
+                        .integer => |integer_text| {
+                            if (parseUnsignedIntegerLiteral(u256, integer_text)) |parsed| {
+                                if (std.math.cast(i64, parsed)) |known_integer| {
+                                    self.locals.setPatternKnownInt(parent.file, parameter.pattern, known_integer) catch {};
+                                }
+                            }
+                        },
+                        .boolean => |boolean| self.locals.setPatternKnownBool(parent.file, parameter.pattern, boolean) catch {},
+                        .refinement => {},
+                    };
+                }
                 runtime_index += 1;
             }
             return self;
@@ -277,6 +297,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn runtimeCheckKeyForBinaryRequires(self: *FunctionLowerer, binary: ast.BinaryExpr) anyerror!?[]const u8 {
+            if (binary.op == .ne) {
+                if (@This().nameExprText(self, binary.lhs)) |name| {
+                    if (@This().exprIsZeroAddress(self, binary.rhs)) return try @This().runtimeCheckNonZeroAddressKey(self, name);
+                }
+                if (@This().nameExprText(self, binary.rhs)) |name| {
+                    if (@This().exprIsZeroAddress(self, binary.lhs)) return try @This().runtimeCheckNonZeroAddressKey(self, name);
+                }
+                return null;
+            }
+
             switch (binary.op) {
                 .ge, .le => {},
                 else => return null,
@@ -295,6 +325,41 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 }
             }
             return null;
+        }
+
+        fn exprIsZeroAddress(self: *FunctionLowerer, expr_id: ast.ExprId) bool {
+            const expr = self.parent.file.expression(expr_id).*;
+            return switch (expr) {
+                .Group => |group| @This().exprIsZeroAddress(self, group.expr),
+                .IntegerLiteral => |literal| (parseUnsignedIntegerLiteral(u256, literal.text) orelse return false) == 0,
+                .AddressLiteral => |literal| @This().addressLiteralIsZero(literal.text),
+                .Field => |field| std.mem.eql(u8, field.name, "ZERO_ADDRESS") and @This().exprPathEquals(self, field.base, &.{ "std", "constants" }),
+                else => false,
+            };
+        }
+
+        fn addressLiteralIsZero(text: []const u8) bool {
+            const trimmed = std.mem.trim(u8, text, " \t\n\r");
+            const digits = if (std.mem.startsWith(u8, trimmed, "0x")) trimmed[2..] else trimmed;
+            if (digits.len == 0) return false;
+            for (digits) |c| {
+                if (c == '_') continue;
+                if (c != '0') return false;
+            }
+            return true;
+        }
+
+        fn exprPathEquals(self: *FunctionLowerer, expr_id: ast.ExprId, expected: []const []const u8) bool {
+            if (expected.len == 0) return false;
+            const expr = self.parent.file.expression(expr_id).*;
+            return switch (expr) {
+                .Group => |group| @This().exprPathEquals(self, group.expr, expected),
+                .Name => |name| expected.len == 1 and std.mem.eql(u8, name.name, expected[0]),
+                .Field => |field| expected.len > 1 and
+                    std.mem.eql(u8, field.name, expected[expected.len - 1]) and
+                    @This().exprPathEquals(self, field.base, expected[0 .. expected.len - 1]),
+                else => false,
+            };
         }
 
         fn nameExprText(self: *FunctionLowerer, expr_id: ast.ExprId) ?[]const u8 {
@@ -319,6 +384,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const normalized = try @This().normalizedUnsignedLiteralText(self, literal_text);
             defer self.parent.allocator.free(normalized);
             return std.fmt.allocPrint(self.parent.allocator, "param:{s}:{s}:{s}", .{ name, direction, normalized });
+        }
+
+        fn runtimeCheckNonZeroAddressKey(self: *FunctionLowerer, name: []const u8) ![]const u8 {
+            return std.fmt.allocPrint(self.parent.allocator, "param:{s}:nonzero_address", .{name});
         }
 
         fn normalizedUnsignedLiteralText(self: *FunctionLowerer, literal_text: []const u8) ![]const u8 {
@@ -507,10 +576,21 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             for (function.parameters) |parameter| {
                 const param_type = self.parent.typecheck.pattern_types[parameter.pattern.index()].type;
                 if (param_type.kind() != .refinement) continue;
+                if (@This().inlineArgAlreadyProvidesRefinement(self, parameter, param_type)) continue;
                 const local_id = self.locals.resolvePatternTarget(self.parent.file, parameter.pattern) orelse continue;
                 const param_value = self.locals.getValue(local_id) orelse continue;
                 try @This().insertRefinementGuard(self, param_value, param_type.refinement, parameter.range, patternName(self.parent.file, parameter.pattern), "parameter_refinement");
             }
+        }
+
+        fn inlineArgAlreadyProvidesRefinement(self: *FunctionLowerer, parameter: ast.Parameter, param_type: sema.Type) bool {
+            const name = patternName(self.parent.file, parameter.pattern) orelse return false;
+            const known = self.parent.inlineKnownArg(name) orelse return false;
+            const actual_type = switch (known) {
+                .refinement => |ty| ty,
+                else => return false,
+            };
+            return actual_type.kind() == .refinement and type_descriptors.typesAssignable(param_type, actual_type);
         }
 
         fn insertRefinementGuard(
@@ -566,6 +646,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn runtimeCheckProvidesForRefinement(self: *FunctionLowerer, name: []const u8, refinement: RefinementType) !?[]const u8 {
+            if (refinements.kindForName(refinement.name) == .non_zero_address) {
+                return try @This().runtimeCheckNonZeroAddressKey(self, name);
+            }
             const bounds = refinements.bounds(refinement) orelse return null;
             if (bounds.min_text) |min_text| {
                 if (bounds.max_text) |max_text| {
@@ -692,7 +775,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn eventTopic0Hex(self: *FunctionLowerer, event_name: []const u8, log_decl: ast.LogDeclItem) anyerror![]const u8 {
-            var abi_types: std.ArrayList([]const u8) = .{};
+            var abi_types: std.ArrayList([]const u8) = .empty;
             defer {
                 for (abi_types.items) |abi_type| self.parent.allocator.free(abi_type);
                 abi_types.deinit(self.parent.allocator);
@@ -721,6 +804,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn parseU256Literal(text: []const u8) ?u256 {
+            if (integer_constants.lookup(text)) |constant| {
+                return parseU256Literal(constant);
+            }
             if (std.mem.startsWith(u8, text, "-")) {
                 const magnitude = parseU256Literal(text[1..]) orelse return null;
                 return @as(u256, 0) -% magnitude;
@@ -1263,7 +1349,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         if (pattern_type.kind() == .unknown) {
                             break :blk try self.lowerExpr(expr_id, locals);
                         }
-                        const target_type = self.parent.lowerSemaType(pattern_type, decl.range);
+                        const target_type = try @This().lowerPatternType(self, decl.pattern) orelse
+                            self.parent.lowerSemaType(pattern_type, decl.range);
                         break :blk try self.lowerExprForFlowTarget(expr_id, target_type, locals);
                     } else if (decl.type_expr) |type_expr| blk: {
                         const lowered_type = self.parent.lowerTypeExpr(type_expr);
@@ -1566,7 +1653,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     return false;
                 },
                 .Log => |log_stmt| {
-                    var args: std.ArrayList(mlir.MlirValue) = .{};
+                    var args: std.ArrayList(mlir.MlirValue) = .empty;
                     for (log_stmt.args) |arg| {
                         try args.append(self.parent.allocator, try self.lowerExpr(arg, locals));
                     }
@@ -2276,7 +2363,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 else => {
                     const range = patternRange(self.parent.file, pattern_id);
-                    const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
+                    const target_type = try @This().lowerPatternType(self, pattern_id) orelse
+                        self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
                     const converted = try @This().convertValueForFlow(self, value, target_type, range);
                     @This().annotatePatternValue(self, pattern_id, converted);
                     try locals.bindPattern(self.parent.file, pattern_id, converted);
@@ -2449,7 +2537,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (tuple_count == 0 or field_count == 0 or tuple_count != field_count) return null;
 
             const loc = self.parent.location(range);
-            var fields: std.ArrayList(mlir.MlirValue) = .{};
+            var fields: std.ArrayList(mlir.MlirValue) = .empty;
             defer fields.deinit(self.parent.allocator);
 
             var index: usize = 0;
@@ -2492,7 +2580,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (field_count == 0 or tuple_count == 0 or field_count != tuple_count) return null;
 
             const loc = self.parent.location(range);
-            var elements: std.ArrayList(mlir.MlirValue) = .{};
+            var elements: std.ArrayList(mlir.MlirValue) = .empty;
             defer elements.deinit(self.parent.allocator);
 
             var index: usize = 0;
@@ -3325,7 +3413,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 break :blk flag;
             } else std.mem.zeroes(mlir.MlirValue);
 
-            var carried_locals: LocalIdList = .{};
+            var carried_locals: LocalIdList = .empty;
             var carried_seen = LocalIdSet.init(self.parent.allocator);
             const carried_supported = try collectLoopCarriedLocals(self.parent.allocator, self.parent.file, for_stmt.body, locals, &carried_locals, &carried_seen);
             if (!carried_supported) {
@@ -3334,7 +3422,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
             carried_locals = try self.filterCarriedLocals(locals, carried_locals.items);
 
-            var init_operands: std.ArrayList(mlir.MlirValue) = .{};
+            var init_operands: std.ArrayList(mlir.MlirValue) = .empty;
             for (carried_locals.items) |local_id| {
                 const value = try self.materializeCarriedLocalValue(locals, local_id);
                 try init_operands.append(self.parent.allocator, value);
@@ -3916,11 +4004,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             carried_locals: []const LocalId,
         ) anyerror!?std.ArrayList(mlir.MlirType) {
             _ = locals;
-            var result_types: std.ArrayList(mlir.MlirType) = .{};
+            var result_types: std.ArrayList(mlir.MlirType) = .empty;
             for (carried_locals) |local_id| {
-                const sema_type = self.parent.typecheck.pattern_types[local_id.index()].type;
-                if (sema_type.kind() == .unknown) return null;
-                try result_types.append(self.parent.allocator, self.parent.lowerSemaType(sema_type, patternRange(self.parent.file, local_id)));
+                const result_type = try @This().lowerPatternType(self, local_id) orelse return null;
+                try result_types.append(self.parent.allocator, result_type);
             }
             return result_types;
         }
@@ -3930,7 +4017,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             locals: *const LocalEnv,
             carried_locals: []const LocalId,
         ) anyerror!LocalIdList {
-            var filtered: LocalIdList = .{};
+            var filtered: LocalIdList = .empty;
             for (carried_locals) |local_id| {
                 if (!locals.hasLocal(local_id)) continue;
                 if (self.parent.typecheck.pattern_types[local_id.index()].type.kind() == .unknown) continue;
@@ -3946,8 +4033,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         ) anyerror!mlir.MlirValue {
             if (locals.getValue(local_id)) |value| return value;
 
-            const sema_type = self.parent.typecheck.pattern_types[local_id.index()].type;
-            if (sema_type.kind() == .unknown) return error.MlirOperationCreationFailed;
+            const result_type = try @This().lowerPatternType(self, local_id) orelse return error.MlirOperationCreationFailed;
             try self.parent.emitLoweringError(
                 patternRange(self.parent.file, local_id),
                 "loop-carried local has no materialized value",
@@ -3958,9 +4044,39 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 "ora.loop_carried_local",
                 range,
                 &.{},
-                self.parent.lowerSemaType(sema_type, range),
+                result_type,
             );
             return appendValueOp(self.block, op);
+        }
+
+        fn lowerPatternType(self: *FunctionLowerer, pattern_id: ast.PatternId) anyerror!?mlir.MlirType {
+            const sema_type = self.parent.typecheck.pattern_types[pattern_id.index()].type;
+            if (sema_type.kind() == .unknown) return null;
+            if (sema_type.kind() != .anonymous_struct) {
+                if (@This().declaredTypeExprForPattern(self, pattern_id)) |type_expr| {
+                    return self.parent.lowerTypeExpr(type_expr);
+                }
+            }
+            return self.parent.lowerSemaType(sema_type, patternRange(self.parent.file, pattern_id));
+        }
+
+        fn declaredTypeExprForPattern(self: *FunctionLowerer, pattern_id: ast.PatternId) ?ast.TypeExprId {
+            if (self.function) |function| {
+                for (function.parameters) |parameter| {
+                    if (parameter.pattern == pattern_id) return parameter.type_expr;
+                }
+            }
+            for (self.parent.file.bodies) |body| {
+                for (body.statements) |statement_id| {
+                    switch (self.parent.file.statement(statement_id).*) {
+                        .VariableDecl => |decl| {
+                            if (decl.pattern == pattern_id) return decl.type_expr;
+                        },
+                        else => {},
+                    }
+                }
+            }
+            return null;
         }
 
         pub fn appendOraYieldFromLocals(
@@ -3975,7 +4091,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return;
             }
 
-            var yielded_values: std.ArrayList(mlir.MlirValue) = .{};
+            var yielded_values: std.ArrayList(mlir.MlirValue) = .empty;
             for (carried_locals) |local_id| {
                 const value = try self.materializeCarriedLocalValue(locals, local_id);
                 try yielded_values.append(self.parent.allocator, value);
@@ -3995,7 +4111,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return;
             }
 
-            var yielded_values: std.ArrayList(mlir.MlirValue) = .{};
+            var yielded_values: std.ArrayList(mlir.MlirValue) = .empty;
             for (carried_locals) |local_id| {
                 const value = try self.materializeCarriedLocalValue(locals, local_id);
                 try yielded_values.append(self.parent.allocator, value);

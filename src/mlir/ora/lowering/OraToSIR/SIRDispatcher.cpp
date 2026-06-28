@@ -1002,6 +1002,13 @@ namespace mlir
                 return AbiReturnBuffer{retPtr, size};
             }
 
+            struct ErrorInfo
+            {
+                uint64_t id = 0;
+                uint32_t selector = 0;
+                uint64_t paramCount = 0;
+            };
+
             struct PubFuncInfo
             {
                 func::FuncOp func;
@@ -1016,6 +1023,8 @@ namespace mlir
                 SmallVector<std::string, 8> abiParamRefinements;
                 SmallVector<std::string, 8> resultInputModes;
                 SmallVector<int64_t, 8> resultInputErrorIds;
+                SmallVector<ErrorInfo, 8> returnErrors;
+                bool hasReturnErrorMetadata = false;
                 bool hasAbiReturn = false;
                 int64_t abiReturnWords = -1;
                 std::string abiReturnLayout;
@@ -1026,13 +1035,6 @@ namespace mlir
                     : func(func), provenanceLoc(provenanceLoc)
                 {
                 }
-            };
-
-            struct ErrorInfo
-            {
-                uint64_t id = 0;
-                uint32_t selector = 0;
-                uint64_t paramCount = 0;
             };
 
             static Value getShiftedSelectorConst(OpBuilder &builder, Location loc, MLIRContext *, uint32_t selector)
@@ -1380,6 +1382,31 @@ namespace mlir
                                 info.resultInputErrorIds.push_back(iattr.getInt());
                             }
                         }
+                        if (auto returnErrorIdsAttr = func->getAttrOfType<ArrayAttr>("ora.return_error_ids"))
+                        {
+                            info.hasReturnErrorMetadata = true;
+                            for (Attribute a : returnErrorIdsAttr)
+                            {
+                                auto iattr = dyn_cast<IntegerAttr>(a);
+                                if (!iattr)
+                                {
+                                    func.emitError("ora.return_error_ids contains non-integer attr");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                uint64_t errorId = iattr.getValue().getZExtValue();
+                                auto found = llvm::find_if(abiErrors, [&](const ErrorInfo &errInfo) {
+                                    return errInfo.id == errorId;
+                                });
+                                if (found == abiErrors.end())
+                                {
+                                    func.emitError("ora.return_error_ids references unknown error id");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                info.returnErrors.push_back(*found);
+                            }
+                        }
 
                         if (auto abiReturnAttr = func->getAttrOfType<StringAttr>("ora.abi_return"))
                         {
@@ -1409,6 +1436,12 @@ namespace mlir
 
                         if (auto returnsErrorUnionAttr = func->getAttrOfType<BoolAttr>("ora.returns_error_union"))
                             info.returnsErrorUnion = returnsErrorUnionAttr.getValue();
+                        if (info.returnsErrorUnion && !info.hasReturnErrorMetadata)
+                        {
+                            func.emitError("public error-union function is missing ora.return_error_ids metadata");
+                            signalPassFailure();
+                            return;
+                        }
                         if (auto modeAttr = func->getAttrOfType<StringAttr>("ora.abi_decode_mode"))
                             info.permissiveAbiDecode = modeAttr.getValue() == "permissive";
                         if (!info.abiParamLayouts.empty() && info.resultInputModes.size() != info.abiParamLayouts.size())
@@ -2207,7 +2240,7 @@ namespace mlir
                     static_cast<void>(getConst(builder, dispatcherMainLoc, u256Type, i64Type, 99, constCache, entry, "min_cdsize_3args"));
                     static_cast<void>(getConst(builder, dispatcherMainLoc, u256Type, i64Type, 224, constCache, entry, "selector_shift"));
 
-                    // Sensei initializes memory[0x20] to its static memory high-water mark
+                    // Plank initializes memory[0x20] to its static memory high-water mark.
                     // before entering main. Raise it past compiler-owned named-memory slots
                     // placed after CODESIZE so user allocations cannot collide with them.
                     Value freePtrSlot = builder.create<sir::BitcastOp>(dispatcherMainLoc, ptrType, c32_entry);
@@ -4054,7 +4087,7 @@ namespace mlir
 
                             builder.setInsertionPointToEnd(errorDispatchBlock);
                             Block *nextErrorBlock = revertError;
-                            for (const ErrorInfo &errInfo : llvm::reverse(abiErrors))
+                            for (const ErrorInfo &errInfo : llvm::reverse(info.returnErrors))
                             {
                                 Block *compareBlock = mainFunc.addBlock();
                                 builder.setInsertionPointToEnd(compareBlock);

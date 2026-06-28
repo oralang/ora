@@ -1,0 +1,1 @@
+expect_error = "@storageDerive namespace must be a string literal"

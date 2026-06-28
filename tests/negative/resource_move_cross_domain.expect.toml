@@ -1,0 +1,1 @@
+expect_error = "cannot move between Resource<USDC> and Resource<DAI>"

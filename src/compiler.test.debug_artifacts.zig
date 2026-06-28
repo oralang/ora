@@ -27,15 +27,16 @@ const Fixture = struct {
 const FIXTURES = [_]Fixture{
     .{ .name = "simple_counter", .source_relpath = "tests/debug_artifacts/simple_counter/simple_counter.ora" },
     .{ .name = "liveness_dead_after_use", .source_relpath = "tests/debug_artifacts/liveness_dead_after_use/liveness_dead_after_use.ora" },
+    .{ .name = "resource_builtins", .source_relpath = "tests/debug_artifacts/resource_builtins/resource_builtins.ora" },
 };
 
 fn binaryAvailable() bool {
-    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch return false;
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch return false;
     return true;
 }
 
 fn expectBinaryAvailable(path: []const u8, build_hint: []const u8) !void {
-    std.fs.cwd().access(path, .{}) catch |err| {
+    std.Io.Dir.cwd().access(std.testing.io, path, .{}) catch |err| {
         std.debug.print("missing required execution-test binary: {s}\n{s}\n", .{ path, build_hint });
         return err;
     };
@@ -43,8 +44,13 @@ fn expectBinaryAvailable(path: []const u8, build_hint: []const u8) !void {
 
 /// Run `ora debug --no-tui <fixture> -o <output_dir>`.
 fn runOraDebug(allocator: std.mem.Allocator, fixture: Fixture, output_dir: []const u8) !void {
-    const result = try std.process.Child.run(.{
-        .allocator = allocator,
+    var process_io = std.Io.Threaded.init(allocator, .{
+        .async_limit = .nothing,
+        .concurrent_limit = .nothing,
+    });
+    defer process_io.deinit();
+
+    const result = try std.process.run(allocator, process_io.io(), .{
         .argv = &[_][]const u8{
             ORA_BINARY_REL,
             "debug",
@@ -53,13 +59,14 @@ fn runOraDebug(allocator: std.mem.Allocator, fixture: Fixture, output_dir: []con
             "-o",
             output_dir,
         },
-        .max_output_bytes = 4 * 1024 * 1024,
+        .stdout_limit = std.Io.Limit.limited(4 * 1024 * 1024),
+        .stderr_limit = std.Io.Limit.limited(4 * 1024 * 1024),
     });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
     switch (result.term) {
-        .Exited => |code| if (code != 0) {
+        .exited => |code| if (code != 0) {
             std.debug.print(
                 "ora debug --no-tui exited with {d}\nstdout:\n{s}\nstderr:\n{s}\n",
                 .{ code, result.stdout, result.stderr },
@@ -99,7 +106,7 @@ fn runDebugProbeWithExtraArgs(
     const debug_info_path = try std.fmt.allocPrint(allocator, "{s}/{s}.debug.json", .{ output_dir, stem });
     defer allocator.free(debug_info_path);
 
-    var argv = std.ArrayList([]const u8){};
+    var argv = std.ArrayList([]const u8).empty;
     defer argv.deinit(allocator);
     try argv.appendSlice(allocator, &[_][]const u8{
         DEBUG_PROBE_BINARY_REL,
@@ -115,16 +122,22 @@ fn runDebugProbeWithExtraArgs(
     try argv.appendSlice(allocator, extra_args);
     try argv.appendSlice(allocator, &[_][]const u8{ "--max-statements", max_statements });
 
-    const result = try std.process.Child.run(.{
-        .allocator = allocator,
+    var process_io = std.Io.Threaded.init(allocator, .{
+        .async_limit = .nothing,
+        .concurrent_limit = .nothing,
+    });
+    defer process_io.deinit();
+
+    const result = try std.process.run(allocator, process_io.io(), .{
         .argv = argv.items,
-        .max_output_bytes = 4 * 1024 * 1024,
+        .stdout_limit = std.Io.Limit.limited(4 * 1024 * 1024),
+        .stderr_limit = std.Io.Limit.limited(4 * 1024 * 1024),
     });
     errdefer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
     switch (result.term) {
-        .Exited => |code| if (code != 0) {
+        .exited => |code| if (code != 0) {
             std.debug.print(
                 "ora-evm-debug-probe exited with {d}\nstdout:\n{s}\nstderr:\n{s}\n",
                 .{ code, result.stdout, result.stderr },
@@ -152,10 +165,14 @@ fn calldataHexForPayloadHex(allocator: std.mem.Allocator, signature: []const u8,
     var selector_hash: [32]u8 = undefined;
     std.crypto.hash.sha3.Keccak256.hash(signature, &selector_hash, .{});
 
-    var out = std.ArrayList(u8){};
+    var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
     try out.ensureTotalCapacity(allocator, 8 + payload_hex.len);
-    for (selector_hash[0..4]) |byte| try out.writer(allocator).print("{x:0>2}", .{byte});
+    for (selector_hash[0..4]) |byte| {
+        var byte_hex: [2]u8 = undefined;
+        const rendered = try std.fmt.bufPrint(&byte_hex, "{x:0>2}", .{byte});
+        try out.appendSlice(allocator, rendered);
+    }
     try out.appendSlice(allocator, payload_hex);
     return try out.toOwnedSlice(allocator);
 }
@@ -202,7 +219,7 @@ fn expectProbeOmits(case_name: []const u8, stdout: []const u8, needle: []const u
 }
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    return std.fs.cwd().readFileAlloc(allocator, path, 16 * 1024 * 1024);
+    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, std.Io.Limit.limited(16 * 1024 * 1024));
 }
 
 fn expectDebugCfgArtifacts(allocator: std.mem.Allocator, output_dir: []const u8, stem: []const u8) !void {
@@ -219,11 +236,11 @@ fn expectDebugCfgArtifacts(allocator: std.mem.Allocator, output_dir: []const u8,
     const per_function_prefix = try std.fmt.allocPrint(allocator, "{s}.", .{stem});
     defer allocator.free(per_function_prefix);
 
-    var dir = try std.fs.cwd().openDir(output_dir, .{ .iterate = true });
-    defer dir.close();
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, output_dir, .{ .iterate = true });
+    defer dir.close(std.testing.io);
     var iter = dir.iterate();
     var per_function_count: usize = 0;
-    while (try iter.next()) |entry| {
+    while (try iter.next(std.testing.io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.startsWith(u8, entry.name, per_function_prefix)) continue;
         if (!std.mem.endsWith(u8, entry.name, ".sir.dot")) continue;
@@ -295,7 +312,7 @@ test "debug-artifacts regression corpus matches goldens" {
         );
         defer allocator.free(out_dir);
 
-        std.fs.cwd().deleteTree(out_dir) catch {};
+        std.Io.Dir.cwd().deleteTree(std.testing.io, out_dir) catch {};
         try runOraDebug(allocator, fixture, out_dir);
 
         const stem = std.fs.path.stem(fixture.source_relpath);
@@ -332,6 +349,60 @@ test "debug-artifacts regression corpus matches goldens" {
     }
 }
 
+test "debug-artifacts source map can be emitted with Sinora release backend" {
+    if (!binaryAvailable()) {
+        std.debug.print(
+            "skip: {s} not found — run `zig build install` first to enable debug-artifact regression tests\n",
+            .{ORA_BINARY_REL},
+        );
+        return error.SkipZigTest;
+    }
+
+    const allocator = testing.allocator;
+    const fixture = FIXTURES[0];
+    const out_dir = "/tmp/ora_dbg_artifacts_release_srcmap";
+
+    std.Io.Dir.cwd().deleteTree(std.testing.io, out_dir) catch {};
+    try runOraDebug(allocator, fixture, out_dir);
+
+    const stem = std.fs.path.stem(fixture.source_relpath);
+    const sourcemap_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/{s}.sourcemap.json",
+        .{ out_dir, stem },
+    );
+    defer allocator.free(sourcemap_path);
+
+    const sourcemap = try readFile(allocator, sourcemap_path);
+    defer allocator.free(sourcemap);
+
+    const SourceMap = struct {
+        runtime_start_pc: u32 = 0,
+        entries: []const struct {
+            idx: u32,
+            pc: u32,
+        } = &.{},
+    };
+    const parsed = try std.json.parseFromSlice(SourceMap, allocator, sourcemap, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    try testing.expect(parsed.value.runtime_start_pc > 0);
+    try testing.expect(parsed.value.entries.len > 0);
+}
+
+test "debug-artifacts resource builtins carry source locations" {
+    const allocator = testing.allocator;
+    const debug_info = try readFile(allocator, "tests/debug_artifacts/resource_builtins/debug.golden.json");
+    defer allocator.free(debug_info);
+
+    try testing.expect(std.mem.containsAtLeast(u8, debug_info, 1, "\"op\":\"sir.sstore\""));
+    try testing.expect(std.mem.containsAtLeast(u8, debug_info, 1, "\"line\":10,\"col\":9"));
+    try testing.expect(std.mem.containsAtLeast(u8, debug_info, 1, "\"line\":18,\"col\":9"));
+    try testing.expect(std.mem.containsAtLeast(u8, debug_info, 1, "\"line\":25,\"col\":9"));
+}
+
 test "debug-probe malformed public calldata reverts before body effects" {
     try expectBinaryAvailable(ORA_BINARY_REL, "test-compiler depends on the top-level install step; run `zig build install` if this test is invoked directly.");
     try expectBinaryAvailable(DEBUG_PROBE_BINARY_REL, "test-compiler depends on `zig build install` in lib/evm; run `zig build -C lib/evm install` if this test is invoked directly.");
@@ -343,7 +414,7 @@ test "debug-probe malformed public calldata reverts before body effects" {
     };
     const out_dir = "/tmp/ora_dbg_artifacts_abi_decode_calldata_revert_exec";
 
-    std.fs.cwd().deleteTree(out_dir) catch {};
+    std.Io.Dir.cwd().deleteTree(std.testing.io, out_dir) catch {};
     try runOraDebug(allocator, fixture, out_dir);
 
     const Case = struct {
@@ -624,16 +695,16 @@ test "debug-probe malformed public calldata reverts before body effects" {
     const result_carrier_out_dir = "/tmp/ora_dbg_artifacts_abi_decode_result_carrier_revert_exec";
     const result_error_payload_out_dir = "/tmp/ora_dbg_artifacts_abi_decode_result_error_payload_revert_exec";
     const result_multi_error_payload_out_dir = "/tmp/ora_dbg_artifacts_abi_decode_result_multi_error_payload_revert_exec";
-    std.fs.cwd().deleteTree(constructor_out_dir) catch {};
-    std.fs.cwd().deleteTree(constructor_string_out_dir) catch {};
-    std.fs.cwd().deleteTree(constructor_slice_out_dir) catch {};
-    std.fs.cwd().deleteTree(constructor_multi_slice_out_dir) catch {};
-    std.fs.cwd().deleteTree(constructor_u256_slice_out_dir) catch {};
-    std.fs.cwd().deleteTree(constructor_bool_slice_out_dir) catch {};
-    std.fs.cwd().deleteTree(constructor_fixed_bytes_slice_out_dir) catch {};
-    std.fs.cwd().deleteTree(result_carrier_out_dir) catch {};
-    std.fs.cwd().deleteTree(result_error_payload_out_dir) catch {};
-    std.fs.cwd().deleteTree(result_multi_error_payload_out_dir) catch {};
+    std.Io.Dir.cwd().deleteTree(std.testing.io, constructor_out_dir) catch {};
+    std.Io.Dir.cwd().deleteTree(std.testing.io, constructor_string_out_dir) catch {};
+    std.Io.Dir.cwd().deleteTree(std.testing.io, constructor_slice_out_dir) catch {};
+    std.Io.Dir.cwd().deleteTree(std.testing.io, constructor_multi_slice_out_dir) catch {};
+    std.Io.Dir.cwd().deleteTree(std.testing.io, constructor_u256_slice_out_dir) catch {};
+    std.Io.Dir.cwd().deleteTree(std.testing.io, constructor_bool_slice_out_dir) catch {};
+    std.Io.Dir.cwd().deleteTree(std.testing.io, constructor_fixed_bytes_slice_out_dir) catch {};
+    std.Io.Dir.cwd().deleteTree(std.testing.io, result_carrier_out_dir) catch {};
+    std.Io.Dir.cwd().deleteTree(std.testing.io, result_error_payload_out_dir) catch {};
+    std.Io.Dir.cwd().deleteTree(std.testing.io, result_multi_error_payload_out_dir) catch {};
     try runOraDebug(allocator, constructor_fixture, constructor_out_dir);
     try runOraDebug(allocator, constructor_string_fixture, constructor_string_out_dir);
     try runOraDebug(allocator, constructor_slice_fixture, constructor_slice_out_dir);
@@ -964,7 +1035,7 @@ test "debug-probe malformed external returndata returns decode error before body
     };
     const out_dir = "/tmp/ora_dbg_artifacts_abi_decode_returndata_revert_exec";
 
-    std.fs.cwd().deleteTree(out_dir) catch {};
+    std.Io.Dir.cwd().deleteTree(std.testing.io, out_dir) catch {};
     try runOraDebug(allocator, fixture, out_dir);
 
     const mock_target_word = "0000000000000000000000000000000000000000000000000000000000000300";

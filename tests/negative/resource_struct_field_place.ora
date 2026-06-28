@@ -1,0 +1,13 @@
+resource TokenUnit = u256;
+
+struct Bucket {
+    balance: Resource<TokenUnit>;
+}
+
+contract ResourceStructFieldPlace {
+    storage var buckets: map<address, Bucket>;
+
+    pub fn issue(owner: address, amount: TokenUnit) {
+        @create(buckets[owner].balance, amount);
+    }
+}

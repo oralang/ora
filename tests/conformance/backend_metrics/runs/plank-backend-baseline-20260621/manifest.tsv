@@ -1,0 +1,5 @@
+run_id	plank-backend-baseline-20260621
+utc	2026-06-21T22:32:31Z
+git_head	496f46ea8b4b2dec3413022b756f56680ac8fa49
+git_branch	update_plank
+variants	debug release

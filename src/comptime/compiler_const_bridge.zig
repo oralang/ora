@@ -48,7 +48,7 @@ fn parseIntegerLiteralParts(allocator: std.mem.Allocator, text: []const u8) !?In
 }
 
 fn removeUnderscores(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
-    var out: std.ArrayList(u8) = .{};
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
     for (text) |c| {
         if (c == '_') continue;

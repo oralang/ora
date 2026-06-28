@@ -19,6 +19,20 @@ const std = @import("std");
 const lexer = @import("ora_lexer");
 pub const embedded_stdlib = @import("stdlib_embedded");
 
+fn processIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+fn cwdRealpathAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const real_z = try std.Io.Dir.cwd().realPathFileAlloc(processIo(), path, allocator);
+    defer allocator.free(real_z);
+    return allocator.dupe(u8, real_z);
+}
+
+fn cwdReadFileAlloc(allocator: std.mem.Allocator, path: []const u8, limit: usize) ![]u8 {
+    return std.Io.Dir.cwd().readFileAlloc(processIo(), path, allocator, std.Io.Limit.limited(limit));
+}
+
 pub const ImportValidationError = error{
     ImportTargetNotFound,
     ImportCycleDetected,
@@ -40,6 +54,16 @@ pub const ModuleKind = enum {
 pub const ResolverOptions = struct {
     include_roots: []const []const u8 = &.{},
     workspace_roots: []const []const u8 = &.{},
+};
+
+pub const ImportScanMode = enum {
+    strict,
+    lenient,
+};
+
+pub const ImportClause = struct {
+    alias: []const u8,
+    specifier: []const u8,
 };
 
 pub const ResolvedModule = struct {
@@ -133,8 +157,8 @@ const ModuleRecord = struct {
             .resolved_path = descriptor.resolved_path,
             .package_name = descriptor.package_name,
             .package_module_path = descriptor.package_module_path,
-            .dependencies = .{},
-            .imports = .{},
+            .dependencies = .empty,
+            .imports = .empty,
         };
     }
 
@@ -218,7 +242,7 @@ const Resolver = struct {
             .states = std.StringHashMap(VisitState).init(allocator),
             .modules = std.StringHashMap(*ModuleRecord).init(allocator),
             .package_bindings = std.StringHashMap([]const u8).init(allocator),
-            .stack = .{},
+            .stack = .empty,
             .entry_canonical_id = null,
         };
     }
@@ -275,7 +299,7 @@ const Resolver = struct {
     }
 
     fn buildEntryDescriptor(self: *Resolver, entry_file_path: []const u8) ImportValidationError!ModuleDescriptor {
-        const resolved_path = std.fs.cwd().realpathAlloc(self.allocator, entry_file_path) catch |err| {
+        const resolved_path = cwdRealpathAlloc(self.allocator, entry_file_path) catch |err| {
             std.log.warn("Entry file not found: '{s}' ({s})", .{ entry_file_path, @errorName(err) });
             return ImportValidationError.ImportTargetNotFound;
         };
@@ -335,104 +359,48 @@ const Resolver = struct {
     }
 
     fn scanModuleImports(self: *Resolver, module: *ModuleRecord) ImportValidationError!void {
-        if (self.isStdRootModule(module.resolved_path)) {
-            for (embedded_stdlib.all()) |std_module| {
-                if (std.mem.eql(u8, std_module.logical_path, "std")) continue;
-                const descriptor = (try self.resolveImportSpecifier(module, std_module.logical_path)) orelse return;
-                const record = try self.ensureModule(descriptor);
-                try module.addImport(self.allocator, stdModuleAlias(std_module), std_module.logical_path, record.canonical_id);
-                try module.addDependency(self.allocator, record.canonical_id);
-                try self.visitRecord(record);
+        if (embedded_stdlib.byResolvedPath(module.resolved_path)) |embedded_module| {
+            for (embedded_module.imports) |import_info| {
+                const dependency_descriptor_opt = try self.resolveImportSpecifier(module, import_info.specifier);
+                if (dependency_descriptor_opt) |dependency_descriptor| {
+                    const dependency_record = try self.ensureModule(dependency_descriptor);
+                    try module.addImport(self.allocator, import_info.alias, import_info.specifier, dependency_record.canonical_id);
+                    try module.addDependency(self.allocator, dependency_record.canonical_id);
+                    try self.visitRecord(dependency_record);
+                }
             }
             return;
         }
-        if (embedded_stdlib.byResolvedPath(module.resolved_path) != null) return;
 
-        const source = std.fs.cwd().readFileAlloc(self.allocator, module.resolved_path, 1024 * 1024) catch |err| {
-            std.log.warn("Failed to read module '{s}': {s}", .{ module.resolved_path, @errorName(err) });
-            return ImportValidationError.ImportTargetNotFound;
-        };
-        defer self.allocator.free(source);
+        var owned_source: ?[]u8 = null;
+        defer if (owned_source) |source_text| self.allocator.free(source_text);
 
-        var lex = lexer.Lexer.init(self.allocator, source);
-        defer lex.deinit();
-
-        const tokens = lex.scanTokens() catch |err| {
-            std.log.warn("Failed to lex module '{s}': {s}", .{ module.resolved_path, @errorName(err) });
-            return ImportValidationError.ParseFailed;
-        };
-        defer self.allocator.free(tokens);
-        try self.scanImportTokens(module, source, tokens);
-    }
-
-    fn isStdRootModule(self: *const Resolver, resolved_path: []const u8) bool {
-        _ = self;
-        const std_module = embedded_stdlib.byLogicalPath("std") orelse return false;
-        return std.mem.eql(u8, resolved_path, std_module.resolved_path);
-    }
-
-    fn stdModuleAlias(module: embedded_stdlib.EmbeddedModule) []const u8 {
-        return std.fs.path.basename(module.logical_path);
-    }
-
-    fn scanImportTokens(self: *Resolver, module: *ModuleRecord, source: []const u8, tokens: []const lexer.Token) ImportValidationError!void {
-        var index: usize = 0;
-        while (index < tokens.len) {
-            var cursor = index;
-            if (tokens[cursor].type == .Comptime and cursor + 1 < tokens.len) {
-                cursor += 1;
-            }
-
-            if (cursor + 7 >= tokens.len) {
-                index += 1;
-                continue;
-            }
-
-            if (tokens[cursor].type != .Const or
-                tokens[cursor + 1].type != .Identifier or
-                tokens[cursor + 2].type != .Equal or
-                tokens[cursor + 3].type != .At or
-                tokens[cursor + 4].type != .Import or
-                tokens[cursor + 5].type != .LeftParen)
-            {
-                index += 1;
-                continue;
-            }
-
-            const path_token = tokens[cursor + 6];
-            if (path_token.type != .StringLiteral and path_token.type != .RawStringLiteral) {
-                std.log.warn("Invalid import path token in '{s}'", .{module.resolved_path});
-                return ImportValidationError.ParseFailed;
-            }
-            if (tokens[cursor + 7].type != .RightParen) {
-                std.log.warn("Unterminated import in '{s}'", .{module.resolved_path});
-                return ImportValidationError.ParseFailed;
-            }
-
-            const specifier = tokenStringValue(path_token) orelse {
-                std.log.warn("Invalid import path literal in '{s}'", .{module.resolved_path});
-                return ImportValidationError.ParseFailed;
+        const source = blk: {
+            owned_source = cwdReadFileAlloc(self.allocator, module.resolved_path, 1024 * 1024) catch |err| {
+                std.log.warn("Failed to read module '{s}': {s}", .{ module.resolved_path, @errorName(err) });
+                return ImportValidationError.ImportTargetNotFound;
             };
-            const alias = lexer.tokenLexeme(source, tokens[cursor + 1]);
+            break :blk owned_source.?;
+        };
 
-            const dependency_descriptor_opt = try self.resolveImportSpecifier(module, specifier);
+        const clauses = scanSourceImportClauses(self.allocator, source, .strict) catch |err| {
+            std.log.warn("Failed to scan imports in module '{s}': {s}", .{ module.resolved_path, @errorName(err) });
+            return err;
+        };
+        defer freeImportClauses(self.allocator, clauses);
+        try self.scanImportClauses(module, clauses);
+    }
+
+    fn scanImportClauses(self: *Resolver, module: *ModuleRecord, clauses: []const ImportClause) ImportValidationError!void {
+        for (clauses) |clause| {
+            const dependency_descriptor_opt = try self.resolveImportSpecifier(module, clause.specifier);
             if (dependency_descriptor_opt) |dependency_descriptor| {
                 const dependency_record = try self.ensureModule(dependency_descriptor);
-                try module.addImport(self.allocator, alias, specifier, dependency_record.canonical_id);
+                try module.addImport(self.allocator, clause.alias, clause.specifier, dependency_record.canonical_id);
                 try module.addDependency(self.allocator, dependency_record.canonical_id);
                 try self.visitRecord(dependency_record);
             }
-
-            index = cursor + 8;
         }
-    }
-
-    fn tokenStringValue(token: lexer.Token) ?[]const u8 {
-        const value_ptr = token.value orelse return null;
-        return switch (value_ptr.*) {
-            .string => |value| value,
-            else => null,
-        };
     }
 
     fn resolveImportSpecifier(self: *Resolver, importer: *const ModuleRecord, specifier: []const u8) ImportValidationError!?ModuleDescriptor {
@@ -465,7 +433,7 @@ const Resolver = struct {
         };
         defer self.allocator.free(joined);
 
-        const resolved_path = std.fs.cwd().realpathAlloc(self.allocator, joined) catch |err| {
+        const resolved_path = cwdRealpathAlloc(self.allocator, joined) catch |err| {
             std.log.warn("Import target not found: '{s}' in module '{s}' ({s})", .{ specifier, importer.resolved_path, @errorName(err) });
             return ImportValidationError.ImportTargetNotFound;
         };
@@ -502,7 +470,7 @@ const Resolver = struct {
 
     fn isAllowedRelativePath(self: *Resolver, resolved_path: []const u8) ImportValidationError!bool {
         if (self.options.workspace_roots.len == 0 and self.options.include_roots.len == 0) {
-            const cwd_root = std.fs.cwd().realpathAlloc(self.allocator, ".") catch {
+            const cwd_root = cwdRealpathAlloc(self.allocator, ".") catch {
                 return ImportValidationError.OutOfMemory;
             };
             defer self.allocator.free(cwd_root);
@@ -510,7 +478,7 @@ const Resolver = struct {
         }
 
         for (self.options.workspace_roots) |root| {
-            const real_root = std.fs.cwd().realpathAlloc(self.allocator, root) catch {
+            const real_root = cwdRealpathAlloc(self.allocator, root) catch {
                 continue;
             };
             defer self.allocator.free(real_root);
@@ -518,7 +486,7 @@ const Resolver = struct {
         }
 
         for (self.options.include_roots) |root| {
-            const real_root = std.fs.cwd().realpathAlloc(self.allocator, root) catch {
+            const real_root = cwdRealpathAlloc(self.allocator, root) catch {
                 continue;
             };
             defer self.allocator.free(real_root);
@@ -603,7 +571,7 @@ const Resolver = struct {
         roots: []const []const u8,
     ) ImportValidationError!?ModuleDescriptor {
         for (roots) |root| {
-            const workspace_root = std.fs.cwd().realpathAlloc(self.allocator, root) catch {
+            const workspace_root = cwdRealpathAlloc(self.allocator, root) catch {
                 continue;
             };
             defer self.allocator.free(workspace_root);
@@ -613,7 +581,7 @@ const Resolver = struct {
             };
             defer self.allocator.free(package_root_joined);
 
-            const package_root = std.fs.cwd().realpathAlloc(self.allocator, package_root_joined) catch {
+            const package_root = cwdRealpathAlloc(self.allocator, package_root_joined) catch {
                 continue;
             };
             defer self.allocator.free(package_root);
@@ -623,7 +591,7 @@ const Resolver = struct {
             };
             defer self.allocator.free(module_joined);
 
-            const resolved_module = std.fs.cwd().realpathAlloc(self.allocator, module_joined) catch {
+            const resolved_module = cwdRealpathAlloc(self.allocator, module_joined) catch {
                 continue;
             };
             errdefer self.allocator.free(resolved_module);
@@ -696,7 +664,7 @@ const Resolver = struct {
         var visited = std.StringHashMap(void).init(self.allocator);
         defer visited.deinit();
 
-        var ordered_records = std.ArrayList(*ModuleRecord){};
+        var ordered_records = std.ArrayList(*ModuleRecord).empty;
         defer ordered_records.deinit(self.allocator);
 
         try self.collectOrderedRecords(entry_canonical_id, &visited, &ordered_records);
@@ -754,6 +722,99 @@ const Resolver = struct {
         };
     }
 };
+
+pub fn scanSourceImportClauses(allocator: std.mem.Allocator, source: []const u8, mode: ImportScanMode) ImportValidationError![]ImportClause {
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+
+    const tokens = lex.scanTokens() catch {
+        if (mode == .lenient) return emptyImportClauses(allocator);
+        return ImportValidationError.ParseFailed;
+    };
+    defer allocator.free(tokens);
+
+    var clauses = std.ArrayList(ImportClause).empty;
+    errdefer freeImportClauses(allocator, clauses.items);
+
+    var index: usize = 0;
+    while (index < tokens.len) {
+        var cursor = index;
+        if (tokens[cursor].type == .Comptime and cursor + 1 < tokens.len) {
+            cursor += 1;
+        }
+
+        if (cursor + 7 >= tokens.len) {
+            index += 1;
+            continue;
+        }
+
+        if (tokens[cursor].type != .Const or
+            tokens[cursor + 2].type != .Equal or
+            tokens[cursor + 3].type != .At or
+            tokens[cursor + 4].type != .Import or
+            tokens[cursor + 5].type != .LeftParen)
+        {
+            index += 1;
+            continue;
+        }
+
+        const path_token = tokens[cursor + 6];
+        if ((path_token.type != .StringLiteral and path_token.type != .RawStringLiteral) or
+            tokens[cursor + 7].type != .RightParen)
+        {
+            if (mode == .lenient) {
+                index += 1;
+                continue;
+            }
+            return ImportValidationError.ParseFailed;
+        }
+
+        const specifier = tokenStringValue(path_token) orelse {
+            if (mode == .lenient) {
+                index += 1;
+                continue;
+            }
+            return ImportValidationError.ParseFailed;
+        };
+        const alias_copy = allocator.dupe(u8, lexer.tokenLexeme(source, tokens[cursor + 1])) catch return ImportValidationError.OutOfMemory;
+        const specifier_copy = allocator.dupe(u8, specifier) catch {
+            allocator.free(alias_copy);
+            return ImportValidationError.OutOfMemory;
+        };
+        clauses.append(allocator, .{
+            .alias = alias_copy,
+            .specifier = specifier_copy,
+        }) catch {
+            allocator.free(alias_copy);
+            allocator.free(specifier_copy);
+            return ImportValidationError.OutOfMemory;
+        };
+
+        index = cursor + 8;
+    }
+
+    return clauses.toOwnedSlice(allocator);
+}
+
+pub fn freeImportClauses(allocator: std.mem.Allocator, clauses: []const ImportClause) void {
+    for (clauses) |clause| {
+        allocator.free(clause.alias);
+        allocator.free(clause.specifier);
+    }
+    allocator.free(clauses);
+}
+
+fn emptyImportClauses(allocator: std.mem.Allocator) ImportValidationError![]ImportClause {
+    return allocator.alloc(ImportClause, 0) catch return ImportValidationError.OutOfMemory;
+}
+
+fn tokenStringValue(token: lexer.Token) ?[]const u8 {
+    const value_ptr = token.value orelse return null;
+    return switch (value_ptr.*) {
+        .string => |value| value,
+        else => null,
+    };
+}
 
 pub fn resolveImportGraph(
     allocator: std.mem.Allocator,

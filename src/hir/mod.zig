@@ -5,7 +5,9 @@ const sema = @import("../sema/mod.zig");
 const sema_model = @import("../sema/model.zig");
 const ConstEvalResult = sema.ConstEvalResult;
 const ora_types = @import("ora_types");
+const integer_constants = ora_types.integer_constants;
 const refinements = ora_types.refinement_semantics;
+const generic_call_args = @import("../generic_call_args.zig");
 const compiler_query = @import("../compiler_query.zig");
 const diagnostics = @import("../diagnostics/mod.zig");
 const executable_fallbacks = @import("executable_fallbacks.zig");
@@ -91,7 +93,7 @@ fn verificationStatementFactEntryLessThan(_: void, lhs: VerificationStatementFac
 }
 
 fn buildVerificationFactLookup(allocator: std.mem.Allocator, facts: []const sema.VerificationFact) ![]const VerificationFactEntry {
-    var entries: std.ArrayList(VerificationFactEntry) = .{};
+    var entries: std.ArrayList(VerificationFactEntry) = .empty;
     errdefer entries.deinit(allocator);
 
     for (facts, 0..) |fact, fact_index| {
@@ -106,7 +108,7 @@ fn buildVerificationFactLookup(allocator: std.mem.Allocator, facts: []const sema
 }
 
 fn buildVerificationTraitMethodFactLookup(allocator: std.mem.Allocator, facts: []const sema.VerificationFact) ![]const VerificationTraitMethodFactEntry {
-    var entries: std.ArrayList(VerificationTraitMethodFactEntry) = .{};
+    var entries: std.ArrayList(VerificationTraitMethodFactEntry) = .empty;
     errdefer entries.deinit(allocator);
 
     for (facts, 0..) |fact, fact_index| {
@@ -122,7 +124,7 @@ fn buildVerificationTraitMethodFactLookup(allocator: std.mem.Allocator, facts: [
 }
 
 fn buildVerificationStatementFactLookup(allocator: std.mem.Allocator, facts: []const sema.VerificationFact) ![]const VerificationStatementFactEntry {
-    var entries: std.ArrayList(VerificationStatementFactEntry) = .{};
+    var entries: std.ArrayList(VerificationStatementFactEntry) = .empty;
     errdefer entries.deinit(allocator);
 
     for (facts, 0..) |fact, fact_index| {
@@ -285,8 +287,9 @@ pub fn lowerModule(
         .verification_statement_fact_lookup = verification_statement_fact_lookup,
         .module_query = module_query,
         .module_body = mlir.oraModuleGetBody(result.module.raw_module),
-        .items = .{},
-        .type_fallbacks = .{},
+        .items = .empty,
+        .type_fallback_count = 0,
+        .type_fallbacks = .empty,
         .placeholder_count = 0,
         .default_value_count = 0,
         .diagnostics = &result.diagnostics,
@@ -314,7 +317,7 @@ pub fn lowerModule(
 
     result.items = lowerer.items.items;
     result.type_fallbacks = lowerer.type_fallbacks.items;
-    result.type_fallback_count = result.type_fallbacks.len;
+    result.type_fallback_count = lowerer.type_fallback_count;
     result.placeholder_count = lowerer.placeholder_count;
     result.default_value_count = lowerer.default_value_count;
     return result;
@@ -322,6 +325,17 @@ pub fn lowerModule(
 
 const Lowerer = struct {
     pub const inline_generic_binding_capacity = 8;
+
+    pub const InlineKnownArgValue = union(enum) {
+        integer: []const u8,
+        boolean: bool,
+        refinement: sema.Type,
+    };
+
+    pub const InlineKnownArgBinding = struct {
+        parameter_name: []const u8,
+        value: InlineKnownArgValue,
+    };
 
     pub const GenericBindingValue = union(enum) {
         ty: sema.Type,
@@ -358,6 +372,7 @@ const Lowerer = struct {
     module_query: ?compiler_query.HirView,
     module_body: mlir.MlirBlock,
     items: std.ArrayList(HirItemHandle),
+    type_fallback_count: usize,
     type_fallbacks: std.ArrayList(TypeFallbackRecord),
     placeholder_count: usize,
     default_value_count: usize,
@@ -366,6 +381,7 @@ const Lowerer = struct {
     contract_body_blocks: []mlir.MlirBlock,
     monomorphized_function_names: std.StringHashMap(void),
     active_type_bindings: []const GenericTypeBinding = &.{},
+    active_inline_known_args: []const InlineKnownArgBinding = &.{},
     active_impl_contract_scope: ?ast.ItemId = null,
     active_impl_self_type: ?sema.Type = null,
     current_statement_id: ?ast.StmtId = null,
@@ -590,12 +606,19 @@ const Lowerer = struct {
         return null;
     }
 
+    pub fn inlineKnownArg(self: *const Lowerer, name: []const u8) ?InlineKnownArgValue {
+        for (self.active_inline_known_args) |binding| {
+            if (std.mem.eql(u8, binding.parameter_name, name)) return binding.value;
+        }
+        return null;
+    }
+
     pub fn lowerTypeExpr(self: *Lowerer, type_expr_id: ast.TypeExprId) mlir.MlirType {
         return switch (self.file.typeExpr(type_expr_id).*) {
             .Path => |path| self.lowerNamedPathType(path.name),
             .Generic => |generic| lowerGenericType(self, generic),
             .Tuple => |tuple| blk: {
-                var element_types: std.ArrayList(mlir.MlirType) = .{};
+                var element_types: std.ArrayList(mlir.MlirType) = .empty;
                 for (tuple.elements) |element| {
                     element_types.append(self.allocator, self.lowerTypeExpr(element)) catch
                         break :blk self.recordTypeFallback(.unsupported_syntax_type, self.typeExprRange(type_expr_id));
@@ -607,7 +630,7 @@ const Lowerer = struct {
                 );
             },
             .AnonymousStruct => |struct_type| blk: {
-                var field_types: std.ArrayList(mlir.MlirType) = .{};
+                var field_types: std.ArrayList(mlir.MlirType) = .empty;
                 for (struct_type.fields) |field| {
                     field_types.append(self.allocator, self.lowerTypeExpr(field.type_expr)) catch
                         break :blk self.recordTypeFallback(.unsupported_syntax_type, self.typeExprRange(type_expr_id));
@@ -626,7 +649,7 @@ const Lowerer = struct {
             .Slice => |slice| support.sliceMemRefType(self.context, self.lowerTypeExpr(slice.element)),
             .ErrorUnion => |error_union| blk: {
                 const payload_type = self.lowerTypeExpr(error_union.payload);
-                var error_types: std.ArrayList(mlir.MlirType) = .{};
+                var error_types: std.ArrayList(mlir.MlirType) = .empty;
                 for (error_union.errors) |error_type_expr| {
                     error_types.append(self.allocator, self.lowerTypeExpr(error_type_expr)) catch
                         break :blk self.recordTypeFallback(.unsupported_syntax_type, self.typeExprRange(type_expr_id));
@@ -714,7 +737,17 @@ const Lowerer = struct {
             .string => support.stringType(self.context),
             .bytes => support.bytesType(self.context),
             .fixed_bytes => support.reprIntegerType(self.context),
+            .storage_slot => support.reprIntegerType(self.context),
+            .storage_range => support.arrayMemRefType(self.context, support.reprIntegerType(self.context), 2),
             .external_proxy => support.addressType(self.context),
+            .resource_domain => |resource| self.lowerSemaType(resource.carrier_type.*, range),
+            .resource_place => |place| blk: {
+                const carrier_type = place.domain_type.resourceCarrierType() orelse {
+                    self.emitLoweringError(range, "resource place carrier must be resolved before HIR lowering", .{}) catch {};
+                    break :blk self.recordTypeFallback(.unsupported_syntax_type, range);
+                };
+                break :blk self.lowerSemaType(carrier_type.*, range);
+            },
             .void => mlir.oraNoneTypeCreate(self.context),
             .array => |array| blk: {
                 const len = array.len orelse {
@@ -769,13 +802,13 @@ const Lowerer = struct {
             .error_union => |error_union| self.lowerErrorUnionSemaType(error_union, range),
             .unknown => self.recordTypeFallback(.sema_unknown, range),
             .function => |function| blk: {
-                var param_types: std.ArrayList(mlir.MlirType) = .{};
+                var param_types: std.ArrayList(mlir.MlirType) = .empty;
                 for (function.param_types) |param_type| {
                     param_types.append(self.allocator, self.lowerSemaType(param_type, range)) catch
                         break :blk self.recordTypeFallback(.unsupported_function_sema_type, range);
                 }
 
-                var result_types: std.ArrayList(mlir.MlirType) = .{};
+                var result_types: std.ArrayList(mlir.MlirType) = .empty;
                 for (function.return_types) |return_type| {
                     result_types.append(self.allocator, self.lowerSemaType(return_type, range)) catch
                         break :blk self.recordTypeFallback(.unsupported_function_sema_type, range);
@@ -790,7 +823,7 @@ const Lowerer = struct {
                 );
             },
             .tuple => |elements| blk: {
-                var element_types: std.ArrayList(mlir.MlirType) = .{};
+                var element_types: std.ArrayList(mlir.MlirType) = .empty;
                 for (elements) |element| {
                     element_types.append(self.allocator, self.lowerSemaType(element, range)) catch
                         break :blk self.recordTypeFallback(.unsupported_tuple_sema_type, range);
@@ -802,8 +835,8 @@ const Lowerer = struct {
                 );
             },
             .anonymous_struct => |struct_type| blk: {
-                var field_names: std.ArrayList(mlir.MlirStringRef) = .{};
-                var field_types: std.ArrayList(mlir.MlirType) = .{};
+                var field_names: std.ArrayList(mlir.MlirStringRef) = .empty;
+                var field_types: std.ArrayList(mlir.MlirType) = .empty;
                 for (struct_type.fields) |field| {
                     field_names.append(self.allocator, support.strRef(field.name)) catch
                         break :blk self.recordTypeFallback(.unsupported_tuple_sema_type, range);
@@ -856,8 +889,8 @@ const Lowerer = struct {
     }
 
     fn lowerInstantiatedEnumAdtType(self: *Lowerer, instantiated: sema.InstantiatedEnum, range: source.TextRange) mlir.MlirType {
-        var variant_names: std.ArrayList(mlir.MlirStringRef) = .{};
-        var payload_types: std.ArrayList(mlir.MlirType) = .{};
+        var variant_names: std.ArrayList(mlir.MlirStringRef) = .empty;
+        var payload_types: std.ArrayList(mlir.MlirType) = .empty;
         for (instantiated.variants) |variant| {
             variant_names.append(self.allocator, support.strRef(variant.name)) catch
                 return self.recordTypeFallback(.unsupported_syntax_type, range);
@@ -876,8 +909,8 @@ const Lowerer = struct {
     }
 
     fn lowerEnumAdtType(self: *Lowerer, enum_item: ast.EnumItem, range: source.TextRange) mlir.MlirType {
-        var variant_names: std.ArrayList(mlir.MlirStringRef) = .{};
-        var payload_types: std.ArrayList(mlir.MlirType) = .{};
+        var variant_names: std.ArrayList(mlir.MlirStringRef) = .empty;
+        var payload_types: std.ArrayList(mlir.MlirType) = .empty;
         for (enum_item.variants) |variant| {
             variant_names.append(self.allocator, support.strRef(variant.name)) catch
                 return self.recordTypeFallback(.unsupported_syntax_type, range);
@@ -899,7 +932,7 @@ const Lowerer = struct {
             .positional => |types| blk: {
                 if (types.len == 0) break :blk mlir.oraNoneTypeCreate(self.context);
                 if (types.len == 1) break :blk self.lowerEnumPayloadTypeExpr(types[0], range);
-                var element_types: std.ArrayList(mlir.MlirType) = .{};
+                var element_types: std.ArrayList(mlir.MlirType) = .empty;
                 for (types) |type_expr| {
                     element_types.append(self.allocator, self.lowerEnumPayloadTypeExpr(type_expr, range)) catch
                         break :blk self.recordTypeFallback(.unsupported_syntax_type, range);
@@ -912,8 +945,8 @@ const Lowerer = struct {
             },
             .named => |fields| blk: {
                 if (fields.len == 0) break :blk mlir.oraNoneTypeCreate(self.context);
-                var field_names: std.ArrayList(mlir.MlirStringRef) = .{};
-                var field_types: std.ArrayList(mlir.MlirType) = .{};
+                var field_names: std.ArrayList(mlir.MlirStringRef) = .empty;
+                var field_types: std.ArrayList(mlir.MlirType) = .empty;
                 for (fields) |field| {
                     field_names.append(self.allocator, support.strRef(field.name)) catch
                         break :blk self.recordTypeFallback(.unsupported_syntax_type, range);
@@ -938,7 +971,7 @@ const Lowerer = struct {
 
     fn lowerErrorUnionSemaType(self: *Lowerer, error_union: sema_model.ErrorUnionType, range: source.TextRange) mlir.MlirType {
         const payload_type = self.lowerSemaType(error_union.payload_type.*, range);
-        var error_types: std.ArrayList(mlir.MlirType) = .{};
+        var error_types: std.ArrayList(mlir.MlirType) = .empty;
         for (error_union.error_types) |error_type| {
             error_types.append(self.allocator, self.lowerSemaType(error_type, range)) catch
                 return self.recordTypeFallback(.unsupported_syntax_type, range);
@@ -1100,7 +1133,7 @@ const Lowerer = struct {
         const start = first_runtime orelse return &.{};
         if (!has_comptime_after_runtime) return function.parameters[start..];
 
-        var parameters: std.ArrayList(ast.Parameter) = .{};
+        var parameters: std.ArrayList(ast.Parameter) = .empty;
         for (function.parameters) |parameter| {
             if (parameter.is_comptime) continue;
             try parameters.append(self.allocator, parameter);
@@ -1142,32 +1175,21 @@ const Lowerer = struct {
         call: ast.CallExpr,
         scratch: []GenericTypeBinding,
     ) !?[]const GenericTypeBinding {
-        const comptime_count = self.leadingComptimeParameterCount(function);
-        const inferable_type_count = self.leadingGenericTypeParameterCount(function);
+        const comptime_count = self.comptimeParameterCount(function);
         if (comptime_count == 0) return &.{};
         const method_receiver_supplied = self.callSuppliesMethodReceiver(call.callee) and self.functionHasRuntimeSelf(function);
-        var runtime_count: usize = 0;
-        for (function.parameters) |parameter| {
-            if (!parameter.is_comptime) runtime_count += 1;
-        }
-        const effective_runtime_count = runtime_count - @as(usize, if (method_receiver_supplied) 1 else 0);
+        const effective_runtime_count = generic_call_args.explicitArgumentCount(function, .{ .skip_first_runtime_parameter = method_receiver_supplied }) - comptime_count;
 
-        if (call.args.len >= comptime_count + effective_runtime_count) {
+        if (call.args.len == comptime_count + effective_runtime_count) {
             const bindings = try self.genericTypeBindingBuffer(comptime_count, scratch);
-            for (function.parameters[0..comptime_count], 0..) |parameter, index| {
-                const type_name = self.patternName(parameter.pattern) orelse return null;
-                const binding = (try self.genericBindingForCallArg(parameter, type_name, call.args[index])) orelse return null;
-                bindings[index] = .{
-                    .name = binding.name,
-                    .value = binding.value,
-                    .mangle_name = binding.mangle_name,
-                };
-            }
+            self.bindExplicitGenericCallArguments(function, call, method_receiver_supplied, bindings) catch |err| switch (err) {
+                error.InvalidGenericArgumentCount => return null,
+                else => return err,
+            };
             return bindings;
         }
 
         if (call.args.len != effective_runtime_count) return null;
-        if (comptime_count != inferable_type_count) return null;
 
         const bindings = try self.genericTypeBindingBuffer(comptime_count, scratch);
         for (function.parameters[0..comptime_count], 0..) |param, index| {
@@ -1186,19 +1208,44 @@ const Lowerer = struct {
             if (runtime_index >= call.args.len) break;
             const arg_type = self.typecheck.exprType(call.args[runtime_index]);
             if (arg_type.kind() != .unknown) {
-                try self.inferHirBinding(function, inferable_type_count, parameter, arg_type, bindings);
+                try self.inferHirBinding(function, comptime_count, parameter, arg_type, bindings);
             }
             runtime_index += 1;
         }
 
         for (bindings) |*binding| {
             if (binding.mangle_name.len == 0) {
-                const ty = hirGenericBindingType(binding.*) orelse return null;
-                binding.mangle_name = try self.typeMangleName(ty);
+                binding.mangle_name = switch (binding.value) {
+                    .ty => |ty| try self.typeMangleName(ty),
+                    .integer => |text| text,
+                };
             }
         }
 
         return bindings;
+    }
+
+    fn bindExplicitGenericCallArguments(
+        self: *Lowerer,
+        function: ast.FunctionItem,
+        call: ast.CallExpr,
+        method_receiver_supplied: bool,
+        bindings: []GenericTypeBinding,
+    ) !void {
+        var iter = generic_call_args.iterator(function, call, .{ .skip_first_runtime_parameter = method_receiver_supplied });
+        while (try iter.next()) |entry| {
+            if (entry.comptime_index) |binding_index| {
+                if (binding_index >= bindings.len) return error.InvalidGenericArgumentCount;
+                const type_name = self.patternName(entry.parameter.pattern) orelse return error.InvalidGenericArgumentCount;
+                const binding = (try self.genericBindingForCallArg(entry.parameter, type_name, entry.arg)) orelse return error.InvalidGenericArgumentCount;
+                bindings[binding_index] = .{
+                    .name = binding.name,
+                    .value = binding.value,
+                    .mangle_name = binding.mangle_name,
+                };
+            }
+        }
+        if (iter.comptime_index != bindings.len or iter.arg_index != call.args.len) return error.InvalidGenericArgumentCount;
     }
 
     fn genericTypeBindingBuffer(self: *Lowerer, count: usize, scratch: []GenericTypeBinding) ![]GenericTypeBinding {
@@ -1207,14 +1254,21 @@ const Lowerer = struct {
     }
 
     pub fn stripGenericCallArgs(self: *Lowerer, function: ast.FunctionItem, call: ast.CallExpr) []const ast.ExprId {
-        const comptime_count = self.leadingComptimeParameterCount(function);
-        var runtime_count: usize = 0;
-        for (function.parameters) |parameter| {
-            if (!parameter.is_comptime) runtime_count += 1;
-        }
+        const comptime_count = self.comptimeParameterCount(function);
+        const runtime_count = generic_call_args.runtimeParameterCount(function);
         if (call.args.len == runtime_count) return call.args;
-        if (comptime_count >= call.args.len) return &.{};
-        return call.args[comptime_count..];
+        if (call.args.len != comptime_count + runtime_count) return &.{};
+
+        const runtime_args = self.allocator.alloc(ast.ExprId, runtime_count) catch return &.{};
+        var out_index: usize = 0;
+        var iter = generic_call_args.iterator(function, call, .{});
+        while ((iter.next() catch return &.{})) |entry| {
+            if (entry.comptime_index != null) continue;
+            if (out_index >= runtime_args.len) return &.{};
+            runtime_args[out_index] = entry.arg;
+            out_index += 1;
+        }
+        return if (out_index == runtime_args.len) runtime_args else &.{};
     }
 
     pub fn leadingComptimeParameterCount(self: *const Lowerer, function: ast.FunctionItem) usize {
@@ -1225,6 +1279,11 @@ const Lowerer = struct {
             count += 1;
         }
         return count;
+    }
+
+    pub fn comptimeParameterCount(self: *const Lowerer, function: ast.FunctionItem) usize {
+        _ = self;
+        return generic_call_args.comptimeParameterCount(function);
     }
 
     pub fn leadingGenericTypeParameterCount(self: *const Lowerer, function: ast.FunctionItem) usize {
@@ -1251,7 +1310,7 @@ const Lowerer = struct {
     }
 
     pub fn mangleGenericFunctionName(self: *Lowerer, base_name: []const u8, bindings: []const GenericTypeBinding) ![]const u8 {
-        var name = std.ArrayList(u8){};
+        var name = std.ArrayList(u8).empty;
         var total_len = base_name.len;
         for (bindings) |binding| {
             total_len += 2 + binding.mangle_name.len;
@@ -1357,7 +1416,11 @@ const Lowerer = struct {
         switch (self.file.typeExpr(type_expr_id).*) {
             .Path => |path| {
                 const name = path.name;
-                for (function.parameters[0..generic_count], 0..) |generic_param, index| {
+                var index: usize = 0;
+                for (function.parameters) |generic_param| {
+                    if (!generic_param.is_comptime) continue;
+                    if (index >= generic_count) break;
+                    defer index += 1;
                     const param_name = self.patternName(generic_param.pattern) orelse continue;
                     if (!std.mem.eql(u8, name, param_name)) continue;
                     if (!self.isGenericTypeParameter(generic_param)) continue;
@@ -1390,6 +1453,11 @@ const Lowerer = struct {
                     }
                 }
             },
+            .Array => |array| {
+                if (arg_type.kind() != .array) return;
+                try self.inferHirBindingFromArraySize(function, generic_count, array.size, arg_type.array.len, bindings);
+                try self.inferHirBindingsFromTypeExpr(function, generic_count, array.element, arg_type.array.element_type.*, bindings);
+            },
             .ErrorUnion => |error_union| {
                 if (arg_type.kind() != .error_union) return;
                 try self.inferHirBindingsFromTypeExpr(function, generic_count, error_union.payload, arg_type.error_union.payload_type.*, bindings);
@@ -1401,10 +1469,74 @@ const Lowerer = struct {
         }
     }
 
+    fn inferHirBindingFromArraySize(
+        self: *Lowerer,
+        function: ast.FunctionItem,
+        generic_count: usize,
+        size: ast.TypeArraySize,
+        arg_len: ?u32,
+        bindings: []GenericTypeBinding,
+    ) !void {
+        const len = arg_len orelse return;
+        const name = switch (size) {
+            .Name => |path| std.mem.trim(u8, path.name, " \t\n\r"),
+            .Integer => return,
+        };
+        const value_text = try std.fmt.allocPrint(self.allocator, "{d}", .{len});
+        self.bindHirGenericInteger(function, generic_count, name, value_text, bindings);
+    }
+
+    fn bindHirGenericInteger(
+        self: *Lowerer,
+        function: ast.FunctionItem,
+        generic_count: usize,
+        name: []const u8,
+        integer_text: []const u8,
+        bindings: []GenericTypeBinding,
+    ) void {
+        var index: usize = 0;
+        for (function.parameters) |generic_param| {
+            if (!generic_param.is_comptime) continue;
+            if (index >= generic_count) break;
+            defer index += 1;
+            const param_name = self.patternName(generic_param.pattern) orelse continue;
+            if (!std.mem.eql(u8, name, param_name)) continue;
+            if (!self.isGenericIntegerParameter(generic_param)) continue;
+
+            if (bindings[index].mangle_name.len > 0) {
+                const existing = hirGenericBindingInteger(bindings[index]) orelse return;
+                if (!std.mem.eql(u8, existing, integer_text)) {
+                    bindings[index].mangle_name = "";
+                    bindings[index].value = .{ .ty = .{ .unknown = {} } };
+                }
+                return;
+            }
+
+            bindings[index].value = .{ .integer = integer_text };
+            bindings[index].mangle_name = integer_text;
+            return;
+        }
+    }
+
     fn hirGenericBindingType(binding: GenericTypeBinding) ?sema.Type {
         return switch (binding.value) {
             .ty => |ty| ty,
             .integer => null,
+        };
+    }
+
+    fn hirGenericBindingInteger(binding: GenericTypeBinding) ?[]const u8 {
+        return switch (binding.value) {
+            .integer => |text| text,
+            .ty => null,
+        };
+    }
+
+    fn isGenericIntegerParameter(self: *const Lowerer, parameter: ast.Parameter) bool {
+        if (!parameter.is_comptime) return false;
+        return switch (self.file.typeExpr(parameter.type_expr).*) {
+            .Path => |path| type_descriptors.integerTypeFromName(std.mem.trim(u8, path.name, " \t\n\r")) != null,
+            else => false,
         };
     }
 
@@ -1421,12 +1553,13 @@ const Lowerer = struct {
     }
 
     pub fn typeMangleName(self: *Lowerer, ty: sema.Type) ![]const u8 {
-        var name = std.ArrayList(u8){};
+        var name = std.ArrayList(u8).empty;
         try appendSemaTypeMangleName(self.allocator, &name, ty);
         return name.toOwnedSlice(self.allocator);
     }
 
     fn recordTypeFallback(self: *Lowerer, reason: TypeFallbackReason, range: source.TextRange) mlir.MlirType {
+        self.type_fallback_count += 1;
         self.type_fallbacks.append(self.allocator, .{
             .reason = reason,
             .location = .{
@@ -1639,7 +1772,11 @@ fn lowerRefinementArgs(lowerer: *Lowerer, args: []const ast.TypeArg) ?[]const Re
 
 fn typeExprIntegerBinding(lowerer: *const Lowerer, type_expr: ast.TypeExprId) ?[]const u8 {
     return switch (lowerer.file.typeExpr(type_expr).*) {
-        .Path => |path| lowerer.substitutedInteger(std.mem.trim(u8, path.name, " \t\n\r")),
+        .Path => |path| blk: {
+            const trimmed = std.mem.trim(u8, path.name, " \t\n\r");
+            if (lowerer.substitutedInteger(trimmed)) |integer| break :blk integer;
+            break :blk integer_constants.lookup(trimmed);
+        },
         else => null,
     };
 }

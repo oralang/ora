@@ -2,6 +2,7 @@ const std = @import("std");
 const lsp = @import("lsp");
 const ora_root = @import("ora_root");
 const completion_items = @import("completion_items.zig");
+const test_analysis = @import("test_analysis.zig");
 
 const completion = ora_root.lsp.completion;
 const frontend = ora_root.lsp.frontend;
@@ -137,6 +138,59 @@ test "lsp completion items: suppresses snippets away from line start or with tri
         &.{},
     );
     try std.testing.expectEqual(@as(usize, 0), triggered.len);
+}
+
+test "lsp completion items: protocol path includes builtin docs and Resource type" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    const source =
+        \\resource TokenUnit = u256;
+        \\contract Vault {
+        \\    storage var balance: Resource<TokenUnit>;
+        \\    pub fn run(value: u64) -> u256 {
+        \\        return @cast(u256, value);
+        \\    }
+        \\}
+    ;
+
+    var index = try test_analysis.semanticIndex(std.testing.allocator, source);
+    defer index.deinit(std.testing.allocator);
+
+    const result = try completion_items.buildFromSemanticIndexWithStats(
+        arena_state.allocator(),
+        source,
+        position(4, 17),
+        null,
+        &index,
+    );
+
+    const cast = itemWithLabel(result.items, "cast") orelse return error.ExpectedCompletion;
+    try std.testing.expectEqual(types.CompletionItemKind.Function, cast.kind.?);
+    try std.testing.expectEqualStrings("@cast(T, value) -> T", cast.detail.?);
+    switch (cast.documentation orelse return error.ExpectedDocumentation) {
+        .MarkupContent => |markup| try std.testing.expect(std.mem.indexOf(u8, markup.value, "checked conversion rules") != null),
+        else => return error.ExpectedMarkupDocumentation,
+    }
+
+    const all = try completion_items.buildFromSemanticIndexWithStats(
+        arena_state.allocator(),
+        source,
+        position(4, 16),
+        null,
+        &index,
+    );
+    _ = itemWithLabel(all.items, "Resource") orelse return error.ExpectedCompletion;
+    _ = itemWithLabel(all.items, "move") orelse return error.ExpectedCompletion;
+    _ = itemWithLabel(all.items, "create") orelse return error.ExpectedCompletion;
+    _ = itemWithLabel(all.items, "destroy") orelse return error.ExpectedCompletion;
+}
+
+fn itemWithLabel(items: []const types.CompletionItem, label: []const u8) ?types.CompletionItem {
+    for (items) |item| {
+        if (std.mem.eql(u8, item.label, label)) return item;
+    }
+    return null;
 }
 
 fn position(line: u32, character: u32) frontend.Position {

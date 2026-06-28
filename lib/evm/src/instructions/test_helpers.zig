@@ -23,7 +23,7 @@
 /// ```
 const std = @import("std");
 const testing = std.testing;
-const primitives = @import("voltaire");
+const primitives = @import("../primitives.zig");
 const evm_mod = @import("../evm.zig");
 const frame_mod = @import("../frame.zig");
 const EvmConfig = @import("../evm_config.zig").EvmConfig;

@@ -99,7 +99,7 @@ test "falsification harness detects a kept-check divergence" {
 }
 
 test "falsification corpus executes with checks removed and checks kept" {
-    std.fs.cwd().access(types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
+    std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -205,7 +205,7 @@ fn expectSameCall(
 // spec passes, and the SAME spec with one wrong expected value is caught. If a
 // corrupted expectation still "passed", the whole layer would be vacuously green.
 test "conformance runner detects a wrong expected return (suite teeth)" {
-    std.fs.cwd().access(types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
+    std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -222,7 +222,7 @@ test "conformance runner detects a wrong expected return (suite teeth)" {
         \\}
         \\
     ;
-    try tmp.dir.writeFile(.{ .sub_path = "teeth.ora", .data = source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "teeth.ora", .data = source });
 
     const good_spec =
         \\[deploy]
@@ -238,7 +238,7 @@ test "conformance runner detects a wrong expected return (suite teeth)" {
         \\returns = { u256 = 42 }
         \\
     ;
-    try tmp.dir.writeFile(.{ .sub_path = "teeth_good.spec.toml", .data = good_spec });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "teeth_good.spec.toml", .data = good_spec });
 
     // Same call, deliberately wrong expected value.
     const bad_spec =
@@ -255,7 +255,7 @@ test "conformance runner detects a wrong expected return (suite teeth)" {
         \\returns = { u256 = 43 }
         \\
     ;
-    try tmp.dir.writeFile(.{ .sub_path = "teeth_bad.spec.toml", .data = bad_spec });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "teeth_bad.spec.toml", .data = bad_spec });
 
     const source_path = try runner.pathFromTmpAlloc(allocator, tmp, "teeth.ora");
     defer allocator.free(source_path);
@@ -274,7 +274,7 @@ test "conformance runner detects a wrong expected return (suite teeth)" {
 }
 
 test "conformance runner detects gas ceilings (suite teeth)" {
-    std.fs.cwd().access(types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
+    std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -291,7 +291,7 @@ test "conformance runner detects gas ceilings (suite teeth)" {
         \\}
         \\
     ;
-    try tmp.dir.writeFile(.{ .sub_path = "gas_teeth.ora", .data = source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "gas_teeth.ora", .data = source });
 
     const good_spec =
         \\[deploy]
@@ -308,7 +308,7 @@ test "conformance runner detects gas ceilings (suite teeth)" {
         \\returns = { u256 = 42 }
         \\
     ;
-    try tmp.dir.writeFile(.{ .sub_path = "gas_teeth_good.spec.toml", .data = good_spec });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "gas_teeth_good.spec.toml", .data = good_spec });
 
     const bad_spec =
         \\[deploy]
@@ -325,7 +325,7 @@ test "conformance runner detects gas ceilings (suite teeth)" {
         \\returns = { u256 = 42 }
         \\
     ;
-    try tmp.dir.writeFile(.{ .sub_path = "gas_teeth_bad.spec.toml", .data = bad_spec });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "gas_teeth_bad.spec.toml", .data = bad_spec });
 
     const source_path = try runner.pathFromTmpAlloc(allocator, tmp, "gas_teeth.ora");
     defer allocator.free(source_path);
@@ -345,7 +345,7 @@ test "conformance corpus files have sidecars or explicit skips" {
 }
 
 test "conformance corpus specs execute" {
-    std.fs.cwd().access(types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
+    std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -377,7 +377,7 @@ test "conformance corpus completeness rejects orphan ora files" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "orphan.ora",
         .data = "contract Orphan {}",
     });
@@ -391,11 +391,11 @@ test "conformance corpus completeness accepts explicit skips" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "orphan.ora",
         .data = "contract Orphan {}",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "SKIP",
         .data = "# known intentionally unchecked case\norphan.ora\n",
     });
@@ -429,6 +429,16 @@ test "conformance arg encoder writes static ABI words" {
 }
 
 test "conformance arg encoder writes dynamic arrays and tuple aggregates" {
+    const fixed_array_wires = [_][]const u8{"uint256[4]"};
+    const fixed_array_args = [_]types.ArgValue{.{ .literal = "[3,5,8,13]" }};
+    const fixed_array = try abi.encodeArgs(testing.allocator, &fixed_array_wires, &fixed_array_args);
+    defer testing.allocator.free(fixed_array);
+    try testing.expectEqual(@as(usize, 128), fixed_array.len);
+    try testing.expectEqual(@as(u256, 3), std.mem.readInt(u256, fixed_array[0..32], .big));
+    try testing.expectEqual(@as(u256, 5), std.mem.readInt(u256, fixed_array[32..64], .big));
+    try testing.expectEqual(@as(u256, 8), std.mem.readInt(u256, fixed_array[64..96], .big));
+    try testing.expectEqual(@as(u256, 13), std.mem.readInt(u256, fixed_array[96..128], .big));
+
     const dynamic_array_wires = [_][]const u8{"uint256[]"};
     const dynamic_array_args = [_]types.ArgValue{.{ .literal = "[5,8,13]" }};
     const dynamic_array = try abi.encodeArgs(testing.allocator, &dynamic_array_wires, &dynamic_array_args);
@@ -499,6 +509,20 @@ test "conformance slot expressions compute mapping and nested mapping slots" {
     const manual = try slots.mappingSlot("address", "0x3000000000000000000000000000000000000000", try slots.mappingSlot("address", "0x2000000000000000000000000000000000000000", 0));
     try testing.expectEqual(manual, nested);
     try testing.expectEqual(manual +% 2, try slots.parseSlotExpression("add(map(address,0x3000000000000000000000000000000000000000,map(address,0x2000000000000000000000000000000000000000,0)),2)"));
+}
+
+test "conformance slot expressions compute domain-separated computed-storage slots" {
+    const root = try slots.parseSlotExpression("computed(ora.test.computed.expr)");
+    const same_root = try slots.parseSlotExpression("computed(ora.test.computed.expr)");
+    const one_key = try slots.parseSlotExpression("computed(ora.test.computed.expr,address,0x1000000000000000000000000000000000000001)");
+    const two_keys_zero = try slots.parseSlotExpression("computed(ora.test.computed.expr,address,0x1000000000000000000000000000000000000001,uint256,0)");
+    const other_namespace = try slots.parseSlotExpression("computed(ora.test.computed.other,address,0x1000000000000000000000000000000000000001)");
+
+    try testing.expectEqual(root, same_root);
+    try testing.expect(root != one_key);
+    try testing.expect(one_key != two_keys_zero);
+    try testing.expect(one_key != other_namespace);
+    try testing.expectEqual(two_keys_zero +% 1, try slots.parseSlotExpression("add(computed(ora.test.computed.expr,address,0x1000000000000000000000000000000000000001,uint256,0),1)"));
 }
 
 test "conformance static return comparison requires canonical narrow signed words" {

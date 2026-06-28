@@ -270,7 +270,7 @@ pub const ErrorRecovery = struct {
 
     pub fn init(allocator: Allocator, max_errors: u32) ErrorRecovery {
         return ErrorRecovery{
-            .errors = std.ArrayList(LexerDiagnostic){},
+            .errors = std.ArrayList(LexerDiagnostic).empty,
             .max_errors = max_errors,
             .allocator = allocator,
         };

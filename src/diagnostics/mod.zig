@@ -34,7 +34,7 @@ pub const DiagnosticList = struct {
     pub fn init(allocator: std.mem.Allocator) DiagnosticList {
         return .{
             .allocator = allocator,
-            .items = .{},
+            .items = .empty,
         };
     }
 

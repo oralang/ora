@@ -1,0 +1,9 @@
+resource DebtUnit = i256;
+
+contract ResourceSignedNegativeLiteral {
+    storage var debts: map<address, Resource<DebtUnit>>;
+
+    pub fn bad(to: address) {
+        @create(debts[to], -1);
+    }
+}

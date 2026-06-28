@@ -9,6 +9,12 @@ fn pathFromTmpAlloc(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, rel_p
     return std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, rel_path });
 }
 
+fn realPathAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const real_z = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, path, allocator);
+    defer allocator.free(real_z);
+    return allocator.dupe(u8, real_z);
+}
+
 fn toFileUriAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "file://{s}", .{path});
 }
@@ -31,24 +37,24 @@ test "lsp workspace: resolves relative imports in workspace" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("project");
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "project");
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "project/entry.ora",
         .data = "const lib = @import(\"./lib.ora\");",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "project/lib.ora",
         .data = "contract Lib { }",
     });
 
     const entry_path_rel = try pathFromTmpAlloc(allocator, tmp, "project/entry.ora");
     defer allocator.free(entry_path_rel);
-    const entry_path = try std.fs.cwd().realpathAlloc(allocator, entry_path_rel);
+    const entry_path = try realPathAlloc(allocator, entry_path_rel);
     defer allocator.free(entry_path);
 
     const workspace_root_rel = try pathFromTmpAlloc(allocator, tmp, "project");
     defer allocator.free(workspace_root_rel);
-    const workspace_root = try std.fs.cwd().realpathAlloc(allocator, workspace_root_rel);
+    const workspace_root = try realPathAlloc(allocator, workspace_root_rel);
     defer allocator.free(workspace_root);
 
     const uri = try toFileUriAlloc(allocator, entry_path);
@@ -74,38 +80,38 @@ test "lsp workspace: sourceImportsTargetPath detects target import without full 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("project");
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "project");
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "project/entry.ora",
         .data = "const lib = @import(\"./lib.ora\");",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "project/lib.ora",
         .data = "contract Lib { }",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "project/other.ora",
         .data = "contract Other { }",
     });
 
     const entry_path_rel = try pathFromTmpAlloc(allocator, tmp, "project/entry.ora");
     defer allocator.free(entry_path_rel);
-    const entry_path = try std.fs.cwd().realpathAlloc(allocator, entry_path_rel);
+    const entry_path = try realPathAlloc(allocator, entry_path_rel);
     defer allocator.free(entry_path);
 
     const lib_path_rel = try pathFromTmpAlloc(allocator, tmp, "project/lib.ora");
     defer allocator.free(lib_path_rel);
-    const lib_path = try std.fs.cwd().realpathAlloc(allocator, lib_path_rel);
+    const lib_path = try realPathAlloc(allocator, lib_path_rel);
     defer allocator.free(lib_path);
 
     const other_path_rel = try pathFromTmpAlloc(allocator, tmp, "project/other.ora");
     defer allocator.free(other_path_rel);
-    const other_path = try std.fs.cwd().realpathAlloc(allocator, other_path_rel);
+    const other_path = try realPathAlloc(allocator, other_path_rel);
     defer allocator.free(other_path);
 
     const workspace_root_rel = try pathFromTmpAlloc(allocator, tmp, "project");
     defer allocator.free(workspace_root_rel);
-    const workspace_root = try std.fs.cwd().realpathAlloc(allocator, workspace_root_rel);
+    const workspace_root = try realPathAlloc(allocator, workspace_root_rel);
     defer allocator.free(workspace_root);
 
     const uri = try toFileUriAlloc(allocator, entry_path);
@@ -135,29 +141,29 @@ test "lsp workspace: sourceImportsTargetPath accepts spaced and raw imports" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("project");
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "project");
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "project/entry.ora",
         .data = "const lib = @ import(r\"./lib.ora\");",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "project/lib.ora",
         .data = "contract Lib { }",
     });
 
     const entry_path_rel = try pathFromTmpAlloc(allocator, tmp, "project/entry.ora");
     defer allocator.free(entry_path_rel);
-    const entry_path = try std.fs.cwd().realpathAlloc(allocator, entry_path_rel);
+    const entry_path = try realPathAlloc(allocator, entry_path_rel);
     defer allocator.free(entry_path);
 
     const lib_path_rel = try pathFromTmpAlloc(allocator, tmp, "project/lib.ora");
     defer allocator.free(lib_path_rel);
-    const lib_path = try std.fs.cwd().realpathAlloc(allocator, lib_path_rel);
+    const lib_path = try realPathAlloc(allocator, lib_path_rel);
     defer allocator.free(lib_path);
 
     const workspace_root_rel = try pathFromTmpAlloc(allocator, tmp, "project");
     defer allocator.free(workspace_root_rel);
-    const workspace_root = try std.fs.cwd().realpathAlloc(allocator, workspace_root_rel);
+    const workspace_root = try realPathAlloc(allocator, workspace_root_rel);
     defer allocator.free(workspace_root);
 
     const uri = try toFileUriAlloc(allocator, entry_path);
@@ -179,20 +185,20 @@ test "lsp workspace: reports relative import without .ora extension" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("project");
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "project");
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "project/entry.ora",
         .data = "const lib = @import(\"./lib\");",
     });
 
     const entry_path_rel = try pathFromTmpAlloc(allocator, tmp, "project/entry.ora");
     defer allocator.free(entry_path_rel);
-    const entry_path = try std.fs.cwd().realpathAlloc(allocator, entry_path_rel);
+    const entry_path = try realPathAlloc(allocator, entry_path_rel);
     defer allocator.free(entry_path);
 
     const workspace_root_rel = try pathFromTmpAlloc(allocator, tmp, "project");
     defer allocator.free(workspace_root_rel);
-    const workspace_root = try std.fs.cwd().realpathAlloc(allocator, workspace_root_rel);
+    const workspace_root = try realPathAlloc(allocator, workspace_root_rel);
     defer allocator.free(workspace_root);
 
     const uri = try toFileUriAlloc(allocator, entry_path);
@@ -216,25 +222,25 @@ test "lsp workspace: reports relative import escaping workspace root" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("project/contracts");
-    try tmp.dir.makePath("outside");
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "project/contracts");
+    try tmp.dir.createDirPath(std.testing.io, "outside");
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "project/contracts/entry.ora",
         .data = "const secret = @import(\"../../outside/secret.ora\");",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "outside/secret.ora",
         .data = "contract Secret { }",
     });
 
     const entry_path_rel = try pathFromTmpAlloc(allocator, tmp, "project/contracts/entry.ora");
     defer allocator.free(entry_path_rel);
-    const entry_path = try std.fs.cwd().realpathAlloc(allocator, entry_path_rel);
+    const entry_path = try realPathAlloc(allocator, entry_path_rel);
     defer allocator.free(entry_path);
 
     const workspace_root_rel = try pathFromTmpAlloc(allocator, tmp, "project");
     defer allocator.free(workspace_root_rel);
-    const workspace_root = try std.fs.cwd().realpathAlloc(allocator, workspace_root_rel);
+    const workspace_root = try realPathAlloc(allocator, workspace_root_rel);
     defer allocator.free(workspace_root);
 
     const uri = try toFileUriAlloc(allocator, entry_path);
@@ -274,18 +280,18 @@ test "lsp workspace: accepts symlink workspace roots" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("realroot");
-    try tmp.dir.symLink("realroot", "aliasroot", .{ .is_directory = true });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "realroot");
+    try tmp.dir.symLink(std.testing.io, "realroot", "aliasroot", .{ .is_directory = true });
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "realroot/entry.ora",
         .data = "const lib = @import(\"./lib.ora\");",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "realroot/lib.ora",
         .data = "contract Lib { }",
     });
 
-    const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
+    const cwd = try realPathAlloc(allocator, ".");
     defer allocator.free(cwd);
 
     const entry_alias_rel = try pathFromTmpAlloc(allocator, tmp, "aliasroot/entry.ora");

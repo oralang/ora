@@ -683,8 +683,8 @@ namespace
         Type successType,
         Value returndataPtr)
     {
-        // External-call returndata decode still maps malformed returns through
-        // the legacy error-union path. This helper only projects successful
+        // External-call returndata decode maps malformed returns through the
+        // external-call error-union path. This helper only projects successful
         // single-word scalar returns according to the parsed ABI layout.
         if (node.kind != AbiLayoutKind::Static)
             return std::nullopt;
@@ -1764,8 +1764,8 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
     }
 
     // The dialect verifier accepts all planned decode sources and failure
-    // modes. The legacy lowering below still implements only external-call
-    // returndata decode mapped into the existing error-union path.
+    // modes. Lowering currently implements external-call returndata decode
+    // mapped into the existing error-union path.
     if (sourceAttr.getValue() != "returndata")
         return rewriter.notifyMatchFailure(op, "only returndata ABI decode is supported");
     if (failureModeAttr.getValue() != "error_union")

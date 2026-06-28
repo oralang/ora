@@ -98,7 +98,7 @@ contract ERC20BitfieldComptimeGenerics {
     pub fn setPaused(next: bool)
         modifies token_flags
     {
-        let f: TokenFlags = token_flags;
+        var f: TokenFlags = token_flags;
         f.paused = next;
         token_flags = f;
     }
@@ -145,7 +145,7 @@ contract ERC20BitfieldComptimeGenerics {
         balances[sender] = sub(u256, book.sender_before, book.amount);
         balances[to] = add(u256, book.recipient_before, book.amount);
 
-        let meta: AccountFlags = account_flags[sender];
+        var meta: AccountFlags = account_flags[sender];
         meta.nonce = meta.nonce +% 1;
         account_flags[sender] = meta;
 

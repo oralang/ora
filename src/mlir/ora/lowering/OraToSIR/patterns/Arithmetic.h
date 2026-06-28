@@ -13,10 +13,6 @@ namespace mlir
         // Forward declarations
         class OraToSIRTypeConverter;
 
-        // Note: ora.add/sub/mul/div/rem conversion patterns removed.
-        // The Zig frontend now emits arith.addi/subi/muli/divui/remui directly,
-        // which are converted by ConvertArithAddIOp etc. below.
-
         class ConvertCmpOp : public OpConversionPattern<ora::CmpOp>
         {
         public:

@@ -19,6 +19,7 @@ CONFORMANCE_DIR = ROOT / "tests/conformance"
 REQUIRED_CI_COMMANDS = {
     "zig build check-feature-execution-coverage",
     "zig build check-negative-corpus",
+    "zig build check-smt-resource-corpus",
     "zig build test-conformance",
     "zig build gate",
 }

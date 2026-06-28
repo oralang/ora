@@ -217,9 +217,9 @@ pub fn lookupIntegerBuiltin(signed: bool, bits: u16) ?BuiltinTypeSpec {
 /// Parses a fixed-bytes family name like "bytes20" into its length, or null.
 ///
 /// The suffix must be a plain canonical decimal: no leading zero ("bytes01"),
-/// no sign ("bytes+5"), no digit separators ("bytes1_6"). The legacy comptime
+/// no sign ("bytes+5"), no digit separators ("bytes1_6"). The previous comptime
 /// parser leaned on std.fmt.parseInt and silently accepted all of those, aliasing
-/// e.g. "bytes01" to bytes1 — a latent bug. This is the canonical definition;
+/// e.g. "bytes01" to bytes1. This is the canonical definition;
 /// such spellings are not fixed-bytes type names.
 pub fn parseFixedBytesName(name: []const u8) ?u8 {
     if (!std.mem.startsWith(u8, name, fixed_bytes_prefix)) return null;

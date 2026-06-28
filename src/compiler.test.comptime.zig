@@ -266,6 +266,37 @@ test "compiler supports comptime while statements" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.return %c5_i256 : i256"));
 }
 
+test "compiler does not require statement-position comptime blocks in generic templates to produce values" {
+    const source_text =
+        \\contract Test {
+        \\    fn choose(comptime mode: u256) -> u256 {
+        \\        var out: u256 = 0;
+        \\        comptime {
+        \\            if (mode == 1) {
+        \\                out = 7;
+        \\            } else {
+        \\                out = 9;
+        \\            }
+        \\        }
+        \\        return out;
+        \\    }
+        \\
+        \\    pub fn one() -> u256 {
+        \\        return choose(1);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const consteval_diags = try compilation.db.constEvalDiagnostics(compilation.root_module_id);
+    try testing.expect(!diagnosticMessagesContain(consteval_diags, "comptime block did not produce a value"));
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+}
+
 test "compiler rejects runtime values inside statement-position comptime blocks" {
     const source_text =
         \\pub fn run(input: u256) -> u256 {
@@ -282,6 +313,34 @@ test "compiler rejects runtime values inside statement-position comptime blocks"
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     try testing.expect(diagnosticMessagesContain(&hir_result.diagnostics, "comptime assignment value is not statically known during HIR lowering"));
+}
+
+test "compiler rejects dynamic arguments to inline helpers that require callsite-known values" {
+    const source_text =
+        \\contract InlineComptime {
+        \\    inline fn choose(mode: u256) -> u256 {
+        \\        var out: u256 = 0;
+        \\        comptime {
+        \\            if (mode == 1) {
+        \\                out = 7;
+        \\            } else {
+        \\                out = 9;
+        \\            }
+        \\        }
+        \\        return out;
+        \\    }
+        \\
+        \\    pub fn run(mode: u256) -> u256 {
+        \\        return choose(mode);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&hir_result.diagnostics, "comptime if condition is not statically known during HIR lowering"));
 }
 
 test "compiler folds comptime shifts before MLIR verification" {
@@ -311,7 +370,7 @@ test "compiler const eval executes cross-module comptime calls" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "dep.ora",
         .data =
         \\comptime fn helper() -> u256 {
@@ -319,7 +378,7 @@ test "compiler const eval executes cross-module comptime calls" {
         \\}
         ,
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\comptime const dep = @import("./dep.ora");
@@ -707,6 +766,65 @@ test "compiler type-checks runtime arguments of generic calls" {
     try testing.expect(diagnosticMessagesContain(diags, "expected argument type 'u256', found 'bool'"));
 }
 
+test "compiler rejects extra explicit generic call arguments" {
+    const source_text =
+        \\contract Math {
+        \\    fn first(comptime T: type, a: T, b: T) -> T {
+        \\        return a;
+        \\    }
+        \\
+        \\    pub fn choose(a: u256, b: u256) -> u256 {
+        \\        return first(u256, a, b, 9);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const diags = &module_typecheck.diagnostics;
+    try testing.expect(!diags.isEmpty());
+    try testing.expect(diagnosticMessagesContain(diags, "could not infer generic type arguments"));
+}
+
+test "compiler rejects extra imported explicit generic call arguments" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "dep.ora",
+        .data =
+        \\fn first(comptime T: type, a: T, b: T) -> T {
+        \\    return a;
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "main.ora",
+        .data =
+        \\comptime const dep = @import("./dep.ora");
+        \\
+        \\contract Math {
+        \\    pub fn choose(a: u256, b: u256) -> u256 {
+        \\        return dep.first(u256, a, b, 9);
+        \\    }
+        \\}
+        ,
+    });
+
+    const root_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/main.ora", .{tmp.sub_path});
+    defer testing.allocator.free(root_path);
+
+    var compilation = try compilePackage(root_path);
+    defer compilation.deinit();
+
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const diags = &module_typecheck.diagnostics;
+    try testing.expect(!diags.isEmpty());
+    try testing.expect(diagnosticMessagesContain(diags, "could not infer generic type arguments"));
+}
+
 test "compiler monomorphizes integer generic contract function calls in HIR" {
     const source_text =
         \\contract Math {
@@ -727,6 +845,93 @@ test "compiler monomorphizes integer generic contract function calls in HIR" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @shl_by__8"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @shl_by__8"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shli"));
+}
+
+test "compiler monomorphizes imported explicit comptime integer calls in HIR" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "dep.ora",
+        .data =
+        \\fn shl_by(comptime N: u256, value: u256) -> u256 {
+        \\    return value << N;
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "main.ora",
+        .data =
+        \\comptime const dep = @import("./dep.ora");
+        \\
+        \\contract Math {
+        \\    pub fn run(value: u256) -> u256 {
+        \\        return dep.shl_by(8, value);
+        \\    }
+        \\}
+        ,
+    });
+
+    const root_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/main.ora", .{tmp.sub_path});
+    defer testing.allocator.free(root_path);
+
+    var compilation = try compilePackage(root_path);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @dep.shl_by__8"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @dep.shl_by__8"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shli"));
+}
+
+test "compiler infers integer generic arguments from fixed array runtime arguments" {
+    const source_text =
+        \\contract Math {
+        \\    fn array_len(comptime N: u256, values: [u256; N]) -> u256 {
+        \\        return N;
+        \\    }
+        \\
+        \\    pub fn run(a: u256, b: u256, c: u256) -> u256 {
+        \\        let values: [u256; 3] = [a, b, c];
+        \\        return array_len(values);
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @array_len__3"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @array_len__3"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.return %c3_i256 : i256"));
+}
+
+test "compiler accepts explicit comptime arguments after runtime arguments" {
+    const source_text =
+        \\contract Math {
+        \\    fn array_len(values: [u256; N], comptime N: u256) -> u256 {
+        \\        return N;
+        \\    }
+        \\
+        \\    pub fn run(a: u256, b: u256, c: u256) -> u256 {
+        \\        let values: [u256; 3] = [a, b, c];
+        \\        return array_len(values, 3);
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @array_len__3"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @array_len__3"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.return %c3_i256 : i256"));
 }
 
 test "compiler monomorphizes generic struct types on type use" {
@@ -4441,6 +4646,26 @@ test "compiler @traitMethods exposes receiver and return type metadata" {
     try testing.expect(consteval.values[second_ret.value.?.index()].?.boolean);
 }
 
+test "compiler @traitMethods is comptime-only" {
+    const source_text =
+        \\trait ERC20 {
+        \\    fn balanceOf(self, owner: address) -> u256;
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    const methods = @traitMethods(ERC20);
+        \\    return methods.len;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 1), typecheck.diagnostics.items.items.len);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "@traitMethods is comptime-only; wrap it in a comptime block"));
+}
+
 test "compiler @structFields rejects trait arguments" {
     const source_text =
         \\trait Foo {
@@ -4536,6 +4761,23 @@ test "compiler corpus covers reflection builtins" {
     var expected_size = try std.math.big.int.Managed.initSet(testing.allocator, 20);
     defer expected_size.deinit();
     try testing.expect(consteval.values[size_index.?].?.integer.eql(expected_size));
+}
+
+test "compiler std interfaceId uses traitMethods reflection in comptime only" {
+    var compilation = try compilePackage("ora-example/corpus/comptime/interface_id.ora");
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(consteval.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "resource place type"));
 }
 
 test "compiler reflection corpus lowers without ora.default_value escaping HIR" {

@@ -1,0 +1,46 @@
+comptime const std_storage = @import("std/storage");
+comptime const fixed = @import("std/storage/fixed_size_data");
+
+contract ComputedFixedSizeRecord {
+    fn recordSlot(owner: address, record_id: u256) -> StorageSlot {
+        return std_storage.derive("ora.example.computed.record", owner, record_id);
+    }
+
+    pub fn save(owner: address, record_id: u256, version: u256, amount: u256, timestamp: u256, flags: u256)
+        modifies std_storage.range(std_storage.derive("ora.example.computed.record", owner, record_id), 4)
+    {
+        let slot: StorageSlot = recordSlot(owner, record_id);
+        let record: [u256; 4] = [version, amount, timestamp, flags];
+        fixed.store(slot, record);
+    }
+
+    pub fn clear(owner: address, record_id: u256)
+        modifies std_storage.range(std_storage.derive("ora.example.computed.record", owner, record_id), 4)
+    {
+        fixed.erase(recordSlot(owner, record_id), 4);
+    }
+
+    pub fn hasRecord(owner: address, record_id: u256) -> bool {
+        return fixed.hasData(recordSlot(owner, record_id), 4);
+    }
+
+    pub fn version(owner: address, record_id: u256) -> u256 {
+        let record: [u256; 4] = fixed.load(recordSlot(owner, record_id), 4);
+        return record[0];
+    }
+
+    pub fn amount(owner: address, record_id: u256) -> u256 {
+        let record: [u256; 4] = fixed.load(recordSlot(owner, record_id), 4);
+        return record[1];
+    }
+
+    pub fn timestamp(owner: address, record_id: u256) -> u256 {
+        let record: [u256; 4] = fixed.load(recordSlot(owner, record_id), 4);
+        return record[2];
+    }
+
+    pub fn flags(owner: address, record_id: u256) -> u256 {
+        let record: [u256; 4] = fixed.load(recordSlot(owner, record_id), 4);
+        return record[3];
+    }
+}

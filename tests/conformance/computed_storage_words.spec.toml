@@ -1,0 +1,223 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "read_first(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 0 }
+
+[[call]]
+fn = "write_pair(address,uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", 11, 22]
+returns = {}
+
+[[call.storage]]
+slot = "0x8a0abc36566788b32fa3a237cd98598f040ba623e0971cd6371395e7a6e49871"
+value = "0xb"
+
+[[call.storage]]
+slot = "0x8a0abc36566788b32fa3a237cd98598f040ba623e0971cd6371395e7a6e49872"
+value = "0x16"
+
+[[call]]
+fn = "read_first(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 11 }
+
+[[call]]
+fn = "read_second(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 22 }
+
+[[call]]
+fn = "write_pair(address,uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", 33, 44]
+returns = {}
+
+[[call.storage]]
+slot = "0x8a0abc36566788b32fa3a237cd98598f040ba623e0971cd6371395e7a6e49871"
+value = "0x21"
+
+[[call.storage]]
+slot = "0x8a0abc36566788b32fa3a237cd98598f040ba623e0971cd6371395e7a6e49872"
+value = "0x2c"
+
+[[call]]
+fn = "read_first(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 33 }
+
+[[call]]
+fn = "read_second(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 44 }
+
+[[call]]
+fn = "read_first(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000002"]
+returns = { u256 = 0 }
+
+[[call]]
+fn = "write_marker(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1234]
+returns = {}
+
+[[call]]
+fn = "write_balance(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", 5555]
+returns = {}
+
+[[call]]
+fn = "write_allowance(address,address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", "0x3000000000000000000000000000000000000003", 7777]
+returns = {}
+
+[[call]]
+fn = "write_other(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", 99]
+returns = {}
+
+[[call]]
+fn = "read_other(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 99 }
+
+[[call]]
+fn = "read_marker()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 1234 }
+
+[[call]]
+fn = "read_balance(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 5555 }
+
+[[call]]
+fn = "read_allowance(address,address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", "0x3000000000000000000000000000000000000003"]
+returns = { u256 = 7777 }
+
+[[call]]
+fn = "read_first(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 33 }
+
+[[call]]
+fn = "read_second(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 44 }
+
+[[call]]
+fn = "read_marker()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 1234 }
+
+[[call]]
+fn = "read_balance(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 5555 }
+
+[[call]]
+fn = "read_allowance(address,address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", "0x3000000000000000000000000000000000000003"]
+returns = { u256 = 7777 }
+
+[[call]]
+fn = "clear_first(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = {}
+
+[[call]]
+fn = "read_first(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 0 }
+
+[[call]]
+fn = "read_second(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 44 }
+
+[[call]]
+fn = "read_other(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 99 }
+
+[[call]]
+fn = "clear_pair(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = {}
+
+[[call]]
+fn = "read_first(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 0 }
+
+[[call]]
+fn = "read_second(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 0 }
+
+[[call]]
+fn = "read_other(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 99 }

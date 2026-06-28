@@ -20,6 +20,7 @@
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/Casting.h"
@@ -313,6 +314,50 @@ static Value phase0BuildWideErrorUnion(
     Value tag = isError
                     ? euh::narrowErrTagConst(rewriter, loc)
                     : euh::narrowOkTagConst(rewriter, loc);
+    if (!isError && llvm::isa<mlir::NoneType>(payload.getType()))
+        payload = constU256(rewriter, loc, 0);
+    if (!isError)
+    {
+        if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(errorUnionType))
+        {
+            Type carrierType = euh::getWideErrorUnionCarrierType(
+                rewriter.getContext(), errType.getSuccessType());
+            if (carrierType && payload.getType() != carrierType)
+            {
+                if (llvm::isa<sir::U256Type>(carrierType))
+                {
+                    payload = coerceToU256(rewriter, loc, payload);
+                }
+                else if (llvm::isa<sir::PtrType>(carrierType))
+                {
+                    if (auto materialized = ora::materializePtrCarrierFromOraValue(
+                            rewriter, loc, carrierType, payload))
+                    {
+                        payload = *materialized;
+                    }
+                    else if (llvm::isa<sir::U256Type>(payload.getType()))
+                    {
+                        payload = rewriter.create<sir::BitcastOp>(loc, carrierType, payload);
+                    }
+                    else if (llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType,
+                                          ora::StringType, ora::BytesType, mlir::MemRefType,
+                                          mlir::UnrankedMemRefType>(payload.getType()))
+                    {
+                        payload = rewriter.create<sir::BitcastOp>(loc, carrierType, payload);
+                    }
+                    else
+                    {
+                        payload = rewriter.create<sir::BitcastOp>(
+                            loc, carrierType, coerceToU256(rewriter, loc, payload));
+                    }
+                }
+                else
+                {
+                    payload = rewriter.create<sir::BitcastOp>(loc, carrierType, payload);
+                }
+            }
+        }
+    }
     return ora::createMaterializationCast(
         rewriter, loc, errorUnionType, ValueRange{tag, payload}, mat_kind::kWideErrorUnionJoin);
 }
@@ -1894,21 +1939,44 @@ LogicalResult NormalizeCondBrOperandsOp::matchAndRewrite(
     auto insertIt = Region::iterator(srcBlock);
     ++insertIt;
 
-    Block *trueRelay = rewriter.createBlock(parent, insertIt);
-    Block *falseRelay = rewriter.createBlock(parent, insertIt);
+    SmallVector<Value, 8> carrier;
+    carrier.append(op.getTrueOperands().begin(), op.getTrueOperands().end());
+    carrier.append(op.getFalseOperands().begin(), op.getFalseOperands().end());
+
+    SmallVector<Type, 8> carrierTypes;
+    SmallVector<Location, 8> carrierLocs;
+    carrierTypes.reserve(carrier.size());
+    carrierLocs.reserve(carrier.size());
+    for (Value value : carrier)
+    {
+        carrierTypes.push_back(value.getType());
+        carrierLocs.push_back(op.getLoc());
+    }
+
+    Block *trueRelay = rewriter.createBlock(parent, insertIt, carrierTypes, carrierLocs);
+    Block *falseRelay = rewriter.createBlock(parent, insertIt, carrierTypes, carrierLocs);
+
+    SmallVector<Value, 8> trueForward;
+    SmallVector<Value, 8> falseForward;
+    trueForward.reserve(op.getTrueOperands().size());
+    falseForward.reserve(op.getFalseOperands().size());
+    for (unsigned i = 0; i < op.getTrueOperands().size(); ++i)
+        trueForward.push_back(trueRelay->getArgument(i));
+    for (unsigned i = 0; i < op.getFalseOperands().size(); ++i)
+        falseForward.push_back(falseRelay->getArgument(op.getTrueOperands().size() + i));
 
     rewriter.setInsertionPointToEnd(trueRelay);
-    rewriter.create<sir::BrOp>(op.getLoc(), op.getTrueOperands(), op.getTrueDest());
+    rewriter.create<sir::BrOp>(op.getLoc(), trueForward, op.getTrueDest());
 
     rewriter.setInsertionPointToEnd(falseRelay);
-    rewriter.create<sir::BrOp>(op.getLoc(), op.getFalseOperands(), op.getFalseDest());
+    rewriter.create<sir::BrOp>(op.getLoc(), falseForward, op.getFalseDest());
 
     rewriter.setInsertionPoint(op);
     rewriter.replaceOpWithNewOp<sir::CondBrOp>(
         op,
         op.getCond(),
-        ValueRange{},
-        ValueRange{},
+        carrier,
+        carrier,
         trueRelay,
         falseRelay);
     return success();
@@ -3895,6 +3963,17 @@ namespace
     {
         if (c.op.getNumOperands() == 1 && c.op.getNumResults() == 1)
         {
+            const bool addressToCarrier =
+                llvm::isa<sir::U256Type>(c.resultType) &&
+                llvm::isa<ora::AddressType, ora::NonZeroAddressType>(c.input.getType());
+            const bool carrierToAddress =
+                llvm::isa<ora::AddressType, ora::NonZeroAddressType>(c.resultType) &&
+                llvm::isa<sir::U256Type>(c.input.getType());
+            const bool addressIdentity =
+                llvm::isa<ora::AddressType, ora::NonZeroAddressType>(c.resultType) &&
+                c.input.getType() == c.resultType;
+            if (!addressToCarrier && !carrierToAddress && !addressIdentity)
+                return failure();
             c.rewriter.replaceOp(c.op, c.input);
             return success();
         }
@@ -3933,6 +4012,13 @@ namespace
 
     static CastHandlerResult castPtrView(CastCtx &c)
     {
+        auto resultIsPointerBackedView = [](Type type) {
+            return llvm::isa<sir::PtrType, ora::TupleType, ora::StructType,
+                             ora::AnonymousStructType, ora::StringType, ora::BytesType,
+                             ora::AdtType, ora::MapType, mlir::MemRefType,
+                             mlir::UnrankedMemRefType>(type);
+        };
+
         if (c.op.getNumOperands() == 1 && c.op.getNumResults() == 1 &&
             llvm::isa<sir::PtrType>(c.resultType))
         {
@@ -3968,6 +4054,8 @@ namespace
         if (c.op.getNumOperands() == 1 && c.op.getNumResults() == 1 &&
             llvm::isa<sir::PtrType>(c.input.getType()))
         {
+            if (!resultIsPointerBackedView(c.resultType))
+                return failure();
             c.rewriter.replaceOp(c.op, c.input);
             return success();
         }
@@ -4038,6 +4126,46 @@ namespace
         return failure();
     }
 
+    static CastHandlerResult castAdtHandleView(CastCtx &c)
+    {
+        if (c.op.getNumOperands() != 1 || c.op.getNumResults() != 1)
+            return failure();
+        if (!llvm::isa<ora::AdtType>(c.resultType))
+            return failure();
+        if (!llvm::isa<sir::U256Type, sir::PtrType>(c.input.getType()))
+            return failure();
+
+        Value view = c.op.getResult(0);
+        if (view.use_empty())
+        {
+            c.rewriter.eraseOp(c.op);
+            return success();
+        }
+
+        SmallVector<mlir::UnrealizedConversionCastOp, 4> normalizedUsers;
+        for (Operation *user : view.getUsers())
+        {
+            auto split = dyn_cast<mlir::UnrealizedConversionCastOp>(user);
+            if (!split || !ora::hasMaterializationKind(split, mat_kind::kNormalizedAdt) ||
+                split.getNumOperands() != 1 || split.getOperand(0) != view ||
+                split.getNumResults() != 2 ||
+                !llvm::isa<sir::U256Type>(split.getResult(0).getType()) ||
+                !llvm::isa<sir::U256Type>(split.getResult(1).getType()))
+                return failure();
+            normalizedUsers.push_back(split);
+        }
+
+        for (auto split : normalizedUsers)
+        {
+            c.rewriter.setInsertionPoint(split);
+            auto [tag, payload] = adt_helpers::loadAdtPartsFromHandle(c.rewriter, split.getLoc(), c.input);
+            c.rewriter.replaceOp(split, {tag, payload});
+        }
+
+        c.rewriter.eraseOp(c.op);
+        return success();
+    }
+
     // Common body for the "split into (tag, payload-carrier)" cast — used by
     // both the kWideErrorUnionSplit kind handler and the generic 1->2 shape
     // handler that mops up wide error-union splits without an explicit kind.
@@ -4101,6 +4229,7 @@ namespace
             {mat_kind::kPtrView, castPtrView},
             {mat_kind::kNormalizedErrorUnion, castNormalizedErrorUnion},
             {mat_kind::kNormalizedAdt, castNormalizedAdt},
+            {mat_kind::kAdtHandleView, castAdtHandleView},
             {mat_kind::kWideErrorUnionSplit, castWideErrorUnionSplit},
         };
         for (const auto &e : table)
@@ -4180,7 +4309,28 @@ namespace
             c.rewriter.replaceOp(c.op, c.input);
             return success();
         }
+        if (llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(c.resultType) &&
+            llvm::isa<sir::U256Type>(c.input.getType()))
+        {
+            auto ptrType = sir::PtrType::get(c.rewriter.getContext(), /*addrSpace*/ 1);
+            Value ptr = c.rewriter.create<sir::BitcastOp>(c.loc, ptrType, c.input);
+            c.rewriter.replaceOp(c.op, ptr);
+            return success();
+        }
         return std::nullopt;
+    }
+
+    static CastHandlerResult castScalarCarrierBridge(CastCtx &c)
+    {
+        if (c.op.getNumOperands() != 1 || c.op.getNumResults() != 1)
+            return std::nullopt;
+        if (!llvm::isa<sir::U256Type>(c.input.getType()) ||
+            !llvm::isa<mlir::IntegerType>(c.resultType))
+            return std::nullopt;
+
+        Value casted = c.rewriter.create<sir::BitcastOp>(c.loc, c.resultType, c.input);
+        c.rewriter.replaceOp(c.op, casted);
+        return success();
     }
 
     static CastHandlerResult castDynamicAggregateView(CastCtx &c)
@@ -4342,6 +4492,7 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
     if (auto r = tryHandlers({castRefinementBridge,
                               castAddressIndexBridge,
                               castMemrefPtrBridge,
+                              castScalarCarrierBridge,
                               castDynamicAggregateView,
                               castPayloadlessErrorStruct,
                               castNarrowErrorUnionPack1to1}))
@@ -4559,6 +4710,50 @@ static LogicalResult emitSwitchDispatch(
     return success();
 }
 
+static LogicalResult emitStructuredExactSwitchDispatch(
+    ConversionPatternRewriter &rewriter,
+    Location loc,
+    const SwitchCasePlan &plan,
+    Block *parentBlock,
+    Value selector,
+    ArrayRef<Block *> caseBlocks,
+    Block *defaultBlock)
+{
+    if (plan.caseIdxs.empty())
+        return failure();
+
+    SmallVector<int64_t, 8> caseValues;
+    SmallVector<Block *, 8> caseDests;
+    DenseSet<int64_t> seenValues;
+    for (int64_t caseIdx : plan.caseIdxs)
+    {
+        int64_t kind = 0;
+        if (plan.caseKinds && caseIdx < static_cast<int64_t>(plan.caseKinds.size()))
+            kind = plan.caseKinds[caseIdx];
+        if (kind != 0)
+            return failure();
+        if (!plan.caseValues || caseIdx >= static_cast<int64_t>(plan.caseValues.size()))
+            return failure();
+        if (!caseBlocks[caseIdx])
+            return failure();
+
+        const int64_t value = plan.caseValues[caseIdx];
+        if (!seenValues.insert(value).second)
+            return failure();
+        caseValues.push_back(value);
+        caseDests.push_back(caseBlocks[caseIdx]);
+    }
+
+    rewriter.setInsertionPointToEnd(parentBlock);
+    rewriter.create<sir::SwitchOp>(
+        loc,
+        selector,
+        rewriter.getI64ArrayAttr(caseValues),
+        defaultBlock,
+        caseDests);
+    return success();
+}
+
 static LogicalResult appendSwitchConvertedOperands(
     ConversionPatternRewriter &rewriter,
     Location loc,
@@ -4746,9 +4941,13 @@ static LogicalResult lowerSwitchWithoutResults(
         rewriter.setInsertionPointToEnd(parentBlock);
     }
 
-    if (failed(emitSwitchDispatch(
-            rewriter, loc, plan, parentRegion, afterBlock, parentBlock, selector, caseBlocks, defaultBlock)))
-        return failure();
+    if (failed(emitStructuredExactSwitchDispatch(
+            rewriter, loc, plan, parentBlock, selector, caseBlocks, defaultBlock)))
+    {
+        if (failed(emitSwitchDispatch(
+                rewriter, loc, plan, parentRegion, afterBlock, parentBlock, selector, caseBlocks, defaultBlock)))
+            return failure();
+    }
 
     rewriter.eraseOp(op);
     return success();

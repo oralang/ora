@@ -1,0 +1,113 @@
+fn init:
+    entry {
+        v0 = runtime_start_offset
+        v1 = runtime_length
+        v2 = malloc v1
+        codecopy v2 v0 v1
+        return v2 v1
+    }
+
+fn testMemoryRead:
+    entry {
+        iret
+    }
+
+fn testMemoryArrayRead:
+    entry {
+        iret
+    }
+
+fn testMultipleMemoryReads:
+    entry {
+        v0 = large_const 0xB6D338200000000000000000000000000000000000000000000000000000000
+        v1 = const 0x4
+        v2 = const 0x1
+        => v2 ? @bb1 : @bb0
+    }
+    bb0 {
+        v3 = malloc v1
+        mstore256 v3 v0
+        revert v3 v1
+    }
+    bb1 {
+        iret
+    }
+
+fn testMemoryReadInConditional:
+    entry {
+        iret
+    }
+
+fn testMemoryReadInLoop:
+    entry {
+        iret
+    }
+
+fn main:
+    main_entry {
+        zero = const 0x0
+        selector_offset = const 0x4
+        word_size = const 0x20
+        min_cdsize_1arg = const 0x23
+        arg1_offset = const 0x24
+        min_cdsize_2args = const 0x43
+        arg2_offset = const 0x44
+        min_cdsize_3args = const 0x63
+        selector_shift = const 0xE0
+        v0 = codesize
+        v1 = mload256 word_size
+        v2 = lt v1 v0
+        sel_zero = const 0x0
+        sel_mask = sub sel_zero v2
+        sel_t = and sel_mask v0
+        sel_inv = not sel_mask
+        sel_f = and sel_inv v1
+        v3 = or sel_t sel_f
+        mstore256 word_size v3
+        cv = callvalue
+        cv_nonzero = iszero cv
+        => cv_nonzero ? @load_selector : @revert_error
+    }
+    load_selector {
+        zero_0 = const 0x0
+        selector_shift_0 = const 0xE0
+        selector_word = calldataload zero_0
+        selector = shr selector_shift_0 selector_word
+        switch selector {
+        0xDD95AE8A => @testMemoryRead_
+        0xA1FEC267 => @testMemoryArrayRead_
+        0x7EA947D9 => @testMultipleMemoryReads_
+        0x088BC1D6 => @testMemoryReadInConditional_
+        0xD87698B2 => @testMemoryReadInLoop_
+        default => @revert_error
+    }
+    }
+    revert_error {
+        zero_1 = const 0x0
+        revert zero_1 zero_1
+    }
+    testMemoryRead_ {
+        icall @testMemoryRead
+        v4 = const 0x0
+        return v4 v4
+    }
+    testMemoryArrayRead_ {
+        icall @testMemoryArrayRead
+        v5 = const 0x0
+        return v5 v5
+    }
+    testMultipleMemoryReads_ {
+        icall @testMultipleMemoryReads
+        v6 = const 0x0
+        return v6 v6
+    }
+    testMemoryReadInConditional_ {
+        icall @testMemoryReadInConditional
+        v7 = const 0x0
+        return v7 v7
+    }
+    testMemoryReadInLoop_ {
+        icall @testMemoryReadInLoop
+        v8 = const 0x0
+        return v8 v8
+    }

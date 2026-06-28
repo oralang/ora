@@ -4,36 +4,38 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const debug_ui = b.option(bool, "debug-ui", "Build debugger TUI/DAP binaries that depend on vaxis") orelse false;
-    const voltaire_root = "../../vendor/voltaire";
-
-    const voltaire_dep = b.dependency("voltaire", .{
+    const blst_lib = createBlstLibrary(b, target, optimize);
+    const c_kzg_lib = createCKzgLibrary(b, target, optimize, blst_lib);
+    const c_kzg_mod = b.addModule("c_kzg", .{
+        .root_source_file = b.path("vendor/c-kzg-4844/bindings/zig/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const primitives_mod = voltaire_dep.module("primitives");
-    const crypto_mod = voltaire_dep.module("crypto");
-    const precompiles_mod = voltaire_dep.module("precompiles");
-    const blockchain_mod = voltaire_dep.module("blockchain");
+    c_kzg_mod.linkLibrary(c_kzg_lib);
+    c_kzg_mod.linkLibrary(blst_lib);
+    c_kzg_mod.addIncludePath(b.path("vendor/c-kzg-4844/src"));
+    c_kzg_mod.addIncludePath(b.path("vendor/c-kzg-4844/blst/bindings"));
+    const rust_crypto_lib_path = b.path("target/release/libora_evm_crypto_wrappers.a");
 
     const bootstrap_crypto = b.addSystemCommand(&.{
         "cargo",
         "build",
         "--manifest-path",
-        b.pathJoin(&.{ voltaire_root, "Cargo.toml" }),
+        b.path("Cargo.toml").getPath(b),
         "--release",
     });
-    bootstrap_crypto.setName("bootstrap-voltaire-crypto");
+    bootstrap_crypto.setName("bootstrap-ora-evm-crypto");
 
     const evm_mod = b.addModule("ora_evm", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "voltaire", .module = primitives_mod },
-            .{ .name = "crypto", .module = crypto_mod },
-            .{ .name = "precompiles", .module = precompiles_mod },
+            .{ .name = "c_kzg", .module = c_kzg_mod },
         },
     });
+    evm_mod.addObjectFile(rust_crypto_lib_path);
+    evm_mod.link_libc = true;
 
     const debug_probe_exe = b.addExecutable(.{
         .name = "ora-evm-debug-probe",
@@ -43,9 +45,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "ora_evm", .module = evm_mod },
-                .{ .name = "voltaire", .module = primitives_mod },
-                .{ .name = "crypto", .module = crypto_mod },
-                .{ .name = "precompiles", .module = precompiles_mod },
             },
         }),
     });
@@ -69,9 +68,6 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .imports = &.{
                     .{ .name = "ora_evm", .module = evm_mod },
-                    .{ .name = "voltaire", .module = primitives_mod },
-                    .{ .name = "crypto", .module = crypto_mod },
-                    .{ .name = "precompiles", .module = precompiles_mod },
                     .{ .name = "vaxis", .module = vaxis_mod },
                 },
             }),
@@ -95,9 +91,6 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .imports = &.{
                     .{ .name = "ora_evm", .module = evm_mod },
-                    .{ .name = "voltaire", .module = primitives_mod },
-                    .{ .name = "crypto", .module = crypto_mod },
-                    .{ .name = "precompiles", .module = precompiles_mod },
                     .{ .name = "vaxis", .module = vaxis_mod },
                 },
             }),
@@ -135,8 +128,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     spec_mod.addImport("evm", evm_mod);
-    spec_mod.addImport("voltaire", primitives_mod);
-    spec_mod.addImport("client_blockchain", blockchain_mod);
 
     const spec_tests = b.addTest(.{
         .name = "ora-evm-spec-tests",
@@ -170,9 +161,6 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseFast,
             .imports = &.{
                 .{ .name = "ora_evm", .module = evm_mod },
-                .{ .name = "voltaire", .module = primitives_mod },
-                .{ .name = "crypto", .module = crypto_mod },
-                .{ .name = "precompiles", .module = precompiles_mod },
             },
         }),
     });
@@ -181,4 +169,74 @@ pub fn build(b: *std.Build) void {
 
     const bench_step = b.step("bench", "Run Ora EVM debugger per-step benchmark");
     bench_step.dependOn(&run_step_bench.step);
+}
+
+fn createBlstLibrary(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const is_wasm = target.result.cpu.arch == .wasm32 or target.result.cpu.arch == .wasm64;
+    const lib = b.addLibrary(.{
+        .name = "blst",
+        .linkage = .static,
+        .use_llvm = true,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    lib.root_module.link_libc = true;
+
+    if (!is_wasm) {
+        const blst_build_cmd = if (target.result.os.tag == .windows)
+            b.addSystemCommand(&.{ "bash", "./build.sh" })
+        else
+            b.addSystemCommand(&.{"./build.sh"});
+        blst_build_cmd.setCwd(b.path("vendor/c-kzg-4844/blst"));
+        lib.step.dependOn(&blst_build_cmd.step);
+        lib.root_module.addAssemblyFile(b.path("vendor/c-kzg-4844/blst/build/assembly.S"));
+    }
+
+    const c_flags = if (is_wasm)
+        &[_][]const u8{ "-std=c99", "-D__BLST_PORTABLE__", "-D__BLST_NO_ASM__", "-fno-sanitize=undefined" }
+    else
+        &[_][]const u8{ "-std=c99", "-fPIC", "-D__BLST_PORTABLE__", "-fno-sanitize=undefined" };
+
+    lib.root_module.addCSourceFiles(.{
+        .files = &.{
+            "vendor/c-kzg-4844/blst/src/server.c",
+        },
+        .flags = c_flags,
+    });
+    lib.root_module.addIncludePath(b.path("vendor/c-kzg-4844/blst/bindings"));
+    return lib;
+}
+
+fn createCKzgLibrary(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    blst_lib: *std.Build.Step.Compile,
+) *std.Build.Step.Compile {
+    const lib = b.addLibrary(.{
+        .name = "c-kzg-4844",
+        .linkage = .static,
+        .use_llvm = true,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    lib.root_module.link_libc = true;
+    lib.root_module.linkLibrary(blst_lib);
+    lib.root_module.addCSourceFiles(.{
+        .files = &.{
+            "vendor/c-kzg-4844/src/ckzg.c",
+        },
+        .flags = &.{ "-std=c99", "-fPIC", "-fno-sanitize=undefined" },
+    });
+    lib.root_module.addIncludePath(b.path("vendor/c-kzg-4844/src"));
+    lib.root_module.addIncludePath(b.path("vendor/c-kzg-4844/blst/bindings"));
+    return lib;
 }

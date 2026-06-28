@@ -1,0 +1,16 @@
+fn add_one:
+    entry input -> output {
+        one = const 0x1
+        output = add input one
+        iret
+    }
+
+fn main:
+    entry {
+        ptr = const 0x0
+        len = const 0x20
+        arg = const 0x29
+        value = icall @add_one arg
+        mstore256 ptr value
+        return ptr len
+    }

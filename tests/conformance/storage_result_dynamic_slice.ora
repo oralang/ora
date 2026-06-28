@@ -17,7 +17,7 @@ contract StorageResultDynamicSlice {
     }
 
     pub fn sum_or(fallback: u256) -> u256 {
-        let total: u256 = 0;
+        var total: u256 = 0;
         match (saved) {
             Ok(values) => {
                 for (values) |item| {

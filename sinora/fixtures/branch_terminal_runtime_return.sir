@@ -1,0 +1,26 @@
+fn init:
+    entry {
+        start = runtime_start_offset
+        len = runtime_length
+        ptr = malloc len
+        codecopy ptr start len
+        return ptr len
+    }
+
+fn main:
+    entry {
+        ptr = const 0x0
+        len = const 0x20
+        cond = const 0x1
+        => cond ? @success : @failure
+    }
+
+    success {
+        value = const 0x2a
+        mstore256 ptr value
+        return ptr len
+    }
+
+    failure {
+        revert ptr ptr
+    }

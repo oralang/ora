@@ -1,0 +1,156 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "computed_store_one(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", 77]
+returns = {}
+gas_max = 70000
+
+[[call]]
+fn = "computed_load_one(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 77 }
+gas_max = 50000
+
+[[call]]
+fn = "computed_erase_one(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = {}
+gas_max = 70000
+
+[[call]]
+fn = "computed_load_one(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 0 }
+gas_max = 50000
+
+[[call]]
+fn = "computed_store_four(address,uint256,uint256,uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", 1, 2, 3, 4]
+returns = {}
+gas_max = 140000
+
+[[call]]
+fn = "computed_sum_four(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 10 }
+gas_max = 60000
+
+[[call]]
+fn = "computed_erase_four(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = {}
+gas_max = 120000
+
+[[call]]
+fn = "computed_store_sixteen(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = {}
+gas_max = 600000
+
+[[call]]
+fn = "computed_sum_sixteen(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 136 }
+gas_max = 120000
+
+[[call]]
+fn = "computed_erase_sixteen(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = {}
+gas_max = 300000
+
+[[call]]
+fn = "array_store_four(address,uint256,uint256,uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000002", 1, 2, 3, 4]
+returns = {}
+gas_max = 140000
+
+[[call]]
+fn = "array_sum_four(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000002"]
+returns = { u256 = 10 }
+gas_max = 60000
+
+[[call]]
+fn = "array_clear_four(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000002"]
+returns = {}
+gas_max = 120000
+
+[[call]]
+fn = "struct_store_four(address,uint256,uint256,uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x3000000000000000000000000000000000000003", 1, 2, 3, 4]
+returns = {}
+gas_max = 140000
+
+[[call]]
+fn = "struct_sum_four(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x3000000000000000000000000000000000000003"]
+returns = { u256 = 10 }
+gas_max = 60000
+
+[[call]]
+fn = "struct_clear_four(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x3000000000000000000000000000000000000003"]
+returns = {}
+gas_max = 120000
+
+[[call]]
+fn = "many_store_four(address,uint256,uint256,uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x4000000000000000000000000000000000000004", 1, 2, 3, 4]
+returns = {}
+gas_max = 140000
+
+[[call]]
+fn = "many_sum_four(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x4000000000000000000000000000000000000004"]
+returns = { u256 = 10 }
+gas_max = 70000
+
+[[call]]
+fn = "many_clear_four(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x4000000000000000000000000000000000000004"]
+returns = {}
+gas_max = 120000

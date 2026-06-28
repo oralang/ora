@@ -153,8 +153,8 @@ pub const VerificationResult = struct {
             .diagnostics = ManagedArrayList(Diagnostic).init(allocator),
             .seen_keys = std.StringHashMap(void).init(allocator),
             .proven_guard_ids = std.StringHashMap(void).init(allocator),
-            .proven_guard_positions = .{},
-            .z3_proofs = .{},
+            .proven_guard_positions = .empty,
+            .z3_proofs = .empty,
             .allocator = allocator,
         };
     }

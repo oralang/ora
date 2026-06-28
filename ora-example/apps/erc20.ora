@@ -1,151 +1,220 @@
-// ERC20 Token Implementation in Ora
-// Using refinement types and error unions
-
-// Error declarations
-error InsufficientBalance(required: u256, available: u256);
-error InsufficientAllowance(required: u256, available: u256);
-error InvalidAddress;
-error InvalidAmount;
-error TransferToZeroAddress;
+// ERC20-style token implemented with Ora resource places.
+//
+// This example models token balances as Resource<TokenUnit> places and spending
+// approvals as Resource<AllowanceUnit> places. Both domains use a u256 carrier,
+// but they mean different things: TokenUnit is owned supply, while
+// AllowanceUnit is authorization to spend a token-denominated amount. Creating
+// allowance units does not mint token supply.
+//
+// ~~~~~ Resource operations define the accounting theory: ~~~~~
+//
+// - @move(from, to, amount) is conservative. It subtracts from one place and adds
+//   to another place as one checked state transition. The total amount in that
+//   resource domain is unchanged, including the same-place alias case where from
+//   and to resolve to the same storage location.
+// - @create(place, amount) is explicit creation in a resource domain. TokenUnit
+//   creation is reserved for init/mint; AllowanceUnit creation records approval
+//   authorization.
+// - @destroy(place, amount) is explicit destruction in a resource domain.
+//   TokenUnit destruction is reserved for burn; AllowanceUnit destruction clears
+//   or spends approval authorization
+//
+// totalSupply is an ordinary storage word. The verifier does not automatically
+// equate it with the global sum of balances, because that would be an unsound
+// hidden assumption about which map represents supply. Functions that change
+// token supply therefore prove the intended correspondence explicitly:
+// create/destroy over TokenUnit places plus arithmetic safety over totalSupply.
+// AllowanceUnit state is separate authorization state and does not contribute to
+// totalSupply.
+//
+// Inline helpers below keep repeated checks and conversions named without adding
+// runtime helper calls. Their bodies are lowered at the call site, and their
+// Result/error behavior remains visible to the compiler and verifier
 
 comptime const std = @import("std");
+
+resource TokenUnit = u256;
+resource AllowanceUnit = u256;
+
+error InsufficientBalance(required: u256, available: u256);
+error InsufficientAllowance(required: u256, available: u256);
+error TransferToZeroAddress;
+
 contract ERC20Token {
-    // Storage variables (explicit @storage region)
-    storage var totalSupply: u256;  // @storage: persistent contract storage
-    storage balances: map<address, u256>;  // @storage: persistent storage map
-    storage allowances: map<address, map<address, u256>>;  // @storage: nested storage map
-    
-    // Events (logs)
+    // Persistent token state.
+    //
+    // totalSupply is an ordinary storage word that records supply for public
+    // queries. Resource conservation is tracked through balances; correspondence
+    // between the two is maintained by the explicit init/mint/burn code below.
+    // Allowances use a separate resource domain so approval accounting cannot be
+    // confused with token supply.
+    storage var totalSupply: TokenUnit;
+    storage var balances: map<address, Resource<TokenUnit>>;
+    storage var allowances: map<address, map<address, Resource<AllowanceUnit>>>;
+    storage var royal_mint: NonZeroAddress;
+
+    // ERC20-compatible logs. Topic indexing is handled by ABI/event lowering.
     log Transfer(from: address, to: address, amount: u256);
     log Approval(owner: address, spender: address, amount: u256);
-    
-    // Constructor - runs once at deployment
-    pub fn init(initialSupply: MinValue<u256, 0>)
-        modifies totalSupply, balances[msg.sender]
-    {
-        // initialSupply: @calldata (function parameter, read-only)
-        let deployer: NonZeroAddress = std.msg.sender();  // @stack: std.msg.sender() returns NonZeroAddress (guaranteed non-zero by EVM, so NonZeroAddress <: address)
-        totalSupply = initialSupply;  // @storage = @calldata: allowed (calldata -> storage)
-        balances[deployer] = initialSupply;  // @storage[@stack] = @calldata: storage map write (NonZeroAddress <: address)
-        log Transfer(std.constants.ZERO_ADDRESS, deployer, initialSupply);  // constants are @stack, NonZeroAddress <: address
+
+    // Inline helpers are source-level helpers, not runtime entrypoints. They are
+    // useful for naming repeated checks and conversions while preserving the
+    // callsite's modifies/proof obligations.
+    inline fn caller() -> NonZeroAddress {
+        // std.msg.sender() is always NonZeroAddress by definition
+        return std.msg.sender();
     }
-    
-    // Get total supply
-    pub fn getTotalSupply() -> u256
-        modifies()
-    {
-        return totalSupply;  // @storage -> @stack: storage read returns stack value
+
+    inline fn tokenValue(amount: TokenUnit) -> u256 {
+        return @cast(u256, amount);
     }
-    
-    // Get balance of an account
-    pub fn balanceOf(account: address) -> u256
-        modifies()
-    {
-        // account: @calldata (function parameter)
-        return balances[account];  // @storage[@calldata] -> @stack: storage map read returns stack value
+
+    inline fn allowanceValue(amount: AllowanceUnit) -> u256 {
+        return @cast(u256, amount);
     }
-    
-    // Transfer tokens from sender to recipient
-    // Uses refinement types to ensure non-negative amounts and non-zero recipient
-    pub fn transfer(recipient: NonZeroAddress, amount: MinValue<u256, 0>) -> !bool
-        modifies balances[msg.sender], balances[recipient]
-        requires(recipient != std.constants.ZERO_ADDRESS)
-        requires(balances[recipient] <= std.constants.U256_MAX - amount)
-    {
-        // recipient: @calldata (function parameter, NonZeroAddress - guaranteed non-zero at compile time)
-        // amount: @calldata (function parameter with refinement type)
-        
-        let sender: NonZeroAddress = std.msg.sender();  // @stack: std.msg.sender() returns NonZeroAddress (guaranteed non-zero by EVM)
-        let sender_balance: u256 = balances[sender];  // @stack: storage map read (@storage[@stack]) returns stack value
-        
-        // No zero address check needed - NonZeroAddress guarantees recipient != 0
-        
-        // Check sufficient balance (runtime check required - sender_balance is from storage)
-        if (sender_balance < amount) {  // @stack < @calldata: allowed comparison
-            return InsufficientBalance(amount, sender_balance);  // error values are @stack
+
+    inline fn allowanceAmount(amount: TokenUnit) -> AllowanceUnit {
+        return @cast(AllowanceUnit, tokenValue(amount));
+    }
+
+    inline fn requireBalance(owner: NonZeroAddress, amount: TokenUnit) -> !bool | InsufficientBalance {
+        let available: TokenUnit = balances[owner];
+        if (available<amount) {
+            return InsufficientBalance(tokenValue(amount), tokenValue(available));
         }
-        
-        // After the check, we know sender_balance >= amount
-        // We can use refinement type to make subtraction type-safe
-        // Note: sender_balance is u256, but we know it's >= amount (MinValue<u256, 0>)
-        // The subtraction is safe because we've verified sender_balance >= amount
-        
-        // Perform transfer
-        balances[sender] = sender_balance - amount;  // @storage[@stack] = @stack: storage map write (safe: sender_balance >= amount verified above)
-        let recipient_balance: u256 = balances[recipient];  // @stack: storage map read (@storage[@calldata]) returns stack value
-        balances[recipient] = recipient_balance + amount;  // @storage[@calldata] = @stack: storage map write
-        
-        log Transfer(sender, recipient, amount);  // all values are @stack
-        return true;  // @stack: return value
+        return true;
     }
-    
-    // Approve spender to spend tokens
-    pub fn approve(spender: NonZeroAddress, amount: MinValue<u256, 0>) -> !bool
-        modifies allowances[msg.sender][spender]
-        requires(spender != std.constants.ZERO_ADDRESS)
-    {
-        // spender: @calldata (function parameter, NonZeroAddress - guaranteed non-zero at compile time)
-        // amount: @calldata (function parameter with refinement type)
-        
-        let owner: NonZeroAddress = std.msg.sender();  // @stack: std.msg.sender() returns NonZeroAddress (guaranteed non-zero by EVM)
-        
-        // No zero address check needed - NonZeroAddress guarantees spender != 0
-        
-        allowances[owner][spender] = amount;  // @storage[@stack][@calldata] = @calldata: nested storage map write (NonZeroAddress <: address)
-        log Approval(owner, spender, amount);  // all values are @stack
-        return true;  // @stack: return value
-    }
-    
-    // Get allowance
-    pub fn allowance(owner: address, spender: address) -> u256
-        modifies()
-    {
-        // owner: @calldata (function parameter)
-        // spender: @calldata (function parameter)
-        return allowances[owner][spender];  // @storage[@calldata][@calldata] -> @stack: nested storage map read returns stack value
-    }
-    
-    // Transfer from one address to another using allowance
-    pub fn transferFrom(sender: address, recipient: NonZeroAddress, amount: MinValue<u256, 0>) -> !bool
-        modifies allowances[sender][msg.sender], balances[sender], balances[recipient]
-        requires(sender != std.constants.ZERO_ADDRESS)
-        requires(recipient != std.constants.ZERO_ADDRESS)
-        requires(balances[recipient] <= std.constants.U256_MAX - amount)
-    {
-        // sender: @calldata (function parameter, can be any address including zero)
-        // recipient: @calldata (function parameter, NonZeroAddress - guaranteed non-zero at compile time)
-        // amount: @calldata (function parameter with refinement type)
-        
-        let spender: NonZeroAddress = std.msg.sender();  // @stack: std.msg.sender() returns NonZeroAddress (guaranteed non-zero by EVM)
-        
-        // No zero address check needed for recipient - NonZeroAddress guarantees recipient != 0
-        // Note: sender can still be zero address (e.g., for contract-to-contract transfers)
-        
-        // Check allowance
-        let current_allowance: u256 = allowances[sender][spender];  // @stack: nested storage map read (@storage[@calldata][@stack]) returns stack value
-        if (current_allowance < amount) {  // @stack < @calldata: allowed comparison
-            return InsufficientAllowance(amount, current_allowance);  // @stack: error value
+
+    inline fn requireAllowance(owner: NonZeroAddress, spender: NonZeroAddress, amount: TokenUnit) -> !bool | InsufficientAllowance {
+        let available: AllowanceUnit = allowances[owner][spender];
+        let required: AllowanceUnit = allowanceAmount(amount);
+        if (available<required) {
+            return InsufficientAllowance(tokenValue(amount), allowanceValue(available));
         }
-        
-        // Check sender balance (runtime check required - sender_balance is from storage)
-        let sender_balance: u256 = balances[sender];  // @stack: storage map read (@storage[@calldata]) returns stack value
-        if (sender_balance < amount) {  // @stack < @calldata: allowed comparison
-            return InsufficientBalance(amount, sender_balance);  // @stack: error value
-        }
-        
-        // After the check, we know sender_balance >= amount and current_allowance >= amount
-        // Subtractions are safe because we've verified the conditions above
-        
-        // Update allowance
-        allowances[sender][spender] = current_allowance - amount;  // @storage[@calldata][@stack] = @stack: nested storage map write (safe: current_allowance >= amount verified above)
-        
-        // Perform transfer
-        balances[sender] = sender_balance - amount;  // @storage[@calldata] = @stack: storage map write (safe: sender_balance >= amount verified above)
-        let recipient_balance: u256 = balances[recipient];  // @stack: storage map read (@storage[@calldata]) returns stack value
-        balances[recipient] = recipient_balance + amount;  // @storage[@calldata] = @stack: storage map write
-        
-        log Transfer(sender, recipient, amount);  // all values are @stack
-        return true;  // @stack: return value
+        return true;
     }
-    
+
+    // Constructor: creates the initial resource supply and records the account
+    // allowed to mint more tokens later.
+    pub fn init(initialSupply: TokenUnit)
+    modifies totalSupply, balances[msg.sender], royal_mint
+    requires totalSupply == 0
+    requires balances[std.msg.sender()] == 0
+    ensures totalSupply == initialSupply
+    ensures balances[std.msg.sender()] == initialSupply
+    {
+        royal_mint = caller();
+        totalSupply = initialSupply;
+        @create(balances[std.msg.sender()], initialSupply);
+        log Transfer(std.constants.ZERO_ADDRESS, royal_mint, tokenValue(initialSupply));
+    }
+
+    // Read-only ERC20 metadata and views expose resource amounts as u256 ABI
+    // words where needed. They do not move, create, or destroy resources.
+    pub fn getTotalSupply() -> u256 {
+        return tokenValue(totalSupply);
+    }
+
+    pub fn name() -> string {
+        return "ExampleToken";
+    }
+
+    pub fn symbol() -> string {
+        return "EXT";
+    }
+
+    // balanceOf allows account(0) to fulfill the ERC20 standard.
+    pub fn balanceOf(account: address) -> u256 {
+        return tokenValue(balances[account]);
+    }
+
+    pub fn allowance(owner: address, spender: address) -> u256 {
+        return allowanceValue(allowances[owner][spender]);
+    }
+
+    // Transfer is a conservative resource transition: no TokenUnit is created or
+    // destroyed, only moved between two balance places.
+    pub fn transfer(recipient: NonZeroAddress, amount: TokenUnit) -> !bool | InsufficientBalance | TransferToZeroAddress
+    modifies balances[msg.sender], balances[recipient]
+    requires recipient != std.constants.ZERO_ADDRESS
+    requires balances[recipient] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    ensures totalSupply == old(totalSupply)
+    {
+        let sender: NonZeroAddress = caller();
+        try requireBalance(sender, amount);
+        @move(balances[sender], balances[recipient], amount);
+
+        log Transfer(sender, recipient, tokenValue(amount));
+        return true;
+    }
+
+    // Allowances are authorization resources in a separate domain. The ERC20
+    // amount parameter is token-denominated, then converted into AllowanceUnit.
+    // approve replaces existing authorization by destroying the current allowance
+    // and creating exactly the requested amount.
+    pub fn approve(spender: NonZeroAddress, amount: TokenUnit) -> !bool | TransferToZeroAddress
+    modifies allowances[msg.sender][spender]
+    requires spender != std.constants.ZERO_ADDRESS
+    ensures allowances[std.msg.sender()][spender] == allowanceAmount(amount)
+    {
+        let owner: NonZeroAddress = caller();
+        @destroy(allowances[owner][spender], allowances[owner][spender]);
+        @create(allowances[owner][spender], allowanceAmount(amount));
+
+        log Approval(owner, spender, tokenValue(amount));
+        return true;
+    }
+
+    // transferFrom spends authorization first, then performs the same conservative
+    // resource move as transfer. The same numeric amount is destroyed from the
+    // AllowanceUnit domain and moved in the TokenUnit domain.
+    pub fn transferFrom(sender: NonZeroAddress, recipient: NonZeroAddress, amount: TokenUnit) -> !bool | InsufficientAllowance | InsufficientBalance | TransferToZeroAddress
+    modifies allowances[sender][msg.sender], balances[sender], balances[recipient]
+    requires sender != std.constants.ZERO_ADDRESS
+    requires recipient != std.constants.ZERO_ADDRESS
+    requires balances[recipient] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    ensures totalSupply == old(totalSupply)
+    {
+        let spender: NonZeroAddress = caller();
+        try requireAllowance(sender, spender, amount);
+        try requireBalance(sender, amount);
+        @destroy(allowances[sender][spender], allowanceAmount(amount));
+        @move(balances[sender], balances[recipient], amount);
+
+        log Transfer(sender, recipient, tokenValue(amount));
+        return true;
+    }
+
+    // Minting is explicit resource creation. The @create operation introduces
+    // TokenUnit into a balance place, and totalSupply is updated in the same
+    // function so the public supply view tracks that creation.
+    pub fn mint(to: NonZeroAddress, amount: TokenUnit) -> !bool | TransferToZeroAddress
+    modifies totalSupply, balances[to]
+    requires caller() == royal_mint
+    requires to != std.constants.ZERO_ADDRESS
+    requires totalSupply <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    requires balances[to] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    ensures totalSupply == old(totalSupply) + amount
+    {
+        totalSupply += amount;
+        @create(balances[to], amount);
+        log Transfer(std.constants.ZERO_ADDRESS, to, tokenValue(amount));
+        return true;
+    }
+
+    // Burning is explicit resource destruction. The @destroy operation removes
+    // TokenUnit from the caller's balance place, and totalSupply is updated in
+    // the same function so the public supply view tracks that destruction.
+    pub fn burn(amount: TokenUnit) -> !bool | InsufficientBalance
+    modifies totalSupply, balances[msg.sender]
+    requires totalSupply >= amount
+    ensures totalSupply == old(totalSupply) - amount
+    {
+        let sender: NonZeroAddress = caller();
+        try requireBalance(sender, amount);
+        totalSupply -= amount;
+        @destroy(balances[sender], amount);
+        log Transfer(sender, std.constants.ZERO_ADDRESS, tokenValue(amount));
+        return true;
+    }
 }

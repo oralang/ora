@@ -175,12 +175,14 @@ pub const TokenType = enum {
     Increases,
     Assume,
     Havoc,
+    Inline,
     Comptime,
     As, // reserved keyword (not currently used)
     Import,
     Struct,
     Bitfield,
     Enum,
+    Resource,
     Extern,
     Trait,
     Impl,
@@ -479,6 +481,7 @@ pub const keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "increases", .Increases },
     .{ "assume", .Assume },
     .{ "havoc", .Havoc },
+    .{ "inline", .Inline },
     .{ "ghost", .Ghost },
     .{ "switch", .Switch },
     .{ "match", .Match },
@@ -489,6 +492,7 @@ pub const keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "struct", .Struct },
     .{ "bitfield", .Bitfield },
     .{ "enum", .Enum },
+    .{ "resource", .Resource },
     .{ "extern", .Extern },
     .{ "trait", .Trait },
     .{ "impl", .Impl },
@@ -600,8 +604,8 @@ pub const Lexer = struct {
     pub fn init(allocator: Allocator, source: []const u8) Lexer {
         return Lexer{
             .source = source,
-            .tokens = std.ArrayList(Token){},
-            .trivia = std.ArrayList(TriviaPiece){},
+            .tokens = std.ArrayList(Token).empty,
+            .trivia = std.ArrayList(TriviaPiece).empty,
             .start = 0,
             .current = 0,
             .line = 1,
@@ -1372,7 +1376,7 @@ pub const Lexer = struct {
 
         self.arena = std.heap.ArenaAllocator.init(self.allocator);
         self.trivia.deinit(self.allocator);
-        self.trivia = .{};
+        self.trivia = .empty;
         if (self.error_recovery) |*recovery| {
             recovery.deinit();
             self.error_recovery = null;
@@ -1489,7 +1493,7 @@ pub inline fn isWhitespace(c: u8) bool {
 pub fn isKeyword(token_type: TokenType) bool {
     if (isBuiltinTypeKeyword(token_type)) return true;
     return switch (token_type) {
-        .Contract, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .For, .Break, .Continue, .Return, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Switch, .Match, .Ghost, .Assert, .Comptime, .As, .Import, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Call, .Staticcall, .Errors, .True, .False, .Error, .Try, .Catch, .From, .To, .Forall, .Exists, .Where, .Map, .Slice => true,
+        .Contract, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .For, .Break, .Continue, .Return, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Inline, .Switch, .Match, .Ghost, .Assert, .Comptime, .As, .Import, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Call, .Staticcall, .Errors, .True, .False, .Error, .Try, .Catch, .From, .To, .Forall, .Exists, .Where, .Map, .Slice => true,
         else => false,
     };
 }

@@ -61,6 +61,7 @@ pub fn Policy(comptime Provider: type) type {
                 .unknown => true,
                 .void => position == .output,
                 .bool, .address, .string, .bytes, .fixed_bytes, .integer, .bitfield => true,
+                .resource_domain => |resource| self.supportsType(resource.carrier_type.*, position),
                 .enum_ => |named| !self.provider.enumHasPayload(named.name),
                 .refinement => |refinement| self.supportsType(refinement.base_type.*, position),
                 .array => |array| self.supportsType(array.element_type.*, position),
@@ -128,6 +129,7 @@ pub fn Policy(comptime Provider: type) type {
         pub fn supportsAbiEncode(self: *const Self, ty: Type) bool {
             return switch (ty) {
                 .bool, .address, .fixed_bytes, .bitfield, .void => true,
+                .resource_domain => |resource| self.supportsAbiEncode(resource.carrier_type.*),
                 .integer => |integer| integerSpec(integer) != null,
                 .enum_ => |named| !self.provider.enumHasPayload(named.name),
                 .string, .bytes => true,
@@ -155,6 +157,7 @@ pub fn Policy(comptime Provider: type) type {
         pub fn supportsAbiDecode(self: *const Self, ty: Type) bool {
             return switch (ty) {
                 .refinement => |refinement| !refinement_semantics.isCompileTimeOnly(refinement) and self.supportsAbiDecode(refinement.base_type.*),
+                .resource_domain => |resource| self.supportsAbiDecode(resource.carrier_type.*),
                 .slice => |slice| self.supportsAbiDecode(slice.element_type.*),
                 .array => |array| self.supportsAbiDecode(array.element_type.*),
                 .tuple => |elements| blk: {
@@ -185,6 +188,7 @@ pub fn Policy(comptime Provider: type) type {
                 .integer => |integer| if (integerSpec(integer) != null) 1 else null,
                 .enum_ => |named| if (self.provider.enumHasPayload(named.name)) null else 1,
                 .refinement => |refinement| self.staticWordCount(refinement.base_type.*),
+                .resource_domain => |resource| self.staticWordCount(resource.carrier_type.*),
                 .tuple => |elements| blk: {
                     var total: usize = 0;
                     for (elements) |element| {

@@ -108,13 +108,13 @@ pub const Graph = struct {
     /// Returns importer URIs that (transitively) depend on the given path.
     /// Returned slice must be freed by caller. Elements are borrowed from graph storage.
     pub fn collectDependents(self: *const Graph, allocator: Allocator, changed_path: []const u8) ![]const []const u8 {
-        var queue_paths = std.ArrayList([]const u8){};
+        var queue_paths = std.ArrayList([]const u8).empty;
         defer queue_paths.deinit(allocator);
 
-        var visited_paths = std.ArrayList([]const u8){};
+        var visited_paths = std.ArrayList([]const u8).empty;
         defer visited_paths.deinit(allocator);
 
-        var affected_uris = std.ArrayList([]const u8){};
+        var affected_uris = std.ArrayList([]const u8).empty;
         defer affected_uris.deinit(allocator);
 
         try queue_paths.append(allocator, changed_path);

@@ -14,6 +14,10 @@
 const std = @import("std");
 const runner = @import("runner.zig");
 
+fn exitCli(code: u8) noreturn {
+    std.process.exit(code);
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -23,12 +27,12 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
     if (args.len != 3) {
         std.debug.print("usage: conformance-one <source.ora> <spec.toml>\n", .{});
-        std.process.exit(2);
+        exitCli(2);
     }
 
     runner.runConformanceSpec(allocator, args[1], args[2]) catch |err| {
         std.debug.print("conformance-one: spec failed: {s}\n", .{@errorName(err)});
-        std.process.exit(1);
+        exitCli(1);
     };
     std.debug.print("conformance-one: ok\n", .{});
 }

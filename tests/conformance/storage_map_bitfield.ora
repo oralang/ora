@@ -9,7 +9,7 @@ contract MapBitfieldStorageSmoke {
     storage var flags: map<address, PackedFlags>;
 
     pub fn configure(account: address, mode: u8, threshold: u16) {
-        let f: PackedFlags = flags[account];
+        var f: PackedFlags = flags[account];
         f.enabled = true;
         f.locked = false;
         f.mode = mode;
@@ -18,13 +18,13 @@ contract MapBitfieldStorageSmoke {
     }
 
     pub fn set_locked(account: address, value: bool) {
-        let f: PackedFlags = flags[account];
+        var f: PackedFlags = flags[account];
         f.locked = value;
         flags[account] = f;
     }
 
     pub fn set_mode(account: address, value: u8) {
-        let f: PackedFlags = flags[account];
+        var f: PackedFlags = flags[account];
         f.mode = value;
         flags[account] = f;
     }

@@ -67,6 +67,7 @@ test "keywords: all keywords recognized" {
         .{ .source = "while", .expected = .While },
         .{ .source = "for", .expected = .For },
         .{ .source = "switch", .expected = .Switch },
+        .{ .source = "resource", .expected = .Resource },
         .{ .source = "let", .expected = .Let },
         .{ .source = "var", .expected = .Var },
     };

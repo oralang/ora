@@ -1,7 +1,7 @@
 /// Unit tests for Keccak256 (SHA3) opcode handler
 const std = @import("std");
 const testing = std.testing;
-const primitives = @import("voltaire");
+const primitives = @import("../primitives.zig");
 const GasConstants = primitives.GasConstants;
 const Hardfork = primitives.Hardfork;
 const Address = primitives.Address.Address;

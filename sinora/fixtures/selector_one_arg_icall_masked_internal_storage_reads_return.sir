@@ -1,0 +1,98 @@
+fn init:
+    entry {
+        v0 = runtime_start_offset
+        v1 = runtime_length
+        v2 = malloc v1
+        codecopy v2 v0 v1
+        return v2 v1
+    }
+
+fn set_owner:
+    entry v0 {
+        v1 = const 0x1
+        slot_config = const 0x0
+        v2 = sload slot_config
+        v3 = sload v1
+        sstore slot_config v0
+        iret
+    }
+
+fn f:
+    entry v0 -> v6 v1 {
+        v1 = const 0x20
+        v2 = const 0x1
+        icall @set_owner v0
+        v3 = iszero v2
+        v4 = iszero v3
+        v5 = and v4 v2
+        v6 = malloc v1
+        mstore256 v6 v5
+        iret
+    }
+
+fn main:
+    main_entry {
+        zero = const 0x0
+        selector_offset = const 0x4
+        word_size = const 0x20
+        min_cdsize_1arg = const 0x23
+        arg1_offset = const 0x24
+        min_cdsize_2args = const 0x43
+        arg2_offset = const 0x44
+        min_cdsize_3args = const 0x63
+        selector_shift = const 0xE0
+        v0 = codesize
+        v1 = const 0x20
+        v2 = add v0 v1
+        v3 = mload256 word_size
+        v4 = lt v3 v2
+        sel_zero = const 0x0
+        sel_mask = sub sel_zero v4
+        sel_t = and sel_mask v2
+        sel_inv = not sel_mask
+        sel_f = and sel_inv v3
+        v5 = or sel_t sel_f
+        mstore256 word_size v5
+        cv = callvalue
+        cv_nonzero = iszero cv
+        => cv_nonzero ? @load_selector : @revert_error
+    }
+    load_selector {
+        zero_0 = const 0x0
+        selector_shift_0 = const 0xE0
+        selector_word = calldataload zero_0
+        selector = shr selector_shift_0 selector_word
+        switch selector {
+        0xFC68521A => @f_
+        default => @revert_error
+    }
+    }
+    revert_error {
+        zero_1 = const 0x0
+        revert zero_1 zero_1
+    }
+    f_ {
+        cdsize_f = calldatasize
+        min_cdsize_1arg_0 = const 0x23
+        valid_f = lt min_cdsize_1arg_0 cdsize_f
+        => valid_f ? @bb0 : @revert_error
+    }
+    bb0 {
+        selector_offset_0 = const 0x4
+        a_f = calldataload selector_offset_0
+        v6 = large_const 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+        v7 = and a_f v6
+        v8 = eq a_f v7
+        => v8 ? @f_exec : @abi_decode_revert_5
+    }
+    f_exec {
+        v9 v10 = icall @f v7
+        return v9 v10
+    }
+    abi_decode_revert_5 {
+        word_size_0 = const 0x20
+        v11 = const 0x5
+        v12 = sallocany 0x20
+        mstore256 v12 v11
+        revert v12 word_size_0
+    }

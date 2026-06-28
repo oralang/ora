@@ -1,0 +1,7 @@
+base	candidate	category	keys	base_total	candidate_total	delta	pct
+debug	release	bytecode_bytes	87	272678	143998	-128680	-47.1912
+debug	release	deploy_gas	88	53959468	28706301	-25253167	-46.8003
+debug	release	runtime_gas	542	9410520	8113098	-1297422	-13.7869
+release	debug	bytecode_bytes	87	143998	272678	128680	89.3624
+release	debug	deploy_gas	88	28706301	53959468	25253167	87.9708
+release	debug	runtime_gas	542	8113098	9410520	1297422	15.9917

@@ -1,0 +1,11 @@
+contract ComptimeForRuntimeBound {
+    pub fn run(input: u256) -> u256 {
+        var total: u256 = 0;
+        comptime {
+            for (input) |i| {
+                total = total + i;
+            }
+        }
+        return total;
+    }
+}

@@ -1,0 +1,1 @@
+expect_error = "is not covered by this function's `modifies` clause"

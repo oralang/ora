@@ -1,0 +1,7 @@
+resource TokenUnit = u256;
+
+contract ResourceCreateNonPlace {
+    pub fn bad(amount: TokenUnit) {
+        @create(amount, amount);
+    }
+}

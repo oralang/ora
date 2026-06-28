@@ -41,7 +41,7 @@ test "lsp call hierarchy calls: builds incoming calls from workspace entry edges
     const arena = arena_state.allocator();
     const converter = PassthroughRanges{ .arena = arena };
 
-    var calls = std.ArrayList(types.CallHierarchyIncomingCall){};
+    var calls = std.ArrayList(types.CallHierarchyIncomingCall).empty;
     try call_hierarchy_calls.appendIncomingMatches(arena, &calls, "file:///main.ora", &entry, "helper", &converter);
 
     try std.testing.expectEqual(@as(usize, 1), calls.items.len);
@@ -66,7 +66,7 @@ test "lsp call hierarchy calls: groups incoming ranges by caller" {
     const arena = arena_state.allocator();
     const converter = PassthroughRanges{ .arena = arena };
 
-    var calls = std.ArrayList(types.CallHierarchyIncomingCall){};
+    var calls = std.ArrayList(types.CallHierarchyIncomingCall).empty;
     try call_hierarchy_calls.appendIncomingMatches(arena, &calls, "file:///main.ora", &entry, "helper", &converter);
 
     try std.testing.expectEqual(@as(usize, 1), calls.items.len);
@@ -109,7 +109,7 @@ test "lsp call hierarchy calls: filters incoming imported calls by target path a
     const arena = arena_state.allocator();
     const converter = PassthroughRanges{ .arena = arena };
 
-    var calls = std.ArrayList(types.CallHierarchyIncomingCall){};
+    var calls = std.ArrayList(types.CallHierarchyIncomingCall).empty;
     try call_hierarchy_calls.appendIncomingImportedMatches(
         arena,
         &calls,

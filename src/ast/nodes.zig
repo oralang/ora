@@ -603,6 +603,7 @@ pub const Item = union(enum) {
     Struct: StructItem,
     Bitfield: BitfieldItem,
     Enum: EnumItem,
+    Resource: ResourceItem,
     Trait: TraitItem,
     Impl: ImplItem,
     TypeAlias: TypeAliasItem,
@@ -635,6 +636,7 @@ pub const FunctionItem = struct {
     name: []const u8,
     is_ghost: bool = false,
     is_comptime: bool = false,
+    is_inline: bool = false,
     is_generic: bool = false,
     abi_decode_permissive: bool = false,
     visibility: Visibility,
@@ -700,6 +702,12 @@ pub const TypeAliasItem = struct {
     is_generic: bool = false,
     template_parameters: []const Parameter,
     target_type: TypeExprId,
+};
+
+pub const ResourceItem = struct {
+    range: source.TextRange,
+    name: []const u8,
+    carrier_type: TypeExprId,
 };
 
 pub const LogDeclItem = struct {

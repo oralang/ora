@@ -37,9 +37,7 @@
 // CHECK-NEXT:     %2 = sir.and %1 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/regions/effects/storage_write_effect.ora":33:13)))
 // CHECK-NEXT:     %3 = sir.bitcast %2 : !sir.u256 : i1 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/regions/effects/storage_write_effect.ora":33:13)))
 // CHECK-NEXT:     %4 = sir.bitcast %3 : i1 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/regions/effects/storage_write_effect.ora":33:9)))
-// CHECK-NEXT:     %5 = sir.iszero %4 : !sir.u256 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/regions/effects/storage_write_effect.ora":33:9)))
-// CHECK-NEXT:     %6 = sir.iszero %5 : !sir.u256 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/regions/effects/storage_write_effect.ora":33:9)))
-// CHECK-NEXT:     sir.cond_br %6 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/regions/effects/storage_write_effect.ora":33:9)))
+// CHECK-NEXT:     sir.cond_br %4 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/regions/effects/storage_write_effect.ora":33:9)))
 // CHECK-NEXT:   ^bb1:  // pred: ^bb0
 // CHECK-NEXT:     sir.sstore %c0 : !sir.u256, %arg0 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/regions/effects/storage_write_effect.ora":34:13)))
 // CHECK-NEXT:     sir.br ^bb3 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/regions/effects/storage_write_effect.ora":33:9)))

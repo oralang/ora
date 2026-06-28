@@ -214,35 +214,35 @@ const testing = std.testing;
 
 test "writeAbiWord: address renders as 0x prefix" {
     var buf: [128]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var writer: std.Io.Writer = .fixed(&buf);
     var word: [32]u8 = .{0} ** 32;
     word[12] = 0xab;
     word[31] = 0xcd;
-    try writeAbiWord(stream.writer(), "address", &word);
-    try testing.expect(std.mem.startsWith(u8, stream.getWritten(), "0x"));
+    try writeAbiWord(&writer, "address", &word);
+    try testing.expect(std.mem.startsWith(u8, buf[0..writer.end], "0x"));
 }
 
 test "writeAbiWord: bool" {
     var buf: [16]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var writer: std.Io.Writer = .fixed(&buf);
     const false_word: [32]u8 = .{0} ** 32;
-    try writeAbiWord(stream.writer(), "bool", &false_word);
-    try testing.expectEqualStrings("false", stream.getWritten());
+    try writeAbiWord(&writer, "bool", &false_word);
+    try testing.expectEqualStrings("false", buf[0..writer.end]);
 
-    stream.reset();
+    writer = .fixed(&buf);
     var true_word: [32]u8 = .{0} ** 32;
     true_word[31] = 1;
-    try writeAbiWord(stream.writer(), "bool", &true_word);
-    try testing.expectEqualStrings("true", stream.getWritten());
+    try writeAbiWord(&writer, "bool", &true_word);
+    try testing.expectEqualStrings("true", buf[0..writer.end]);
 }
 
 test "writeAbiWord: uint256 decimal" {
     var buf: [128]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var writer: std.Io.Writer = .fixed(&buf);
     var word: [32]u8 = .{0} ** 32;
     word[31] = 42;
-    try writeAbiWord(stream.writer(), "uint256", &word);
-    try testing.expectEqualStrings("42", stream.getWritten());
+    try writeAbiWord(&writer, "uint256", &word);
+    try testing.expectEqualStrings("42", buf[0..writer.end]);
 }
 
 test "writeU256BE / readU256BE round-trip" {

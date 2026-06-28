@@ -7,6 +7,7 @@ pub const SyntaxKind = enum {
     StructItem,
     BitfieldItem,
     EnumItem,
+    ResourceItem,
     TraitItem,
     ImplItem,
     TypeAliasItem,

@@ -23,6 +23,8 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <optional>
+
 #define DEBUG_TYPE "ora-to-sir"
 
 using namespace mlir;
@@ -101,6 +103,15 @@ namespace {
     {
         MapHashKey k = makeMapHashKey(funcOp, mapSlot, key);
         cache.hashes[k] = hash;
+    }
+
+    static void emitEmptyRevert(PatternRewriter &rewriter, Location loc)
+    {
+        auto *ctx = rewriter.getContext();
+        auto ptrType = sir::PtrType::get(ctx, /*addrSpace=*/1);
+        Value zero = constU256(rewriter, loc, 0);
+        Value zeroPtr = rewriter.create<sir::BitcastOp>(loc, ptrType, zero);
+        rewriter.create<sir::RevertOp>(loc, zeroPtr, zero);
     }
 } // namespace
 
@@ -1884,6 +1895,195 @@ LogicalResult ConvertSStoreOp::matchAndRewrite(
     return success();
 }
 
+LogicalResult ConvertStorageDeriveOp::matchAndRewrite(
+    ora::StorageDeriveOp op,
+    typename ora::StorageDeriveOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+
+    auto namespaceHashAttr = llvm::dyn_cast<IntegerAttr>(op.getNamespaceHash());
+    if (!namespaceHashAttr)
+        return rewriter.notifyMatchFailure(op, "storage.derive missing integer namespace_hash");
+
+    ValueRange keys = adaptor.getKeys();
+
+    // Domain-separate computed storage from all other physical storage layouts.
+    // The preimage is always:
+    //   [ORA_CST_V1, key_count, namespace_hash, key0, key1, ...]
+    // including the zero-key case. Returning namespace_hash directly would put
+    // computed storage in the same flat slot space as ordinary sstore globals.
+    constexpr uint64_t kComputedStorageDomainPrefix = 0x4f72614353545631ULL; // "OraCSTV1"
+    uint64_t wordCount = 3 + static_cast<uint64_t>(keys.size());
+    Value byteLen = constU256(rewriter, loc, wordCount * 32);
+    Value buffer = rewriter.create<sir::MallocOp>(loc, ptrType, byteLen);
+    rewriter.create<sir::StoreOp>(loc, buffer, constU256(rewriter, loc, kComputedStorageDomainPrefix));
+    Value keyCountPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, buffer, constU256(rewriter, loc, 32));
+    rewriter.create<sir::StoreOp>(loc, keyCountPtr, constU256(rewriter, loc, static_cast<uint64_t>(keys.size())));
+    Value namespacePtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, buffer, constU256(rewriter, loc, 64));
+    rewriter.create<sir::StoreOp>(loc, namespacePtr, constU256(rewriter, loc, namespaceHashAttr));
+
+    for (auto indexedKey : llvm::enumerate(keys))
+    {
+        Value keyWord = ensureU256(rewriter, loc, op.getOperation(), indexedKey.value(), "storage.derive key");
+        if (!keyWord)
+            return failure();
+        Value offset = constU256(rewriter, loc, (indexedKey.index() + 3) * 32);
+        Value ptr = rewriter.create<sir::AddPtrOp>(loc, ptrType, buffer, offset);
+        rewriter.create<sir::StoreOp>(loc, ptr, keyWord);
+    }
+
+    Value slot = rewriter.create<sir::KeccakOp>(loc, u256Type, buffer, byteLen);
+    rewriter.replaceOp(op, slot);
+    return success();
+}
+
+LogicalResult ConvertStorageWordLoadOp::matchAndRewrite(
+    ora::StorageWordLoadOp op,
+    typename ora::StorageWordLoadOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+
+    Value slot = ensureU256(rewriter, loc, op.getOperation(), adaptor.getSlot(), "storage.word_load slot");
+    if (!slot)
+        return failure();
+    Value offset = ensureU256(rewriter, loc, op.getOperation(), adaptor.getOffset(), "storage.word_load offset");
+    if (!offset)
+        return failure();
+
+    Value physicalSlot = rewriter.create<sir::AddOp>(loc, u256Type, slot, offset);
+    Value wrapped = rewriter.create<sir::LtOp>(loc, u256Type, physicalSlot, slot);
+    Value notWrapped = rewriter.create<sir::IsZeroOp>(loc, u256Type, wrapped);
+
+    Block *parentBlock = op->getBlock();
+    Region *parentRegion = parentBlock->getParent();
+    auto afterBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
+    auto okBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
+    auto revertBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
+    auto resultArg = afterBlock->addArgument(u256Type, loc);
+    op.getResult().replaceAllUsesWith(resultArg);
+    rewriter.eraseOp(op);
+
+    rewriter.setInsertionPointToEnd(parentBlock);
+    rewriter.create<sir::CondBrOp>(loc, notWrapped, ValueRange{}, ValueRange{}, okBlock, revertBlock);
+
+    rewriter.setInsertionPointToStart(okBlock);
+    Value loaded = rewriter.create<sir::SLoadOp>(loc, u256Type, physicalSlot);
+    rewriter.create<sir::BrOp>(loc, ValueRange{loaded}, afterBlock);
+
+    rewriter.setInsertionPointToStart(revertBlock);
+    emitEmptyRevert(rewriter, loc);
+    return success();
+}
+
+LogicalResult ConvertStorageWordStoreOp::matchAndRewrite(
+    ora::StorageWordStoreOp op,
+    typename ora::StorageWordStoreOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+
+    Value slot = ensureU256(rewriter, loc, op.getOperation(), adaptor.getSlot(), "storage.word_store slot");
+    if (!slot)
+        return failure();
+    Value offset = ensureU256(rewriter, loc, op.getOperation(), adaptor.getOffset(), "storage.word_store offset");
+    if (!offset)
+        return failure();
+    Value value = ensureU256(rewriter, loc, op.getOperation(), adaptor.getValue(), "storage.word_store value");
+    if (!value)
+        return failure();
+
+    Value physicalSlot = rewriter.create<sir::AddOp>(loc, u256Type, slot, offset);
+    Value wrapped = rewriter.create<sir::LtOp>(loc, u256Type, physicalSlot, slot);
+    Value notWrapped = rewriter.create<sir::IsZeroOp>(loc, u256Type, wrapped);
+
+    Block *parentBlock = op->getBlock();
+    Region *parentRegion = parentBlock->getParent();
+    auto afterBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
+    auto okBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
+    auto revertBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
+    rewriter.eraseOp(op);
+
+    rewriter.setInsertionPointToEnd(parentBlock);
+    rewriter.create<sir::CondBrOp>(loc, notWrapped, ValueRange{}, ValueRange{}, okBlock, revertBlock);
+
+    rewriter.setInsertionPointToStart(okBlock);
+    rewriter.create<sir::SStoreOp>(loc, physicalSlot, value);
+    rewriter.create<sir::BrOp>(loc, ValueRange{}, afterBlock);
+
+    rewriter.setInsertionPointToStart(revertBlock);
+    emitEmptyRevert(rewriter, loc);
+    return success();
+}
+
+LogicalResult ConvertStorageRangeEraseOp::matchAndRewrite(
+    ora::StorageRangeEraseOp op,
+    typename ora::StorageRangeEraseOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+
+    Value slot = ensureU256(rewriter, loc, op.getOperation(), adaptor.getSlot(), "storage.range_erase slot");
+    if (!slot)
+        return failure();
+    auto wordCountAttr = op->getAttrOfType<IntegerAttr>("word_count");
+    if (!wordCountAttr)
+        return rewriter.notifyMatchFailure(op, "storage.range_erase missing bounded word_count attribute");
+    if (wordCountAttr.getValue().isNegative())
+        return rewriter.notifyMatchFailure(op, "storage.range_erase word_count must be non-negative");
+    if (wordCountAttr.getValue().isZero())
+    {
+        rewriter.eraseOp(op);
+        return success();
+    }
+    Value len = constU256(rewriter, loc, wordCountAttr);
+
+    Block *parentBlock = op->getBlock();
+    Region *parentRegion = parentBlock->getParent();
+    auto afterBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
+    auto condBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256Type}, {loc});
+    auto bodyBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256Type}, {loc});
+    auto revertBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
+
+    rewriter.setInsertionPointToEnd(parentBlock);
+    Value zero = constU256(rewriter, loc, 0);
+    Value maxOffset = constU256(rewriter, loc, wordCountAttr.getValue() - 1);
+    Value lastSlot = rewriter.create<sir::AddOp>(loc, u256Type, slot, maxOffset);
+    Value wrapped = rewriter.create<sir::LtOp>(loc, u256Type, lastSlot, slot);
+    Value notWrapped = rewriter.create<sir::IsZeroOp>(loc, u256Type, wrapped);
+    rewriter.create<sir::CondBrOp>(loc, notWrapped, ValueRange{zero}, ValueRange{}, condBlock, revertBlock);
+
+    rewriter.setInsertionPointToStart(revertBlock);
+    emitEmptyRevert(rewriter, loc);
+
+    rewriter.setInsertionPointToStart(condBlock);
+    Value iv = condBlock->getArgument(0);
+    Value hasElement = rewriter.create<sir::LtOp>(loc, u256Type, iv, len);
+    rewriter.create<sir::CondBrOp>(loc, hasElement, ValueRange{iv}, ValueRange{}, bodyBlock, afterBlock);
+
+    rewriter.setInsertionPointToStart(bodyBlock);
+    Value bodyIv = bodyBlock->getArgument(0);
+    Value physicalSlot = rewriter.create<sir::AddOp>(loc, u256Type, slot, bodyIv);
+    Value storeZero = constU256(rewriter, loc, 0);
+    rewriter.create<sir::SStoreOp>(loc, physicalSlot, storeZero);
+    Value one = constU256(rewriter, loc, 1);
+    Value nextIv = rewriter.create<sir::AddOp>(loc, u256Type, bodyIv, one);
+    rewriter.create<sir::BrOp>(loc, ValueRange{nextIv}, condBlock);
+
+    rewriter.eraseOp(op);
+    return success();
+}
+
 // -----------------------------------------------------------------------------
 // Lower ora.tload → sir.tload
 // -----------------------------------------------------------------------------
@@ -1948,7 +2148,7 @@ LogicalResult ConvertTStoreOp::matchAndRewrite(
 }
 
 // Lock/unlock/guard use a tx-scoped "locked set" stored in TSTORE at key = LOCK_PREFIX + slot.
-// Sensei text has no tstore.lock/unlock/guard; we expand to const/add/tstore/tload/cond_br/revert.
+// Plank SIR text has no tstore.lock/unlock/guard; we expand to const/add/tstore/tload/cond_br/revert.
 constexpr unsigned kLockPrefixBit = 255;
 static llvm::APInt getLockPrefixAPInt()
 {
@@ -1978,11 +2178,23 @@ static Value deriveMapElementSlot(
     Value key,
     Value mapSlot,
     Type u256Type,
-    Type ptrType)
+    Type ptrType,
+    MapHashCache *mapHashCache = nullptr,
+    Operation *funcOp = nullptr,
+    Operation *anchor = nullptr)
 {
     Value keyU256 = key;
     if (!llvm::isa<sir::U256Type>(keyU256.getType()))
         keyU256 = rewriter.create<sir::BitcastOp>(loc, u256Type, keyU256);
+
+    if (mapHashCache)
+    {
+        Operation *cacheFunc = funcOp;
+        if (!cacheFunc && anchor)
+            cacheFunc = anchor->getParentOfType<func::FuncOp>();
+        if (Value cached = lookupCachedMapHash(*mapHashCache, cacheFunc, anchor, mapSlot, keyU256))
+            return cached;
+    }
 
     Value size64 = constU256(rewriter, loc, 64);
     Value slotKey = rewriter.create<sir::MallocOp>(loc, ptrType, size64);
@@ -1992,7 +2204,557 @@ static Value deriveMapElementSlot(
     Value slotKeyPlus32 = rewriter.create<sir::AddPtrOp>(loc, ptrType, slotKey, offset32);
     rewriter.create<sir::StoreOp>(loc, slotKeyPlus32, mapSlot);
 
-    return rewriter.create<sir::KeccakOp>(loc, u256Type, slotKey, size64);
+    Value hash = rewriter.create<sir::KeccakOp>(loc, u256Type, slotKey, size64);
+    if (mapHashCache)
+    {
+        Operation *cacheFunc = funcOp;
+        if (!cacheFunc && anchor)
+            cacheFunc = anchor->getParentOfType<func::FuncOp>();
+        storeCachedMapHash(*mapHashCache, cacheFunc, mapSlot, keyU256, hash);
+    }
+    return hash;
+}
+
+static llvm::StringRef getGlobalNameFromMapOperand(mlir::Value mapOperand, mlir::Operation *currentOp);
+
+struct ResourceRootRef
+{
+    llvm::StringRef name;
+    bool transient = false;
+};
+
+struct ResourcePlaceSlot
+{
+    Value slot;
+    bool transient = false;
+};
+
+static std::optional<ResourceRootRef> getResourceRootFromPlaceOperand(mlir::Value placeOperand)
+{
+    mlir::Operation *definingOp = placeOperand.getDefiningOp();
+    if (!definingOp)
+        return std::nullopt;
+
+    if (auto sloadOp = llvm::dyn_cast<ora::SLoadOp>(definingOp))
+        return ResourceRootRef{sloadOp.getGlobalName(), false};
+
+    if (auto tloadOp = llvm::dyn_cast<ora::TLoadOp>(definingOp))
+    {
+        auto keyAttr = tloadOp->getAttrOfType<StringAttr>("key");
+        if (!keyAttr)
+            return std::nullopt;
+        return ResourceRootRef{keyAttr.getValue(), true};
+    }
+
+    if (auto extractOp = llvm::dyn_cast<ora::StructFieldExtractOp>(definingOp))
+        return getResourceRootFromPlaceOperand(extractOp.getStructValue());
+
+    if (auto castOp = llvm::dyn_cast<mlir::UnrealizedConversionCastOp>(definingOp))
+    {
+        auto inputs = castOp.getInputs();
+        if (inputs.size() == 1)
+            return getResourceRootFromPlaceOperand(inputs[0]);
+    }
+
+    return std::nullopt;
+}
+
+static FailureOr<ResourcePlaceSlot> deriveResourceRootSlot(
+    Operation *op,
+    ResourceRootRef root,
+    ConversionPatternRewriter &rewriter)
+{
+    if (root.name.empty())
+        return rewriter.notifyMatchFailure(op, "could not extract resource place root name");
+
+    auto slotIndex = computeGlobalSlot(root.name, op);
+    if (!slotIndex)
+        return rewriter.notifyMatchFailure(op, "missing ora.slot_index for resource place root");
+
+    Value slot = findOrCreateSlotConstant(op, *slotIndex, root.name, rewriter);
+    if (auto slotOp = slot.getDefiningOp<sir::ConstOp>())
+        setResultName(slotOp, 0, ("slot_" + root.name).str());
+
+    return ResourcePlaceSlot{slot, root.transient};
+}
+
+static FailureOr<ResourcePlaceSlot> deriveDirectResourceProjectionSlot(
+    Operation *op,
+    Value originalPlace,
+    ConversionPatternRewriter &rewriter)
+{
+    Operation *definingOp = originalPlace.getDefiningOp();
+    if (!definingOp)
+        return rewriter.notifyMatchFailure(op, "resource direct place has no defining storage operation");
+
+    if (auto root = getResourceRootFromPlaceOperand(originalPlace))
+    {
+        if (llvm::isa<ora::SLoadOp, ora::TLoadOp>(definingOp))
+            return deriveResourceRootSlot(op, *root, rewriter);
+    }
+
+    if (auto extractOp = llvm::dyn_cast<ora::StructFieldExtractOp>(definingOp))
+    {
+        FailureOr<ResourcePlaceSlot> baseSlot = deriveDirectResourceProjectionSlot(op, extractOp.getStructValue(), rewriter);
+        if (failed(baseSlot))
+            return failure();
+
+        auto structType = llvm::dyn_cast<ora::StructType>(extractOp.getStructValue().getType());
+        if (!structType)
+            return rewriter.notifyMatchFailure(op, "resource struct-field place base is not a named storage struct");
+
+        size_t fieldIndex = 0;
+        auto fieldOffset = getStructFieldStorageOffset(op, structType, extractOp.getFieldName(), &fieldIndex);
+        if (!fieldOffset)
+            return rewriter.notifyMatchFailure(op, "unknown resource struct-field place");
+
+        Value fieldSlot = addStorageWordOffset(op->getLoc(), baseSlot->slot, *fieldOffset, rewriter);
+        return ResourcePlaceSlot{fieldSlot, baseSlot->transient};
+    }
+
+    if (auto castOp = llvm::dyn_cast<mlir::UnrealizedConversionCastOp>(definingOp))
+    {
+        auto inputs = castOp.getInputs();
+        if (inputs.size() == 1)
+            return deriveDirectResourceProjectionSlot(op, inputs[0], rewriter);
+    }
+
+    return rewriter.notifyMatchFailure(op, "resource direct place is not a storage root or struct-field projection");
+}
+
+static bool isSupportedResourceCarrier(Type type)
+{
+    if (auto oraInt = llvm::dyn_cast<ora::IntegerType>(type))
+        return oraInt.getWidth() == 256;
+    if (auto builtinInt = llvm::dyn_cast<mlir::IntegerType>(type))
+        return builtinInt.getWidth() == 256;
+    return false;
+}
+
+static bool isSignedResourceCarrier(Type type)
+{
+    if (auto oraInt = llvm::dyn_cast<ora::IntegerType>(type))
+        return oraInt.getIsSigned();
+    if (auto builtinInt = llvm::dyn_cast<mlir::IntegerType>(type))
+        return builtinInt.isSigned();
+    return false;
+}
+
+static bool isSignedResourceCarrier(Operation *op, Type type)
+{
+    if (auto signedAttr = op->getAttrOfType<BoolAttr>("carrier_signed"))
+        return signedAttr.getValue();
+    return isSignedResourceCarrier(type);
+}
+
+static bool resourceRuntimeChecksProved(Operation *op)
+{
+    if (auto attr = op->getAttrOfType<BoolAttr>("ora.resource_runtime_checks_proved"))
+        return attr.getValue();
+    return false;
+}
+
+static Block *emitResourceRevertUnless(Location loc, ConversionPatternRewriter &rewriter, Value condition)
+{
+    Block *guardBlock = rewriter.getInsertionBlock();
+    Region *parentRegion = guardBlock->getParent();
+    Block *afterBlock = rewriter.splitBlock(guardBlock, rewriter.getInsertionPoint());
+
+    Block *revertBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
+    rewriter.setInsertionPointToStart(revertBlock);
+    emitEmptyRevert(rewriter, loc);
+
+    rewriter.setInsertionPointToEnd(guardBlock);
+    rewriter.create<sir::CondBrOp>(loc, condition, ValueRange{}, ValueRange{}, afterBlock, revertBlock);
+    rewriter.setInsertionPointToStart(afterBlock);
+    return afterBlock;
+}
+
+static void emitResourceUnsignedBalanceGuard(
+    Location loc,
+    ConversionPatternRewriter &rewriter,
+    Value current,
+    Value amount,
+    Type u256Type)
+{
+    Value underflow = rewriter.create<sir::LtOp>(loc, u256Type, current, amount);
+    Value ok = rewriter.create<sir::IsZeroOp>(loc, u256Type, underflow);
+    emitResourceRevertUnless(loc, rewriter, ok);
+}
+
+static void emitResourceUnsignedAddGuard(
+    Location loc,
+    ConversionPatternRewriter &rewriter,
+    Value updated,
+    Value previous,
+    Type u256Type)
+{
+    Value overflow = rewriter.create<sir::LtOp>(loc, u256Type, updated, previous);
+    Value ok = rewriter.create<sir::IsZeroOp>(loc, u256Type, overflow);
+    emitResourceRevertUnless(loc, rewriter, ok);
+}
+
+static void emitResourceSignedNonNegativeGuard(
+    Location loc,
+    ConversionPatternRewriter &rewriter,
+    Value amount,
+    Type u256Type)
+{
+    Value zero = constU256(rewriter, loc, 0);
+    Value negative = rewriter.create<sir::SLtOp>(loc, u256Type, amount, zero);
+    Value ok = rewriter.create<sir::IsZeroOp>(loc, u256Type, negative);
+    emitResourceRevertUnless(loc, rewriter, ok);
+}
+
+static void emitResourceSignedSubGuard(
+    Location loc,
+    ConversionPatternRewriter &rewriter,
+    Value updated,
+    Value previous,
+    Type u256Type)
+{
+    Value underflow = rewriter.create<sir::SGtOp>(loc, u256Type, updated, previous);
+    Value ok = rewriter.create<sir::IsZeroOp>(loc, u256Type, underflow);
+    emitResourceRevertUnless(loc, rewriter, ok);
+}
+
+static void emitResourceSignedAddGuard(
+    Location loc,
+    ConversionPatternRewriter &rewriter,
+    Value updated,
+    Value previous,
+    Type u256Type)
+{
+    Value overflow = rewriter.create<sir::SLtOp>(loc, u256Type, updated, previous);
+    Value ok = rewriter.create<sir::IsZeroOp>(loc, u256Type, overflow);
+    emitResourceRevertUnless(loc, rewriter, ok);
+}
+
+static FailureOr<ResourcePlaceSlot> deriveResourcePlaceSlot(
+    Operation *op,
+    OperandRange originalPlace,
+    ValueRange convertedPlace,
+    Type carrierType,
+    MapHashCache *mapHashCache,
+    ConversionPatternRewriter &rewriter)
+{
+    if (originalPlace.size() != convertedPlace.size() || originalPlace.empty())
+        return rewriter.notifyMatchFailure(op, "resource place must be a storage root or a map root plus at least one key");
+
+    auto loc = op->getLoc();
+    auto ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+
+    if (originalPlace.size() == 1)
+    {
+        if (originalPlace.front().getType() != carrierType)
+            return rewriter.notifyMatchFailure(op, "direct resource place type does not match carrier type");
+        return deriveDirectResourceProjectionSlot(op, originalPlace.front(), rewriter);
+    }
+
+    auto root = getResourceRootFromPlaceOperand(originalPlace.front());
+    if (!root || root->name.empty())
+        return rewriter.notifyMatchFailure(op, "could not extract resource place root name");
+
+    FailureOr<ResourcePlaceSlot> rootSlot = deriveResourceRootSlot(op, *root, rewriter);
+    if (failed(rootSlot))
+        return failure();
+    Value mapSlot = rootSlot->slot;
+
+    auto mapType = llvm::dyn_cast<ora::MapType>(originalPlace.front().getType());
+    if (!mapType)
+        return rewriter.notifyMatchFailure(op, "resource place root is not a map");
+
+    Value slot = mapSlot;
+    for (unsigned i = 1; i < originalPlace.size(); ++i)
+    {
+        Type originalKeyType = mapType.getKeyType();
+        Value key = convertedPlace[i];
+        FailureOr<Value> materializedKey = materializeStorageMapKey(op, key, originalKeyType, rewriter, "resource place key");
+        if (failed(materializedKey))
+            return failure();
+
+        slot = deriveMapElementSlot(
+            loc,
+            rewriter,
+            *materializedKey,
+            slot,
+            u256Type,
+            ptrType,
+            mapHashCache,
+            op->getParentOfType<func::FuncOp>(),
+            op);
+        if (!root->name.empty() && i == 1)
+        {
+            if (auto hashOp = slot.getDefiningOp())
+                setResultName(hashOp, 0, ("hash_" + root->name).str());
+        }
+
+        Type valueType = mapType.getValueType();
+        if (i + 1 < originalPlace.size())
+        {
+            mapType = llvm::dyn_cast<ora::MapType>(valueType);
+            if (!mapType)
+                return rewriter.notifyMatchFailure(op, "resource place has extra keys after scalar map value");
+        }
+    }
+
+    return ResourcePlaceSlot{slot, rootSlot->transient};
+}
+
+static bool resourcePlacesHaveDistinctRoots(
+    OperandRange sourcePlace,
+    OperandRange destinationPlace)
+{
+    if (sourcePlace.empty() || destinationPlace.empty())
+        return false;
+
+    auto sourceRoot = getResourceRootFromPlaceOperand(sourcePlace.front());
+    auto destinationRoot = getResourceRootFromPlaceOperand(destinationPlace.front());
+    if (!sourceRoot || !destinationRoot)
+        return false;
+    return sourceRoot->transient != destinationRoot->transient || sourceRoot->name != destinationRoot->name;
+}
+
+static LogicalResult lowerResourceCreateOrDestroy(
+    Operation *op,
+    OperandRange originalPlace,
+    ValueRange convertedPlace,
+    Value amount,
+    Type carrierType,
+    bool isCreate,
+    MapHashCache *mapHashCache,
+    ConversionPatternRewriter &rewriter)
+{
+    if (!isSupportedResourceCarrier(carrierType))
+        return rewriter.notifyMatchFailure(op, "resource lowering currently supports only 256-bit integer carriers");
+
+    auto loc = op->getLoc();
+    auto ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    const bool isSigned = isSignedResourceCarrier(op, carrierType);
+    const bool skipRuntimeGuards = resourceRuntimeChecksProved(op);
+
+    Value amountU256 = ensureU256(rewriter, loc, op, amount, "resource amount");
+    if (!amountU256)
+        return failure();
+
+    FailureOr<ResourcePlaceSlot> slot = deriveResourcePlaceSlot(op, originalPlace, convertedPlace, carrierType, mapHashCache, rewriter);
+    if (failed(slot))
+        return failure();
+
+    rewriter.setInsertionPoint(op);
+    Value current = slot->transient
+                        ? rewriter.create<sir::TLoadOp>(loc, u256Type, slot->slot).getResult()
+                        : rewriter.create<sir::SLoadOp>(loc, u256Type, slot->slot).getResult();
+    if (isSigned && !skipRuntimeGuards)
+        emitResourceSignedNonNegativeGuard(loc, rewriter, amountU256, u256Type);
+    if (isCreate)
+    {
+        Value updated = rewriter.create<sir::AddOp>(loc, u256Type, current, amountU256);
+        if (!skipRuntimeGuards)
+        {
+            if (isSigned)
+                emitResourceSignedAddGuard(loc, rewriter, updated, current, u256Type);
+            else
+                emitResourceUnsignedAddGuard(loc, rewriter, updated, current, u256Type);
+        }
+        if (slot->transient)
+            rewriter.create<sir::TStoreOp>(loc, slot->slot, updated);
+        else
+            rewriter.create<sir::SStoreOp>(loc, slot->slot, updated);
+    }
+    else
+    {
+        Value updated = rewriter.create<sir::SubOp>(loc, u256Type, current, amountU256);
+        if (!skipRuntimeGuards)
+        {
+            if (isSigned)
+                emitResourceSignedSubGuard(loc, rewriter, updated, current, u256Type);
+            else
+                emitResourceUnsignedBalanceGuard(loc, rewriter, current, amountU256, u256Type);
+        }
+        if (slot->transient)
+            rewriter.create<sir::TStoreOp>(loc, slot->slot, updated);
+        else
+            rewriter.create<sir::SStoreOp>(loc, slot->slot, updated);
+    }
+
+    rewriter.eraseOp(op);
+    return success();
+}
+
+LogicalResult ConvertResourceCreateOp::matchAndRewrite(
+    ora::CreateOp op,
+    typename ora::CreateOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    return lowerResourceCreateOrDestroy(
+        op.getOperation(),
+        op.getPlace(),
+        adaptor.getPlace(),
+        adaptor.getAmount(),
+        op.getCarrierType(),
+        /*isCreate=*/true,
+        mapHashCache,
+        rewriter);
+}
+
+LogicalResult ConvertResourceDestroyOp::matchAndRewrite(
+    ora::DestroyOp op,
+    typename ora::DestroyOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    return lowerResourceCreateOrDestroy(
+        op.getOperation(),
+        op.getPlace(),
+        adaptor.getPlace(),
+        adaptor.getAmount(),
+        op.getCarrierType(),
+        /*isCreate=*/false,
+        mapHashCache,
+        rewriter);
+}
+
+static void emitResourceMoveSamePlace(
+    Location loc,
+    ConversionPatternRewriter &rewriter,
+    ResourcePlaceSlot place,
+    Value amount,
+    Type u256Type,
+    bool isSigned,
+    bool skipRuntimeGuards,
+    Block *mergeBlock)
+{
+    if (skipRuntimeGuards)
+    {
+        if (mergeBlock)
+            rewriter.create<sir::BrOp>(loc, ValueRange{}, mergeBlock);
+        return;
+    }
+
+    Value current = place.transient
+                        ? rewriter.create<sir::TLoadOp>(loc, u256Type, place.slot).getResult()
+                        : rewriter.create<sir::SLoadOp>(loc, u256Type, place.slot).getResult();
+    if (isSigned)
+    {
+        emitResourceSignedNonNegativeGuard(loc, rewriter, amount, u256Type);
+        Value updated = rewriter.create<sir::SubOp>(loc, u256Type, current, amount);
+        emitResourceSignedSubGuard(loc, rewriter, updated, current, u256Type);
+    }
+    else
+    {
+        emitResourceUnsignedBalanceGuard(loc, rewriter, current, amount, u256Type);
+    }
+    if (mergeBlock)
+        rewriter.create<sir::BrOp>(loc, ValueRange{}, mergeBlock);
+}
+
+static void emitResourceMoveDistinctPlaces(
+    Location loc,
+    ConversionPatternRewriter &rewriter,
+    ResourcePlaceSlot sourcePlace,
+    ResourcePlaceSlot destinationPlace,
+    Value amount,
+    Type u256Type,
+    bool isSigned,
+    bool skipRuntimeGuards,
+    Block *mergeBlock)
+{
+    Value sourceCurrent = sourcePlace.transient
+                              ? rewriter.create<sir::TLoadOp>(loc, u256Type, sourcePlace.slot).getResult()
+                              : rewriter.create<sir::SLoadOp>(loc, u256Type, sourcePlace.slot).getResult();
+    Value destinationCurrent = destinationPlace.transient
+                                   ? rewriter.create<sir::TLoadOp>(loc, u256Type, destinationPlace.slot).getResult()
+                                   : rewriter.create<sir::SLoadOp>(loc, u256Type, destinationPlace.slot).getResult();
+
+    if (isSigned && !skipRuntimeGuards)
+        emitResourceSignedNonNegativeGuard(loc, rewriter, amount, u256Type);
+
+    Value sourceUpdated = rewriter.create<sir::SubOp>(loc, u256Type, sourceCurrent, amount);
+    if (!skipRuntimeGuards)
+    {
+        if (isSigned)
+            emitResourceSignedSubGuard(loc, rewriter, sourceUpdated, sourceCurrent, u256Type);
+        else
+            emitResourceUnsignedBalanceGuard(loc, rewriter, sourceCurrent, amount, u256Type);
+    }
+
+    Value destinationUpdated = rewriter.create<sir::AddOp>(loc, u256Type, destinationCurrent, amount);
+    if (!skipRuntimeGuards)
+    {
+        if (isSigned)
+            emitResourceSignedAddGuard(loc, rewriter, destinationUpdated, destinationCurrent, u256Type);
+        else
+            emitResourceUnsignedAddGuard(loc, rewriter, destinationUpdated, destinationCurrent, u256Type);
+    }
+
+    if (sourcePlace.transient)
+        rewriter.create<sir::TStoreOp>(loc, sourcePlace.slot, sourceUpdated);
+    else
+        rewriter.create<sir::SStoreOp>(loc, sourcePlace.slot, sourceUpdated);
+
+    if (destinationPlace.transient)
+        rewriter.create<sir::TStoreOp>(loc, destinationPlace.slot, destinationUpdated);
+    else
+        rewriter.create<sir::SStoreOp>(loc, destinationPlace.slot, destinationUpdated);
+    if (mergeBlock)
+        rewriter.create<sir::BrOp>(loc, ValueRange{}, mergeBlock);
+}
+
+LogicalResult ConvertResourceMoveOp::matchAndRewrite(
+    ora::MoveOp op,
+    typename ora::MoveOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    if (!isSupportedResourceCarrier(op.getCarrierType()))
+        return rewriter.notifyMatchFailure(op, "resource lowering currently supports only 256-bit integer carriers");
+
+    auto loc = op.getLoc();
+    auto ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    const bool isSigned = isSignedResourceCarrier(op.getOperation(), op.getCarrierType());
+    const bool skipRuntimeGuards = resourceRuntimeChecksProved(op.getOperation());
+
+    Value amountU256 = ensureU256(rewriter, loc, op.getOperation(), adaptor.getAmount(), "resource amount");
+    if (!amountU256)
+        return failure();
+
+    FailureOr<ResourcePlaceSlot> sourceSlot = deriveResourcePlaceSlot(op.getOperation(), op.getSourcePlace(), adaptor.getSourcePlace(), op.getCarrierType(), mapHashCache, rewriter);
+    if (failed(sourceSlot))
+        return failure();
+
+    FailureOr<ResourcePlaceSlot> destinationSlot = deriveResourcePlaceSlot(op.getOperation(), op.getDestinationPlace(), adaptor.getDestinationPlace(), op.getCarrierType(), mapHashCache, rewriter);
+    if (failed(destinationSlot))
+        return failure();
+
+    rewriter.setInsertionPoint(op);
+    if (resourcePlacesHaveDistinctRoots(op.getSourcePlace(), op.getDestinationPlace()))
+    {
+        emitResourceMoveDistinctPlaces(loc, rewriter, *sourceSlot, *destinationSlot, amountU256, u256Type, isSigned, skipRuntimeGuards, nullptr);
+        rewriter.eraseOp(op);
+        return success();
+    }
+
+    Value sameSlot = rewriter.create<sir::EqOp>(loc, u256Type, sourceSlot->slot, destinationSlot->slot);
+    Block *branchBlock = op->getBlock();
+    Region *parentRegion = branchBlock->getParent();
+    Block *mergeBlock = rewriter.splitBlock(branchBlock, Block::iterator(op));
+    Block *sameBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
+    Block *distinctBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
+
+    rewriter.setInsertionPointToEnd(branchBlock);
+    rewriter.create<sir::CondBrOp>(loc, sameSlot, ValueRange{}, ValueRange{}, sameBlock, distinctBlock);
+
+    rewriter.setInsertionPointToStart(sameBlock);
+    emitResourceMoveSamePlace(loc, rewriter, *sourceSlot, amountU256, u256Type, isSigned, skipRuntimeGuards, mergeBlock);
+
+    rewriter.setInsertionPointToStart(distinctBlock);
+    emitResourceMoveDistinctPlaces(loc, rewriter, *sourceSlot, *destinationSlot, amountU256, u256Type, isSigned, skipRuntimeGuards, mergeBlock);
+
+    rewriter.eraseOp(op);
+    return success();
 }
 
 static Block *emitLockedKeyRevertGuard(
@@ -2212,6 +2974,8 @@ static llvm::StringRef getGlobalNameFromMapOperand(mlir::Value mapOperand, mlir:
 {
     // First, try to find the defining operation
     mlir::Operation *definingOp = mapOperand.getDefiningOp();
+    if (!definingOp)
+        return llvm::StringRef();
     if (auto sloadOp = llvm::dyn_cast<ora::SLoadOp>(definingOp))
     {
         return sloadOp.getGlobalName();

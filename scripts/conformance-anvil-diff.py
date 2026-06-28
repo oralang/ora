@@ -30,14 +30,22 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 ORA = ROOT / "zig-out" / "bin" / "ora"
-RPC = "http://127.0.0.1:8545"
+RPC = os.environ.get("ANVIL_RPC_URL", "http://127.0.0.1:8545")
 RPC_TIMEOUT_S = int(os.environ.get("ANVIL_RPC_TIMEOUT", "30"))
+RECEIPT_ATTEMPTS = int(os.environ.get("ANVIL_RECEIPT_ATTEMPTS", "100"))
+RECEIPT_POLL_S = float(os.environ.get("ANVIL_RECEIPT_POLL_MS", "50")) / 1000.0
+PROGRESS = os.environ.get("ANVIL_DIFF_PROGRESS", "1") != "0"
 # Anvil's deterministic dev account 0 — same on every launch.
 DEV_ADDRESS = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 
 
 def sh(args: list[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(args, capture_output=True, text=True, **kw)
+
+
+def progress(message: str) -> None:
+    if PROGRESS:
+        print(f"diff: {message}", file=sys.stderr, flush=True)
 
 
 def cast(*args: str, rpc: bool = True) -> str:
@@ -101,20 +109,27 @@ def rpc_call_try(from_addr: str, to_addr: str, data: str, value: int = 0) -> tup
     return rpc_try("eth_call", [tx_object(from_addr, to_addr, data, value), "latest"])
 
 
-def wait_receipt(tx_hash: str) -> dict:
-    for _ in range(100):
+def wait_receipt(tx_hash: str, stage: str) -> dict:
+    progress(f"{stage}: waiting receipt {tx_hash}")
+    for attempt in range(RECEIPT_ATTEMPTS):
         receipt = rpc_request("eth_getTransactionReceipt", [tx_hash])
         if receipt is not None:
+            progress(f"{stage}: receipt mined status={receipt.get('status')}")
             return receipt
-        time.sleep(0.05)
-    raise RuntimeError(f"timed out waiting for receipt {tx_hash}")
+        time.sleep(RECEIPT_POLL_S)
+    raise RuntimeError(
+        f"{stage}: timed out waiting for receipt {tx_hash} "
+        f"after {RECEIPT_ATTEMPTS} attempts"
+    )
 
 
-def send_transaction(from_addr: str, to_addr: str | None, data: str, value: int = 0) -> tuple[bool, dict | object]:
+def send_transaction(from_addr: str, to_addr: str | None, data: str, value: int = 0, *, stage: str) -> tuple[bool, dict | object]:
+    progress(f"{stage}: send transaction")
     ok, result = rpc_try("eth_sendTransaction", [tx_object(from_addr, to_addr, data, value)])
     if not ok:
+        progress(f"{stage}: send rejected {result}")
         return False, result
-    receipt = wait_receipt(str(result))
+    receipt = wait_receipt(str(result), stage)
     return receipt.get("status") in ("0x1", "1", 1, True), receipt
 
 
@@ -245,6 +260,10 @@ def parse_slot_expression(text: str) -> int:
     text = text.strip()
     if not text:
         raise Unsupported("empty storage slot expression")
+    inner = call_inner(text, "computed")
+    if inner is not None:
+        parts = split_top_level(inner)
+        return computed_storage_slot(parts)
     inner = call_inner(text, "map")
     if inner is not None:
         parts = split_top_level(inner)
@@ -282,6 +301,29 @@ def mapping_slot(wire_type: str, key_text: str, root_slot: int) -> int:
     else:
         key_word = encode_static_abi_word(wire_type, key_text)
     return keccak_bytes(key_word + (root_slot % U256_MOD).to_bytes(32, "big"))
+
+
+def computed_storage_slot(parts: list[str]) -> int:
+    if not parts or (len(parts) - 1) % 2 != 0:
+        raise Unsupported(f"invalid computed storage slot expression: computed({','.join(parts)})")
+
+    namespace = parts[0].strip().strip('"')
+    if not namespace:
+        raise Unsupported("computed storage namespace must be non-empty")
+
+    key_count = (len(parts) - 1) // 2
+    domain_prefix = 0x4F72614353545631  # "OraCSTV1"
+    preimage = bytearray()
+    preimage += domain_prefix.to_bytes(32, "big")
+    preimage += key_count.to_bytes(32, "big")
+    preimage += keccak_bytes(namespace.encode()).to_bytes(32, "big")
+
+    for index in range(key_count):
+        wire_type = parts[1 + index * 2]
+        value = parts[2 + index * 2]
+        preimage += encode_static_abi_word(wire_type, value)
+
+    return keccak_bytes(bytes(preimage))
 
 
 def keccak_slot(slot: int) -> int:
@@ -625,6 +667,7 @@ def constructor_sig(abi_doc: dict) -> str | None:
 
 
 def compile_contract(ora_path: Path, outdir: Path) -> tuple[str, dict]:
+    progress(f"compile {ora_path.relative_to(ROOT)}")
     p = sh([str(ORA), "emit", "--no-verify", "--emit=abi,bytecode", str(ora_path), "-o", str(outdir)])
     if p.returncode != 0:
         raise RuntimeError(f"compile failed for {ora_path}: {p.stderr[:300]}")
@@ -672,12 +715,13 @@ def deploy_contract(bytecode: str, abi_doc: dict, args: list[str], caller: str |
     initcode = bytecode + encode_constructor_args(abi_doc, resolve_args(args, addresses, None))
     from_addr = caller or DEV_ADDRESS
     fund(from_addr)
-    ok, receipt = send_transaction(from_addr, None, initcode, value)
+    ok, receipt = send_transaction(from_addr, None, initcode, value, stage="deploy")
     if not ok or not isinstance(receipt, dict):
         raise RuntimeError(f"contract deployment reverted: {receipt}")
     address = receipt.get("contractAddress")
     if not address:
         raise RuntimeError(f"contract deployment did not return an address: {receipt}")
+    progress(f"deploy: checking code at {address}")
     code = rpc_code(address)
     if code in ("", "0x"):
         raise RuntimeError(f"contract deployment produced empty code at {address}")
@@ -711,6 +755,7 @@ def main() -> int:
 
 def run_spec(spec: dict, spec_path: Path, ora_path: Path, outdir: Path) -> int:
 
+    progress(f"spec {spec_path.relative_to(ROOT)}")
     bytecode, abi_doc = compile_contract(ora_path, outdir)
 
     addresses: dict[str, str] = {}
@@ -774,7 +819,7 @@ def run_spec(spec: dict, spec_path: Path, ora_path: Path, outdir: Path) -> int:
         if "returns" in call:
             ret = call["returns"]
             if EMPTY_RET.fullmatch(ret.strip()):
-                ok, out = send_transaction(from_addr, target_addr, calldata, value)
+                ok, out = send_transaction(from_addr, target_addr, calldata, value, stage=f"{label}:tx")
                 receipt_for_assertions = out
                 if not ok:
                     diverged += 1
@@ -783,6 +828,7 @@ def run_spec(spec: dict, spec_path: Path, ora_path: Path, outdir: Path) -> int:
                     diverged += 1
                 checked += 1
             else:
+                progress(f"{label}: eth_call")
                 out = rpc_call(from_addr, target_addr, calldata, value)
                 try:
                     ok, observed = compare_return_spec(ret, out)
@@ -790,7 +836,7 @@ def run_spec(spec: dict, spec_path: Path, ora_path: Path, outdir: Path) -> int:
                     print(f"  [skip] {label}: {err}")
                     skipped += 1
                     continue
-                tx_ok, receipt = send_transaction(from_addr, target_addr, calldata, value)  # commit state change
+                tx_ok, receipt = send_transaction(from_addr, target_addr, calldata, value, stage=f"{label}:commit")  # commit state change
                 receipt_for_assertions = receipt
                 if not tx_ok:
                     ok = False
@@ -803,12 +849,13 @@ def run_spec(spec: dict, spec_path: Path, ora_path: Path, outdir: Path) -> int:
                 print(f"  [{mark}] {label} -> anvil={observed} expected(lib/evm)={ret.strip()}{note}")
                 checked += 1
         elif "reverts" in call:
+            progress(f"{label}: eth_call expect revert")
             ok, out = rpc_call_try(from_addr, target_addr, calldata, value)
             mark = "OK" if not ok else "DIVERGE"
             if ok:
                 diverged += 1
             elif gas_ceiling(call) is not None:
-                tx_ok, receipt = send_transaction(from_addr, target_addr, calldata, value)
+                tx_ok, receipt = send_transaction(from_addr, target_addr, calldata, value, stage=f"{label}:revert-tx")
                 receipt_for_assertions = receipt
                 if tx_ok:
                     mark = "DIVERGE"
@@ -820,7 +867,7 @@ def run_spec(spec: dict, spec_path: Path, ora_path: Path, outdir: Path) -> int:
             print(f"  [{mark}] {label} -> anvil reverts ({note})")
             checked += 1
         elif "succeeds" in call:
-            ok, receipt = send_transaction(from_addr, target_addr, calldata, value)
+            ok, receipt = send_transaction(from_addr, target_addr, calldata, value, stage=f"{label}:tx")
             receipt_for_assertions = receipt
             if not check_receipt_gas(label, call, receipt):
                 ok = False

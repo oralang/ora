@@ -1,0 +1,13 @@
+resource TokenUnit = u256;
+
+contract ResourceSmtFailWriteOutsideModifies {
+    storage var left: Resource<TokenUnit>;
+    storage var right: Resource<TokenUnit>;
+
+    pub fn transfer(amount: TokenUnit)
+        modifies left
+        requires left >= amount
+    {
+        @move(left, right, amount);
+    }
+}

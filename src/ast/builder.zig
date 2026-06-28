@@ -40,13 +40,13 @@ pub const Builder = struct {
             .tree = tree,
             .diagnostics = diags,
             .allocator = arena_allocator,
-            .root_items = .{},
-            .items = .{},
-            .bodies = .{},
-            .statements = .{},
-            .expressions = .{},
-            .type_exprs = .{},
-            .patterns = .{},
+            .root_items = .empty,
+            .items = .empty,
+            .bodies = .empty,
+            .statements = .empty,
+            .expressions = .empty,
+            .type_exprs = .empty,
+            .patterns = .empty,
         };
     }
 

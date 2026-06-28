@@ -6,7 +6,7 @@ const Allocator = std.mem.Allocator;
 
 pub const Store = struct {
     allocator: Allocator,
-    roots: std.ArrayList([]const u8) = .{},
+    roots: std.ArrayList([]const u8) = .empty,
 
     pub fn init(allocator: Allocator) Store {
         return .{ .allocator = allocator };
@@ -46,7 +46,8 @@ pub const Store = struct {
         }
 
         if (!added_root) {
-            const cwd = try std.fs.cwd().realpathAlloc(self.allocator, ".");
+            const io = std.Io.Threaded.global_single_threaded.io();
+            const cwd = try std.process.currentPathAlloc(io, self.allocator);
             defer self.allocator.free(cwd);
             _ = try self.addPath(cwd);
         }

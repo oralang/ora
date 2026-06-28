@@ -1,0 +1,9 @@
+// Negative: computed storage namespaces must be compile-time string literals so
+// SMT can model each namespace as a distinct logical storage root.
+contract BadComputedStorageDynamicNamespace {
+    pub fn bad(owner: address) {
+        let ns = "ora.test.bad.dynamic";
+        let slot: StorageSlot = @storageDerive(ns, owner);
+        _ = slot;
+    }
+}

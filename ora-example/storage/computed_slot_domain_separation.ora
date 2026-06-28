@@ -1,0 +1,61 @@
+comptime const std_storage = @import("std/storage");
+
+contract ComputedSlotDomainSeparation {
+    storage var marker: u256;
+    storage var balances: map<address, u256>;
+
+    fn rootSlot() -> StorageSlot {
+        return std_storage.derive("ora.example.computed.domain");
+    }
+
+    fn ownerSlot(owner: address) -> StorageSlot {
+        return std_storage.derive("ora.example.computed.domain", owner);
+    }
+
+    fn epochSlot(owner: address, epoch: u256) -> StorageSlot {
+        return std_storage.derive("ora.example.computed.domain", owner, epoch);
+    }
+
+    pub fn writeRoot(value: u256)
+        modifies std_storage.range(std_storage.derive("ora.example.computed.domain"), 1)
+    {
+        std_storage.words.store(rootSlot(), 0, value);
+    }
+
+    pub fn writeOwner(owner: address, value: u256)
+        modifies std_storage.range(std_storage.derive("ora.example.computed.domain", owner), 1)
+    {
+        std_storage.words.store(ownerSlot(owner), 0, value);
+    }
+
+    pub fn writeEpoch(owner: address, epoch: u256, value: u256)
+        modifies std_storage.range(std_storage.derive("ora.example.computed.domain", owner, epoch), 1)
+    {
+        std_storage.words.store(epochSlot(owner, epoch), 0, value);
+    }
+
+    pub fn writeNormalStorage(owner: address, marker_value: u256, balance_value: u256) {
+        marker = marker_value;
+        balances[owner] = balance_value;
+    }
+
+    pub fn readRoot() -> u256 {
+        return std_storage.words.load(rootSlot(), 0);
+    }
+
+    pub fn readOwner(owner: address) -> u256 {
+        return std_storage.words.load(ownerSlot(owner), 0);
+    }
+
+    pub fn readEpoch(owner: address, epoch: u256) -> u256 {
+        return std_storage.words.load(epochSlot(owner, epoch), 0);
+    }
+
+    pub fn readMarker() -> u256 {
+        return marker;
+    }
+
+    pub fn readBalance(owner: address) -> u256 {
+        return balances[owner];
+    }
+}

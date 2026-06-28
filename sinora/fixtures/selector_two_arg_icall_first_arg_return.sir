@@ -1,0 +1,166 @@
+fn init:
+    entry {
+        v0 = runtime_start_offset
+        v1 = runtime_length
+        v2 = malloc v1
+        codecopy v2 v0 v1
+        return v2 v1
+    }
+
+fn from_literals:
+    entry -> v1 v0 {
+        v0 = const 0x20
+        c10 = const 0xA
+        v1 = malloc v0
+        mstore256 v1 c10
+        iret
+    }
+
+fn from_variables:
+    entry -> v1 v0 {
+        v0 = const 0x20
+        c30 = const 0x1E
+        v1 = malloc v0
+        mstore256 v1 c30
+        iret
+    }
+
+fn from_expressions:
+    entry {
+        v0 = large_const 0xB6D338200000000000000000000000000000000000000000000000000000000
+        v1 = large_const 0x7BD80E3100000000000000000000000000000000000000000000000000000000
+        v2 = const 0x4
+        v3 = const 0x20
+        c10 = const 0xA
+        v4 = const 0x1
+        => v4 ? @bb1 : @bb0
+    }
+    bb0 {
+        v5 = malloc v2
+        mstore256 v5 v1
+        revert v5 v2
+    }
+    bb1 {
+        => v4 ? @bb3 : @bb2
+    }
+    bb2 {
+        v6 = malloc v2
+        mstore256 v6 v0
+        revert v6 v2
+    }
+    bb3 -> v7 v3 {
+        v7 = malloc v3
+        mstore256 v7 c10
+        iret
+    }
+
+fn from_parameters:
+    entry v0 v1 -> v3 v2 {
+        v2 = const 0x20
+        v3 = malloc v2
+        mstore256 v3 v0
+        iret
+    }
+
+fn from_function_calls:
+    entry -> v1 v0 {
+        v0 = const 0x20
+        c10 = const 0xA
+        v1 = malloc v0
+        mstore256 v1 c10
+        iret
+    }
+
+fn get_ten:
+    entry -> v2 {
+        v0 = const 0x20
+        c10 = const 0xA
+        v1 = malloc v0
+        mstore256 v1 c10
+        v2 = mload256 v1
+        iret
+    }
+
+fn get_twenty:
+    entry -> v2 {
+        v0 = const 0x20
+        c20 = const 0x14
+        v1 = malloc v0
+        mstore256 v1 c20
+        v2 = mload256 v1
+        iret
+    }
+
+fn main:
+    main_entry {
+        zero = const 0x0
+        selector_offset = const 0x4
+        word_size = const 0x20
+        min_cdsize_1arg = const 0x23
+        arg1_offset = const 0x24
+        min_cdsize_2args = const 0x43
+        arg2_offset = const 0x44
+        min_cdsize_3args = const 0x63
+        selector_shift = const 0xE0
+        v0 = codesize
+        v1 = mload256 word_size
+        v2 = lt v1 v0
+        sel_zero = const 0x0
+        sel_mask = sub sel_zero v2
+        sel_t = and sel_mask v0
+        sel_inv = not sel_mask
+        sel_f = and sel_inv v1
+        v3 = or sel_t sel_f
+        mstore256 word_size v3
+        cv = callvalue
+        cv_nonzero = iszero cv
+        => cv_nonzero ? @load_selector : @revert_error
+    }
+    load_selector {
+        zero_0 = const 0x0
+        selector_shift_0 = const 0xE0
+        selector_word = calldataload zero_0
+        selector = shr selector_shift_0 selector_word
+        switch selector {
+        0x0BAB86D9 => @from_literals_
+        0x1352BCF3 => @from_variables_
+        0xBA16D54D => @from_expressions_
+        0x0865B165 => @from_parameters_
+        0x0C6028DD => @from_function_calls_
+        default => @revert_error
+    }
+    }
+    revert_error {
+        zero_1 = const 0x0
+        revert zero_1 zero_1
+    }
+    from_literals_ {
+        v4 v5 = icall @from_literals
+        return v4 v5
+    }
+    from_variables_ {
+        v6 v7 = icall @from_variables
+        return v6 v7
+    }
+    from_expressions_ {
+        v8 v9 = icall @from_expressions
+        return v8 v9
+    }
+    from_parameters_ {
+        cdsize_from_parameters = calldatasize
+        min_cdsize_2args_0 = const 0x43
+        valid_from_parameters = lt min_cdsize_2args_0 cdsize_from_parameters
+        => valid_from_parameters ? @from_parameters_exec : @revert_error
+    }
+    from_parameters_exec {
+        selector_offset_0 = const 0x4
+        a_from_parameters = calldataload selector_offset_0
+        arg1_offset_0 = const 0x24
+        b_from_parameters = calldataload arg1_offset_0
+        v12 v13 = icall @from_parameters a_from_parameters b_from_parameters
+        return v12 v13
+    }
+    from_function_calls_ {
+        v10 v11 = icall @from_function_calls
+        return v10 v11
+    }

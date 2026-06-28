@@ -4,6 +4,7 @@ const ast = @import("../ast/mod.zig");
 const source = @import("../source/mod.zig");
 const ora_types = @import("ora_types");
 const type_builtin = ora_types.builtin;
+const integer_constants = ora_types.integer_constants;
 const refinements = ora_types.refinement_semantics;
 const hir_locals = @import("locals.zig");
 const Type = ora_types.SemanticType;
@@ -112,6 +113,8 @@ pub fn lowerTypeDescriptor(ctx: mlir.MlirContext, descriptor: Type, allocator: s
         .string => stringType(ctx),
         .bytes => bytesType(ctx),
         .fixed_bytes => reprIntegerType(ctx),
+        .storage_slot => reprIntegerType(ctx),
+        .storage_range => arrayMemRefType(ctx, reprIntegerType(ctx), 2),
         .void => mlir.oraNoneTypeCreate(ctx),
         .array => |array| blk: {
             const len = array.len orelse return error.UnresolvedArrayLength;
@@ -198,6 +201,9 @@ fn parseRefinementIntArg(args: []const RefinementArg, index: usize) ?u256 {
 }
 
 fn parseRefinementIntLiteral(text: []const u8) ?u256 {
+    if (integer_constants.lookup(text)) |constant| {
+        return parseRefinementIntLiteral(constant);
+    }
     if (std.mem.startsWith(u8, text, "-")) {
         const magnitude = parseU256Literal(text[1..]) orelse return null;
         return @as(u256, 0) -% magnitude;
@@ -456,6 +462,7 @@ pub fn resolvedIntegerSignedness(ty: Type) anyerror!?bool {
     return switch (unwrapRefinementSemaType(ty)) {
         .integer => |integer| integer.signed,
         .comptime_integer => error.MlirOperationCreationFailed,
+        .resource_domain => |resource| resolvedIntegerSignedness(resource.carrier_type.*),
         else => null,
     };
 }
@@ -561,6 +568,7 @@ pub fn itemRange(file: *const ast.AstFile, item_id: ast.ItemId) source.TextRange
         .Struct => |node| node.range,
         .Bitfield => |node| node.range,
         .Enum => |node| node.range,
+        .Resource => |node| node.range,
         .Trait => |node| node.range,
         .Impl => |node| node.range,
         .TypeAlias => |node| node.range,

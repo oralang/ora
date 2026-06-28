@@ -93,12 +93,8 @@ mlir_tablegen(OraOps.h.inc -gen-op-decls -I${PROJECT_SOURCE_DIR}/td)
 mlir_tablegen(OraOps.cpp.inc -gen-op-defs -I${PROJECT_SOURCE_DIR}/td)
 add_public_tablegen_target(MLIROraOpsIncGen)
 
-# Dependencies removed since main dialect library is disabled
-# add_dependencies(MLIROraDialect MLIROraDialectIncGen)
-# add_dependencies(MLIROraDialect MLIROraOpsIncGen)
-
 # MLIR renamed/reshuffled interface libraries across versions.
-# Support both legacy and current exports.
+# Link the interface target name exposed by the active MLIR package.
 set(ORA_DIALECT_C_LINK_LIBS
   MLIRIR
   MLIRSupport

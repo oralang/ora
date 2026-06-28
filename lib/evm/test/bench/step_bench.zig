@@ -12,9 +12,9 @@
 //! bench`.
 
 const std = @import("std");
-const primitives = @import("voltaire");
-const Address = primitives.Address.Address;
 const ora_evm = @import("ora_evm");
+const primitives = ora_evm.primitives;
+const Address = primitives.Address.Address;
 
 const Evm = ora_evm.Evm(.{});
 const Frame = ora_evm.Frame(.{});

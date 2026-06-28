@@ -1,0 +1,18 @@
+contract ComputedStorageCostArray {
+    storage var payloads: map<address, [u256; 4]>;
+
+    pub fn store_four(owner: address, a: u256, b: u256, c: u256, d: u256) {
+        let data: [u256; 4] = [a, b, c, d];
+        payloads[owner] = data;
+    }
+
+    pub fn sum_four(owner: address) -> u256 {
+        let data: [u256; 4] = payloads[owner];
+        return data[0] + data[1] + data[2] + data[3];
+    }
+
+    pub fn clear_four(owner: address) {
+        let data: [u256; 4] = [0, 0, 0, 0];
+        payloads[owner] = data;
+    }
+}

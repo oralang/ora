@@ -1,0 +1,37 @@
+resource TokenUnit = u256;
+comptime const std = @import("std");
+
+struct Ledger {
+    reserve: Resource<TokenUnit>;
+    treasury: Resource<TokenUnit>;
+}
+
+contract ResourceStorageStructField {
+    storage var ledger: Ledger;
+
+    pub fn issue(amount: TokenUnit)
+        modifies ledger.reserve
+        requires ledger.reserve <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        ensures ledger.reserve == old(ledger.reserve) + amount
+    {
+        @create(ledger.reserve, amount);
+    }
+
+    pub fn sweep(amount: TokenUnit)
+        modifies ledger.reserve, ledger.treasury
+        requires ledger.reserve >= amount
+        requires ledger.treasury <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        ensures ledger.reserve == old(ledger.reserve) - amount
+        ensures ledger.treasury == old(ledger.treasury) + amount
+    {
+        @move(ledger.reserve, ledger.treasury, amount);
+    }
+
+    pub fn reserveBalance() -> TokenUnit {
+        return ledger.reserve;
+    }
+
+    pub fn treasuryBalance() -> TokenUnit {
+        return ledger.treasury;
+    }
+}

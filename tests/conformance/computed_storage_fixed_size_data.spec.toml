@@ -1,0 +1,196 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "has_payload(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { bool = false }
+gas_max = 45000
+
+[[call]]
+fn = "store_empty(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = {}
+gas_max = 35000
+
+[[call]]
+fn = "store_three(address,uint256,uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", 11, 22, 33]
+returns = {}
+gas_max = 110000
+
+[[call]]
+fn = "first(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 11 }
+gas_max = 45000
+
+[[call]]
+fn = "second(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 22 }
+gas_max = 45000
+
+[[call]]
+fn = "third(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 33 }
+gas_max = 45000
+
+[[call]]
+fn = "store_four(address,uint256,uint256,uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", 1, 2, 3, 4]
+returns = {}
+gas_max = 1000000
+
+[[call]]
+fn = "sum_four(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 10 }
+gas_max = 1000000
+
+[[call]]
+fn = "erase_four(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = {}
+gas_max = 1000000
+
+[[call]]
+fn = "store_sixteen(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = {}
+gas_max = 2000000
+
+[[call]]
+fn = "sum_sixteen(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 136 }
+gas_max = 2000000
+
+[[call]]
+fn = "has_payload(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { bool = true }
+gas_max = 45000
+
+[[call]]
+fn = "store_other(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", 99]
+returns = {}
+gas_max = 60000
+
+[[call]]
+fn = "other(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 99 }
+gas_max = 40000
+
+[[call]]
+fn = "erase_sixteen(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = {}
+gas_max = 2000000
+
+[[call]]
+fn = "store_one(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000002", 77]
+returns = {}
+gas_max = 60000
+
+[[call]]
+fn = "first(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000002"]
+returns = { u256 = 77 }
+gas_max = 45000
+
+[[call]]
+fn = "second(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000002"]
+returns = { u256 = 0 }
+gas_max = 45000
+
+[[call]]
+fn = "erase_payload(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = {}
+gas_max = 45000
+
+[[call]]
+fn = "has_payload(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { bool = false }
+gas_max = 45000
+
+[[call]]
+fn = "first(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 0 }
+gas_max = 45000
+
+[[call]]
+fn = "second(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 0 }
+gas_max = 45000
+
+[[call]]
+fn = "third(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 0 }
+gas_max = 45000
+
+[[call]]
+fn = "other(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 99 }
+gas_max = 40000

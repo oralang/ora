@@ -81,7 +81,7 @@ pub fn incoming(
 
     var response_scope = server.responseScope();
     defer response_scope.deinit();
-    var calls = std.ArrayList(types.CallHierarchyIncomingCall){};
+    var calls = std.ArrayList(types.CallHierarchyIncomingCall).empty;
     try server.docs.ensureIncomingCallTargetIndex(server.workspaceRootPaths(), &server.phase_counters);
     var range_converter = range_converters.OpenDocument(@TypeOf(server)){
         .arena = arena,

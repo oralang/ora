@@ -1,0 +1,10 @@
+trait RuntimeReflection {
+    fn balanceOf(self, owner: address) -> u256;
+}
+
+contract FailRuntimeTraitMethods {
+    pub fn bad() -> u256 {
+        const methods = @traitMethods(RuntimeReflection);
+        return methods.len;
+    }
+}

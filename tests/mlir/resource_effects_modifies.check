@@ -1,0 +1,24 @@
+// INPUT: ora-example/corpus/resources/resource_effects_modifies.ora
+// CHECK-LABEL: ora.contract @ResourceEffectsModifies
+// CHECK: ora.global "reserve" : i256
+// CHECK: ora.global "treasury" : i256
+// CHECK: ora.global "balances" : !ora.map<!ora.address, i256>
+//
+// CHECK-LABEL: func.func @sweep
+// CHECK-SAME: ora.modifies_slots = ["reserve", "treasury"]
+// CHECK-SAME: ora.read_slots = ["reserve", "treasury"]
+// CHECK-SAME: ora.write_slots = ["reserve", "treasury"]
+// CHECK: "ora.move"
+// CHECK-SAME: carrier_signed = false
+// CHECK-SAME: carrier_type = i256
+// CHECK-SAME: domain = "TokenUnit"
+// CHECK-SAME: operandSegmentSizes = array<i32: 1, 1, 1>
+//
+// CHECK-LABEL: func.func @deposit
+// CHECK-SAME: ora.modifies_slots = ["balances[param#0]"]
+// CHECK-SAME: ora.read_slots = ["balances"]
+// CHECK-SAME: ora.write_slots = ["balances"]
+// CHECK: "ora.create"
+// CHECK-SAME: carrier_signed = false
+// CHECK-SAME: carrier_type = i256
+// CHECK-SAME: domain = "TokenUnit"

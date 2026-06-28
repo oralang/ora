@@ -1,0 +1,16 @@
+// INPUT: tests/conformance/resource_self_transfer.ora
+// CHECK-LABEL: ora.contract @ResourceSelfTransfer
+// CHECK: ora.global "balances" : !ora.map<!ora.address, i256>
+//
+// CHECK-LABEL: func.func @selfTransfer
+// CHECK-SAME: ora.read_slots = ["balances"]
+// CHECK-SAME: ora.write_slots = ["balances"]
+// CHECK: %balances
+// CHECK-SAME: ora.sload "balances"
+// CHECK: %balances_{{[0-9]+}}
+// CHECK-SAME: ora.sload "balances"
+// CHECK: "ora.move"
+// CHECK-SAME: carrier_signed = false
+// CHECK-SAME: carrier_type = i256
+// CHECK-SAME: domain = "TokenUnit"
+// CHECK-SAME: operandSegmentSizes = array<i32: 2, 2, 1>

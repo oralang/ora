@@ -1,0 +1,32 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "issue_usdc(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000000", 11]
+returns = {}
+
+[[call]]
+fn = "issue_dai(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000000", 22]
+returns = {}
+
+[[call]]
+fn = "usdcOf(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000000"]
+returns = { u256 = 11 }
+
+[[call]]
+fn = "daiOf(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000000"]
+returns = { u256 = 22 }

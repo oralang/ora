@@ -1,0 +1,33 @@
+fn store(comptime N: u256, slot: StorageSlot, data: [u256; N]) {
+    var i: u256 = 0;
+    while (i < N) {
+        @storageWordStore(slot, i, data[i]);
+        i += 1;
+    }
+}
+
+fn load(slot: StorageSlot, comptime N: u256) -> [u256; N] {
+    memory var data: [u256; N];
+    var i: u256 = 0;
+    while (i < N) {
+        data[i] = @storageWordLoad(slot, i);
+        i += 1;
+    }
+    return data;
+}
+
+fn erase(slot: StorageSlot, comptime N: u256) {
+    @storageRangeErase(@storageRange(slot, N));
+}
+
+fn hasData(slot: StorageSlot, comptime N: u256) -> bool {
+    var found: bool = false;
+    var i: u256 = 0;
+    while (i < N) {
+        if (@storageWordLoad(slot, i) != 0) {
+            found = true;
+        }
+        i += 1;
+    }
+    return found;
+}

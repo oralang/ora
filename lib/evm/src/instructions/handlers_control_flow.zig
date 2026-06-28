@@ -1,6 +1,6 @@
 /// Control flow opcode handlers for the EVM
 const std = @import("std");
-const primitives = @import("voltaire");
+const primitives = @import("../primitives.zig");
 const GasConstants = primitives.GasConstants;
 
 /// Handlers struct - provides control flow operation handlers for a Frame type

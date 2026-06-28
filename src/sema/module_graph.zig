@@ -14,8 +14,9 @@ const ImplEntry = model.ImplEntry;
 const VisitState = enum(u2) { unvisited, visiting, done };
 
 fn compilerPhaseDebugEnabled() bool {
-    const value = std.process.getEnvVarOwned(std.heap.page_allocator, "ORA_COMPILER_PHASE_DEBUG") catch return false;
-    defer std.heap.page_allocator.free(value);
+    if (!@import("builtin").link_libc) return false;
+    const value_ptr = std.c.getenv("ORA_COMPILER_PHASE_DEBUG") orelse return false;
+    const value = std.mem.span(value_ptr);
     return value.len != 0 and !std.mem.eql(u8, value, "0");
 }
 
@@ -43,7 +44,7 @@ pub fn buildModuleGraph(allocator: std.mem.Allocator, package_id: source.Package
         try file_paths.put(try normalizeModuleFilePath(arena, input.file_path), input.module_id);
     }
 
-    var modules: std.ArrayList(ModuleSummary) = .{};
+    var modules: std.ArrayList(ModuleSummary) = .empty;
     if (inputs.len != 0) try modules.ensureTotalCapacityPrecise(arena, inputs.len);
     for (inputs) |input| {
         compilerPhaseLog("build-module-graph module {s} scan-imports begin root-items={d}", .{ input.path, input.ast_file.root_items.len });
@@ -52,8 +53,8 @@ pub fn buildModuleGraph(allocator: std.mem.Allocator, package_id: source.Package
             if (input.ast_file.item(item_id).* == .Import) import_count += 1;
         }
 
-        var imports: std.ArrayList(ModuleImport) = .{};
-        var dependencies: std.ArrayList(source.ModuleId) = .{};
+        var imports: std.ArrayList(ModuleImport) = .empty;
+        var dependencies: std.ArrayList(source.ModuleId) = .empty;
         if (import_count != 0) {
             try imports.ensureTotalCapacityPrecise(arena, import_count);
             try dependencies.ensureTotalCapacityPrecise(arena, import_count);
@@ -138,15 +139,15 @@ pub fn buildItemIndex(allocator: std.mem.Allocator, file: *const ast.AstFile) !I
     errdefer result.deinit();
 
     const arena = result.arena.allocator();
-    var entries: std.ArrayList(NamedItem) = .{};
-    var impl_entries: std.ArrayList(ImplEntry) = .{};
-    var trait_method_lookup: std.ArrayList(lookup.MemberEntry) = .{};
-    var impl_method_lookup: std.ArrayList(lookup.MemberEntry) = .{};
-    var impl_method_owner_lookup: std.ArrayList(lookup.IndexEntry) = .{};
-    var struct_field_lookup: std.ArrayList(lookup.MemberEntry) = .{};
-    var bitfield_field_lookup: std.ArrayList(lookup.MemberEntry) = .{};
-    var enum_variant_lookup: std.ArrayList(lookup.MemberEntry) = .{};
-    var contract_member_lookup: std.ArrayList(lookup.MemberEntry) = .{};
+    var entries: std.ArrayList(NamedItem) = .empty;
+    var impl_entries: std.ArrayList(ImplEntry) = .empty;
+    var trait_method_lookup: std.ArrayList(lookup.MemberEntry) = .empty;
+    var impl_method_lookup: std.ArrayList(lookup.MemberEntry) = .empty;
+    var impl_method_owner_lookup: std.ArrayList(lookup.IndexEntry) = .empty;
+    var struct_field_lookup: std.ArrayList(lookup.MemberEntry) = .empty;
+    var bitfield_field_lookup: std.ArrayList(lookup.MemberEntry) = .empty;
+    var enum_variant_lookup: std.ArrayList(lookup.MemberEntry) = .empty;
+    var contract_member_lookup: std.ArrayList(lookup.MemberEntry) = .empty;
     for (file.root_items) |item_id| {
         try collectItemEntry(arena, file, item_id, null, &entries, &impl_entries, &trait_method_lookup, &impl_method_lookup, &impl_method_owner_lookup, &struct_field_lookup, &bitfield_field_lookup, &enum_variant_lookup, &contract_member_lookup);
     }
@@ -234,6 +235,7 @@ fn collectItemEntry(
             }
             break :blk item.Trait.name;
         },
+        .Resource => item.Resource.name,
         .TypeAlias => item.TypeAlias.name,
         .LogDecl => item.LogDecl.name,
         .ErrorDecl => item.ErrorDecl.name,
@@ -294,6 +296,7 @@ fn contractMemberName(item: ast.Item) ?[]const u8 {
         .Struct => |struct_item| struct_item.name,
         .Bitfield => |bitfield| bitfield.name,
         .Enum => |enum_item| enum_item.name,
+        .Resource => |resource| resource.name,
         .Trait => |trait_item| trait_item.name,
         .TypeAlias => |type_alias| type_alias.name,
         .LogDecl => |log_decl| log_decl.name,
@@ -312,7 +315,7 @@ fn containsModuleId(values: []const source.ModuleId, needle: source.ModuleId) bo
 fn buildTopoOrder(allocator: std.mem.Allocator, modules: []const ModuleSummary, has_cycles: *bool) ![]const source.ModuleId {
     const states = try allocator.alloc(VisitState, modules.len);
     @memset(states, .unvisited);
-    var ordered: std.ArrayList(source.ModuleId) = .{};
+    var ordered: std.ArrayList(source.ModuleId) = .empty;
     if (modules.len != 0) try ordered.ensureTotalCapacityPrecise(allocator, modules.len);
 
     for (modules, 0..) |module_summary, index| {

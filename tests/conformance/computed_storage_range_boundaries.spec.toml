@@ -1,0 +1,83 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "seed(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = {}
+
+[[call.storage]]
+slot = "computed(ora.test.computed.range,address,0x1000000000000000000000000000000000000001)"
+value = "0xb"
+
+[[call.storage]]
+slot = "add(computed(ora.test.computed.range,address,0x1000000000000000000000000000000000000001),1)"
+value = "0x16"
+
+[[call.storage]]
+slot = "add(computed(ora.test.computed.range,address,0x1000000000000000000000000000000000000001),2)"
+value = "0x21"
+
+[[call.storage]]
+slot = "add(computed(ora.test.computed.range,address,0x1000000000000000000000000000000000000001),3)"
+value = "0x2c"
+
+[[call]]
+fn = "erase_zero(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = {}
+
+[[call]]
+fn = "read_at(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", 0]
+returns = { u256 = 11 }
+
+[[call]]
+fn = "read_at(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", 1]
+returns = { u256 = 22 }
+
+[[call]]
+fn = "erase_two(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = {}
+
+[[call]]
+fn = "read_at(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", 0]
+returns = { u256 = 0 }
+
+[[call]]
+fn = "read_at(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", 1]
+returns = { u256 = 0 }
+
+[[call]]
+fn = "read_at(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", 2]
+returns = { u256 = 33 }
+
+[[call]]
+fn = "read_at(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", 3]
+returns = { u256 = 44 }

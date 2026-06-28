@@ -2,10 +2,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
-    comptime if (builtin.zig_version.major != 0 or builtin.zig_version.minor != 15 or builtin.zig_version.pre != null or builtin.zig_version.build != null) {
+    comptime if (builtin.zig_version.major != 0 or builtin.zig_version.minor < 15 or builtin.zig_version.minor > 16 or builtin.zig_version.pre != null or builtin.zig_version.build != null) {
         @compileError(std.fmt.comptimePrint(
             \\Your Zig version does not meet the build requirement:
-            \\  required Zig version: 0.15.x
+            \\  required Zig version: 0.15.x or 0.16.x
             \\  actual   Zig version: {[current_version]s}
             \\
         , .{

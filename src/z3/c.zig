@@ -89,6 +89,7 @@ pub const Z3_parser_context_from_string = c.Z3_parser_context_from_string;
 pub const Z3_benchmark_to_smtlib_string = c.Z3_benchmark_to_smtlib_string;
 pub const Z3_solver_set_params = c.Z3_solver_set_params;
 pub const Z3_ast_to_string = c.Z3_ast_to_string;
+pub const Z3_get_ast_id = c.Z3_get_ast_id;
 pub const Z3_simplify = c.Z3_simplify;
 pub const Z3_get_version = c.Z3_get_version;
 pub const Z3_mk_params = c.Z3_mk_params;

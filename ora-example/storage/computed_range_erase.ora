@@ -1,0 +1,33 @@
+comptime const std_storage = @import("std/storage");
+
+contract ComputedRangeErase {
+    fn payloadSlot(account: address) -> StorageSlot {
+        return std_storage.derive("ora.example.computed.range", account);
+    }
+
+    pub fn seed(account: address)
+        modifies std_storage.range(std_storage.derive("ora.example.computed.range", account), 4)
+    {
+        let slot: StorageSlot = payloadSlot(account);
+        std_storage.words.store(slot, 0, 11);
+        std_storage.words.store(slot, 1, 22);
+        std_storage.words.store(slot, 2, 33);
+        std_storage.words.store(slot, 3, 44);
+    }
+
+    pub fn eraseNothing(account: address)
+        modifies std_storage.range(std_storage.derive("ora.example.computed.range", account), 0)
+    {
+        std_storage.words.erase(std_storage.range(payloadSlot(account), 0));
+    }
+
+    pub fn erasePrefix(account: address)
+        modifies std_storage.range(std_storage.derive("ora.example.computed.range", account), 2)
+    {
+        std_storage.words.erase(std_storage.range(payloadSlot(account), 2));
+    }
+
+    pub fn readAt(account: address, offset: u256) -> u256 {
+        return std_storage.words.load(payloadSlot(account), offset);
+    }
+}

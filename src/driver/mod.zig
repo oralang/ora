@@ -11,8 +11,9 @@ const compile_options = @import("../compile_options.zig");
 const Metrics = @import("../metrics.zig").Metrics;
 
 fn compilerPhaseDebugEnabled() bool {
-    const value = std.process.getEnvVarOwned(std.heap.page_allocator, "ORA_COMPILER_PHASE_DEBUG") catch return false;
-    defer std.heap.page_allocator.free(value);
+    if (!@import("builtin").link_libc) return false;
+    const value_ptr = std.c.getenv("ORA_COMPILER_PHASE_DEBUG") orelse return false;
+    const value = std.mem.span(value_ptr);
     return value.len != 0 and !std.mem.eql(u8, value, "0");
 }
 
@@ -49,13 +50,71 @@ pub const Compilation = struct {
     package_id: source.PackageId,
     root_module_id: source.ModuleId,
     artifact_blocked: bool = false,
+    artifact_block_reason: ?ArtifactEmissionBlockReason = null,
 
     pub fn deinit(self: *Compilation) void {
         self.db.deinit();
     }
 
     pub fn isArtifactEmittable(self: *const Compilation) bool {
-        return !self.artifact_blocked;
+        return !self.artifact_blocked and self.artifact_block_reason == null;
+    }
+
+    pub fn artifactEmissionDecision(self: *Compilation) !ArtifactEmissionDecision {
+        if (self.artifact_block_reason) |reason| return .{ .blocked = reason };
+        if (self.artifact_blocked) return .{ .blocked = .package_diagnostics };
+        const lowering = try self.db.lowerToHir(self.root_module_id);
+        return artifactEmissionDecisionForLowering(self, lowering);
+    }
+
+    pub fn artifactEmissionDecisionForLowering(
+        self: *const Compilation,
+        lowering: *const hir.LoweringResult,
+    ) ArtifactEmissionDecision {
+        if (self.artifact_blocked) {
+            return .{ .blocked = self.artifact_block_reason orelse .package_diagnostics };
+        }
+        if (diagnosticsHaveErrors(&lowering.diagnostics)) {
+            return .{ .blocked = .hir_diagnostics };
+        }
+        if (!lowering.isEmittable()) {
+            return .{ .blocked = .{
+                .hir_executable_fallbacks = .{
+                    .type_fallback_count = lowering.type_fallback_count,
+                    .placeholder_count = lowering.placeholder_count,
+                    .default_value_count = lowering.default_value_count,
+                },
+            } };
+        }
+        if (hir.findExecutableFallback(lowering.module.raw_module)) |violation| {
+            return .{ .blocked = .{ .structural_executable_fallback = violation } };
+        }
+        return .{ .allowed = lowering };
+    }
+};
+
+pub const HirFallbackCounts = struct {
+    type_fallback_count: usize,
+    placeholder_count: usize,
+    default_value_count: usize,
+};
+
+pub const ArtifactEmissionBlockReason = union(enum) {
+    package_diagnostics,
+    hir_diagnostics,
+    hir_executable_fallbacks: HirFallbackCounts,
+    structural_executable_fallback: hir.ExecutableFallbackViolation,
+};
+
+pub const ArtifactEmissionDecision = union(enum) {
+    allowed: *const hir.LoweringResult,
+    blocked: ArtifactEmissionBlockReason,
+
+    pub fn isAllowed(self: ArtifactEmissionDecision) bool {
+        return switch (self) {
+            .allowed => true,
+            .blocked => false,
+        };
     }
 };
 
@@ -104,6 +163,12 @@ fn finishCompilation(compilation: *Compilation) !void {
         };
         endMetric(instrumentation, tree.tokens.len);
         compilerPhaseLog("module {s} syntax", .{module.name});
+        const syntax_diagnostics = try compilation.db.syntaxDiagnostics(module.file_id);
+        if (diagnosticsHaveErrors(syntax_diagnostics)) {
+            compilation.artifact_blocked = true;
+            compilation.artifact_block_reason = .package_diagnostics;
+            return;
+        }
     }
 
     for (package.modules.items) |module_id| {
@@ -116,6 +181,12 @@ fn finishCompilation(compilation: *Compilation) !void {
         };
         endMetric(instrumentation, ast_file.expressions.len);
         compilerPhaseLog("module {s} ast", .{module.name});
+        const ast_diagnostics = try compilation.db.astDiagnostics(module.file_id);
+        if (diagnosticsHaveErrors(ast_diagnostics)) {
+            compilation.artifact_blocked = true;
+            compilation.artifact_block_reason = .package_diagnostics;
+            return;
+        }
     }
 
     compilerPhaseLog("module-graph begin", .{});
@@ -148,6 +219,12 @@ fn finishCompilation(compilation: *Compilation) !void {
         };
         endMetric(instrumentation, resolution.expr_bindings.len);
         compilerPhaseLog("module {s} resolve", .{module.name});
+        const resolution_diagnostics = try compilation.db.resolutionDiagnostics(module_id);
+        if (diagnosticsHaveErrors(resolution_diagnostics)) {
+            compilation.artifact_blocked = true;
+            compilation.artifact_block_reason = .package_diagnostics;
+            return;
+        }
         beginMetric(instrumentation, "typecheck");
         const typecheck = compilation.db.moduleTypeCheck(module_id) catch |err| {
             cancelMetric(instrumentation);
@@ -157,6 +234,7 @@ fn finishCompilation(compilation: *Compilation) !void {
         compilerPhaseLog("module {s} typecheck", .{module.name});
         if (diagnosticsHaveErrors(&typecheck.diagnostics)) {
             compilation.artifact_blocked = true;
+            compilation.artifact_block_reason = .package_diagnostics;
             return;
         }
         beginMetric(instrumentation, "const-eval");
@@ -184,10 +262,21 @@ fn finishCompilation(compilation: *Compilation) !void {
     compilerPhaseLog("root lower-to-hir done", .{});
     if (diagnosticsHaveErrors(&lowering.diagnostics)) {
         compilation.artifact_blocked = true;
+        compilation.artifact_block_reason = .hir_diagnostics;
         return;
     }
-    if (!lowering.isEmittable() or hir.findExecutableFallback(lowering.module.raw_module) != null) {
+    if (!lowering.isEmittable()) {
         compilation.artifact_blocked = true;
+        compilation.artifact_block_reason = .{ .hir_executable_fallbacks = .{
+            .type_fallback_count = lowering.type_fallback_count,
+            .placeholder_count = lowering.placeholder_count,
+            .default_value_count = lowering.default_value_count,
+        } };
+        return;
+    }
+    if (hir.findExecutableFallback(lowering.module.raw_module)) |violation| {
+        compilation.artifact_blocked = true;
+        compilation.artifact_block_reason = .{ .structural_executable_fallback = violation };
         return;
     }
 }
@@ -202,10 +291,10 @@ pub fn compileSourceWithOptions(allocator: std.mem.Allocator, path: []const u8, 
     compiler_db.setCompileOptions(options);
 
     const package_id = try compiler_db.addPackage("main");
-    try addEmbeddedStdModules(&compiler_db, package_id);
     const file_id = try compiler_db.addSourceFile(path, text);
     const module_name = std.fs.path.stem(path);
     const module_id = try compiler_db.addModule(package_id, file_id, module_name);
+    try addEmbeddedStdModulesReferencedByAst(allocator, &compiler_db, package_id, try compiler_db.astFile(file_id));
 
     return .{
         .db = compiler_db,
@@ -233,7 +322,7 @@ fn loadPackageSources(
         const source_text = if (embedded_source) |text|
             text
         else
-            try std.fs.cwd().readFileAlloc(allocator, module_info.resolved_path, 1024 * 1024);
+            try std.Io.Dir.cwd().readFileAlloc(std.Io.Threaded.global_single_threaded.io(), module_info.resolved_path, allocator, std.Io.Limit.limited(1024 * 1024));
         defer if (embedded_source == null) allocator.free(source_text);
 
         const file_id = try compiler_db.addSourceFile(module_info.resolved_path, source_text);
@@ -254,9 +343,37 @@ fn loadPackageSources(
     };
 }
 
-fn addEmbeddedStdModules(compiler_db: *db.CompilerDb, package_id: source.PackageId) !void {
-    for (embedded_stdlib.all()) |module| {
-        const file_id = try compiler_db.addSourceFile(module.resolved_path, module.source);
-        _ = try compiler_db.addModule(package_id, file_id, module.logical_path);
+fn addEmbeddedStdModulesReferencedByAst(
+    allocator: std.mem.Allocator,
+    compiler_db: *db.CompilerDb,
+    package_id: source.PackageId,
+    ast_file: *const ast.AstFile,
+) anyerror!void {
+    var added = std.StringHashMap(void).init(allocator);
+    defer added.deinit();
+    for (ast_file.root_items) |item_id| {
+        const item = ast_file.item(item_id).*;
+        if (item == .Import) {
+            const module = embedded_stdlib.byLogicalPath(item.Import.path) orelse continue;
+            try addEmbeddedStdModuleWithDependencies(allocator, compiler_db, package_id, module, &added);
+        }
+    }
+}
+
+fn addEmbeddedStdModuleWithDependencies(
+    allocator: std.mem.Allocator,
+    compiler_db: *db.CompilerDb,
+    package_id: source.PackageId,
+    module: embedded_stdlib.EmbeddedModule,
+    added: *std.StringHashMap(void),
+) anyerror!void {
+    if (added.contains(module.logical_path)) return;
+    try added.put(module.logical_path, {});
+    const file_id = try compiler_db.addSourceFile(module.resolved_path, module.source);
+    _ = try compiler_db.addModule(package_id, file_id, module.logical_path);
+    for (module.imports) |import_info| {
+        if (embedded_stdlib.byLogicalPath(import_info.specifier)) |dependency| {
+            try addEmbeddedStdModuleWithDependencies(allocator, compiler_db, package_id, dependency, added);
+        }
     }
 }

@@ -1,6 +1,6 @@
 const std = @import("std");
-const primitives = @import("voltaire");
 const ora_evm = @import("ora_evm");
+const primitives = ora_evm.primitives;
 
 const MOCK_RETURNDATA_PRECOMPILE_ADDRESS = primitives.Address.fromU256(0x300);
 
@@ -58,12 +58,12 @@ const ProbeConfig = struct {
     }
 };
 
-pub fn main() !void {
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init) !void {
+    var gpa_state = std.heap.DebugAllocator(.{}){};
     defer _ = gpa_state.deinit();
     const allocator = gpa_state.allocator();
 
-    var config = try parseArgs(allocator);
+    var config = try parseArgs(allocator, init.minimal.args);
     defer config.deinit(allocator);
     mock_returndata = config.mock_returndata;
 
@@ -135,7 +135,7 @@ pub fn main() !void {
         debugger.max_steps = limits.max_steps;
 
         var stdout_buffer: [4096]u8 = undefined;
-        var stdout_file = std.fs.File.stdout().writer(&stdout_buffer);
+        var stdout_file = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
         const stdout = &stdout_file.interface;
         try stdout.print("debug probe\n", .{});
         try stdout.print("  bytecode: {s}\n", .{config.bytecode_path});
@@ -213,7 +213,7 @@ pub fn main() !void {
     debugger.max_steps = limits.max_steps;
 
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout_file = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_file = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
     const stdout = &stdout_file.interface;
     try stdout.print("debug probe\n", .{});
     try stdout.print("  bytecode: {s}\n", .{config.bytecode_path});
@@ -289,9 +289,30 @@ fn printStop(
     }
 }
 
-fn parseArgs(allocator: std.mem.Allocator) !ProbeConfig {
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+fn collectArgs(allocator: std.mem.Allocator, process_args: std.process.Args) ![][]u8 {
+    var iterator = try std.process.Args.Iterator.initAllocator(process_args, allocator);
+    defer iterator.deinit();
+
+    var list: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (list.items) |arg| allocator.free(arg);
+        list.deinit(allocator);
+    }
+
+    while (iterator.next()) |arg| {
+        try list.append(allocator, try allocator.dupe(u8, arg));
+    }
+    return list.toOwnedSlice(allocator);
+}
+
+fn freeArgs(allocator: std.mem.Allocator, args: [][]u8) void {
+    for (args) |arg| allocator.free(arg);
+    allocator.free(args);
+}
+
+fn parseArgs(allocator: std.mem.Allocator, process_args: std.process.Args) !ProbeConfig {
+    const args = try collectArgs(allocator, process_args);
+    defer freeArgs(allocator, args);
 
     if (args.len < 4) {
         try printUsage();
@@ -311,7 +332,7 @@ fn parseArgs(allocator: std.mem.Allocator) !ProbeConfig {
     var signature: ?[]u8 = null;
     defer if (signature) |sig| allocator.free(sig);
 
-    var raw_args: std.ArrayList([]u8) = .{};
+    var raw_args: std.ArrayList([]u8) = .empty;
     defer {
         for (raw_args.items) |item| allocator.free(item);
         raw_args.deinit(allocator);
@@ -398,7 +419,7 @@ fn parseArgs(allocator: std.mem.Allocator) !ProbeConfig {
 
 fn printUsage() !void {
     var stderr_buffer: [2048]u8 = undefined;
-    var stderr_file = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_file = std.Io.File.stderr().writer(std.Io.Threaded.global_single_threaded.io(), &stderr_buffer);
     const stderr = &stderr_file.interface;
     try stderr.print(
         \\usage:

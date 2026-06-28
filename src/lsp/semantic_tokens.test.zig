@@ -78,6 +78,49 @@ test "semantic tokens: refinement type names classify as default library types" 
     return error.TestExpectedEqual;
 }
 
+test "semantic tokens: Resource and at-prefixed builtins classify as default library" {
+    const source = "@move Resource @cast";
+    const tokens = try cachedTokens(testing.allocator, source, null);
+    defer testing.allocator.free(tokens);
+
+    const move = try semanticTokenForLexeme(source, tokens, "move");
+    try testing.expectEqual(semantic_tokens.SemanticTokenKind.function, move.kind);
+    try testing.expect((move.modifiers & semantic_tokens.SemanticTokenModifier.mask(.defaultLibrary)) != 0);
+
+    const resource = try semanticTokenForLexeme(source, tokens, "Resource");
+    try testing.expectEqual(semantic_tokens.SemanticTokenKind.type, resource.kind);
+    try testing.expect((resource.modifiers & semantic_tokens.SemanticTokenModifier.mask(.defaultLibrary)) != 0);
+
+    const cast = try semanticTokenForLexeme(source, tokens, "cast");
+    try testing.expectEqual(semantic_tokens.SemanticTokenKind.function, cast.kind);
+    try testing.expect((cast.modifiers & semantic_tokens.SemanticTokenModifier.mask(.defaultLibrary)) != 0);
+}
+
+test "semantic tokens: builtin environment namespaces and constants classify as default library" {
+    const source = "msg.sender i256.MAX std.msg.value std.constants.U256_MAX";
+    const tokens = try cachedTokens(testing.allocator, source, null);
+    defer testing.allocator.free(tokens);
+
+    const msg = try semanticTokenForLexeme(source, tokens, "msg");
+    try testing.expectEqual(semantic_tokens.SemanticTokenKind.namespace, msg.kind);
+    try testing.expect((msg.modifiers & semantic_tokens.SemanticTokenModifier.mask(.defaultLibrary)) != 0);
+
+    const sender = try semanticTokenForLexeme(source, tokens, "sender");
+    try testing.expectEqual(semantic_tokens.SemanticTokenKind.property, sender.kind);
+    try testing.expect((sender.modifiers & semantic_tokens.SemanticTokenModifier.mask(.defaultLibrary)) != 0);
+    try testing.expect((sender.modifiers & semantic_tokens.SemanticTokenModifier.mask(.readonly)) != 0);
+
+    const u256_max = try semanticTokenForLexeme(source, tokens, "U256_MAX");
+    try testing.expectEqual(semantic_tokens.SemanticTokenKind.variable, u256_max.kind);
+    try testing.expect((u256_max.modifiers & semantic_tokens.SemanticTokenModifier.mask(.defaultLibrary)) != 0);
+    try testing.expect((u256_max.modifiers & semantic_tokens.SemanticTokenModifier.mask(.readonly)) != 0);
+
+    const max = try semanticTokenForLexeme(source, tokens, "MAX");
+    try testing.expectEqual(semantic_tokens.SemanticTokenKind.variable, max.kind);
+    try testing.expect((max.modifiers & semantic_tokens.SemanticTokenModifier.mask(.defaultLibrary)) != 0);
+    try testing.expect((max.modifiers & semantic_tokens.SemanticTokenModifier.mask(.readonly)) != 0);
+}
+
 test "semantic tokens: cached tokenizer propagates allocator failure" {
     const source =
         \\contract Wallet {
@@ -101,12 +144,9 @@ test "semantic tokens: cached tokenizer propagates allocator failure" {
             allocator.free(tokens);
             try testing.expect(!failing.has_induced_failure);
             if (observed_induced_failure) break;
-        } else |err| switch (err) {
-            error.OutOfMemory => {
-                try testing.expect(failing.has_induced_failure);
-                observed_induced_failure = true;
-            },
-            else => return err,
+        } else |_| {
+            try testing.expect(failing.has_induced_failure);
+            observed_induced_failure = true;
         }
     }
 
@@ -130,6 +170,24 @@ fn expectSemanticTokenForLexeme(
             return;
         }
         return;
+    }
+
+    return error.TestExpectedEqual;
+}
+
+fn semanticTokenForLexeme(
+    source: []const u8,
+    tokens: []const semantic_tokens.SemanticToken,
+    lexeme: []const u8,
+) !semantic_tokens.SemanticToken {
+    const offset = std.mem.indexOf(u8, source, lexeme) orelse return error.TestExpectedEqual;
+    const start_char: u32 = @intCast(offset);
+    const length: u32 = @intCast(lexeme.len);
+
+    for (tokens) |token| {
+        if (token.line == 0 and token.start_char == start_char and token.length == length) {
+            return token;
+        }
     }
 
     return error.TestExpectedEqual;

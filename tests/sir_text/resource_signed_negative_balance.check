@@ -1,0 +1,23 @@
+// INPUT: ora-example/corpus/resources/signed_resource_negative_balance.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+
+// CHECK-LABEL: fn settle:
+// CHECK: c0 = const 0x0
+// CHECK: slot_settled = const 0x1
+// CHECK: [[POS_AMOUNT:v[0-9]+]] = sgt v0 c0
+// CHECK: [[ZERO_AMOUNT:v[0-9]+]] = eq v0 c0
+// CHECK: [[NON_NEG:v[0-9]+]] = or [[POS_AMOUNT]] [[ZERO_AMOUNT]]
+// CHECK: => [[NON_NEG]] ? @bb1 : @bb0
+// CHECK: [[NEG_AMOUNT:v[0-9]+]] = slt v0 0x0
+// CHECK: [[AMOUNT_OK:v[0-9]+]] = iszero [[NEG_AMOUNT]]
+// CHECK: => [[AMOUNT_OK]] ? @bb5 : @bb0
+// CHECK: [[SRC_AFTER:v[0-9]+]] = sub {{v[0-9]+}} v0
+// CHECK: [[SRC_SIGN_OVERFLOW:v[0-9]+]] = sgt [[SRC_AFTER]]
+// CHECK: [[SRC_OK:v[0-9]+]] = iszero [[SRC_SIGN_OVERFLOW]]
+// CHECK: => [[SRC_OK]] ? @bb6 : @bb0
+// CHECK: [[DST_AFTER:v[0-9]+]] = add {{v[0-9]+}} v0
+// CHECK: [[DST_SIGN_OVERFLOW:v[0-9]+]] = slt [[DST_AFTER]]
+// CHECK: [[DST_OK:v[0-9]+]] = iszero [[DST_SIGN_OVERFLOW]]
+// CHECK: => [[DST_OK]] ? @bb7 : @bb0
+// CHECK: sstore 0x0 [[SRC_AFTER]]
+// CHECK: sstore 0x1 [[DST_AFTER]]

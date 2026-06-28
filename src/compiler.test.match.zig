@@ -1343,7 +1343,7 @@ test "compiler source loader injects embedded std result module" {
     defer compilation.deinit();
 
     const package = compilation.db.sources.package(compilation.package_id);
-    try testing.expectEqual(@as(usize, 6), package.modules.items.len);
+    try testing.expectEqual(@as(usize, 5), package.modules.items.len);
 
     const graph = try compilation.db.moduleGraph(compilation.package_id);
     const root_summary = for (graph.modules) |summary| {
@@ -1355,12 +1355,12 @@ test "compiler source loader injects embedded std result module" {
     const std_summary = for (graph.modules) |summary| {
         if (summary.module_id == std_module_id) break summary;
     } else return error.TestUnexpectedResult;
-    try testing.expectEqual(@as(usize, 4), std_summary.imports.len);
+    try testing.expectEqual(@as(usize, 3), std_summary.imports.len);
 }
 
-test "compiler lowers try expressions through real error helper ops" {
+test "compiler lowers try expressions without rewrapping identical error unions" {
     const source_text =
-        \\error Failure(code: u256);
+        \\error Failure;
         \\
         \\pub fn lift(maybe: !u256 | Failure) -> !u256 | Failure {
         \\    return try maybe;
@@ -1375,8 +1375,32 @@ test "compiler lowers try expressions through real error helper ops" {
     defer testing.allocator.free(hir_text);
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.is_error"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.unwrap"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.get_error"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.err"));
+}
+
+test "compiler rewraps identical payload error unions that need wide carriers" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\
+        \\pub fn lift(maybe: !bool | Failure) -> !bool | Failure {
+        \\    return try maybe;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.is_error"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.get_error"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "-> !ora.struct<\"Failure\">"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.err"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.force_wide_error_union"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.unwrap"));
 }
 
@@ -1399,12 +1423,13 @@ test "compiler carries tuple-payload error unions through HIR" {
 test "compiler marks payload-bearing narrow error unions for wide lowering in HIR" {
     const source_text =
         \\error Failure(code: u256);
+        \\error Other;
         \\
         \\pub fn helper(flag: bool) -> !bool | Failure {
         \\    return flag;
         \\}
         \\
-        \\pub fn use(flag: bool) -> !bool | Failure {
+        \\pub fn use(flag: bool) -> !bool | Failure | Other {
         \\    return try helper(flag);
         \\}
     ;
@@ -1413,6 +1438,8 @@ test "compiler marks payload-bearing narrow error unions for wide lowering in HI
     defer testing.allocator.free(hir_text);
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.force_wide_error_union"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.get_error"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "-> !ora.struct<\"Failure\">"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.ok"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.err"));
 }
@@ -1546,7 +1573,7 @@ test "compiler reports sema diagnostics for declaration assignment and return mi
         \\
         \\pub fn broken(flag: bool) -> u256 {
         \\    let a: u256 = flag;
-        \\    let b = 1;
+        \\    var b = 1;
         \\    b = flag;
         \\    return flag;
         \\}
@@ -1974,7 +2001,7 @@ test "compiler uses selector-derived ids for imported Result errors" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "dep.ora",
         .data =
         \\error Failure;
@@ -1987,7 +2014,7 @@ test "compiler uses selector-derived ids for imported Result errors" {
         \\}
         ,
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\comptime const dep = @import("./dep.ora");
@@ -2600,11 +2627,11 @@ test "compiler carries payload-bearing narrow error unions across function calls
     const source_text =
         \\error Failure(code: u256);
         \\
-        \\fn helper(flag: bool) -> !bool | Failure {
-        \\    return flag;
-        \\}
-        \\
         \\contract Probe {
+        \\    pub fn helper(flag: bool) -> !bool | Failure {
+        \\        return flag;
+        \\    }
+        \\
         \\    pub fn run(flag: bool) -> !bool | Failure {
         \\        return helper(flag);
         \\    }

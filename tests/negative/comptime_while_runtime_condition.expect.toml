@@ -1,0 +1,1 @@
+expect_error = "comptime while condition is not statically known during HIR lowering"

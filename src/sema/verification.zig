@@ -17,7 +17,7 @@ pub fn verificationFacts(allocator: std.mem.Allocator, file: *const ast.AstFile,
     errdefer result.deinit();
 
     const arena = result.arena.allocator();
-    var facts: std.ArrayList(VerificationFact) = .{};
+    var facts: std.ArrayList(VerificationFact) = .empty;
 
     try appendVerificationFacts(arena, file, key, &facts);
 

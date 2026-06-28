@@ -67,7 +67,7 @@ const ChildList = struct {
 
     inline_buffer: [inline_capacity]ChildRef = undefined,
     inline_len: usize = 0,
-    spill: std.ArrayList(ChildRef) = .{},
+    spill: std.ArrayList(ChildRef) = .empty,
     items: []const ChildRef = &.{},
 
     fn init() ChildList {
@@ -125,8 +125,8 @@ const Parser = struct {
             .trivia = trivia,
             .tokens = tokens,
             .diagnostics = diags,
-            .nodes = .{},
-            .children = .{},
+            .nodes = .empty,
+            .children = .empty,
             .index = 0,
             .pending_type_gt = 0,
         };
@@ -177,9 +177,9 @@ const Parser = struct {
             .nodes_capacity = self.nodes.capacity,
             .root = root,
         };
-        self.tokens = .{};
-        self.children = .{};
-        self.nodes = .{};
+        self.tokens = .empty;
+        self.children = .empty;
+        self.nodes = .empty;
         return tree;
     }
 
@@ -216,7 +216,25 @@ const Parser = struct {
         if (self.at(.Comptime) and self.peekKind(1) == .Fn) {
             return self.parseFunctionItem();
         }
+        if (self.at(.Comptime) and self.peekKind(1) == .Inline and self.peekKind(2) == .Fn) {
+            return self.parseFunctionItem();
+        }
+        if (self.at(.Inline) and self.peekKind(1) == .Fn) {
+            return self.parseFunctionItem();
+        }
+        if (self.at(.Inline) and self.peekKind(1) == .Comptime and self.peekKind(2) == .Fn) {
+            return self.parseFunctionItem();
+        }
         if (self.at(.Pub) and self.peekKind(1) == .Comptime and self.peekKind(2) == .Fn) {
+            return self.parseFunctionItem();
+        }
+        if (self.at(.Pub) and self.peekKind(1) == .Inline and self.peekKind(2) == .Fn) {
+            return self.parseFunctionItem();
+        }
+        if (self.at(.Pub) and self.peekKind(1) == .Comptime and self.peekKind(2) == .Inline and self.peekKind(3) == .Fn) {
+            return self.parseFunctionItem();
+        }
+        if (self.at(.Pub) and self.peekKind(1) == .Inline and self.peekKind(2) == .Comptime and self.peekKind(3) == .Fn) {
             return self.parseFunctionItem();
         }
         if (self.at(.Pub) and self.peekKind(1) == .Contract) {
@@ -227,10 +245,11 @@ const Parser = struct {
         }
         return switch (self.current().kind) {
             .Contract => self.parseContractItem(),
-            .Pub, .Fn => self.parseFunctionItem(),
+            .Pub, .Fn, .Inline => self.parseFunctionItem(),
             .Struct => self.parseStructItem(),
             .Bitfield => self.parseBitfieldItem(),
             .Enum => self.parseEnumItem(),
+            .Resource => self.parseResourceItem(),
             .Extern => self.parseTraitItem(),
             .Trait => self.parseTraitItem(),
             .Impl => self.parseImplItem(),
@@ -310,7 +329,7 @@ const Parser = struct {
             try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
 
-        if (self.at(.Comptime)) {
+        while (self.at(.Comptime) or self.at(.Inline)) {
             try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
 
@@ -1118,6 +1137,50 @@ const Parser = struct {
         }
 
         return self.finishNode(SyntaxKind.TypeAliasItem, children.items);
+    }
+
+    fn parseResourceItem(self: *Parser) anyerror!green.GreenNodeId {
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
+
+        if (self.at(.Resource)) {
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected 'resource' in resource declaration");
+        }
+
+        if (tokenIsIdentifierLike(self.current().kind)) {
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected resource name");
+            return self.finishNode(SyntaxKind.ResourceItem, children.items);
+        }
+
+        if (self.at(.LeftParen)) {
+            try self.reportHere("generic resource declarations are not supported");
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseParameterListNode() });
+        }
+
+        if (self.at(.Equal)) {
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected '=' in resource declaration");
+            return self.finishNode(SyntaxKind.ResourceItem, children.items);
+        }
+
+        if (self.at(.Semicolon)) {
+            try self.reportHere("expected carrier type in resource declaration");
+        } else {
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{.Semicolon}) });
+        }
+
+        if (self.at(.Semicolon)) {
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected ';' after resource declaration");
+        }
+
+        return self.finishNode(SyntaxKind.ResourceItem, children.items);
     }
 
     fn parseMemberNode(self: *Parser, kind: SyntaxKind, message: []const u8) anyerror!green.GreenNodeId {
@@ -2884,8 +2947,8 @@ const Parser = struct {
         if (self.startsDecodePermissiveFunction()) return true;
         const kind = self.current().kind;
         return switch (kind) {
-            .Contract, .Pub, .Fn, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Log, .Error, .Const, .Ghost, .Storage, .Memory, .Tstore, .Let, .Var, .Immutable => true,
-            .Comptime => self.peekKind(1) == .Const or self.peekKind(1) == .Fn,
+            .Contract, .Pub, .Fn, .Inline, .Struct, .Bitfield, .Enum, .Resource, .Extern, .Trait, .Impl, .Log, .Error, .Const, .Ghost, .Storage, .Memory, .Tstore, .Let, .Var, .Immutable => true,
+            .Comptime => self.peekKind(1) == .Const or self.peekKind(1) == .Fn or (self.peekKind(1) == .Inline and self.peekKind(2) == .Fn),
             .Identifier => self.startsTypeAliasItem(),
             else => false,
         };
@@ -2895,7 +2958,7 @@ const Parser = struct {
         if (!self.looksLikeDecodePermissiveMarker()) return false;
         var cursor = self.index + 2;
         if (self.peekTokenKindAt(cursor) == .Pub) cursor += 1;
-        if (self.peekTokenKindAt(cursor) == .Comptime) cursor += 1;
+        while (self.peekTokenKindAt(cursor) == .Comptime or self.peekTokenKindAt(cursor) == .Inline) cursor += 1;
         return self.peekTokenKindAt(cursor) == .Fn;
     }
 
@@ -3399,7 +3462,7 @@ fn copyTokens(allocator: std.mem.Allocator, token_slice: []const lexer.Token) !s
 
     const synthetic_greater_capacity = try std.math.mul(usize, split_greater_count, 2);
     const token_capacity = try std.math.add(usize, token_slice.len, synthetic_greater_capacity);
-    var tokens: std.ArrayList(green.GreenToken) = .{};
+    var tokens: std.ArrayList(green.GreenToken) = .empty;
     errdefer tokens.deinit(allocator);
     try tokens.ensureTotalCapacityPrecise(allocator, token_capacity);
 

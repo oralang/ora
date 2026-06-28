@@ -3,7 +3,7 @@
 /// Architecture mirrors evm.zig - Evm orchestrates, Frame executes
 const std = @import("std");
 const log = @import("logger.zig");
-const primitives = @import("voltaire");
+const primitives = @import("primitives.zig");
 const GasConstants = primitives.GasConstants;
 const Address = primitives.Address;
 const Frame = @import("frame.zig").Frame;
@@ -11,7 +11,7 @@ const Hardfork = primitives.Hardfork;
 const host = @import("host.zig");
 const errors = @import("errors.zig");
 const trace = @import("trace.zig");
-const precompiles = @import("precompiles");
+const precompiles = @import("precompiles.zig");
 const evm_config = @import("evm_config.zig");
 const EvmConfig = evm_config.EvmConfig;
 const storage_mod = @import("storage.zig");
@@ -19,7 +19,7 @@ const access_list_manager_mod = @import("access_list_manager.zig");
 const AccessListManager = access_list_manager_mod.AccessListManager;
 const AccessListSnapshot = access_list_manager_mod.AccessListSnapshot;
 
-// Re-export StorageKey from Voltaire primitives (canonical path)
+// Re-export StorageKey from the Ora-owned primitive boundary.
 pub const StorageKey = primitives.State.StorageKey;
 pub const StorageSlotKey = StorageKey; // Backwards compatibility alias
 
@@ -203,16 +203,16 @@ pub fn Evm(comptime config: EvmConfig) type {
             self.nonces.clearRetainingCapacity();
             self.code.clearRetainingCapacity();
             self.access_list_manager = AccessListManager.init(arena_allocator);
-            self.frames = std.ArrayList(FrameType){};
+            self.frames = .empty;
             // Call handlers hold pointers to the active frame across nested
             // calls. Reserve the whole legal call-depth range so appending a
             // child frame cannot reallocate and dangle those parent pointers.
             try self.frames.ensureTotalCapacity(arena_allocator, max_call_depth);
-            self.logs = std.ArrayList(call_result.Log){};
+            self.logs = .empty;
             self.created_accounts = std.AutoHashMap(primitives.Address, void).init(arena_allocator);
             self.selfdestructed_accounts = std.AutoHashMap(primitives.Address, void).init(arena_allocator);
             self.touched_accounts = std.AutoHashMap(primitives.Address, void).init(arena_allocator);
-            self.balance_snapshot_stack = std.ArrayList(*std.AutoHashMap(primitives.Address, u256)){};
+            self.balance_snapshot_stack = .empty;
 
             // Set blob versioned hashes for EIP-4844
             // CRITICAL: Must copy blob hashes into arena to ensure correct lifetime
@@ -334,8 +334,7 @@ pub fn Evm(comptime config: EvmConfig) type {
             // RLP encoding of [sender (20 bytes), nonce]
             // For simplicity, use a fixed buffer (max size for nonce encoding is small)
             var buffer: [64]u8 = undefined;
-            var fbs = std.io.fixedBufferStream(&buffer);
-            const writer = fbs.writer();
+            var writer: std.Io.Writer = .fixed(&buffer);
 
             // Calculate nonce encoding length
             const nonce_len: usize = blk: {
@@ -372,7 +371,7 @@ pub fn Evm(comptime config: EvmConfig) type {
                 try writer.writeAll(nonce_bytes[start..]);
             }
 
-            const rlp_data = fbs.getWritten();
+            const rlp_data = buffer[0..writer.end];
 
             // Compute keccak256 hash
             var hash: [32]u8 = undefined;
@@ -461,17 +460,12 @@ pub fn Evm(comptime config: EvmConfig) type {
             // Pre-warm precompiles
             // EIP-2929: Precompiles are always warm at transaction start
             // Determine number of precompiles based on hardfork
-            // Berlin-Istanbul: 0x01-0x09 (9 precompiles: ECRECOVER through BLAKE2F)
-            // Cancun+: 0x01-0x0A (10 precompiles, added KZG point evaluation at 0x0A via EIP-4844)
-            // Prague+: 0x01-0x12 (19 precompiles, added BLS12-381 operations at 0x0B-0x12 via EIP-2537)
-            const precompile_count: usize = if (self.hardfork.isAtLeast(.PRAGUE))
-                0x12 // Prague: All precompiles including BLS12-381
-            else if (self.hardfork.isAtLeast(.CANCUN))
-                0x0A // Cancun: Includes KZG point evaluation
-            else
-                0x09; // Berlin-Istanbul: Up to BLAKE2F
+            // Frontier: 0x01-0x04, Byzantium: 0x01-0x08,
+            // Istanbul: 0x01-0x09, Cancun: 0x01-0x0A,
+            // Prague/Osaka: 0x01-0x13.
+            const precompile_count: usize = precompiles.maxAddressForHardfork(self.hardfork);
 
-            var precompile_addrs: [0x12]primitives.Address = undefined;
+            var precompile_addrs: [precompiles.MAX_PRECOMPILE_ADDRESS]primitives.Address = undefined;
             var i: usize = 0;
             while (i < precompile_count) : (i += 1) {
                 precompile_addrs[i] = primitives.Address.fromU256(i + 1);
@@ -803,7 +797,7 @@ pub fn Evm(comptime config: EvmConfig) type {
             // Restore storage on failure
             // IMPORTANT: Identify slots to delete BEFORE restoring original_storage
             // First, identify slots that were added during the call (exist in original_storage but not in snapshot)
-            var added_slots = std.ArrayList(struct { key: StorageKey, original: u256 }){};
+            var added_slots: std.ArrayList(struct { key: StorageKey, original: u256 }) = .empty;
             try added_slots.ensureTotalCapacity(self.arena.allocator(), 10);
             var orig_check_it = self.storage.original_storage.iterator();
             while (orig_check_it.next()) |entry| {
@@ -1242,7 +1236,7 @@ pub fn Evm(comptime config: EvmConfig) type {
             // Calculate new contract address
             const new_address = if (salt) |s| blk: {
                 // CREATE2: keccak256(0xff ++ caller ++ salt ++ keccak256(init_code))[12:]
-                var hash_input = std.ArrayList(u8){};
+                var hash_input: std.ArrayList(u8) = .empty;
                 defer hash_input.deinit(self.arena.allocator());
 
                 try hash_input.append(self.arena.allocator(), 0xff);
@@ -1284,7 +1278,7 @@ pub fn Evm(comptime config: EvmConfig) type {
 
                 // Manually construct RLP encoding of [address_bytes, nonce]
                 // Address is 20 bytes, nonce is variable length
-                var rlp_data = std.ArrayList(u8){};
+                var rlp_data: std.ArrayList(u8) = .empty;
                 defer rlp_data.deinit(self.arena.allocator());
 
                 // Encode address (20 bytes, 0x80 + 20 = 0x94)
@@ -1324,7 +1318,7 @@ pub fn Evm(comptime config: EvmConfig) type {
 
                 // Wrap in list prefix
                 const total_len = rlp_data.items.len;
-                var final_rlp = std.ArrayList(u8){};
+                var final_rlp: std.ArrayList(u8) = .empty;
                 defer final_rlp.deinit(self.arena.allocator());
                 try final_rlp.append(self.arena.allocator(), @as(u8, @intCast(0xc0 + total_len))); // List with length
                 try final_rlp.appendSlice(self.arena.allocator(), rlp_data.items);
@@ -1374,7 +1368,7 @@ pub fn Evm(comptime config: EvmConfig) type {
                     const has_nonce = h.getNonce(new_address) > 0;
                     break :blk has_code or has_nonce;
                 } else {
-                    const has_code = (self.code.get(new_address) orelse &[_]u8{}).len > 0;
+                    const has_code = if (self.code.get(new_address)) |code| code.len > 0 else false;
                     const has_nonce = (self.nonces.get(new_address) orelse 0) > 0;
                     break :blk has_code or has_nonce;
                 }
@@ -1680,8 +1674,10 @@ pub fn Evm(comptime config: EvmConfig) type {
         pub fn get_code(self: *Self, address: primitives.Address) []const u8 {
             const raw_code = if (self.host) |h|
                 h.getCode(address)
+            else if (self.code.get(address)) |code|
+                code
             else
-                self.code.get(address) orelse &[_]u8{};
+                &.{};
 
             // EIP-7702: Check for delegation designation (Prague+)
             if (self.hardfork.isAtLeast(.PRAGUE) and raw_code.len == 23 and
@@ -1696,8 +1692,10 @@ pub fn Evm(comptime config: EvmConfig) type {
                 // delegation designation, we return its delegation code as-is
                 const delegated_code = if (self.host) |h|
                     h.getCode(delegated_addr)
+                else if (self.code.get(delegated_addr)) |code|
+                    code
                 else
-                    self.code.get(delegated_addr) orelse &[_]u8{};
+                    &.{};
 
                 return delegated_code;
             }

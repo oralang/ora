@@ -396,6 +396,97 @@ def Ora_SStoreOp : Ora_Op<"sstore",
   }];
 }
 
+def Ora_StorageDeriveOp : Ora_PureOp<"storage.derive"> {
+  let summary = "Derive an opaque computed-storage slot";
+  let description = [{
+    Derives a compiler-owned computed-storage slot from a compile-time namespace
+    hash and zero or more scalar runtime keys. The namespace string is retained
+    for diagnostics, source maps, and layout manifests; lowering hashes a
+    domain-separated preimage containing a fixed Ora computed-storage tag, the
+    key count, the namespace_hash attribute, and the keys.
+
+    Example:
+    ```mlir
+    %slot = ora.storage.derive "vault.position"(%owner : !ora.address)
+      {namespace_hash = 123 : i256} : (!ora.address) -> !ora.int<256, false>
+    ```
+  }];
+
+  let arguments = (ins StrAttr:$namespace_name, AnyAttr:$namespace_hash, Variadic<AnyType>:$keys);
+  let results = (outs AnyType:$slot);
+
+  let assemblyFormat = "$namespace_name `(` $keys `)` attr-dict `:` functional-type($keys, results)";
+  let hasVerifier = 1;
+}
+
+def Ora_StorageWordLoadOp : Ora_Op<"storage.word_load",
+    [MemoryEffects<[MemRead]>]> {
+  let summary = "Load one word from a computed-storage capability";
+  let description = [{
+    Loads a single word from an opaque computed-storage slot plus a word offset.
+    The source language can construct the slot only through compiler-owned
+    derivation primitives, not integer casts.
+
+    Example:
+    ```mlir
+    %word = ora.storage.word_load %slot, %offset : i256, i256 -> i256
+    ```
+  }];
+
+  let arguments = (ins AnyType:$slot, AnyType:$offset);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "$slot `,` $offset attr-dict `:` type($slot) `,` type($offset) `->` type($result)";
+  let hasVerifier = 1;
+}
+
+def Ora_StorageWordStoreOp : Ora_Op<"storage.word_store",
+    [MemoryEffects<[MemWrite]>]> {
+  let summary = "Store one word through a computed-storage capability";
+  let description = [{
+    Stores a single word to an opaque computed-storage slot plus a word offset.
+    Source programs can construct the slot only through compiler-owned
+    derivation primitives, and this op lowers through the normal SIR storage
+    path rather than exposing raw EVM assembly.
+
+    Example:
+    ```mlir
+    ora.storage.word_store %slot, %offset, %value : i256, i256, i256
+    ```
+  }];
+
+  let arguments = (ins AnyType:$slot, AnyType:$offset, AnyType:$value);
+
+  let assemblyFormat = "$slot `,` $offset `,` $value attr-dict `:` type($slot) `,` type($offset) `,` type($value)";
+  let hasVerifier = 1;
+}
+
+def Ora_StorageRangeEraseOp : Ora_Op<"storage.range_erase",
+    [MemoryEffects<[MemWrite]>]> {
+  let summary = "Erase a bounded computed-storage word range";
+  let description = [{
+    Erases a bounded computed-storage word range by zeroing every physical word
+    in `[slot, slot + word_count)`. The range is represented in source as an
+    opaque StorageRange capability, so user code cannot forge it with integer
+    casts. The lowering contract is intentionally stricter than the value
+    operands: `word_count` must be present as a compile-time attribute, and the
+    converter must reject the operation if only a runtime length is available.
+    Physical slots are computed as `slot + offset`; source and HIR require
+    computed-storage ranges to be statically bounded, and OraToSIR rejects any
+    malformed unbounded range before bytecode emission.
+
+    Example:
+    ```mlir
+    ora.storage.range_erase %slot {word_count = 4 : i64} : i256
+    ```
+  }];
+
+  let arguments = (ins AnyType:$slot, I64Attr:$word_count);
+
+  let assemblyFormat = "$slot attr-dict `:` type($slot)";
+  let hasVerifier = 1;
+}
+
 def Ora_MemoryGlobalOp : Ora_TypedSymbolDeclOp<"memory.global",
     "Memory global variable declaration"> {
   let summary = "Memory global variable declaration";
@@ -604,21 +695,6 @@ def Ora_RangeOp : Ora_PureOp<"range", [AllTypesMatch<["start", "end", "result"]>
 // Arithmetic Operations
 //===----------------------------------------------------------------------===//
 
-def Ora_AddOp : Ora_BinaryIntegerOp<"add", "Add operation",
-    Ora_IntegerLikeValueType,
-    [DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>]> {
-  let summary = "Add operation";
-  let description = [{
-    Adds two Ora integer values with proper unsigned semantics and overflow handling.
-    Accepts !ora.int<width, signed> types and preserves the type in the result.
-    
-    Example:
-    ```mlir
-    %result = ora.add %lhs, %rhs : (!ora.int<256, false>, !ora.int<256, false>) -> !ora.int<256, false>
-    ```
-  }];
-}
-
 def Ora_AddWrappingOp : Ora_BinaryIntegerOp<"add_wrapping",
     "Wrapping add operation", Ora_IntegerLikeValueType> {
   let summary = "Wrapping add operation";
@@ -655,59 +731,6 @@ def Ora_ShrWrappingOp : Ora_BinaryIntegerOp<"shr_wrapping",
     "Wrapping shift-right operation", Ora_IntegerLikeValueType> {
   let summary = "Wrapping shift-right operation";
   let description = [{Shifts an Ora integer right with wrapping semantics, preserving signedness from the Ora type.}];
-}
-
-def Ora_SubOp : Ora_CheckedBinaryIntegerOp<"sub", "Subtract operation"> {
-  let summary = "Subtract operation";
-  let description = [{
-    Subtracts two Ora integer values with proper unsigned semantics and overflow handling.
-    Accepts !ora.int<width, signed> types and preserves the type in the result.
-    
-    Example:
-    ```mlir
-    %result = ora.sub %lhs, %rhs : (!ora.int<256, false>, !ora.int<256, false>) -> !ora.int<256, false>
-    ```
-  }];
-}
-
-def Ora_MulOp : Ora_CheckedBinaryIntegerOp<"mul", "Multiply operation"> {
-  let summary = "Multiply operation";
-  let description = [{
-    Multiplies two Ora integer values with proper unsigned semantics and overflow handling.
-    Accepts !ora.int<width, signed> types and preserves the type in the result.
-    
-    Example:
-    ```mlir
-    %result = ora.mul %lhs, %rhs : (!ora.int<256, false>, !ora.int<256, false>) -> !ora.int<256, false>
-    ```
-  }];
-}
-
-def Ora_DivOp : Ora_CheckedBinaryIntegerOp<"div", "Divide operation"> {
-  let summary = "Divide operation";
-  let description = [{
-    Divides two Ora integer values with proper unsigned semantics.
-    Accepts !ora.int<width, signed> types and preserves the type in the result.
-    
-    Example:
-    ```mlir
-    %result = ora.div %lhs, %rhs : (!ora.int<256, false>, !ora.int<256, false>) -> !ora.int<256, false>
-    ```
-  }];
-  let hasVerifier = 1;
-}
-
-def Ora_RemOp : Ora_VerifiedBinaryIntegerOp<"rem", "Remainder operation"> {
-  let summary = "Remainder operation";
-  let description = [{
-    Computes the remainder of dividing two Ora integer values.
-    Accepts !ora.int<width, signed> types and preserves the type in the result.
-    
-    Example:
-    ```mlir
-    %result = ora.rem %lhs, %rhs : (!ora.int<256, false>, !ora.int<256, false>) -> !ora.int<256, false>
-    ```
-  }];
 }
 
 def Ora_CmpOp : Ora_PureOp<"cmp", [SameTypeOperands]> {
@@ -1495,23 +1518,65 @@ def Ora_QuantifiedOp : Ora_PureOp<"quantified"> {
 }
 
 //===----------------------------------------------------------------------===//
-// Financial Operations
+// Resource Operations
 //===----------------------------------------------------------------------===//
 
-def Ora_MoveOp : Ora_Op<"move"> {
-  let summary = "Move operation for financial transfers";
+class Ora_ResourceBoundaryOp<string mnemonic, string summaryText> :
+    Ora_Op<mnemonic, [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = summaryText;
+  let arguments = (ins
+    Variadic<AnyType>:$place,
+    AnyType:$amount,
+    StrAttr:$domain,
+    TypeAttr:$carrier_type,
+    BoolAttr:$carrier_signed
+  );
+  let hasVerifier = 1;
+}
+
+def Ora_MoveOp : Ora_Op<"move", [AttrSizedOperandSegments, MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Move quantity between resource places";
   let description = [{
-    Moves an amount from one balance to another.
-    
+    Moves an amount between two Resource<T> storage places in the same resource
+    domain. The source_place and destination_place segments are place paths, not
+    copied values. The first value in each segment is the map root; subsequent
+    values are the evaluated map keys.
+
     Example:
     ```mlir
-    ora.move %amount from %source to %destination : (i256, i256, i256) -> ()
+    "ora.move"(%balances, %from, %balances, %to, %amount)
+      <{operand_segment_sizes = array<i32: 2, 2, 1>,
+        domain = "TokenUnit",
+        carrier_type = !ora.int<256, false>}>
+      : (!ora.map<!ora.address, !ora.int<256, false>>, !ora.address,
+         !ora.map<!ora.address, !ora.int<256, false>>, !ora.address,
+         !ora.int<256, false>) -> ()
     ```
   }];
-  
-  let arguments = (ins AnyType:$amount, AnyType:$source, AnyType:$destination);
-  
-  // let assemblyFormat = "$amount `from` $source `to` $destination attr-dict `:` type($amount) `,` type($source) `,` type($destination)";
+
+  let arguments = (ins
+    Variadic<AnyType>:$source_place,
+    Variadic<AnyType>:$destination_place,
+    AnyType:$amount,
+    StrAttr:$domain,
+    TypeAttr:$carrier_type,
+    BoolAttr:$carrier_signed
+  );
+  let hasVerifier = 1;
+}
+
+def Ora_CreateOp : Ora_ResourceBoundaryOp<"create", "Create quantity in a resource place"> {
+  let description = [{
+    Creates an amount in a Resource<T> storage place as an explicit domain
+    boundary delta. The place segment is a place path, not a copied value.
+  }];
+}
+
+def Ora_DestroyOp : Ora_ResourceBoundaryOp<"destroy", "Destroy quantity from a resource place"> {
+  let description = [{
+    Destroys an amount from a Resource<T> storage place as an explicit domain
+    boundary delta. The place segment is a place path, not a copied value.
+  }];
 }
 
 //===----------------------------------------------------------------------===//

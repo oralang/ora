@@ -38,7 +38,7 @@ test "lsp workspace symbol response: appends cached open-document root symbols" 
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var results = std.ArrayList(types.SymbolInformation){};
+    var results = std.ArrayList(types.SymbolInformation).empty;
     const stats = try workspace_symbol_response.appendOpenDocumentSymbols(
         arena,
         &results,
@@ -72,7 +72,7 @@ test "lsp workspace symbol response: appends matching root symbols" {
     const arena = arena_state.allocator();
     const ranges = PassthroughRanges{};
 
-    var results = std.ArrayList(types.SymbolInformation){};
+    var results = std.ArrayList(types.SymbolInformation).empty;
     const stats = try workspace_symbol_response.appendEntrySymbols(arena, &results, "file:///cold.ora", &entry, "CR", &ranges);
 
     try std.testing.expectEqual(@as(usize, 1), results.items.len);
@@ -97,7 +97,7 @@ test "lsp workspace symbol response: appends all root symbols for empty query" {
     const arena = arena_state.allocator();
     const ranges = PassthroughRanges{};
 
-    var results = std.ArrayList(types.SymbolInformation){};
+    var results = std.ArrayList(types.SymbolInformation).empty;
     const stats = try workspace_symbol_response.appendEntrySymbols(arena, &results, "file:///cold.ora", &entry, "", &ranges);
 
     try std.testing.expectEqual(@as(usize, 2), results.items.len);

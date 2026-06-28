@@ -37,10 +37,7 @@ fn expectModuleVerificationFailure(text: []const u8) !void {
     const h = createContext();
     defer destroyContext(h);
 
-    const module = parseModuleFromText(h.ctx, text) catch |err| switch (err) {
-        error.MlirParseFailed => return,
-        else => return err,
-    };
+    const module = parseModuleFromText(h.ctx, text) catch return;
     defer c.oraModuleDestroy(module);
 
     const verified = c.mlirOperationVerify(c.oraModuleGetOperation(module));
@@ -147,13 +144,11 @@ test "mlir verifier rejects ora.adt.construct with wrong payload type" {
     try expectModuleVerificationFailure(text);
 }
 
-test "mlir verifier rejects ora.div with statically zero divisor" {
+test "mlir rejects removed ora.div operation" {
     const text =
         \\module {
         \\  func.func @f() {
-        \\    %lhs = "arith.constant"() <{value = 42 : i256}> : () -> !ora.int<256, false>
-        \\    %rhs = "arith.constant"() <{value = 0 : i256}> : () -> !ora.int<256, false>
-        \\    %0 = "ora.div"(%lhs, %rhs) : (!ora.int<256, false>, !ora.int<256, false>) -> !ora.int<256, false>
+        \\    %0 = "ora.div"() : () -> i256
         \\    func.return
         \\  }
         \\}
@@ -162,13 +157,11 @@ test "mlir verifier rejects ora.div with statically zero divisor" {
     try expectModuleVerificationFailure(text);
 }
 
-test "mlir verifier rejects ora.rem with statically zero divisor" {
+test "mlir rejects removed ora.rem operation" {
     const text =
         \\module {
         \\  func.func @f() {
-        \\    %lhs = "arith.constant"() <{value = 42 : i256}> : () -> !ora.int<256, false>
-        \\    %rhs = "arith.constant"() <{value = 0 : i256}> : () -> !ora.int<256, false>
-        \\    %0 = "ora.rem"(%lhs, %rhs) : (!ora.int<256, false>, !ora.int<256, false>) -> !ora.int<256, false>
+        \\    %0 = "ora.rem"() : () -> i256
         \\    func.return
         \\  }
         \\}
@@ -270,6 +263,143 @@ test "mlir verifier rejects ora.map_store with wrong key type" {
     ;
 
     try expectModuleVerificationFailure(text);
+}
+
+test "mlir verifier accepts resource boundary ops with map place paths" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @f(%balances: !ora.map<!ora.address, !ora.int<256, false>>, %from: !ora.address, %to: !ora.address, %amount: !ora.int<256, false>) {
+        \\    "ora.move"(%balances, %from, %balances, %to, %amount) <{operand_segment_sizes = array<i32: 2, 2, 1>, domain = "TokenUnit", carrier_type = !ora.int<256, false>, carrier_signed = false}> : (!ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.int<256, false>) -> ()
+        \\    "ora.create"(%balances, %to, %amount) <{domain = "TokenUnit", carrier_type = !ora.int<256, false>, carrier_signed = false}> : (!ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.int<256, false>) -> ()
+        \\    "ora.destroy"(%balances, %from, %amount) <{domain = "TokenUnit", carrier_type = !ora.int<256, false>, carrier_signed = false}> : (!ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.int<256, false>) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModuleFromText(h.ctx, text);
+    defer c.oraModuleDestroy(module);
+
+    try testing.expect(c.mlirOperationVerify(c.oraModuleGetOperation(module)));
+}
+
+test "mlir verifier accepts direct storage resource place roots" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  ora.global "reserve" : !ora.int<256, false>
+        \\  ora.global "treasury" : !ora.int<256, false>
+        \\  func.func @f(%amount: !ora.int<256, false>) {
+        \\    %reserve = "ora.sload"() <{global = "reserve"}> : () -> !ora.int<256, false>
+        \\    %treasury = "ora.sload"() <{global = "treasury"}> : () -> !ora.int<256, false>
+        \\    "ora.create"(%reserve, %amount) <{domain = "TokenUnit", carrier_type = !ora.int<256, false>, carrier_signed = false}> : (!ora.int<256, false>, !ora.int<256, false>) -> ()
+        \\    "ora.destroy"(%reserve, %amount) <{domain = "TokenUnit", carrier_type = !ora.int<256, false>, carrier_signed = false}> : (!ora.int<256, false>, !ora.int<256, false>) -> ()
+        \\    "ora.move"(%reserve, %treasury, %amount) <{operand_segment_sizes = array<i32: 1, 1, 1>, domain = "TokenUnit", carrier_type = !ora.int<256, false>, carrier_signed = false}> : (!ora.int<256, false>, !ora.int<256, false>, !ora.int<256, false>) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModuleFromText(h.ctx, text);
+    defer c.oraModuleDestroy(module);
+
+    try testing.expect(c.mlirOperationVerify(c.oraModuleGetOperation(module)));
+}
+
+test "mlir verifier rejects copied values as resource places" {
+    const text =
+        \\module {
+        \\  func.func @f(%source: !ora.int<256, false>, %destination: !ora.int<256, false>, %amount: !ora.int<256, false>) {
+        \\    "ora.move"(%source, %destination, %amount) <{operand_segment_sizes = array<i32: 1, 1, 1>, domain = "TokenUnit", carrier_type = !ora.int<256, false>, carrier_signed = false}> : (!ora.int<256, false>, !ora.int<256, false>, !ora.int<256, false>) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    try expectModuleVerificationFailure(text);
+}
+
+test "mlir verifier rejects resource ops without carrier_signed" {
+    const text =
+        \\module {
+        \\  func.func @f(%balances: !ora.map<!ora.address, !ora.int<256, false>>, %from: !ora.address, %to: !ora.address, %amount: !ora.int<256, false>) {
+        \\    "ora.move"(%balances, %from, %balances, %to, %amount) <{operand_segment_sizes = array<i32: 2, 2, 1>, domain = "TokenUnit", carrier_type = !ora.int<256, false>}> : (!ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.int<256, false>) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    try expectModuleVerificationFailure(text);
+}
+
+test "OraToSIR lowers resource create and destroy to checked storage updates" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module attributes {ora.global_slots_built, ora.global_slots = {balances = 0 : ui64}} {
+        \\  ora.global "balances" : !ora.map<!ora.address, !ora.int<256, false>> {ora.slot_index = 0 : ui64}
+        \\  func.func @f(%owner: !ora.address, %amount: !ora.int<256, false>) {
+        \\    %balances = "ora.sload"() <{global = "balances"}> : () -> !ora.map<!ora.address, !ora.int<256, false>>
+        \\    "ora.create"(%balances, %owner, %amount) <{domain = "TokenUnit", carrier_type = !ora.int<256, false>, carrier_signed = false}> : (!ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.int<256, false>) -> ()
+        \\    "ora.destroy"(%balances, %owner, %amount) <{domain = "TokenUnit", carrier_type = !ora.int<256, false>, carrier_signed = false}> : (!ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.int<256, false>) -> ()
+        \\    ora.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModuleFromText(h.ctx, text);
+    defer c.oraModuleDestroy(module);
+
+    try testing.expect(c.mlirOperationVerify(c.oraModuleGetOperation(module)));
+    try testing.expect(c.oraConvertToSIR(h.ctx, module, false));
+}
+
+test "OraToSIR lowers resource move to alias-aware checked storage updates" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module attributes {ora.global_slots_built, ora.global_slots = {balances = 0 : ui64}} {
+        \\  ora.global "balances" : !ora.map<!ora.address, !ora.int<256, false>> {ora.slot_index = 0 : ui64}
+        \\  func.func @f(%from: !ora.address, %to: !ora.address, %amount: !ora.int<256, false>) {
+        \\    %balances = "ora.sload"() <{global = "balances"}> : () -> !ora.map<!ora.address, !ora.int<256, false>>
+        \\    "ora.move"(%balances, %from, %balances, %to, %amount) <{operand_segment_sizes = array<i32: 2, 2, 1>, domain = "TokenUnit", carrier_type = !ora.int<256, false>, carrier_signed = false}> : (!ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.int<256, false>) -> ()
+        \\    ora.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModuleFromText(h.ctx, text);
+    defer c.oraModuleDestroy(module);
+
+    try testing.expect(c.mlirOperationVerify(c.oraModuleGetOperation(module)));
+    try testing.expect(c.oraConvertToSIR(h.ctx, module, false));
+}
+
+test "OraToSIR fails closed for resource move without a storage root" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @f(%balances: !ora.map<!ora.address, !ora.int<256, false>>, %from: !ora.address, %to: !ora.address, %amount: !ora.int<256, false>) {
+        \\    "ora.move"(%balances, %from, %balances, %to, %amount) <{operand_segment_sizes = array<i32: 2, 2, 1>, domain = "TokenUnit", carrier_type = !ora.int<256, false>, carrier_signed = false}> : (!ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.int<256, false>) -> ()
+        \\    ora.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModuleFromText(h.ctx, text);
+    defer c.oraModuleDestroy(module);
+
+    try testing.expect(c.mlirOperationVerify(c.oraModuleGetOperation(module)));
+    try testing.expect(!c.oraConvertToSIR(h.ctx, module, false));
 }
 
 test "mlir verifier rejects ora.error.unwrap on non-error-union type" {

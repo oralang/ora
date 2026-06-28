@@ -22,7 +22,7 @@
 // CHECK: return
 
 // CHECK-LABEL:     bb1 {
-// CHECK: v[[TAIL_HEAD:[0-9]+]] = add v[[SELECTOR_BYTES]] a_length
+// CHECK: v[[TAIL_HEAD:[0-9]+]] = add 0x4 a_length
 // CHECK: calldatasize
 // CHECK: lt
 // CHECK: => {{.*}} ? @bb2 : @abi_decode_revert_0

@@ -1,0 +1,14 @@
+// INPUT: tests/conformance/resource_signed_amount.ora
+// CHECK-LABEL: ora.contract @ResourceSignedAmount
+// CHECK: ora.global "debts" : !ora.map<!ora.address, i256>
+//
+// CHECK-LABEL: func.func @credit
+// CHECK-SAME: ora.abi_params = ["address", "int256"]
+// CHECK-SAME: ora.modifies_slots = ["debts[param#0]"]
+// CHECK-SAME: ora.read_slots = ["debts"]
+// CHECK-SAME: ora.write_slots = ["debts"]
+// CHECK: arith.cmpi sge
+// CHECK: "ora.create"
+// CHECK-SAME: carrier_signed = true
+// CHECK-SAME: carrier_type = i256
+// CHECK-SAME: domain = "DebtUnit"

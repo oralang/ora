@@ -18,7 +18,7 @@
 // CHECK-NOT: const 0xFF7E9F57
 // CHECK: mstore256 elem10_ptr
 // CHECK-NOT: const 0xFF7E9F57
-// CHECK: mstore256 elem11_ptr [[ERR_SELECTOR]]
+// CHECK: mstore256 elem11_ptr 0xFF7E9F57
 
 // CHECK-LABEL:     bb2 {
 // CHECK: elem7 = mload256

@@ -40,7 +40,7 @@ fn sliceListContains(items: []const []const u8, needle: []const u8) bool {
 }
 
 fn appendSirHeaderLocals(header: []const u8, locals: *std.ArrayList([]const u8)) !void {
-    const before_brace = std.mem.trimRight(u8, header[0 .. header.len - 1], " \t\r");
+    const before_brace = std.mem.trimEnd(u8, header[0 .. header.len - 1], " \t\r");
     const arrow = std.mem.indexOf(u8, before_brace, " -> ");
     const input_part = if (arrow) |idx| before_brace[0..idx] else before_brace;
 
@@ -58,7 +58,7 @@ fn isSirBlockHeaderLine(line: []const u8, trimmed: []const u8) bool {
 }
 
 fn sirBlockHeaderName(header: []const u8) ?[]const u8 {
-    const before_brace = std.mem.trimRight(u8, header[0 .. header.len - 1], " \t\r");
+    const before_brace = std.mem.trimEnd(u8, header[0 .. header.len - 1], " \t\r");
     var tokens = std.mem.tokenizeAny(u8, before_brace, " \t");
     return tokens.next();
 }
@@ -102,7 +102,7 @@ fn expectReturndataGuardBeforePayloadLoad(function_text: []const u8) !void {
 }
 
 fn expectSirBlockOperandsAreLocal(sir_text: []const u8, block_name: []const u8, op_name: []const u8) !void {
-    var locals = std.ArrayList([]const u8){};
+    var locals = std.ArrayList([]const u8).empty;
     defer locals.deinit(testing.allocator);
 
     const op_needle = try std.fmt.allocPrint(testing.allocator, " = {s} ", .{op_name});
@@ -226,7 +226,7 @@ test "compiler parses and lowers extern traits" {
     const trait_item_node = nthChildNodeOfKind(root, .TraitItem, 0).?;
     try testing.expect(nthChildNodeOfKind(trait_item_node, .TraitMethodSignature, 0) != null);
 
-    var ast_diags: std.ArrayList(compiler.diagnostics.Diagnostic) = .{};
+    var ast_diags: std.ArrayList(compiler.diagnostics.Diagnostic) = .empty;
     defer ast_diags.deinit(testing.allocator);
     var lower_result = try compiler.ast.lower(testing.allocator, &parser_result.tree);
     defer lower_result.deinit();
@@ -2237,9 +2237,9 @@ test "compiler reports duplicate impls across imported modules" {
         \\}
     ;
 
-    try tmp.dir.writeFile(.{ .sub_path = "a.ora", .data = dependency_source });
-    try tmp.dir.writeFile(.{ .sub_path = "b.ora", .data = dependency_source });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "a.ora", .data = dependency_source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b.ora", .data = dependency_source });
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\comptime const a = @import("./a.ora");
@@ -2379,7 +2379,7 @@ test "compiler accepts imported bounded generic calls for implemented trait type
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "dep.ora",
         .data =
         \\trait Marker {
@@ -2401,7 +2401,7 @@ test "compiler accepts imported bounded generic calls for implemented trait type
         \\}
         ,
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\comptime const dep = @import("./dep.ora");
@@ -2433,7 +2433,7 @@ test "compiler rejects imported bounded generic calls for unimplemented trait ty
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "dep.ora",
         .data =
         \\trait Marker {
@@ -2455,7 +2455,7 @@ test "compiler rejects imported bounded generic calls for unimplemented trait ty
         \\}
         ,
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\comptime const dep = @import("./dep.ora");
@@ -2484,7 +2484,7 @@ test "compiler lowers imported trait-bound generic value method calls" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "dep.ora",
         .data =
         \\trait Marker {
@@ -2506,7 +2506,7 @@ test "compiler lowers imported trait-bound generic value method calls" {
         \\}
         ,
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\comptime const dep = @import("./dep.ora");
@@ -2539,7 +2539,7 @@ test "compiler lowers imported trait-bound generic associated method calls" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "dep.ora",
         .data =
         \\trait Factory {
@@ -2559,7 +2559,7 @@ test "compiler lowers imported trait-bound generic associated method calls" {
         \\}
         ,
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\comptime const dep = @import("./dep.ora");

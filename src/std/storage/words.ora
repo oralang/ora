@@ -1,0 +1,11 @@
+fn load(slot: StorageSlot, offset: u256) -> u256 {
+    return @storageWordLoad(slot, offset);
+}
+
+fn store(slot: StorageSlot, offset: u256, value: u256) {
+    @storageWordStore(slot, offset, value);
+}
+
+fn erase(range: StorageRange) {
+    @storageRangeErase(range);
+}

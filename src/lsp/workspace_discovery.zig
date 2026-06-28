@@ -80,7 +80,7 @@ pub const Cache = struct {
         self.stats.runs = addSat(self.stats.runs, 1);
         self.stats.cache_rebuilds = addSat(self.stats.cache_rebuilds, 1);
 
-        var importers = std.ArrayList(DiscoveredImporter){};
+        var importers = std.ArrayList(DiscoveredImporter).empty;
         errdefer {
             for (importers.items) |*importer| importer.deinit(self.allocator);
             importers.deinit(self.allocator);
@@ -91,11 +91,12 @@ pub const Cache = struct {
         for (workspace_roots) |root| {
             if (reached_limit) break;
 
-            var root_dir = std.fs.openDirAbsolute(root, .{ .iterate = true }) catch {
+            const io = std.Io.Threaded.global_single_threaded.io();
+            var root_dir = std.Io.Dir.openDirAbsolute(io, root, .{ .iterate = true }) catch {
                 self.stats.skipped = addSat(self.stats.skipped, 1);
                 continue;
             };
-            defer root_dir.close();
+            defer root_dir.close(io);
 
             var walker = root_dir.walk(self.allocator) catch {
                 self.stats.skipped = addSat(self.stats.skipped, 1);
@@ -103,7 +104,7 @@ pub const Cache = struct {
             };
             defer walker.deinit();
 
-            while (try walker.next()) |entry| {
+            while (try walker.next(io)) |entry| {
                 if (entry.kind != .file) continue;
 
                 files_seen_this_run = addSat(files_seen_this_run, 1);
@@ -136,7 +137,7 @@ pub const Cache = struct {
 
                 if (docs.isOpenDocument(importer_uri)) continue;
 
-                const source = std.fs.cwd().readFileAlloc(self.allocator, normalized_path, max_file_bytes) catch {
+                const source = std.Io.Dir.cwd().readFileAlloc(std.Io.Threaded.global_single_threaded.io(), normalized_path, self.allocator, std.Io.Limit.limited(max_file_bytes)) catch {
                     self.stats.skipped = addSat(self.stats.skipped, 1);
                     continue;
                 };
