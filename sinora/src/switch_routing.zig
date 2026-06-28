@@ -10,10 +10,44 @@ const std = @import("std");
 
 const ir = @import("ir.zig");
 
-const sparse_bucket_bits = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
-const sparse_bucket_shifts = [_]u8{ 0, 4, 8, 12, 16, 20, 24 };
-const dense_max_table_slots: usize = 256;
-const min_selector_check_saving_x1000: usize = 4000;
+pub const sparse_bucket_bits = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
+pub const sparse_bucket_shifts = [_]u8{ 0, 4, 8, 12, 16, 20, 24 };
+pub const dense_max_table_slots: usize = 256;
+pub const min_selector_check_saving_x1000: usize = 4000;
+
+pub const StrategyKind = enum {
+    linear,
+    sparse,
+    dense,
+};
+
+pub const StrategyFact = struct {
+    kind: StrategyKind,
+    name: []const u8,
+    requires_exact_selector_validation: bool,
+    uses_compressed_index: bool,
+};
+
+pub const dispatcher_strategy_facts = [_]StrategyFact{
+    .{
+        .kind = .linear,
+        .name = "linear",
+        .requires_exact_selector_validation = true,
+        .uses_compressed_index = false,
+    },
+    .{
+        .kind = .sparse,
+        .name = "sparse",
+        .requires_exact_selector_validation = true,
+        .uses_compressed_index = true,
+    },
+    .{
+        .kind = .dense,
+        .name = "dense",
+        .requires_exact_selector_validation = true,
+        .uses_compressed_index = true,
+    },
+};
 
 pub const Plan = union(enum) {
     linear,
@@ -550,4 +584,19 @@ test "switch routing chooser uses sparse only when current lowering saves select
     };
     const plan = choosePlan(.{ .selector = "selector", .cases = &cases, .default_target = "fallback" });
     try std.testing.expect(plan == .sparse);
+}
+
+test "switch routing strategy fact table covers planner variants" {
+    const plan_fields = @typeInfo(Plan).@"union".fields;
+    try std.testing.expectEqual(plan_fields.len, dispatcher_strategy_facts.len);
+    inline for (plan_fields) |field| {
+        var found = false;
+        for (dispatcher_strategy_facts) |fact| {
+            if (std.mem.eql(u8, fact.name, field.name)) {
+                found = true;
+                break;
+            }
+        }
+        try std.testing.expect(found);
+    }
 }

@@ -16,12 +16,177 @@ pub const ObligationSet = struct {
     obligations: []const Obligation = &.{},
     assumptions: []const Assumption = &.{},
     queries: []const VerificationQuery = &.{},
+    proof_artifacts: []const ProofArtifact = &.{},
     diagnostics: []const ObligationDiagnostic = &.{},
     terms: []const Term = &.{},
 
     pub fn hasBlockingDiagnostic(self: ObligationSet) bool {
         for (self.diagnostics) |diagnostic| {
             if (diagnostic.blocks_artifacts) return true;
+        }
+        return false;
+    }
+
+    pub fn artifactDecision(self: ObligationSet) ArtifactDecision {
+        for (self.diagnostics) |diagnostic| {
+            if (diagnostic.blocks_artifacts) return .{ .blocked = .blocking_diagnostic };
+        }
+        self.validateTermReferences() catch return .{ .blocked = .invalid_dependency };
+        self.validateIdReferences() catch return .{ .blocked = .invalid_dependency };
+
+        for (self.queries) |query| {
+            if (query.result) |result| {
+                if (result.degraded) return .{ .blocked = .degraded_query };
+                if (result.vacuity_unknown) return .{ .blocked = .unknown_query };
+                if (result.status == .unknown) return .{ .blocked = .unknown_query };
+                if (!querySucceeded(query, result)) {
+                    return .{ .blocked = if (query.backend == .lean) .lean_required_failure else .failed_query };
+                }
+            } else if (query.obligation_ids.len > 0) {
+                return .{ .blocked = if (query.backend == .lean) .lean_required_failure else .missing_proof };
+            }
+        }
+
+        for (self.obligations) |item| {
+            if (!item.blocksArtifacts()) continue;
+            if (!self.hasSuccessfulProofFor(item)) {
+                return .{ .blocked = if (item.required_backend == .lean) .lean_required_failure else .missing_proof };
+            }
+        }
+
+        return .allowed;
+    }
+
+    pub fn validateTermReferences(self: ObligationSet) !void {
+        for (self.assumptions) |assumption| {
+            if (assumption.formula) |formula| try self.validateFormulaRef(formula);
+        }
+        for (self.obligations) |obligation| {
+            try self.validateKindTermRefs(obligation.kind);
+        }
+        for (self.terms) |term| {
+            try self.validateTerm(term);
+        }
+    }
+
+    fn validateKindTermRefs(self: ObligationSet, kind: Kind) !void {
+        switch (kind) {
+            .logical => |logical| try self.validateFormulaRef(logical.formula),
+            .runtime_guard => |guard| try self.validateFormulaRef(guard.formula),
+            .resource => |resource| if (resource.amount) |amount| try self.validateFormulaRef(amount),
+            .quantifier,
+            .type_wf,
+            .type_relation,
+            .region_relation,
+            .effect_frame,
+            .filtered_input,
+            .backend_fact,
+            => {},
+        }
+    }
+
+    fn validateFormulaRef(self: ObligationSet, formula: FormulaRef) !void {
+        switch (formula) {
+            .origin_value => {},
+            .term => |id| try self.validateTermId(id),
+        }
+    }
+
+    fn validateTerm(self: ObligationSet, term: Term) !void {
+        switch (term) {
+            .bool_lit,
+            .int_lit,
+            .variable,
+            .result,
+            .place_read,
+            => {},
+            .old => |id| try self.validateTermId(id),
+            .unary => |unary| try self.validateTermId(unary.operand),
+            .binary => |binary| {
+                try self.validateTermId(binary.lhs);
+                try self.validateTermId(binary.rhs);
+            },
+            .refinement_predicate => |predicate| {
+                try self.validateTermId(predicate.value);
+                for (predicate.args) |arg| try self.validateTermId(arg);
+            },
+            .quantified => |quantified| {
+                if (quantified.condition) |condition| try self.validateTermId(condition);
+                try self.validateTermId(quantified.body);
+            },
+        }
+    }
+
+    fn validateTermId(self: ObligationSet, id: TermId) !void {
+        if (id >= self.terms.len) return error.InvalidTermReference;
+    }
+
+    pub fn validateIdReferences(self: ObligationSet) !void {
+        for (self.obligations) |item| {
+            for (item.dependencies) |id| {
+                if (!self.obligationIdExists(id)) return error.InvalidDependency;
+            }
+            for (item.derived_from) |id| {
+                if (!self.obligationIdExists(id)) return error.InvalidDependency;
+            }
+            switch (item.kind) {
+                .filtered_input => |filtered| for (filtered.accepted_by) |id| {
+                    if (!self.obligationIdExists(id) and !self.assumptionIdExists(id)) return error.InvalidDependency;
+                },
+                else => {},
+            }
+        }
+        for (self.proof_artifacts) |artifact| {
+            for (artifact.obligation_ids) |id| {
+                if (!self.obligationIdExists(id)) return error.InvalidDependency;
+            }
+        }
+        for (self.queries) |query| {
+            for (query.obligation_ids) |id| {
+                if (!self.obligationIdExists(id)) return error.InvalidDependency;
+            }
+            for (query.assumption_ids) |id| {
+                if (!self.assumptionIdExists(id)) return error.InvalidDependency;
+            }
+            if (query.proof_artifact_id) |artifact_id| {
+                const artifact = self.proofArtifactById(artifact_id) orelse return error.InvalidDependency;
+                if (query.backend != .lean) return error.InvalidDependency;
+                for (query.obligation_ids) |id| {
+                    if (!containsId(artifact.obligation_ids, id)) return error.InvalidDependency;
+                }
+            }
+        }
+    }
+
+    fn obligationIdExists(self: ObligationSet, id: Id) bool {
+        for (self.obligations) |item| {
+            if (item.id == id) return true;
+        }
+        return false;
+    }
+
+    fn assumptionIdExists(self: ObligationSet, id: Id) bool {
+        for (self.assumptions) |item| {
+            if (item.id == id) return true;
+        }
+        return false;
+    }
+
+    fn proofArtifactById(self: ObligationSet, id: Id) ?ProofArtifact {
+        for (self.proof_artifacts) |item| {
+            if (item.id == id) return item;
+        }
+        return null;
+    }
+
+    fn hasSuccessfulProofFor(self: ObligationSet, item: Obligation) bool {
+        for (self.queries) |query| {
+            if (item.required_backend) |backend| {
+                if (query.backend != backend) continue;
+            }
+            if (!containsId(query.obligation_ids, item.id)) continue;
+            const result = query.result orelse continue;
+            if (querySucceeded(query, result)) return true;
         }
         return false;
     }
@@ -35,6 +200,7 @@ pub const Obligation = struct {
     origin: Origin,
     kind: Kind,
     artifact_policy: ArtifactPolicy = .blocks_verified_artifacts,
+    required_backend: ?VerificationBackend = null,
     dependencies: []const Id = &.{},
     derived_from: []const Id = &.{},
 
@@ -59,6 +225,7 @@ pub const VerificationQuery = struct {
     solver_logic: VerificationSolverLogic = .all,
     constraint_count: u32 = 0,
     smtlib_hash: ?u64 = null,
+    proof_artifact_id: ?Id = null,
     result: ?VerificationQueryResult = null,
 };
 
@@ -103,6 +270,8 @@ pub const VerificationQueryStatus = enum(u8) {
     sat,
     unsat,
     unknown,
+    proved,
+    failed,
 };
 
 pub const VerificationQuerySummary = struct {
@@ -143,6 +312,22 @@ pub const Assumption = struct {
     formula: ?FormulaRef = null,
 };
 
+pub const ProofArtifact = struct {
+    id: Id,
+    owner: Owner,
+    source: SourceRef,
+    kind: ProofArtifactKind = .userland_lean,
+    module_name: []const u8,
+    theorem_name: []const u8,
+    path: ?[]const u8 = null,
+    content_hash: ?u64 = null,
+    obligation_ids: []const Id = &.{},
+};
+
+pub const ProofArtifactKind = enum(u8) {
+    userland_lean,
+};
+
 pub const ObligationDiagnostic = struct {
     kind: DiagnosticKind,
     source: SourceRef,
@@ -172,6 +357,73 @@ pub const ArtifactPolicy = enum(u8) {
     blocks_verified_artifacts,
     diagnostic_only,
 };
+
+pub const ArtifactDecision = union(enum) {
+    allowed,
+    blocked: ArtifactBlockReason,
+
+    pub fn isAllowed(self: ArtifactDecision) bool {
+        return switch (self) {
+            .allowed => true,
+            .blocked => false,
+        };
+    }
+};
+
+pub const ArtifactBlockReason = enum(u8) {
+    blocking_diagnostic,
+    invalid_dependency,
+    unknown_query,
+    degraded_query,
+    failed_query,
+    missing_proof,
+    lean_required_failure,
+};
+
+fn containsId(ids: []const Id, needle: Id) bool {
+    for (ids) |id| {
+        if (id == needle) return true;
+    }
+    return false;
+}
+
+fn querySucceeded(query: VerificationQuery, result: VerificationQueryResult) bool {
+    return switch (result.status) {
+        .proved => true,
+        .failed, .unknown => false,
+        .sat => switch (query.backend) {
+            .lean => false,
+            else => switch (query.kind) {
+                .base, .guard_satisfy => true,
+                .obligation,
+                .loop_invariant_step,
+                .loop_body_safety,
+                .loop_invariant_post,
+                .guard_violate,
+                => false,
+            },
+        },
+        .unsat => switch (query.backend) {
+            .lean => false,
+            else => switch (query.kind) {
+                .obligation,
+                .loop_invariant_step,
+                .loop_body_safety,
+                .loop_invariant_post,
+                .guard_violate,
+                => true,
+                .base, .guard_satisfy => false,
+            },
+        },
+    };
+}
+
+fn expectArtifactBlocked(expected: ArtifactBlockReason, decision: ArtifactDecision) !void {
+    switch (decision) {
+        .allowed => return error.TestUnexpectedResult,
+        .blocked => |actual| try std.testing.expectEqual(expected, actual),
+    }
+}
 
 pub const OwnerTag = enum(u8) {
     module,
@@ -294,6 +546,7 @@ pub const KindTag = enum(u8) {
     region_relation,
     effect_frame,
     resource,
+    quantifier,
     filtered_input,
     backend_fact,
 };
@@ -306,6 +559,7 @@ pub const Kind = union(KindTag) {
     region_relation: RegionRelationGoal,
     effect_frame: EffectFrameGoal,
     resource: ResourceGoal,
+    quantifier: QuantifierGoal,
     filtered_input: FilteredInputGoal,
     backend_fact: BackendFactGoal,
 };
@@ -313,6 +567,7 @@ pub const Kind = union(KindTag) {
 pub const LogicalGoal = struct {
     role: LogicalRole,
     formula: FormulaRef,
+    arithmetic_safety: ?ArithmeticSafetyKind = null,
 };
 
 pub const LogicalRole = enum(u8) {
@@ -330,6 +585,16 @@ pub const LogicalRole = enum(u8) {
     refinement,
     imported_callee_obligation,
     imported_callee_ensures,
+};
+
+pub const ArithmeticSafetyKind = enum(u8) {
+    addition_overflow,
+    subtraction_overflow,
+    multiplication_overflow,
+    power_overflow,
+    negation_overflow,
+    division_by_zero,
+    shift_amount_bounds,
 };
 
 pub const RuntimeGuardGoal = struct {
@@ -406,6 +671,34 @@ pub const ResourceProperty = enum(u8) {
     modifies_covered,
 };
 
+pub const QuantifierGoal = struct {
+    quantifier: Quantifier,
+    variable: []const u8,
+    binder_type: TypeRef,
+    binder_sort: QuantifierBinderSort,
+    fragment: VerificationQueryFragment,
+    pattern_status: QuantifierPatternStatus,
+    degradation: ?QuantifierDegradation = null,
+};
+
+pub const QuantifierBinderSort = enum(u8) {
+    bool,
+    bit_vector,
+    byte_sequence,
+    opaque_unknown,
+};
+
+pub const QuantifierPatternStatus = enum(u8) {
+    explicit,
+    synthesized,
+    absent,
+};
+
+pub const QuantifierDegradation = enum(u8) {
+    unsupported_binder_type,
+    malformed_binder_width,
+};
+
 pub const FilteredInputGoal = struct {
     value: VarRef,
     sink: PlaceRef,
@@ -476,19 +769,26 @@ pub const TermTag = enum(u8) {
     place_read,
     unary,
     binary,
+    refinement_predicate,
     quantified,
 };
 
 pub const Term = union(TermTag) {
     bool_lit: bool,
-    int_lit: []const u8,
+    int_lit: IntegerLiteralTerm,
     variable: VarRef,
     old: TermId,
     result,
     place_read: PlaceRef,
     unary: UnaryTerm,
     binary: BinaryTerm,
+    refinement_predicate: RefinementPredicateTerm,
     quantified: QuantifiedTerm,
+};
+
+pub const IntegerLiteralTerm = struct {
+    value: []const u8,
+    ty: ?TypeRef = null,
 };
 
 pub const VarRef = struct {
@@ -528,6 +828,12 @@ pub const BinaryOp = enum(u8) {
     and_,
     or_,
     implies,
+};
+
+pub const RefinementPredicateTerm = struct {
+    name: []const u8,
+    value: TermId,
+    args: []const TermId = &.{},
 };
 
 pub const QuantifiedTerm = struct {
@@ -592,6 +898,7 @@ test "manifest enum tags stay byte-sized" {
         DiagnosticKind,
         Phase,
         ArtifactPolicy,
+        ArtifactBlockReason,
         OwnerTag,
         BackendComponent,
         OriginTag,
@@ -602,7 +909,9 @@ test "manifest enum tags stay byte-sized" {
         VerificationQueryFragment,
         VerificationSolverLogic,
         VerificationQueryStatus,
+        ProofArtifactKind,
         LogicalRole,
+        ArithmeticSafetyKind,
         GuardErasurePolicy,
         ValueRefKind,
         TypeRelation,
@@ -610,6 +919,9 @@ test "manifest enum tags stay byte-sized" {
         EffectFrameRelation,
         ResourceOperation,
         ResourceProperty,
+        QuantifierBinderSort,
+        QuantifierPatternStatus,
+        QuantifierDegradation,
         BackendProperty,
         AssumptionKind,
         FormulaRefTag,
@@ -674,6 +986,36 @@ test "blocking diagnostics gate obligation set" {
     try std.testing.expect(set.hasBlockingDiagnostic());
 }
 
+test "term references validate canonical formulas" {
+    const args = [_]TermId{1};
+    const terms = [_]Term{
+        .{ .variable = .{ .name = "amount", .ty = .{ .spelling = "u256" } } },
+        .{ .int_lit = .{ .value = "1", .ty = .{ .spelling = "u256" } } },
+        .{ .refinement_predicate = .{ .name = "MinValue", .value = 0, .args = &args } },
+    };
+    const obligation: Obligation = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "deposit" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "refinement_guard", .ordinal = 0 } },
+        .kind = .{ .logical = .{
+            .role = .refinement,
+            .formula = .{ .term = 2 },
+        } },
+    };
+    const set: ObligationSet = .{ .obligations = &.{obligation}, .terms = &terms };
+    try set.validateTermReferences();
+}
+
+test "term reference validation rejects dangling ids" {
+    const terms = [_]Term{
+        .{ .unary = .{ .op = .not, .operand = 1 } },
+    };
+    const set: ObligationSet = .{ .terms = &terms };
+    try std.testing.expectError(error.InvalidTermReference, set.validateTermReferences());
+}
+
 test "diagnostic-only entries do not block artifacts" {
     const diagnostics = [_]ObligationDiagnostic{
         .{
@@ -685,6 +1027,406 @@ test "diagnostic-only entries do not block artifacts" {
     };
     const set: ObligationSet = .{ .diagnostics = &diagnostics };
     try std.testing.expect(!set.hasBlockingDiagnostic());
+}
+
+test "artifact policy allows blocking obligation only after successful proof query" {
+    const obligation_ids = [_]Id{1};
+    const obligations = [_]Obligation{
+        .{
+            .id = 1,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .sema,
+            .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+            .kind = .{ .logical = .{
+                .role = .ensures,
+                .formula = .{ .term = 0 },
+            } },
+        },
+    };
+    const queries = [_]VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .result = .{ .status = .unsat },
+        },
+    };
+    const set: ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &.{.{ .bool_lit = true }},
+    };
+
+    try std.testing.expect(set.artifactDecision().isAllowed());
+}
+
+test "artifact policy blocks unknown and degraded query results" {
+    const obligation_ids = [_]Id{1};
+    const obligations = [_]Obligation{
+        .{
+            .id = 1,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .sema,
+            .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+            .kind = .{ .logical = .{
+                .role = .ensures,
+                .formula = .{ .term = 0 },
+            } },
+        },
+    };
+    const unknown_queries = [_]VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .result = .{ .status = .unknown },
+        },
+    };
+    const degraded_queries = [_]VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .result = .{ .status = .unsat, .degraded = true },
+        },
+    };
+
+    try expectArtifactBlocked(.unknown_query, (ObligationSet{
+        .obligations = &obligations,
+        .queries = &unknown_queries,
+        .terms = &.{.{ .bool_lit = true }},
+    }).artifactDecision());
+    try expectArtifactBlocked(.degraded_query, (ObligationSet{
+        .obligations = &obligations,
+        .queries = &degraded_queries,
+        .terms = &.{.{ .bool_lit = true }},
+    }).artifactDecision());
+}
+
+test "artifact policy blocks invalid dependencies and missing proofs" {
+    const invalid_dependencies = [_]Id{42};
+    const obligations = [_]Obligation{
+        .{
+            .id = 1,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .sema,
+            .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+            .kind = .{ .logical = .{
+                .role = .ensures,
+                .formula = .{ .term = 0 },
+            } },
+        },
+    };
+    const invalid_obligations = [_]Obligation{
+        .{
+            .id = 1,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .sema,
+            .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+            .kind = .{ .logical = .{
+                .role = .ensures,
+                .formula = .{ .term = 0 },
+            } },
+            .dependencies = &invalid_dependencies,
+        },
+    };
+
+    try expectArtifactBlocked(.invalid_dependency, (ObligationSet{
+        .obligations = &invalid_obligations,
+        .terms = &.{.{ .bool_lit = true }},
+    }).artifactDecision());
+    try expectArtifactBlocked(.missing_proof, (ObligationSet{
+        .obligations = &obligations,
+        .terms = &.{.{ .bool_lit = true }},
+    }).artifactDecision());
+}
+
+test "artifact policy treats Lean-required proof gaps as hard failures" {
+    const obligation_ids = [_]Id{1};
+    const obligations = [_]Obligation{
+        .{
+            .id = 1,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .sema,
+            .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+            .kind = .{ .logical = .{
+                .role = .ensures,
+                .formula = .{ .term = 0 },
+            } },
+            .required_backend = .lean,
+        },
+    };
+    const failed_lean_queries = [_]VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .lean,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .result = .{ .status = .failed },
+        },
+    };
+    const proved_lean_queries = [_]VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .lean,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .result = .{ .status = .proved },
+        },
+    };
+
+    try expectArtifactBlocked(.lean_required_failure, (ObligationSet{
+        .obligations = &obligations,
+        .terms = &.{.{ .bool_lit = true }},
+    }).artifactDecision());
+    try expectArtifactBlocked(.lean_required_failure, (ObligationSet{
+        .obligations = &obligations,
+        .queries = &failed_lean_queries,
+        .terms = &.{.{ .bool_lit = true }},
+    }).artifactDecision());
+    try std.testing.expect((ObligationSet{
+        .obligations = &obligations,
+        .queries = &proved_lean_queries,
+        .terms = &.{.{ .bool_lit = true }},
+    }).artifactDecision().isAllowed());
+}
+
+test "userland Lean proof artifact attaches to a required obligation" {
+    const obligation_ids = [_]Id{1};
+    const obligations = [_]Obligation{
+        .{
+            .id = 1,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .sema,
+            .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+            .kind = .{ .logical = .{
+                .role = .ensures,
+                .formula = .{ .term = 0 },
+            } },
+            .required_backend = .lean,
+        },
+    };
+    const artifacts = [_]ProofArtifact{
+        .{
+            .id = 10,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .{ .file = "proofs/ERC20/Transfer.lean", .line = 1 },
+            .module_name = "ERC20.Transfer",
+            .theorem_name = "transfer_preserves_supply",
+            .path = "proofs/ERC20/Transfer.lean",
+            .content_hash = 0x1234,
+            .obligation_ids = &obligation_ids,
+        },
+    };
+    const queries = [_]VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .lean,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .proof_artifact_id = 10,
+            .result = .{ .status = .proved },
+        },
+    };
+    try std.testing.expect((ObligationSet{
+        .obligations = &obligations,
+        .queries = &queries,
+        .proof_artifacts = &artifacts,
+        .terms = &.{.{ .bool_lit = true }},
+    }).artifactDecision().isAllowed());
+}
+
+test "userland Lean proof attachment fails closed when missing or mismatched" {
+    const obligation_ids = [_]Id{1};
+    const other_obligation_ids = [_]Id{2};
+    const obligations = [_]Obligation{
+        .{
+            .id = 1,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .sema,
+            .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+            .kind = .{ .logical = .{
+                .role = .ensures,
+                .formula = .{ .term = 0 },
+            } },
+            .required_backend = .lean,
+        },
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "mint" } },
+            .source = .generated(),
+            .phase = .sema,
+            .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 1 } },
+            .kind = .{ .logical = .{
+                .role = .ensures,
+                .formula = .{ .term = 0 },
+            } },
+        },
+    };
+    const artifacts = [_]ProofArtifact{
+        .{
+            .id = 10,
+            .owner = .{ .function = .{ .name = "mint" } },
+            .source = .generated(),
+            .module_name = "ERC20.Mint",
+            .theorem_name = "mint_supply",
+            .obligation_ids = &other_obligation_ids,
+        },
+    };
+    const missing_artifact_queries = [_]VerificationQuery{
+        .{
+            .id = 3,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .lean,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .proof_artifact_id = 99,
+            .result = .{ .status = .proved },
+        },
+    };
+    const mismatched_artifact_queries = [_]VerificationQuery{
+        .{
+            .id = 3,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .lean,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .proof_artifact_id = 10,
+            .result = .{ .status = .proved },
+        },
+    };
+    const z3_with_artifact_queries = [_]VerificationQuery{
+        .{
+            .id = 3,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .proof_artifact_id = 10,
+            .result = .{ .status = .unsat },
+        },
+    };
+
+    try expectArtifactBlocked(.invalid_dependency, (ObligationSet{
+        .obligations = &obligations,
+        .queries = &missing_artifact_queries,
+        .terms = &.{.{ .bool_lit = true }},
+    }).artifactDecision());
+    try expectArtifactBlocked(.invalid_dependency, (ObligationSet{
+        .obligations = &obligations,
+        .queries = &mismatched_artifact_queries,
+        .proof_artifacts = &artifacts,
+        .terms = &.{.{ .bool_lit = true }},
+    }).artifactDecision());
+    try expectArtifactBlocked(.invalid_dependency, (ObligationSet{
+        .obligations = &obligations,
+        .queries = &z3_with_artifact_queries,
+        .proof_artifacts = &artifacts,
+        .terms = &.{.{ .bool_lit = true }},
+    }).artifactDecision());
+}
+
+test "userland Lean proof artifact does not bypass Z3 unknown or degradation" {
+    const obligation_ids = [_]Id{1};
+    const obligations = [_]Obligation{
+        .{
+            .id = 1,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .sema,
+            .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+            .kind = .{ .logical = .{
+                .role = .ensures,
+                .formula = .{ .term = 0 },
+            } },
+            .required_backend = .lean,
+        },
+    };
+    const artifacts = [_]ProofArtifact{
+        .{
+            .id = 10,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .module_name = "ERC20.Transfer",
+            .theorem_name = "transfer_preserves_supply",
+            .obligation_ids = &obligation_ids,
+        },
+    };
+    const queries = [_]VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .lean,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .proof_artifact_id = 10,
+            .result = .{ .status = .proved },
+        },
+        .{
+            .id = 3,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .result = .{ .status = .unknown },
+        },
+    };
+
+    try expectArtifactBlocked(.unknown_query, (ObligationSet{
+        .obligations = &obligations,
+        .queries = &queries,
+        .proof_artifacts = &artifacts,
+        .terms = &.{.{ .bool_lit = true }},
+    }).artifactDecision());
 }
 
 test "obligation can point at MLIR origin without proof term" {

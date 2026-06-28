@@ -17,6 +17,9 @@ pub fn write(writer: anytype, set: obligation.ObligationSet, comptime format: Fo
 }
 
 pub fn writeJsonLines(writer: anytype, set: obligation.ObligationSet) !void {
+    try writeArtifactDecisionRecord(writer, set);
+    try writeCoverageSummaryRecord(writer, set);
+
     for (set.assumptions) |item| {
         try writer.writeAll("{\"record\":\"assumption\"");
         try writeIdField(writer, "id", item.id);
@@ -43,6 +46,20 @@ pub fn writeJsonLines(writer: anytype, set: obligation.ObligationSet) !void {
         try writer.writeAll("}\n");
     }
 
+    for (set.proof_artifacts) |item| {
+        try writer.writeAll("{\"record\":\"proof_artifact\"");
+        try writeIdField(writer, "id", item.id);
+        try writeOwnerField(writer, item.owner);
+        try writeSourceField(writer, item.source);
+        try writeStringField(writer, "kind", @tagName(item.kind));
+        try writeStringField(writer, "module_name", item.module_name);
+        try writeStringField(writer, "theorem_name", item.theorem_name);
+        try writeOptionalStringField(writer, "path", item.path);
+        try writeOptionalNumberField(writer, "content_hash", item.content_hash);
+        try writeIdListField(writer, "obligation_ids", item.obligation_ids);
+        try writer.writeAll("}\n");
+    }
+
     for (set.queries) |item| {
         try writer.writeAll("{\"record\":\"query\"");
         try writeIdField(writer, "id", item.id);
@@ -60,6 +77,7 @@ pub fn writeJsonLines(writer: anytype, set: obligation.ObligationSet) !void {
         try writeStringField(writer, "solver_logic", @tagName(item.solver_logic));
         try writeNumberField(writer, "constraint_count", item.constraint_count);
         try writeOptionalNumberField(writer, "smtlib_hash", item.smtlib_hash);
+        try writeOptionalNumberField(writer, "proof_artifact_id", item.proof_artifact_id);
         if (item.result) |result| try writeQueryResultField(writer, result);
         try writer.writeAll("}\n");
     }
@@ -79,6 +97,125 @@ pub fn writeJsonLines(writer: anytype, set: obligation.ObligationSet) !void {
         try writeTermField(writer, item);
         try writer.writeAll("}\n");
     }
+}
+
+fn writeArtifactDecisionRecord(writer: anytype, set: obligation.ObligationSet) !void {
+    try writer.writeAll("{\"record\":\"artifact_decision\"");
+    const decision = set.artifactDecision();
+    switch (decision) {
+        .allowed => {
+            try writeStringField(writer, "status", "allowed");
+            try writeOptionalStringField(writer, "reason", null);
+        },
+        .blocked => |reason| {
+            try writeStringField(writer, "status", "blocked");
+            try writeOptionalStringField(writer, "reason", @tagName(reason));
+        },
+    }
+    try writer.writeAll("}\n");
+}
+
+const CoverageSummary = struct {
+    assumptions: u32 = 0,
+    obligations: u32 = 0,
+    queries: u32 = 0,
+    proof_artifacts: u32 = 0,
+    diagnostics: u32 = 0,
+    terms: u32 = 0,
+    query_obligation_links: u32 = 0,
+    proof_obligation_links: u32 = 0,
+    obligation_kinds: [enumFieldCount(obligation.KindTag)]u32 = [_]u32{0} ** enumFieldCount(obligation.KindTag),
+    query_backends: [enumFieldCount(obligation.VerificationBackend)]u32 = [_]u32{0} ** enumFieldCount(obligation.VerificationBackend),
+    query_results: [enumFieldCount(obligation.VerificationQueryStatus)]u32 = [_]u32{0} ** enumFieldCount(obligation.VerificationQueryStatus),
+    query_results_missing: u32 = 0,
+
+    fn from(set: obligation.ObligationSet) CoverageSummary {
+        var summary: CoverageSummary = .{
+            .assumptions = saturatedLen(set.assumptions),
+            .obligations = saturatedLen(set.obligations),
+            .queries = saturatedLen(set.queries),
+            .proof_artifacts = saturatedLen(set.proof_artifacts),
+            .diagnostics = saturatedLen(set.diagnostics),
+            .terms = saturatedLen(set.terms),
+        };
+
+        for (set.obligations) |item| {
+            summary.obligation_kinds[@intFromEnum(std.meta.activeTag(item.kind))] += 1;
+        }
+        for (set.queries) |query| {
+            summary.query_backends[@intFromEnum(query.backend)] += 1;
+            summary.query_obligation_links +|= saturatedLen(query.obligation_ids);
+            if (query.result) |result| {
+                summary.query_results[@intFromEnum(result.status)] += 1;
+            } else {
+                summary.query_results_missing +|= 1;
+            }
+        }
+        for (set.proof_artifacts) |artifact| {
+            summary.proof_obligation_links +|= saturatedLen(artifact.obligation_ids);
+        }
+
+        return summary;
+    }
+};
+
+fn writeCoverageSummaryRecord(writer: anytype, set: obligation.ObligationSet) !void {
+    const summary = CoverageSummary.from(set);
+    try writer.writeAll("{\"record\":\"coverage_summary\"");
+    try writeNumberField(writer, "assumptions", summary.assumptions);
+    try writeNumberField(writer, "obligations", summary.obligations);
+    try writeNumberField(writer, "queries", summary.queries);
+    try writeNumberField(writer, "proof_artifacts", summary.proof_artifacts);
+    try writeNumberField(writer, "diagnostics", summary.diagnostics);
+    try writeNumberField(writer, "terms", summary.terms);
+    try writeNumberField(writer, "query_obligation_links", summary.query_obligation_links);
+    try writeNumberField(writer, "proof_obligation_links", summary.proof_obligation_links);
+    try writeEnumCountObjectField(writer, "obligation_kinds", obligation.KindTag, &summary.obligation_kinds);
+    try writeEnumCountObjectField(writer, "query_backends", obligation.VerificationBackend, &summary.query_backends);
+    try writeQueryResultCountObjectField(writer, summary.query_results_missing, &summary.query_results);
+    try writer.writeAll("}\n");
+}
+
+fn writeEnumCountObjectField(
+    writer: anytype,
+    comptime name: []const u8,
+    comptime T: type,
+    counts: *const [enumFieldCount(T)]u32,
+) !void {
+    try writeFieldPrefix(writer, name);
+    try writer.writeByte('{');
+    inline for (@typeInfo(T).@"enum".fields, 0..) |field, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writeJsonString(writer, field.name);
+        try writer.writeByte(':');
+        try writer.print("{d}", .{counts[index]});
+    }
+    try writer.writeByte('}');
+}
+
+fn writeQueryResultCountObjectField(
+    writer: anytype,
+    missing_count: u32,
+    counts: *const [enumFieldCount(obligation.VerificationQueryStatus)]u32,
+) !void {
+    try writeFieldPrefix(writer, "query_results");
+    try writer.writeAll("{\"missing\":");
+    try writer.print("{d}", .{missing_count});
+    inline for (@typeInfo(obligation.VerificationQueryStatus).@"enum".fields, 0..) |field, index| {
+        try writer.writeByte(',');
+        try writeJsonString(writer, field.name);
+        try writer.writeByte(':');
+        try writer.print("{d}", .{counts[index]});
+    }
+    try writer.writeByte('}');
+}
+
+fn enumFieldCount(comptime T: type) comptime_int {
+    return @typeInfo(T).@"enum".fields.len;
+}
+
+fn saturatedLen(items: anytype) u32 {
+    return std.math.cast(u32, items.len) orelse std.math.maxInt(u32);
 }
 
 fn writeIdField(writer: anytype, comptime name: []const u8, value: obligation.Id) !void {
@@ -128,9 +265,7 @@ fn writeOptionalEnumField(writer: anytype, comptime name: []const u8, comptime T
 }
 
 fn writeFieldPrefix(writer: anytype, comptime name: []const u8) !void {
-    try writer.writeAll(",\"");
-    try writer.writeAll(name);
-    try writer.writeAll("\":");
+    try writer.writeAll(",\"" ++ name ++ "\":");
 }
 
 fn writeTaggedFieldPrefix(writer: anytype, comptime name: []const u8, tag: []const u8) !void {
@@ -146,17 +281,25 @@ fn writeTaggedObjectPrefix(writer: anytype, tag: []const u8) !void {
 
 fn writeJsonString(writer: anytype, value: []const u8) !void {
     try writer.writeByte('"');
-    for (value) |byte| {
+    var start: usize = 0;
+    for (value, 0..) |byte, index| {
         switch (byte) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            0x00...0x08, 0x0b...0x0c, 0x0e...0x1f => try writeControlEscape(writer, byte),
-            else => try writer.writeByte(byte),
+            '"', '\\', '\n', '\r', '\t', 0x00...0x08, 0x0b...0x0c, 0x0e...0x1f => {
+                if (start < index) try writer.writeAll(value[start..index]);
+                switch (byte) {
+                    '"' => try writer.writeAll("\\\""),
+                    '\\' => try writer.writeAll("\\\\"),
+                    '\n' => try writer.writeAll("\\n"),
+                    '\r' => try writer.writeAll("\\r"),
+                    '\t' => try writer.writeAll("\\t"),
+                    else => try writeControlEscape(writer, byte),
+                }
+                start = index + 1;
+            },
+            else => {},
         }
     }
+    if (start < value.len) try writer.writeAll(value[start..]);
     try writer.writeByte('"');
 }
 
@@ -245,6 +388,9 @@ fn writeKindField(writer: anytype, kind: obligation.Kind) !void {
     switch (kind) {
         .logical => |logical| {
             try writeStringField(writer, "role", @tagName(logical.role));
+            if (logical.arithmetic_safety) |safety| {
+                try writeStringField(writer, "arithmetic_safety", @tagName(safety));
+            }
             try writeFormulaField(writer, logical.formula);
         },
         .runtime_guard => |guard| {
@@ -275,6 +421,15 @@ fn writeKindField(writer: anytype, kind: obligation.Kind) !void {
             if (resource.destination) |place| try writePlaceFieldNamed(writer, "destination", place);
             if (resource.amount) |amount| try writeFormulaFieldNamed(writer, "amount", amount);
             try writeStringField(writer, "property", @tagName(resource.property));
+        },
+        .quantifier => |quantifier| {
+            try writeStringField(writer, "quantifier", @tagName(quantifier.quantifier));
+            try writeStringField(writer, "variable", quantifier.variable);
+            try writeTypeRefField(writer, "binder_type", quantifier.binder_type);
+            try writeStringField(writer, "binder_sort", @tagName(quantifier.binder_sort));
+            try writeStringField(writer, "fragment", @tagName(quantifier.fragment));
+            try writeStringField(writer, "pattern_status", @tagName(quantifier.pattern_status));
+            try writeOptionalEnumField(writer, "degradation", obligation.QuantifierDegradation, quantifier.degradation);
         },
         .filtered_input => |filtered| {
             try writeVarRefField(writer, "value", filtered.value);
@@ -370,7 +525,10 @@ fn writeTermField(writer: anytype, term: obligation.Term) !void {
     try writeTaggedFieldPrefix(writer, "term", @tagName(term));
     switch (term) {
         .bool_lit => |value| try writeBoolField(writer, "value", value),
-        .int_lit => |value| try writeStringField(writer, "value", value),
+        .int_lit => |literal| {
+            try writeStringField(writer, "value", literal.value);
+            if (literal.ty) |ty| try writeTypeRefField(writer, "ty", ty);
+        },
         .variable => |value| try writeVarRefField(writer, "value", value),
         .old => |id| try writeIdField(writer, "operand", id),
         .result => {},
@@ -383,6 +541,11 @@ fn writeTermField(writer: anytype, term: obligation.Term) !void {
             try writeStringField(writer, "op", @tagName(binary.op));
             try writeIdField(writer, "lhs", binary.lhs);
             try writeIdField(writer, "rhs", binary.rhs);
+        },
+        .refinement_predicate => |predicate| {
+            try writeStringField(writer, "name", predicate.name);
+            try writeIdField(writer, "value", predicate.value);
+            try writeIdListField(writer, "args", predicate.args);
         },
         .quantified => |quantified| {
             try writeStringField(writer, "quantifier", @tagName(quantified.quantifier));
@@ -419,10 +582,38 @@ fn dumpToOwnedString(allocator: std.mem.Allocator, set: obligation.ObligationSet
     return try buffer.toOwnedSlice();
 }
 
+const coverage_zero =
+    "{\"record\":\"coverage_summary\",\"assumptions\":0,\"obligations\":0,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
+
+const coverage_one_logical =
+    "{\"record\":\"coverage_summary\",\"assumptions\":0,\"obligations\":1,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":1,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
+
+const coverage_one_logical_three_terms =
+    "{\"record\":\"coverage_summary\",\"assumptions\":0,\"obligations\":1,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":3,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":1,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
+
+const coverage_one_diagnostic =
+    "{\"record\":\"coverage_summary\",\"assumptions\":0,\"obligations\":0,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":1,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
+
+const coverage_one_backend_fact =
+    "{\"record\":\"coverage_summary\",\"assumptions\":0,\"obligations\":1,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":1},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
+
+const coverage_one_z3_unknown_query =
+    "{\"record\":\"coverage_summary\",\"assumptions\":0,\"obligations\":0,\"queries\":1,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":1,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":1,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":1,\"proved\":0,\"failed\":0}}\n";
+
+const coverage_one_proof_artifact =
+    "{\"record\":\"coverage_summary\",\"assumptions\":0,\"obligations\":0,\"queries\":0,\"proof_artifacts\":1,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":1,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
+
+const coverage_one_z3_unsat_proof =
+    "{\"record\":\"coverage_summary\",\"assumptions\":0,\"obligations\":1,\"queries\":1,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":1,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":1,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":1,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":1,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
+
 test "json-lines dump of empty manifest is empty" {
     const actual = try dumpToOwnedString(std.testing.allocator, .{});
     defer std.testing.allocator.free(actual);
-    try std.testing.expectEqualStrings("", actual);
+    try std.testing.expectEqualStrings(
+        "{\"record\":\"artifact_decision\",\"status\":\"allowed\",\"reason\":null}\n" ++
+            coverage_zero,
+        actual,
+    );
 }
 
 test "json-lines dump of mlir-origin logical obligation" {
@@ -444,7 +635,70 @@ test "json-lines dump of mlir-origin logical obligation" {
     defer std.testing.allocator.free(actual);
 
     try std.testing.expectEqualStrings(
-        "{\"record\":\"obligation\",\"id\":1,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":\"Token\",\"name\":\"transfer\"},\"source\":{\"file\":\"erc20.ora\",\"line\":10,\"column\":5,\"byte_start\":100,\"byte_end\":120},\"phase\":\"ora_mlir\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":2},\"kind\":{\"tag\":\"logical\",\"role\":\"ensures\",\"formula\":{\"tag\":\"origin_value\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":2},\"value_kind\":\"result\",\"index\":0}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n",
+        "{\"record\":\"artifact_decision\",\"status\":\"blocked\",\"reason\":\"missing_proof\"}\n" ++
+            coverage_one_logical ++
+            "{\"record\":\"obligation\",\"id\":1,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":\"Token\",\"name\":\"transfer\"},\"source\":{\"file\":\"erc20.ora\",\"line\":10,\"column\":5,\"byte_start\":100,\"byte_end\":120},\"phase\":\"ora_mlir\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":2},\"kind\":{\"tag\":\"logical\",\"role\":\"ensures\",\"formula\":{\"tag\":\"origin_value\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":2},\"value_kind\":\"result\",\"index\":0}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n",
+        actual,
+    );
+}
+
+test "json-lines dump of arithmetic safety subtype" {
+    const item: obligation.Obligation = .{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "pow" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .{ .mlir_op = .{ .op_name = "ora.assert", .symbol = "pow", .ordinal = 4 } },
+        .kind = .{ .logical = .{
+            .role = .arithmetic_safety,
+            .arithmetic_safety = .power_overflow,
+            .formula = .{ .origin_value = .{
+                .origin = .{ .mlir_op = .{ .op_name = "ora.assert", .symbol = "pow", .ordinal = 4 } },
+                .kind = .operand,
+            } },
+        } },
+    };
+    const set: obligation.ObligationSet = .{ .obligations = &.{item} };
+    const actual = try dumpToOwnedString(std.testing.allocator, set);
+    defer std.testing.allocator.free(actual);
+
+    try std.testing.expectEqualStrings(
+        "{\"record\":\"artifact_decision\",\"status\":\"blocked\",\"reason\":\"missing_proof\"}\n" ++
+            coverage_one_logical ++
+            "{\"record\":\"obligation\",\"id\":2,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"pow\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"ora_mlir\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.assert\",\"symbol\":\"pow\",\"ordinal\":4},\"kind\":{\"tag\":\"logical\",\"role\":\"arithmetic_safety\",\"arithmetic_safety\":\"power_overflow\",\"formula\":{\"tag\":\"origin_value\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.assert\",\"symbol\":\"pow\",\"ordinal\":4},\"value_kind\":\"operand\",\"index\":0}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n",
+        actual,
+    );
+}
+
+test "json-lines dump of canonical refinement predicate terms" {
+    const args = [_]obligation.TermId{1};
+    const terms = [_]obligation.Term{
+        .{ .variable = .{ .name = "amount", .ty = .{ .spelling = "u256" } } },
+        .{ .int_lit = .{ .value = "1", .ty = .{ .spelling = "u256" } } },
+        .{ .refinement_predicate = .{ .name = "MinValue", .value = 0, .args = &args } },
+    };
+    const item: obligation.Obligation = .{
+        .id = 4,
+        .owner = .{ .function = .{ .name = "deposit" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "refinement_guard", .ordinal = 0 } },
+        .kind = .{ .logical = .{
+            .role = .refinement,
+            .formula = .{ .term = 2 },
+        } },
+    };
+    const set: obligation.ObligationSet = .{ .obligations = &.{item}, .terms = &terms };
+    const actual = try dumpToOwnedString(std.testing.allocator, set);
+    defer std.testing.allocator.free(actual);
+
+    try std.testing.expectEqualStrings(
+        "{\"record\":\"artifact_decision\",\"status\":\"blocked\",\"reason\":\"missing_proof\"}\n" ++
+            coverage_one_logical_three_terms ++
+            "{\"record\":\"obligation\",\"id\":4,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"deposit\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"sema\",\"origin\":{\"tag\":\"sema_fact\",\"kind\":\"refinement_guard\",\"ordinal\":0},\"kind\":{\"tag\":\"logical\",\"role\":\"refinement\",\"formula\":{\"tag\":\"term\",\"id\":2}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n" ++
+            "{\"record\":\"term\",\"id\":0,\"term\":{\"tag\":\"variable\",\"value\":{\"name\":\"amount\",\"ty\":{\"tag\":\"spelling\",\"value\":\"u256\"}}}}\n" ++
+            "{\"record\":\"term\",\"id\":1,\"term\":{\"tag\":\"int_lit\",\"value\":\"1\",\"ty\":{\"tag\":\"spelling\",\"value\":\"u256\"}}}\n" ++
+            "{\"record\":\"term\",\"id\":2,\"term\":{\"tag\":\"refinement_predicate\",\"name\":\"MinValue\",\"value\":0,\"args\":[1]}}\n",
         actual,
     );
 }
@@ -460,7 +714,9 @@ test "json-lines dump of blocking diagnostic" {
     defer std.testing.allocator.free(actual);
 
     try std.testing.expectEqualStrings(
-        "{\"record\":\"diagnostic\",\"kind\":\"unsupported\",\"source\":{\"file\":\"test.ora\",\"line\":3,\"column\":9,\"byte_start\":0,\"byte_end\":0},\"message\":\"unsupported quantified binder\",\"blocks_artifacts\":true}\n",
+        "{\"record\":\"artifact_decision\",\"status\":\"blocked\",\"reason\":\"blocking_diagnostic\"}\n" ++
+            coverage_one_diagnostic ++
+            "{\"record\":\"diagnostic\",\"kind\":\"unsupported\",\"source\":{\"file\":\"test.ora\",\"line\":3,\"column\":9,\"byte_start\":0,\"byte_end\":0},\"message\":\"unsupported quantified binder\",\"blocks_artifacts\":true}\n",
         actual,
     );
 }
@@ -484,7 +740,9 @@ test "json-lines dump of derived backend fact" {
     defer std.testing.allocator.free(actual);
 
     try std.testing.expectEqualStrings(
-        "{\"record\":\"obligation\",\"id\":3,\"owner\":{\"tag\":\"backend\",\"component\":\"dispatcher\",\"name\":\"erc20\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"sinora\",\"origin\":{\"tag\":\"backend_fact\",\"component\":\"dispatcher\",\"fact\":\"selector_table_complete\",\"ordinal\":0},\"kind\":{\"tag\":\"backend_fact\",\"component\":\"dispatcher\",\"property\":\"complete\"},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[1,2]}\n",
+        "{\"record\":\"artifact_decision\",\"status\":\"blocked\",\"reason\":\"invalid_dependency\"}\n" ++
+            coverage_one_backend_fact ++
+            "{\"record\":\"obligation\",\"id\":3,\"owner\":{\"tag\":\"backend\",\"component\":\"dispatcher\",\"name\":\"erc20\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"sinora\",\"origin\":{\"tag\":\"backend_fact\",\"component\":\"dispatcher\",\"fact\":\"selector_table_complete\",\"ordinal\":0},\"kind\":{\"tag\":\"backend_fact\",\"component\":\"dispatcher\",\"property\":\"complete\"},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[1,2]}\n",
         actual,
     );
 }
@@ -512,7 +770,76 @@ test "json-lines dump of projected verifier query" {
     defer std.testing.allocator.free(actual);
 
     try std.testing.expectEqualStrings(
-        "{\"record\":\"query\",\"id\":8,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"transfer\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"report\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.refinement_guard\",\"symbol\":\"transfer\",\"ordinal\":4},\"backend\":\"z3\",\"kind\":\"guard_violate\",\"logical_role\":null,\"guard_id\":\"guard:transfer:amount\",\"obligation_ids\":[7],\"assumption_ids\":[],\"fragment\":\"qf_bv_array\",\"solver_logic\":\"qf_aufbv\",\"constraint_count\":5,\"smtlib_hash\":1234,\"result\":{\"tag\":\"unknown\",\"vacuous\":false,\"vacuity_unknown\":true,\"degraded\":false}}\n",
+        "{\"record\":\"artifact_decision\",\"status\":\"blocked\",\"reason\":\"invalid_dependency\"}\n" ++
+            coverage_one_z3_unknown_query ++
+            "{\"record\":\"query\",\"id\":8,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"transfer\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"report\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.refinement_guard\",\"symbol\":\"transfer\",\"ordinal\":4},\"backend\":\"z3\",\"kind\":\"guard_violate\",\"logical_role\":null,\"guard_id\":\"guard:transfer:amount\",\"obligation_ids\":[7],\"assumption_ids\":[],\"fragment\":\"qf_bv_array\",\"solver_logic\":\"qf_aufbv\",\"constraint_count\":5,\"smtlib_hash\":1234,\"proof_artifact_id\":null,\"result\":{\"tag\":\"unknown\",\"vacuous\":false,\"vacuity_unknown\":true,\"degraded\":false}}\n",
+        actual,
+    );
+}
+
+test "json-lines dump of userland proof artifact attachment" {
+    const ids = [_]obligation.Id{7};
+    const item: obligation.ProofArtifact = .{
+        .id = 9,
+        .owner = .{ .function = .{ .name = "transfer" } },
+        .source = .{ .file = "proofs/ERC20/Transfer.lean", .line = 1 },
+        .module_name = "ERC20.Transfer",
+        .theorem_name = "transfer_preserves_supply",
+        .path = "proofs/ERC20/Transfer.lean",
+        .content_hash = 0x1234,
+        .obligation_ids = &ids,
+    };
+    const set: obligation.ObligationSet = .{ .proof_artifacts = &.{item} };
+    const actual = try dumpToOwnedString(std.testing.allocator, set);
+    defer std.testing.allocator.free(actual);
+
+    try std.testing.expectEqualStrings(
+        "{\"record\":\"artifact_decision\",\"status\":\"blocked\",\"reason\":\"invalid_dependency\"}\n" ++
+            coverage_one_proof_artifact ++
+            "{\"record\":\"proof_artifact\",\"id\":9,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"transfer\"},\"source\":{\"file\":\"proofs/ERC20/Transfer.lean\",\"line\":1,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"kind\":\"userland_lean\",\"module_name\":\"ERC20.Transfer\",\"theorem_name\":\"transfer_preserves_supply\",\"path\":\"proofs/ERC20/Transfer.lean\",\"content_hash\":4660,\"obligation_ids\":[7]}\n",
+        actual,
+    );
+}
+
+test "json-lines summary shows checker coverage for allowed artifacts" {
+    const ids = [_]obligation.Id{1};
+    const item: obligation.Obligation = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "transfer" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .{ .mlir_op = .{ .op_name = "ora.ensures", .symbol = "transfer" } },
+        .kind = .{ .logical = .{
+            .role = .ensures,
+            .formula = .{ .origin_value = .{
+                .origin = .{ .mlir_op = .{ .op_name = "ora.ensures", .symbol = "transfer" } },
+            } },
+        } },
+    };
+    const query: obligation.VerificationQuery = .{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "transfer" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .{ .mlir_op = .{ .op_name = "ora.ensures", .symbol = "transfer" } },
+        .backend = .z3,
+        .kind = .obligation,
+        .logical_role = .ensures,
+        .obligation_ids = &ids,
+        .fragment = .qf_bv,
+        .solver_logic = .qf_aufbv,
+        .constraint_count = 3,
+        .result = .{ .status = .unsat },
+    };
+    const set: obligation.ObligationSet = .{ .obligations = &.{item}, .queries = &.{query} };
+    const actual = try dumpToOwnedString(std.testing.allocator, set);
+    defer std.testing.allocator.free(actual);
+
+    try std.testing.expectEqualStrings(
+        "{\"record\":\"artifact_decision\",\"status\":\"allowed\",\"reason\":null}\n" ++
+            coverage_one_z3_unsat_proof ++
+            "{\"record\":\"obligation\",\"id\":1,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"transfer\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"ora_mlir\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":0},\"kind\":{\"tag\":\"logical\",\"role\":\"ensures\",\"formula\":{\"tag\":\"origin_value\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":0},\"value_kind\":\"result\",\"index\":0}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n" ++
+            "{\"record\":\"query\",\"id\":2,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"transfer\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"report\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":0},\"backend\":\"z3\",\"kind\":\"obligation\",\"logical_role\":\"ensures\",\"guard_id\":null,\"obligation_ids\":[1],\"assumption_ids\":[],\"fragment\":\"qf_bv\",\"solver_logic\":\"qf_aufbv\",\"constraint_count\":3,\"smtlib_hash\":null,\"proof_artifact_id\":null,\"result\":{\"tag\":\"unsat\",\"vacuous\":false,\"vacuity_unknown\":false,\"degraded\":false}}\n",
         actual,
     );
 }

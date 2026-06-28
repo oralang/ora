@@ -4789,6 +4789,7 @@ fn runMlirEmitAdvanced(
 
     var verification_result_opt: ?@import("z3/errors.zig").VerificationResult = null;
     var verification_failed = false;
+    var verification_report_blocked_artifacts = false;
     var pending_smt_report: ?@import("z3/mod.zig").SmtReportArtifacts = null;
     defer {
         if (verification_result_opt) |*vr| vr.deinit();
@@ -4827,10 +4828,18 @@ fn runMlirEmitAdvanced(
 
         if (mlir_options.emit_smt_report) {
             pending_smt_report = try verifier.buildSmtReport(final_module, file_path, &verification_result);
+            if (pending_smt_report) |report| {
+                verification_report_blocked_artifacts = report.blocksTrustedArtifacts();
+            }
         }
 
         if (!verification_result.success) {
             try printVerificationErrors(stdout, verification_result.errors.items);
+            try stdout.flush();
+            verification_failed = true;
+        }
+        if (verification_report_blocked_artifacts and verification_result.success) {
+            try stdout.print("Verification failed: SMT report did not authorize trusted artifact emission\n", .{});
             try stdout.flush();
             verification_failed = true;
         }

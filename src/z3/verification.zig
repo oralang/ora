@@ -13,10 +13,14 @@
 //===----------------------------------------------------------------------===//
 
 const std = @import("std");
-const z3 = @import("c.zig");
+pub const z3_c = @import("c.zig");
+pub const Z3Context = @import("context.zig").Context;
+pub const Z3Solver = @import("solver.zig").Solver;
+
+const z3 = z3_c;
 const mlir = @import("mlir_c_api").c;
-const Context = @import("context.zig").Context;
-const Solver = @import("solver.zig").Solver;
+const Context = Z3Context;
+const Solver = Z3Solver;
 const Encoder = @import("encoder.zig").Encoder;
 const errors = @import("errors.zig");
 const mlir_helpers = @import("mlir_helpers.zig");
@@ -103,6 +107,9 @@ pub const QueryFragment = enum(u8) {
     other,
 };
 
+pub const PendingObligationSourceKind = Encoder.PendingObligationSourceKind;
+pub const PendingConstraintSourceKind = Encoder.PendingConstraintSourceKind;
+
 const TrackedAssumption = struct {
     proxy: ?z3.Z3_ast = null,
     ast: z3.Z3_ast,
@@ -119,10 +126,15 @@ fn cloneAssumptionTagSlice(
 pub const SmtReportArtifacts = struct {
     markdown: []u8,
     json: []u8,
+    trusted_artifacts_allowed: bool,
 
     pub fn deinit(self: *SmtReportArtifacts, allocator: std.mem.Allocator) void {
         allocator.free(self.markdown);
         allocator.free(self.json);
+    }
+
+    pub fn blocksTrustedArtifacts(self: SmtReportArtifacts) bool {
+        return !self.trusted_artifacts_allowed;
     }
 };
 
@@ -3182,6 +3194,48 @@ pub const VerificationPass = struct {
         return PreparedQuerySummary.fromPreparedQueries(queries.items);
     }
 
+    pub fn collectPreparedQueryManifest(self: *VerificationPass, mlir_module: mlir.MlirModule) !PreparedQueryManifest {
+        self.encoder.clearDegradation();
+        try self.extractAnnotationsFromMLIR(mlir_module);
+        if (self.encoder.isDegraded()) return error.VerificationEncodingDegraded;
+
+        var queries = try self.buildPreparedQueries();
+        defer {
+            for (queries.items) |*query| {
+                query.deinit(self.allocator);
+            }
+            queries.deinit();
+        }
+        if (self.encoder.isDegraded()) return error.VerificationEncodingDegraded;
+
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        errdefer arena.deinit();
+        const arena_allocator = arena.allocator();
+
+        const rows = try arena_allocator.alloc(PreparedQueryManifestRow, queries.items.len);
+        for (queries.items, rows) |query, *row| {
+            row.* = .{
+                .kind = query.kind,
+                .fragment = query.fragment,
+                .solver_logic = query.solver_logic,
+                .function_name = try arena_allocator.dupe(u8, query.function_name),
+                .guard_id = if (query.guard_id) |guard_id| try arena_allocator.dupe(u8, guard_id) else null,
+                .obligation_kind = query.obligation_kind,
+                .file = try arena_allocator.dupe(u8, query.file),
+                .line = query.line,
+                .column = query.column,
+                .constraint_count = std.math.cast(u32, query.constraint_count) orelse std.math.maxInt(u32),
+                .smtlib_hash = query.smtlib_hash,
+                .references_loop_post_state = query.references_loop_post_state,
+            };
+        }
+
+        return .{
+            .arena = arena,
+            .rows = rows,
+        };
+    }
+
     fn executePreparedQueriesSequential(self: *VerificationPass, queries: []const PreparedQuery) !errors.VerificationResult {
         const results = try self.allocator.alloc(PreparedQueryResult, queries.len);
         defer self.allocator.free(results);
@@ -4037,6 +4091,7 @@ pub const VerificationPass = struct {
         return .{
             .markdown = markdown,
             .json = json,
+            .trusted_artifacts_allowed = summary.verification_success,
         };
     }
 
@@ -4082,6 +4137,7 @@ pub const VerificationPass = struct {
         return .{
             .markdown = markdown,
             .json = json,
+            .trusted_artifacts_allowed = false,
         };
     }
 
@@ -4128,6 +4184,7 @@ pub const VerificationPass = struct {
         return .{
             .markdown = markdown,
             .json = json,
+            .trusted_artifacts_allowed = false,
         };
     }
 
@@ -6672,6 +6729,31 @@ pub const PreparedQuerySummary = struct {
     }
 };
 
+pub const PreparedQueryManifestRow = struct {
+    kind: QueryKind,
+    fragment: QueryFragment = .unknown,
+    solver_logic: QuerySolverLogic = .all,
+    function_name: []const u8,
+    guard_id: ?[]const u8 = null,
+    obligation_kind: ?AnnotationKind = null,
+    file: []const u8,
+    line: u32,
+    column: u32,
+    constraint_count: u32 = 0,
+    smtlib_hash: u64 = 0,
+    references_loop_post_state: bool = false,
+};
+
+pub const PreparedQueryManifest = struct {
+    arena: std.heap.ArenaAllocator,
+    rows: []const PreparedQueryManifestRow,
+
+    pub fn deinit(self: *PreparedQueryManifest) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
 const ResourceEffectKind = enum {
     conserved_move,
     explicit_create,
@@ -6845,6 +6927,27 @@ pub fn formalAssumptionKindLabel(kind: AnnotationKind) ?[]const u8 {
         .ContractInvariant,
         .RefinementGuard,
         => null,
+    };
+}
+
+pub fn formalPendingObligationRoleLabel(kind: PendingObligationSourceKind) ?[]const u8 {
+    return switch (kind) {
+        .local => null,
+        .callee_precondition => "callee_precondition",
+        .imported_callee_obligation => "imported_callee_obligation",
+        .imported_callee_ensures => "imported_callee_ensures",
+    };
+}
+
+pub fn formalPendingConstraintAssumptionKindLabel(kind: PendingConstraintSourceKind) ?[]const u8 {
+    return switch (kind) {
+        .generic => null,
+        .assume => "assume",
+        .path_assume => "path_assume",
+        .binding => "binding",
+        .two_state_linkage => "two_state_linkage",
+        .env_assume => "env_assume",
+        .frame => "frame",
     };
 }
 
@@ -12452,6 +12555,7 @@ test "SMT report fails closed on real query-build degradation" {
     defer artifacts.deinit(testing.allocator);
 
     try testing.expect(pass.encoder.isDegraded());
+    try testing.expect(artifacts.blocksTrustedArtifacts());
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"encoding_degraded\":true") != null);
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"degradation_reason\":\"struct_field_extract requires exact product metadata\"") != null);
     try testing.expect(std.mem.indexOf(u8, artifacts.markdown, "Encoding degraded: `true`") != null);
@@ -13672,6 +13776,7 @@ test "explain mode reports contradictory requires as vacuous" {
     defer testing.allocator.free(artifacts.markdown);
     defer testing.allocator.free(artifacts.json);
 
+    try testing.expect(artifacts.blocksTrustedArtifacts());
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"vacuous\":true") != null);
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"vacuity_unknown\":false") != null);
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"kind\":\"requires\"") != null);
@@ -13701,6 +13806,7 @@ test "runVerificationPass explain mode remains on canonical prepared-query path"
     defer testing.allocator.free(artifacts.markdown);
     defer testing.allocator.free(artifacts.json);
 
+    try testing.expect(artifacts.blocksTrustedArtifacts());
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"vacuous\":true") != null);
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"explain_core\":\"requires requires\"") != null);
 }

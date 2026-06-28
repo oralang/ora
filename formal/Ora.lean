@@ -40,3 +40,10 @@ import Ora.Spec.TypeRelations
 import Ora.Generated.CompilerTypeRelations
 import Ora.TypeRelationsSync
 import Ora.Dispatcher
+import Ora.Spec.DispatcherFacts
+import Ora.Generated.DispatcherStrategySnapshot
+import Ora.DispatcherStrategySync
+import Ora.Spec.SinoraBackendFacts
+import Ora.Generated.SinoraBackendSnapshot
+import Ora.SinoraBackendSync
+import Ora.Obligation.Manifest

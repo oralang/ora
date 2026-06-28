@@ -22,14 +22,14 @@ const finite_scf_while_unroll_limit: usize = 64;
 pub const Encoder = struct {
     pub const default_max_summary_inline_depth: u32 = 8;
 
-    pub const PendingObligationSourceKind = enum {
+    pub const PendingObligationSourceKind = enum(u8) {
         local,
         imported_callee_obligation,
         imported_callee_ensures,
         callee_precondition,
     };
 
-    pub const PendingConstraintSourceKind = enum {
+    pub const PendingConstraintSourceKind = enum(u8) {
         generic,
         assume,
         path_assume,
