@@ -89,12 +89,12 @@ const ImportedObligationSource = struct {
     kind: Encoder.PendingObligationSourceKind,
 };
 
-const QuerySolverLogic = enum {
+pub const QuerySolverLogic = enum(u8) {
     all,
     qf_aufbv,
 };
 
-const QueryFragment = enum {
+pub const QueryFragment = enum(u8) {
     unknown,
     qf_bv,
     qf_bv_array,
@@ -3163,6 +3163,23 @@ pub const VerificationPass = struct {
         }
 
         return try self.executePreparedQueriesSequential(queries.items);
+    }
+
+    pub fn collectPreparedQuerySummary(self: *VerificationPass, mlir_module: mlir.MlirModule) !PreparedQuerySummary {
+        self.encoder.clearDegradation();
+        try self.extractAnnotationsFromMLIR(mlir_module);
+        if (self.encoder.isDegraded()) return error.VerificationEncodingDegraded;
+
+        var queries = try self.buildPreparedQueries();
+        defer {
+            for (queries.items) |*query| {
+                query.deinit(self.allocator);
+            }
+            queries.deinit();
+        }
+        if (self.encoder.isDegraded()) return error.VerificationEncodingDegraded;
+
+        return PreparedQuerySummary.fromPreparedQueries(queries.items);
     }
 
     fn executePreparedQueriesSequential(self: *VerificationPass, queries: []const PreparedQuery) !errors.VerificationResult {
@@ -6615,7 +6632,7 @@ fn sameLoopInvariantGroup(self: *VerificationPass, reference: EncodedAnnotation,
     return constraintSlicesEquivalent(self, reference.path_constraints, candidate.path_constraints);
 }
 
-const QueryKind = enum {
+pub const QueryKind = enum(u8) {
     Base,
     Obligation,
     LoopInvariantStep,
@@ -6623,6 +6640,36 @@ const QueryKind = enum {
     LoopInvariantPost,
     GuardSatisfy,
     GuardViolate,
+};
+
+pub const PreparedQuerySummary = struct {
+    total: u64 = 0,
+    base: u64 = 0,
+    obligation: u64 = 0,
+    loop_invariant_step: u64 = 0,
+    loop_body_safety: u64 = 0,
+    loop_invariant_post: u64 = 0,
+    guard_satisfy: u64 = 0,
+    guard_violate: u64 = 0,
+
+    fn add(self: *PreparedQuerySummary, kind: QueryKind) void {
+        self.total += 1;
+        switch (kind) {
+            .Base => self.base += 1,
+            .Obligation => self.obligation += 1,
+            .LoopInvariantStep => self.loop_invariant_step += 1,
+            .LoopBodySafety => self.loop_body_safety += 1,
+            .LoopInvariantPost => self.loop_invariant_post += 1,
+            .GuardSatisfy => self.guard_satisfy += 1,
+            .GuardViolate => self.guard_violate += 1,
+        }
+    }
+
+    fn fromPreparedQueries(queries: []const PreparedQuery) PreparedQuerySummary {
+        var summary: PreparedQuerySummary = .{};
+        for (queries) |query| summary.add(query.kind);
+        return summary;
+    }
 };
 
 const ResourceEffectKind = enum {
@@ -6740,6 +6787,10 @@ fn verificationTrustLabel(
 }
 
 fn queryKindLabel(kind: QueryKind) []const u8 {
+    return formalQueryKindLabel(kind);
+}
+
+pub fn formalQueryKindLabel(kind: QueryKind) []const u8 {
     return switch (kind) {
         .Base => "base",
         .Obligation => "obligation",
@@ -6748,6 +6799,52 @@ fn queryKindLabel(kind: QueryKind) []const u8 {
         .LoopInvariantPost => "loop_invariant_post",
         .GuardSatisfy => "guard_satisfy",
         .GuardViolate => "guard_violate",
+    };
+}
+
+pub fn formalQueryFragmentLabel(fragment: QueryFragment) []const u8 {
+    return switch (fragment) {
+        .unknown => "unknown",
+        .qf_bv => "qf_bv",
+        .qf_bv_array => "qf_bv_array",
+        .aufbv => "aufbv",
+        .aufbv_quantifiers => "aufbv_quantifiers",
+        .other => "other",
+    };
+}
+
+pub fn formalQuerySolverLogicLabel(logic: QuerySolverLogic) []const u8 {
+    return switch (logic) {
+        .all => "all",
+        .qf_aufbv => "qf_aufbv",
+    };
+}
+
+pub fn formalLogicalRoleLabel(kind: AnnotationKind) ?[]const u8 {
+    return switch (kind) {
+        .Requires => "requires",
+        .CalleePrecondition => "callee_precondition",
+        .Ensures => "ensures",
+        .Guard => "guard",
+        .LoopInvariant => "loop_invariant",
+        .ContractInvariant => "contract_invariant",
+        .RefinementGuard => "refinement",
+        .Assume, .PathAssume => null,
+    };
+}
+
+pub fn formalAssumptionKindLabel(kind: AnnotationKind) ?[]const u8 {
+    return switch (kind) {
+        .Requires => "requires",
+        .Assume => "assume",
+        .PathAssume => "path_assume",
+        .CalleePrecondition,
+        .Ensures,
+        .Guard,
+        .LoopInvariant,
+        .ContractInvariant,
+        .RefinementGuard,
+        => null,
     };
 }
 

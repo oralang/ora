@@ -1,6 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 const mlir = @import("mlir_c_api").c;
+const z3_verification = @import("ora_z3_verification");
 
 const obligation = @import("formal/obligation.zig");
 const obligation_from_mlir = @import("formal/obligation_from_mlir.zig");
@@ -104,6 +105,116 @@ fn countQuery(set: obligation.ObligationSet, kind: obligation.VerificationQueryK
     return count;
 }
 
+fn expectSummaryMatchesZ3PreparedQueries(
+    formal_summary: obligation.VerificationQuerySummary,
+    z3_summary: z3_verification.PreparedQuerySummary,
+) !void {
+    const formal_total =
+        @as(u64, formal_summary.base) +
+        @as(u64, formal_summary.obligation) +
+        @as(u64, formal_summary.loop_invariant_step) +
+        @as(u64, formal_summary.loop_body_safety) +
+        @as(u64, formal_summary.loop_invariant_post) +
+        @as(u64, formal_summary.guard_satisfy) +
+        @as(u64, formal_summary.guard_violate);
+    try testing.expectEqual(formal_total, z3_summary.total);
+    try testing.expectEqual(@as(u64, formal_summary.base), z3_summary.base);
+    try testing.expectEqual(@as(u64, formal_summary.obligation), z3_summary.obligation);
+    try testing.expectEqual(@as(u64, formal_summary.loop_invariant_step), z3_summary.loop_invariant_step);
+    try testing.expectEqual(@as(u64, formal_summary.loop_body_safety), z3_summary.loop_body_safety);
+    try testing.expectEqual(@as(u64, formal_summary.loop_invariant_post), z3_summary.loop_invariant_post);
+    try testing.expectEqual(@as(u64, formal_summary.guard_satisfy), z3_summary.guard_satisfy);
+    try testing.expectEqual(@as(u64, formal_summary.guard_violate), z3_summary.guard_violate);
+}
+
+test "formal query vocabulary matches Z3 prepared query vocabulary" {
+    inline for (std.meta.fields(z3_verification.QueryKind)) |field| {
+        const z3_kind: z3_verification.QueryKind = @enumFromInt(field.value);
+        const label = z3_verification.formalQueryKindLabel(z3_kind);
+        const formal_kind = std.meta.stringToEnum(obligation.VerificationQueryKind, label) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(label, @tagName(formal_kind));
+    }
+
+    inline for (std.meta.fields(obligation.VerificationQueryKind)) |field| {
+        var found = false;
+        inline for (std.meta.fields(z3_verification.QueryKind)) |z3_field| {
+            const z3_kind: z3_verification.QueryKind = @enumFromInt(z3_field.value);
+            found = found or std.mem.eql(u8, field.name, z3_verification.formalQueryKindLabel(z3_kind));
+        }
+        try testing.expect(found);
+    }
+}
+
+test "formal query fragments and solver logic match Z3 vocabulary" {
+    inline for (std.meta.fields(z3_verification.QueryFragment)) |field| {
+        const z3_fragment: z3_verification.QueryFragment = @enumFromInt(field.value);
+        const label = z3_verification.formalQueryFragmentLabel(z3_fragment);
+        const formal_fragment = std.meta.stringToEnum(obligation.VerificationQueryFragment, label) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(label, @tagName(formal_fragment));
+    }
+
+    inline for (std.meta.fields(z3_verification.QuerySolverLogic)) |field| {
+        const z3_logic: z3_verification.QuerySolverLogic = @enumFromInt(field.value);
+        const label = z3_verification.formalQuerySolverLogicLabel(z3_logic);
+        const formal_logic = std.meta.stringToEnum(obligation.VerificationSolverLogic, label) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(label, @tagName(formal_logic));
+    }
+}
+
+test "formal logical and assumption roles match Z3 annotation vocabulary" {
+    inline for (std.meta.fields(z3_verification.AnnotationKind)) |field| {
+        const annotation: z3_verification.AnnotationKind = @enumFromInt(field.value);
+        if (z3_verification.formalLogicalRoleLabel(annotation)) |label| {
+            const role = std.meta.stringToEnum(obligation.LogicalRole, label) orelse return error.TestUnexpectedResult;
+            try testing.expectEqualStrings(label, @tagName(role));
+        }
+        if (z3_verification.formalAssumptionKindLabel(annotation)) |label| {
+            const kind = std.meta.stringToEnum(obligation.AssumptionKind, label) orelse return error.TestUnexpectedResult;
+            try testing.expectEqualStrings(label, @tagName(kind));
+        }
+    }
+}
+
+test "formal MLIR manifest query summary matches Z3 prepared query summary" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @checked(%flag: i1) {
+        \\    "ora.requires"(%flag) : (i1) -> ()
+        \\    "ora.ensures"(%flag) : (i1) -> ()
+        \\    "ora.assert"(%flag) <{message = "must hold"}> : (i1) -> ()
+        \\    "ora.assume"(%flag) : (i1) -> ()
+        \\    "ora.refinement_guard"(%flag) <{message = "guard"}> : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    const guard_op = findFirstOpByName(module, "ora.refinement_guard") orelse return error.TestUnexpectedResult;
+    mlir.oraOperationSetAttributeByName(
+        guard_op,
+        strRef("ora.guard_id"),
+        mlir.oraStringAttrCreate(h.ctx, strRef("guard:checked:flag")),
+    );
+
+    var formal_result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer formal_result.deinit();
+
+    var pass = try z3_verification.VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    const z3_summary = try pass.collectPreparedQuerySummary(module);
+
+    try expectSummaryMatchesZ3PreparedQueries(
+        obligation.VerificationQuerySummary.fromQueries(formal_result.set.queries),
+        z3_summary,
+    );
+}
+
 test "formal obligation MLIR adapter collects verification markers and assumptions" {
     const h = createContext();
     defer destroyContext(h);
@@ -137,12 +248,13 @@ test "formal obligation MLIR adapter collects verification markers and assumptio
     try testing.expect(!result.set.hasBlockingDiagnostic());
     try testing.expectEqual(@as(usize, 3), result.set.obligations.len);
     try testing.expectEqual(@as(usize, 2), result.set.assumptions.len);
-    try testing.expectEqual(@as(usize, 4), result.set.queries.len);
+    try testing.expectEqual(@as(usize, 5), result.set.queries.len);
     try testing.expectEqual(@as(usize, 1), countAssumption(result.set, .requires));
     try testing.expectEqual(@as(usize, 1), countAssumption(result.set, .assume));
     try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
     try testing.expectEqual(@as(usize, 1), countLogical(result.set, .assert));
     try testing.expectEqual(@as(usize, 1), countRuntimeGuards(result.set));
+    try testing.expectEqual(@as(usize, 1), countQuery(result.set, .base));
     try testing.expectEqual(@as(usize, 2), countQuery(result.set, .obligation));
     try testing.expectEqual(@as(usize, 1), countQuery(result.set, .guard_satisfy));
     try testing.expectEqual(@as(usize, 1), countQuery(result.set, .guard_violate));
@@ -208,11 +320,12 @@ test "formal obligation MLIR adapter covers Z3 assertion tags and implicit safet
     try testing.expect(!result.set.hasBlockingDiagnostic());
     try testing.expectEqual(@as(usize, 3), result.set.obligations.len);
     try testing.expectEqual(@as(usize, 2), result.set.assumptions.len);
-    try testing.expectEqual(@as(usize, 4), result.set.queries.len);
+    try testing.expectEqual(@as(usize, 5), result.set.queries.len);
     try testing.expectEqual(@as(usize, 1), countAssumption(result.set, .requires));
     try testing.expectEqual(@as(usize, 1), countAssumption(result.set, .path_assume));
     try testing.expectEqual(@as(usize, 1), countRuntimeGuards(result.set));
     try testing.expectEqual(@as(usize, 2), countLogical(result.set, .arithmetic_safety));
+    try testing.expectEqual(@as(usize, 1), countQuery(result.set, .base));
     try testing.expectEqual(@as(usize, 2), countQuery(result.set, .obligation));
     try testing.expectEqual(@as(usize, 1), countQuery(result.set, .guard_satisfy));
     try testing.expectEqual(@as(usize, 1), countQuery(result.set, .guard_violate));
@@ -245,7 +358,8 @@ test "formal obligation MLIR adapter expands resource op properties" {
 
     try testing.expect(!result.set.hasBlockingDiagnostic());
     try testing.expectEqual(@as(usize, 6), result.set.obligations.len);
-    try testing.expectEqual(@as(usize, 6), result.set.queries.len);
+    try testing.expectEqual(@as(usize, 7), result.set.queries.len);
+    try testing.expectEqual(@as(usize, 1), countQuery(result.set, .base));
     try testing.expectEqual(@as(usize, 6), countQuery(result.set, .obligation));
     try testing.expectEqual(@as(usize, 1), countResource(result.set, .move, .amount_non_negative));
     try testing.expectEqual(@as(usize, 1), countResource(result.set, .move, .source_sufficient));

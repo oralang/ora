@@ -74,6 +74,7 @@ pub fn collect(
     };
 
     try collector.walkOperation(mlir.oraModuleGetOperation(module), null);
+    try collector.addBaseQueriesForFunctionOwners();
 
     const set: obligation.ObligationSet = .{
         .obligations = try collector.obligations.toOwnedSlice(collector.allocator),
@@ -449,6 +450,37 @@ const Collector = struct {
             .logical_role = logical_role,
             .guard_id = guard_id,
             .obligation_ids = obligation_ids,
+        });
+    }
+
+    fn addBaseQueriesForFunctionOwners(self: *Collector) !void {
+        var seen = std.StringHashMap(void).init(self.allocator);
+        defer seen.deinit();
+
+        for (self.assumptions.items) |item| {
+            try self.addBaseQueryForOwner(item.owner, &seen);
+        }
+        for (self.obligations.items) |item| {
+            try self.addBaseQueryForOwner(item.owner, &seen);
+        }
+    }
+
+    fn addBaseQueryForOwner(
+        self: *Collector,
+        owner: obligation.Owner,
+        seen: *std.StringHashMap(void),
+    ) !void {
+        if (owner != .function) return;
+        const name = owner.function.name;
+        const entry = try seen.getOrPut(name);
+        if (entry.found_existing) return;
+        try self.queries.append(self.allocator, .{
+            .id = self.nextId(),
+            .owner = owner,
+            .source = .generated(),
+            .phase = .report,
+            .origin = .{ .source = {} },
+            .kind = .base,
         });
     }
 
