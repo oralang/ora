@@ -41,6 +41,23 @@ pub const OptimizationPass = enum {
     }
 };
 
+pub const OptimizationPassFact = struct {
+    pass: OptimizationPass,
+    name: []const u8,
+    cli_code: u8,
+};
+
+pub const optimization_pass_facts = [_]OptimizationPassFact{
+    .{ .pass = .sccp, .name = "sccp", .cli_code = 's' },
+    .{ .pass = .copy_propagation, .name = "copy_propagation", .cli_code = 'c' },
+    .{ .pass = .literal_commoning, .name = "literal_commoning", .cli_code = 'p' },
+    .{ .pass = .unused_operation_elimination, .name = "unused_operation_elimination", .cli_code = 'u' },
+    .{ .pass = .defragment, .name = "defragment", .cli_code = 'd' },
+    .{ .pass = .switch_peephole, .name = "switch_peephole", .cli_code = 'l' },
+};
+
+pub const optimization_pipeline_runs_final_legalizer = true;
+
 pub const optimize_help =
     \\Optimization passes to run in order. Each character is a pass:
     \\  s = SCCP (constant propagation)
@@ -544,6 +561,24 @@ test "optimization string parses and runs passes in order" {
     try std.testing.expectEqual(@as(usize, 2), program.functions[0].blocks.len);
     try std.testing.expectEqualStrings("one", program.functions[0].blocks[0].terminator.jump);
     try std.testing.expectEqual(@as(usize, 0), program.functions[0].blocks[0].instructions.len);
+}
+
+test "optimization pass fact table covers CLI parser vocabulary" {
+    const fields = @typeInfo(OptimizationPass).@"enum".fields;
+    try std.testing.expectEqual(fields.len, optimization_pass_facts.len);
+    inline for (fields) |field| {
+        const pass: OptimizationPass = @enumFromInt(field.value);
+        var found = false;
+        for (optimization_pass_facts) |fact| {
+            if (fact.pass == pass) {
+                try std.testing.expectEqual(pass, OptimizationPass.fromChar(fact.cli_code) orelse return error.TestUnexpectedResult);
+                try std.testing.expectEqualStrings(field.name, fact.name);
+                found = true;
+                break;
+            }
+        }
+        try std.testing.expect(found);
+    }
 }
 
 test "defragmenter pass drops unreachable program fragments" {

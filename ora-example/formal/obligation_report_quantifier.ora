@@ -1,0 +1,7 @@
+contract ObligationReportQuantifier {
+    pub fn bounded(x: u256) -> bool
+        ensures (forall i: u256 where i < x => i <= x)
+    {
+        return true;
+    }
+}

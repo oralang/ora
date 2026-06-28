@@ -23,7 +23,8 @@ theorem refArgsEq_self : ∀ as, refArgsEq as as = true
   | [] => rfl
   | a :: as => by simp [refArgsEq, refArgEq_self a, refArgsEq_self as]
 
-theorem IntTy.assignable_refl (e : IntTy) : IntTy.assignable e e = true := by simp [IntTy.assignable]
+theorem IntTy.assignable_refl (e : IntTy) : IntTy.assignable e e = true := by
+  simp [IntTy.assignable]
 
 theorem errorMem_self {e : Ty} {ee : List Ty} (h : e ∈ ee) : errorMem e ee = true := by
   simp only [errorMem, List.any_eq_true]; exact ⟨e, h, Ty.beq_self e⟩
@@ -33,12 +34,14 @@ theorem errorSubsetB_self : ∀ ee, errorSubsetB ee ee = true
       simp only [errorSubsetB, List.all_eq_true]
       intro x hx; exact errorMem_self hx
 
-theorem assignableList_refl_of : (ts : List Ty) → (∀ t ∈ ts, Ty.assignable t t = true) → assignableList ts ts = true
+theorem assignableList_refl_of : (ts : List Ty) →
+    (∀ t ∈ ts, Ty.assignable t t = true) → assignableList ts ts = true
   | [], _ => rfl
   | t :: ts, h => by
       simp only [asgList_cons, Bool.and_eq_true]
       exact ⟨h t (.head _), assignableList_refl_of ts (fun x hx => h x (.tail _ hx))⟩
-theorem assignableFields_refl_of : (fs : List (Name × Ty)) → (∀ f ∈ fs, Ty.assignable f.2 f.2 = true) → assignableFields fs fs = true
+theorem assignableFields_refl_of : (fs : List (Name × Ty)) →
+    (∀ f ∈ fs, Ty.assignable f.2 f.2 = true) → assignableFields fs fs = true
   | [], _ => rfl
   | (n, t) :: fs, h => by
       simp only [asgFields_cons, Bool.and_eq_true, beq_self_eq_true, true_and]
@@ -78,7 +81,8 @@ theorem errorSubsetB_trans {a b c : List Ty}
   exact h2 e (errorMem_iff.1 (h1 e he))
 
 theorem boundOk_trans {e1 e2 e3 : Option Int} {isMin : Bool}
-    (h1 : boundOk e1 e2 isMin = true) (h2 : boundOk e2 e3 isMin = true) : boundOk e1 e3 isMin = true := by
+    (h1 : boundOk e1 e2 isMin = true) (h2 : boundOk e2 e3 isMin = true) :
+    boundOk e1 e3 isMin = true := by
   cases isMin <;> cases e1 <;> cases e2 <;> cases e3 <;>
     simp_all [boundOk, decide_eq_true_eq] <;> omega
 
@@ -127,7 +131,9 @@ theorem refCond_trans {ne1 ne2 ne3 : Name} {ae1 ae2 ae3 : List RefinementArg}
                 | some b2 => cases hr3 : refBounds ne3 ae3 with
                     | none => rw [hr2, hr3] at h2; simp at h2
                     | some b3 =>
-                        obtain ⟨e1, m1⟩ := b1; obtain ⟨e2, m2⟩ := b2; obtain ⟨e3, m3⟩ := b3
+                        obtain ⟨e1, m1⟩ := b1
+                        obtain ⟨e2, m2⟩ := b2
+                        obtain ⟨e3, m3⟩ := b3
                         simp only [hr1, hr2, Bool.and_eq_true] at h1
                         simp only [hr2, hr3, Bool.and_eq_true] at h2
                         simp only [hr1, hr3, Bool.and_eq_true]
@@ -154,7 +160,8 @@ theorem prim_trans (p q r : PrimTy) :
     | simp_all
 
 theorem assignableList_trans : (as bs cs : List Ty) →
-    (∀ a ∈ as, ∀ b c, Ty.assignable a b = true → Ty.assignable b c = true → Ty.assignable a c = true) →
+    (∀ a ∈ as, ∀ b c, Ty.assignable a b = true → Ty.assignable b c = true →
+      Ty.assignable a c = true) →
     assignableList as bs = true → assignableList bs cs = true → assignableList as cs = true
   | [], [], [], _, _, _ => rfl
   | [], [], _ :: _, _, _, h2 => by nomatch h2
@@ -167,7 +174,8 @@ theorem assignableList_trans : (as bs cs : List Ty) →
              assignableList_trans as bs cs (fun x hx => ih x (.tail _ hx)) h1.2 h2.2⟩
 
 theorem assignableFields_trans : (as bs cs : List (Name × Ty)) →
-    (∀ a ∈ as, ∀ b c, Ty.assignable a.2 b = true → Ty.assignable b c = true → Ty.assignable a.2 c = true) →
+    (∀ a ∈ as, ∀ b c, Ty.assignable a.2 b = true → Ty.assignable b c = true →
+      Ty.assignable a.2 c = true) →
     assignableFields as bs = true → assignableFields bs cs = true → assignableFields as cs = true
   | [], [], [], _, _, _ => rfl
   | [], [], _ :: _, _, _, h2 => by nomatch h2

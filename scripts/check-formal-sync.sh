@@ -42,6 +42,21 @@ run_emitter() {
     > "$snapshot"
 }
 
+run_sinora_emitter() {
+  local label="$1"
+  local emitter="$2"
+  local snapshot="$3"
+
+  echo "  - $label -> $snapshot"
+  zig run \
+    --cache-dir "$ROOT/.zig-cache/formal-sync" \
+    --global-cache-dir "$ROOT/.zig-cache/formal-sync-global" \
+    --dep sinora \
+    -Mroot="$emitter" \
+    -Msinora=sinora/src/sinora.zig \
+    > "$snapshot"
+}
+
 lint_snapshot() {
   local snapshot="$1"
 
@@ -71,12 +86,16 @@ SNAPSHOTS=(
   "formal/Ora/Generated/CompilerSnapshot.lean"
   "formal/Ora/Generated/DeclEnvSnapshot.lean"
   "formal/Ora/Generated/CompilerTypeRelations.lean"
+  "formal/Ora/Generated/DispatcherStrategySnapshot.lean"
+  "formal/Ora/Generated/SinoraBackendSnapshot.lean"
 )
 
 echo "==> [1/3] regenerating formal snapshots from the compiler"
 run_emitter "compiler universe" "src/formal/emit_compiler_snapshot.zig" "${SNAPSHOTS[0]}"
 run_emitter "declaration environment" "src/formal/emit_declenv_snapshot.zig" "${SNAPSHOTS[1]}"
 run_emitter "type relations" "src/formal/emit_type_relations_snapshot.zig" "${SNAPSHOTS[2]}"
+run_sinora_emitter "dispatcher strategies" "src/formal/emit_dispatcher_strategy_snapshot.zig" "${SNAPSHOTS[3]}"
+run_sinora_emitter "sinora backend" "src/formal/emit_sinora_backend_snapshot.zig" "${SNAPSHOTS[4]}"
 
 echo "==> [2/3] data-only lint"
 for snapshot in "${SNAPSHOTS[@]}"; do

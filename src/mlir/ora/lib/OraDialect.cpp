@@ -788,18 +788,6 @@ namespace mlir
     {
         namespace
         {
-            static bool isStaticallyZeroIntegerValue(::mlir::Value value)
-            {
-                if (auto constOp = value.getDefiningOp<arith::ConstantOp>())
-                {
-                    if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(constOp.getValue()))
-                    {
-                        return intAttr.getValue().isZero();
-                    }
-                }
-                return false;
-            }
-
             static std::optional<mlir::IntegerAttr> getConstantIntegerAttr(::mlir::Value value)
             {
                 if (auto constOp = value.getDefiningOp<arith::ConstantOp>())
@@ -1037,20 +1025,6 @@ namespace mlir
                 return failure();
             }
         } // namespace
-
-        ::mlir::LogicalResult DivOp::verify()
-        {
-            if (isStaticallyZeroIntegerValue(getRhs()))
-                return emitOpError("divisor must not be a statically known zero constant");
-            return success();
-        }
-
-        ::mlir::LogicalResult RemOp::verify()
-        {
-            if (isStaticallyZeroIntegerValue(getRhs()))
-                return emitOpError("divisor must not be a statically known zero constant");
-            return success();
-        }
 
         ::mlir::LogicalResult SLoadOp::verify()
         {
@@ -2468,76 +2442,6 @@ namespace mlir
                 }
             };
 
-            enum class SignedBinaryFoldKind
-            {
-                Div,
-                Rem,
-            };
-
-            template <typename OpT, SignedBinaryFoldKind Kind>
-            struct FoldSignedAwareBinaryConstants : public OpRewritePattern<OpT>
-            {
-                using OpRewritePattern<OpT>::OpRewritePattern;
-
-                LogicalResult matchAndRewrite(OpT op, PatternRewriter &rewriter) const override
-                {
-                    auto lhsVal = getConstantIntegerAttr(op.getLhs());
-                    auto rhsVal = getConstantIntegerAttr(op.getRhs());
-                    if (!lhsVal || !rhsVal || rhsVal->getValue().isZero())
-                        return failure();
-
-                    auto resultOraType = llvm::dyn_cast<ora::IntegerType>(op.getResult().getType());
-                    if (!resultOraType)
-                        return failure();
-
-                    llvm::APInt result = lhsVal->getValue();
-                    if constexpr (Kind == SignedBinaryFoldKind::Div)
-                        result = resultOraType.getIsSigned()
-                                     ? lhsVal->getValue().sdiv(rhsVal->getValue())
-                                     : lhsVal->getValue().udiv(rhsVal->getValue());
-                    else
-                        result = resultOraType.getIsSigned()
-                                     ? lhsVal->getValue().srem(rhsVal->getValue())
-                                     : lhsVal->getValue().urem(rhsVal->getValue());
-
-                    return replaceOpWithConstant(
-                        rewriter,
-                        op,
-                        op.getResult().getType(),
-                        result);
-                }
-            };
-
-            struct FoldDivIdentity : public OpRewritePattern<DivOp>
-            {
-                using OpRewritePattern<DivOp>::OpRewritePattern;
-
-                LogicalResult matchAndRewrite(DivOp op, PatternRewriter &rewriter) const override
-                {
-                    if (isIntegerConstant(op.getRhs(), 1))
-                        return replaceOpWithValueIfSameType(rewriter, op, op.getLhs());
-                    return failure();
-                }
-            };
-
-            struct FoldRemByOne : public OpRewritePattern<RemOp>
-            {
-                using OpRewritePattern<RemOp>::OpRewritePattern;
-
-                LogicalResult matchAndRewrite(RemOp op, PatternRewriter &rewriter) const override
-                {
-                    auto rhsVal = getConstantIntegerAttr(op.getRhs());
-                    if (!rhsVal || rhsVal->getValue() != 1)
-                        return failure();
-
-                    return replaceOpWithConstant(
-                        rewriter,
-                        op,
-                        op.getResult().getType(),
-                        llvm::APInt::getZero(rhsVal->getValue().getBitWidth()));
-                }
-            };
-
             struct FoldPowerConstants : public OpRewritePattern<PowerOp>
             {
                 using OpRewritePattern<PowerOp>::OpRewritePattern;
@@ -2659,14 +2563,6 @@ namespace mlir
                 results.add<
                     FoldBinaryIntegerConstants<OpT, Kind>,
                     FoldBinaryIntegerIdentity<OpT, Kind>>(context);
-            }
-
-            template <typename OpT, SignedBinaryFoldKind Kind, typename IdentityPatternT>
-            static void addSignedAwareBinaryCanonicalizers(RewritePatternSet &results, MLIRContext *context)
-            {
-                results.add<
-                    FoldSignedAwareBinaryConstants<OpT, Kind>,
-                    IdentityPatternT>(context);
             }
 
             template <typename OpT, ShiftFoldKind Kind>
@@ -3105,14 +3001,6 @@ namespace mlir
                 results, context);                                                 \
         }
 
-#define DEFINE_ORA_SIGNED_BINARY_CANONICALIZER(OpT, Kind, IdentityPatternT)        \
-        void OpT::getCanonicalizationPatterns(RewritePatternSet &results,          \
-                                              MLIRContext *context)                \
-        {                                                                          \
-            addSignedAwareBinaryCanonicalizers<OpT, SignedBinaryFoldKind::Kind,    \
-                                               IdentityPatternT>(results, context);\
-        }
-
 #define DEFINE_ORA_SHIFT_CANONICALIZER(OpT, Kind)                                  \
         void OpT::getCanonicalizationPatterns(RewritePatternSet &results,          \
                                               MLIRContext *context)                \
@@ -3128,14 +3016,9 @@ namespace mlir
             results.add<__VA_ARGS__>(context);                                     \
         }
 
-        DEFINE_ORA_BINARY_CANONICALIZER(AddOp, Add)
         DEFINE_ORA_BINARY_CANONICALIZER(AddWrappingOp, Add)
-        DEFINE_ORA_BINARY_CANONICALIZER(MulOp, Mul)
         DEFINE_ORA_BINARY_CANONICALIZER(MulWrappingOp, Mul)
-        DEFINE_ORA_BINARY_CANONICALIZER(SubOp, Sub)
         DEFINE_ORA_BINARY_CANONICALIZER(SubWrappingOp, Sub)
-        DEFINE_ORA_SIGNED_BINARY_CANONICALIZER(DivOp, Div, FoldDivIdentity)
-        DEFINE_ORA_SIGNED_BINARY_CANONICALIZER(RemOp, Rem, FoldRemByOne)
         DEFINE_ORA_PATTERN_CANONICALIZER(PowerOp, FoldPowerConstants, FoldPowerIdentity)
         DEFINE_ORA_SHIFT_CANONICALIZER(ShlWrappingOp, Left)
         DEFINE_ORA_SHIFT_CANONICALIZER(ShrWrappingOp, Right)
@@ -3153,7 +3036,6 @@ namespace mlir
         DEFINE_ORA_PATTERN_CANONICALIZER(StructFieldUpdateOp, FoldStructFieldUpdateNoop, FoldStructFieldUpdateIntoInit, FoldStructFieldUpdateOverwrite)
 
 #undef DEFINE_ORA_BINARY_CANONICALIZER
-#undef DEFINE_ORA_SIGNED_BINARY_CANONICALIZER
 #undef DEFINE_ORA_SHIFT_CANONICALIZER
 #undef DEFINE_ORA_PATTERN_CANONICALIZER
 
@@ -3226,63 +3108,6 @@ namespace mlir
         //===----------------------------------------------------------------------===//
         // Result Naming (via OpAsmOpInterface)
         //===----------------------------------------------------------------------===//
-
-        // Arithmetic operations: use semantic names
-        void AddOp::getAsmResultNames(::mlir::OpAsmSetValueNameFn setNameFn)
-        {
-            auto nameAttr = (*this)->getAttrOfType<StringAttr>("ora.result_name_0");
-            if (nameAttr)
-            {
-                setNameFn(getResult(), nameAttr.getValue());
-            }
-            else
-            {
-                // Default semantic name for addition
-                setNameFn(getResult(), "sum");
-            }
-        }
-
-        void SubOp::getAsmResultNames(::mlir::OpAsmSetValueNameFn setNameFn)
-        {
-            auto nameAttr = (*this)->getAttrOfType<StringAttr>("ora.result_name_0");
-            if (nameAttr)
-            {
-                setNameFn(getResult(), nameAttr.getValue());
-            }
-            else
-            {
-                // Default semantic name for subtraction
-                setNameFn(getResult(), "difference");
-            }
-        }
-
-        void MulOp::getAsmResultNames(::mlir::OpAsmSetValueNameFn setNameFn)
-        {
-            auto nameAttr = (*this)->getAttrOfType<StringAttr>("ora.result_name_0");
-            if (nameAttr)
-            {
-                setNameFn(getResult(), nameAttr.getValue());
-            }
-            else
-            {
-                // Default semantic name for multiplication
-                setNameFn(getResult(), "product");
-            }
-        }
-
-        void DivOp::getAsmResultNames(::mlir::OpAsmSetValueNameFn setNameFn)
-        {
-            auto nameAttr = (*this)->getAttrOfType<StringAttr>("ora.result_name_0");
-            if (nameAttr)
-            {
-                setNameFn(getResult(), nameAttr.getValue());
-            }
-            else
-            {
-                // Default semantic name for division
-                setNameFn(getResult(), "quotient");
-            }
-        }
 
         // Memory load: use variable name
         void MLoadOp::getAsmResultNames(::mlir::OpAsmSetValueNameFn setNameFn)

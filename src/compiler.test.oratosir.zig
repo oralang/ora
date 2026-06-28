@@ -2420,28 +2420,28 @@ test "Phase1 Ora canonicalizer folds safe arithmetic identities only" {
 
     const text =
         \\module {
-        \\  func.func @safe_identities(%arg0: !ora.int<256, false>) -> (!ora.int<256, false>, !ora.int<256, false>, !ora.int<256, false>, !ora.int<256, false>, !ora.int<256, false>, !ora.int<256, false>, !ora.int<256, false>, !ora.int<256, false>, !ora.int<256, false>) {
-        \\    %zero = ora.const "zero" : !ora.int<256, false> = 0 : i256
-        \\    %one = ora.const "one" : !ora.int<256, false> = 1 : i256
-        \\    %three = ora.const "three" : !ora.int<256, false> = 3 : i256
-        \\    %seven = ora.const "seven" : !ora.int<256, false> = 7 : i256
-        \\    %add_rhs = ora.add %arg0, %zero : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
-        \\    %add_lhs = ora.add %zero, %arg0 : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
-        \\    %sub_rhs = ora.sub %arg0, %zero : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
-        \\    %mul_rhs = ora.mul %arg0, %one : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
-        \\    %mul_lhs = ora.mul %one, %arg0 : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
-        \\    %mul_zero = ora.mul %arg0, %zero : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
-        \\    %div_one = ora.div %arg0, %one : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
-        \\    %rem_const = ora.rem %seven, %three : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
-        \\    %rem_one = ora.rem %arg0, %one : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
-        \\    return %add_rhs, %add_lhs, %sub_rhs, %mul_rhs, %mul_lhs, %mul_zero, %div_one, %rem_const, %rem_one : !ora.int<256, false>, !ora.int<256, false>, !ora.int<256, false>, !ora.int<256, false>, !ora.int<256, false>, !ora.int<256, false>, !ora.int<256, false>, !ora.int<256, false>, !ora.int<256, false>
+        \\  func.func @safe_identities(%arg0: i256) -> (i256, i256, i256, i256, i256, i256, i256, i256, i256) {
+        \\    %zero = arith.constant 0 : i256
+        \\    %one = arith.constant 1 : i256
+        \\    %three = arith.constant 3 : i256
+        \\    %seven = arith.constant 7 : i256
+        \\    %add_rhs = arith.addi %arg0, %zero : i256
+        \\    %add_lhs = arith.addi %zero, %arg0 : i256
+        \\    %sub_rhs = arith.subi %arg0, %zero : i256
+        \\    %mul_rhs = arith.muli %arg0, %one : i256
+        \\    %mul_lhs = arith.muli %one, %arg0 : i256
+        \\    %mul_zero = arith.muli %arg0, %zero : i256
+        \\    %div_one = arith.divui %arg0, %one : i256
+        \\    %rem_const = arith.remui %seven, %three : i256
+        \\    %rem_one = arith.remui %arg0, %one : i256
+        \\    return %add_rhs, %add_lhs, %sub_rhs, %mul_rhs, %mul_lhs, %mul_zero, %div_one, %rem_const, %rem_one : i256, i256, i256, i256, i256, i256, i256, i256, i256
         \\  }
-        \\  func.func @kept_non_identities(%arg0: !ora.int<256, false>) -> (!ora.int<256, false>, !ora.int<256, false>, !ora.int<256, false>) {
-        \\    %zero = ora.const "zero" : !ora.int<256, false> = 0 : i256
-        \\    %sub = ora.sub %zero, %arg0 : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
-        \\    %div = ora.div %zero, %arg0 : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
-        \\    %rem = ora.rem %arg0, %zero : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
-        \\    return %sub, %div, %rem : !ora.int<256, false>, !ora.int<256, false>, !ora.int<256, false>
+        \\  func.func @kept_non_identities(%arg0: i256) -> (i256, i256, i256) {
+        \\    %zero = arith.constant 0 : i256
+        \\    %sub = arith.subi %zero, %arg0 : i256
+        \\    %div = arith.divui %zero, %arg0 : i256
+        \\    %rem = arith.remui %arg0, %zero : i256
+        \\    return %sub, %div, %rem : i256, i256, i256
         \\  }
         \\}
     ;
@@ -2455,11 +2455,11 @@ test "Phase1 Ora canonicalizer folds safe arithmetic identities only" {
     defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
     const rendered = module_text_ref.data[0..module_text_ref.length];
 
-    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, rendered, "ora.add "));
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "ora.sub "));
-    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, rendered, "ora.mul "));
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "ora.div "));
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "ora.rem "));
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, rendered, "arith.addi"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "arith.subi"));
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, rendered, "arith.muli"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "arith.divui"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "arith.remui"));
 }
 
 test "Phase1 Ora canonicalizer folds wrapping arithmetic" {
@@ -3025,10 +3025,10 @@ test "Phase1 Ora CSE removes duplicate pure ops but keeps gas reads" {
 
     const text =
         \\module {
-        \\  func.func @pure_duplicate(%arg0: !ora.int<256, false>, %arg1: !ora.int<256, false>) -> (!ora.int<256, false>, !ora.int<256, false>) {
-        \\    %first = ora.add %arg0, %arg1 : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
-        \\    %second = ora.add %arg0, %arg1 : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
-        \\    return %first, %second : !ora.int<256, false>, !ora.int<256, false>
+        \\  func.func @pure_duplicate(%arg0: i256, %arg1: i256) -> (i256, i256) {
+        \\    %first = arith.addi %arg0, %arg1 : i256
+        \\    %second = arith.addi %arg0, %arg1 : i256
+        \\    return %first, %second : i256, i256
         \\  }
         \\  func.func @gas_reads() -> (i256, i256) {
         \\    %first = ora.evm.gas : i256
@@ -3052,7 +3052,7 @@ test "Phase1 Ora CSE removes duplicate pure ops but keeps gas reads" {
     defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
     const rendered = module_text_ref.data[0..module_text_ref.length];
 
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "ora.add "));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "arith.addi"));
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, rendered, "ora.evm.gas"));
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, rendered, "ora.external_call"));
 }
@@ -3063,9 +3063,9 @@ test "Phase1 Ora canonicalization removes dead pure values only" {
 
     const text =
         \\module {
-        \\  func.func @dead_pure(%arg0: !ora.int<256, false>) -> !ora.int<256, false> {
-        \\    %dead = ora.add %arg0, %arg0 : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
-        \\    return %arg0 : !ora.int<256, false>
+        \\  func.func @dead_pure(%arg0: i256) -> i256 {
+        \\    %dead = arith.addi %arg0, %arg0 : i256
+        \\    return %arg0 : i256
         \\  }
         \\  func.func @keeps_effectful(%arg0: !ora.int<256, false>) -> !ora.int<256, false> {
         \\    %gas = ora.evm.gas : !ora.int<256, false>
@@ -3084,7 +3084,7 @@ test "Phase1 Ora canonicalization removes dead pure values only" {
     const rendered = module_text_ref.data[0..module_text_ref.length];
 
     const dead_pure = try oraFunctionSlice(rendered, "dead_pure");
-    try testing.expect(!std.mem.containsAtLeast(u8, dead_pure, 1, "ora.add"));
+    try testing.expect(!std.mem.containsAtLeast(u8, dead_pure, 1, "arith.addi"));
 
     const keeps_effectful = try oraFunctionSlice(rendered, "keeps_effectful");
     try testing.expect(std.mem.containsAtLeast(u8, keeps_effectful, 1, "ora.evm.gas"));

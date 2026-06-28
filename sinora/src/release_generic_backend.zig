@@ -26,6 +26,42 @@ pub const GenericBackendError = error{
     MissingSchedule,
 };
 
+pub const ReleasePipelineStage = enum {
+    literal_commoning,
+    short_circuit_branch_threading,
+    critical_edge_splitting,
+    effect_analysis,
+    effectful_scheduling,
+    memory_layout,
+    code_to_asm,
+};
+
+pub const release_pipeline_stages = [_]ReleasePipelineStage{
+    .literal_commoning,
+    .short_circuit_branch_threading,
+    .critical_edge_splitting,
+    .effect_analysis,
+    .effectful_scheduling,
+    .memory_layout,
+    .code_to_asm,
+};
+
+pub const release_pipeline_splits_critical_edges = true;
+pub const release_pipeline_uses_effectful_scheduler = true;
+pub const release_pipeline_supports_source_maps = true;
+
+pub fn releasePipelineStageName(stage: ReleasePipelineStage) []const u8 {
+    return switch (stage) {
+        .literal_commoning => "literal_commoning",
+        .short_circuit_branch_threading => "short_circuit_branch_threading",
+        .critical_edge_splitting => "critical_edge_splitting",
+        .effect_analysis => "effect_analysis",
+        .effectful_scheduling => "effectful_scheduling",
+        .memory_layout => "memory_layout",
+        .code_to_asm => "code_to_asm",
+    };
+}
+
 pub const ScheduledProgram = struct {
     allocator: std.mem.Allocator,
     blocks: []release_op_graph.ScheduledBlock,
@@ -698,6 +734,16 @@ test "generic backend keeps dense candidates linear until table lowering is avai
     defer std.testing.allocator.free(bytes);
 
     try std.testing.expectEqual(@as(usize, 4), countByte(bytes, evm_asm.op.JUMPI));
+}
+
+test "release pipeline fact table records mandatory backend stages" {
+    try std.testing.expectEqual(@as(usize, 7), release_pipeline_stages.len);
+    try std.testing.expectEqualStrings("literal_commoning", releasePipelineStageName(release_pipeline_stages[0]));
+    try std.testing.expectEqualStrings("critical_edge_splitting", releasePipelineStageName(release_pipeline_stages[2]));
+    try std.testing.expectEqualStrings("effectful_scheduling", releasePipelineStageName(release_pipeline_stages[4]));
+    try std.testing.expect(release_pipeline_splits_critical_edges);
+    try std.testing.expect(release_pipeline_uses_effectful_scheduler);
+    try std.testing.expect(release_pipeline_supports_source_maps);
 }
 
 test "generic backend lowers sparse switch routing" {

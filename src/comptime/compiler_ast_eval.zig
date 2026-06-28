@@ -72,7 +72,7 @@ pub const ConstEvalOptions = struct {
 ///
 /// The immediate goal is architectural:
 /// - compiler DB should query comptime through `src/comptime/`
-/// - legacy AST walker remains isolated in `ast_eval.zig`
+/// - the AST walker remains isolated in `ast_eval.zig`
 /// - the lightweight compiler walker can later be upgraded to use the full
 ///   shared environment/value engine without moving the compiler call sites again
 pub fn constEval(allocator: std.mem.Allocator, file: *const ast.AstFile, options: ConstEvalOptions) !ConstEvalResult {

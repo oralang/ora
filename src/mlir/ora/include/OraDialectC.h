@@ -434,8 +434,8 @@ extern "C"
         MlirType structType,
         size_t index);
 
-    /// Create an Ora error union type !ora.error_union<successType>.
-    /// This legacy constructor leaves the declared error set empty.
+    /// Create an Ora error union type !ora.error_union<successType> with an
+    /// empty declared error set.
     MLIR_CAPI_EXPORTED MlirType oraErrorUnionTypeGet(
         MlirContext ctx,
         MlirType successType);
@@ -1889,19 +1889,12 @@ MLIR_CAPI_EXPORTED MlirOperation oraBreakOpCreate(
     // Ora Canonicalization
     //===----------------------------------------------------------------------===//
 
-    /// Run canonicalization on Ora MLIR (folds constants in ora.add, ora.mul, etc.)
+    /// Run canonicalization on Ora MLIR (folds Ora-specific constants and identities)
     /// Registers Ora dialect and runs canonicalization pass
     /// Returns true on success, false on failure
     MLIR_CAPI_EXPORTED bool oraCanonicalizeOraMLIR(
         MlirContext ctx,
         MlirModule module);
-
-    /// Run canonicalization on Ora MLIR and optionally dump MLIR pass statistics.
-    /// Keeps the legacy oraCanonicalizeOraMLIR entry point source-compatible.
-    MLIR_CAPI_EXPORTED bool oraCanonicalizeOraMLIRWithStatistics(
-        MlirContext ctx,
-        MlirModule module,
-        bool enableStatistics);
 
     /// Run canonicalization and copy deterministic Ora-owned pass statistics
     /// into `outStatistics` when it is non-null. `printStatistics` controls
@@ -1923,14 +1916,6 @@ MLIR_CAPI_EXPORTED MlirOperation oraBreakOpCreate(
         MlirContext ctx,
         MlirModule module,
         bool debugInfo);
-
-    /// Convert Ora dialect operations to SIR dialect and optionally dump MLIR pass statistics.
-    /// Keeps the legacy oraConvertToSIR entry point source-compatible.
-    MLIR_CAPI_EXPORTED bool oraConvertToSIRWithStatistics(
-        MlirContext ctx,
-        MlirModule module,
-        bool debugInfo,
-        bool enableStatistics);
 
     /// Convert Ora dialect operations to SIR dialect and copy deterministic
     /// Ora-owned pass statistics into `outStatistics` when it is non-null.

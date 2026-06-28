@@ -2018,8 +2018,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (!can_strict_decode_returndata) {
                 // N3c: summary clauses still need the decoded payload value to
                 // evaluate the summary expression. Unsupported summary return
-                // shapes stay on the legacy payload projection until their
-                // strict decode surface exists.
+                // shapes use the payload-only projection until their strict
+                // decode surface exists.
                 const decode_op = try abi_runtime_decoder.createAbiDecodeOp(
                     self.parent.allocator,
                     self.parent.context,
@@ -2145,8 +2145,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         ) anyerror!mlir.MlirValue {
             const layout_context = @This().layoutContext(self);
             // TODO(N3b): error selector decode reads the first 4 raw returndata
-            // bytes. The temporary u256 layout matches the legacy lowering, but
-            // the layout-driven runtime decoder needs a raw selector-byte shape.
+            // bytes. The temporary u256 layout matches the current external
+            // error path, but the layout-driven runtime decoder needs a raw
+            // selector-byte shape.
             const decode_op = try abi_runtime_decoder.createAbiDecodeOp(
                 self.parent.allocator,
                 self.parent.context,

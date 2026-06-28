@@ -3015,6 +3015,26 @@ fn writeJsonString(writer: anytype, text: []const u8) !void {
     try writer.writeByte('"');
 }
 
+fn artifactRelativePath(root: []const u8, path: []const u8) []const u8 {
+    if (root.len == 0 or !std.fs.path.isAbsolute(path)) return path;
+    if (!std.mem.startsWith(u8, path, root)) return path;
+
+    const suffix = path[root.len..];
+    if (suffix.len == 0) return ".";
+    if (suffix[0] == '/' or suffix[0] == '\\') return suffix[1..];
+    return path;
+}
+
+fn writeArtifactPathJson(writer: anytype, root: []const u8, path: []const u8) !void {
+    try writeJsonString(writer, artifactRelativePath(root, path));
+}
+
+test "debug artifact source paths strip cwd prefix only at path boundary" {
+    try std.testing.expectEqualStrings("tests/main.ora", artifactRelativePath("/repo/ora", "/repo/ora/tests/main.ora"));
+    try std.testing.expectEqualStrings("/repo/ora2/tests/main.ora", artifactRelativePath("/repo/ora", "/repo/ora2/tests/main.ora"));
+    try std.testing.expectEqualStrings("tests/main.ora", artifactRelativePath("/repo/ora", "tests/main.ora"));
+}
+
 const DebugLocalInfo = struct {
     id: u32,
     scope_id: u32,
@@ -4789,6 +4809,7 @@ fn runMlirEmitAdvanced(
 
     var verification_result_opt: ?@import("z3/errors.zig").VerificationResult = null;
     var verification_failed = false;
+    var verification_report_blocked_artifacts = false;
     var pending_smt_report: ?@import("z3/mod.zig").SmtReportArtifacts = null;
     defer {
         if (verification_result_opt) |*vr| vr.deinit();
@@ -4827,10 +4848,18 @@ fn runMlirEmitAdvanced(
 
         if (mlir_options.emit_smt_report) {
             pending_smt_report = try verifier.buildSmtReport(final_module, file_path, &verification_result);
+            if (pending_smt_report) |report| {
+                verification_report_blocked_artifacts = report.blocksTrustedArtifacts();
+            }
         }
 
         if (!verification_result.success) {
             try printVerificationErrors(stdout, verification_result.errors.items);
+            try stdout.flush();
+            verification_failed = true;
+        }
+        if (verification_report_blocked_artifacts and verification_result.success) {
+            try stdout.print("Verification failed: SMT report did not authorize trusted artifact emission\n", .{});
             try stdout.flush();
             verification_failed = true;
         }
@@ -5896,6 +5925,8 @@ fn mergeSourceMaps(
 
     var executable_lines = try buildExecutableLineMap(allocator, db, root_module_id);
     defer deinitExecutableLineMap(allocator, &executable_lines);
+    const artifact_path_root = try std.process.currentPathAlloc(std.Io.Threaded.global_single_threaded.io(), allocator);
+    defer allocator.free(artifact_path_root);
 
     // Merge: for each SIR location entry, look up its backend PC.
     // Collect unique source files
@@ -6124,7 +6155,7 @@ fn mergeSourceMaps(
     // Emit sources array
     for (sources.items, 0..) |src, i| {
         if (i > 0) try writer.writeAll(",");
-        try writeJsonString(writer, src);
+        try writeArtifactPathJson(writer, artifact_path_root, src);
     }
     try writer.writeAll("],\"entries\":[");
 
@@ -6163,7 +6194,7 @@ fn mergeSourceMaps(
             }
             if (entry.synthetic_path) |synthetic_path| {
                 try writer.writeAll(",\"synthetic_path\":");
-                try writeJsonString(writer, synthetic_path);
+                try writeArtifactPathJson(writer, artifact_path_root, synthetic_path);
             }
         }
         if (entry.is_hoisted) {
@@ -6219,12 +6250,14 @@ fn writeProofSidecar(
     var out = std.Io.Writer.Allocating.init(allocator);
     defer out.deinit();
     const w = &out.writer;
+    const artifact_path_root = try std.process.currentPathAlloc(std.Io.Threaded.global_single_threaded.io(), allocator);
+    defer allocator.free(artifact_path_root);
 
     try w.writeAll("[");
     for (positions, 0..) |pos, i| {
         if (i != 0) try w.writeAll(",");
         try w.writeAll("{\"file\":");
-        try writeJsonString(w, pos.file);
+        try writeArtifactPathJson(w, artifact_path_root, pos.file);
         try w.print(",\"line\":{d},\"column\":{d},\"status\":", .{ pos.line, pos.column });
         try writeJsonString(w, pos.status);
         try w.writeAll("}");
@@ -6297,6 +6330,8 @@ fn writeDebugInfoSidecar(
 
     var executable_lines = try buildExecutableLineMap(allocator, db, root_module_id);
     defer deinitExecutableLineMap(allocator, &executable_lines);
+    const artifact_path_root = try std.process.currentPathAlloc(std.Io.Threaded.global_single_threaded.io(), allocator);
+    defer allocator.free(artifact_path_root);
 
     const EnrichedOp = struct {
         idx: u32,
@@ -6363,7 +6398,7 @@ fn writeDebugInfoSidecar(
         try writeJsonString(writer, op.block);
         try writer.writeAll(",\"file\":");
         if (op.file) |file| {
-            try writeJsonString(writer, file);
+            try writeArtifactPathJson(writer, artifact_path_root, file);
         } else {
             try writer.writeAll("null");
         }
@@ -6396,7 +6431,7 @@ fn writeDebugInfoSidecar(
         }
         if (op.synthetic_path) |synthetic_path| {
             try writer.writeAll(",\"synthetic_path\":");
-            try writeJsonString(writer, synthetic_path);
+            try writeArtifactPathJson(writer, artifact_path_root, synthetic_path);
         }
         if (op.kind) |kind| {
             try writer.writeAll(",\"kind\":");
@@ -6424,7 +6459,7 @@ fn writeDebugInfoSidecar(
                 try writer.writeAll("null");
             }
             try writer.writeAll(",\"file\":");
-            try writeJsonString(writer, scope.file_path);
+            try writeArtifactPathJson(writer, artifact_path_root, scope.file_path);
             try writer.writeAll(",\"function\":");
             try writeJsonString(writer, scope.function_name);
             try writer.writeAll(",\"contract\":");
