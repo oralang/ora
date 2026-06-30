@@ -127,10 +127,12 @@ pub const SmtReportArtifacts = struct {
     markdown: []u8,
     json: []u8,
     trusted_artifacts_allowed: bool,
+    query_manifest: ?PreparedQueryManifest = null,
 
     pub fn deinit(self: *SmtReportArtifacts, allocator: std.mem.Allocator) void {
         allocator.free(self.markdown);
         allocator.free(self.json);
+        if (self.query_manifest) |*manifest| manifest.deinit();
     }
 
     pub fn blocksTrustedArtifacts(self: SmtReportArtifacts) bool {
@@ -3208,12 +3210,20 @@ pub const VerificationPass = struct {
         }
         if (self.encoder.isDegraded()) return error.VerificationEncodingDegraded;
 
+        return try self.preparedQueryManifestFromQueries(queries.items, null);
+    }
+
+    fn preparedQueryManifestFromQueries(
+        self: *VerificationPass,
+        queries: []const PreparedQuery,
+        runs: ?[]const ReportQueryRun,
+    ) !PreparedQueryManifest {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         errdefer arena.deinit();
         const arena_allocator = arena.allocator();
 
-        const rows = try arena_allocator.alloc(PreparedQueryManifestRow, queries.items.len);
-        for (queries.items, rows) |query, *row| {
+        const rows = try arena_allocator.alloc(PreparedQueryManifestRow, queries.len);
+        for (queries, rows, 0..) |query, *row, index| {
             row.* = .{
                 .kind = query.kind,
                 .fragment = query.fragment,
@@ -3228,6 +3238,13 @@ pub const VerificationPass = struct {
                 .smtlib_hash = query.smtlib_hash,
                 .references_loop_post_state = query.references_loop_post_state,
             };
+            if (runs) |run_items| {
+                const run = run_items[index];
+                row.result_status = queryResultStatus(run.status);
+                row.vacuous = run.vacuous;
+                row.vacuity_unknown = run.vacuity_unknown;
+                row.verified_with_caveats = run.verified_with_caveats;
+            }
         }
 
         return .{
@@ -4090,10 +4107,16 @@ pub const VerificationPass = struct {
             kind_counts,
             verification_result,
         );
+        errdefer self.allocator.free(json);
+
+        var query_manifest = try self.preparedQueryManifestFromQueries(queries.items, report_runs);
+        errdefer query_manifest.deinit();
+
         return .{
             .markdown = markdown,
             .json = json,
             .trusted_artifacts_allowed = summary.verification_success,
+            .query_manifest = query_manifest,
         };
     }
 
@@ -6744,6 +6767,10 @@ pub const PreparedQueryManifestRow = struct {
     constraint_count: u32 = 0,
     smtlib_hash: u64 = 0,
     references_loop_post_state: bool = false,
+    result_status: ?QueryResultStatus = null,
+    vacuous: bool = false,
+    vacuity_unknown: bool = false,
+    verified_with_caveats: bool = false,
 };
 
 pub const PreparedQueryManifest = struct {
@@ -6755,6 +6782,20 @@ pub const PreparedQueryManifest = struct {
         self.* = undefined;
     }
 };
+
+pub const QueryResultStatus = enum(u8) {
+    sat,
+    unsat,
+    unknown,
+};
+
+fn queryResultStatus(status: z3.Z3_lbool) QueryResultStatus {
+    return switch (status) {
+        z3.Z3_L_TRUE => .sat,
+        z3.Z3_L_FALSE => .unsat,
+        else => .unknown,
+    };
+}
 
 const ResourceEffectKind = enum {
     conserved_move,
@@ -13383,6 +13424,47 @@ test "rendered SMT report json includes query fragment metadata" {
     try testing.expect(std.mem.indexOf(u8, json, "\"query_fragment_counts\":{\"qf_bv\":0,\"qf_bv_array\":0,\"aufbv\":0,\"aufbv_quantifiers\":1") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"fragment\":\"AUFBV+Quantifiers\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"solver_logic\":\"ALL\"") != null);
+}
+
+test "prepared query manifest from report runs includes result metadata" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    var queries = [_]PreparedQuery{.{
+        .kind = .Obligation,
+        .fragment = .aufbv_quantifiers,
+        .solver_logic = .all,
+        .function_name = "f",
+        .obligation_kind = .Ensures,
+        .file = "/tmp/test.ora",
+        .line = 12,
+        .column = 3,
+        .constraint_count = 7,
+        .smtlib_hash = 99,
+        .references_loop_post_state = true,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "f [ensures]"),
+    }};
+    defer queries[0].deinit(testing.allocator);
+
+    const runs = [_]ReportQueryRun{.{
+        .status = z3.Z3_L_FALSE,
+        .vacuous = true,
+        .vacuity_unknown = true,
+        .verified_with_caveats = true,
+    }};
+
+    var manifest = try pass.preparedQueryManifestFromQueries(queries[0..], runs[0..]);
+    defer manifest.deinit();
+
+    try testing.expectEqual(@as(usize, 1), manifest.rows.len);
+    try testing.expectEqual(QueryResultStatus.unsat, manifest.rows[0].result_status.?);
+    try testing.expect(manifest.rows[0].vacuous);
+    try testing.expect(manifest.rows[0].vacuity_unknown);
+    try testing.expect(manifest.rows[0].verified_with_caveats);
+    try testing.expect(manifest.rows[0].references_loop_post_state);
+    try testing.expectEqual(@as(u32, 7), manifest.rows[0].constraint_count);
+    try testing.expectEqual(@as(u64, 99), manifest.rows[0].smtlib_hash);
 }
 
 test "rendered SMT report json includes vacuous explain tags" {

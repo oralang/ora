@@ -36,10 +36,33 @@ pub const errors = @import("errors.zig");
 pub const Context = context.Context;
 pub const Solver = solver.Solver;
 pub const Encoder = encoder.Encoder;
+pub const z3_c = verification.z3_c;
+pub const Z3Context = verification.Z3Context;
+pub const Z3Solver = verification.Z3Solver;
 pub const VerificationPass = verification.VerificationPass;
 pub const VerificationResult = errors.VerificationResult;
 pub const VerificationError = errors.VerificationError;
 pub const SmtReportArtifacts = verification.SmtReportArtifacts;
+
+/// Data-only query metadata exported for the backend-neutral formal obligation
+/// manifest adapters.
+pub const AnnotationKind = verification.AnnotationKind;
+pub const PendingConstraintSourceKind = verification.PendingConstraintSourceKind;
+pub const PendingObligationSourceKind = verification.PendingObligationSourceKind;
+pub const PreparedQueryManifest = verification.PreparedQueryManifest;
+pub const PreparedQueryManifestRow = verification.PreparedQueryManifestRow;
+pub const PreparedQuerySummary = verification.PreparedQuerySummary;
+pub const QueryFragment = verification.QueryFragment;
+pub const QueryKind = verification.QueryKind;
+pub const QueryResultStatus = verification.QueryResultStatus;
+pub const QuerySolverLogic = verification.QuerySolverLogic;
+pub const formalAssumptionKindLabel = verification.formalAssumptionKindLabel;
+pub const formalPendingConstraintAssumptionKindLabel = verification.formalPendingConstraintAssumptionKindLabel;
+pub const formalPendingObligationRoleLabel = verification.formalPendingObligationRoleLabel;
+pub const formalQueryFragmentLabel = verification.formalQueryFragmentLabel;
+pub const formalQueryKindLabel = verification.formalQueryKindLabel;
+pub const formalQuerySolverLogicLabel = verification.formalQuerySolverLogicLabel;
+pub const formalLogicalRoleLabel = verification.formalLogicalRoleLabel;
 
 //===----------------------------------------------------------------------===//
 // Version and Feature Detection
