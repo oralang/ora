@@ -37,6 +37,7 @@ pub const CheckStatus = enum(u8) {
 };
 
 pub const EncodeError = std.mem.Allocator.Error || error{
+    AmbiguousQuery,
     ExpectedBitVector,
     ExpectedBool,
     InvalidCharacter,
@@ -47,9 +48,12 @@ pub const EncodeError = std.mem.Allocator.Error || error{
     Overflow,
     SolverInitFailed,
     TypeMismatch,
+    UnknownAssumption,
     UnknownObligation,
+    UnknownQuery,
     UnsupportedCompilerTypeId,
     UnsupportedObligationKind,
+    UnsupportedBoundVariableTerm,
     UnsupportedOldTerm,
     UnsupportedOriginValue,
     UnsupportedPlaceReadTerm,
@@ -78,15 +82,27 @@ pub const Adapter = struct {
     }
 
     pub fn checkObligation(self: *Adapter, id: obligation.Id) EncodeError!CheckStatus {
+        const query = (try self.findUniqueQueryForObligation(id)) orelse return error.UnknownQuery;
+        return self.checkQueryRow(query);
+    }
+
+    pub fn checkQuery(self: *Adapter, id: obligation.Id) EncodeError!CheckStatus {
+        const query = self.findQuery(id) orelse return error.UnknownQuery;
+        return self.checkQueryRow(query);
+    }
+
+    fn checkQueryRow(self: *Adapter, query: obligation.VerificationQuery) EncodeError!CheckStatus {
         try self.set.validateTermReferences();
 
-        const target = self.findObligation(id) orelse return error.UnknownObligation;
+        if (query.obligation_ids.len != 1) return error.UnsupportedObligationKind;
+        const target = self.findObligation(query.obligation_ids[0]) orelse return error.UnknownObligation;
         const goal = try self.formulaForObligation(target.kind);
 
         var solver = try Solver.init(self.context, self.allocator);
         defer solver.deinit();
 
-        for (self.set.assumptions) |assumption| {
+        for (query.assumption_ids) |assumption_id| {
+            const assumption = self.findAssumption(assumption_id) orelse return error.UnknownAssumption;
             if (assumption.formula) |formula| {
                 const ast = try self.encodeFormula(formula);
                 try solver.assertChecked(ast);
@@ -104,8 +120,35 @@ pub const Adapter = struct {
         };
     }
 
+    fn findUniqueQueryForObligation(
+        self: *const Adapter,
+        id: obligation.Id,
+    ) EncodeError!?obligation.VerificationQuery {
+        var found: ?obligation.VerificationQuery = null;
+        for (self.set.queries) |query| {
+            if (query.obligation_ids.len != 1 or query.obligation_ids[0] != id) continue;
+            if (found != null) return error.AmbiguousQuery;
+            found = query;
+        }
+        return found;
+    }
+
+    fn findQuery(self: *const Adapter, id: obligation.Id) ?obligation.VerificationQuery {
+        for (self.set.queries) |item| {
+            if (item.id == id) return item;
+        }
+        return null;
+    }
+
     fn findObligation(self: *const Adapter, id: obligation.Id) ?obligation.Obligation {
         for (self.set.obligations) |item| {
+            if (item.id == id) return item;
+        }
+        return null;
+    }
+
+    fn findAssumption(self: *const Adapter, id: obligation.Id) ?obligation.Assumption {
+        for (self.set.assumptions) |item| {
             if (item.id == id) return item;
         }
         return null;
@@ -167,9 +210,19 @@ pub const Adapter = struct {
     }
 
     fn encodeVariable(self: *Adapter, variable: obligation.VarRef) EncodeError!z3.Z3_ast {
-        const ty = variable.ty orelse return error.MissingType;
+        const free = switch (variable) {
+            .free => |value| value,
+            .bound => return error.UnsupportedBoundVariableTerm,
+        };
+        const ty = free.ty orelse return error.MissingType;
         const sort = try self.sortForType(try typeInfo(ty));
-        const name = try self.allocator.dupeZ(u8, variable.name);
+        const name_text = try std.fmt.allocPrint(self.allocator, "file{d}::{s}#pattern{d}", .{
+            free.id.file_id,
+            free.name,
+            free.id.pattern_id,
+        });
+        defer self.allocator.free(name_text);
+        const name = try self.allocator.dupeZ(u8, name_text);
         defer self.allocator.free(name);
 
         const symbol = z3.Z3_mk_string_symbol(self.context.ctx, name.ptr);
@@ -364,7 +417,7 @@ pub const Adapter = struct {
         return switch (self.set.terms[id]) {
             .bool_lit => .{ .kind = .bool },
             .int_lit => |literal| typeInfo(literal.ty orelse return error.MissingType),
-            .variable => |variable| typeInfo(variable.ty orelse return error.MissingType),
+            .variable => |variable| typeInfo(variableTypeRef(variable) orelse return error.MissingType),
             .old => |operand| self.termTypeInfo(operand),
             .unary => |unary| switch (unary.op) {
                 .not => .{ .kind = .bool },
@@ -426,6 +479,13 @@ pub const Adapter = struct {
         if (z3.Z3_get_sort_kind(self.context.ctx, sort) != z3.Z3_BV_SORT) return error.ExpectedBitVector;
     }
 };
+
+fn variableTypeRef(variable: obligation.VarRef) ?obligation.TypeRef {
+    return switch (variable) {
+        .free => |free| free.ty,
+        .bound => |bound| bound.ty,
+    };
+}
 
 fn expectArgCount(predicate: obligation.RefinementPredicateTerm, expected: usize) EncodeError!void {
     if (predicate.args.len != expected) return error.InvalidRefinementArity;

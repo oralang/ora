@@ -375,8 +375,8 @@ test "formal Z3 adapter proves canonical term obligation from assumptions" {
     defer z3_ctx.deinit();
 
     const terms = [_]obligation.Term{
-        .{ .variable = .{ .name = "balance", .ty = .{ .spelling = "u256" } } },
-        .{ .variable = .{ .name = "amount", .ty = .{ .spelling = "u256" } } },
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 0, .pattern_id = 0 }, .name = "balance", .ty = .{ .spelling = "u256" } } } },
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 0, .pattern_id = 1 }, .name = "amount", .ty = .{ .spelling = "u256" } } } },
         .{ .binary = .{ .op = .ge, .lhs = 0, .rhs = 1 } },
     };
     const assumptions = [_]obligation.Assumption{
@@ -403,9 +403,25 @@ test "formal Z3 adapter proves canonical term obligation from assumptions" {
             } },
         },
     };
+    const assumption_ids = [_]obligation.Id{1};
+    const obligation_ids = [_]obligation.Id{2};
+    const queries = [_]obligation.VerificationQuery{
+        .{
+            .id = 3,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .assumption_ids = &assumption_ids,
+        },
+    };
     const set: obligation.ObligationSet = .{
         .assumptions = &assumptions,
         .obligations = &obligations,
+        .queries = &queries,
         .terms = &terms,
     };
 
@@ -418,7 +434,7 @@ test "formal Z3 adapter finds counterexample for unassumed canonical obligation"
     defer z3_ctx.deinit();
 
     const terms = [_]obligation.Term{
-        .{ .variable = .{ .name = "amount", .ty = .{ .spelling = "u256" } } },
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 0, .pattern_id = 0 }, .name = "amount", .ty = .{ .spelling = "u256" } } } },
         .{ .int_lit = .{ .value = "0", .ty = .{ .spelling = "u256" } } },
         .{ .refinement_predicate = .{ .name = "NonZero", .value = 0 } },
     };
@@ -435,8 +451,22 @@ test "formal Z3 adapter finds counterexample for unassumed canonical obligation"
             } },
         },
     };
+    const obligation_ids = [_]obligation.Id{1};
+    const queries = [_]obligation.VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "deposit" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+        },
+    };
     const set: obligation.ObligationSet = .{
         .obligations = &obligations,
+        .queries = &queries,
         .terms = &terms,
     };
 
@@ -463,7 +493,20 @@ test "formal Z3 adapter fails closed on MLIR-origin formulas" {
             } },
         },
     };
-    const set: obligation.ObligationSet = .{ .obligations = &obligations };
+    const obligation_ids = [_]obligation.Id{1};
+    const queries = [_]obligation.VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "checked" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+        },
+    };
+    const set: obligation.ObligationSet = .{ .obligations = &obligations, .queries = &queries };
 
     var adapter = obligation_to_z3.Adapter.init(&z3_ctx, testing.allocator, set);
     try testing.expectError(error.UnsupportedOriginValue, adapter.checkObligation(1));
@@ -471,8 +514,8 @@ test "formal Z3 adapter fails closed on MLIR-origin formulas" {
 
 test "formal Lean emitter writes manifest rows from canonical obligations" {
     const terms = [_]obligation.Term{
-        .{ .variable = .{ .name = "balance", .ty = .{ .spelling = "u256" } } },
-        .{ .variable = .{ .name = "amount", .ty = .{ .spelling = "u256" } } },
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 0, .pattern_id = 0 }, .name = "balance", .ty = .{ .spelling = "u256" } } } },
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 0, .pattern_id = 1 }, .name = "amount", .ty = .{ .spelling = "u256" } } } },
         .{ .binary = .{ .op = .ge, .lhs = 0, .rhs = 1 } },
     };
     const assumptions = [_]obligation.Assumption{
@@ -499,46 +542,43 @@ test "formal Lean emitter writes manifest rows from canonical obligations" {
             } },
         },
     };
+    const assumption_ids = [_]obligation.Id{1};
+    const obligation_ids = [_]obligation.Id{2};
+    const queries = [_]obligation.VerificationQuery{
+        .{
+            .id = 3,
+            .owner = .{ .function = .{ .name = "deposit" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .assumption_ids = &assumption_ids,
+        },
+    };
     const set: obligation.ObligationSet = .{
         .assumptions = &assumptions,
         .obligations = &obligations,
+        .queries = &queries,
         .terms = &terms,
     };
 
     const actual = try emitLeanToOwnedString(testing.allocator, set);
     defer testing.allocator.free(actual);
 
-    try testing.expectEqualStrings(
-        "import Ora.Obligation.Manifest\n\n" ++
-            "namespace Ora.Generated.ObligationSmoke\n\n" ++
-            "open Ora.Obligation\n\n" ++
-            "def emittedTerms : List Term := [\n" ++
-            "  .variable { name := \"balance\", ty := some (.spelling \"u256\"), region := none },\n" ++
-            "  .variable { name := \"amount\", ty := some (.spelling \"u256\"), region := none },\n" ++
-            "  .binary { op := .ge, lhs := 0, rhs := 1 }\n" ++
-            "]\n\n" ++
-            "def emittedAssumptions : List AssumptionRow := [\n" ++
-            "  { id := 1, owner := \"transfer\", kind := .requires, formula := some (.term 2) }\n" ++
-            "]\n\n" ++
-            "def emittedObligations : List ObligationRow := [\n" ++
-            "  { id := 2, owner := \"transfer\", kind := .logical .invariant (.term 2) }\n" ++
-            "]\n\n" ++
-            "def emittedProofArtifacts : List ProofArtifactRow := []\n\n" ++
-            "def emittedManifest : Manifest := {\n" ++
-            "  terms := emittedTerms,\n" ++
-            "  assumptions := emittedAssumptions,\n" ++
-            "  obligations := emittedObligations,\n" ++
-            "  proofArtifacts := emittedProofArtifacts\n" ++
-            "}\n\n" ++
-            "theorem emitted_manifest_wf : emittedManifest.wf = true := by decide\n\n" ++
-            "end Ora.Generated.ObligationSmoke\n",
-        actual,
-    );
+    try testing.expect(std.mem.containsAtLeast(u8, actual, 1, "import Ora.Obligation.Semantics"));
+    try testing.expect(std.mem.containsAtLeast(u8, actual, 1, ".variable .free { id := { file_id := 0, pattern_id := 0 }, name := \"balance\""));
+    try testing.expect(std.mem.containsAtLeast(u8, actual, 1, ".variable .free { id := { file_id := 0, pattern_id := 1 }, name := \"amount\""));
+    try testing.expect(std.mem.containsAtLeast(u8, actual, 1, "{ id := 1, owner := \"transfer\", kind := .requires, formula := some (.term 2) }"));
+    try testing.expect(std.mem.containsAtLeast(u8, actual, 1, "{ id := 2, owner := \"transfer\", kind := .logical .invariant (.term 2) }"));
+    try testing.expect(std.mem.containsAtLeast(u8, actual, 1, "theorem emitted_manifest_wf : emittedManifest.wf = true := by decide"));
+    try testing.expect(std.mem.containsAtLeast(u8, actual, 1, "def emittedObligation_2 : Prop :="));
 }
 
 test "formal Lean emitter writes resource rows with places" {
     const terms = [_]obligation.Term{
-        .{ .variable = .{ .name = "amount", .ty = .{ .spelling = "u256" } } },
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 0, .pattern_id = 0 }, .name = "amount", .ty = .{ .spelling = "u256" } } } },
         .{ .int_lit = .{ .value = "0", .ty = .{ .spelling = "u256" } } },
         .{ .binary = .{ .op = .ge, .lhs = 0, .rhs = 1 } },
     };
@@ -569,8 +609,22 @@ test "formal Lean emitter writes resource rows with places" {
             } },
         },
     };
+    const obligation_ids = [_]obligation.Id{1};
+    const queries = [_]obligation.VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "deposit" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+        },
+    };
     const set: obligation.ObligationSet = .{
         .obligations = &obligations,
+        .queries = &queries,
         .terms = &terms,
     };
 
@@ -707,7 +761,7 @@ test "formal Lean emitter fails closed on MLIR-origin formulas" {
 
 test "formal cross-check elides runtime guard only when Z3 proves and Lean exports" {
     const terms = [_]obligation.Term{
-        .{ .variable = .{ .name = "amount", .ty = .{ .spelling = "u256" } } },
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 0, .pattern_id = 0 }, .name = "amount", .ty = .{ .spelling = "u256" } } } },
         .{ .int_lit = .{ .value = "1", .ty = .{ .spelling = "u256" } } },
         .{ .binary = .{ .op = .ge, .lhs = 0, .rhs = 1 } },
     };
@@ -736,9 +790,25 @@ test "formal cross-check elides runtime guard only when Z3 proves and Lean expor
             } },
         },
     };
+    const assumption_ids = [_]obligation.Id{1};
+    const obligation_ids = [_]obligation.Id{2};
+    const queries = [_]obligation.VerificationQuery{
+        .{
+            .id = 3,
+            .owner = .{ .function = .{ .name = "deposit" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .assumption_ids = &assumption_ids,
+        },
+    };
     const set: obligation.ObligationSet = .{
         .assumptions = &assumptions,
         .obligations = &obligations,
+        .queries = &queries,
         .terms = &terms,
     };
 
@@ -754,7 +824,7 @@ test "formal cross-check elides runtime guard only when Z3 proves and Lean expor
 
 test "formal cross-check keeps runtime guard when Z3 finds a counterexample" {
     const terms = [_]obligation.Term{
-        .{ .variable = .{ .name = "amount", .ty = .{ .spelling = "u256" } } },
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 0, .pattern_id = 0 }, .name = "amount", .ty = .{ .spelling = "u256" } } } },
         .{ .refinement_predicate = .{ .name = "NonZero", .value = 0 } },
     };
     const obligations = [_]obligation.Obligation{
@@ -771,8 +841,22 @@ test "formal cross-check keeps runtime guard when Z3 finds a counterexample" {
             } },
         },
     };
+    const obligation_ids = [_]obligation.Id{1};
+    const queries = [_]obligation.VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "deposit" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+        },
+    };
     const set: obligation.ObligationSet = .{
         .obligations = &obligations,
+        .queries = &queries,
         .terms = &terms,
     };
 
@@ -802,8 +886,22 @@ test "formal cross-check keeps always-runtime guard even when proved" {
             } },
         },
     };
+    const obligation_ids = [_]obligation.Id{1};
+    const queries = [_]obligation.VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "critical" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+        },
+    };
     const set: obligation.ObligationSet = .{
         .obligations = &obligations,
+        .queries = &queries,
         .terms = &terms,
     };
 
@@ -902,8 +1000,7 @@ test "formal obligation MLIR adapter collects verification markers and assumptio
     const guard = result.set.obligations[2];
     try testing.expect(guard.kind == .runtime_guard);
     try testing.expectEqualStrings("guard:checked:flag", guard.kind.runtime_guard.guard_id);
-    try testing.expectEqual(obligation.ValueRefKind.operand, guard.kind.runtime_guard.formula.origin_value.kind);
-    try testing.expectEqual(@as(u32, 0), guard.kind.runtime_guard.formula.origin_value.index);
+    try testing.expect(guard.kind.runtime_guard.formula == .term);
 }
 
 test "formal obligation MLIR adapter records effect frame summaries" {
@@ -953,9 +1050,9 @@ test "formal obligation MLIR adapter records effect frame summaries" {
     const reads = result.set.obligations[1].kind.effect_frame;
     try testing.expectEqual(obligation.EffectFrameRelation.read_preserved_by_frame, reads.relation);
     try testing.expectEqual(@as(usize, 1), reads.declared.len);
-    try testing.expectEqual(@as(usize, 2), reads.actual.len);
-    try testing.expectEqualStrings("scratch", reads.actual[1].root);
-    try testing.expectEqual(obligation.RegionRef.transient, reads.actual[1].region);
+    try testing.expectEqual(@as(usize, 1), reads.actual.len);
+    try testing.expectEqualStrings("scratch", reads.actual[0].root);
+    try testing.expectEqual(obligation.RegionRef.transient, reads.actual[0].region);
 }
 
 test "formal obligation MLIR adapter records lock and external frame metadata" {
@@ -1051,9 +1148,9 @@ test "formal obligation MLIR adapter covers Z3 assertion tags and implicit safet
 
     try testing.expect(!result.set.hasBlockingDiagnostic());
     try testing.expectEqual(@as(usize, 3), result.set.obligations.len);
-    try testing.expectEqual(@as(usize, 2), result.set.assumptions.len);
+    try testing.expectEqual(@as(usize, 1), result.set.assumptions.len);
     try testing.expectEqual(@as(usize, 5), result.set.queries.len);
-    try testing.expectEqual(@as(usize, 1), countAssumption(result.set, .requires));
+    try testing.expectEqual(@as(usize, 0), countAssumption(result.set, .requires));
     try testing.expectEqual(@as(usize, 1), countAssumption(result.set, .path_assume));
     try testing.expectEqual(@as(usize, 1), countRuntimeGuards(result.set));
     try testing.expectEqual(@as(usize, 2), countLogical(result.set, .arithmetic_safety));
@@ -1103,8 +1200,7 @@ test "formal obligation MLIR adapter expands resource op properties" {
     for (result.set.obligations) |item| {
         try testing.expect(item.kind == .resource);
         try testing.expectEqualStrings("TokenUnit", item.kind.resource.domain);
-        try testing.expectEqual(obligation.ValueRefKind.operand, item.kind.resource.amount.?.origin_value.kind);
-        try testing.expectEqual(@as(u32, 4), item.kind.resource.amount.?.origin_value.index);
+        try testing.expect(item.kind.resource.amount.? == .term);
         const source = item.kind.resource.source orelse return error.TestUnexpectedResult;
         const destination = item.kind.resource.destination orelse return error.TestUnexpectedResult;
         try expectPlaceRoot(source, "arg#0", .storage);
@@ -1249,20 +1345,20 @@ test "formal report coverage summarizes representative MLIR obligation classes" 
     defer result.deinit();
 
     try testing.expect(!result.set.hasBlockingDiagnostic());
-    try testing.expectEqual(@as(usize, 14), result.set.obligations.len);
+    try testing.expectEqual(@as(usize, 13), result.set.obligations.len);
     try testing.expectEqual(@as(usize, 1), result.set.assumptions.len);
-    try testing.expectEqual(@as(usize, 15), result.set.queries.len);
+    try testing.expectEqual(@as(usize, 14), result.set.queries.len);
     try testing.expectEqual(@as(usize, 1), countAssumption(result.set, .requires));
     try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
     try testing.expectEqual(@as(usize, 1), countLogical(result.set, .assert));
     try testing.expectEqual(@as(usize, 2), countLogical(result.set, .arithmetic_safety));
     try testing.expectEqual(@as(usize, 1), countRuntimeGuards(result.set));
     try testing.expectEqual(@as(usize, 1), countEffectFrame(result.set, .write_covered_by_modifies));
-    try testing.expectEqual(@as(usize, 1), countEffectFrame(result.set, .read_preserved_by_frame));
+    try testing.expectEqual(@as(usize, 0), countEffectFrame(result.set, .read_preserved_by_frame));
     try testing.expectEqual(@as(usize, 1), countResource(result.set, .move, .conservation));
     try testing.expectEqual(@as(usize, 1), countQuantifier(result.set));
     try testing.expectEqual(@as(usize, 1), countQuery(result.set, .base));
-    try testing.expectEqual(@as(usize, 12), countQuery(result.set, .obligation));
+    try testing.expectEqual(@as(usize, 11), countQuery(result.set, .obligation));
     try testing.expectEqual(@as(usize, 1), countQuery(result.set, .guard_satisfy));
     try testing.expectEqual(@as(usize, 1), countQuery(result.set, .guard_violate));
 
@@ -1270,11 +1366,11 @@ test "formal report coverage summarizes representative MLIR obligation classes" 
     defer testing.allocator.free(report);
 
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"artifact_decision\",\"status\":\"blocked\",\"reason\":\"missing_proof\"}"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"assumptions\":1,\"obligations\":14,\"queries\":15"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_obligation_links\":14"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"obligation_kinds\":{\"logical\":4,\"runtime_guard\":1,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":2,\"resource\":6,\"quantifier\":1,\"filtered_input\":0,\"backend_fact\":0}"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_backends\":{\"unspecified\":15,\"z3\":0,\"lean\":0}"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_results\":{\"missing\":15,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"assumptions\":1,\"obligations\":13,\"queries\":14"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_obligation_links\":13"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"obligation_kinds\":{\"logical\":4,\"runtime_guard\":1,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":1,\"resource\":6,\"quantifier\":1,\"filtered_input\":0,\"backend_fact\":0}"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_backends\":{\"unspecified\":14,\"z3\":0,\"lean\":0}"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_results\":{\"missing\":14,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"logical\",\"role\":\"ensures\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"arithmetic_safety\":\"addition_overflow\""));

@@ -38,11 +38,15 @@ pub const ObligationSet = struct {
             if (query.result) |result| {
                 if (result.degraded) return .{ .blocked = .degraded_query };
                 if (result.vacuity_unknown) return .{ .blocked = .unknown_query };
-                if (result.status == .unknown) return .{ .blocked = .unknown_query };
+                if (result.status == .unknown) {
+                    if (self.queryUnknownDischargedByLean(query)) continue;
+                    return .{ .blocked = .unknown_query };
+                }
                 if (!querySucceeded(query, result)) {
                     return .{ .blocked = if (query.backend == .lean) .lean_required_failure else .failed_query };
                 }
             } else if (query.obligation_ids.len > 0) {
+                if (self.hasSuccessfulLeanProofForQuery(query)) continue;
                 return .{ .blocked = if (query.backend == .lean) .lean_required_failure else .missing_proof };
             }
         }
@@ -186,9 +190,36 @@ pub const ObligationSet = struct {
             }
             if (!containsId(query.obligation_ids, item.id)) continue;
             const result = query.result orelse continue;
+            if (query.backend == .lean and !self.queryHasValidProofArtifact(query)) continue;
             if (querySucceeded(query, result)) return true;
         }
         return false;
+    }
+
+    fn queryUnknownDischargedByLean(self: ObligationSet, query: VerificationQuery) bool {
+        if (query.backend != .z3) return false;
+        if (query.obligation_ids.len == 0) return false;
+        return self.hasSuccessfulLeanProofForQuery(query);
+    }
+
+    fn hasSuccessfulLeanProofForQuery(self: ObligationSet, target: VerificationQuery) bool {
+        for (self.queries) |candidate| {
+            if (candidate.backend != .lean) continue;
+            if (candidate.discharges_query_id != target.id) continue;
+            if (!equalIdSlices(candidate.obligation_ids, target.obligation_ids)) continue;
+            if (!equalIdSlices(candidate.assumption_ids, target.assumption_ids)) continue;
+            if (!self.queryHasValidProofArtifact(candidate)) continue;
+            const result = candidate.result orelse continue;
+            if (querySucceeded(candidate, result)) return true;
+        }
+        return false;
+    }
+
+    fn queryHasValidProofArtifact(self: ObligationSet, query: VerificationQuery) bool {
+        if (query.backend != .lean) return false;
+        const artifact_id = query.proof_artifact_id orelse return false;
+        const artifact = self.proofArtifactById(artifact_id) orelse return false;
+        return equalIdSlices(artifact.obligation_ids, query.obligation_ids);
     }
 };
 
@@ -226,6 +257,7 @@ pub const VerificationQuery = struct {
     constraint_count: u32 = 0,
     smtlib_hash: ?u64 = null,
     proof_artifact_id: ?Id = null,
+    discharges_query_id: ?Id = null,
     result: ?VerificationQueryResult = null,
 };
 
@@ -342,6 +374,7 @@ pub const DiagnosticKind = enum(u8) {
     missing_effect_path,
     missing_formula,
     invalid_dependency,
+    unmatched_report_row,
 };
 
 pub const Phase = enum(u8) {
@@ -385,6 +418,14 @@ fn containsId(ids: []const Id, needle: Id) bool {
         if (id == needle) return true;
     }
     return false;
+}
+
+fn equalIdSlices(lhs: []const Id, rhs: []const Id) bool {
+    if (lhs.len != rhs.len) return false;
+    for (lhs, rhs) |left, right| {
+        if (left != right) return false;
+    }
+    return true;
 }
 
 fn querySucceeded(query: VerificationQuery, result: VerificationQueryResult) bool {
@@ -791,7 +832,42 @@ pub const IntegerLiteralTerm = struct {
     ty: ?TypeRef = null,
 };
 
-pub const VarRef = struct {
+pub const FreeVarId = struct {
+    /// Compiler binding identity for a free source variable.
+    ///
+    /// HIR locals use `ast.PatternId`; after MLIR lowering the formal collector
+    /// keeps that id scoped by `source.FileId` so variable names remain
+    /// alpha-convertible.
+    file_id: u32,
+    pattern_id: u32,
+};
+
+pub const VarRefTag = enum(u8) {
+    free,
+    bound,
+};
+
+pub const VarRef = union(VarRefTag) {
+    free: FreeVarRef,
+    bound: BoundVarRef,
+};
+
+pub const FreeVarRef = struct {
+    id: FreeVarId,
+    name: []const u8,
+    ty: ?TypeRef = null,
+    region: ?RegionRef = null,
+};
+
+pub const BoundVarRef = struct {
+    /// De Bruijn index. `0` refers to the nearest enclosing binder.
+    index: u32,
+    name: []const u8 = "",
+    ty: ?TypeRef = null,
+    region: ?RegionRef = null,
+};
+
+pub const BinderRef = struct {
     name: []const u8,
     ty: ?TypeRef = null,
     region: ?RegionRef = null,
@@ -838,7 +914,7 @@ pub const RefinementPredicateTerm = struct {
 
 pub const QuantifiedTerm = struct {
     quantifier: Quantifier,
-    binder: VarRef,
+    binder: BinderRef,
     condition: ?TermId = null,
     body: TermId,
 };
@@ -926,6 +1002,7 @@ test "manifest enum tags stay byte-sized" {
         AssumptionKind,
         FormulaRefTag,
         TermTag,
+        VarRefTag,
         UnaryOp,
         BinaryOp,
         Quantifier,
@@ -989,7 +1066,7 @@ test "blocking diagnostics gate obligation set" {
 test "term references validate canonical formulas" {
     const args = [_]TermId{1};
     const terms = [_]Term{
-        .{ .variable = .{ .name = "amount", .ty = .{ .spelling = "u256" } } },
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 0, .pattern_id = 0 }, .name = "amount", .ty = .{ .spelling = "u256" } } } },
         .{ .int_lit = .{ .value = "1", .ty = .{ .spelling = "u256" } } },
         .{ .refinement_predicate = .{ .name = "MinValue", .value = 0, .args = &args } },
     };
@@ -1176,6 +1253,16 @@ test "artifact policy treats Lean-required proof gaps as hard failures" {
             .required_backend = .lean,
         },
     };
+    const artifacts = [_]ProofArtifact{
+        .{
+            .id = 10,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .module_name = "ERC20.Transfer",
+            .theorem_name = "transfer_preserves_supply",
+            .obligation_ids = &obligation_ids,
+        },
+    };
     const failed_lean_queries = [_]VerificationQuery{
         .{
             .id = 2,
@@ -1189,6 +1276,19 @@ test "artifact policy treats Lean-required proof gaps as hard failures" {
             .result = .{ .status = .failed },
         },
     };
+    const proved_lean_queries_without_artifact = [_]VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .lean,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .result = .{ .status = .proved },
+        },
+    };
     const proved_lean_queries = [_]VerificationQuery{
         .{
             .id = 2,
@@ -1199,6 +1299,7 @@ test "artifact policy treats Lean-required proof gaps as hard failures" {
             .backend = .lean,
             .kind = .obligation,
             .obligation_ids = &obligation_ids,
+            .proof_artifact_id = 10,
             .result = .{ .status = .proved },
         },
     };
@@ -1212,9 +1313,15 @@ test "artifact policy treats Lean-required proof gaps as hard failures" {
         .queries = &failed_lean_queries,
         .terms = &.{.{ .bool_lit = true }},
     }).artifactDecision());
+    try expectArtifactBlocked(.lean_required_failure, (ObligationSet{
+        .obligations = &obligations,
+        .queries = &proved_lean_queries_without_artifact,
+        .terms = &.{.{ .bool_lit = true }},
+    }).artifactDecision());
     try std.testing.expect((ObligationSet{
         .obligations = &obligations,
         .queries = &proved_lean_queries,
+        .proof_artifacts = &artifacts,
         .terms = &.{.{ .bool_lit = true }},
     }).artifactDecision().isAllowed());
 }
@@ -1369,8 +1476,90 @@ test "userland Lean proof attachment fails closed when missing or mismatched" {
     }).artifactDecision());
 }
 
-test "userland Lean proof artifact does not bypass Z3 unknown or degradation" {
+test "artifact policy accepts Lean proof for missing structural query only with valid artifact" {
     const obligation_ids = [_]Id{1};
+    const obligations = [_]Obligation{
+        .{
+            .id = 1,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .ora_mlir,
+            .origin = .source,
+            .kind = .{ .effect_frame = .{
+                .relation = .write_covered_by_modifies,
+            } },
+        },
+    };
+    const artifacts = [_]ProofArtifact{
+        .{
+            .id = 10,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .module_name = "Ora.Obligation.Theorems",
+            .theorem_name = "effect_frame_write_covered_by_modifies_shape_follows_from_row",
+            .obligation_ids = &obligation_ids,
+        },
+    };
+    const structural_query = VerificationQuery{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "transfer" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .obligation,
+        .obligation_ids = &obligation_ids,
+    };
+    const proved_query = VerificationQuery{
+        .id = 3,
+        .owner = .{ .function = .{ .name = "transfer" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .backend = .lean,
+        .kind = .obligation,
+        .obligation_ids = &obligation_ids,
+        .proof_artifact_id = 10,
+        .discharges_query_id = 2,
+        .result = .{ .status = .proved },
+    };
+    const missing_artifact_query = VerificationQuery{
+        .id = 3,
+        .owner = .{ .function = .{ .name = "transfer" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .backend = .lean,
+        .kind = .obligation,
+        .obligation_ids = &obligation_ids,
+        .discharges_query_id = 2,
+        .result = .{ .status = .proved },
+    };
+
+    const blocked_queries = [_]VerificationQuery{structural_query};
+    try expectArtifactBlocked(.missing_proof, (ObligationSet{
+        .obligations = &obligations,
+        .queries = &blocked_queries,
+    }).artifactDecision());
+
+    const invalid_queries = [_]VerificationQuery{ structural_query, missing_artifact_query };
+    try expectArtifactBlocked(.missing_proof, (ObligationSet{
+        .obligations = &obligations,
+        .queries = &invalid_queries,
+        .proof_artifacts = &artifacts,
+    }).artifactDecision());
+
+    const proved_queries = [_]VerificationQuery{ structural_query, proved_query };
+    try std.testing.expect((ObligationSet{
+        .obligations = &obligations,
+        .queries = &proved_queries,
+        .proof_artifacts = &artifacts,
+    }).artifactDecision().isAllowed());
+}
+
+test "userland Lean proof artifact discharges only plain Z3 unknown" {
+    const obligation_ids = [_]Id{1};
+    const assumption_ids = [_]Id{1};
+    const other_assumption_ids = [_]Id{2};
     const obligations = [_]Obligation{
         .{
             .id = 1,
@@ -1383,6 +1572,26 @@ test "userland Lean proof artifact does not bypass Z3 unknown or degradation" {
                 .formula = .{ .term = 0 },
             } },
             .required_backend = .lean,
+        },
+    };
+    const assumptions = [_]Assumption{
+        .{
+            .id = 1,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .sema,
+            .origin = .{ .sema_fact = .{ .kind = "requires", .ordinal = 0 } },
+            .kind = .requires,
+            .formula = .{ .term = 0 },
+        },
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .sema,
+            .origin = .{ .sema_fact = .{ .kind = "requires", .ordinal = 1 } },
+            .kind = .requires,
+            .formula = .{ .term = 0 },
         },
     };
     const artifacts = [_]ProofArtifact{
@@ -1405,7 +1614,9 @@ test "userland Lean proof artifact does not bypass Z3 unknown or degradation" {
             .backend = .lean,
             .kind = .obligation,
             .obligation_ids = &obligation_ids,
+            .assumption_ids = &assumption_ids,
             .proof_artifact_id = 10,
+            .discharges_query_id = 3,
             .result = .{ .status = .proved },
         },
         .{
@@ -1417,13 +1628,224 @@ test "userland Lean proof artifact does not bypass Z3 unknown or degradation" {
             .backend = .z3,
             .kind = .obligation,
             .obligation_ids = &obligation_ids,
+            .assumption_ids = &assumption_ids,
             .result = .{ .status = .unknown },
         },
     };
+    const mismatched_assumption_queries = [_]VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .lean,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .assumption_ids = &other_assumption_ids,
+            .proof_artifact_id = 10,
+            .discharges_query_id = 3,
+            .result = .{ .status = .proved },
+        },
+        .{
+            .id = 3,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .assumption_ids = &assumption_ids,
+            .result = .{ .status = .unknown },
+        },
+    };
+    const missing_artifact_queries = [_]VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .lean,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .assumption_ids = &assumption_ids,
+            .discharges_query_id = 3,
+            .result = .{ .status = .proved },
+        },
+        .{
+            .id = 3,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .assumption_ids = &assumption_ids,
+            .result = .{ .status = .unknown },
+        },
+    };
+    const wrong_target_query = [_]VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .lean,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .assumption_ids = &assumption_ids,
+            .proof_artifact_id = 10,
+            .discharges_query_id = 99,
+            .result = .{ .status = .proved },
+        },
+        .{
+            .id = 3,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .assumption_ids = &assumption_ids,
+            .result = .{ .status = .unknown },
+        },
+    };
+    const sat_queries = [_]VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .lean,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .assumption_ids = &assumption_ids,
+            .proof_artifact_id = 10,
+            .discharges_query_id = 3,
+            .result = .{ .status = .proved },
+        },
+        .{
+            .id = 3,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .assumption_ids = &assumption_ids,
+            .result = .{ .status = .sat },
+        },
+    };
+    const vacuity_unknown_queries = [_]VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .lean,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .assumption_ids = &assumption_ids,
+            .proof_artifact_id = 10,
+            .discharges_query_id = 3,
+            .result = .{ .status = .proved },
+        },
+        .{
+            .id = 3,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .assumption_ids = &assumption_ids,
+            .result = .{ .status = .unknown, .vacuity_unknown = true },
+        },
+    };
+    const degraded_queries = [_]VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .lean,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .assumption_ids = &assumption_ids,
+            .proof_artifact_id = 10,
+            .discharges_query_id = 3,
+            .result = .{ .status = .proved },
+        },
+        .{
+            .id = 3,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+            .assumption_ids = &assumption_ids,
+            .result = .{ .status = .unknown, .degraded = true },
+        },
+    };
 
+    try std.testing.expect((ObligationSet{
+        .obligations = &obligations,
+        .assumptions = &assumptions,
+        .queries = &queries,
+        .proof_artifacts = &artifacts,
+        .terms = &.{.{ .bool_lit = true }},
+    }).artifactDecision().isAllowed());
     try expectArtifactBlocked(.unknown_query, (ObligationSet{
         .obligations = &obligations,
-        .queries = &queries,
+        .assumptions = &assumptions,
+        .queries = &mismatched_assumption_queries,
+        .proof_artifacts = &artifacts,
+        .terms = &.{.{ .bool_lit = true }},
+    }).artifactDecision());
+    try expectArtifactBlocked(.unknown_query, (ObligationSet{
+        .obligations = &obligations,
+        .assumptions = &assumptions,
+        .queries = &missing_artifact_queries,
+        .proof_artifacts = &artifacts,
+        .terms = &.{.{ .bool_lit = true }},
+    }).artifactDecision());
+    try expectArtifactBlocked(.unknown_query, (ObligationSet{
+        .obligations = &obligations,
+        .assumptions = &assumptions,
+        .queries = &wrong_target_query,
+        .proof_artifacts = &artifacts,
+        .terms = &.{.{ .bool_lit = true }},
+    }).artifactDecision());
+    try expectArtifactBlocked(.failed_query, (ObligationSet{
+        .obligations = &obligations,
+        .assumptions = &assumptions,
+        .queries = &sat_queries,
+        .proof_artifacts = &artifacts,
+        .terms = &.{.{ .bool_lit = true }},
+    }).artifactDecision());
+    try expectArtifactBlocked(.unknown_query, (ObligationSet{
+        .obligations = &obligations,
+        .assumptions = &assumptions,
+        .queries = &vacuity_unknown_queries,
+        .proof_artifacts = &artifacts,
+        .terms = &.{.{ .bool_lit = true }},
+    }).artifactDecision());
+    try expectArtifactBlocked(.degraded_query, (ObligationSet{
+        .obligations = &obligations,
+        .assumptions = &assumptions,
+        .queries = &degraded_queries,
         .proof_artifacts = &artifacts,
         .terms = &.{.{ .bool_lit = true }},
     }).artifactDecision());

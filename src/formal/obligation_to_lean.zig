@@ -1,10 +1,8 @@
 //! Canonical obligation manifest to Lean emitter.
 //!
 //! This emitter consumes the same `obligation.ObligationSet` used by the first
-//! Z3 adapter and writes a Lean module containing manifest data plus a kernel
-//! checked structural well-formedness theorem. It does not claim semantic proof
-//! of user contracts yet; that belongs to later slices that assign meaning to
-//! these rows.
+//! Z3 adapter and writes a Lean module containing manifest data, semantic
+//! proposition names, and a kernel-checked structural well-formedness theorem.
 
 const std = @import("std");
 const obligation = @import("obligation.zig");
@@ -13,16 +11,38 @@ pub const Options = struct {
     namespace: []const u8 = "Ora.Generated.ObligationSmoke",
 };
 
+pub fn writeDataModule(writer: anytype, set: obligation.ObligationSet, options: Options) !void {
+    try set.validateTermReferences();
+    try set.validateIdReferences();
+
+    try writeModulePreamble(writer, "Ora.Obligation.Manifest", options.namespace);
+    try writeManifestRows(writer, set);
+    try writeManifestDefinition(writer);
+    try writeRowDefinitions(writer, set);
+    try writeNamespaceEnd(writer, options.namespace);
+}
+
 pub fn writeModule(writer: anytype, set: obligation.ObligationSet, options: Options) !void {
     try set.validateTermReferences();
     try set.validateIdReferences();
 
-    try writer.writeAll("import Ora.Obligation.Manifest\n\n");
-    try writer.writeAll("namespace ");
-    try writer.writeAll(options.namespace);
-    try writer.writeAll("\n\n");
-    try writer.writeAll("open Ora.Obligation\n\n");
+    try writeModulePreamble(writer, "Ora.Obligation.Semantics", options.namespace);
+    try writeManifestRows(writer, set);
+    try writeManifestDefinition(writer);
+    try writer.writeAll("theorem emitted_manifest_wf : emittedManifest.wf = true := by decide\n\n");
+    try writeSemanticDefinitions(writer, set);
+    try writeNamespaceEnd(writer, options.namespace);
+}
 
+fn writeModulePreamble(writer: anytype, import_name: []const u8, namespace: []const u8) !void {
+    try writer.writeAll("import ");
+    try writer.writeAll(import_name);
+    try writer.writeAll("\n\nnamespace ");
+    try writer.writeAll(namespace);
+    try writer.writeAll("\n\nopen Ora.Obligation\n\n");
+}
+
+fn writeManifestRows(writer: anytype, set: obligation.ObligationSet) !void {
     try writeTerms(writer, set.terms);
     try writer.writeByte('\n');
     try writeAssumptions(writer, set.assumptions);
@@ -31,16 +51,20 @@ pub fn writeModule(writer: anytype, set: obligation.ObligationSet, options: Opti
     try writer.writeByte('\n');
     try writeProofArtifacts(writer, set.proof_artifacts);
     try writer.writeByte('\n');
+}
 
+fn writeManifestDefinition(writer: anytype) !void {
     try writer.writeAll("def emittedManifest : Manifest := {\n");
     try writer.writeAll("  terms := emittedTerms,\n");
     try writer.writeAll("  assumptions := emittedAssumptions,\n");
     try writer.writeAll("  obligations := emittedObligations,\n");
     try writer.writeAll("  proofArtifacts := emittedProofArtifacts\n");
     try writer.writeAll("}\n\n");
-    try writer.writeAll("theorem emitted_manifest_wf : emittedManifest.wf = true := by decide\n\n");
+}
+
+fn writeNamespaceEnd(writer: anytype, namespace: []const u8) !void {
     try writer.writeAll("end ");
-    try writer.writeAll(options.namespace);
+    try writer.writeAll(namespace);
     try writer.writeByte('\n');
 }
 
@@ -63,21 +87,8 @@ fn writeAssumptions(writer: anytype, rows: []const obligation.Assumption) !void 
 
     try writer.writeAll("[\n");
     for (rows, 0..) |row, index| {
-        try writer.writeAll("  { id := ");
-        try writer.print("{d}", .{row.id});
-        try writer.writeAll(", owner := ");
-        try writeLeanString(writer, ownerName(row.owner));
-        try writer.writeAll(", kind := .");
-        try writer.writeAll(assumptionKindName(row.kind));
-        try writer.writeAll(", formula := ");
-        if (row.formula) |formula| {
-            try writer.writeAll("some (");
-            try writeFormula(writer, formula);
-            try writer.writeByte(')');
-        } else {
-            try writer.writeAll("none");
-        }
-        try writer.writeAll(" }");
+        try writer.writeAll("  ");
+        try writeAssumptionRow(writer, row);
         try writeListSeparator(writer, index, rows.len);
     }
     try writer.writeAll("]\n");
@@ -89,16 +100,144 @@ fn writeObligations(writer: anytype, rows: []const obligation.Obligation) !void 
 
     try writer.writeAll("[\n");
     for (rows, 0..) |row, index| {
-        try writer.writeAll("  { id := ");
-        try writer.print("{d}", .{row.id});
-        try writer.writeAll(", owner := ");
-        try writeLeanString(writer, ownerName(row.owner));
-        try writer.writeAll(", kind := ");
-        try writeObligationKind(writer, row.kind);
-        try writer.writeAll(" }");
+        try writer.writeAll("  ");
+        try writeObligationRow(writer, row);
         try writeListSeparator(writer, index, rows.len);
     }
     try writer.writeAll("]\n");
+}
+
+fn writeAssumptionRow(writer: anytype, row: obligation.Assumption) !void {
+    try writer.writeAll("{ id := ");
+    try writer.print("{d}", .{row.id});
+    try writer.writeAll(", owner := ");
+    try writeLeanString(writer, ownerName(row.owner));
+    try writer.writeAll(", kind := .");
+    try writer.writeAll(assumptionKindName(row.kind));
+    try writer.writeAll(", formula := ");
+    if (row.formula) |formula| {
+        try writer.writeAll("some (");
+        try writeFormula(writer, formula);
+        try writer.writeByte(')');
+    } else {
+        try writer.writeAll("none");
+    }
+    try writer.writeAll(" }");
+}
+
+fn writeObligationRow(writer: anytype, row: obligation.Obligation) !void {
+    try writer.writeAll("{ id := ");
+    try writer.print("{d}", .{row.id});
+    try writer.writeAll(", owner := ");
+    try writeLeanString(writer, ownerName(row.owner));
+    try writer.writeAll(", kind := ");
+    try writeObligationKind(writer, row.kind);
+    try writer.writeAll(" }");
+}
+
+fn writeSemanticDefinitions(writer: anytype, set: obligation.ObligationSet) !void {
+    var emitted_any = false;
+
+    try writeRowDefinitions(writer, set);
+
+    for (set.obligations) |row| {
+        if (!kindSupportsSemantics(row.kind)) continue;
+        if (!emitted_any) {
+            try writer.writeAll("-- Semantic proposition names for proof attachment.\n");
+            emitted_any = true;
+        }
+        try writer.writeAll("def emittedObligation_");
+        try writer.print("{d}", .{row.id});
+        try writer.writeAll(" : Prop :=\n  obligationDenotes emittedManifest ");
+        try writeObligationRow(writer, row);
+        try writer.writeAll("\n\n");
+    }
+
+    for (set.queries) |query| {
+        if (!try querySupportsSemantics(set, query)) continue;
+        if (!emitted_any) {
+            try writer.writeAll("-- Semantic proposition names for proof attachment.\n");
+            emitted_any = true;
+        }
+        try writer.writeAll("def emittedQuery_");
+        try writer.print("{d}", .{query.id});
+        try writer.writeAll(" : Prop :=\n");
+        for (query.obligation_ids, 0..) |obligation_id, index| {
+            const row = findObligation(set, obligation_id) orelse return error.InvalidDependency;
+            if (index != 0) try writer.writeAll(" /\\\n");
+            try writer.writeAll("  obligationFollowsFromAssumptions emittedManifest\n    ");
+            try writeAssumptionRowsByIds(writer, set, query.assumption_ids);
+            try writer.writeAll("\n    ");
+            try writeObligationRow(writer, row);
+        }
+        try writer.writeAll("\n\n");
+    }
+}
+
+fn writeRowDefinitions(writer: anytype, set: obligation.ObligationSet) !void {
+    for (set.assumptions) |row| {
+        try writer.writeAll("def emittedAssumptionRow_");
+        try writer.print("{d}", .{row.id});
+        try writer.writeAll(" : AssumptionRow :=\n  ");
+        try writeAssumptionRow(writer, row);
+        try writer.writeAll("\n\n");
+    }
+
+    for (set.obligations) |row| {
+        try writer.writeAll("def emittedObligationRow_");
+        try writer.print("{d}", .{row.id});
+        try writer.writeAll(" : ObligationRow :=\n  ");
+        try writeObligationRow(writer, row);
+        try writer.writeAll("\n\n");
+    }
+}
+
+fn writeAssumptionRowsByIds(writer: anytype, set: obligation.ObligationSet, ids: []const obligation.Id) !void {
+    if (ids.len == 0) return writer.writeAll("[]");
+    try writer.writeByte('[');
+    for (ids, 0..) |id, index| {
+        if (index != 0) try writer.writeAll(", ");
+        const row = findAssumption(set, id) orelse return error.InvalidDependency;
+        try writeAssumptionRow(writer, row);
+    }
+    try writer.writeByte(']');
+}
+
+fn findObligation(set: obligation.ObligationSet, id: obligation.Id) ?obligation.Obligation {
+    for (set.obligations) |row| {
+        if (row.id == id) return row;
+    }
+    return null;
+}
+
+fn findAssumption(set: obligation.ObligationSet, id: obligation.Id) ?obligation.Assumption {
+    for (set.assumptions) |row| {
+        if (row.id == id) return row;
+    }
+    return null;
+}
+
+fn querySupportsSemantics(set: obligation.ObligationSet, query: obligation.VerificationQuery) !bool {
+    if (query.obligation_ids.len == 0) return false;
+    for (query.obligation_ids) |obligation_id| {
+        const row = findObligation(set, obligation_id) orelse return error.InvalidDependency;
+        if (!kindSupportsSemantics(row.kind)) return false;
+    }
+    return true;
+}
+
+fn kindSupportsSemantics(kind: obligation.Kind) bool {
+    return switch (kind) {
+        .logical, .runtime_guard, .effect_frame => true,
+        .type_wf,
+        .type_relation,
+        .region_relation,
+        .resource,
+        .quantifier,
+        .filtered_input,
+        .backend_fact,
+        => false,
+    };
 }
 
 fn writeProofArtifacts(writer: anytype, rows: []const obligation.ProofArtifact) !void {
@@ -186,7 +325,7 @@ fn writeTerm(writer: anytype, term: obligation.Term) !void {
             try writer.writeAll(".quantified { quantifier := .");
             try writer.writeAll(quantifierName(quantified.quantifier));
             try writer.writeAll(", binder := ");
-            try writeVarRef(writer, quantified.binder);
+            try writeBinderRef(writer, quantified.binder);
             try writer.writeAll(", condition := ");
             if (quantified.condition) |condition| {
                 try writer.writeAll("some ");
@@ -227,6 +366,10 @@ fn writeObligationKind(writer: anytype, kind: obligation.Kind) !void {
             try writeFormula(writer, guard.formula);
             try writer.writeByte(')');
         },
+        .effect_frame => |effect| {
+            try writer.writeAll(".effectFrame ");
+            try writeEffectFrameGoal(writer, effect);
+        },
         .resource => |resource| {
             try writer.writeAll(".resource ");
             try writeResourceGoal(writer, resource);
@@ -242,7 +385,6 @@ fn writeObligationKind(writer: anytype, kind: obligation.Kind) !void {
         .type_wf,
         .type_relation,
         .region_relation,
-        .effect_frame,
         .filtered_input,
         => return error.UnsupportedObligationKind,
     }
@@ -279,6 +421,16 @@ fn writeQuantifierGoal(writer: anytype, quantifier: obligation.QuantifierGoal) !
     try writer.writeAll(" }");
 }
 
+fn writeEffectFrameGoal(writer: anytype, effect: obligation.EffectFrameGoal) !void {
+    try writer.writeAll("{ relation := .");
+    try writer.writeAll(effectFrameRelationName(effect.relation));
+    try writer.writeAll(", declared := ");
+    try writePlaceRefList(writer, effect.declared);
+    try writer.writeAll(", actual := ");
+    try writePlaceRefList(writer, effect.actual);
+    try writer.writeAll(" }");
+}
+
 fn writeResourceGoal(writer: anytype, resource: obligation.ResourceGoal) !void {
     try writer.writeAll("{ op := .");
     try writer.writeAll(resourceOperationName(resource.op));
@@ -308,6 +460,16 @@ fn writeOptionalPlaceRef(writer: anytype, place: ?obligation.PlaceRef) !void {
     } else {
         try writer.writeAll("none");
     }
+}
+
+fn writePlaceRefList(writer: anytype, places: []const obligation.PlaceRef) !void {
+    if (places.len == 0) return writer.writeAll("[]");
+    try writer.writeByte('[');
+    for (places, 0..) |place, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writePlaceRef(writer, place);
+    }
+    try writer.writeByte(']');
 }
 
 fn writePlaceRef(writer: anytype, place: obligation.PlaceRef) !void {
@@ -358,18 +520,62 @@ fn writePlaceKey(writer: anytype, key: obligation.PlaceKey) !void {
 }
 
 fn writeVarRef(writer: anytype, variable: obligation.VarRef) !void {
+    switch (variable) {
+        .free => |free| {
+            try writer.writeAll(".free ");
+            try writeFreeVarRef(writer, free);
+        },
+        .bound => |bound| {
+            try writer.writeAll(".bound ");
+            try writeBoundVarRef(writer, bound);
+        },
+    }
+}
+
+fn writeFreeVarRef(writer: anytype, variable: obligation.FreeVarRef) !void {
+    try writer.writeAll("{ id := { file_id := ");
+    try writer.print("{d}", .{variable.id.file_id});
+    try writer.writeAll(", pattern_id := ");
+    try writer.print("{d}", .{variable.id.pattern_id});
+    try writer.writeAll(" }");
+    try writer.writeAll(", name := ");
+    try writeLeanString(writer, variable.name);
+    try writer.writeAll(", ty := ");
+    try writeOptionalTypeRef(writer, variable.ty);
+    try writer.writeAll(", region := ");
+    try writeOptionalRegionRef(writer, variable.region);
+    try writer.writeAll(" }");
+}
+
+fn writeBoundVarRef(writer: anytype, variable: obligation.BoundVarRef) !void {
+    try writer.writeAll("{ index := ");
+    try writer.print("{d}", .{variable.index});
+    try writer.writeAll(", name := ");
+    try writeLeanString(writer, variable.name);
+    try writer.writeAll(", ty := ");
+    try writeOptionalTypeRef(writer, variable.ty);
+    try writer.writeAll(", region := ");
+    try writeOptionalRegionRef(writer, variable.region);
+    try writer.writeAll(" }");
+}
+
+fn writeBinderRef(writer: anytype, variable: obligation.BinderRef) !void {
     try writer.writeAll("{ name := ");
     try writeLeanString(writer, variable.name);
     try writer.writeAll(", ty := ");
     try writeOptionalTypeRef(writer, variable.ty);
     try writer.writeAll(", region := ");
-    if (variable.region) |region| {
+    try writeOptionalRegionRef(writer, variable.region);
+    try writer.writeAll(" }");
+}
+
+fn writeOptionalRegionRef(writer: anytype, region: ?obligation.RegionRef) !void {
+    if (region) |value| {
         try writer.writeAll("some .");
-        try writer.writeAll(regionName(region));
+        try writer.writeAll(regionName(value));
     } else {
         try writer.writeAll("none");
     }
-    try writer.writeAll(" }");
 }
 
 fn writeOptionalTypeRef(writer: anytype, ty: ?obligation.TypeRef) !void {
@@ -604,6 +810,15 @@ fn resourcePropertyName(property: obligation.ResourceProperty) []const u8 {
     };
 }
 
+fn effectFrameRelationName(relation: obligation.EffectFrameRelation) []const u8 {
+    return switch (relation) {
+        .write_covered_by_modifies => "writeCoveredByModifies",
+        .read_preserved_by_frame => "readPreservedByFrame",
+        .lock_covers_write => "lockCoversWrite",
+        .external_call_frame => "externalCallFrame",
+    };
+}
+
 fn assumptionKindName(kind: obligation.AssumptionKind) []const u8 {
     return switch (kind) {
         .requires => "requires",
@@ -619,4 +834,82 @@ fn assumptionKindName(kind: obligation.AssumptionKind) []const u8 {
         .ghost_axiom => "ghostAxiom",
         .goal => "goal",
     };
+}
+
+test "Lean emitter writes locally nameless variable references" {
+    const terms = [_]obligation.Term{
+        .{ .variable = .{
+            .free = .{
+                .id = .{ .file_id = 0, .pattern_id = 7 },
+                .name = "x",
+                .ty = .{ .spelling = "u256" },
+            },
+        } },
+        .{ .variable = .{
+            .bound = .{
+                .index = 0,
+                .name = "i",
+                .ty = .{ .spelling = "u256" },
+            },
+        } },
+    };
+    const set: obligation.ObligationSet = .{ .terms = &terms };
+
+    var buffer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer buffer.deinit();
+    try writeDataModule(&buffer.writer, set, .{ .namespace = "Ora.Generated.VarRefSmoke" });
+
+    const rendered = buffer.written();
+    try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 1, ".free { id := { file_id := 0, pattern_id := 7 }"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 1, ".bound { index := 0"));
+}
+
+test "Lean emitter writes effect frame obligations" {
+    const declared_keys = [_]obligation.PlaceKey{.{ .parameter = 0 }};
+    const declared = [_]obligation.PlaceRef{
+        .{
+            .root = "balances",
+            .region = .storage,
+            .keys = &declared_keys,
+        },
+    };
+    const actual = declared;
+    const obligations = [_]obligation.Obligation{
+        .{
+            .id = 1,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .{},
+            .phase = .ora_mlir,
+            .origin = .source,
+            .kind = .{ .effect_frame = .{
+                .relation = .write_covered_by_modifies,
+                .declared = &declared,
+                .actual = &actual,
+            } },
+        },
+    };
+    const queries = [_]obligation.VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .{},
+            .phase = .ora_mlir,
+            .origin = .source,
+            .backend = .lean,
+            .kind = .obligation,
+            .obligation_ids = &.{1},
+        },
+    };
+    const set: obligation.ObligationSet = .{ .obligations = &obligations, .queries = &queries };
+
+    var buffer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer buffer.deinit();
+    try writeModule(&buffer.writer, set, .{ .namespace = "Ora.Generated.EffectFrameSmoke" });
+
+    const rendered = buffer.written();
+    try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 1, ".effectFrame { relation := .writeCoveredByModifies"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "{ root := \"balances\", region := .storage"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "keys := [.parameter 0]"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "def emittedQuery_2 : Prop :="));
+    try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "obligationFollowsFromAssumptions emittedManifest"));
 }

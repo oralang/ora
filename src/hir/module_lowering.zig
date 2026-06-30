@@ -758,21 +758,36 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 }
             }
 
-            // Attach ora.param_names so the SMT encoder can use readable variable names.
+            // Attach source parameter metadata for verification/proof tooling.
+            // Names are only presentation; binding ids are the compiler identity.
             if (parameters.len > 0) {
                 const param_name_attrs = try self.allocator.alloc(mlir.MlirAttribute, parameters.len);
+                const param_binding_id_attrs = try self.allocator.alloc(mlir.MlirAttribute, parameters.len);
                 defer self.allocator.free(param_name_attrs);
+                defer self.allocator.free(param_binding_id_attrs);
                 for (parameters, 0..) |parameter, index| {
                     const param_name = switch (self.file.pattern(parameter.pattern).*) {
                         .Name => |name| name.name,
                         else => "",
                     };
+                    var binding_id_buf: [64]u8 = undefined;
+                    const binding_id = try std.fmt.bufPrint(
+                        &binding_id_buf,
+                        "file:{d}:pattern:{d}",
+                        .{ self.file.file_id.index(), parameter.pattern.index() },
+                    );
                     param_name_attrs[index] = mlir.oraStringAttrCreate(self.context, strRef(param_name));
+                    param_binding_id_attrs[index] = mlir.oraStringAttrCreate(self.context, strRef(binding_id));
                 }
                 mlir.oraOperationSetAttributeByName(
                     op,
                     strRef("ora.param_names"),
                     mlir.oraArrayAttrCreate(self.context, @intCast(param_name_attrs.len), param_name_attrs.ptr),
+                );
+                mlir.oraOperationSetAttributeByName(
+                    op,
+                    strRef("ora.param_binding_ids"),
+                    mlir.oraArrayAttrCreate(self.context, @intCast(param_binding_id_attrs.len), param_binding_id_attrs.ptr),
                 );
             }
 

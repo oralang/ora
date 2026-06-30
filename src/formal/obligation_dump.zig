@@ -472,6 +472,35 @@ fn writeTypeRefField(writer: anytype, comptime name: []const u8, ty: obligation.
 
 fn writeVarRefField(writer: anytype, comptime name: []const u8, value: obligation.VarRef) !void {
     try writeFieldPrefix(writer, name);
+    switch (value) {
+        .free => |free| {
+            try writer.writeAll("{\"tag\":\"free\"");
+            try writeFreeVarIdField(writer, free.id);
+            try writeStringField(writer, "name", free.name);
+            if (free.ty) |ty| try writeTypeRefField(writer, "ty", ty);
+            if (free.region) |region| try writeStringField(writer, "region", @tagName(region));
+        },
+        .bound => |bound| {
+            try writer.writeAll("{\"tag\":\"bound\"");
+            try writeNumberField(writer, "index", bound.index);
+            try writeStringField(writer, "name", bound.name);
+            if (bound.ty) |ty| try writeTypeRefField(writer, "ty", ty);
+            if (bound.region) |region| try writeStringField(writer, "region", @tagName(region));
+        },
+    }
+    try writer.writeByte('}');
+}
+
+fn writeFreeVarIdField(writer: anytype, value: obligation.FreeVarId) !void {
+    try writeFieldPrefix(writer, "id");
+    try writer.print("{{\"file_id\":{d},\"pattern_id\":{d}}}", .{
+        value.file_id,
+        value.pattern_id,
+    });
+}
+
+fn writeBinderRefField(writer: anytype, comptime name: []const u8, value: obligation.BinderRef) !void {
+    try writeFieldPrefix(writer, name);
     try writer.writeAll("{\"name\":");
     try writeJsonString(writer, value.name);
     if (value.ty) |ty| try writeTypeRefField(writer, "ty", ty);
@@ -549,7 +578,7 @@ fn writeTermField(writer: anytype, term: obligation.Term) !void {
         },
         .quantified => |quantified| {
             try writeStringField(writer, "quantifier", @tagName(quantified.quantifier));
-            try writeVarRefField(writer, "binder", quantified.binder);
+            try writeBinderRefField(writer, "binder", quantified.binder);
             if (quantified.condition) |condition| try writeIdField(writer, "condition", condition);
             try writeIdField(writer, "body", quantified.body);
         },
@@ -673,7 +702,7 @@ test "json-lines dump of arithmetic safety subtype" {
 test "json-lines dump of canonical refinement predicate terms" {
     const args = [_]obligation.TermId{1};
     const terms = [_]obligation.Term{
-        .{ .variable = .{ .name = "amount", .ty = .{ .spelling = "u256" } } },
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 0, .pattern_id = 0 }, .name = "amount", .ty = .{ .spelling = "u256" } } } },
         .{ .int_lit = .{ .value = "1", .ty = .{ .spelling = "u256" } } },
         .{ .refinement_predicate = .{ .name = "MinValue", .value = 0, .args = &args } },
     };
@@ -696,7 +725,7 @@ test "json-lines dump of canonical refinement predicate terms" {
         "{\"record\":\"artifact_decision\",\"status\":\"blocked\",\"reason\":\"missing_proof\"}\n" ++
             coverage_one_logical_three_terms ++
             "{\"record\":\"obligation\",\"id\":4,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"deposit\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"sema\",\"origin\":{\"tag\":\"sema_fact\",\"kind\":\"refinement_guard\",\"ordinal\":0},\"kind\":{\"tag\":\"logical\",\"role\":\"refinement\",\"formula\":{\"tag\":\"term\",\"id\":2}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n" ++
-            "{\"record\":\"term\",\"id\":0,\"term\":{\"tag\":\"variable\",\"value\":{\"name\":\"amount\",\"ty\":{\"tag\":\"spelling\",\"value\":\"u256\"}}}}\n" ++
+            "{\"record\":\"term\",\"id\":0,\"term\":{\"tag\":\"variable\",\"value\":{\"tag\":\"free\",\"id\":{\"file_id\":0,\"pattern_id\":0},\"name\":\"amount\",\"ty\":{\"tag\":\"spelling\",\"value\":\"u256\"}}}}\n" ++
             "{\"record\":\"term\",\"id\":1,\"term\":{\"tag\":\"int_lit\",\"value\":\"1\",\"ty\":{\"tag\":\"spelling\",\"value\":\"u256\"}}}\n" ++
             "{\"record\":\"term\",\"id\":2,\"term\":{\"tag\":\"refinement_predicate\",\"name\":\"MinValue\",\"value\":0,\"args\":[1]}}\n",
         actual,

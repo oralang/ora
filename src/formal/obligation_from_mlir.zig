@@ -84,6 +84,12 @@ const transparent_value_ops = std.StaticStringMap(void).initComptime(.{
     .{ "tensor.cast", {} },
 });
 
+const arithmetic_value_op_map = std.StaticStringMap(obligation.BinaryOp).initComptime(.{
+    .{ "arith.addi", .add },
+    .{ "arith.subi", .sub },
+    .{ "arith.muli", .mul },
+});
+
 const ResourceRootOp = enum(u8) {
     storage_load,
     transient_load,
@@ -143,6 +149,7 @@ pub fn collect(
     try collector.addBaseQueriesForFunctionOwners();
 
     const set: obligation.ObligationSet = .{
+        .terms = try collector.terms.toOwnedSlice(collector.allocator),
         .obligations = try collector.obligations.toOwnedSlice(collector.allocator),
         .assumptions = try collector.assumptions.toOwnedSlice(collector.allocator),
         .queries = try collector.queries.toOwnedSlice(collector.allocator),
@@ -158,12 +165,24 @@ pub fn collect(
 const Collector = struct {
     allocator: std.mem.Allocator,
     options: CollectOptions,
+    terms: std.ArrayList(obligation.Term) = .empty,
     obligations: std.ArrayList(obligation.Obligation) = .empty,
     assumptions: std.ArrayList(obligation.Assumption) = .empty,
     queries: std.ArrayList(obligation.VerificationQuery) = .empty,
     diagnostics: std.ArrayList(obligation.ObligationDiagnostic) = .empty,
+    active_binders: std.ArrayList(BinderFrame) = .empty,
     next_id: obligation.Id = 1,
     next_ordinal: u32 = 0,
+    function_param_names: []const []const u8 = &.{},
+    function_param_binding_ids: []const obligation.FreeVarId = &.{},
+
+    const synthetic_file_id = std.math.maxInt(u32);
+
+    const BinderFrame = struct {
+        name: []const u8,
+        ty: obligation.TypeRef,
+        region: ?obligation.RegionRef = null,
+    };
 
     const ResourcePlaces = struct {
         source: ?obligation.PlaceRef = null,
@@ -181,11 +200,43 @@ const Collector = struct {
         const ordinal = self.nextOrdinal();
         const op_name = operationName(op);
         const symbol = try self.symbolForOperation(op, op_name, inherited_symbol);
+        const previous_param_names = self.function_param_names;
+        const previous_param_binding_ids = self.function_param_binding_ids;
+        const previous_binder_len = self.active_binders.items.len;
+        const is_function = std.mem.eql(u8, op_name, "func.func");
+        if (is_function) {
+            self.function_param_names = (try self.stringArrayAttr(op, "ora.param_names")) orelse &.{};
+            self.function_param_binding_ids = (try self.freeVarIdArrayAttr(op, "ora.param_binding_ids")) orelse &.{};
+            if (self.function_param_names.len != 0 and self.function_param_binding_ids.len == 0) {
+                try self.addBlockingDiagnostic(
+                    .missing_type,
+                    "func.func has ora.param_names but is missing ora.param_binding_ids",
+                );
+            } else if (self.function_param_binding_ids.len != 0 and
+                self.function_param_names.len != 0 and
+                self.function_param_binding_ids.len != self.function_param_names.len)
+            {
+                try self.addBlockingDiagnosticFmt(
+                    .missing_type,
+                    "ora.param_binding_ids has {d} entries but ora.param_names has {d}",
+                    .{ self.function_param_binding_ids.len, self.function_param_names.len },
+                );
+            }
+            self.active_binders.shrinkRetainingCapacity(previous_binder_len);
+        }
+        defer {
+            if (is_function) {
+                self.active_binders.shrinkRetainingCapacity(previous_binder_len);
+                self.function_param_binding_ids = previous_param_binding_ids;
+                self.function_param_names = previous_param_names;
+            }
+        }
+
         try self.collectEffectFrameAttrs(op, op_name, symbol, ordinal);
         if (op_kind_map.get(op_name)) |kind| {
             try self.collectOperation(op, kind, op_name, symbol, ordinal);
         } else if (arithmetic_op_map.get(op_name)) |safety| {
-            try self.addArithmeticSafetyOp(op_name, symbol, ordinal, safety, null);
+            try self.addArithmeticSafetyOp(op_name, symbol, ordinal, safety, null, try self.sourceForOperation(op));
         }
 
         const num_regions = mlir.oraOperationGetNumRegions(op);
@@ -214,19 +265,23 @@ const Collector = struct {
         const write_slots = (try self.placeArrayAttr(op, "ora.write_slots")) orelse &.{};
         const read_slots = (try self.placeArrayAttr(op, "ora.read_slots")) orelse &.{};
         const modifies_slots = (try self.placeArrayAttr(op, "ora.modifies_slots")) orelse &.{};
+        const source = try self.sourceForOperation(op);
 
         if (write_slots.len != 0 or modifies_slots.len != 0) {
-            try self.addEffectFrameGoal(.write_covered_by_modifies, modifies_slots, write_slots, op_name, symbol, ordinal);
+            try self.addEffectFrameGoal(.write_covered_by_modifies, modifies_slots, write_slots, op_name, symbol, ordinal, source);
         }
         if (read_slots.len != 0) {
-            try self.addEffectFrameGoal(.read_preserved_by_frame, write_slots, read_slots, op_name, symbol, ordinal);
+            const preserved_reads = try self.readsDisjointFromWrites(read_slots, write_slots);
+            if (preserved_reads.len != 0) {
+                try self.addEffectFrameGoal(.read_preserved_by_frame, write_slots, preserved_reads, op_name, symbol, ordinal, source);
+            }
         }
 
         if (std.mem.eql(u8, op_name, "ora.lock")) {
             if (try self.placeAttr(op, "key")) |locked| {
                 const declared = try self.allocator.alloc(obligation.PlaceRef, 1);
                 declared[0] = locked;
-                try self.addEffectFrameGoal(.lock_covers_write, declared, &.{}, op_name, symbol, ordinal);
+                try self.addEffectFrameGoal(.lock_covers_write, declared, &.{}, op_name, symbol, ordinal, source);
             } else {
                 try self.addBlockingDiagnostic(.missing_effect_path, "ora.lock missing key attribute");
             }
@@ -238,7 +293,7 @@ const Collector = struct {
                 .root = frame,
                 .region = .none,
             };
-            try self.addEffectFrameGoal(.external_call_frame, declared, &.{}, op_name, symbol, ordinal);
+            try self.addEffectFrameGoal(.external_call_frame, declared, &.{}, op_name, symbol, ordinal, source);
         }
     }
 
@@ -250,6 +305,7 @@ const Collector = struct {
         op_name: []const u8,
         symbol: ?[]const u8,
         ordinal: u32,
+        source: obligation.SourceRef,
     ) !void {
         const origin = mlirOrigin(op_name, symbol, ordinal);
         const owner = self.ownerFor(symbol);
@@ -257,7 +313,7 @@ const Collector = struct {
         try self.obligations.append(self.allocator, .{
             .id = id,
             .owner = owner,
-            .source = .generated(),
+            .source = source,
             .phase = .ora_mlir,
             .origin = origin,
             .kind = .{ .effect_frame = .{
@@ -266,7 +322,21 @@ const Collector = struct {
                 .actual = actual,
             } },
         });
-        try self.addQuery(.obligation, null, null, id, owner, origin);
+        try self.addQueryNoAssumptions(.obligation, null, null, id, owner, origin, source);
+    }
+
+    fn readsDisjointFromWrites(
+        self: *Collector,
+        reads: []const obligation.PlaceRef,
+        writes: []const obligation.PlaceRef,
+    ) ![]const obligation.PlaceRef {
+        if (reads.len == 0) return &.{};
+
+        var preserved: std.ArrayList(obligation.PlaceRef) = .empty;
+        for (reads) |read| {
+            if (!placeListContains(writes, read)) try preserved.append(self.allocator, read);
+        }
+        return try preserved.toOwnedSlice(self.allocator);
     }
 
     fn collectOperation(
@@ -328,7 +398,7 @@ const Collector = struct {
         try self.obligations.append(self.allocator, .{
             .id = self.nextId(),
             .owner = self.ownerFor(symbol),
-            .source = .generated(),
+            .source = try self.sourceForOperation(op),
             .phase = .ora_mlir,
             .origin = mlirOrigin(op_name, symbol, ordinal),
             .kind = .{ .quantifier = .{
@@ -355,7 +425,9 @@ const Collector = struct {
         var handled_tag = false;
 
         if (hasAttr(op, "ora.requires")) {
-            try self.addAssumptionOp(op, op_name, symbol, ordinal, .requires);
+            // `ora.requires` is emitted as the semantic precondition; the
+            // tagged assert is the runtime enforcement mirror and should not
+            // duplicate the formal assumption.
             handled_tag = true;
         }
         if (hasAttr(op, "ora.ensures")) {
@@ -373,11 +445,11 @@ const Collector = struct {
 
         if (!handled_tag) {
             if (arithmeticSafetyFromAssertOp(op)) |safety| {
-                const formula = self.formulaOperand(op, op_name, symbol, ordinal, 0) orelse {
+                const formula = (try self.formulaOperand(op, op_name, symbol, ordinal, 0)) orelse {
                     try self.addMissingFormulaDiagnostic(op_name, symbol, ordinal);
                     return;
                 };
-                try self.addArithmeticSafetyOp(op_name, symbol, ordinal, safety, formula);
+                try self.addArithmeticSafetyOp(op_name, symbol, ordinal, safety, formula, try self.sourceForOperation(op));
                 return;
             }
             try self.addLogicalOp(op, op_name, symbol, ordinal, default_role);
@@ -396,18 +468,19 @@ const Collector = struct {
         symbol: ?[]const u8,
         ordinal: u32,
     ) !void {
-        const formula = self.formulaOperand(op, op_name, symbol, ordinal, 0) orelse {
+        const formula = (try self.formulaOperand(op, op_name, symbol, ordinal, 0)) orelse {
             try self.addMissingFormulaDiagnostic(op_name, symbol, ordinal);
             return;
         };
         const origin = mlirOrigin(op_name, symbol, ordinal);
         const owner = self.ownerFor(symbol);
+        const source = try self.sourceForOperation(op);
         if (try self.stringAttr(op, "ora.guard_id")) |guard_id| {
             const id = self.nextId();
             try self.obligations.append(self.allocator, .{
                 .id = id,
                 .owner = owner,
-                .source = .generated(),
+                .source = source,
                 .phase = .ora_mlir,
                 .origin = origin,
                 .kind = .{ .runtime_guard = .{
@@ -416,14 +489,14 @@ const Collector = struct {
                     .erasure = .may_elide_if_proven,
                 } },
             });
-            try self.addQuery(.guard_satisfy, null, guard_id, id, owner, origin);
-            try self.addQuery(.guard_violate, null, guard_id, id, owner, origin);
+            try self.addQuery(.guard_satisfy, null, guard_id, id, owner, origin, source);
+            try self.addQuery(.guard_violate, null, guard_id, id, owner, origin, source);
         } else {
             const id = self.nextId();
             try self.obligations.append(self.allocator, .{
                 .id = id,
                 .owner = owner,
-                .source = .generated(),
+                .source = source,
                 .phase = .ora_mlir,
                 .origin = origin,
                 .kind = .{ .logical = .{
@@ -431,7 +504,7 @@ const Collector = struct {
                     .formula = formula,
                 } },
             });
-            try self.addQuery(.obligation, .guard, null, id, owner, origin);
+            try self.addQuery(.obligation, .guard, null, id, owner, origin, source);
         }
     }
 
@@ -464,18 +537,19 @@ const Collector = struct {
         ordinal: u32,
         role: obligation.LogicalRole,
     ) !void {
-        const formula = self.formulaOperand(op, op_name, symbol, ordinal, 0) orelse {
+        const formula = (try self.formulaOperand(op, op_name, symbol, ordinal, 0)) orelse {
             try self.addMissingFormulaDiagnostic(op_name, symbol, ordinal);
             return;
         };
         const origin = mlirOrigin(op_name, symbol, ordinal);
         const owner = self.ownerFor(symbol);
         const id = self.nextId();
+        const source = try self.sourceForOperation(op);
 
         try self.obligations.append(self.allocator, .{
             .id = id,
             .owner = owner,
-            .source = .generated(),
+            .source = source,
             .phase = .ora_mlir,
             .origin = origin,
             .kind = .{ .logical = .{
@@ -483,7 +557,7 @@ const Collector = struct {
                 .formula = formula,
             } },
         });
-        try self.addQuery(.obligation, role, null, id, owner, origin);
+        try self.addQuery(.obligation, role, null, id, owner, origin, source);
     }
 
     fn addAssumptionOp(
@@ -494,7 +568,7 @@ const Collector = struct {
         ordinal: u32,
         kind: obligation.AssumptionKind,
     ) !void {
-        const formula = self.formulaOperand(op, op_name, symbol, ordinal, 0) orelse {
+        const formula = (try self.formulaOperand(op, op_name, symbol, ordinal, 0)) orelse {
             try self.addMissingFormulaDiagnostic(op_name, symbol, ordinal);
             return;
         };
@@ -502,7 +576,7 @@ const Collector = struct {
         try self.assumptions.append(self.allocator, .{
             .id = self.nextId(),
             .owner = self.ownerFor(symbol),
-            .source = .generated(),
+            .source = try self.sourceForOperation(op),
             .phase = .ora_mlir,
             .origin = mlirOrigin(op_name, symbol, ordinal),
             .kind = kind,
@@ -517,7 +591,7 @@ const Collector = struct {
         symbol: ?[]const u8,
         ordinal: u32,
     ) !void {
-        const formula = self.formulaOperand(op, op_name, symbol, ordinal, 0) orelse {
+        const formula = (try self.formulaOperand(op, op_name, symbol, ordinal, 0)) orelse {
             try self.addMissingFormulaDiagnostic(op_name, symbol, ordinal);
             return;
         };
@@ -528,11 +602,12 @@ const Collector = struct {
         const origin = mlirOrigin(op_name, symbol, ordinal);
         const owner = self.ownerFor(symbol);
         const id = self.nextId();
+        const source = try self.sourceForOperation(op);
 
         try self.obligations.append(self.allocator, .{
             .id = id,
             .owner = owner,
-            .source = .generated(),
+            .source = source,
             .phase = .ora_mlir,
             .origin = origin,
             .kind = .{ .runtime_guard = .{
@@ -541,8 +616,8 @@ const Collector = struct {
                 .erasure = .may_elide_if_proven,
             } },
         });
-        try self.addQuery(.guard_satisfy, null, guard_id, id, owner, origin);
-        try self.addQuery(.guard_violate, null, guard_id, id, owner, origin);
+        try self.addQuery(.guard_satisfy, null, guard_id, id, owner, origin, source);
+        try self.addQuery(.guard_violate, null, guard_id, id, owner, origin, source);
     }
 
     fn addResourceOp(
@@ -563,11 +638,15 @@ const Collector = struct {
             return;
         }
         const amount_index = operand_count - 1;
-        const amount = self.formulaOperand(op, op_name, symbol, ordinal, @intCast(amount_index)).?;
+        const amount = (try self.formulaOperand(op, op_name, symbol, ordinal, @intCast(amount_index))) orelse {
+            try self.addMissingFormulaDiagnostic(op_name, symbol, ordinal);
+            return;
+        };
         const places = try self.resourcePlaces(op, resource_op, operand_count, op_name) orelse return;
+        const source = try self.sourceForOperation(op);
 
         for (resourceProperties(resource_op)) |property| {
-            try self.addResourceGoal(resource_op, domain, places, amount, symbol, ordinal, property);
+            try self.addResourceGoal(resource_op, domain, places, amount, symbol, ordinal, property, source);
         }
     }
 
@@ -767,6 +846,7 @@ const Collector = struct {
         symbol: ?[]const u8,
         ordinal: u32,
         property: obligation.ResourceProperty,
+        source: obligation.SourceRef,
     ) !void {
         const origin: obligation.Origin = .{ .resource_op = .{
             .op = resource_op,
@@ -778,7 +858,7 @@ const Collector = struct {
         try self.obligations.append(self.allocator, .{
             .id = id,
             .owner = owner,
-            .source = .generated(),
+            .source = source,
             .phase = .ora_mlir,
             .origin = origin,
             .kind = .{ .resource = .{
@@ -790,7 +870,7 @@ const Collector = struct {
                 .property = property,
             } },
         });
-        try self.addQuery(.obligation, null, null, id, owner, origin);
+        try self.addQuery(.obligation, null, null, id, owner, origin, source);
     }
 
     fn addArithmeticSafetyOp(
@@ -800,6 +880,7 @@ const Collector = struct {
         ordinal: u32,
         safety: obligation.ArithmeticSafetyKind,
         formula_override: ?obligation.FormulaRef,
+        source: obligation.SourceRef,
     ) !void {
         const origin = mlirOrigin(op_name, symbol, ordinal);
         const owner = self.ownerFor(symbol);
@@ -807,7 +888,7 @@ const Collector = struct {
         try self.obligations.append(self.allocator, .{
             .id = id,
             .owner = owner,
-            .source = .generated(),
+            .source = source,
             .phase = .ora_mlir,
             .origin = origin,
             .kind = .{ .logical = .{
@@ -816,7 +897,7 @@ const Collector = struct {
                 .arithmetic_safety = safety,
             } },
         });
-        try self.addQuery(.obligation, .arithmetic_safety, null, id, owner, origin);
+        try self.addQuery(.obligation, .arithmetic_safety, null, id, owner, origin, source);
     }
 
     fn addQuery(
@@ -827,20 +908,67 @@ const Collector = struct {
         obligation_id: obligation.Id,
         owner: obligation.Owner,
         origin: obligation.Origin,
+        source: obligation.SourceRef,
+    ) !void {
+        const assumption_ids = try self.assumptionIdsForOwner(owner);
+        try self.appendQuery(kind, logical_role, guard_id, obligation_id, owner, origin, source, assumption_ids);
+    }
+
+    fn addQueryNoAssumptions(
+        self: *Collector,
+        kind: obligation.VerificationQueryKind,
+        logical_role: ?obligation.LogicalRole,
+        guard_id: ?[]const u8,
+        obligation_id: obligation.Id,
+        owner: obligation.Owner,
+        origin: obligation.Origin,
+        source: obligation.SourceRef,
+    ) !void {
+        try self.appendQuery(kind, logical_role, guard_id, obligation_id, owner, origin, source, &.{});
+    }
+
+    fn appendQuery(
+        self: *Collector,
+        kind: obligation.VerificationQueryKind,
+        logical_role: ?obligation.LogicalRole,
+        guard_id: ?[]const u8,
+        obligation_id: obligation.Id,
+        owner: obligation.Owner,
+        origin: obligation.Origin,
+        source: obligation.SourceRef,
+        assumption_ids: []const obligation.Id,
     ) !void {
         const obligation_ids = try self.allocator.alloc(obligation.Id, 1);
         obligation_ids[0] = obligation_id;
         try self.queries.append(self.allocator, .{
             .id = self.nextId(),
             .owner = owner,
-            .source = .generated(),
+            .source = source,
             .phase = .report,
             .origin = origin,
             .kind = kind,
             .logical_role = logical_role,
             .guard_id = guard_id,
             .obligation_ids = obligation_ids,
+            .assumption_ids = assumption_ids,
         });
+    }
+
+    fn assumptionIdsForOwner(self: *Collector, owner: obligation.Owner) ![]const obligation.Id {
+        var count: usize = 0;
+        for (self.assumptions.items) |item| {
+            if (ownerEqual(item.owner, owner)) count += 1;
+        }
+        if (count == 0) return &.{};
+
+        const ids = try self.allocator.alloc(obligation.Id, count);
+        var index: usize = 0;
+        for (self.assumptions.items) |item| {
+            if (!ownerEqual(item.owner, owner)) continue;
+            ids[index] = item.id;
+            index += 1;
+        }
+        return ids;
     }
 
     fn addBaseQueriesForFunctionOwners(self: *Collector) !void {
@@ -881,14 +1009,343 @@ const Collector = struct {
         symbol: ?[]const u8,
         ordinal: u32,
         operand_index: u32,
-    ) ?obligation.FormulaRef {
-        _ = self;
+    ) !?obligation.FormulaRef {
         if (mlir.oraOperationGetNumOperands(op) <= operand_index) return null;
+        const value = mlir.oraOperationGetOperand(op, operand_index);
+        if (try self.termFromValue(value)) |term| {
+            var formula: obligation.FormulaRef = .{ .term = term };
+            if (self.function_param_names.len != 0 and
+                !std.mem.eql(u8, op_name, "ora.requires") and
+                !std.mem.eql(u8, op_name, "ora.assume") and
+                !hasAttr(op, "ora.requires"))
+            {
+                formula = .{ .term = try self.wrapFunctionParamsWithOwnerAssumptions(term, self.ownerFor(symbol)) };
+            }
+            return formula;
+        }
         return .{ .origin_value = .{
             .origin = mlirOrigin(op_name, symbol, ordinal),
             .kind = .operand,
             .index = operand_index,
         } };
+    }
+
+    fn termFromValue(self: *Collector, value: mlir.MlirValue) anyerror!?obligation.TermId {
+        if (mlir.oraValueIsNull(value)) return null;
+
+        if (mlir.mlirValueIsABlockArgument(value)) {
+            const raw_arg_number = mlir.mlirBlockArgumentGetArgNumber(value);
+            if (raw_arg_number < 0) return null;
+            const arg_number: usize = @intCast(raw_arg_number);
+            const name = if (arg_number < self.function_param_names.len)
+                self.function_param_names[arg_number]
+            else
+                try std.fmt.allocPrint(self.allocator, "arg#{d}", .{arg_number});
+            return try self.addTerm(.{ .variable = .{
+                .free = .{
+                    .id = self.freeVarIdForFunctionParam(arg_number),
+                    .name = name,
+                    .ty = .{ .spelling = "u256" },
+                },
+            } });
+        }
+
+        if (!mlir.oraValueIsAOpResult(value)) return null;
+        const owner = mlir.oraOpResultGetOwner(value);
+        if (mlir.oraOperationIsNull(owner)) return null;
+
+        const owner_name = operationName(owner);
+        if (isTransparentValueOp(owner_name)) {
+            if (mlir.oraOperationGetNumOperands(owner) == 0) return null;
+            return try self.termFromValue(mlir.oraOperationGetOperand(owner, 0));
+        }
+        if (std.mem.eql(u8, owner_name, "arith.constant")) return try self.constantTerm(owner);
+        if (arithmetic_value_op_map.get(owner_name)) |binary_op| return try self.binaryTermFromOperands(owner, binary_op);
+        if (std.mem.eql(u8, owner_name, "arith.xori")) return try self.xoriTerm(owner);
+        if (std.mem.eql(u8, owner_name, "arith.cmpi")) return try self.cmpiTerm(owner);
+        if (std.mem.eql(u8, owner_name, "ora.cmp")) return try self.oraCmpTerm(owner);
+        if (std.mem.eql(u8, owner_name, "ora.quantified")) return try self.quantifiedTerm(owner);
+        return null;
+    }
+
+    fn constantTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
+        if (try self.stringAttr(op, "ora.bound_variable")) |name| {
+            const binder = self.boundVariableForName(name) orelse {
+                try self.addBlockingDiagnosticFmt(.missing_formula, "bound variable '{s}' has no active binder", .{name});
+                return null;
+            };
+            return try self.addTerm(.{ .variable = .{
+                .bound = binder,
+            } });
+        }
+
+        const value_attr = mlir.oraOperationGetAttributeByName(op, strRef("value"));
+        if (mlir.oraAttributeIsNull(value_attr)) return null;
+
+        const text = mlir.oraIntegerAttrGetValueString(value_attr);
+        defer if (text.data != null) mlir.oraStringRefFree(text);
+        if (text.data != null) {
+            if (operationResultIsI1(op)) {
+                const literal = std.mem.trim(u8, text.data[0..text.length], " \t\n\r");
+                if (std.mem.eql(u8, literal, "0")) return try self.addTerm(.{ .bool_lit = false });
+                if (std.mem.eql(u8, literal, "1")) return try self.addTerm(.{ .bool_lit = true });
+            }
+            return try self.addTerm(.{ .int_lit = .{
+                .value = try normalizeU256LiteralText(self.allocator, text.data[0..text.length]),
+                .ty = .{ .spelling = "u256" },
+            } });
+        }
+
+        return try self.addTerm(.{ .bool_lit = mlir.oraBoolAttrGetValue(value_attr) });
+    }
+
+    fn cmpiTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
+        if (mlir.oraOperationGetNumOperands(op) < 2) return null;
+        const predicate_attr = mlir.oraOperationGetAttributeByName(op, strRef("predicate"));
+        if (mlir.oraAttributeIsNull(predicate_attr)) return null;
+        const binary_op = cmpiPredicateToBinaryOp(mlir.oraIntegerAttrGetValueSInt(predicate_attr)) orelse return null;
+        return try self.binaryTermFromOperands(op, binary_op);
+    }
+
+    fn oraCmpTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
+        if (mlir.oraOperationGetNumOperands(op) < 2) return null;
+        var predicate = stringAttrView(op, "predicate") orelse return null;
+        const binary_op = stringPredicateToBinaryOp(predicate.slice()) orelse return null;
+        return try self.binaryTermFromOperands(op, binary_op);
+    }
+
+    fn xoriTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
+        if (mlir.oraOperationGetNumOperands(op) < 2) return null;
+        const lhs = (try self.termFromValue(mlir.oraOperationGetOperand(op, 0))) orelse return null;
+        const rhs = (try self.termFromValue(mlir.oraOperationGetOperand(op, 1))) orelse return null;
+        if (self.termIsBoolLiteral(rhs, true)) {
+            return try self.addTerm(.{ .unary = .{ .op = .not, .operand = lhs } });
+        }
+        if (self.termIsBoolLiteral(lhs, true)) {
+            return try self.addTerm(.{ .unary = .{ .op = .not, .operand = rhs } });
+        }
+        return null;
+    }
+
+    fn termIsBoolLiteral(self: *Collector, id: obligation.TermId, value: bool) bool {
+        if (id >= self.terms.items.len) return false;
+        const term = self.terms.items[id];
+        return term == .bool_lit and term.bool_lit == value;
+    }
+
+    fn binaryTermFromOperands(self: *Collector, op: mlir.MlirOperation, binary_op: obligation.BinaryOp) anyerror!?obligation.TermId {
+        const lhs = (try self.termFromValue(mlir.oraOperationGetOperand(op, 0))) orelse return null;
+        const rhs = (try self.termFromValue(mlir.oraOperationGetOperand(op, 1))) orelse return null;
+        return try self.addTerm(.{ .binary = .{
+            .op = binary_op,
+            .lhs = lhs,
+            .rhs = rhs,
+        } });
+    }
+
+    fn quantifiedTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
+        var quantifier_view = stringAttrView(op, "quantifier") orelse return null;
+        const quantifier = quantifier_map.get(quantifier_view.slice()) orelse return null;
+        const variable = try self.stringAttr(op, "variable") orelse return null;
+        const variable_type = try self.stringAttr(op, "variable_type") orelse return null;
+        const operand_count = mlir.oraOperationGetNumOperands(op);
+        if (operand_count == 0) return null;
+
+        const binder_depth = self.active_binders.items.len;
+        try self.active_binders.append(self.allocator, .{
+            .name = variable,
+            .ty = .{ .spelling = variable_type },
+        });
+        defer self.active_binders.shrinkRetainingCapacity(binder_depth);
+
+        const has_condition = operand_count >= 2;
+        const condition = if (has_condition)
+            (try self.termFromValue(mlir.oraOperationGetOperand(op, 0))) orelse return null
+        else
+            null;
+        const body_operand_index: usize = if (has_condition) 1 else 0;
+        const body = (try self.termFromValue(mlir.oraOperationGetOperand(op, body_operand_index))) orelse return null;
+        return try self.addTerm(.{ .quantified = .{
+            .quantifier = quantifier,
+            .binder = .{
+                .name = variable,
+                .ty = .{ .spelling = variable_type },
+            },
+            .condition = condition,
+            .body = body,
+        } });
+    }
+
+    fn wrapFunctionParamsWithOwnerAssumptions(
+        self: *Collector,
+        term: obligation.TermId,
+        owner: obligation.Owner,
+    ) anyerror!obligation.TermId {
+        const condition = try self.combinedAssumptionConditionForOwner(owner);
+        var current = term;
+        var condition_available = condition;
+        var index = self.function_param_names.len;
+        while (index != 0) {
+            index -= 1;
+            const param_id = self.freeVarIdForFunctionParam(index);
+            const param_ty: obligation.TypeRef = .{ .spelling = "u256" };
+            current = try self.bindFreeVariableInTerm(current, param_id, self.function_param_names[index], param_ty);
+            if (condition_available) |condition_term| {
+                condition_available = try self.bindFreeVariableInTerm(condition_term, param_id, self.function_param_names[index], param_ty);
+            }
+            current = try self.addTerm(.{ .quantified = .{
+                .quantifier = .forall,
+                .binder = .{
+                    .name = self.function_param_names[index],
+                    .ty = param_ty,
+                },
+                .condition = condition_available,
+                .body = current,
+            } });
+            condition_available = null;
+        }
+        return current;
+    }
+
+    fn bindFreeVariableInTerm(
+        self: *Collector,
+        term: obligation.TermId,
+        free_id: obligation.FreeVarId,
+        name: []const u8,
+        ty: obligation.TypeRef,
+    ) anyerror!obligation.TermId {
+        return self.bindFreeVariableInTermAtDepth(term, free_id, name, ty, 0);
+    }
+
+    fn bindFreeVariableInTermAtDepth(
+        self: *Collector,
+        term_id: obligation.TermId,
+        free_id: obligation.FreeVarId,
+        name: []const u8,
+        ty: obligation.TypeRef,
+        binder_depth: u32,
+    ) anyerror!obligation.TermId {
+        if (term_id >= self.terms.items.len) return error.InvalidTermReference;
+        return switch (self.terms.items[term_id]) {
+            .bool_lit,
+            .int_lit,
+            .result,
+            .place_read,
+            => term_id,
+            .variable => |variable| switch (variable) {
+                .free => |free| {
+                    if (!freeVarIdEql(free.id, free_id)) return term_id;
+                    return try self.addTerm(.{ .variable = .{ .bound = .{
+                        .index = binder_depth,
+                        .name = name,
+                        .ty = free.ty orelse ty,
+                        .region = free.region,
+                    } } });
+                },
+                .bound => term_id,
+            },
+            .old => |operand| {
+                const rebound = try self.bindFreeVariableInTermAtDepth(operand, free_id, name, ty, binder_depth);
+                if (rebound == operand) return term_id;
+                return try self.addTerm(.{ .old = rebound });
+            },
+            .unary => |unary| {
+                const operand = try self.bindFreeVariableInTermAtDepth(unary.operand, free_id, name, ty, binder_depth);
+                if (operand == unary.operand) return term_id;
+                return try self.addTerm(.{ .unary = .{ .op = unary.op, .operand = operand } });
+            },
+            .binary => |binary| {
+                const lhs = try self.bindFreeVariableInTermAtDepth(binary.lhs, free_id, name, ty, binder_depth);
+                const rhs = try self.bindFreeVariableInTermAtDepth(binary.rhs, free_id, name, ty, binder_depth);
+                if (lhs == binary.lhs and rhs == binary.rhs) return term_id;
+                return try self.addTerm(.{ .binary = .{
+                    .op = binary.op,
+                    .lhs = lhs,
+                    .rhs = rhs,
+                } });
+            },
+            .refinement_predicate => |predicate| {
+                const value = try self.bindFreeVariableInTermAtDepth(predicate.value, free_id, name, ty, binder_depth);
+                var changed = value != predicate.value;
+                if (predicate.args.len == 0) {
+                    if (!changed) return term_id;
+                    return try self.addTerm(.{ .refinement_predicate = .{
+                        .name = predicate.name,
+                        .value = value,
+                    } });
+                }
+                const args = try self.allocator.alloc(obligation.TermId, predicate.args.len);
+                for (predicate.args, 0..) |arg, arg_index| {
+                    args[arg_index] = try self.bindFreeVariableInTermAtDepth(arg, free_id, name, ty, binder_depth);
+                    changed = changed or args[arg_index] != arg;
+                }
+                if (!changed) return term_id;
+                return try self.addTerm(.{ .refinement_predicate = .{
+                    .name = predicate.name,
+                    .value = value,
+                    .args = args,
+                } });
+            },
+            .quantified => |quantified| {
+                const condition = if (quantified.condition) |condition_id|
+                    try self.bindFreeVariableInTermAtDepth(condition_id, free_id, name, ty, binder_depth + 1)
+                else
+                    null;
+                const body = try self.bindFreeVariableInTermAtDepth(quantified.body, free_id, name, ty, binder_depth + 1);
+                if (condition == quantified.condition and body == quantified.body) return term_id;
+                return try self.addTerm(.{ .quantified = .{
+                    .quantifier = quantified.quantifier,
+                    .binder = quantified.binder,
+                    .condition = condition,
+                    .body = body,
+                } });
+            },
+        };
+    }
+
+    fn boundVariableForName(self: *Collector, name: []const u8) ?obligation.BoundVarRef {
+        var index = self.active_binders.items.len;
+        var depth: u32 = 0;
+        while (index != 0) {
+            index -= 1;
+            const binder = self.active_binders.items[index];
+            if (std.mem.eql(u8, binder.name, name)) return .{
+                .index = depth,
+                .name = binder.name,
+                .ty = binder.ty,
+                .region = binder.region,
+            };
+            depth += 1;
+        }
+        return null;
+    }
+
+    fn freeVarIdForFunctionParam(self: *Collector, index: usize) obligation.FreeVarId {
+        if (index < self.function_param_binding_ids.len) return self.function_param_binding_ids[index];
+        return .{
+            .file_id = synthetic_file_id,
+            .pattern_id = @intCast(index),
+        };
+    }
+
+    fn combinedAssumptionConditionForOwner(self: *Collector, owner: obligation.Owner) !?obligation.TermId {
+        var current: ?obligation.TermId = null;
+        for (self.assumptions.items) |item| {
+            if (!ownerEqual(item.owner, owner)) continue;
+            const formula = item.formula orelse continue;
+            if (formula != .term) continue;
+            current = if (current) |lhs|
+                try self.addTerm(.{ .binary = .{ .op = .and_, .lhs = lhs, .rhs = formula.term } })
+            else
+                formula.term;
+        }
+        return current;
+    }
+
+    fn addTerm(self: *Collector, term: obligation.Term) !obligation.TermId {
+        const id: obligation.TermId = @intCast(self.terms.items.len);
+        try self.terms.append(self.allocator, term);
+        return id;
     }
 
     fn addMissingFormulaDiagnostic(
@@ -924,9 +1381,58 @@ const Collector = struct {
         try self.addBlockingDiagnostic(kind, try std.fmt.allocPrint(self.allocator, fmt, args));
     }
 
+    fn sourceForOperation(self: *Collector, op: mlir.MlirOperation) !obligation.SourceRef {
+        if (mlir.oraOperationIsNull(op)) return .generated();
+        const loc = mlir.oraOperationGetLocation(op);
+        if (mlir.oraLocationIsNull(loc)) return .generated();
+
+        const printed = mlir.oraLocationPrintToString(loc);
+        defer if (printed.data != null) mlir.oraStringRefFree(printed);
+        if (printed.data == null or printed.length == 0) return .generated();
+        return (try sourceRefFromLocationText(self.allocator, printed.data[0..printed.length])) orelse .generated();
+    }
+
     fn stringAttr(self: *Collector, op: mlir.MlirOperation, name: []const u8) !?[]const u8 {
         var value = stringAttrView(op, name) orelse return null;
         return try self.allocator.dupe(u8, value.slice());
+    }
+
+    fn stringArrayAttr(self: *Collector, op: mlir.MlirOperation, name: []const u8) !?[]const []const u8 {
+        const attr = mlir.oraOperationGetAttributeByName(op, strRef(name));
+        if (mlir.oraAttributeIsNull(attr)) return null;
+
+        const count: usize = @intCast(mlir.oraArrayAttrGetNumElements(attr));
+        const values = try self.allocator.alloc([]const u8, count);
+        for (values, 0..) |*slot, index| {
+            const element = mlir.oraArrayAttrGetElement(attr, @intCast(index));
+            var value = stringAttrValueView(element) orelse {
+                try self.addBlockingDiagnosticFmt(.missing_type, "{s} contains a non-string element", .{name});
+                return null;
+            };
+            slot.* = try self.allocator.dupe(u8, value.slice());
+        }
+        return values;
+    }
+
+    fn freeVarIdArrayAttr(self: *Collector, op: mlir.MlirOperation, name: []const u8) !?[]const obligation.FreeVarId {
+        const attr = mlir.oraOperationGetAttributeByName(op, strRef(name));
+        if (mlir.oraAttributeIsNull(attr)) return null;
+
+        const count: usize = @intCast(mlir.oraArrayAttrGetNumElements(attr));
+        const values = try self.allocator.alloc(obligation.FreeVarId, count);
+        for (values, 0..) |*slot, index| {
+            const element = mlir.oraArrayAttrGetElement(attr, @intCast(index));
+            var value = stringAttrValueView(element) orelse {
+                try self.addBlockingDiagnosticFmt(.missing_type, "{s} contains a non-string binding id", .{name});
+                return null;
+            };
+            const id_text = value.slice();
+            slot.* = parseFreeVarId(id_text) orelse {
+                try self.addBlockingDiagnosticFmt(.missing_type, "{s} contains malformed binding id '{s}'", .{ name, id_text });
+                return null;
+            };
+        }
+        return values;
     }
 
     fn placeArrayAttr(self: *Collector, op: mlir.MlirOperation, name: []const u8) !?[]const obligation.PlaceRef {
@@ -1061,6 +1567,82 @@ const Collector = struct {
     }
 };
 
+fn ownerEqual(lhs: obligation.Owner, rhs: obligation.Owner) bool {
+    return switch (lhs) {
+        .module => |left| switch (rhs) {
+            .module => |right| std.mem.eql(u8, left, right),
+            else => false,
+        },
+        .function => |left| switch (rhs) {
+            .function => |right| std.mem.eql(u8, left.name, right.name),
+            else => false,
+        },
+        .contract => |left| switch (rhs) {
+            .contract => |right| std.mem.eql(u8, left, right),
+            else => false,
+        },
+        .trait_method => |left| switch (rhs) {
+            .trait_method => |right| std.mem.eql(u8, left.trait_name, right.trait_name) and
+                std.mem.eql(u8, left.method_name, right.method_name) and
+                optionalStringEqual(left.impl_name, right.impl_name),
+            else => false,
+        },
+        .statement => |left| switch (rhs) {
+            .statement => |right| left.ordinal == right.ordinal and
+                std.mem.eql(u8, left.function_name, right.function_name),
+            else => false,
+        },
+        .backend => |left| switch (rhs) {
+            .backend => |right| left.component == right.component and std.mem.eql(u8, left.name, right.name),
+            else => false,
+        },
+    };
+}
+
+fn freeVarIdEql(lhs: obligation.FreeVarId, rhs: obligation.FreeVarId) bool {
+    return lhs.file_id == rhs.file_id and lhs.pattern_id == rhs.pattern_id;
+}
+
+fn parseFreeVarId(text: []const u8) ?obligation.FreeVarId {
+    var parts = std.mem.splitScalar(u8, text, ':');
+    const file_tag = parts.next() orelse return null;
+    if (!std.mem.eql(u8, file_tag, "file")) return null;
+    const file_text = parts.next() orelse return null;
+    const pattern_tag = parts.next() orelse return null;
+    if (!std.mem.eql(u8, pattern_tag, "pattern")) return null;
+    const pattern_text = parts.next() orelse return null;
+    if (parts.next() != null) return null;
+
+    return .{
+        .file_id = std.fmt.parseUnsigned(u32, file_text, 10) catch return null,
+        .pattern_id = std.fmt.parseUnsigned(u32, pattern_text, 10) catch return null,
+    };
+}
+
+fn optionalStringEqual(lhs: ?[]const u8, rhs: ?[]const u8) bool {
+    if (lhs == null or rhs == null) return lhs == null and rhs == null;
+    return std.mem.eql(u8, lhs.?, rhs.?);
+}
+
+fn operationResultIsI1(op: mlir.MlirOperation) bool {
+    if (mlir.oraOperationGetNumResults(op) != 1) return false;
+    const result = mlir.oraOperationGetResult(op, 0);
+    if (mlir.oraValueIsNull(result)) return false;
+    const ty = mlir.oraValueGetType(result);
+    if (mlir.oraTypeIsNull(ty)) return false;
+    if (!mlir.oraTypeIsAInteger(ty)) return false;
+    return mlir.oraIntegerTypeGetWidth(ty) == 1;
+}
+
+fn normalizeU256LiteralText(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    const trimmed = std.mem.trim(u8, text, " \t\n\r");
+    if (!std.mem.startsWith(u8, trimmed, "-")) return try allocator.dupe(u8, trimmed);
+
+    const signed = std.fmt.parseInt(i256, trimmed, 10) catch return try allocator.dupe(u8, trimmed);
+    const unsigned: u256 = @bitCast(signed);
+    return try std.fmt.allocPrint(allocator, "{d}", .{unsigned});
+}
+
 fn effectSlotPathRootEnd(path: []const u8) usize {
     for (path, 0..) |byte, index| {
         if (byte == '.' or byte == '[') return index;
@@ -1112,6 +1694,62 @@ fn operationName(op: mlir.MlirOperation) []const u8 {
     return name.data[0..name.length];
 }
 
+fn sourceRefFromLocationText(allocator: std.mem.Allocator, text: []const u8) !?obligation.SourceRef {
+    var cursor: usize = 0;
+    var best: ?obligation.SourceRef = null;
+    while (cursor < text.len) : (cursor += 1) {
+        if (text[cursor] != '"') continue;
+        const file_start = cursor + 1;
+        var file_end = file_start;
+        while (file_end < text.len) : (file_end += 1) {
+            if (text[file_end] == '"' and (file_end == file_start or text[file_end - 1] != '\\')) break;
+        }
+        if (file_end >= text.len) break;
+
+        var after = file_end + 1;
+        if (after >= text.len or text[after] != ':') {
+            cursor = file_end;
+            continue;
+        }
+        after += 1;
+        const line = parseU32At(text, &after) orelse {
+            cursor = file_end;
+            continue;
+        };
+        if (after >= text.len or text[after] != ':') {
+            cursor = file_end;
+            continue;
+        }
+        after += 1;
+        const column = parseU32At(text, &after) orelse {
+            cursor = file_end;
+            continue;
+        };
+
+        best = .{
+            .file = try allocator.dupe(u8, text[file_start..file_end]),
+            .line = line,
+            .column = column,
+        };
+        cursor = after;
+    }
+    return best;
+}
+
+fn parseU32At(text: []const u8, cursor: *usize) ?u32 {
+    const start = cursor.*;
+    var value: u32 = 0;
+    while (cursor.* < text.len) : (cursor.* += 1) {
+        const byte = text[cursor.*];
+        if (byte < '0' or byte > '9') break;
+        const digit: u32 = byte - '0';
+        value = std.math.mul(u32, value, 10) catch return null;
+        value = std.math.add(u32, value, digit) catch return null;
+    }
+    if (cursor.* == start) return null;
+    return value;
+}
+
 fn strRef(text: []const u8) mlir.MlirStringRef {
     return .{ .data = text.ptr, .length = text.len };
 }
@@ -1159,6 +1797,38 @@ fn appendField(
     return updated;
 }
 
+fn placeListContains(places: []const obligation.PlaceRef, needle: obligation.PlaceRef) bool {
+    for (places) |place| {
+        if (placeRefEql(place, needle)) return true;
+    }
+    return false;
+}
+
+fn placeRefEql(lhs: obligation.PlaceRef, rhs: obligation.PlaceRef) bool {
+    if (!std.mem.eql(u8, lhs.root, rhs.root)) return false;
+    if (lhs.region != rhs.region) return false;
+    if (lhs.fields.len != rhs.fields.len) return false;
+    if (lhs.keys.len != rhs.keys.len) return false;
+    for (lhs.fields, rhs.fields) |left, right| {
+        if (!std.mem.eql(u8, left, right)) return false;
+    }
+    for (lhs.keys, rhs.keys) |left, right| {
+        if (!placeKeyEql(left, right)) return false;
+    }
+    return true;
+}
+
+fn placeKeyEql(lhs: obligation.PlaceKey, rhs: obligation.PlaceKey) bool {
+    if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
+    return switch (lhs) {
+        .parameter => |value| value == rhs.parameter,
+        .comptime_parameter => |value| value == rhs.comptime_parameter,
+        .comptime_range_parameter => |value| value == rhs.comptime_range_parameter,
+        .constant => |value| std.mem.eql(u8, value, rhs.constant),
+        .msg_sender, .tx_origin, .unknown => true,
+    };
+}
+
 fn isTransparentValueOp(op_name: []const u8) bool {
     return transparent_value_ops.has(op_name);
 }
@@ -1168,6 +1838,38 @@ fn derivedFormula(op_name: []const u8, symbol: ?[]const u8, ordinal: u32) obliga
         .origin = mlirOrigin(op_name, symbol, ordinal),
         .kind = .derived,
     } };
+}
+
+fn cmpiPredicateToBinaryOp(predicate: i64) ?obligation.BinaryOp {
+    return switch (predicate) {
+        0 => .eq,
+        1 => .ne,
+        6 => .lt,
+        7 => .le,
+        8 => .gt,
+        9 => .ge,
+        else => null,
+    };
+}
+
+fn stringPredicateToBinaryOp(predicate: []const u8) ?obligation.BinaryOp {
+    const PredicateMap = std.StaticStringMap(obligation.BinaryOp);
+    const map = comptime PredicateMap.initComptime(.{
+        .{ "eq", .eq },
+        .{ "ne", .ne },
+        .{ "neq", .ne },
+        .{ "lt", .lt },
+        .{ "ult", .lt },
+        .{ "le", .le },
+        .{ "lte", .le },
+        .{ "ule", .le },
+        .{ "gt", .gt },
+        .{ "ugt", .gt },
+        .{ "ge", .ge },
+        .{ "gte", .ge },
+        .{ "uge", .ge },
+    });
+    return map.get(predicate);
 }
 
 const QuantifierBinderClassification = struct {
