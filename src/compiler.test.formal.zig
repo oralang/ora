@@ -161,6 +161,71 @@ fn expectPlaceRoot(place: obligation.PlaceRef, expected_root: []const u8, expect
     try testing.expectEqual(expected_region, place.region);
 }
 
+fn expectLogicalTerm(set: obligation.ObligationSet, role: obligation.LogicalRole) !obligation.TermId {
+    for (set.obligations) |item| {
+        if (item.kind != .logical or item.kind.logical.role != role) continue;
+        if (item.kind.logical.formula != .term) return error.TestUnexpectedResult;
+        return item.kind.logical.formula.term;
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn expectQuantifiedTerm(
+    set: obligation.ObligationSet,
+    term_id: obligation.TermId,
+    expected_quantifier: obligation.Quantifier,
+    expected_name: []const u8,
+) !obligation.QuantifiedTerm {
+    try testing.expect(term_id < set.terms.len);
+    try testing.expect(set.terms[term_id] == .quantified);
+    const quantified = set.terms[term_id].quantified;
+    try testing.expectEqual(expected_quantifier, quantified.quantifier);
+    try testing.expectEqualStrings(expected_name, quantified.binder.name);
+    return quantified;
+}
+
+fn expectBinaryTerm(
+    set: obligation.ObligationSet,
+    term_id: obligation.TermId,
+    expected_op: obligation.BinaryOp,
+) !obligation.BinaryTerm {
+    try testing.expect(term_id < set.terms.len);
+    try testing.expect(set.terms[term_id] == .binary);
+    const binary = set.terms[term_id].binary;
+    try testing.expectEqual(expected_op, binary.op);
+    return binary;
+}
+
+fn expectFreeVarTerm(
+    set: obligation.ObligationSet,
+    term_id: obligation.TermId,
+    expected_file_id: u32,
+    expected_pattern_id: u32,
+    expected_name: []const u8,
+) !void {
+    try testing.expect(term_id < set.terms.len);
+    try testing.expect(set.terms[term_id] == .variable);
+    const variable = set.terms[term_id].variable;
+    try testing.expect(variable == .free);
+    try testing.expectEqual(expected_file_id, variable.free.id.file_id);
+    try testing.expectEqual(expected_pattern_id, variable.free.id.pattern_id);
+    try testing.expectEqualStrings(expected_name, variable.free.name);
+}
+
+fn expectBoundVarTerm(
+    set: obligation.ObligationSet,
+    term_id: obligation.TermId,
+    expected_index: u32,
+    expected_name: []const u8,
+) !void {
+    try testing.expect(term_id < set.terms.len);
+    try testing.expect(set.terms[term_id] == .variable);
+    const variable = set.terms[term_id].variable;
+    try testing.expect(variable == .bound);
+    try testing.expectEqual(expected_index, variable.bound.index);
+    try testing.expectEqualStrings(expected_name, variable.bound.name);
+}
+
 fn expectSummaryMatchesZ3PreparedQueries(
     formal_summary: obligation.VerificationQuerySummary,
     z3_summary: z3_verification.PreparedQuerySummary,
@@ -1001,6 +1066,176 @@ test "formal obligation MLIR adapter collects verification markers and assumptio
     try testing.expect(guard.kind == .runtime_guard);
     try testing.expectEqualStrings("guard:checked:flag", guard.kind.runtime_guard.guard_id);
     try testing.expect(guard.kind.runtime_guard.formula == .term);
+}
+
+test "formal obligation MLIR adapter binds function params by compiler id not display name" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @same_display_name(%arg0: i256, %arg1: i256) attributes {
+        \\    ora.param_names = ["same", "same"],
+        \\    ora.param_binding_ids = ["file:7:pattern:10", "file:7:pattern:11"]
+        \\  } {
+        \\    %cmp = arith.cmpi ule, %arg0, %arg1 : i256
+        \\    "ora.ensures"(%cmp) : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
+
+    const outer = try expectQuantifiedTerm(result.set, try expectLogicalTerm(result.set, .ensures), .forall, "same");
+    const inner = try expectQuantifiedTerm(result.set, outer.body, .forall, "same");
+    const body = try expectBinaryTerm(result.set, inner.body, .le);
+    try expectBoundVarTerm(result.set, body.lhs, 1, "same");
+    try expectBoundVarTerm(result.set, body.rhs, 0, "same");
+}
+
+test "formal obligation MLIR adapter blocks named params without compiler binding ids" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @old_metadata(%arg0: i256) attributes {
+        \\    ora.param_names = ["x"]
+        \\  } {
+        \\    %cmp = arith.cmpi ule, %arg0, %arg0 : i256
+        \\    "ora.ensures"(%cmp) : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), result.set.diagnostics.len);
+    try testing.expectEqual(obligation.ArtifactBlockReason.blocking_diagnostic, result.set.artifactDecision().blocked);
+}
+
+test "formal obligation MLIR adapter binds function params in inserted forall conditions" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @bounded_by_requires(%arg0: i256) attributes {
+        \\    ora.param_names = ["x"],
+        \\    ora.param_binding_ids = ["file:9:pattern:3"]
+        \\  } {
+        \\    %c10 = arith.constant 10 : i256
+        \\    %req = arith.cmpi ult, %arg0, %c10 : i256
+        \\    "ora.requires"(%req) : (i1) -> ()
+        \\    %ens = arith.cmpi ule, %arg0, %c10 : i256
+        \\    "ora.ensures"(%ens) : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countAssumption(result.set, .requires));
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
+
+    const requires_formula = result.set.assumptions[0].formula orelse return error.TestUnexpectedResult;
+    try testing.expect(requires_formula == .term);
+    const requires_body = try expectBinaryTerm(result.set, requires_formula.term, .lt);
+    try expectFreeVarTerm(result.set, requires_body.lhs, 9, 3, "x");
+
+    const outer = try expectQuantifiedTerm(result.set, try expectLogicalTerm(result.set, .ensures), .forall, "x");
+    const condition_id = outer.condition orelse return error.TestUnexpectedResult;
+    const condition = try expectBinaryTerm(result.set, condition_id, .lt);
+    try expectBoundVarTerm(result.set, condition.lhs, 0, "x");
+    const body = try expectBinaryTerm(result.set, outer.body, .le);
+    try expectBoundVarTerm(result.set, body.lhs, 0, "x");
+}
+
+test "formal obligation MLIR adapter tracks nested forall binders with De Bruijn indexes" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @nested_forall() {
+        \\    %i = arith.constant {ora.bound_variable = "i"} 0 : i256
+        \\    %j = arith.constant {ora.bound_variable = "j"} 0 : i256
+        \\    %cmp = arith.cmpi ule, %i, %j : i256
+        \\    %inner = "ora.quantified"(%cmp) <{quantifier = "forall", variable = "j", variable_type = "u256"}> : (i1) -> i1
+        \\    %outer = "ora.quantified"(%inner) <{quantifier = "forall", variable = "i", variable_type = "u256"}> : (i1) -> i1
+        \\    "ora.assert"(%outer) <{message = "nested"}> : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .assert));
+
+    const outer = try expectQuantifiedTerm(result.set, try expectLogicalTerm(result.set, .assert), .forall, "i");
+    const inner = try expectQuantifiedTerm(result.set, outer.body, .forall, "j");
+    const body = try expectBinaryTerm(result.set, inner.body, .le);
+    try expectBoundVarTerm(result.set, body.lhs, 1, "i");
+    try expectBoundVarTerm(result.set, body.rhs, 0, "j");
+}
+
+test "formal obligation MLIR adapter resolves shadowed forall binders to nearest binder" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @shadowed_forall() {
+        \\    %i = arith.constant {ora.bound_variable = "i"} 0 : i256
+        \\    %cmp = arith.cmpi ule, %i, %i : i256
+        \\    %inner = "ora.quantified"(%cmp) <{quantifier = "forall", variable = "i", variable_type = "u256"}> : (i1) -> i1
+        \\    %outer = "ora.quantified"(%inner) <{quantifier = "forall", variable = "i", variable_type = "u256"}> : (i1) -> i1
+        \\    "ora.assert"(%outer) <{message = "shadowed"}> : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .assert));
+
+    const outer = try expectQuantifiedTerm(result.set, try expectLogicalTerm(result.set, .assert), .forall, "i");
+    const inner = try expectQuantifiedTerm(result.set, outer.body, .forall, "i");
+    const body = try expectBinaryTerm(result.set, inner.body, .le);
+    try expectBoundVarTerm(result.set, body.lhs, 0, "i");
+    try expectBoundVarTerm(result.set, body.rhs, 0, "i");
 }
 
 test "formal obligation MLIR adapter records effect frame summaries" {
