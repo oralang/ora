@@ -26,10 +26,35 @@ inductive TyRef where
   | compilerTypeId : Nat → TyRef
   deriving Repr, BEq, DecidableEq
 
-structure VarRef where
+structure FreeVarId where
+  file_id : Nat
+  pattern_id : Nat
+  deriving Repr, BEq, DecidableEq
+
+structure FreeVarRef where
+  id : FreeVarId
   name : String
   ty : Option TyRef := none
   region : Option RegionRef := none
+  deriving Repr, BEq, DecidableEq
+
+structure BoundVarRef where
+  /-- De Bruijn index: `0` is the nearest enclosing quantifier binder. -/
+  index : Nat
+  name : String := ""
+  ty : Option TyRef := none
+  region : Option RegionRef := none
+  deriving Repr, BEq, DecidableEq
+
+structure BinderRef where
+  name : String
+  ty : Option TyRef := none
+  region : Option RegionRef := none
+  deriving Repr, BEq, DecidableEq
+
+inductive VarRef where
+  | free : FreeVarRef → VarRef
+  | bound : BoundVarRef → VarRef
   deriving Repr, BEq, DecidableEq
 
 inductive PlaceKey where
@@ -127,7 +152,7 @@ structure RefinementPredicateTerm where
 
 structure QuantifiedTerm where
   quantifier : Quantifier
-  binder : VarRef
+  binder : BinderRef
   condition : Option TermId := none
   body : TermId
   deriving Repr, BEq, DecidableEq
@@ -196,6 +221,19 @@ inductive BackendProperty where
   | dependencyValid
   deriving Repr, BEq, DecidableEq
 
+inductive EffectFrameRelation where
+  | writeCoveredByModifies
+  | readPreservedByFrame
+  | lockCoversWrite
+  | externalCallFrame
+  deriving Repr, BEq, DecidableEq
+
+structure EffectFrameGoal where
+  relation : EffectFrameRelation
+  declared : List PlaceRef := []
+  actual : List PlaceRef := []
+  deriving Repr, BEq, DecidableEq
+
 structure ResourceGoal where
   op : ResourceOperation
   domain : String
@@ -223,6 +261,7 @@ structure BackendFactGoal where
 inductive ObligationKind where
   | logical : LogicalRole → FormulaRef → ObligationKind
   | runtimeGuard : String → FormulaRef → ObligationKind
+  | effectFrame : EffectFrameGoal → ObligationKind
   | resource : ResourceGoal → ObligationKind
   | quantifier : QuantifierGoal → ObligationKind
   | backendFact : BackendFactGoal → ObligationKind
@@ -305,9 +344,40 @@ def Term.wf (terms : List Term) : Term → Bool
       optionalTermRefInBounds terms q.condition &&
       termRefInBounds terms q.body
 
+def termRefBefore (id : TermId) (ref : TermId) : Bool :=
+  ref < id
+
+def optionalTermRefBefore (id : TermId) : Option TermId → Bool
+  | none => true
+  | some ref => termRefBefore id ref
+
+def Term.refsBefore (id : TermId) : Term → Bool
+  | .boolLit _ => true
+  | .intLit _ => true
+  | .variable _ => true
+  | .old ref => termRefBefore id ref
+  | .result => true
+  | .unary u => termRefBefore id u.operand
+  | .binary b =>
+      termRefBefore id b.lhs &&
+      termRefBefore id b.rhs
+  | .refinementPredicate p =>
+      termRefBefore id p.value &&
+      p.args.all (termRefBefore id)
+  | .quantified q =>
+      optionalTermRefBefore id q.condition &&
+      termRefBefore id q.body
+
+def termsTopologicalFrom : TermId → List Term → Bool
+  | _, [] => true
+  | id, term :: rest =>
+      term.refsBefore id &&
+      termsTopologicalFrom (id + 1) rest
+
 def ObligationKind.wf (terms : List Term) : ObligationKind → Bool
   | .logical _ formula => formula.wf terms
   | .runtimeGuard _ formula => formula.wf terms
+  | .effectFrame _ => true
   | .resource goal =>
       match goal.amount with
       | none => true
@@ -334,5 +404,8 @@ def Manifest.wf (manifest : Manifest) : Bool :=
   manifest.assumptions.all (AssumptionRow.wf manifest.terms) &&
   manifest.obligations.all (ObligationRow.wf manifest.terms) &&
   manifest.proofArtifacts.all (ProofArtifactRow.wf manifest.obligations)
+
+def Manifest.termsTopological (manifest : Manifest) : Bool :=
+  termsTopologicalFrom 0 manifest.terms
 
 end Ora.Obligation

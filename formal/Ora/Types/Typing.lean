@@ -5,7 +5,8 @@ This is the §5 typing relation from the type-system spec, as a Lean inductive. 
 a SKELETON: a minimal core-expression syntax and a representative set of rules, built
 so the judgment is real, derivable, and reasoned about inductively — reusing the
 already-proven `Ty.assignable` / `Located.assignable` for the side conditions, so
-subsumption and storage typing are sound by construction.
+subsumption and storage typing are checked relative to this skeleton's rules.
+This is not yet a compiler-wide soundness theorem.
 
 TWO deliberate design choices, made now so they are not future drift points:
 

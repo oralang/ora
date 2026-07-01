@@ -14,6 +14,7 @@ const type_descriptors = @import("sema/type_descriptors.zig");
 pub const obligation = @import("formal/obligation.zig");
 pub const obligation_crosscheck = @import("formal/obligation_crosscheck.zig");
 pub const obligation_dump = @import("formal/obligation_dump.zig");
+pub const proof_check = @import("formal/proof_check.zig");
 pub const obligation_to_lean = @import("formal/obligation_to_lean.zig");
 
 pub const builtin = ora_types.builtin;

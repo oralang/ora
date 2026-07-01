@@ -5,10 +5,10 @@
 # Phase 1 core-calculus mechanization can add `mathlib` here with a single
 # `[[require]]` block if/when the proofs need it).
 #
-# This package is a standalone PROOF project. It is checked by `lake build`
-# (the Lean kernel does the trusting). It is NOT a build or runtime dependency
-# of the `ora` compiler: `build.zig` does not reference it and nothing links
-# against it. See README.md ("Dependency posture").
+# This package is the Lean proof project. `lake build` is called by the formal
+# sync gate, and `ora --prove` may invoke Lean for supported userland proof
+# provider paths. The Lean code is not linked into the `ora` compiler binary.
+# See README.md ("Dependency posture").
 
 name = "ora"
 defaultTargets = ["Ora"]

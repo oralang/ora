@@ -86,7 +86,8 @@ def Effect.ofParts (r w : List Slot) (f : EffectFlags) : Effect :=
     · rfl
   all_goals rfl
 
-/-- Effect join (the `⊔` of §5): slot-union, flag-merge, via the canonical `ofParts`. -/
+/-- Effect join (the `⊔` of §5): ordered slot concatenation, flag-merge, via
+    the canonical `ofParts`. This skeleton does not deduplicate slots. -/
 def Effect.join (a b : Effect) : Effect :=
   Effect.ofParts (a.readSlots ++ b.readSlots) (a.writeSlots ++ b.writeSlots)
     (a.flags.merge b.flags)
@@ -98,8 +99,8 @@ def Effect.join (a b : Effect) : Effect :=
 @[simp] theorem Effect.join_flags (a b : Effect) :
     (a.join b).flags = a.flags.merge b.flags := by simp [Effect.join]
 
-/-- `join` is associative — unconditionally, since both sides canonicalize to the union
-    of slots and merge of flags. -/
+/-- `join` is associative — unconditionally, since both sides canonicalize to
+    the same ordered concatenation of slots and merge of flags. -/
 theorem Effect.join_assoc (a b c : Effect) :
     (a.join b).join c = a.join (b.join c) := by
   show Effect.ofParts _ _ _ = Effect.ofParts _ _ _
