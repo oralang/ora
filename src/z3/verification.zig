@@ -3503,21 +3503,20 @@ pub const VerificationPass = struct {
             }
 
             if (entry.vacuous) {
-                if (vacuousCoreContainsRequires(entry.explain_tags)) {
-                    try combined.addError(.{
-                        .error_type = .PreconditionViolation,
-                        .message = try std.fmt.allocPrint(
-                            self.allocator,
-                            "verification assumptions are inconsistent for {s} in {s}",
-                            .{ queryKindLabel(query.kind), query.function_name },
-                        ),
-                        .file = try self.allocator.dupe(u8, query.file),
-                        .line = query.line,
-                        .column = query.column,
-                        .counterexample = null,
-                        .allocator = self.allocator,
-                    });
-                }
+                const detail = entry.explain_str orelse firstFailClosedCoreAssumptionLabel(entry.explain_tags) orelse "tracked assumptions";
+                try combined.addError(.{
+                    .error_type = .PreconditionViolation,
+                    .message = try std.fmt.allocPrint(
+                        self.allocator,
+                        "verification assumptions are inconsistent for {s} in {s} ({s})",
+                        .{ queryKindLabel(query.kind), query.function_name, detail },
+                    ),
+                    .file = try self.allocator.dupe(u8, query.file),
+                    .line = query.line,
+                    .column = query.column,
+                    .counterexample = null,
+                    .allocator = self.allocator,
+                });
                 continue;
             }
 
@@ -7558,11 +7557,14 @@ const PreparedQueryResult = struct {
     vacuity_unknown: bool = false,
 };
 
-fn vacuousCoreContainsRequires(tags: []const AssumptionTag) bool {
+fn firstFailClosedCoreAssumptionLabel(tags: []const AssumptionTag) ?[]const u8 {
     for (tags) |tag| {
-        if (tag.kind == .requires) return true;
+        switch (tag.kind) {
+            .goal, .path_assume => continue,
+            else => return defaultTrackedAssumptionLabel(tag.kind),
+        }
     }
-    return false;
+    return null;
 }
 
 fn querySolverLogicLabel(logic: QuerySolverLogic) []const u8 {
@@ -8257,7 +8259,7 @@ fn runMandatoryVacuityCheck(
 
     const vacuity = try checkPreparedQueryTrackedAssumptions(self, solver, query, false);
     if (vacuity.status == z3.Z3_L_FALSE) {
-        if (vacuousCoreContainsRequires(vacuity.explain_tags)) {
+        if (firstFailClosedCoreAssumptionLabel(vacuity.explain_tags) != null) {
             if (log_prefix) |prefix| {
                 if (vacuity.explain_str) |core| {
                     std.debug.print("{s} note: assumptions inconsistent ({s})\n", .{ prefix, core });
@@ -8308,7 +8310,7 @@ fn runExplainCheck(
     if (query.kind != .Base) {
         const vacuity = try checkPreparedQueryTrackedAssumptions(self, solver, query, false);
         if (vacuity.status == z3.Z3_L_FALSE) {
-            if (vacuousCoreContainsRequires(vacuity.explain_tags)) {
+            if (firstFailClosedCoreAssumptionLabel(vacuity.explain_tags) != null) {
                 if (log_prefix) |prefix| {
                     if (vacuity.explain_str) |core| {
                         std.debug.print("{s} note: assumptions inconsistent ({s})\n", .{ prefix, core });
@@ -12816,6 +12818,97 @@ test "result collection fails closed on inconclusive vacuity check" {
     try testing.expectEqual(errors.VerificationErrorType.Unknown, collected.errors.items[0].error_type);
     try testing.expect(std.mem.containsAtLeast(u8, collected.errors.items[0].message, 1, "vacuity check was inconclusive for obligation in f"));
     try testing.expectEqual(@as(usize, 0), collected.proven_guard_positions.items.len);
+}
+
+test "non-requires inconsistent assumptions do not prove or erase guard" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const frame_proxy = try pass.solver.mkFreshBoolProxy("frame_inconsistent");
+    const tracked_assumptions = try testing.allocator.dupe(TrackedAssumption, &[_]TrackedAssumption{
+        .{
+            .proxy = frame_proxy,
+            .ast = z3.Z3_mk_false(pass.context.ctx),
+            .tag = .{
+                .kind = .frame,
+                .function_name = "f",
+                .file = "/tmp/test.ora",
+                .line = 6,
+                .column = 5,
+                .label = "injected frame contradiction",
+            },
+        },
+    });
+
+    var queries = [_]PreparedQuery{.{
+        .kind = .GuardViolate,
+        .function_name = "f",
+        .guard_id = "guard:test:frame-vacuity",
+        .file = "/tmp/test.ora",
+        .line = 7,
+        .column = 3,
+        .tracked_assumptions = tracked_assumptions,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "verification: f guard guard:test:frame-vacuity [violate]"),
+    }};
+    defer queries[0].deinit(testing.allocator);
+
+    var result = try pass.executePreparedQueriesSequential(queries[0..]);
+    defer result.deinit();
+
+    try testing.expect(!result.success);
+    try testing.expectEqual(@as(usize, 1), result.errors.items.len);
+    try testing.expectEqual(errors.VerificationErrorType.PreconditionViolation, result.errors.items[0].error_type);
+    try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "verification assumptions are inconsistent"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "frame condition"));
+    try testing.expect(!result.proven_guard_ids.contains("guard:test:frame-vacuity"));
+    try testing.expectEqual(@as(usize, 0), result.proven_guard_positions.items.len);
+    try testing.expectEqual(@as(usize, 0), result.z3_proofs.items.len);
+}
+
+test "pure path-assume contradiction still proves dead guard path" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const path_assumption = z3.Z3_mk_false(pass.context.ctx);
+    const path_proxy = try pass.solver.mkFreshBoolProxy("path_inconsistent");
+    const tracked_assumptions = try testing.allocator.dupe(TrackedAssumption, &[_]TrackedAssumption{
+        .{
+            .proxy = path_proxy,
+            .ast = path_assumption,
+            .tag = .{
+                .kind = .path_assume,
+                .function_name = "f",
+                .file = "/tmp/test.ora",
+                .line = 6,
+                .column = 5,
+                .label = "injected dead path",
+            },
+        },
+    });
+
+    var queries = [_]PreparedQuery{.{
+        .kind = .GuardViolate,
+        .function_name = "f",
+        .guard_id = "guard:test:path-vacuity",
+        .file = "/tmp/test.ora",
+        .line = 7,
+        .column = 3,
+        .constraints = try testing.allocator.dupe(z3.Z3_ast, &[_]z3.Z3_ast{path_assumption}),
+        .tracked_assumptions = tracked_assumptions,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(assert false)\n(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "verification: f guard guard:test:path-vacuity [violate]"),
+    }};
+    defer queries[0].deinit(testing.allocator);
+
+    var result = try pass.executePreparedQueriesSequential(queries[0..]);
+    defer result.deinit();
+
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors.items.len);
+    try testing.expect(result.proven_guard_ids.contains("guard:test:path-vacuity"));
+    try testing.expectEqual(@as(usize, 1), result.proven_guard_positions.items.len);
+    try testing.expectEqual(@as(usize, 0), result.z3_proofs.items.len);
 }
 
 test "prepared query result collection includes captured Z3 API message" {
