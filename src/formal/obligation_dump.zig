@@ -22,6 +22,7 @@ pub fn writeJsonLines(writer: anytype, set: obligation.ObligationSet) !void {
 
     for (set.assumptions) |item| {
         try writer.writeAll("{\"record\":\"assumption\"");
+        try writeSchemaVersionField(writer);
         try writeIdField(writer, "id", item.id);
         try writeOwnerField(writer, item.owner);
         try writeSourceField(writer, item.source);
@@ -34,6 +35,7 @@ pub fn writeJsonLines(writer: anytype, set: obligation.ObligationSet) !void {
 
     for (set.obligations) |item| {
         try writer.writeAll("{\"record\":\"obligation\"");
+        try writeSchemaVersionField(writer);
         try writeIdField(writer, "id", item.id);
         try writeOwnerField(writer, item.owner);
         try writeSourceField(writer, item.source);
@@ -48,6 +50,7 @@ pub fn writeJsonLines(writer: anytype, set: obligation.ObligationSet) !void {
 
     for (set.proof_artifacts) |item| {
         try writer.writeAll("{\"record\":\"proof_artifact\"");
+        try writeSchemaVersionField(writer);
         try writeIdField(writer, "id", item.id);
         try writeOwnerField(writer, item.owner);
         try writeSourceField(writer, item.source);
@@ -62,6 +65,7 @@ pub fn writeJsonLines(writer: anytype, set: obligation.ObligationSet) !void {
 
     for (set.queries) |item| {
         try writer.writeAll("{\"record\":\"query\"");
+        try writeSchemaVersionField(writer);
         try writeIdField(writer, "id", item.id);
         try writeOwnerField(writer, item.owner);
         try writeSourceField(writer, item.source);
@@ -84,6 +88,7 @@ pub fn writeJsonLines(writer: anytype, set: obligation.ObligationSet) !void {
 
     for (set.diagnostics) |item| {
         try writer.writeAll("{\"record\":\"diagnostic\"");
+        try writeSchemaVersionField(writer);
         try writeStringField(writer, "kind", @tagName(item.kind));
         try writeSourceField(writer, item.source);
         try writeStringField(writer, "message", item.message);
@@ -93,6 +98,7 @@ pub fn writeJsonLines(writer: anytype, set: obligation.ObligationSet) !void {
 
     for (set.terms, 0..) |item, index| {
         try writer.writeAll("{\"record\":\"term\"");
+        try writeSchemaVersionField(writer);
         try writeIdField(writer, "id", @intCast(index));
         try writeTermField(writer, item);
         try writer.writeAll("}\n");
@@ -101,6 +107,7 @@ pub fn writeJsonLines(writer: anytype, set: obligation.ObligationSet) !void {
 
 fn writeArtifactDecisionRecord(writer: anytype, set: obligation.ObligationSet) !void {
     try writer.writeAll("{\"record\":\"artifact_decision\"");
+    try writeSchemaVersionField(writer);
     const decision = set.artifactDecision();
     switch (decision) {
         .allowed => {
@@ -162,6 +169,7 @@ const CoverageSummary = struct {
 fn writeCoverageSummaryRecord(writer: anytype, set: obligation.ObligationSet) !void {
     const summary = CoverageSummary.from(set);
     try writer.writeAll("{\"record\":\"coverage_summary\"");
+    try writeSchemaVersionField(writer);
     try writeNumberField(writer, "assumptions", summary.assumptions);
     try writeNumberField(writer, "obligations", summary.obligations);
     try writeNumberField(writer, "queries", summary.queries);
@@ -266,6 +274,10 @@ fn writeOptionalEnumField(writer: anytype, comptime name: []const u8, comptime T
 
 fn writeFieldPrefix(writer: anytype, comptime name: []const u8) !void {
     try writer.writeAll(",\"" ++ name ++ "\":");
+}
+
+fn writeSchemaVersionField(writer: anytype) !void {
+    try writeNumberField(writer, "schema_version", obligation.obligation_dump_schema_version);
 }
 
 fn writeTaggedFieldPrefix(writer: anytype, comptime name: []const u8, tag: []const u8) !void {
@@ -612,34 +624,34 @@ fn dumpToOwnedString(allocator: std.mem.Allocator, set: obligation.ObligationSet
 }
 
 const coverage_zero =
-    "{\"record\":\"coverage_summary\",\"assumptions\":0,\"obligations\":0,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
+    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":0,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
 
 const coverage_one_logical =
-    "{\"record\":\"coverage_summary\",\"assumptions\":0,\"obligations\":1,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":1,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
+    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":1,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":1,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
 
 const coverage_one_logical_three_terms =
-    "{\"record\":\"coverage_summary\",\"assumptions\":0,\"obligations\":1,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":3,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":1,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
+    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":1,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":3,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":1,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
 
 const coverage_one_diagnostic =
-    "{\"record\":\"coverage_summary\",\"assumptions\":0,\"obligations\":0,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":1,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
+    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":0,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":1,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
 
 const coverage_one_backend_fact =
-    "{\"record\":\"coverage_summary\",\"assumptions\":0,\"obligations\":1,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":1},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
+    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":1,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":1},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
 
 const coverage_one_z3_unknown_query =
-    "{\"record\":\"coverage_summary\",\"assumptions\":0,\"obligations\":0,\"queries\":1,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":1,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":1,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":1,\"proved\":0,\"failed\":0}}\n";
+    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":0,\"queries\":1,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":1,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":1,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":1,\"proved\":0,\"failed\":0}}\n";
 
 const coverage_one_proof_artifact =
-    "{\"record\":\"coverage_summary\",\"assumptions\":0,\"obligations\":0,\"queries\":0,\"proof_artifacts\":1,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":1,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
+    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":0,\"queries\":0,\"proof_artifacts\":1,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":1,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
 
 const coverage_one_z3_unsat_proof =
-    "{\"record\":\"coverage_summary\",\"assumptions\":0,\"obligations\":1,\"queries\":1,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":1,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":1,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":1,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":1,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
+    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":1,\"queries\":1,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":1,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":1,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":1,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":1,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
 
 test "json-lines dump of empty manifest is empty" {
     const actual = try dumpToOwnedString(std.testing.allocator, .{});
     defer std.testing.allocator.free(actual);
     try std.testing.expectEqualStrings(
-        "{\"record\":\"artifact_decision\",\"status\":\"allowed\",\"reason\":null}\n" ++
+        "{\"record\":\"artifact_decision\",\"schema_version\":1,\"status\":\"allowed\",\"reason\":null}\n" ++
             coverage_zero,
         actual,
     );
@@ -664,9 +676,9 @@ test "json-lines dump of mlir-origin logical obligation" {
     defer std.testing.allocator.free(actual);
 
     try std.testing.expectEqualStrings(
-        "{\"record\":\"artifact_decision\",\"status\":\"blocked\",\"reason\":\"missing_proof\"}\n" ++
+        "{\"record\":\"artifact_decision\",\"schema_version\":1,\"status\":\"blocked\",\"reason\":\"missing_proof\"}\n" ++
             coverage_one_logical ++
-            "{\"record\":\"obligation\",\"id\":1,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":\"Token\",\"name\":\"transfer\"},\"source\":{\"file\":\"erc20.ora\",\"line\":10,\"column\":5,\"byte_start\":100,\"byte_end\":120},\"phase\":\"ora_mlir\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":2},\"kind\":{\"tag\":\"logical\",\"role\":\"ensures\",\"formula\":{\"tag\":\"origin_value\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":2},\"value_kind\":\"result\",\"index\":0}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n",
+            "{\"record\":\"obligation\",\"schema_version\":1,\"id\":1,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":\"Token\",\"name\":\"transfer\"},\"source\":{\"file\":\"erc20.ora\",\"line\":10,\"column\":5,\"byte_start\":100,\"byte_end\":120},\"phase\":\"ora_mlir\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":2},\"kind\":{\"tag\":\"logical\",\"role\":\"ensures\",\"formula\":{\"tag\":\"origin_value\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":2},\"value_kind\":\"result\",\"index\":0}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n",
         actual,
     );
 }
@@ -692,9 +704,9 @@ test "json-lines dump of arithmetic safety subtype" {
     defer std.testing.allocator.free(actual);
 
     try std.testing.expectEqualStrings(
-        "{\"record\":\"artifact_decision\",\"status\":\"blocked\",\"reason\":\"missing_proof\"}\n" ++
+        "{\"record\":\"artifact_decision\",\"schema_version\":1,\"status\":\"blocked\",\"reason\":\"missing_proof\"}\n" ++
             coverage_one_logical ++
-            "{\"record\":\"obligation\",\"id\":2,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"pow\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"ora_mlir\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.assert\",\"symbol\":\"pow\",\"ordinal\":4},\"kind\":{\"tag\":\"logical\",\"role\":\"arithmetic_safety\",\"arithmetic_safety\":\"power_overflow\",\"formula\":{\"tag\":\"origin_value\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.assert\",\"symbol\":\"pow\",\"ordinal\":4},\"value_kind\":\"operand\",\"index\":0}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n",
+            "{\"record\":\"obligation\",\"schema_version\":1,\"id\":2,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"pow\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"ora_mlir\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.assert\",\"symbol\":\"pow\",\"ordinal\":4},\"kind\":{\"tag\":\"logical\",\"role\":\"arithmetic_safety\",\"arithmetic_safety\":\"power_overflow\",\"formula\":{\"tag\":\"origin_value\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.assert\",\"symbol\":\"pow\",\"ordinal\":4},\"value_kind\":\"operand\",\"index\":0}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n",
         actual,
     );
 }
@@ -722,12 +734,12 @@ test "json-lines dump of canonical refinement predicate terms" {
     defer std.testing.allocator.free(actual);
 
     try std.testing.expectEqualStrings(
-        "{\"record\":\"artifact_decision\",\"status\":\"blocked\",\"reason\":\"missing_proof\"}\n" ++
+        "{\"record\":\"artifact_decision\",\"schema_version\":1,\"status\":\"blocked\",\"reason\":\"missing_proof\"}\n" ++
             coverage_one_logical_three_terms ++
-            "{\"record\":\"obligation\",\"id\":4,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"deposit\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"sema\",\"origin\":{\"tag\":\"sema_fact\",\"kind\":\"refinement_guard\",\"ordinal\":0},\"kind\":{\"tag\":\"logical\",\"role\":\"refinement\",\"formula\":{\"tag\":\"term\",\"id\":2}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n" ++
-            "{\"record\":\"term\",\"id\":0,\"term\":{\"tag\":\"variable\",\"value\":{\"tag\":\"free\",\"id\":{\"file_id\":0,\"pattern_id\":0},\"name\":\"amount\",\"ty\":{\"tag\":\"spelling\",\"value\":\"u256\"}}}}\n" ++
-            "{\"record\":\"term\",\"id\":1,\"term\":{\"tag\":\"int_lit\",\"value\":\"1\",\"ty\":{\"tag\":\"spelling\",\"value\":\"u256\"}}}\n" ++
-            "{\"record\":\"term\",\"id\":2,\"term\":{\"tag\":\"refinement_predicate\",\"name\":\"MinValue\",\"value\":0,\"args\":[1]}}\n",
+            "{\"record\":\"obligation\",\"schema_version\":1,\"id\":4,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"deposit\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"sema\",\"origin\":{\"tag\":\"sema_fact\",\"kind\":\"refinement_guard\",\"ordinal\":0},\"kind\":{\"tag\":\"logical\",\"role\":\"refinement\",\"formula\":{\"tag\":\"term\",\"id\":2}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n" ++
+            "{\"record\":\"term\",\"schema_version\":1,\"id\":0,\"term\":{\"tag\":\"variable\",\"value\":{\"tag\":\"free\",\"id\":{\"file_id\":0,\"pattern_id\":0},\"name\":\"amount\",\"ty\":{\"tag\":\"spelling\",\"value\":\"u256\"}}}}\n" ++
+            "{\"record\":\"term\",\"schema_version\":1,\"id\":1,\"term\":{\"tag\":\"int_lit\",\"value\":\"1\",\"ty\":{\"tag\":\"spelling\",\"value\":\"u256\"}}}\n" ++
+            "{\"record\":\"term\",\"schema_version\":1,\"id\":2,\"term\":{\"tag\":\"refinement_predicate\",\"name\":\"MinValue\",\"value\":0,\"args\":[1]}}\n",
         actual,
     );
 }
@@ -743,9 +755,9 @@ test "json-lines dump of blocking diagnostic" {
     defer std.testing.allocator.free(actual);
 
     try std.testing.expectEqualStrings(
-        "{\"record\":\"artifact_decision\",\"status\":\"blocked\",\"reason\":\"blocking_diagnostic\"}\n" ++
+        "{\"record\":\"artifact_decision\",\"schema_version\":1,\"status\":\"blocked\",\"reason\":\"blocking_diagnostic\"}\n" ++
             coverage_one_diagnostic ++
-            "{\"record\":\"diagnostic\",\"kind\":\"unsupported\",\"source\":{\"file\":\"test.ora\",\"line\":3,\"column\":9,\"byte_start\":0,\"byte_end\":0},\"message\":\"unsupported quantified binder\",\"blocks_artifacts\":true}\n",
+            "{\"record\":\"diagnostic\",\"schema_version\":1,\"kind\":\"unsupported\",\"source\":{\"file\":\"test.ora\",\"line\":3,\"column\":9,\"byte_start\":0,\"byte_end\":0},\"message\":\"unsupported quantified binder\",\"blocks_artifacts\":true}\n",
         actual,
     );
 }
@@ -769,9 +781,9 @@ test "json-lines dump of derived backend fact" {
     defer std.testing.allocator.free(actual);
 
     try std.testing.expectEqualStrings(
-        "{\"record\":\"artifact_decision\",\"status\":\"blocked\",\"reason\":\"invalid_dependency\"}\n" ++
+        "{\"record\":\"artifact_decision\",\"schema_version\":1,\"status\":\"blocked\",\"reason\":\"invalid_dependency\"}\n" ++
             coverage_one_backend_fact ++
-            "{\"record\":\"obligation\",\"id\":3,\"owner\":{\"tag\":\"backend\",\"component\":\"dispatcher\",\"name\":\"erc20\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"sinora\",\"origin\":{\"tag\":\"backend_fact\",\"component\":\"dispatcher\",\"fact\":\"selector_table_complete\",\"ordinal\":0},\"kind\":{\"tag\":\"backend_fact\",\"component\":\"dispatcher\",\"property\":\"complete\"},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[1,2]}\n",
+            "{\"record\":\"obligation\",\"schema_version\":1,\"id\":3,\"owner\":{\"tag\":\"backend\",\"component\":\"dispatcher\",\"name\":\"erc20\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"sinora\",\"origin\":{\"tag\":\"backend_fact\",\"component\":\"dispatcher\",\"fact\":\"selector_table_complete\",\"ordinal\":0},\"kind\":{\"tag\":\"backend_fact\",\"component\":\"dispatcher\",\"property\":\"complete\"},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[1,2]}\n",
         actual,
     );
 }
@@ -799,9 +811,9 @@ test "json-lines dump of projected verifier query" {
     defer std.testing.allocator.free(actual);
 
     try std.testing.expectEqualStrings(
-        "{\"record\":\"artifact_decision\",\"status\":\"blocked\",\"reason\":\"invalid_dependency\"}\n" ++
+        "{\"record\":\"artifact_decision\",\"schema_version\":1,\"status\":\"blocked\",\"reason\":\"invalid_dependency\"}\n" ++
             coverage_one_z3_unknown_query ++
-            "{\"record\":\"query\",\"id\":8,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"transfer\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"report\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.refinement_guard\",\"symbol\":\"transfer\",\"ordinal\":4},\"backend\":\"z3\",\"kind\":\"guard_violate\",\"logical_role\":null,\"guard_id\":\"guard:transfer:amount\",\"obligation_ids\":[7],\"assumption_ids\":[],\"fragment\":\"qf_bv_array\",\"solver_logic\":\"qf_aufbv\",\"constraint_count\":5,\"smtlib_hash\":1234,\"proof_artifact_id\":null,\"result\":{\"tag\":\"unknown\",\"vacuous\":false,\"vacuity_unknown\":true,\"degraded\":false}}\n",
+            "{\"record\":\"query\",\"schema_version\":1,\"id\":8,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"transfer\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"report\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.refinement_guard\",\"symbol\":\"transfer\",\"ordinal\":4},\"backend\":\"z3\",\"kind\":\"guard_violate\",\"logical_role\":null,\"guard_id\":\"guard:transfer:amount\",\"obligation_ids\":[7],\"assumption_ids\":[],\"fragment\":\"qf_bv_array\",\"solver_logic\":\"qf_aufbv\",\"constraint_count\":5,\"smtlib_hash\":1234,\"proof_artifact_id\":null,\"result\":{\"tag\":\"unknown\",\"vacuous\":false,\"vacuity_unknown\":true,\"degraded\":false}}\n",
         actual,
     );
 }
@@ -823,9 +835,9 @@ test "json-lines dump of userland proof artifact attachment" {
     defer std.testing.allocator.free(actual);
 
     try std.testing.expectEqualStrings(
-        "{\"record\":\"artifact_decision\",\"status\":\"blocked\",\"reason\":\"invalid_dependency\"}\n" ++
+        "{\"record\":\"artifact_decision\",\"schema_version\":1,\"status\":\"blocked\",\"reason\":\"invalid_dependency\"}\n" ++
             coverage_one_proof_artifact ++
-            "{\"record\":\"proof_artifact\",\"id\":9,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"transfer\"},\"source\":{\"file\":\"proofs/ERC20/Transfer.lean\",\"line\":1,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"kind\":\"userland_lean\",\"module_name\":\"ERC20.Transfer\",\"theorem_name\":\"transfer_preserves_supply\",\"path\":\"proofs/ERC20/Transfer.lean\",\"content_hash\":4660,\"obligation_ids\":[7]}\n",
+            "{\"record\":\"proof_artifact\",\"schema_version\":1,\"id\":9,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"transfer\"},\"source\":{\"file\":\"proofs/ERC20/Transfer.lean\",\"line\":1,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"kind\":\"userland_lean\",\"module_name\":\"ERC20.Transfer\",\"theorem_name\":\"transfer_preserves_supply\",\"path\":\"proofs/ERC20/Transfer.lean\",\"content_hash\":4660,\"obligation_ids\":[7]}\n",
         actual,
     );
 }
@@ -865,10 +877,10 @@ test "json-lines summary shows checker coverage for allowed artifacts" {
     defer std.testing.allocator.free(actual);
 
     try std.testing.expectEqualStrings(
-        "{\"record\":\"artifact_decision\",\"status\":\"allowed\",\"reason\":null}\n" ++
+        "{\"record\":\"artifact_decision\",\"schema_version\":1,\"status\":\"allowed\",\"reason\":null}\n" ++
             coverage_one_z3_unsat_proof ++
-            "{\"record\":\"obligation\",\"id\":1,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"transfer\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"ora_mlir\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":0},\"kind\":{\"tag\":\"logical\",\"role\":\"ensures\",\"formula\":{\"tag\":\"origin_value\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":0},\"value_kind\":\"result\",\"index\":0}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n" ++
-            "{\"record\":\"query\",\"id\":2,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"transfer\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"report\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":0},\"backend\":\"z3\",\"kind\":\"obligation\",\"logical_role\":\"ensures\",\"guard_id\":null,\"obligation_ids\":[1],\"assumption_ids\":[],\"fragment\":\"qf_bv\",\"solver_logic\":\"qf_aufbv\",\"constraint_count\":3,\"smtlib_hash\":null,\"proof_artifact_id\":null,\"result\":{\"tag\":\"unsat\",\"vacuous\":false,\"vacuity_unknown\":false,\"degraded\":false}}\n",
+            "{\"record\":\"obligation\",\"schema_version\":1,\"id\":1,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"transfer\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"ora_mlir\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":0},\"kind\":{\"tag\":\"logical\",\"role\":\"ensures\",\"formula\":{\"tag\":\"origin_value\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":0},\"value_kind\":\"result\",\"index\":0}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n" ++
+            "{\"record\":\"query\",\"schema_version\":1,\"id\":2,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"transfer\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"report\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":0},\"backend\":\"z3\",\"kind\":\"obligation\",\"logical_role\":\"ensures\",\"guard_id\":null,\"obligation_ids\":[1],\"assumption_ids\":[],\"fragment\":\"qf_bv\",\"solver_logic\":\"qf_aufbv\",\"constraint_count\":3,\"smtlib_hash\":null,\"proof_artifact_id\":null,\"result\":{\"tag\":\"unsat\",\"vacuous\":false,\"vacuity_unknown\":false,\"degraded\":false}}\n",
         actual,
     );
 }

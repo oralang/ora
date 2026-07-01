@@ -204,15 +204,38 @@ fn buildCertificateJson(
     process_environ: std.process.Environ,
 ) ![]const u8 {
     const lean_version = try queryLeanVersion(allocator, process_environ);
+    defer allocator.free(lean_version);
 
+    return try buildCertificateJsonWithLeanVersion(
+        allocator,
+        generated_namespace,
+        obligations_source,
+        proof_check_source,
+        rows,
+        lean_version,
+    );
+}
+
+fn buildCertificateJsonWithLeanVersion(
+    allocator: std.mem.Allocator,
+    generated_namespace: []const u8,
+    obligations_source: []const u8,
+    proof_check_source: []const u8,
+    rows: []const CertificateRow,
+    lean_version: []const u8,
+) ![]const u8 {
     var out = std.Io.Writer.Allocating.init(allocator);
     defer out.deinit();
     const writer = &out.writer;
 
     const obligations_sha256 = try sha256HexAlloc(allocator, obligations_source);
+    defer allocator.free(obligations_sha256);
     const proof_check_sha256 = try sha256HexAlloc(allocator, proof_check_source);
+    defer allocator.free(proof_check_sha256);
 
-    try writer.writeAll("{\n  \"version\": 1,\n  \"status\": \"checked\",\n  \"checker\": \"lean\",\n  \"hash_algorithm\": \"sha256\",\n  \"lean_version\": ");
+    try writer.writeAll("{\n  \"schema_version\": ");
+    try writer.print("{d}", .{obligation.proof_certificate_schema_version});
+    try writer.writeAll(",\n  \"status\": \"checked\",\n  \"checker\": \"lean\",\n  \"hash_algorithm\": \"sha256\",\n  \"lean_version\": ");
     try writeJsonString(writer, lean_version);
     try writer.writeAll(",\n  \"generated_namespace\": ");
     try writeJsonString(writer, generated_namespace);
@@ -680,4 +703,41 @@ test "proof content digest check reads path and rejects mismatch" {
         null,
         expected,
     ));
+}
+
+test "proof certificate JSON exposes stable schema fields" {
+    const allocator = std.testing.allocator;
+    const obligation_ids = [_]obligation.Id{7};
+    const assumption_ids = [_]obligation.Id{3};
+    const rows = [_]CertificateRow{.{
+        .target_query_id = 11,
+        .lean_query_id = 12,
+        .obligation_ids = &obligation_ids,
+        .assumption_ids = &assumption_ids,
+        .module_name = "Ora.Proofs.Transfer",
+        .theorem_name = "Ora.Proofs.Transfer.preserves_supply",
+        .path = "proofs/Transfer.lean",
+        .content_sha256 = "0000000000000000000000000000000000000000000000000000000000000000",
+        .target_smtlib_hash = 99,
+        .target_constraint_count = 5,
+    }};
+
+    const certificate = try buildCertificateJsonWithLeanVersion(
+        allocator,
+        "Ora.Generated.Obligations.Transfer",
+        "def emittedQuery_11 : Prop := True\n",
+        "theorem check_query_11_0 : True := by trivial\n",
+        &rows,
+        "Lean test version",
+    );
+    defer allocator.free(certificate);
+
+    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"schema_version\": 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"version\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"hash_algorithm\": \"sha256\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"lean_version\": \"Lean test version\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"proof_count\": 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"target_query_id\": 11") != null);
+    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"lean_query_id\": 12") != null);
+    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"content_sha256\": \"0000000000000000000000000000000000000000000000000000000000000000\"") != null);
 }

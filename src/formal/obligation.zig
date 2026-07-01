@@ -12,6 +12,9 @@ const std = @import("std");
 pub const Id = u32;
 pub const TermId = u32;
 
+pub const obligation_dump_schema_version: u32 = 1;
+pub const proof_certificate_schema_version: u32 = 1;
+
 pub const ObligationSet = struct {
     obligations: []const Obligation = &.{},
     assumptions: []const Assumption = &.{},

@@ -1600,13 +1600,13 @@ test "formal report coverage summarizes representative MLIR obligation classes" 
     const report = try dumpManifestToOwnedString(testing.allocator, result.set);
     defer testing.allocator.free(report);
 
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"artifact_decision\",\"status\":\"blocked\",\"reason\":\"missing_proof\"}"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"assumptions\":1,\"obligations\":13,\"queries\":14"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"artifact_decision\",\"schema_version\":1,\"status\":\"blocked\",\"reason\":\"missing_proof\"}"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":1,\"obligations\":13,\"queries\":14"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_obligation_links\":13"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"obligation_kinds\":{\"logical\":4,\"runtime_guard\":1,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":1,\"resource\":6,\"quantifier\":1,\"filtered_input\":0,\"backend_fact\":0}"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_backends\":{\"unspecified\":14,\"z3\":0,\"lean\":0}"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_results\":{\"missing\":14,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\""));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":1"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"logical\",\"role\":\"ensures\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"arithmetic_safety\":\"addition_overflow\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"arithmetic_safety\":\"division_by_zero\""));
@@ -1615,7 +1615,7 @@ test "formal report coverage summarizes representative MLIR obligation classes" 
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"resource\",\"op\":\"move\",\"domain\":\"TokenUnit\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"property\":\"conservation\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"quantifier\",\"quantifier\":\"forall\""));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"query\""));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"query\",\"schema_version\":1"));
 }
 
 test "formal report coverage includes representative source contracts" {
@@ -1628,8 +1628,8 @@ test "formal report coverage includes representative source contracts" {
     {
         const report = try dumpManifestToOwnedString(testing.allocator, logical.set);
         defer testing.allocator.free(report);
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\""));
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\""));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":1"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":1"));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"role\":\"ensures\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"role\":\"assert\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"arithmetic_safety\":\"subtraction_overflow\""));
@@ -1644,7 +1644,7 @@ test "formal report coverage includes representative source contracts" {
     {
         const report = try dumpManifestToOwnedString(testing.allocator, resource.set);
         defer testing.allocator.free(report);
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\""));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":1"));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"effect_frame\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"resource\",\"op\":\"move\",\"domain\":\"TokenUnit\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"property\":\"conservation\""));
@@ -1656,7 +1656,7 @@ test "formal report coverage includes representative source contracts" {
     {
         const report = try dumpManifestToOwnedString(testing.allocator, quantifier.set);
         defer testing.allocator.free(report);
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\""));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":1"));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"quantifier\",\"quantifier\":\"forall\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"binder_type\":{\"tag\":\"spelling\",\"value\":\"u256\"}"));
     }
