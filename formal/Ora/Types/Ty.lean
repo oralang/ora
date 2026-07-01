@@ -186,7 +186,7 @@ A located type: a type, the region it lives in, and its provenance (where the
 value came from — a SEPARATE axis from region). Mirrors the compiler's
 `LocatedType` (`semantic.zig:468`); `provenance` defaults to `.local`.
 
-`σ ::= τ @ ρ` (`docs/formal-specs/ora-2.md` §4.4). Mutability `µ` (on bindings)
+`σ ::= τ @ ρ` (`docs/formal-specs/type_system_spec_v1.md` §1.4). Mutability `µ` (on bindings)
 and effects `ϵ` (on functions) are NOT part of σ — they live in other layers.
 -/
 structure Located where
