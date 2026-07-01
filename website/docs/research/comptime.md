@@ -32,4 +32,4 @@ The design goal is a hermetic, deterministic comptime model that supports:
 
 - [Generics (comptime type parameters)](/docs/generics)
 - `docs/compiler/comptime-and-smt.md` (implementation state and roadmap)
-- `docs/formal-specs/ora-2.md` (design intent)
+- `docs/formal-specs/type_system_spec_v1.md` (design intent)

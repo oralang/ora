@@ -37,7 +37,7 @@ investigated.
 ## Evidence (selected)
 
 - `docs/Ora Type System Specification v0.11.pdf`
-- `docs/formal-specs/ora-2.md`
+- `docs/formal-specs/type_system_spec_v1.md`
 - `TYPE_SYSTEM_STATE.md`
 - `docs/compiler/comptime-and-smt.md`
 - `docs/compiler/refinement-types-strategy.md`

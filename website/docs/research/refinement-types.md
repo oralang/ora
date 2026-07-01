@@ -166,4 +166,4 @@ fn classify(amount: u256) -> MinValue<u256, 1> {
 
 - `docs/compiler/refinement-types-strategy.md`
 - `TYPE_SYSTEM_STATE.md`
-- `docs/formal-specs/ora-2.md`
+- `docs/formal-specs/type_system_spec_v1.md`
