@@ -47,6 +47,7 @@ const MlirOptions = struct {
     z3_proofs: bool = false,
     minimize_cores: bool = false,
     keep_proved_checks: bool = false,
+    lean_proofs_path: ?[]const u8 = null,
     emit_smt_report: bool = false,
     mlir_pass_pipeline: ?[]const u8 = null,
     mlir_verify_each_pass: bool = false,
@@ -63,6 +64,7 @@ const MlirOptions = struct {
     suppress_artifact_logs: bool = false,
     chain_id: u64 = compiler.compile_options.default_chain_id,
     metrics: *Metrics = undefined,
+    process_environ: std.process.Environ = std.process.Environ.empty,
 
     fn getOptimizationLevel(self: MlirOptions) OptimizationLevel {
         if (self.opt_level) |level| {
@@ -670,6 +672,7 @@ pub fn main(init: std.process.Init) !void {
     const z3_proofs: bool = parsed.z3_proofs;
     const minimize_cores: bool = parsed.minimize_cores;
     const keep_proved_checks: bool = parsed.keep_proved_checks;
+    const lean_proofs_path: ?[]const u8 = parsed.lean_proofs_path;
     const emit_smt_report: bool = parsed.emit_smt_report;
     const mlir_pass_pipeline: ?[]const u8 = parsed.mlir_pass_pipeline;
     const mlir_verify_each_pass: bool = parsed.mlir_verify_each_pass;
@@ -818,6 +821,7 @@ pub fn main(init: std.process.Init) !void {
         .z3_proofs = z3_proofs,
         .minimize_cores = minimize_cores,
         .keep_proved_checks = keep_proved_checks,
+        .lean_proofs_path = lean_proofs_path,
         .emit_smt_report = emit_smt_report,
         .mlir_pass_pipeline = mlir_pass_pipeline,
         .mlir_verify_each_pass = mlir_verify_each_pass,
@@ -833,6 +837,7 @@ pub fn main(init: std.process.Init) !void {
         .persist_sir_mlir = false,
         .chain_id = cli_chain_id orelse compiler.compile_options.default_chain_id,
         .metrics = &metrics,
+        .process_environ = init.minimal.environ,
     };
 
     if (command_kind == .Debug) {
@@ -1299,7 +1304,7 @@ fn invalidateBuildArtifactOutputs(
     try deleteStemArtifactFilesWithSuffixesIfExists(allocator, bin_dir, stem, &bin_suffixes);
     const sir_suffixes = [_][]const u8{".sir"};
     try deleteStemArtifactFilesWithSuffixesIfExists(allocator, sir_dir, stem, &sir_suffixes);
-    const verify_suffixes = [_][]const u8{ ".smt.report.md", ".smt.report.json", ".proof.json" };
+    const verify_suffixes = [_][]const u8{ ".smt.report.md", ".smt.report.json", ".proof.json", ".lean.proof.json" };
     try deleteStemArtifactFilesWithSuffixesIfExists(allocator, verify_dir, stem, &verify_suffixes);
     const mlir_suffixes = [_][]const u8{ ".ora.mlir", ".sir.mlir" };
     try deleteStemArtifactFilesWithSuffixesIfExists(allocator, mlir_dir, stem, &mlir_suffixes);
@@ -1318,6 +1323,7 @@ fn invalidateDirectEmitOutputs(
         ".sourcemap.json",
         ".debug.json",
         ".proof.json",
+        ".lean.proof.json",
         ".sir",
         ".smt.report.md",
         ".smt.report.json",
@@ -1456,6 +1462,10 @@ fn runBuildArtifacts(
     defer allocator.free(smt_json_file);
     try moveArtifactFileIfExists(allocator, staging_root, smt_json_file, verify_dir);
 
+    const lean_proof_file = try std.fmt.allocPrint(allocator, "{s}.lean.proof.json", .{stem});
+    defer allocator.free(lean_proof_file);
+    try moveArtifactFileIfExists(allocator, staging_root, lean_proof_file, verify_dir);
+
     if (verification_failed) {
         return error.VerificationFailed;
     }
@@ -1570,6 +1580,7 @@ fn runDebugArtifacts(
         ".sourcemap.json",
         ".debug.json",
         ".proof.json",
+        ".lean.proof.json",
         ".smt.report.md",
         ".smt.report.json",
         ".sir.dot",
@@ -2441,6 +2452,7 @@ fn printUsage(io: std.Io) !void {
     try stdout.print("  --explain              - Enable unsat-core explain mode for SMT verification\n", .{});
     try stdout.print("  --z3-proofs            - Emit raw Z3 proof objects in SMT reports/debug output (slower)\n", .{});
     try stdout.print("  --keep-proved-checks   - Keep SMT-proved guards/requires/ensures/invariants as runtime checks (falsification harness)\n", .{});
+    try stdout.print("  --lean-proofs <file>   - Check userland Lean proof rows for Z3-unknown obligations; unblocks artifacts only\n", .{});
     try stdout.print("  --minimize-cores       - Greedily minimize explain-mode unsat cores; implies --explain\n", .{});
     try stdout.print("  --debug                - Enable compiler debug output\n", .{});
     try stdout.print("  --debug-info           - Preserve source-stable lowering for debugger artifacts\n", .{});
@@ -2524,7 +2536,7 @@ fn writeCompilerDiagnosticSnippet(
 // Z3 verification output formatting
 // ---------------------------------------------------------------------------
 
-const z3_errors = @import("z3/errors.zig");
+const z3_verification = @import("ora_z3_verification");
 
 /// Parse guard_id format: "guard:{path}:{line}:{col}:{len}:{refinement_kind}:{var_name}"
 const ParsedGuard = struct {
@@ -2596,7 +2608,7 @@ fn formatHexValue(raw: []const u8) []const u8 {
     return raw; // keep full for now
 }
 
-fn printVerificationDiagnostics(stdout: anytype, diagnostics: []const z3_errors.Diagnostic) !void {
+fn printVerificationDiagnostics(stdout: anytype, diagnostics: []const z3_verification.Diagnostic) !void {
     // Group diagnostics by function name.
     try stdout.print("\n", .{});
     try stdout.print("Verification Report: {d} refinement guard{s} can be violated\n", .{
@@ -2654,10 +2666,10 @@ fn printVerificationDiagnostics(stdout: anytype, diagnostics: []const z3_errors.
 
 test "verification diagnostics explain registry-backed NonZero guard violations" {
     const allocator = std.testing.allocator;
-    var counterexample = z3_errors.Counterexample.init(allocator);
+    var counterexample = z3_verification.Counterexample.init(allocator);
     defer counterexample.deinit();
 
-    var diagnostics = [_]z3_errors.Diagnostic{.{
+    var diagnostics = [_]z3_verification.Diagnostic{.{
         .guard_id = "guard:test.ora:1:2:3:NonZero:amount",
         .function_name = "deposit",
         .counterexample = counterexample,
@@ -2671,7 +2683,7 @@ test "verification diagnostics explain registry-backed NonZero guard violations"
     try std.testing.expect(std.mem.indexOf(u8, buffer.written(), "`amount` can be zero") != null);
 }
 
-fn printRuntimeGuardSummary(stdout: anytype, diagnostics: []const z3_errors.Diagnostic) !void {
+fn printRuntimeGuardSummary(stdout: anytype, diagnostics: []const z3_verification.Diagnostic) !void {
     try stdout.print("\nRefinement guards: {d} kept as runtime check{s}\n", .{
         diagnostics.len,
         if (diagnostics.len != 1) @as([]const u8, "s") else "",
@@ -2692,7 +2704,7 @@ fn printRuntimeGuardSummary(stdout: anytype, diagnostics: []const z3_errors.Diag
     }
 }
 
-fn printVerificationErrors(stdout: anytype, errors: []const z3_errors.VerificationError) !void {
+fn printVerificationErrors(stdout: anytype, errors: []const z3_verification.VerificationError) !void {
     var degraded_count: usize = 0;
     for (errors) |err| {
         if (err.error_type == .EncodingDegraded) degraded_count += 1;
@@ -4807,17 +4819,22 @@ fn runMlirEmitAdvanced(
         try verifyMlirModule(stdout, final_module, "Ora MLIR");
     }
 
-    var verification_result_opt: ?@import("z3/errors.zig").VerificationResult = null;
+    var verification_result_opt: ?z3_verification.VerificationResult = null;
     var verification_failed = false;
     var verification_report_blocked_artifacts = false;
-    var pending_smt_report: ?@import("z3/mod.zig").SmtReportArtifacts = null;
+    var pending_smt_report: ?z3_verification.SmtReportArtifacts = null;
     defer {
         if (verification_result_opt) |*vr| vr.deinit();
         if (pending_smt_report) |*report| report.deinit(mlir_allocator);
     }
 
+    if (mlir_options.lean_proofs_path != null and !mlir_options.verify_z3) {
+        try stdout.print("error: --lean-proofs requires SMT verification; remove --no-verify.\n", .{});
+        try stdout.flush();
+        return error.VerificationFailed;
+    }
+
     if (mlir_options.verify_z3) {
-        const z3_verification = @import("z3/verification.zig");
         var verifier = try z3_verification.VerificationPass.initWithProofs(mlir_allocator, mlir_options.z3_proofs);
         defer verifier.deinit();
 
@@ -4846,19 +4863,41 @@ fn runMlirEmitAdvanced(
             }
         }
 
-        if (mlir_options.emit_smt_report) {
+        const needs_lean_proof_gate = mlir_options.lean_proofs_path != null;
+        if (mlir_options.emit_smt_report or needs_lean_proof_gate) {
             pending_smt_report = try verifier.buildSmtReport(final_module, file_path, &verification_result);
             if (pending_smt_report) |report| {
                 verification_report_blocked_artifacts = report.blocksTrustedArtifacts();
             }
         }
 
-        if (!verification_result.success) {
+        var lean_artifact_gate_allowed = false;
+        var lean_artifact_gate_failed = false;
+        if (needs_lean_proof_gate) {
+            lean_artifact_gate_allowed = applyLeanProofArtifactGate(
+                allocator,
+                file_path,
+                final_module,
+                mlir_options.lean_proofs_path.?,
+                pending_smt_report.?,
+                mlir_options,
+                stdout,
+            ) catch |err| blk: {
+                try stdout.print("Lean proof gate failed: {s}\n", .{@errorName(err)});
+                lean_artifact_gate_failed = true;
+                break :blk false;
+            };
+        }
+
+        if (lean_artifact_gate_failed) {
+            verification_failed = true;
+        }
+        if (!verification_result.success and !lean_artifact_gate_allowed) {
             try printVerificationErrors(stdout, verification_result.errors.items);
             try stdout.flush();
             verification_failed = true;
         }
-        if (verification_report_blocked_artifacts and verification_result.success) {
+        if (verification_report_blocked_artifacts and verification_result.success and !lean_artifact_gate_allowed) {
             try stdout.print("Verification failed: SMT report did not authorize trusted artifact emission\n", .{});
             try stdout.flush();
             verification_failed = true;
@@ -4868,7 +4907,6 @@ fn runMlirEmitAdvanced(
     }
 
     if (mlir_options.emit_smt_report and !mlir_options.verify_z3) {
-        const z3_verification = @import("z3/verification.zig");
         var verifier = try z3_verification.VerificationPass.initWithProofs(mlir_allocator, mlir_options.z3_proofs);
         defer verifier.deinit();
         if (mlir_options.verify_mode) |mode| {
@@ -5551,7 +5589,7 @@ fn writeSmtReportArtifacts(
     allocator: std.mem.Allocator,
     file_path: []const u8,
     output_dir: ?[]const u8,
-    report: @import("z3/mod.zig").SmtReportArtifacts,
+    report: z3_verification.SmtReportArtifacts,
     stdout: anytype,
     suppress_log: bool,
 ) !void {
@@ -5594,6 +5632,167 @@ fn writeSmtReportArtifacts(
         try stdout.print("SMT report saved to {s}\n", .{md_path});
         try stdout.print("SMT report JSON saved to {s}\n", .{json_path});
     }
+}
+
+fn applyLeanProofArtifactGate(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    final_module: @import("mlir_c_api").c.MlirModule,
+    proof_manifest_path: []const u8,
+    smt_report: z3_verification.SmtReportArtifacts,
+    mlir_options: MlirOptions,
+    stdout: anytype,
+) !bool {
+    const proof_manifest = @import("formal/proof_manifest.zig");
+    const proof_check = @import("formal/proof_check.zig");
+    const obligation_from_mlir = @import("formal/obligation_from_mlir.zig");
+    const obligation_from_z3 = @import("formal/obligation_from_z3.zig");
+    const obligation_to_lean = @import("formal/obligation_to_lean.zig");
+
+    const query_manifest = smt_report.query_manifest orelse return error.MissingPreparedQueryManifest;
+
+    var formal_result = try obligation_from_mlir.collect(allocator, final_module, .{});
+    defer formal_result.deinit();
+
+    var merged_result = try obligation_from_z3.overlayPreparedQueryResults(allocator, formal_result.set, query_manifest.rows);
+    defer merged_result.deinit();
+
+    const generated_namespace = try leanProofGeneratedNamespace(allocator, file_path);
+    defer allocator.free(generated_namespace);
+
+    var obligations_source_out = std.Io.Writer.Allocating.init(allocator);
+    defer obligations_source_out.deinit();
+    try obligation_to_lean.writeModule(&obligations_source_out.writer, merged_result.set, .{
+        .namespace = generated_namespace,
+    });
+    const obligations_source = obligations_source_out.written();
+
+    const proof_manifest_bytes = try std.Io.Dir.cwd().readFileAlloc(
+        std.Io.Threaded.global_single_threaded.io(),
+        proof_manifest_path,
+        allocator,
+        .unlimited,
+    );
+    defer allocator.free(proof_manifest_bytes);
+
+    var parsed_manifest = try proof_manifest.parseProofManifestJson(allocator, proof_manifest_bytes);
+    defer parsed_manifest.deinit();
+
+    var applied = try proof_check.applyProofRows(
+        allocator,
+        merged_result.set,
+        parsed_manifest.rows,
+        generated_namespace,
+        obligations_source,
+        mlir_options.process_environ,
+        stdout,
+    );
+    defer if (applied) |*result| result.deinit();
+
+    const decided_set = if (applied) |*result| result.set else merged_result.set;
+    const decision = decided_set.artifactDecision();
+    if (applied) |*result| {
+        try writeLeanProofCertificate(
+            allocator,
+            file_path,
+            mlir_options.output_dir,
+            result.certificate_json,
+            stdout,
+            mlir_options.suppress_artifact_logs,
+        );
+    }
+
+    switch (decision) {
+        .allowed => return true,
+        .blocked => |reason| {
+            if (reason == .blocking_diagnostic) {
+                try printLeanProofGateDiagnostics(stdout, decided_set);
+            }
+            try stdout.print("Lean proof gate did not authorize artifact emission: {s}\n", .{@tagName(reason)});
+            return false;
+        },
+    }
+}
+
+fn printLeanProofGateDiagnostics(stdout: anytype, set: @import("formal/obligation.zig").ObligationSet) !void {
+    var printed_header = false;
+    for (set.diagnostics) |diagnostic| {
+        if (!diagnostic.blocks_artifacts) continue;
+        if (!printed_header) {
+            try stdout.print("Formal proof gate diagnostics:\n", .{});
+            printed_header = true;
+        }
+        try stdout.print("  - {s}: {s}", .{ @tagName(diagnostic.kind), diagnostic.message });
+        try printFormalSourceRef(stdout, diagnostic.source);
+        try stdout.writeByte('\n');
+    }
+}
+
+fn printFormalSourceRef(stdout: anytype, source: @import("formal/obligation.zig").SourceRef) !void {
+    if (source.file) |file| {
+        try stdout.print(" ({s}", .{file});
+        if (source.line != 0) try stdout.print(":{d}", .{source.line});
+        if (source.column != 0) try stdout.print(":{d}", .{source.column});
+        try stdout.writeByte(')');
+    } else if (source.line != 0) {
+        try stdout.print(" (line {d}", .{source.line});
+        if (source.column != 0) try stdout.print(":{d}", .{source.column});
+        try stdout.writeByte(')');
+    }
+}
+
+fn writeLeanProofCertificate(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    output_dir: ?[]const u8,
+    certificate_json: []const u8,
+    stdout: anytype,
+    suppress_log: bool,
+) !void {
+    const base_name = std.fs.path.stem(file_path);
+    const filename = try std.fmt.allocPrint(allocator, "{s}.lean.proof.json", .{base_name});
+    defer allocator.free(filename);
+
+    var path_buf: ?[]u8 = null;
+    defer if (path_buf) |buf| allocator.free(buf);
+
+    const path = if (output_dir) |dir| blk: {
+        try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), dir);
+        path_buf = try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
+        break :blk path_buf.?;
+    } else filename;
+
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = path,
+        .data = certificate_json,
+    });
+
+    if (!suppress_log) {
+        try stdout.print("Lean proof certificate saved to {s}\n", .{path});
+    }
+}
+
+fn leanProofGeneratedNamespace(allocator: std.mem.Allocator, file_path: []const u8) ![]const u8 {
+    const stem = std.fs.path.stem(file_path);
+    var component_out = std.Io.Writer.Allocating.init(allocator);
+    defer component_out.deinit();
+    const writer = &component_out.writer;
+
+    try writer.writeAll("Source_");
+    for (stem) |byte| {
+        if (std.ascii.isAlphanumeric(byte) or byte == '_') {
+            try writer.writeByte(byte);
+        } else {
+            try writer.writeByte('_');
+        }
+    }
+
+    const hash = std.hash.Wyhash.hash(0, file_path);
+    return try std.fmt.allocPrint(
+        allocator,
+        "Ora.Generated.Obligations.{s}_{x}",
+        .{ component_out.written(), hash },
+    );
 }
 
 // ============================================================================
@@ -6242,7 +6441,7 @@ fn writeProofSidecar(
     allocator: std.mem.Allocator,
     output_dir: []const u8,
     stem: []const u8,
-    positions: []const @import("z3/errors.zig").ProvenGuardPosition,
+    positions: []const z3_verification.ProvenGuardPosition,
 ) !void {
     const filename = try std.fmt.allocPrint(allocator, "{s}/{s}.proof.json", .{ output_dir, stem });
     defer allocator.free(filename);

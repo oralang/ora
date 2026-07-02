@@ -27,6 +27,12 @@ const mlir_helpers = @import("mlir_helpers.zig");
 const refinements = @import("ora_types").refinement_semantics;
 const ManagedArrayList = std.array_list.Managed;
 
+pub const VerificationResult = errors.VerificationResult;
+pub const VerificationError = errors.VerificationError;
+pub const Diagnostic = errors.Diagnostic;
+pub const Counterexample = errors.Counterexample;
+pub const ProvenGuardPosition = errors.ProvenGuardPosition;
+
 fn libcEnv(comptime name: [:0]const u8) ?[]const u8 {
     if (!@import("builtin").link_libc) return null;
     return if (std.c.getenv(name)) |value| std.mem.span(value) else null;

@@ -287,8 +287,9 @@ fn writeTerm(writer: anytype, term: obligation.Term) !void {
             try writer.writeAll(" }");
         },
         .variable => |variable| {
-            try writer.writeAll(".variable ");
+            try writer.writeAll(".variable (");
             try writeVarRef(writer, variable);
+            try writer.writeByte(')');
         },
         .old => |id| {
             try writer.writeAll(".old ");

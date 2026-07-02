@@ -221,6 +221,14 @@ pub fn build(b: *std.Build) void {
     });
     mlir_helpers_mod.addImport("mlir_c_api", mlir_c_mod);
     mlir_helpers_mod.addImport("ora_types", ora_types_mod);
+    const z3_verification_mod = b.createModule(.{
+        .root_source_file = b.path("src/z3/verification.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    z3_verification_mod.addImport("mlir_c_api", mlir_c_mod);
+    z3_verification_mod.addImport("ora_lib", lib_mod);
+    z3_verification_mod.addImport("ora_types", ora_types_mod);
 
     const evm_blst_lib = createEvmBlstLibrary(b, target, optimize);
     const evm_c_kzg_lib = createEvmCKzgLibrary(b, target, optimize, evm_blst_lib);
@@ -266,6 +274,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("ora_lexer", ora_lexer_mod);
     exe_mod.addImport("ora_types", ora_types_mod);
     exe_mod.addImport("ora_refinements", ora_refinements_mod);
+    exe_mod.addImport("ora_z3_verification", z3_verification_mod);
     lib_mod.addImport("mlir_c_api", mlir_c_mod);
     lib_mod.addImport("mlir_helpers", mlir_helpers_mod);
     lib_mod.addImport("log", log_mod);
@@ -1353,14 +1362,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const z3_verification_mod = b.createModule(.{
-        .root_source_file = b.path("src/z3/verification.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    z3_verification_mod.addImport("mlir_c_api", mlir_c_mod);
-    z3_verification_mod.addImport("ora_lib", lib_mod);
-    z3_verification_mod.addImport("ora_types", ora_types_mod);
     compiler_test_mod.addImport("ora_root", lib_mod);
     compiler_test_mod.addImport("ora_lib", lib_mod);
     compiler_test_mod.addImport("mlir_c_api", mlir_c_mod);
