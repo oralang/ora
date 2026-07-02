@@ -13,7 +13,12 @@ const ir = @import("ir.zig");
 pub const sparse_bucket_bits = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
 pub const sparse_bucket_shifts = [_]u8{ 0, 4, 8, 12, 16, 20, 24 };
 pub const dense_max_table_slots: usize = 256;
-pub const min_selector_check_saving_x1000: usize = 4000;
+// One-check switching margin. This constant predates the policy-score
+// model, when its job was to absorb the (then-unmodeled) table dispatch
+// overhead; scores now price that overhead and code bytes explicitly, so
+// only a small model-error margin remains. Lean-pinned in
+// Ora/Spec/DispatcherFacts.lean.
+pub const min_selector_check_saving_x1000: usize = 1000;
 
 /// Dispatch-overhead costs in check-equivalents. One "check" is the exact
 /// case guard as release codegen emits it (selector reload + PUSH4 + EQ +
@@ -21,15 +26,68 @@ pub const min_selector_check_saving_x1000: usize = 4000;
 /// zero, MUL/ADD, CODECOPY, MLOAD, JUMP — costs ≈ 70 gas ≈ 2.8 checks and
 /// is paid once per routed call by both sparse and dense plans.
 pub const table_dispatch_overhead_checks_x1000: usize = 2800;
-/// Range plans additionally pay the SUB rebase and the wrap-safe bounds
-/// check (PUSH span, DUP2, GT, PUSH dest, JUMPI ≈ 15 gas ≈ 0.6 checks).
-pub const dense_range_extra_checks_x1000: usize = 600;
 /// Multiplicative plans additionally pay PUSH4 C + MUL ≈ 8 gas ≈ 0.3 checks.
 pub const dense_multiplicative_extra_checks_x1000: usize = 300;
 /// Deterministic budget for the multiplicative-constant search, per table
 /// size. Candidates come from a fixed splitmix32 sequence, so the same
 /// source always finds the same constant — byte-stable builds.
 pub const multiplicative_search_budget: usize = 512;
+
+/// Dispatch code-size policy. Every plan is scored as
+/// `runtime_avg_checks_x1000 + lambda_x1000_per_byte * plan_code_bytes` and
+/// the cheapest score wins. Lambda converts code bytes into check
+/// equivalents: code deposit costs 200 gas/byte once, runtime cost recurs
+/// per call, so lambda encodes an assumed amortization horizon
+/// (lambda_x1000 = 200 / 25 / N_calls * 1000). `.gas` optimizes runtime
+/// only; `.balanced` assumes ~1600 calls over the contract's life; `.size`
+/// assumes ~160 and suits deploy-constrained contracts.
+pub const DispatchPolicy = enum {
+    gas,
+    balanced,
+    size,
+
+    pub fn lambdaX1000PerByte(self: DispatchPolicy) usize {
+        return switch (self) {
+            .gas => 0,
+            .balanced => 5,
+            .size => 50,
+        };
+    }
+};
+
+/// Active policy. CLI surfacing is deferred; this constant is the single
+/// switch point and must stay comptime-known for byte-stable builds.
+pub const dispatch_policy: DispatchPolicy = .balanced;
+
+pub const jump_table_entry_bytes: usize = 2;
+
+fn planScoreX1000(runtime_avg_checks_x1000: usize, code_bytes: usize) usize {
+    return runtime_avg_checks_x1000 + dispatch_policy.lambdaX1000PerByte() * code_bytes;
+}
+
+// Approximate emitted-code sizes per routing shape. These only need to be
+// honest enough to rank plans; the real arbiter of regressions is the
+// committed bytecode-size baseline.
+fn linearCodeBytes(cases: usize) usize {
+    // One exact check (selector reload + PUSH4 + EQ + PUSH2 + JUMPI) per case.
+    return 13 * cases;
+}
+
+fn densePlanCodeBytes(plan: DensePlan) usize {
+    const preamble: usize = switch (plan.kind) {
+        .bit_window => 30,
+        .multiplicative => 36, // + PUSH4 constant + MUL
+    };
+    // Table entries plus one landing block (JUMPDEST + exact check +
+    // default jump) per used slot.
+    return preamble + jump_table_entry_bytes * plan.table_slots + 18 * plan.used_slots;
+}
+
+fn sparsePlanCodeBytes(plan: SparsePlan) usize {
+    // Dispatch preamble, table entries, per-bucket block overhead, and the
+    // in-bucket exact chains (one check per case plus the default jump).
+    return 30 + jump_table_entry_bytes * plan.bucket_count + 5 * plan.used_buckets + 17 * plan.cases;
+}
 
 pub const StrategyKind = enum {
     linear,
@@ -154,15 +212,20 @@ pub const SparsePlan = struct {
     sparse_total_avg_checks_x1000: usize = 0,
 };
 
+// The `range` kind (index = selector - min with a wrap-safe bounds check)
+// was retired by the policy-score model: multiplicative perfect hashing
+// finds a small pow2 table for every compact case set at lower runtime AND
+// byte cost, so range had no reachable selection path left — exactly the
+// advertised-but-dead-strategy shape this planner is not allowed to carry.
+// Recover the emitter from git history if a producer ever needs true
+// range tables.
 pub const DensePlanKind = enum {
     bit_window,
-    range,
     multiplicative,
 
     pub fn jsonName(self: DensePlanKind) []const u8 {
         return switch (self) {
             .bit_window => "bit_window",
-            .range => "range",
             .multiplicative => "multiplicative",
         };
     }
@@ -178,9 +241,6 @@ pub const DensePlan = struct {
     index_bits: ?u8 = null,
     index_shift: ?u8 = null,
     mul_constant: ?u32 = null,
-    range_min: ?u32 = null,
-    range_max: ?u32 = null,
-    index_bounds_checks: usize = 0,
     runtime_selector_eq_checks: usize = 1,
     dense_dispatch_avg_checks_x1000: usize = 0,
     dense_total_avg_checks_x1000: usize = 0,
@@ -198,7 +258,10 @@ pub fn choosePlan(switch_term: ir.SwitchTerminator) Plan {
         return .linear;
     }
 
-    const linear_avg = linearAverageChecksX1000(switch_term.cases.len);
+    const linear_score = planScoreX1000(
+        linearAverageChecksX1000(switch_term.cases.len),
+        linearCodeBytes(switch_term.cases.len),
+    );
 
     // Dense first: it routes through the same jump-table machinery as sparse
     // but lands on exactly one exact-selector guard, so any qualifying dense
@@ -206,11 +269,13 @@ pub fn choosePlan(switch_term: ir.SwitchTerminator) Plan {
     // scan >= 1 guards after identical table overhead).
     const dense_result = bestDensePlan(switch_term.cases);
     if (dense_result.best) |dense| {
-        if (savesSelectorChecks(linear_avg, dense.dense_total_avg_checks_x1000)) return .{ .dense = dense };
+        const score = planScoreX1000(dense.dense_total_avg_checks_x1000, densePlanCodeBytes(dense));
+        if (savesSelectorChecks(linear_score, score)) return .{ .dense = dense };
     }
 
     if (bestSparsePlan(switch_term.cases)) |sparse| {
-        if (savesSelectorChecks(linear_avg, sparse.sparse_total_avg_checks_x1000)) {
+        const score = planScoreX1000(sparse.sparse_total_avg_checks_x1000, sparsePlanCodeBytes(sparse));
+        if (savesSelectorChecks(linear_score, score)) {
             return .{ .sparse = sparse };
         }
     }
@@ -228,7 +293,6 @@ pub fn bucketIndex(selector: u32, bucket_bits: u8, bucket_shift: u8) usize {
 pub fn denseIndex(selector: u32, dense: DensePlan) usize {
     return switch (dense.kind) {
         .bit_window => bucketIndex(selector, dense.index_bits.?, dense.index_shift.?),
-        .range => @intCast(selector - dense.range_min.?),
         .multiplicative => multiplicativeIndex(selector, dense.mul_constant.?, dense.index_bits.?),
     };
 }
@@ -263,8 +327,11 @@ fn bestSparsePlan(cases: []const ir.SwitchCase) ?SparsePlan {
     for (sparse_bucket_bits) |bits| {
         for (sparse_bucket_shifts) |shift| {
             const candidate = analyzeSparsePlan(cases, bits, shift);
+            // A plan whose worst bucket holds every case degenerates to the
+            // linear chain plus table overhead; everything else competes on
+            // the policy score (big tables pay their bytes there — no more
+            // hard bucket-count cliffs).
             if (candidate.max_bucket_size >= cases.len) continue;
-            if (!isSparseTableCandidateAllowed(cases.len, candidate)) continue;
             if (isBetterSparsePlan(candidate, best)) best = candidate;
         }
     }
@@ -275,11 +342,6 @@ fn bestDensePlan(cases: []const ir.SwitchCase) DensePlanResult {
     if (cases.len < 4) return .{};
 
     var result: DensePlanResult = .{};
-    if (denseRangePlan(cases)) |candidate| {
-        result.candidates += 1;
-        result.best = candidate;
-    }
-
     for (sparse_bucket_bits) |bits| {
         for (sparse_bucket_shifts) |shift| {
             if (denseBitWindowPlan(cases, bits, shift)) |candidate| {
@@ -378,37 +440,6 @@ fn analyzeSparsePlan(cases: []const ir.SwitchCase, bucket_bits: u8, bucket_shift
     };
 }
 
-fn denseRangePlan(cases: []const ir.SwitchCase) ?DensePlan {
-    var min_selector: u32 = std.math.maxInt(u32);
-    var max_selector: u32 = 0;
-    for (cases) |case| {
-        const selector = parseU32Selector(case.value).?;
-        min_selector = @min(min_selector, selector);
-        max_selector = @max(max_selector, selector);
-    }
-
-    const table_slots_u64 = @as(u64, max_selector) - @as(u64, min_selector) + 1;
-    if (table_slots_u64 > dense_max_table_slots) return null;
-    const table_slots: usize = @intCast(table_slots_u64);
-
-    var occupied = [_]bool{false} ** dense_max_table_slots;
-    for (cases) |case| {
-        const selector = parseU32Selector(case.value).?;
-        const index: usize = @intCast(selector - min_selector);
-        if (occupied[index]) return null;
-        occupied[index] = true;
-    }
-
-    return makeDensePlan(.{
-        .kind = .range,
-        .cases = cases.len,
-        .table_slots = table_slots,
-        .index_bounds_checks = 1,
-        .range_min = min_selector,
-        .range_max = max_selector,
-    });
-}
-
 fn denseBitWindowPlan(cases: []const ir.SwitchCase, index_bits: u8, index_shift: u8) ?DensePlan {
     std.debug.assert(index_bits > 0 and index_bits <= 8);
     std.debug.assert(index_shift <= 24);
@@ -439,13 +470,9 @@ fn makeDensePlan(args: struct {
     index_bits: ?u8 = null,
     index_shift: ?u8 = null,
     mul_constant: ?u32 = null,
-    range_min: ?u32 = null,
-    range_max: ?u32 = null,
-    index_bounds_checks: usize = 0,
 }) DensePlan {
     const dispatch_overhead_x1000 = table_dispatch_overhead_checks_x1000 + switch (args.kind) {
         .bit_window => 0,
-        .range => dense_range_extra_checks_x1000,
         .multiplicative => dense_multiplicative_extra_checks_x1000,
     };
     return .{
@@ -458,9 +485,6 @@ fn makeDensePlan(args: struct {
         .index_bits = args.index_bits,
         .index_shift = args.index_shift,
         .mul_constant = args.mul_constant,
-        .range_min = args.range_min,
-        .range_max = args.range_max,
-        .index_bounds_checks = args.index_bounds_checks,
         .dense_dispatch_avg_checks_x1000 = dispatch_overhead_x1000,
         // O(1) table route plus exactly one exact-selector guard in the
         // landing block; independent of case count.
@@ -479,8 +503,10 @@ fn allCasesAreU32Selectors(cases: []const ir.SwitchCase) bool {
 
 fn isBetterDensePlan(candidate: DensePlan, maybe_best: ?DensePlan) bool {
     const best = maybe_best orelse return true;
+    const candidate_score = planScoreX1000(candidate.dense_total_avg_checks_x1000, densePlanCodeBytes(candidate));
+    const best_score = planScoreX1000(best.dense_total_avg_checks_x1000, densePlanCodeBytes(best));
+    if (candidate_score != best_score) return candidate_score < best_score;
     if (candidate.table_slots != best.table_slots) return candidate.table_slots < best.table_slots;
-    if (candidate.index_bounds_checks != best.index_bounds_checks) return candidate.index_bounds_checks < best.index_bounds_checks;
     if (candidate.load_factor_x1000 != best.load_factor_x1000) return candidate.load_factor_x1000 > best.load_factor_x1000;
     if (candidate.kind != best.kind) return candidate.kind == .bit_window;
     const candidate_shift = candidate.index_shift orelse std.math.maxInt(u8);
@@ -489,16 +515,14 @@ fn isBetterDensePlan(candidate: DensePlan, maybe_best: ?DensePlan) bool {
     const candidate_bits = candidate.index_bits orelse std.math.maxInt(u8);
     const best_bits = best.index_bits orelse std.math.maxInt(u8);
     if (candidate_bits != best_bits) return candidate_bits < best_bits;
-    const candidate_min = candidate.range_min orelse std.math.maxInt(u32);
-    const best_min = best.range_min orelse std.math.maxInt(u32);
-    return candidate_min < best_min;
+    return false;
 }
 
 fn isBetterSparsePlan(candidate: SparsePlan, maybe_best: ?SparsePlan) bool {
     const best = maybe_best orelse return true;
-    if (candidate.sparse_total_avg_checks_x1000 != best.sparse_total_avg_checks_x1000) {
-        return candidate.sparse_total_avg_checks_x1000 < best.sparse_total_avg_checks_x1000;
-    }
+    const candidate_score = planScoreX1000(candidate.sparse_total_avg_checks_x1000, sparsePlanCodeBytes(candidate));
+    const best_score = planScoreX1000(best.sparse_total_avg_checks_x1000, sparsePlanCodeBytes(best));
+    if (candidate_score != best_score) return candidate_score < best_score;
     if (candidate.max_bucket_size != best.max_bucket_size) return candidate.max_bucket_size < best.max_bucket_size;
     if (candidate.used_buckets != best.used_buckets) return candidate.used_buckets < best.used_buckets;
     if (candidate.bucket_count != best.bucket_count) return candidate.bucket_count < best.bucket_count;
@@ -523,12 +547,11 @@ fn linearAverageChecksX1000(cases: usize) usize {
     return divRound((cases * (cases + 1) / 2) * 1000, cases);
 }
 
-fn savesSelectorChecks(linear_avg_x1000: usize, candidate_avg_x1000: usize) bool {
-    return candidate_avg_x1000 + min_selector_check_saving_x1000 <= linear_avg_x1000;
-}
-
-fn isSparseTableCandidateAllowed(case_count: usize, candidate: SparsePlan) bool {
-    return candidate.bucket_count <= case_count and candidate.used_buckets <= @max(@as(usize, 1), case_count / 4);
+// Switching hysteresis: a table shape must beat the linear score by at
+// least this margin (in milli-check-equivalents) before we leave the
+// simplest lowering. Both sides are policy scores (runtime + lambda*bytes).
+fn savesSelectorChecks(linear_score_x1000: usize, candidate_score_x1000: usize) bool {
+    return candidate_score_x1000 + min_selector_check_saving_x1000 <= linear_score_x1000;
 }
 
 test "switch routing metrics find eligible sparse table plans" {
@@ -559,7 +582,7 @@ test "switch routing metrics find eligible sparse table plans" {
 
     try std.testing.expectEqual(@as(usize, 1), stats.switches);
     try std.testing.expectEqual(@as(usize, cases.len), stats.cases);
-    // Sequential 0..19 admits a collision-free range table, and a real dense
+    // Sequential 0..19 admits a collision-free bit window, and a real dense
     // route (O(1) + one exact check) beats bucket scanning — chooser is dense.
     try std.testing.expectEqual(@as(usize, 1), stats.chosen_dense);
     try std.testing.expectEqual(@as(usize, 1), stats.sparse_candidates);
@@ -570,7 +593,10 @@ test "switch routing metrics find eligible sparse table plans" {
     try std.testing.expectEqual(table_dispatch_overhead_checks_x1000, best.sparse_bucket_dispatch_avg_checks_x1000);
 }
 
-test "switch routing metrics find dense range plans for compact case values" {
+test "switch routing metrics keep small compact switches linear" {
+    // Five compact tag values admit dense candidates (bit windows over the
+    // low bits), but a 5-case linear chain out-scores any table shape under
+    // every policy — the metrics still report the candidates.
     const cases = [_]ir.SwitchCase{
         .{ .value = "10", .target = "a", .line = 1 },
         .{ .value = "11", .target = "b", .line = 2 },
@@ -584,11 +610,7 @@ test "switch routing metrics find dense range plans for compact case values" {
     try std.testing.expect(stats.dense_candidates > 0);
     try std.testing.expectEqual(@as(usize, 1), stats.chosen_linear);
     const best = stats.best_dense orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(DensePlanKind.range, best.kind);
-    try std.testing.expectEqual(@as(usize, 5), best.table_slots);
-    try std.testing.expectEqual(@as(usize, 0), best.hole_slots);
-    try std.testing.expectEqual(@as(?u32, 10), best.range_min);
-    try std.testing.expectEqual(@as(?u32, 14), best.range_max);
+    try std.testing.expectEqual(@as(usize, 5), best.used_slots);
 }
 
 test "switch routing metrics find dense bit-window plans for selector-shaped values" {
@@ -659,7 +681,7 @@ test "switch routing chooser keeps small switches linear even with perfect dense
     try std.testing.expect(plan == .linear);
 }
 
-test "switch routing chooser picks dense range for compact case sets" {
+test "switch routing chooser picks dense bit-window for compact case sets" {
     const cases = [_]ir.SwitchCase{
         .{ .value = "0", .target = "a", .line = 1 },
         .{ .value = "1", .target = "b", .line = 2 },
@@ -684,8 +706,10 @@ test "switch routing chooser picks dense range for compact case sets" {
     };
     const plan = choosePlan(.{ .selector = "selector", .cases = &cases, .default_target = "fallback" });
     try std.testing.expect(plan == .dense);
-    try std.testing.expectEqual(DensePlanKind.range, plan.dense.kind);
-    try std.testing.expectEqual(@as(usize, 0), plan.dense.hole_slots);
+    // Sequential 0..19 sits collision-free in the 5-bit window at shift 0 —
+    // the cheapest table shape for the set (no MUL, 32 slots).
+    try std.testing.expectEqual(DensePlanKind.bit_window, plan.dense.kind);
+    try std.testing.expectEqual(@as(?u8, 5), plan.dense.index_bits);
 }
 
 test "switch routing multiplicative hashing rescues sets no bit window can table" {

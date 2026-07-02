@@ -842,57 +842,6 @@ test "generic backend preserves switch case order in linear chains" {
     }
 }
 
-test "generic backend lowers dense range switch routing with wrap-safe bounds" {
-    var source: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer source.deinit();
-
-    try source.writer.writeAll(
-        \\fn main:
-        \\    entry {
-        \\        selector = const 0x05
-        \\        switch selector {
-        \\
-    );
-    for (0..20) |index| {
-        try source.writer.print("        0x{x} => @hit\n", .{index});
-    }
-    try source.writer.writeAll(
-        \\        default => @other
-        \\        }
-        \\    }
-        \\
-        \\    hit {
-        \\        stop
-        \\    }
-        \\
-        \\    other {
-        \\        invalid
-        \\    }
-    );
-
-    var program = try parseTestProgram(source.written());
-    defer program.deinit();
-
-    const plan = switch (program.functions[0].blocks[0].terminator) {
-        .switch_ => |switch_term| switch_routing.choosePlan(switch_term),
-        else => return error.TestUnexpectedResult,
-    };
-    try std.testing.expect(plan == .dense);
-    try std.testing.expectEqual(switch_routing.DensePlanKind.range, plan.dense.kind);
-
-    const bytes = try emitRelease(std.testing.allocator, program);
-    defer std.testing.allocator.free(bytes);
-
-    // Table route (CODECOPY + MLOAD + JUMP) plus the wrap-safe range bounds
-    // check (DUP2/GT/JUMPI) and its POP trampoline; one exact-check JUMPI per
-    // landing slot plus the bounds JUMPI.
-    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.CODECOPY) != null);
-    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.DUP2) != null);
-    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.GT) != null);
-    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.POP) != null);
-    try std.testing.expectEqual(@as(usize, 21), countByte(bytes, evm_asm.op.JUMPI));
-}
-
 test "generic backend lowers dense bit-window switch routing" {
     var source: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer source.deinit();

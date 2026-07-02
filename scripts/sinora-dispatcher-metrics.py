@@ -41,7 +41,7 @@ def dense_kind_id(best_dense: dict[str, Any] | None) -> int:
     kind = best_dense.get("kind")
     if kind == "bit_window":
         return 1
-    if kind == "range":
+    if kind == "multiplicative":
         return 2
     raise TypeError(f"unknown dense kind: {kind!r}")
 

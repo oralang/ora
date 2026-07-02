@@ -972,17 +972,8 @@ const GenericEmitter = struct {
         const table_store = self.layout.switch_table_store orelse return CodeToAsmError.UnsupportedSir;
         const table_label = try self.bytecode.newLabel();
 
-        const out_of_range_label = try self.emitDenseIndex(switch_store, plan, context);
+        try self.emitDenseIndex(switch_store, plan);
         try self.emitJumpTableDispatch(table_label, jump_table_entry_width, table_store, context);
-
-        // Dead zone after the table JUMP: the range bounds check lands here
-        // to drop its index copy before taking the default edge, so the
-        // default block sees the same stack as every other route into it.
-        if (out_of_range_label) |label| {
-            try self.bytecode.markJumpDest(label);
-            try self.bytecode.pushOp(evm_asm.op.POP);
-            try self.emitDefaultSwitchJump(function_name, switch_term, context);
-        }
 
         const table_targets = try self.allocator.alloc(evm_asm.Label, plan.table_slots);
         errdefer self.allocator.free(table_targets);
@@ -1043,49 +1034,26 @@ const GenericEmitter = struct {
     }
 
     // Emits the dense slot-index computation, leaving the index on the stack
-    // for emitJumpTableDispatch. Range plans rebase with `selector - min`,
-    // which wraps mod 2^256 for selectors below min, so the single
-    // `index > span` guard catches both under- and overflow of the range;
-    // the returned label must be landed on a POP-then-default trampoline.
+    // for emitJumpTableDispatch. Both kinds mask the index into
+    // [0, table_slots), so no bounds check is needed.
     fn emitDenseIndex(
         self: *GenericEmitter,
         switch_store: u32,
         plan: switch_routing.DensePlan,
-        context: EmitContext,
-    ) !?evm_asm.Label {
+    ) !void {
         switch (plan.kind) {
             .bit_window => {
                 try self.emitStoredSelector(switch_store);
                 try self.emitBitWindowIndex(plan.index_bits.?, plan.index_shift.?);
-                return null;
             },
             .multiplicative => {
                 // Multiply-shift hash: product bits at or above 32 shift into
                 // masked-off positions, so the same shift+mask tail as bit
-                // windows bounds the index with no range check.
+                // windows bounds the index.
                 try self.emitStoredSelector(switch_store);
                 try self.bytecode.pushU32(plan.mul_constant.?);
                 try self.bytecode.pushOp(evm_asm.op.MUL);
                 try self.emitBitWindowIndex(plan.index_bits.?, plan.index_shift.?);
-                return null;
-            },
-            .range => {
-                const min_selector = plan.range_min.?;
-                const span = plan.range_max.? - min_selector;
-                if (min_selector != 0) {
-                    try self.bytecode.pushU32(min_selector);
-                    try self.emitStoredSelector(switch_store);
-                    try self.bytecode.pushOp(evm_asm.op.SUB);
-                } else {
-                    try self.emitStoredSelector(switch_store);
-                }
-                const out_of_range = try self.bytecode.newLabel();
-                try self.bytecode.pushU32(span);
-                try self.bytecode.pushOp(evm_asm.op.DUP2);
-                try self.bytecode.pushOp(evm_asm.op.GT);
-                try self.pushLabelRef(out_of_range, context);
-                try self.bytecode.pushOp(evm_asm.op.JUMPI);
-                return out_of_range;
             },
         }
     }

@@ -176,12 +176,9 @@ fn writeSwitchRoutingStatsField(writer: anytype, name: []const u8, stats: Switch
         try writeOptionalU8(writer, best.index_bits);
         try writer.writeAll(", \"index_shift\": ");
         try writeOptionalU8(writer, best.index_shift);
-        try writer.writeAll(", \"range_min\": ");
-        try writeOptionalU32(writer, best.range_min);
-        try writer.writeAll(", \"range_max\": ");
-        try writeOptionalU32(writer, best.range_max);
-        try writer.print(", \"index_bounds_checks\": {}, ", .{best.index_bounds_checks});
-        try writer.print("\"runtime_selector_eq_checks\": {}, ", .{best.runtime_selector_eq_checks});
+        try writer.writeAll(", \"mul_constant\": ");
+        try writeOptionalU32(writer, best.mul_constant);
+        try writer.print(", \"runtime_selector_eq_checks\": {}, ", .{best.runtime_selector_eq_checks});
         try writer.print("\"dense_dispatch_avg_checks_x1000\": {}, ", .{best.dense_dispatch_avg_checks_x1000});
         try writer.print("\"dense_total_avg_checks_x1000\": {}, ", .{best.dense_total_avg_checks_x1000});
         try writer.print("\"linear_worst_checks\": {}, ", .{best.linear_worst_checks});

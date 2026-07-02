@@ -42,19 +42,22 @@ def expectedDispatcherStrategyRows : List (String × Bool × Bool) :=
     let info := strategy.info
     (info.compilerName, info.requiresExactSelectorValidation, info.usesCompressedIndex)
 
+/-
+The `range` kind was retired by the planner's policy-score model:
+multiplicative perfect hashing dominates its entire natural domain, leaving
+range with no reachable selection path (see sinora/src/switch_routing.zig).
+-/
 inductive DensePlanKind where
   | bitWindow
-  | range
   | multiplicative
   deriving Repr, DecidableEq
 
 def DensePlanKind.compilerName : DensePlanKind → String
   | .bitWindow => "bit_window"
-  | .range => "range"
   | .multiplicative => "multiplicative"
 
 def allDensePlanKinds : List DensePlanKind :=
-  [.bitWindow, .range, .multiplicative]
+  [.bitWindow, .multiplicative]
 
 def expectedDensePlanKinds : List String :=
   allDensePlanKinds.map DensePlanKind.compilerName
@@ -66,7 +69,12 @@ def expectedSparseBucketShifts : List Nat :=
   [0, 4, 8, 12, 16, 20, 24]
 
 def expectedDenseMaxTableSlots : Nat := 256
-def expectedMinSelectorCheckSavingX1000 : Nat := 4000
+/-
+Reduced from 4000 when the planner moved to policy scores: the margin's
+original job (absorbing unmodeled table-dispatch overhead) is now done by
+explicit runtime + code-byte costs, leaving a one-check model-error margin.
+-/
+def expectedMinSelectorCheckSavingX1000 : Nat := 1000
 
 def HasExactSelectorValidation (strategy : DispatcherStrategy) : Prop :=
   strategy.info.requiresExactSelectorValidation = true

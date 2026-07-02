@@ -18,13 +18,13 @@ def compilerDispatcherStrategyRows : List (String × Bool × Bool) :=
    ("dense", true, true)]
 
 def compilerDensePlanKinds : List String :=
-  ["bit_window", "range", "multiplicative"]
+  ["bit_window", "multiplicative"]
 
 def compilerSparseBucketBits : List Nat := [1, 2, 3, 4, 5, 6, 7, 8]
 
 def compilerSparseBucketShifts : List Nat := [0, 4, 8, 12, 16, 20, 24]
 
 def compilerDenseMaxTableSlots : Nat := 256
-def compilerMinSelectorCheckSavingX1000 : Nat := 4000
+def compilerMinSelectorCheckSavingX1000 : Nat := 1000
 
 end Ora.Generated
