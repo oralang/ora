@@ -2,7 +2,7 @@
 // INPUT: ora-example/switch/switch_labeled.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @init() attributes {ora.init = true, ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @init() attributes {ora.dispatch_class = "readonly", ora.init = true, ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 5 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %alloc_size = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c7 = sir.const 7 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/switch/switch_labeled.ora":3:23)))

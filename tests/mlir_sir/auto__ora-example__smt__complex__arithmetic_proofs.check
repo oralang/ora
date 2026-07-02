@@ -2,7 +2,7 @@
 // INPUT: ora-example/smt/complex/arithmetic_proofs.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @addPreservesMin(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":9:28), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":9:50)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:10", "min:u:0:0:0:20"], ora.abi_params = ["uint32", "uint32"], ora.param_binding_ids = ["file:0:pattern:0", "file:0:pattern:1"], ora.param_names = ["a", "b"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x03dca4bc", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @addPreservesMin(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":9:28), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":9:50)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:10", "min:u:0:0:0:20"], ora.abi_params = ["uint32", "uint32"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:0", "file:0:pattern:1"], ora.param_names = ["a", "b"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x03dca4bc", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 4 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 0 : !sir.u256 loc(unknown)
@@ -83,7 +83,7 @@
 // CHECK-NEXT:   ^bb9:  // pred: ^bb7
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":9:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":9:5)
-// CHECK-NEXT:   func.func @multiplyBounds(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":20:27), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":20:51)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:1;max:u:0:0:0:10", "min:u:0:0:0:1;max:u:0:0:0:10"], ora.abi_params = ["uint32", "uint32"], ora.param_binding_ids = ["file:0:pattern:2", "file:0:pattern:3"], ora.param_names = ["x", "y"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0xfdce4991", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @multiplyBounds(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":20:27), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":20:51)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:1;max:u:0:0:0:10", "min:u:0:0:0:1;max:u:0:0:0:10"], ora.abi_params = ["uint32", "uint32"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:2", "file:0:pattern:3"], ora.param_names = ["x", "y"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0xfdce4991", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 56016217287220138543383237988819299768112786790290310538187226855197252780032 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 4 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 0 : !sir.u256 loc(unknown)
@@ -185,7 +185,7 @@
 // CHECK-NEXT:   ^bb10:  // pred: ^bb9
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":20:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":20:5)
-// CHECK-NEXT:   func.func @subtractSafe(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":32:25), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":32:33)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["uint32", "uint32"], ora.param_binding_ids = ["file:0:pattern:4", "file:0:pattern:5"], ora.param_names = ["a", "b"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x116c57f9", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @subtractSafe(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":32:25), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":32:33)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["uint32", "uint32"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:4", "file:0:pattern:5"], ora.param_names = ["a", "b"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x116c57f9", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4294967295 : !sir.u256 loc(unknown)
@@ -205,7 +205,7 @@
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":32:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":32:5)
-// CHECK-NEXT:   func.func @divideBounds(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":40:25), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":40:60)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:100;max:u:0:0:0:1000", "min:u:0:0:0:1"], ora.abi_params = ["uint32", "uint32"], ora.param_binding_ids = ["file:0:pattern:6", "file:0:pattern:7"], ora.param_names = ["dividend", "divisor"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x524995d6", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @divideBounds(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":40:25), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":40:60)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:100;max:u:0:0:0:1000", "min:u:0:0:0:1"], ora.abi_params = ["uint32", "uint32"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:6", "file:0:pattern:7"], ora.param_names = ["dividend", "divisor"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x524995d6", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c1000 = sir.const 1000 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc(unknown)
@@ -265,7 +265,7 @@
 // CHECK-NEXT:   ^bb6:  // pred: ^bb5
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":40:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":40:5)
-// CHECK-NEXT:   func.func @moduloBounds(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":51:25), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":51:37)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", "min:u:0:0:0:1"], ora.abi_params = ["uint32", "uint32"], ora.param_binding_ids = ["file:0:pattern:8", "file:0:pattern:9"], ora.param_names = ["value", "modulus"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x2fc8888a", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @moduloBounds(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":51:25), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":51:37)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", "min:u:0:0:0:1"], ora.abi_params = ["uint32", "uint32"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:8", "file:0:pattern:9"], ora.param_names = ["value", "modulus"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x2fc8888a", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 4294967295 : !sir.u256 loc(unknown)
@@ -302,7 +302,7 @@
 // CHECK-NEXT:   ^bb4:  // pred: ^bb3
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":51:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":51:5)
-// CHECK-NEXT:   func.func @arithmeticChain(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":61:28), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":61:52)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:1;max:u:0:0:0:10", "min:u:0:0:0:1;max:u:0:0:0:10"], ora.abi_params = ["uint32", "uint32"], ora.param_binding_ids = ["file:0:pattern:10", "file:0:pattern:11"], ora.param_names = ["x", "y"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0xdbf44a76", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @arithmeticChain(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":61:28), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":61:52)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:1;max:u:0:0:0:10", "min:u:0:0:0:1;max:u:0:0:0:10"], ora.abi_params = ["uint32", "uint32"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:10", "file:0:pattern:11"], ora.param_names = ["x", "y"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0xdbf44a76", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 56016217287220138543383237988819299768112786790290310538187226855197252780032 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
@@ -437,7 +437,7 @@
 // CHECK-NEXT:   ^bb15:  // pred: ^bb13
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":61:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":61:5)
-// CHECK-NEXT:   func.func @powerBounds(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":73:24), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":73:50)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:2;max:u:0:0:0:5", "min:u:0:0:0:1;max:u:0:0:0:3"], ora.abi_params = ["uint32", "uint32"], ora.param_binding_ids = ["file:0:pattern:12", "file:0:pattern:13"], ora.param_names = ["base", "exponent"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x8ceb30f5", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @powerBounds(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":73:24), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/complex/arithmetic_proofs.ora":73:50)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:2;max:u:0:0:0:5", "min:u:0:0:0:1;max:u:0:0:0:3"], ora.abi_params = ["uint32", "uint32"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:12", "file:0:pattern:13"], ora.param_names = ["base", "exponent"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x8ceb30f5", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c5 = sir.const 5 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c2 = sir.const 2 : !sir.u256 loc(unknown)

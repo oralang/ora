@@ -2,7 +2,7 @@
 // INPUT: ora-example/storage/storage_test_2.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {allowances = 1 : ui64, balances = 0 : ui64, history = 2 : ui64}, ora.global_slots_built} {
-// CHECK-NEXT:   func.func @init() attributes {ora.effect = "readwrites", ora.init = true, ora.read_slots = ["balances", "allowances"], ora.visibility = "pub", ora.write_slots = ["balances", "allowances"]} {
+// CHECK-NEXT:   func.func @init() attributes {ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.init = true, ora.read_slots = ["balances", "allowances"], ora.visibility = "pub", ora.write_slots = ["balances", "allowances"]} {
 // CHECK-NEXT:     %c500 = sir.const 500 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/storage/storage_test_2.ora":19:36)))
 // CHECK-NEXT:     %slot_balances = sir.const 0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/storage/storage_test_2.ora":18:9)))
 // CHECK-NEXT:     %slot_allowances = sir.const 1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/storage/storage_test_2.ora":19:9)))

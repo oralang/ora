@@ -1,0 +1,21 @@
+// Dispatcher case-ordering target: bump() is declared between two read-only
+// functions, but the dispatcher promotes state-mutating functions to the
+// front of the selector chain (views are normally eth_call'd, where dispatch
+// gas is free). The SIR-level case order is pinned in
+// src/compiler.test.oratosir.zig; this spec proves the reordered dispatcher
+// still routes every function correctly on lib/evm.
+contract DispatcherCaseOrdering {
+    storage var counter: u256;
+
+    pub fn peek() -> u256 {
+        return counter;
+    }
+
+    pub fn bump() {
+        counter = counter + 1;
+    }
+
+    pub fn peek_more() -> u256 {
+        return counter;
+    }
+}

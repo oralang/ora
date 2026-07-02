@@ -2,25 +2,25 @@
 // INPUT: ora-example/expressions/basic_expressions.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @testLiterals() attributes {ora.selector = "0x8d4758e7", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testLiterals() attributes {ora.dispatch_class = "readonly", ora.selector = "0x8d4758e7", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/expressions/basic_expressions.ora":3:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/expressions/basic_expressions.ora":3:5)
-// CHECK-NEXT:   func.func @testArithmetic() attributes {ora.selector = "0x0f74a039", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testArithmetic() attributes {ora.dispatch_class = "readonly", ora.selector = "0x0f74a039", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/expressions/basic_expressions.ora":13:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/expressions/basic_expressions.ora":13:5)
-// CHECK-NEXT:   func.func @testUnary() attributes {ora.selector = "0xfb55d5be", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testUnary() attributes {ora.dispatch_class = "readonly", ora.selector = "0xfb55d5be", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/expressions/basic_expressions.ora":23:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/expressions/basic_expressions.ora":23:5)
-// CHECK-NEXT:   func.func @testParentheses() attributes {ora.selector = "0xdf796d93", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testParentheses() attributes {ora.dispatch_class = "readonly", ora.selector = "0xdf796d93", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/expressions/basic_expressions.ora":29:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/expressions/basic_expressions.ora":29:5)
-// CHECK-NEXT:   func.func @testPrecedence() attributes {ora.selector = "0x2f8a68ab", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testPrecedence() attributes {ora.dispatch_class = "readonly", ora.selector = "0x2f8a68ab", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/expressions/basic_expressions.ora":34:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/expressions/basic_expressions.ora":34:5)
-// CHECK-NEXT:   func.func @testLogical() attributes {ora.selector = "0xeefdd346", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testLogical() attributes {ora.dispatch_class = "readonly", ora.selector = "0xeefdd346", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/expressions/basic_expressions.ora":42:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/expressions/basic_expressions.ora":42:5)
-// CHECK-NEXT:   func.func @testComparisons() attributes {ora.selector = "0xc5a1fa04", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testComparisons() attributes {ora.dispatch_class = "readonly", ora.selector = "0xc5a1fa04", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/expressions/basic_expressions.ora":48:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/expressions/basic_expressions.ora":48:5)
 // CHECK-NEXT: } loc("{{.*}}/ora-example/expressions/basic_expressions.ora":1:1)

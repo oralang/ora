@@ -2,7 +2,7 @@
 // INPUT: ora-example/dce_test.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @testDeadCodeElimination() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.selector = "0x6ead426f", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testDeadCodeElimination() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x6ead426f", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/dce_test.ora":11:9)))
 // CHECK-NEXT:     %c42 = sir.const 42 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/dce_test.ora":9:26)))
 // CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/dce_test.ora":11:9)))

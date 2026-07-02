@@ -2,43 +2,43 @@
 // INPUT: ora-example/type-system/regions/region_type_checking.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {storage_val = 0 : ui64, tstore_val = 1 : ui64}, ora.global_slots_built} {
-// CHECK-NEXT:   func.func @testStorageToStack() attributes {ora.effect = "reads", ora.read_slots = ["storage_val"], ora.selector = "0x9fb40665", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testStorageToStack() attributes {ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["storage_val"], ora.selector = "0x9fb40665", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":12:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":12:5)
-// CHECK-NEXT:   func.func @testStorageToMemory() attributes {ora.effect = "reads", ora.read_slots = ["storage_val"], ora.selector = "0xd80a53d9", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testStorageToMemory() attributes {ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["storage_val"], ora.selector = "0xd80a53d9", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":17:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":17:5)
-// CHECK-NEXT:   func.func @testMemoryToStack() attributes {ora.selector = "0x98eba30e", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testMemoryToStack() attributes {ora.dispatch_class = "readonly", ora.selector = "0x98eba30e", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":23:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":23:5)
-// CHECK-NEXT:   func.func @testMemoryToStorage() attributes {ora.effect = "writes", ora.selector = "0x459a14ef", ora.visibility = "pub", ora.write_slots = ["storage_val"]} {
+// CHECK-NEXT:   func.func @testMemoryToStorage() attributes {ora.dispatch_class = "mutating", ora.effect = "writes", ora.selector = "0x459a14ef", ora.visibility = "pub", ora.write_slots = ["storage_val"]} {
 // CHECK-NEXT:     %slot_storage_val = sir.const 0 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":31:9)))
 // CHECK-NEXT:     %c200 = sir.const 200 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":30:39)))
 // CHECK-NEXT:     sir.sstore %slot_storage_val : !sir.u256, %c200 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":31:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":29:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":29:5)
-// CHECK-NEXT:   func.func @testTStoreToStack() attributes {ora.effect = "reads", ora.read_slots = ["transient:tstore_val"], ora.selector = "0xe30ba670", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testTStoreToStack() attributes {ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["transient:tstore_val"], ora.selector = "0xe30ba670", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":35:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":35:5)
-// CHECK-NEXT:   func.func @testTStoreToMemory() attributes {ora.effect = "reads", ora.read_slots = ["transient:tstore_val"], ora.selector = "0x652481a3", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testTStoreToMemory() attributes {ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["transient:tstore_val"], ora.selector = "0x652481a3", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":40:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":40:5)
-// CHECK-NEXT:   func.func @testStackToStorage() attributes {ora.effect = "writes", ora.selector = "0x1d175868", ora.visibility = "pub", ora.write_slots = ["storage_val"]} {
+// CHECK-NEXT:   func.func @testStackToStorage() attributes {ora.dispatch_class = "mutating", ora.effect = "writes", ora.selector = "0x1d175868", ora.visibility = "pub", ora.write_slots = ["storage_val"]} {
 // CHECK-NEXT:     %slot_storage_val = sir.const 0 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":47:9)))
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":46:31)))
 // CHECK-NEXT:     sir.sstore %slot_storage_val : !sir.u256, %c100 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":47:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":45:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":45:5)
-// CHECK-NEXT:   func.func @testStackToTStore() attributes {ora.effect = "writes", ora.selector = "0xd635e3c0", ora.visibility = "pub", ora.write_slots = ["transient:tstore_val"]} {
+// CHECK-NEXT:   func.func @testStackToTStore() attributes {ora.dispatch_class = "mutating", ora.effect = "writes", ora.selector = "0xd635e3c0", ora.visibility = "pub", ora.write_slots = ["transient:tstore_val"]} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":53:9)))
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":52:31)))
 // CHECK-NEXT:     sir.tstore %0 : !sir.u256, %c100 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":53:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":51:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":51:5)
-// CHECK-NEXT:   func.func @testCalldataToStack(%arg0: !sir.u256 loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":57:32)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.param_binding_ids = ["file:0:pattern:13"], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xf7958575", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testCalldataToStack(%arg0: !sir.u256 loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":57:32)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:13"], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xf7958575", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":57:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":57:5)
-// CHECK-NEXT:   func.func @testCalldataToMemory(%arg0: !sir.u256 loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":62:33)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.param_binding_ids = ["file:0:pattern:15"], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xc6de9c3d", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testCalldataToMemory(%arg0: !sir.u256 loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":62:33)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:15"], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xc6de9c3d", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":62:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":62:5)
 // CHECK-NEXT: } loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":7:1)

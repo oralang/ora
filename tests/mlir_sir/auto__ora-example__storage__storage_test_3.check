@@ -2,7 +2,7 @@
 // INPUT: ora-example/storage/storage_test_3.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {owner = 2 : ui64, total_users = 1 : ui64, users = 0 : ui64}, ora.global_slots_built} {
-// CHECK-NEXT:   func.func @init() attributes {ora.effect = "readwrites", ora.init = true, ora.read_slots = ["users"], ora.visibility = "pub", ora.write_slots = ["owner", "total_users", "users"]} {
+// CHECK-NEXT:   func.func @init() attributes {ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.init = true, ora.read_slots = ["users"], ora.visibility = "pub", ora.write_slots = ["owner", "total_users", "users"]} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/storage/storage_test_3.ora":28:21)))
 // CHECK-NEXT:     %slot_owner = sir.const 2 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c1000 = sir.const 1000 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/storage/storage_test_3.ora":27:22)))

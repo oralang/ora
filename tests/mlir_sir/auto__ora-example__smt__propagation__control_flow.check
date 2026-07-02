@@ -2,7 +2,7 @@
 // INPUT: ora-example/smt/propagation/control_flow.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @propagateIf(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/propagation/control_flow.ora":2:24)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.param_binding_ids = ["file:0:pattern:0"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x7d6e4e46", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @propagateIf(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/propagation/control_flow.ora":2:24)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:0"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x7d6e4e46", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
@@ -28,7 +28,7 @@
 // CHECK-NEXT:   ^bb3:  // pred: ^bb2
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/propagation/control_flow.ora":2:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/propagation/control_flow.ora":2:5)
-// CHECK-NEXT:   func.func @propagateIfElse(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/propagation/control_flow.ora":11:28)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.param_binding_ids = ["file:0:pattern:3"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xef7d8bc8", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @propagateIfElse(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/propagation/control_flow.ora":11:28)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:3"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xef7d8bc8", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.gt %arg0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/propagation/control_flow.ora":12:18)
@@ -45,7 +45,7 @@
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/propagation/control_flow.ora":11:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/propagation/control_flow.ora":11:5)
-// CHECK-NEXT:   func.func @propagateNested(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/propagation/control_flow.ora":22:28)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:0;max:u:0:0:0:200"], ora.abi_params = ["uint256"], ora.param_binding_ids = ["file:0:pattern:6"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xaaa1336e", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @propagateNested(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/propagation/control_flow.ora":22:28)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:0;max:u:0:0:0:200"], ora.abi_params = ["uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:6"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xaaa1336e", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c200 = sir.const 200 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
@@ -84,7 +84,7 @@
 // CHECK-NEXT:   ^bb4:  // pred: ^bb3
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/propagation/control_flow.ora":22:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/propagation/control_flow.ora":22:5)
-// CHECK-NEXT:   func.func @propagateLoop(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/propagation/control_flow.ora":34:26)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:1"], ora.abi_params = ["uint256"], ora.param_binding_ids = ["file:0:pattern:9"], ora.param_names = ["n"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x3a9fb56f", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @propagateLoop(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/propagation/control_flow.ora":34:26)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:1"], ora.abi_params = ["uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:9"], ora.param_names = ["n"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x3a9fb56f", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 4 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 0 : !sir.u256 loc(unknown)
@@ -146,7 +146,7 @@
 // CHECK-NEXT:   ^bb9(%40: !sir.u256 loc("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/smt/propagation/control_flow.ora":41:9)))):  // pred: ^bb5
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/propagation/control_flow.ora":34:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/propagation/control_flow.ora":34:5)
-// CHECK-NEXT:   func.func @propagateSwitch(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/propagation/control_flow.ora":49:28)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:0;max:u:0:0:0:3"], ora.abi_params = ["uint256"], ora.param_binding_ids = ["file:0:pattern:13"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x35a3e630", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @propagateSwitch(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/propagation/control_flow.ora":49:28)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:0;max:u:0:0:0:3"], ora.abi_params = ["uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:13"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x35a3e630", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c3 = sir.const 3 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
@@ -189,7 +189,7 @@
 // CHECK-NEXT:   ^bb6:  // pred: ^bb5
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/propagation/control_flow.ora":49:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/propagation/control_flow.ora":49:5)
-// CHECK-NEXT:   func.func @propagateReturn(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/propagation/control_flow.ora":61:28)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.param_binding_ids = ["file:0:pattern:14"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x02932f45", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @propagateReturn(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/propagation/control_flow.ora":61:28)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:14"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x02932f45", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc(unknown)

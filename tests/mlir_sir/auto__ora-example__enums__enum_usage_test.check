@@ -2,7 +2,7 @@
 // INPUT: ora-example/enums/enum_usage_test.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {current_status = 0 : ui64, last_error = 1 : ui64}, ora.global_slots_built, sir.enum_values = {ErrorCode.InsufficientFunds = "ERR_INSUFFICIENT_FUNDS", ErrorCode.InvalidInput = "ERR_INVALID_INPUT", ErrorCode.Unauthorized = "ERR_UNAUTHORIZED", Status.Active = 1 : i8, Status.Cancelled = 3 : i8, Status.Completed = 2 : i8, Status.Pending = 0 : i8}} {
-// CHECK-NEXT:   func.func @init() attributes {ora.effect = "writes", ora.init = true, ora.visibility = "pub", ora.write_slots = ["current_status", "last_error"]} {
+// CHECK-NEXT:   func.func @init() attributes {ora.dispatch_class = "mutating", ora.effect = "writes", ora.init = true, ora.visibility = "pub", ora.write_slots = ["current_status", "last_error"]} {
 // CHECK-NEXT:     %0 = sir.const 49 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/enums/enum_usage_test.ora":30:22)))
 // CHECK-NEXT:     %1 = sir.const 31 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/enums/enum_usage_test.ora":30:9)))
 // CHECK-NEXT:     %2 = sir.const 31355036523672601755552936981278738597748551780069081046368022906219802918912 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/enums/enum_usage_test.ora":30:22)))

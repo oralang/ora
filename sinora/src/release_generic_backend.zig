@@ -791,6 +791,57 @@ test "generic backend lowers sparse switch routing" {
     try std.testing.expect(countByte(bytes, evm_asm.op.JUMPI) >= 260);
 }
 
+test "generic backend preserves switch case order in linear chains" {
+    // The frontend emits dispatcher cases in priority order (state-mutating
+    // first); the linear chain must check them in exactly that order, since
+    // position in the chain is the gas the ordering pass is buying.
+    var program = try parseTestProgram(
+        \\fn main:
+        \\    entry {
+        \\        selector = const 0x21
+        \\        switch selector {
+        \\        0xaabb0001 => @one
+        \\        0xaabb0002 => @two
+        \\        0xaabb0003 => @three
+        \\        0xaabb0004 => @four
+        \\        default => @other
+        \\        }
+        \\    }
+        \\
+        \\    one {
+        \\        stop
+        \\    }
+        \\
+        \\    two {
+        \\        stop
+        \\    }
+        \\
+        \\    three {
+        \\        stop
+        \\    }
+        \\
+        \\    four {
+        \\        stop
+        \\    }
+        \\
+        \\    other {
+        \\        invalid
+        \\    }
+    );
+    defer program.deinit();
+
+    const bytes = try emitRelease(std.testing.allocator, program);
+    defer std.testing.allocator.free(bytes);
+
+    var last_pos: usize = 0;
+    for ([_]u32{ 0xaabb0001, 0xaabb0002, 0xaabb0003, 0xaabb0004 }) |selector| {
+        var needle: [4]u8 = undefined;
+        std.mem.writeInt(u32, &needle, selector, .big);
+        const pos = std.mem.indexOfPos(u8, bytes, last_pos, &needle) orelse return error.TestUnexpectedResult;
+        last_pos = pos + needle.len;
+    }
+}
+
 test "generic backend lowers dense range switch routing with wrap-safe bounds" {
     var source: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer source.deinit();

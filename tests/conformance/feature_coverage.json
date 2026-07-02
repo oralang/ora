@@ -829,6 +829,14 @@
       ]
     },
     {
+      "id": "dispatcher.case_ordering",
+      "area": "dispatcher",
+      "behavior": "The dispatcher promotes state-mutating functions ahead of read-only functions in the selector chain (SIR-level order pinned in compiler.test.oratosir.zig); the reordered dispatcher routes every function correctly and unknown selectors revert",
+      "specs": [
+        "tests/conformance/dispatcher_case_ordering.spec.toml"
+      ]
+    },
+    {
       "id": "dispatcher.dense_table_routing",
       "area": "dispatcher",
       "behavior": "A 16-fn dispatcher routes through the dense jump table (collision-free 7-bit selector window): every fn executes via its table slot's exact-selector guard, unknown selectors and slot-aliasing selectors (same low 7 bits, different full selector) revert via the default edge",

@@ -1521,6 +1521,22 @@ namespace mlir
                         pubFuncs.push_back(info);
                     }
 
+                    // Frequency-ordered dispatch: state-mutating functions get
+                    // the cheap chain positions; provably read-only functions
+                    // (ora.dispatch_class = "readonly", normally reached via
+                    // gas-free eth_call) sort last. Stable sort preserves
+                    // declaration order within each class, and a missing
+                    // attribute never demotes. Order is semantics-neutral —
+                    // it only shifts linear-chain gas.
+                    std::stable_sort(pubFuncs.begin(), pubFuncs.end(),
+                                     [](const PubFuncInfo &a, const PubFuncInfo &b) {
+                                         auto classOf = [](const PubFuncInfo &info) {
+                                             auto attr = info.func->getAttrOfType<StringAttr>("ora.dispatch_class");
+                                             return (attr && attr.getValue() == "readonly") ? 1 : 0;
+                                         };
+                                         return classOf(a) < classOf(b);
+                                     });
+
                     // Synthesize boilerplate init/main; user-defined versions are replaced.
                     if (auto sym = SymbolTable::lookupSymbolIn(module, StringRef("init")))
                         sym->erase();

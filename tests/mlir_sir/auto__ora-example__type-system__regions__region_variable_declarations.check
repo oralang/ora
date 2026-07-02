@@ -2,19 +2,19 @@
 // INPUT: ora-example/type-system/regions/region_variable_declarations.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {storage_address = 2 : ui64, storage_counter = 0 : ui64, storage_flag = 1 : ui64, tstore_counter = 3 : ui64, tstore_flag = 4 : ui64}, ora.global_slots_built} {
-// CHECK-NEXT:   func.func @testMemoryDeclarations() attributes {ora.selector = "0xd18036b9", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testMemoryDeclarations() attributes {ora.dispatch_class = "readonly", ora.selector = "0xd18036b9", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/regions/region_variable_declarations.ora":18:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/regions/region_variable_declarations.ora":18:5)
-// CHECK-NEXT:   func.func @testStackDeclarations() attributes {ora.selector = "0x742d3fe1", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testStackDeclarations() attributes {ora.dispatch_class = "readonly", ora.selector = "0x742d3fe1", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/regions/region_variable_declarations.ora":25:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/regions/region_variable_declarations.ora":25:5)
-// CHECK-NEXT:   func.func @testRegionInType() attributes {ora.effect = "writes", ora.selector = "0x66ac22da", ora.visibility = "pub", ora.write_slots = ["storage_counter"]} {
+// CHECK-NEXT:   func.func @testRegionInType() attributes {ora.dispatch_class = "mutating", ora.effect = "writes", ora.selector = "0x66ac22da", ora.visibility = "pub", ora.write_slots = ["storage_counter"]} {
 // CHECK-NEXT:     %slot_storage_counter = sir.const 0 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/type-system/regions/region_variable_declarations.ora":32:9)))
 // CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/type-system/regions/region_variable_declarations.ora":32:27)))
 // CHECK-NEXT:     sir.sstore %slot_storage_counter : !sir.u256, %c1 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/type-system/regions/region_variable_declarations.ora":32:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/regions/region_variable_declarations.ora":31:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/regions/region_variable_declarations.ora":31:5)
-// CHECK-NEXT:   func.func @testRegionInitialization() attributes {ora.effect = "readwrites", ora.read_slots = ["storage_counter"], ora.selector = "0x7f772ce3", ora.visibility = "pub", ora.write_slots = ["storage_counter"]} {
+// CHECK-NEXT:   func.func @testRegionInitialization() attributes {ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.read_slots = ["storage_counter"], ora.selector = "0x7f772ce3", ora.visibility = "pub", ora.write_slots = ["storage_counter"]} {
 // CHECK-NEXT:     %slot_storage_counter = sir.const 0 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/type-system/regions/region_variable_declarations.ora":49:9)))
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/type-system/regions/region_variable_declarations.ora":48:26)))
 // CHECK-NEXT:     sir.sstore %slot_storage_counter : !sir.u256, %c100 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/type-system/regions/region_variable_declarations.ora":49:9)))

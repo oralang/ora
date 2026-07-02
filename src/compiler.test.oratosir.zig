@@ -7317,6 +7317,47 @@ test "OraToSIR lowers bytes Result unwrap_or helper call" {
     try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 }
 
+test "dispatcher orders state-mutating functions before read-only functions" {
+    // bump() is declared between the two read-only functions but must get
+    // the first chain position (transactions pay dispatch gas; eth_call'd
+    // views do not). The views keep declaration order behind it.
+    const source_text =
+        \\contract Ordered {
+        \\    storage var counter: u256;
+        \\
+        \\    pub fn peek() -> u256 {
+        \\        return counter;
+        \\    }
+        \\
+        \\    pub fn bump() {
+        \\        counter = counter + 1;
+        \\    }
+        \\
+        \\    pub fn peek_more() -> u256 {
+        \\        return counter;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const main_fn = try functionSlice(rendered, "main");
+    try expectOrderedNeedles(main_fn, &.{
+        "0x68110B2F", // bump() — mutating, promoted to the front
+        "0x59E02DD7", // peek() — read-only, declaration order preserved
+        "0xCA096932", // peek_more()
+    });
+}
+
 test "OraToSIR keeps private scalar helper calls word-shaped" {
     const source_text =
         \\contract PrivateScalarHelper {

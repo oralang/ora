@@ -684,6 +684,20 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 if (function.abi_decode_permissive) {
                     try attrs.append(self.allocator, namedStringAttr(self.context, "ora.abi_decode_mode", "permissive"));
                 }
+                // Dispatcher case-ordering class. Read-only functions are
+                // normally reached via eth_call, where dispatch gas is free,
+                // so the dispatcher gives mutating functions the cheap chain
+                // positions. Only provably read-only functions may be
+                // demoted; anything unknown stays "mutating" (misordering
+                // costs gas, never correctness — order is semantics-neutral).
+                const dispatch_class: []const u8 = if (item_id.index() < self.typecheck.item_effects.len)
+                    switch (self.typecheck.item_effects[item_id.index()]) {
+                        .pure, .reads => "readonly",
+                        .writes, .reads_writes, .side_effects, .external => "mutating",
+                    }
+                else
+                    "mutating";
+                try attrs.append(self.allocator, namedStringAttr(self.context, "ora.dispatch_class", dispatch_class));
             }
             if (function.visibility == .private) {
                 if (return_type) |ret_type| {

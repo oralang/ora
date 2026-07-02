@@ -2,7 +2,7 @@
 // INPUT: ora-example/smt/guards/max_value_runtime.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {stored_value = 0 : ui64}, ora.global_slots_built} {
-// CHECK-NEXT:   func.func @runtimeMaxValue100(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":16:31)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["max:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.param_binding_ids = ["file:4:pattern:0"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xfe896b04", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @runtimeMaxValue100(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":16:31)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["max:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:4:pattern:0"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xfe896b04", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
@@ -28,7 +28,7 @@
 // CHECK-NEXT:   ^bb3:  // pred: ^bb2
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":16:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":16:5)
-// CHECK-NEXT:   func.func @runtimeMaxValueInsufficient(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":24:40)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["max:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.param_binding_ids = ["file:4:pattern:2"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x8c083720", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @runtimeMaxValueInsufficient(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":24:40)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["max:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:4:pattern:2"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x8c083720", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
@@ -54,7 +54,7 @@
 // CHECK-NEXT:   ^bb3:  // pred: ^bb2
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":24:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":24:5)
-// CHECK-NEXT:   func.func @runtimeMaxValueFromStorage() attributes {ora.effect = "reads", ora.read_slots = ["stored_value"], ora.selector = "0x46cae805", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @runtimeMaxValueFromStorage() attributes {ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["stored_value"], ora.selector = "0x46cae805", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_stored_value = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":33:34)
@@ -73,7 +73,7 @@
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":32:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":32:5)
-// CHECK-NEXT:   func.func @runtimeMaxValueFromCall(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":40:36)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["max:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.param_binding_ids = ["file:4:pattern:5"], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x83b24fe2", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @runtimeMaxValueFromCall(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":40:36)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["max:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:4:pattern:5"], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x83b24fe2", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc(unknown)
@@ -102,7 +102,7 @@
 // CHECK-NEXT:     sir.store %17 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":43:9)))
 // CHECK-NEXT:     sir.return %17 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":43:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":40:5)
-// CHECK-NEXT:   func.func @testCall(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":46:21)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.param_binding_ids = ["file:4:pattern:6"], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xd0a9c043", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testCall(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":46:21)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:4:pattern:6"], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xd0a9c043", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":47:23)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
@@ -121,7 +121,7 @@
 // CHECK-NEXT:     %10 = sir.icall @runtimeMaxValueFromCall(%arg0) : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":49:33)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":46:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":46:5)
-// CHECK-NEXT:   func.func @runtimeMaxValueArithmetic(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":55:38), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":55:47)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["uint256", "uint256"], ora.param_binding_ids = ["file:4:pattern:10", "file:4:pattern:11"], ora.param_names = ["x", "y"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0xce11b7e1", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @runtimeMaxValueArithmetic(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":55:38), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":55:47)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["uint256", "uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:4:pattern:10", "file:4:pattern:11"], ora.param_names = ["x", "y"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0xce11b7e1", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 6988570666312495752839002421695666563898142680323167511053911032881624383488 : !sir.u256 loc(unknown)
@@ -191,7 +191,7 @@
 // CHECK-NEXT:   ^bb9:  // pred: ^bb7
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":55:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":55:5)
-// CHECK-NEXT:   func.func @runtimeMaxValueConditional(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":65:39)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.param_binding_ids = ["file:4:pattern:14"], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x515195f7", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @runtimeMaxValueConditional(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":65:39)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:4:pattern:14"], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x515195f7", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":65:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":65:5)
 // CHECK-NEXT: } loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":12:1)

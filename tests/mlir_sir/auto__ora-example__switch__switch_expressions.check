@@ -2,7 +2,7 @@
 // INPUT: ora-example/switch/switch_expressions.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {switch_result = 0 : ui64}, ora.global_slots_built, sir.enum_values = {UserRole.Admin = 3 : i8, UserRole.Guest = 0 : i8, UserRole.Member = 1 : i8, UserRole.Moderator = 2 : i8}} {
-// CHECK-NEXT:   func.func @test_basic_switch(%arg0: !sir.u256 loc("{{.*}}/ora-example/switch/switch_expressions.ora":17:30)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.effect = "writes", ora.param_binding_ids = ["file:0:pattern:0"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xde20aa76", ora.visibility = "pub", ora.write_slots = ["switch_result"]} {
+// CHECK-NEXT:   func.func @test_basic_switch(%arg0: !sir.u256 loc("{{.*}}/ora-example/switch/switch_expressions.ora":17:30)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "writes", ora.param_binding_ids = ["file:0:pattern:0"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xde20aa76", ora.visibility = "pub", ora.write_slots = ["switch_result"]} {
 // CHECK-NEXT:     %slot_switch_result = sir.const 0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/switch/switch_expressions.ora":21:17)))
 // CHECK-NEXT:     %c999 = sir.const 999 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c30 = sir.const 30 : !sir.u256 loc(unknown)
