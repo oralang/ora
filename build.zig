@@ -853,6 +853,24 @@ pub fn build(b: *std.Build) void {
     linkZ3Libraries(b, z3_verification_tests, z3_step, target);
     test_step.dependOn(&b.addRunArtifact(z3_verification_tests).step);
 
+    // Formal proof-checker tests. This target keeps the userland Lean proof
+    // acceptance code in the normal build graph even before B3 wires it to CLI
+    // artifact emission.
+    const proof_check_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/formal/proof_check.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const proof_check_tests = b.addTest(.{
+        .name = "formal-proof-check-tests",
+        .root_module = proof_check_test_mod,
+    });
+    const proof_check_tests_run = b.addRunArtifact(proof_check_tests);
+    test_step.dependOn(&proof_check_tests_run.step);
+
+    const test_proof_check_step = b.step("test-proof-check", "Run formal proof-checker tests");
+    test_proof_check_step.dependOn(&proof_check_tests_run.step);
+
     // MLIR verifier-negative tests
     const mlir_verifiers_test_mod = b.createModule(.{
         .root_source_file = b.path("src/mlir/verifiers.test.zig"),

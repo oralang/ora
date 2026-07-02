@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const obligation = @import("obligation.zig");
+const proof_manifest = @import("proof_manifest.zig");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const max_proof_artifact_bytes = 4 * 1024 * 1024;
@@ -23,15 +24,7 @@ pub const ApplyResult = struct {
     }
 };
 
-pub const ProofRow = struct {
-    query_id: obligation.Id,
-    obligation_ids: []const obligation.Id,
-    assumption_ids: []const obligation.Id = &.{},
-    module_name: []const u8,
-    theorem_name: []const u8,
-    path: ?[]const u8 = null,
-    content_sha256: ?[]const u8 = null,
-};
+pub const ProofRow = proof_manifest.ProofRow;
 
 pub fn applyProofRows(
     allocator: std.mem.Allocator,
@@ -139,8 +132,12 @@ fn applyRows(
     }
 
     if (checker_rows.items.len == 0) return error.EmptyProofRows;
-    const proof_check_source = try runLeanChecker(allocator, generated_namespace, obligations_source, checker_rows.items, process_environ, stdout, quiet, arena_allocator);
-    const certificate_json = try buildCertificateJson(arena_allocator, generated_namespace, obligations_source, proof_check_source, certificate_rows.items, process_environ);
+    const proof_check = try runLeanChecker(allocator, generated_namespace, obligations_source, checker_rows.items, process_environ, stdout, quiet, arena_allocator);
+    if (proof_check.axiom_audits.len != certificate_rows.items.len) return error.LeanAxiomAuditMissing;
+    for (certificate_rows.items, proof_check.axiom_audits) |*row, audit| {
+        row.axioms = audit.axioms;
+    }
+    const certificate_json = try buildCertificateJson(arena_allocator, generated_namespace, obligations_source, proof_check.source, certificate_rows.items, process_environ);
 
     var merged = set;
     merged.proof_artifacts = try concat(obligation.ProofArtifact, arena_allocator, set.proof_artifacts, artifacts.items);
@@ -150,7 +147,7 @@ fn applyRows(
         .arena = arena,
         .set = merged,
         .applied_count = checker_rows.items.len,
-        .proof_check_source = proof_check_source,
+        .proof_check_source = proof_check.source,
         .certificate_json = certificate_json,
     };
 }
@@ -182,6 +179,16 @@ const CheckedProofRow = struct {
     theorem_name: []const u8,
 };
 
+const LeanCheckResult = struct {
+    source: []const u8,
+    axiom_audits: []const AxiomAuditRow,
+};
+
+const AxiomAuditRow = struct {
+    check_name: []const u8,
+    axioms: []const []const u8,
+};
+
 const CertificateRow = struct {
     target_query_id: obligation.Id,
     lean_query_id: obligation.Id,
@@ -191,6 +198,7 @@ const CertificateRow = struct {
     theorem_name: []const u8,
     path: ?[]const u8,
     content_sha256: ?[]const u8,
+    axioms: []const []const u8 = &.{},
     target_smtlib_hash: ?u64,
     target_constraint_count: u32,
 };
@@ -280,6 +288,8 @@ fn buildCertificateJsonWithLeanVersion(
         } else {
             try writer.writeAll("null");
         }
+        try writer.writeAll(",\n      \"axioms\": ");
+        try writeJsonStringArray(writer, row.axioms);
         try writer.writeAll("\n    }");
     }
     try writer.writeAll("\n  ]\n}\n");
@@ -325,6 +335,15 @@ fn writeJsonIdArray(writer: anytype, ids: []const obligation.Id) !void {
     try writer.writeByte(']');
 }
 
+fn writeJsonStringArray(writer: anytype, values: []const []const u8) !void {
+    try writer.writeByte('[');
+    for (values, 0..) |value, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writeJsonString(writer, value);
+    }
+    try writer.writeByte(']');
+}
+
 fn writeJsonString(writer: anytype, value: []const u8) !void {
     const hex = "0123456789abcdef";
     try writer.writeByte('"');
@@ -355,8 +374,8 @@ fn runLeanChecker(
     process_environ: std.process.Environ,
     stdout: anytype,
     quiet: bool,
-    capture_allocator: ?std.mem.Allocator,
-) ![]const u8 {
+    result_allocator: std.mem.Allocator,
+) !LeanCheckResult {
     _ = try namespaceSuffix(generated_namespace);
     for (rows) |row| {
         try validateLeanModulePath(row.module_name);
@@ -391,6 +410,29 @@ fn runLeanChecker(
     );
     defer allocator.free(checker_path);
 
+    const checker_source = try buildLeanCheckerSource(result_allocator, generated_namespace, obligations_module, rows);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = checker_rel, .data = checker_source });
+
+    try runLeanCommand(allocator, &.{ "lake", "build", obligations_module }, process_environ, stdout, quiet);
+    for (rows) |row| {
+        try runLeanCommand(allocator, &.{ "lake", "build", row.module_name }, process_environ, stdout, quiet);
+    }
+    const checker_output = try runLeanCommandCapture(allocator, &.{ "lake", "env", "lean", checker_path }, process_environ, stdout, quiet);
+    defer allocator.free(checker_output.stdout);
+    defer allocator.free(checker_output.stderr);
+
+    return .{
+        .source = checker_source,
+        .axiom_audits = try parseLeanAxiomAuditOutput(result_allocator, checker_output.stdout, rows),
+    };
+}
+
+fn buildLeanCheckerSource(
+    allocator: std.mem.Allocator,
+    generated_namespace: []const u8,
+    obligations_module: []const u8,
+    rows: []const CheckedProofRow,
+) ![]const u8 {
     var checker = std.Io.Writer.Allocating.init(allocator);
     defer checker.deinit();
     const writer = &checker.writer;
@@ -400,11 +442,16 @@ fn runLeanChecker(
         \\-- The obligation module imported below is materialized in an
         \\-- Ora.ProofCheckScratch namespace during the same compile.
         \\
+        \\import Lean
+        \\import Lean.Util.CollectAxioms
+        \\
     );
     try writer.print("import {s}\n", .{obligations_module});
     for (rows) |row| {
         try writer.print("import {s}\n", .{row.module_name});
     }
+    try writer.writeByte('\n');
+    try writeLeanAxiomAuditPrelude(writer);
     try writer.writeByte('\n');
     for (rows, 0..) |row, index| {
         try writer.print(
@@ -415,18 +462,68 @@ fn runLeanChecker(
             \\
         , .{ row.query_id, index, generated_namespace, row.query_id, row.theorem_name });
     }
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = checker_rel, .data = checker.written() });
-
-    try runLeanCommand(allocator, &.{ "lake", "build", obligations_module }, process_environ, stdout, quiet);
-    try runLeanCommand(allocator, &.{ "lake", "env", "lean", checker_path }, process_environ, stdout, quiet);
-
-    if (capture_allocator) |cap| {
-        return try cap.dupe(u8, checker.written());
+    try writer.writeAll("#ora_audit_axioms [\n");
+    for (rows, 0..) |row, index| {
+        try writer.print("  check_query_{d}_{d}\n", .{ row.query_id, index });
     }
-    return &.{};
+    try writer.writeAll("]\n");
+    return try allocator.dupe(u8, checker.written());
+}
+
+fn writeLeanAxiomAuditPrelude(writer: anytype) !void {
+    try writer.writeAll(
+        \\open Lean Elab Command
+        \\
+        \\namespace Ora.ProofCheckAxiomAudit
+        \\
+        \\def normalizeNames (names : Array Name) : Array Name := Id.run do
+        \\  let mut out := #[]
+        \\  for name in names.qsort Name.lt do
+        \\    unless out.any (fun existing => existing == name) do
+        \\      out := out.push name
+        \\  return out
+        \\
+        \\def allowedAxiom (name : Name) : Bool :=
+        \\  name == `propext || name == `Quot.sound
+        \\
+        \\def formatAxioms (axioms : Array Name) : String :=
+        \\  "[" ++ String.intercalate "," (axioms.toList.map (fun name => toString name)) ++ "]"
+        \\
+        \\syntax (name := oraProofCheckAxiomAudit) "#ora_audit_axioms " "[" ident* "]" : command
+        \\
+        \\@[command_elab oraProofCheckAxiomAudit] def elabOraProofCheckAxiomAudit : CommandElab := fun stx => do
+        \\  let ids := stx[2].getArgs
+        \\  let names := ids.map Syntax.getId
+        \\  let env ← getEnv
+        \\  for decl in names do
+        \\    unless env.contains decl do
+        \\      throwError m!"missing proof-check theorem during axiom audit: {decl}"
+        \\
+        \\    let axioms ← collectAxioms decl
+        \\    let normalized := normalizeNames axioms
+        \\    liftIO <| IO.println s!"ORA_AXIOM_AUDIT\t{decl}\t{formatAxioms normalized}"
+        \\
+        \\    let disallowed := normalized.filter (fun dep => !allowedAxiom dep)
+        \\    if disallowed.size != 0 then
+        \\      throwError m!"Lean proof uses disallowed axioms for {decl}: {formatAxioms disallowed}"
+        \\
+        \\end Ora.ProofCheckAxiomAudit
+        \\
+    );
 }
 
 fn runLeanCommand(allocator: std.mem.Allocator, argv: []const []const u8, process_environ: std.process.Environ, stdout: anytype, quiet: bool) !void {
+    const output = try runLeanCommandCapture(allocator, argv, process_environ, stdout, quiet);
+    defer allocator.free(output.stdout);
+    defer allocator.free(output.stderr);
+}
+
+const LeanCommandOutput = struct {
+    stdout: []u8,
+    stderr: []u8,
+};
+
+fn runLeanCommandCapture(allocator: std.mem.Allocator, argv: []const []const u8, process_environ: std.process.Environ, stdout: anytype, quiet: bool) !LeanCommandOutput {
     var process_io = std.Io.Threaded.init(allocator, .{
         .async_limit = .nothing,
         .concurrent_limit = .nothing,
@@ -445,11 +542,11 @@ fn runLeanCommand(allocator: std.mem.Allocator, argv: []const []const u8, proces
         .stdout_limit = std.Io.Limit.limited(1024 * 1024),
         .stderr_limit = std.Io.Limit.limited(1024 * 1024),
     });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
 
     switch (result.term) {
-        .exited => |code| if (code == 0) return,
+        .exited => |code| if (code == 0) {
+            return .{ .stdout = result.stdout, .stderr = result.stderr };
+        },
         else => {},
     }
     if (!quiet) {
@@ -458,7 +555,73 @@ fn runLeanCommand(allocator: std.mem.Allocator, argv: []const []const u8, proces
         if (result.stderr.len != 0) try stdout.print("{s}\n", .{result.stderr});
         try stdout.flush();
     }
+    allocator.free(result.stdout);
+    allocator.free(result.stderr);
     return error.LeanProofCheckFailed;
+}
+
+fn parseLeanAxiomAuditOutput(
+    allocator: std.mem.Allocator,
+    output: []const u8,
+    rows: []const CheckedProofRow,
+) ![]const AxiomAuditRow {
+    const audits = try allocator.alloc(AxiomAuditRow, rows.len);
+    const seen = try allocator.alloc(bool, rows.len);
+    defer allocator.free(seen);
+    @memset(seen, false);
+    for (audits) |*audit| audit.* = .{ .check_name = &.{}, .axioms = &.{} };
+
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |line_raw| {
+        const line = std.mem.trim(u8, line_raw, "\r");
+        const prefix = "ORA_AXIOM_AUDIT\t";
+        if (!std.mem.startsWith(u8, line, prefix)) continue;
+        const rest = line[prefix.len..];
+        const tab_index = std.mem.indexOfScalar(u8, rest, '\t') orelse return error.InvalidLeanAxiomAudit;
+        const check_name = rest[0..tab_index];
+        const axiom_list = rest[tab_index + 1 ..];
+
+        const row_index = try findAxiomAuditRow(rows, check_name);
+        if (seen[row_index]) return error.DuplicateLeanAxiomAudit;
+        seen[row_index] = true;
+        audits[row_index] = .{
+            .check_name = try allocator.dupe(u8, check_name),
+            .axioms = try parseAxiomList(allocator, axiom_list),
+        };
+    }
+
+    for (seen) |was_seen| {
+        if (!was_seen) return error.LeanAxiomAuditMissing;
+    }
+    return audits;
+}
+
+fn findAxiomAuditRow(rows: []const CheckedProofRow, check_name: []const u8) !usize {
+    var expected_buf: [96]u8 = undefined;
+    for (rows, 0..) |row, index| {
+        const expected = std.fmt.bufPrint(&expected_buf, "check_query_{d}_{d}", .{ row.query_id, index }) catch return error.InvalidLeanAxiomAudit;
+        if (std.mem.eql(u8, check_name, expected)) return index;
+    }
+    return error.UnexpectedLeanAxiomAudit;
+}
+
+fn parseAxiomList(allocator: std.mem.Allocator, raw: []const u8) ![]const []const u8 {
+    const value = std.mem.trim(u8, raw, " \t\r\n");
+    if (value.len < 2 or value[0] != '[' or value[value.len - 1] != ']') return error.InvalidLeanAxiomAudit;
+    const inner = value[1 .. value.len - 1];
+    if (inner.len == 0) return &.{};
+
+    var items: std.ArrayList([]const u8) = .empty;
+    var parts = std.mem.splitScalar(u8, inner, ',');
+    while (parts.next()) |part_raw| {
+        const part = std.mem.trim(u8, part_raw, " \t\r\n");
+        if (part.len == 0) return error.InvalidLeanAxiomAudit;
+        for (part) |byte| {
+            if (byte < 0x20 or byte == '[' or byte == ']') return error.InvalidLeanAxiomAudit;
+        }
+        try items.append(allocator, try allocator.dupe(u8, part));
+    }
+    return try items.toOwnedSlice(allocator);
 }
 
 fn namespaceSuffix(namespace: []const u8) ![]const u8 {
@@ -512,11 +675,10 @@ fn proofCheckScratchSegment(
     hasher.final(&digest);
     const digest_hex = std.fmt.bytesToHex(digest, .lower);
 
-    var nonce: [8]u8 = undefined;
-    std.crypto.random.bytes(&nonce);
-    const nonce_hex = std.fmt.bytesToHex(nonce, .lower);
+    const random_source = std.Random.IoSource{ .io = std.Io.Threaded.global_single_threaded.io() };
+    const nonce = random_source.interface().int(u64);
 
-    return try std.fmt.allocPrint(allocator, "Run_{s}_{s}", .{ digest_hex[0..16], nonce_hex[0..16] });
+    return try std.fmt.allocPrint(allocator, "Run_{s}_{x}", .{ digest_hex[0..16], nonce });
 }
 
 fn sha256HexAlloc(allocator: std.mem.Allocator, data: []const u8) ![]const u8 {
@@ -718,6 +880,7 @@ test "proof certificate JSON exposes stable schema fields" {
         .theorem_name = "Ora.Proofs.Transfer.preserves_supply",
         .path = "proofs/Transfer.lean",
         .content_sha256 = "0000000000000000000000000000000000000000000000000000000000000000",
+        .axioms = &.{ "propext", "Quot.sound" },
         .target_smtlib_hash = 99,
         .target_constraint_count = 5,
     }};
@@ -740,4 +903,219 @@ test "proof certificate JSON exposes stable schema fields" {
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"target_query_id\": 11") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"lean_query_id\": 12") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"content_sha256\": \"0000000000000000000000000000000000000000000000000000000000000000\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"axioms\": [\"propext\", \"Quot.sound\"]") != null);
+}
+
+test "Lean checker source audits proof-row theorem axiom dependencies" {
+    const allocator = std.testing.allocator;
+    const rows = [_]CheckedProofRow{.{
+        .query_id = 17,
+        .module_name = "Ora.Proofs.Transfer",
+        .theorem_name = "Ora.Proofs.Transfer.preserves_supply",
+    }};
+
+    const checker = try buildLeanCheckerSource(
+        allocator,
+        "Ora.Generated.Obligations.Transfer",
+        "Ora.ProofCheckScratch.Run_test.Obligations",
+        &rows,
+    );
+    defer allocator.free(checker);
+
+    try std.testing.expect(std.mem.indexOf(u8, checker, "import Lean.Util.CollectAxioms") != null);
+    try std.testing.expect(std.mem.indexOf(u8, checker, "name == `propext || name == `Quot.sound") != null);
+    try std.testing.expect(std.mem.indexOf(u8, checker, "ORA_AXIOM_AUDIT\\t{decl}\\t{formatAxioms normalized}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, checker, "theorem check_query_17_0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, checker, "#ora_audit_axioms [\n  check_query_17_0\n]") != null);
+}
+
+test "Lean axiom audit output maps rows and rejects drift" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const rows = [_]CheckedProofRow{
+        .{
+            .query_id = 11,
+            .module_name = "Ora.Proofs.Clean",
+            .theorem_name = "Ora.Proofs.Clean.ok",
+        },
+        .{
+            .query_id = 12,
+            .module_name = "Ora.Proofs.Quot",
+            .theorem_name = "Ora.Proofs.Quot.ok",
+        },
+    };
+    const audits = try parseLeanAxiomAuditOutput(
+        a,
+        "noise\nORA_AXIOM_AUDIT\tcheck_query_11_0\t[]\nORA_AXIOM_AUDIT\tcheck_query_12_1\t[propext,Quot.sound]\n",
+        &rows,
+    );
+    try std.testing.expectEqual(@as(usize, 2), audits.len);
+    try std.testing.expectEqualStrings("check_query_11_0", audits[0].check_name);
+    try std.testing.expectEqual(@as(usize, 0), audits[0].axioms.len);
+    try std.testing.expectEqualStrings("check_query_12_1", audits[1].check_name);
+    try std.testing.expectEqual(@as(usize, 2), audits[1].axioms.len);
+    try std.testing.expectEqualStrings("propext", audits[1].axioms[0]);
+    try std.testing.expectEqualStrings("Quot.sound", audits[1].axioms[1]);
+
+    try std.testing.expectError(error.LeanAxiomAuditMissing, parseLeanAxiomAuditOutput(
+        a,
+        "ORA_AXIOM_AUDIT\tcheck_query_11_0\t[]\n",
+        &rows,
+    ));
+    try std.testing.expectError(error.UnexpectedLeanAxiomAudit, parseLeanAxiomAuditOutput(
+        a,
+        "ORA_AXIOM_AUDIT\tcheck_query_11_0\t[]\nORA_AXIOM_AUDIT\tcheck_query_99_0\t[]\n",
+        &rows,
+    ));
+    try std.testing.expectError(error.DuplicateLeanAxiomAudit, parseLeanAxiomAuditOutput(
+        a,
+        "ORA_AXIOM_AUDIT\tcheck_query_11_0\t[]\nORA_AXIOM_AUDIT\tcheck_query_11_0\t[]\n",
+        rows[0..1],
+    ));
+}
+
+test "Lean proof checker rejects sorry and user axioms" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var env_map = std.process.Environ.Map.init(allocator);
+    defer env_map.deinit();
+    const home = std.c.getenv("HOME") orelse return error.SkipZigTest;
+    const home_slice = std.mem.span(home);
+    try env_map.put("HOME", home_slice);
+    const inherited_path = if (std.c.getenv("PATH")) |path| std.mem.span(path) else "/usr/bin:/bin:/opt/homebrew/bin";
+    const path = try std.fmt.allocPrint(allocator, "{s}/.elan/bin:{s}", .{ home_slice, inherited_path });
+    defer allocator.free(path);
+    try env_map.put("PATH", path);
+    const process_environ: std.process.Environ = .{ .block = try env_map.createPosixBlock(allocator, .{}) };
+    defer process_environ.block.deinit(allocator);
+
+    const suffix = "RunB2AxiomFixture";
+    try std.Io.Dir.cwd().createDirPath(io, "formal/Ora/ProofCheckFixture");
+    defer std.Io.Dir.cwd().deleteFile(io, "formal/Ora/ProofCheckFixture/RunB2AxiomFixture.lean") catch {};
+    defer std.Io.Dir.cwd().deleteDir(io, "formal/Ora/ProofCheckFixture") catch {};
+
+    const fixture_source =
+        \\namespace Ora.ProofCheckFixture.RunB2AxiomFixture
+        \\
+        \\theorem clean : True := by
+        \\  trivial
+        \\
+        \\axiom userAxiom : True
+        \\theorem userAxiomBacked : True := by
+        \\  exact userAxiom
+        \\
+        \\theorem sorryBacked : True := by
+        \\  sorry
+        \\
+        \\end Ora.ProofCheckFixture.RunB2AxiomFixture
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = "formal/Ora/ProofCheckFixture/RunB2AxiomFixture.lean",
+        .data = fixture_source,
+    });
+
+    try expectLeanFixtureProof(allocator, process_environ, suffix, "clean", true, null);
+    try expectLeanFixtureProof(allocator, process_environ, suffix, "userAxiomBacked", false, "userAxiom");
+    try expectLeanFixtureProof(allocator, process_environ, suffix, "sorryBacked", false, "sorryAx");
+}
+
+fn expectLeanFixtureProof(
+    allocator: std.mem.Allocator,
+    process_environ: std.process.Environ,
+    suffix: []const u8,
+    theorem: []const u8,
+    should_accept: bool,
+    expected_diagnostic: ?[]const u8,
+) !void {
+    const obligation_ids = [_]obligation.Id{1};
+    const obligations = [_]obligation.Obligation{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "fixture" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+        .kind = .{ .logical = .{
+            .role = .ensures,
+            .formula = .{ .origin_value = .{
+                .origin = .source,
+                .kind = .result,
+                .index = 0,
+            } },
+        } },
+        .required_backend = .lean,
+    }};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "fixture" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .backend = .z3,
+        .kind = .obligation,
+        .logical_role = .ensures,
+        .obligation_ids = &obligation_ids,
+        .result = .{ .status = .unknown },
+    }};
+    const set = obligation.ObligationSet{
+        .obligations = &obligations,
+        .queries = &queries,
+    };
+    const module_name = try std.fmt.allocPrint(allocator, "Ora.ProofCheckFixture.{s}", .{suffix});
+    defer allocator.free(module_name);
+    const theorem_name = try std.fmt.allocPrint(allocator, "Ora.ProofCheckFixture.{s}.{s}", .{ suffix, theorem });
+    defer allocator.free(theorem_name);
+    const rows = [_]ProofRow{.{
+        .query_id = 2,
+        .obligation_ids = &obligation_ids,
+        .module_name = module_name,
+        .theorem_name = theorem_name,
+    }};
+    const obligations_source =
+        \\namespace Ora.Generated.Obligations.ProofCheckFixture
+        \\
+        \\def emittedQuery_2 : Prop := True
+        \\
+        \\end Ora.Generated.Obligations.ProofCheckFixture
+        \\
+    ;
+    var stdout = std.Io.Writer.Allocating.init(allocator);
+    defer stdout.deinit();
+
+    if (should_accept) {
+        var result = applyRows(
+            allocator,
+            set,
+            &rows,
+            "Ora.Generated.Obligations.ProofCheckFixture",
+            obligations_source,
+            process_environ,
+            &stdout.writer,
+            false,
+        ) catch |err| {
+            std.debug.print("proof-check fixture stdout:\n{s}\n", .{stdout.written()});
+            return err;
+        };
+        defer result.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, result.certificate_json, "\"axioms\": []") != null);
+        return;
+    }
+
+    try std.testing.expectError(error.LeanProofCheckFailed, applyRows(
+        allocator,
+        set,
+        &rows,
+        "Ora.Generated.Obligations.ProofCheckFixture",
+        obligations_source,
+        process_environ,
+        &stdout.writer,
+        false,
+    ));
+    if (expected_diagnostic) |needle| {
+        try std.testing.expect(std.mem.indexOf(u8, stdout.written(), needle) != null);
+    }
 }

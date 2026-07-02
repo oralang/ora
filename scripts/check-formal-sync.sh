@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # check-formal-sync — proves the compiler-emitted formal facts conform to the
-# Lean spec (formal/). Three gates:
+# Lean spec (formal/). Four gates:
 #
 #   1. REGENERATE  all data-only snapshots from the compiler (`src/formal/*`):
 #      type universe, curated declaration environment, and type-relation rows.
@@ -11,6 +11,8 @@
 #      formal/Ora/*.lean and do all the proving.
 #   3. DRIFT + PROOF: fail if any committed snapshot is stale (git diff), then
 #      `lake build` — the kernel checks that compiler facts == spec.
+#   4. AXIOM AUDIT: regenerate the ignored whole-tree theorem audit and run it
+#      through Lean; only propext/Quot.sound dependencies are allowed.
 #
 # Local: run it, and if step 3 reports drift, review + commit the new snapshot.
 # CI: a non-empty git diff means "compiler changed but snapshot not regenerated".
@@ -90,20 +92,20 @@ SNAPSHOTS=(
   "formal/Ora/Generated/SinoraBackendSnapshot.lean"
 )
 
-echo "==> [1/3] regenerating formal snapshots from the compiler"
+echo "==> [1/4] regenerating formal snapshots from the compiler"
 run_emitter "compiler universe" "src/formal/emit_compiler_snapshot.zig" "${SNAPSHOTS[0]}"
 run_emitter "declaration environment" "src/formal/emit_declenv_snapshot.zig" "${SNAPSHOTS[1]}"
 run_emitter "type relations" "src/formal/emit_type_relations_snapshot.zig" "${SNAPSHOTS[2]}"
 run_sinora_emitter "dispatcher strategies" "src/formal/emit_dispatcher_strategy_snapshot.zig" "${SNAPSHOTS[3]}"
 run_sinora_emitter "sinora backend" "src/formal/emit_sinora_backend_snapshot.zig" "${SNAPSHOTS[4]}"
 
-echo "==> [2/3] data-only lint"
+echo "==> [2/4] data-only lint"
 for snapshot in "${SNAPSHOTS[@]}"; do
   lint_snapshot "$snapshot"
 done
 echo "  ok (data only)"
 
-echo "==> [3/3] drift check + lake build"
+echo "==> [3/4] drift check + lake build"
 for snapshot in "${SNAPSHOTS[@]}"; do
   check_drift "$snapshot"
 done
@@ -117,5 +119,10 @@ done
 # `rfl`-lemmas (no `maxHeartbeats` bump), so each now builds in ~1.5s and both are
 # imported by the `Ora` root — the `lake build` above already compiles and
 # drift-checks them. No special-casing.
+
+echo "==> [4/4] Lean axiom audit"
+mkdir -p formal/.lake
+python3 scripts/check-formal-trust-surface.py > formal/.lake/ora-formal-axiom-audit.lean
+( cd formal && lake env lean .lake/ora-formal-axiom-audit.lean )
 
 echo "==> check-formal-sync OK"
