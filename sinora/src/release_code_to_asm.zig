@@ -1059,6 +1059,16 @@ const GenericEmitter = struct {
                 try self.emitBitWindowIndex(plan.index_bits.?, plan.index_shift.?);
                 return null;
             },
+            .multiplicative => {
+                // Multiply-shift hash: product bits at or above 32 shift into
+                // masked-off positions, so the same shift+mask tail as bit
+                // windows bounds the index with no range check.
+                try self.emitStoredSelector(switch_store);
+                try self.bytecode.pushU32(plan.mul_constant.?);
+                try self.bytecode.pushOp(evm_asm.op.MUL);
+                try self.emitBitWindowIndex(plan.index_bits.?, plan.index_shift.?);
+                return null;
+            },
             .range => {
                 const min_selector = plan.range_min.?;
                 const span = plan.range_max.? - min_selector;

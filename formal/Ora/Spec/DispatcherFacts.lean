@@ -45,14 +45,16 @@ def expectedDispatcherStrategyRows : List (String × Bool × Bool) :=
 inductive DensePlanKind where
   | bitWindow
   | range
+  | multiplicative
   deriving Repr, DecidableEq
 
 def DensePlanKind.compilerName : DensePlanKind → String
   | .bitWindow => "bit_window"
   | .range => "range"
+  | .multiplicative => "multiplicative"
 
 def allDensePlanKinds : List DensePlanKind :=
-  [.bitWindow, .range]
+  [.bitWindow, .range, .multiplicative]
 
 def expectedDensePlanKinds : List String :=
   allDensePlanKinds.map DensePlanKind.compilerName

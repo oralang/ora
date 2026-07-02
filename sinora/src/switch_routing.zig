@@ -24,6 +24,12 @@ pub const table_dispatch_overhead_checks_x1000: usize = 2800;
 /// Range plans additionally pay the SUB rebase and the wrap-safe bounds
 /// check (PUSH span, DUP2, GT, PUSH dest, JUMPI ≈ 15 gas ≈ 0.6 checks).
 pub const dense_range_extra_checks_x1000: usize = 600;
+/// Multiplicative plans additionally pay PUSH4 C + MUL ≈ 8 gas ≈ 0.3 checks.
+pub const dense_multiplicative_extra_checks_x1000: usize = 300;
+/// Deterministic budget for the multiplicative-constant search, per table
+/// size. Candidates come from a fixed splitmix32 sequence, so the same
+/// source always finds the same constant — byte-stable builds.
+pub const multiplicative_search_budget: usize = 512;
 
 pub const StrategyKind = enum {
     linear,
@@ -151,11 +157,13 @@ pub const SparsePlan = struct {
 pub const DensePlanKind = enum {
     bit_window,
     range,
+    multiplicative,
 
     pub fn jsonName(self: DensePlanKind) []const u8 {
         return switch (self) {
             .bit_window => "bit_window",
             .range => "range",
+            .multiplicative => "multiplicative",
         };
     }
 };
@@ -169,6 +177,7 @@ pub const DensePlan = struct {
     load_factor_x1000: usize = 0,
     index_bits: ?u8 = null,
     index_shift: ?u8 = null,
+    mul_constant: ?u32 = null,
     range_min: ?u32 = null,
     range_max: ?u32 = null,
     index_bounds_checks: usize = 0,
@@ -220,7 +229,31 @@ pub fn denseIndex(selector: u32, dense: DensePlan) usize {
     return switch (dense.kind) {
         .bit_window => bucketIndex(selector, dense.index_bits.?, dense.index_shift.?),
         .range => @intCast(selector - dense.range_min.?),
+        .multiplicative => multiplicativeIndex(selector, dense.mul_constant.?, dense.index_bits.?),
     };
+}
+
+/// Multiply-shift hashing (Dietzfelbinger): the top `bits` bits of the low
+/// 32-bit half of selector*C. On EVM this is `((sel * C) >> (32 - bits)) &
+/// mask` with a plain 256-bit MUL — product bits at or above 32 land at
+/// positions >= bits after the shift and are cleared by the mask, so no
+/// extra truncation op is needed.
+pub fn multiplicativeIndex(selector: u32, constant: u32, bits: u8) usize {
+    std.debug.assert(bits > 0 and bits <= 8);
+    const product = @as(u64, selector) * @as(u64, constant);
+    const shift: u6 = @intCast(32 - @as(u32, bits));
+    const mask: u64 = (@as(u64, 1) << @as(u6, @intCast(bits))) - 1;
+    return @intCast((product >> shift) & mask);
+}
+
+/// Fixed-seed splitmix32 giving the deterministic multiplicative-constant
+/// candidate sequence (forced odd — even constants lose low entropy).
+pub fn multiplicativeCandidate(index: u32) u32 {
+    var z = index +% 0x9E3779B9;
+    z = (z ^ (z >> 16)) *% 0x85EBCA6B;
+    z = (z ^ (z >> 13)) *% 0xC2B2AE35;
+    z = z ^ (z >> 16);
+    return z | 1;
 }
 
 fn bestSparsePlan(cases: []const ir.SwitchCase) ?SparsePlan {
@@ -255,7 +288,49 @@ fn bestDensePlan(cases: []const ir.SwitchCase) DensePlanResult {
             }
         }
     }
+
+    var table_slots = std.math.ceilPowerOfTwo(usize, @max(cases.len, 2)) catch return result;
+    while (table_slots <= dense_max_table_slots) : (table_slots *= 2) {
+        if (denseMultiplicativePlan(cases, table_slots)) |candidate| {
+            result.candidates += 1;
+            if (isBetterDensePlan(candidate, result.best)) result.best = candidate;
+        }
+    }
     return result;
+}
+
+fn denseMultiplicativePlan(cases: []const ir.SwitchCase, table_slots: usize) ?DensePlan {
+    std.debug.assert(std.math.isPowerOfTwo(table_slots) and table_slots <= dense_max_table_slots);
+    if (cases.len > table_slots) return null;
+    const bits: u8 = @intCast(std.math.log2_int(usize, table_slots));
+    if (bits == 0 or bits > 8) return null;
+
+    var candidate_index: u32 = 0;
+    while (candidate_index < multiplicative_search_budget) : (candidate_index += 1) {
+        const constant = multiplicativeCandidate(candidate_index);
+        var occupied = [_]bool{false} ** dense_max_table_slots;
+        var collision_free = true;
+        for (cases) |case| {
+            const selector = parseU32Selector(case.value).?;
+            const slot = multiplicativeIndex(selector, constant, bits);
+            if (occupied[slot]) {
+                collision_free = false;
+                break;
+            }
+            occupied[slot] = true;
+        }
+        if (collision_free) {
+            return makeDensePlan(.{
+                .kind = .multiplicative,
+                .cases = cases.len,
+                .table_slots = table_slots,
+                .index_bits = bits,
+                .index_shift = 32 - bits,
+                .mul_constant = constant,
+            });
+        }
+    }
+    return null;
 }
 
 fn analyzeSparsePlan(cases: []const ir.SwitchCase, bucket_bits: u8, bucket_shift: u8) SparsePlan {
@@ -363,12 +438,16 @@ fn makeDensePlan(args: struct {
     table_slots: usize,
     index_bits: ?u8 = null,
     index_shift: ?u8 = null,
+    mul_constant: ?u32 = null,
     range_min: ?u32 = null,
     range_max: ?u32 = null,
     index_bounds_checks: usize = 0,
 }) DensePlan {
-    const dispatch_overhead_x1000 = table_dispatch_overhead_checks_x1000 +
-        (if (args.kind == .range) dense_range_extra_checks_x1000 else 0);
+    const dispatch_overhead_x1000 = table_dispatch_overhead_checks_x1000 + switch (args.kind) {
+        .bit_window => 0,
+        .range => dense_range_extra_checks_x1000,
+        .multiplicative => dense_multiplicative_extra_checks_x1000,
+    };
     return .{
         .kind = args.kind,
         .cases = args.cases,
@@ -378,6 +457,7 @@ fn makeDensePlan(args: struct {
         .load_factor_x1000 = divRound(args.cases * 1000, args.table_slots),
         .index_bits = args.index_bits,
         .index_shift = args.index_shift,
+        .mul_constant = args.mul_constant,
         .range_min = args.range_min,
         .range_max = args.range_max,
         .index_bounds_checks = args.index_bounds_checks,
@@ -608,13 +688,15 @@ test "switch routing chooser picks dense range for compact case sets" {
     try std.testing.expectEqual(@as(usize, 0), plan.dense.hole_slots);
 }
 
-test "switch routing chooser falls back to sparse when every dense window collides" {
-    // Liveness witness for the sparse strategy. The pair 0x…01/0x…02 differs
-    // only in bits [0,2) and the pair 0x00000001/0x10000000 collides in every
-    // low window, so no (bits, shift) bit-window is collision-free across the
-    // set; the value span also exceeds dense_max_table_slots, so no range
-    // plan exists. Bits [8,10) split the set into 4 buckets of 5, which the
-    // sparse analyzer finds and the honest cost model accepts.
+test "switch routing multiplicative hashing rescues sets no bit window can table" {
+    // The pair 0x…01/0x…02 differs only in bits [0,2) and the pair
+    // 0x00000001/0x10000000 collides in every low window, so no (bits, shift)
+    // bit-window is collision-free across the set, and the value span exceeds
+    // dense_max_table_slots so no range plan exists. Before the multiplicative
+    // kind this set fell back to sparse buckets; the constant search finds a
+    // collision-free multiply-shift table, so it now routes dense. Sparse's
+    // own liveness witness is the >256-case switch in release_generic_backend
+    // ("lowers sparse switch routing"), which no dense table can hold.
     const cases = [_]ir.SwitchCase{
         .{ .value = "0x00000001", .target = "a", .line = 1 },
         .{ .value = "0x00000002", .target = "b", .line = 2 },
@@ -638,15 +720,17 @@ test "switch routing chooser falls back to sparse when every dense window collid
         .{ .value = "0x00000305", .target = "t", .line = 20 },
     };
     const plan = choosePlan(.{ .selector = "selector", .cases = &cases, .default_target = "fallback" });
-    try std.testing.expect(plan == .sparse);
+    try std.testing.expect(plan == .dense);
+    try std.testing.expectEqual(DensePlanKind.multiplicative, plan.dense.kind);
 }
 
-test "switch routing chooser picks dense bit-window for the dispatcher liveness contract" {
+test "switch routing chooser picks dense for the dispatcher liveness contract" {
     // Liveness pin: the 16 keccak selectors of d0()..d15() from
     // tests/conformance/dispatcher_dense_routing.ora. A 7-bit window at
-    // shift 0 is collision-free, and 16 cases clear the saving threshold —
-    // if this stops choosing dense, the dispatcher execution coverage in
-    // that conformance spec silently degrades to another strategy.
+    // shift 0 is collision-free (128 slots), but the multiplicative search
+    // finds a smaller collision-free table, and smaller tables win the
+    // comparator — if this stops choosing dense, the dispatcher execution
+    // coverage in that conformance spec silently degrades.
     const cases = [_]ir.SwitchCase{
         .{ .value = "0xa9874b2a", .target = "a", .line = 1 },
         .{ .value = "0x8c18f2f1", .target = "b", .line = 2 },
@@ -667,7 +751,8 @@ test "switch routing chooser picks dense bit-window for the dispatcher liveness 
     };
     const plan = choosePlan(.{ .selector = "selector", .cases = &cases, .default_target = "fallback" });
     try std.testing.expect(plan == .dense);
-    try std.testing.expectEqual(DensePlanKind.bit_window, plan.dense.kind);
+    try std.testing.expectEqual(DensePlanKind.multiplicative, plan.dense.kind);
+    try std.testing.expect(plan.dense.table_slots < 128);
 }
 
 test "switch routing strategy fact table covers planner variants" {
