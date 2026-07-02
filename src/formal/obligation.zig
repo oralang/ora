@@ -40,6 +40,7 @@ pub const ObligationSet = struct {
         for (self.queries) |query| {
             if (query.result) |result| {
                 if (result.degraded) return .{ .blocked = .degraded_query };
+                if (result.vacuous) return .{ .blocked = .vacuous_query };
                 if (result.vacuity_unknown) return .{ .blocked = .unknown_query };
                 if (result.status == .unknown) {
                     if (self.queryUnknownDischargedByLean(query)) continue;
@@ -410,6 +411,7 @@ pub const ArtifactBlockReason = enum(u8) {
     blocking_diagnostic,
     invalid_dependency,
     unknown_query,
+    vacuous_query,
     degraded_query,
     failed_query,
     missing_proof,
@@ -1197,6 +1199,25 @@ test "artifact policy blocks unknown and degraded query results" {
         .obligations = &obligations,
         .queries = &degraded_queries,
         .terms = &.{.{ .bool_lit = true }},
+    }).artifactDecision());
+}
+
+test "artifact policy blocks vacuous query results even when proved" {
+    const queries = [_]VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .result = .{ .status = .proved, .vacuous = true },
+        },
+    };
+
+    try expectArtifactBlocked(.vacuous_query, (ObligationSet{
+        .queries = &queries,
     }).artifactDecision());
 }
 

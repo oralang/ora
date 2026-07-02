@@ -5469,7 +5469,7 @@ test "compiler lowers requires clauses to runtime revert and erases ensures befo
     try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "ora.ensures"));
 }
 
-test "refinement cleanup deduplicates requires checks implied by parameter refinement" {
+test "refinement cleanup keeps dominated requires checks without proven guard id" {
     const source_text =
         \\contract Check {
         \\    pub fn run(value: InRange<u256, 0, 200>)
@@ -5492,12 +5492,60 @@ test "refinement cleanup deduplicates requires checks implied by parameter refin
     defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
     const after = after_ref.data[0..after_ref.length];
 
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, after, "cf.assert"));
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, after, "cf.assert"));
     try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "ora.requires"));
     try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "ora.assert"));
 }
 
-test "refinement cleanup deduplicates zero-address requires implied by NonZeroAddress" {
+fn firstGuardIdFromModuleText(text: []const u8) ![]const u8 {
+    const marker = "ora.guard_id = \"";
+    const start = (std.mem.indexOf(u8, text, marker) orelse return error.TestUnexpectedResult) + marker.len;
+    const end = start + (std.mem.indexOfScalar(u8, text[start..], '"') orelse return error.TestUnexpectedResult);
+    return text[start..end];
+}
+
+test "refinement cleanup erases only proven guard while keeping dominated requires checks" {
+    const source_text =
+        \\contract Check {
+        \\    pub fn run(value: InRange<u256, 0, 200>)
+        \\        requires value >= 0
+        \\        requires value <= 200
+        \\    {
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+
+    const before_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (before_ref.data != null) mlir.oraStringRefFree(before_ref);
+    const before = before_ref.data[0..before_ref.length];
+    const guard_id = try firstGuardIdFromModuleText(before);
+
+    var proven_guard_ids = std.StringHashMap(void).init(testing.allocator);
+    defer {
+        var it = proven_guard_ids.iterator();
+        while (it.next()) |entry| testing.allocator.free(entry.key_ptr.*);
+        proven_guard_ids.deinit();
+    }
+    try proven_guard_ids.put(try testing.allocator.dupe(u8, guard_id), {});
+
+    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
+
+    const after_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
+    const after = after_ref.data[0..after_ref.length];
+
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, after, "cf.assert"));
+    try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "ora.refinement_guard"));
+    try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "ora.requires"));
+    try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "ora.assert"));
+}
+
+test "refinement cleanup keeps dominated zero-address requires checks without proven guard id" {
     const source_text =
         \\comptime const std = @import("std");
         \\
@@ -5522,7 +5570,7 @@ test "refinement cleanup deduplicates zero-address requires implied by NonZeroAd
     defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
     const after = after_ref.data[0..after_ref.length];
 
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, after, "cf.assert"));
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, after, "cf.assert"));
     try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "ora.requires"));
     try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "ora.assert"));
 }

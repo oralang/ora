@@ -14017,9 +14017,8 @@ test "explain mode reports contradictory requires as vacuous" {
     try testing.expectEqual(errors.VerificationErrorType.PreconditionViolation, verification_result.errors.items[0].error_type);
     try testing.expectEqual(@as(usize, 0), verification_result.proven_guard_positions.items.len);
 
-    const artifacts = try pass.buildSmtReport(module, "/tmp/vacuous_requires_test.ora", &verification_result);
-    defer testing.allocator.free(artifacts.markdown);
-    defer testing.allocator.free(artifacts.json);
+    var artifacts = try pass.buildSmtReport(module, "/tmp/vacuous_requires_test.ora", &verification_result);
+    defer artifacts.deinit(testing.allocator);
 
     try testing.expect(artifacts.blocksTrustedArtifacts());
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"vacuous\":true") != null);
@@ -14047,9 +14046,8 @@ test "runVerificationPass explain mode remains on canonical prepared-query path"
     try testing.expect(!verification_result.success);
     try testing.expectEqual(errors.VerificationErrorType.PreconditionViolation, verification_result.errors.items[0].error_type);
 
-    const artifacts = try pass.buildSmtReport(module, "/tmp/vacuous_requires_test.ora", &verification_result);
-    defer testing.allocator.free(artifacts.markdown);
-    defer testing.allocator.free(artifacts.json);
+    var artifacts = try pass.buildSmtReport(module, "/tmp/vacuous_requires_test.ora", &verification_result);
+    defer artifacts.deinit(testing.allocator);
 
     try testing.expect(artifacts.blocksTrustedArtifacts());
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"vacuous\":true") != null);
