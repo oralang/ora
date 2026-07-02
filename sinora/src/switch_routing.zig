@@ -15,6 +15,16 @@ pub const sparse_bucket_shifts = [_]u8{ 0, 4, 8, 12, 16, 20, 24 };
 pub const dense_max_table_slots: usize = 256;
 pub const min_selector_check_saving_x1000: usize = 4000;
 
+/// Dispatch-overhead costs in check-equivalents. One "check" is the exact
+/// case guard as release codegen emits it (selector reload + PUSH4 + EQ +
+/// JUMPI ≈ 25 gas). The jump-table machinery — index compute, scratch-word
+/// zero, MUL/ADD, CODECOPY, MLOAD, JUMP — costs ≈ 70 gas ≈ 2.8 checks and
+/// is paid once per routed call by both sparse and dense plans.
+pub const table_dispatch_overhead_checks_x1000: usize = 2800;
+/// Range plans additionally pay the SUB rebase and the wrap-safe bounds
+/// check (PUSH span, DUP2, GT, PUSH dest, JUMPI ≈ 15 gas ≈ 0.6 checks).
+pub const dense_range_extra_checks_x1000: usize = 600;
+
 pub const StrategyKind = enum {
     linear,
     sparse,
@@ -181,18 +191,19 @@ pub fn choosePlan(switch_term: ir.SwitchTerminator) Plan {
 
     const linear_avg = linearAverageChecksX1000(switch_term.cases.len);
 
+    // Dense first: it routes through the same jump-table machinery as sparse
+    // but lands on exactly one exact-selector guard, so any qualifying dense
+    // plan is at least as cheap as any qualifying sparse plan (whose buckets
+    // scan >= 1 guards after identical table overhead).
+    const dense_result = bestDensePlan(switch_term.cases);
+    if (dense_result.best) |dense| {
+        if (savesSelectorChecks(linear_avg, dense.dense_total_avg_checks_x1000)) return .{ .dense = dense };
+    }
+
     if (bestSparsePlan(switch_term.cases)) |sparse| {
         if (savesSelectorChecks(linear_avg, sparse.sparse_total_avg_checks_x1000)) {
             return .{ .sparse = sparse };
         }
-    }
-
-    // Dense candidates are still reported in metrics, but the current lowering
-    // emits a dense slot guard chain plus the exact selector guard. Without a
-    // real data-table dynamic jump, that is not cheaper than the linear chain.
-    const dense_result = bestDensePlan(switch_term.cases);
-    if (dense_result.best) |dense| {
-        if (savesSelectorChecks(linear_avg, dense.dense_total_avg_checks_x1000)) return .{ .dense = dense };
     }
 
     return .linear;
@@ -286,9 +297,9 @@ fn analyzeSparsePlan(cases: []const ir.SwitchCase, bucket_bits: u8, bucket_shift
         .linear_worst_checks = n,
         .linear_known_selector_avg_checks_x1000 = linearAverageChecksX1000(n),
         .sparse_worst_bucket_checks = max_bucket_size,
-        .sparse_bucket_dispatch_avg_checks_x1000 = 0,
+        .sparse_bucket_dispatch_avg_checks_x1000 = table_dispatch_overhead_checks_x1000,
         .sparse_known_selector_avg_checks_x1000 = sparse_exact_avg,
-        .sparse_total_avg_checks_x1000 = sparse_exact_avg,
+        .sparse_total_avg_checks_x1000 = sparse_exact_avg + table_dispatch_overhead_checks_x1000,
     };
 }
 
@@ -356,6 +367,8 @@ fn makeDensePlan(args: struct {
     range_max: ?u32 = null,
     index_bounds_checks: usize = 0,
 }) DensePlan {
+    const dispatch_overhead_x1000 = table_dispatch_overhead_checks_x1000 +
+        (if (args.kind == .range) dense_range_extra_checks_x1000 else 0);
     return .{
         .kind = args.kind,
         .cases = args.cases,
@@ -368,8 +381,10 @@ fn makeDensePlan(args: struct {
         .range_min = args.range_min,
         .range_max = args.range_max,
         .index_bounds_checks = args.index_bounds_checks,
-        .dense_dispatch_avg_checks_x1000 = linearAverageChecksX1000(args.cases),
-        .dense_total_avg_checks_x1000 = linearAverageChecksX1000(args.cases) + 1000,
+        .dense_dispatch_avg_checks_x1000 = dispatch_overhead_x1000,
+        // O(1) table route plus exactly one exact-selector guard in the
+        // landing block; independent of case count.
+        .dense_total_avg_checks_x1000 = dispatch_overhead_x1000 + 1000,
         .linear_worst_checks = args.cases,
         .linear_known_selector_avg_checks_x1000 = linearAverageChecksX1000(args.cases),
     };
@@ -464,12 +479,15 @@ test "switch routing metrics find eligible sparse table plans" {
 
     try std.testing.expectEqual(@as(usize, 1), stats.switches);
     try std.testing.expectEqual(@as(usize, cases.len), stats.cases);
-    try std.testing.expectEqual(@as(usize, 1), stats.chosen_sparse);
+    // Sequential 0..19 admits a collision-free range table, and a real dense
+    // route (O(1) + one exact check) beats bucket scanning — chooser is dense.
+    try std.testing.expectEqual(@as(usize, 1), stats.chosen_dense);
     try std.testing.expectEqual(@as(usize, 1), stats.sparse_candidates);
     const best = stats.best_sparse orelse return error.TestUnexpectedResult;
     try std.testing.expect(best.max_bucket_size < cases.len);
     try std.testing.expect(best.sparse_known_selector_avg_checks_x1000 < best.linear_known_selector_avg_checks_x1000);
     try std.testing.expect(best.sparse_total_avg_checks_x1000 >= best.sparse_known_selector_avg_checks_x1000);
+    try std.testing.expectEqual(table_dispatch_overhead_checks_x1000, best.sparse_bucket_dispatch_avg_checks_x1000);
 }
 
 test "switch routing metrics find dense range plans for compact case values" {
@@ -548,7 +566,9 @@ test "switch routing metrics ignore non-selector-width switch cases" {
     try std.testing.expect(stats.best_dense == null);
 }
 
-test "switch routing chooser keeps dense candidates linear until lowering has a real table jump" {
+test "switch routing chooser keeps small switches linear even with perfect dense windows" {
+    // 4 cases average 2.5 exact checks on the linear chain — cheaper than any
+    // table route's fixed dispatch overhead plus its landing-block check.
     const cases = [_]ir.SwitchCase{
         .{ .value = "0x00000001", .target = "a", .line = 1 },
         .{ .value = "0x00000011", .target = "b", .line = 2 },
@@ -559,7 +579,7 @@ test "switch routing chooser keeps dense candidates linear until lowering has a 
     try std.testing.expect(plan == .linear);
 }
 
-test "switch routing chooser uses sparse only when current lowering saves selector checks" {
+test "switch routing chooser picks dense range for compact case sets" {
     const cases = [_]ir.SwitchCase{
         .{ .value = "0", .target = "a", .line = 1 },
         .{ .value = "1", .target = "b", .line = 2 },
@@ -583,7 +603,71 @@ test "switch routing chooser uses sparse only when current lowering saves select
         .{ .value = "19", .target = "t", .line = 20 },
     };
     const plan = choosePlan(.{ .selector = "selector", .cases = &cases, .default_target = "fallback" });
+    try std.testing.expect(plan == .dense);
+    try std.testing.expectEqual(DensePlanKind.range, plan.dense.kind);
+    try std.testing.expectEqual(@as(usize, 0), plan.dense.hole_slots);
+}
+
+test "switch routing chooser falls back to sparse when every dense window collides" {
+    // Liveness witness for the sparse strategy. The pair 0x…01/0x…02 differs
+    // only in bits [0,2) and the pair 0x00000001/0x10000000 collides in every
+    // low window, so no (bits, shift) bit-window is collision-free across the
+    // set; the value span also exceeds dense_max_table_slots, so no range
+    // plan exists. Bits [8,10) split the set into 4 buckets of 5, which the
+    // sparse analyzer finds and the honest cost model accepts.
+    const cases = [_]ir.SwitchCase{
+        .{ .value = "0x00000001", .target = "a", .line = 1 },
+        .{ .value = "0x00000002", .target = "b", .line = 2 },
+        .{ .value = "0x10000000", .target = "c", .line = 3 },
+        .{ .value = "0x20000000", .target = "d", .line = 4 },
+        .{ .value = "0x00000003", .target = "e", .line = 5 },
+        .{ .value = "0x00000101", .target = "f", .line = 6 },
+        .{ .value = "0x00000102", .target = "g", .line = 7 },
+        .{ .value = "0x10000103", .target = "h", .line = 8 },
+        .{ .value = "0x00000104", .target = "i", .line = 9 },
+        .{ .value = "0x00000105", .target = "j", .line = 10 },
+        .{ .value = "0x00000201", .target = "k", .line = 11 },
+        .{ .value = "0x00000202", .target = "l", .line = 12 },
+        .{ .value = "0x00000203", .target = "m", .line = 13 },
+        .{ .value = "0x00000204", .target = "n", .line = 14 },
+        .{ .value = "0x00000205", .target = "o", .line = 15 },
+        .{ .value = "0x00000301", .target = "p", .line = 16 },
+        .{ .value = "0x00000302", .target = "q", .line = 17 },
+        .{ .value = "0x00000303", .target = "r", .line = 18 },
+        .{ .value = "0x00000304", .target = "s", .line = 19 },
+        .{ .value = "0x00000305", .target = "t", .line = 20 },
+    };
+    const plan = choosePlan(.{ .selector = "selector", .cases = &cases, .default_target = "fallback" });
     try std.testing.expect(plan == .sparse);
+}
+
+test "switch routing chooser picks dense bit-window for the dispatcher liveness contract" {
+    // Liveness pin: the 16 keccak selectors of d0()..d15() from
+    // tests/conformance/dispatcher_dense_routing.ora. A 7-bit window at
+    // shift 0 is collision-free, and 16 cases clear the saving threshold —
+    // if this stops choosing dense, the dispatcher execution coverage in
+    // that conformance spec silently degrades to another strategy.
+    const cases = [_]ir.SwitchCase{
+        .{ .value = "0xa9874b2a", .target = "a", .line = 1 },
+        .{ .value = "0x8c18f2f1", .target = "b", .line = 2 },
+        .{ .value = "0x7ef1dbea", .target = "c", .line = 3 },
+        .{ .value = "0x1946b5be", .target = "d", .line = 4 },
+        .{ .value = "0x848ea577", .target = "e", .line = 5 },
+        .{ .value = "0x56f897ef", .target = "f", .line = 6 },
+        .{ .value = "0x5fc75cb5", .target = "g", .line = 7 },
+        .{ .value = "0x80b3bd9b", .target = "h", .line = 8 },
+        .{ .value = "0x8b7d553d", .target = "i", .line = 9 },
+        .{ .value = "0xbaf74a09", .target = "j", .line = 10 },
+        .{ .value = "0xe0265090", .target = "k", .line = 11 },
+        .{ .value = "0x13f2ec66", .target = "l", .line = 12 },
+        .{ .value = "0x1d12652e", .target = "m", .line = 13 },
+        .{ .value = "0xc57076af", .target = "n", .line = 14 },
+        .{ .value = "0x1b15e99d", .target = "o", .line = 15 },
+        .{ .value = "0x29a6a38d", .target = "p", .line = 16 },
+    };
+    const plan = choosePlan(.{ .selector = "selector", .cases = &cases, .default_target = "fallback" });
+    try std.testing.expect(plan == .dense);
+    try std.testing.expectEqual(DensePlanKind.bit_window, plan.dense.kind);
 }
 
 test "switch routing strategy fact table covers planner variants" {

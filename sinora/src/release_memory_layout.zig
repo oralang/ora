@@ -91,8 +91,11 @@ pub fn generateSimple(
                 collector.switch_store = try collector.alloc(word_size);
             }
             if (block.terminator == .switch_ and collector.switch_table_store == null) {
-                if (switch_routing.choosePlan(block.terminator.switch_) == .sparse) {
-                    collector.switch_table_store = try collector.alloc(word_size);
+                // Sparse and dense both route through the CODECOPY jump
+                // table and need its scratch word.
+                switch (switch_routing.choosePlan(block.terminator.switch_)) {
+                    .sparse, .dense => collector.switch_table_store = try collector.alloc(word_size),
+                    .linear => {},
                 }
             }
 

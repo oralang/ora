@@ -108,6 +108,7 @@ pub const op = struct {
     pub const PUSH0: u8 = 0x5f;
     pub const PUSH1: u8 = 0x60;
     pub const DUP1: u8 = 0x80;
+    pub const DUP2: u8 = 0x81;
     pub const DUP4: u8 = 0x83;
     pub const SWAP1: u8 = 0x90;
     pub const LOG0: u8 = 0xa0;

@@ -1,0 +1,72 @@
+// Dispatcher dense-routing liveness target. Sixteen zero-arg public fns give
+// the selector switch a collision-free 7-bit window (shift 0) and clear the
+// planner's saving threshold, so the backend routes this dispatcher through
+// the dense jump table. The selector list is pinned in
+// sinora/src/switch_routing.zig ("dispatcher liveness contract" test); the
+// spec calls every fn plus an unknown selector so the table route, its
+// exact-selector guards, and the default edge all execute on lib/evm.
+contract DispatcherDenseRouting {
+    pub fn d0() -> u256 {
+        return 100;
+    }
+
+    pub fn d1() -> u256 {
+        return 101;
+    }
+
+    pub fn d2() -> u256 {
+        return 102;
+    }
+
+    pub fn d3() -> u256 {
+        return 103;
+    }
+
+    pub fn d4() -> u256 {
+        return 104;
+    }
+
+    pub fn d5() -> u256 {
+        return 105;
+    }
+
+    pub fn d6() -> u256 {
+        return 106;
+    }
+
+    pub fn d7() -> u256 {
+        return 107;
+    }
+
+    pub fn d8() -> u256 {
+        return 108;
+    }
+
+    pub fn d9() -> u256 {
+        return 109;
+    }
+
+    pub fn d10() -> u256 {
+        return 110;
+    }
+
+    pub fn d11() -> u256 {
+        return 111;
+    }
+
+    pub fn d12() -> u256 {
+        return 112;
+    }
+
+    pub fn d13() -> u256 {
+        return 113;
+    }
+
+    pub fn d14() -> u256 {
+        return 114;
+    }
+
+    pub fn d15() -> u256 {
+        return 115;
+    }
+}

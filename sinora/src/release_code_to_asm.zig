@@ -886,10 +886,7 @@ const GenericEmitter = struct {
         switch (switch_routing.choosePlan(switch_term)) {
             .linear => try self.emitLinearSwitch(function_name, switch_store, switch_term, context),
             .sparse => |plan| try self.emitSparseSwitch(function_name, switch_store, switch_term, plan, context),
-            // The chooser never returns dense until a real table-jump lowering
-            // exists; fail closed so a cost-model change alone can never
-            // resurrect the retired slot-guard-chain lowering.
-            .dense => return CodeToAsmError.UnsupportedSir,
+            .dense => |plan| try self.emitDenseSwitch(function_name, switch_store, switch_term, plan, context),
         }
     }
 
@@ -965,18 +962,34 @@ const GenericEmitter = struct {
             const selector = switch_routing.parseU32Selector(case.value) orelse return CodeToAsmError.UnsupportedSir;
             const slot = switch_routing.denseIndex(selector, plan);
             if (slot >= slot_labels.len) return CodeToAsmError.UnsupportedSir;
-            if (slot_labels[slot] == null) slot_labels[slot] = try self.bytecode.newLabel();
+            // The planner only proposes collision-free tables; a duplicate
+            // slot here is planner/codegen drift.
+            if (slot_labels[slot] != null) return CodeToAsmError.UnsupportedSir;
+            slot_labels[slot] = try self.bytecode.newLabel();
         }
 
-        for (slot_labels, 0..) |maybe_label, slot| {
-            const label = maybe_label orelse continue;
-            try self.emitDenseIndex(switch_store, plan);
-            try self.bytecode.pushU32(@intCast(slot));
-            try self.bytecode.pushOp(evm_asm.op.EQ);
-            try self.pushLabelRef(label, context);
-            try self.bytecode.pushOp(evm_asm.op.JUMPI);
+        const default_label = self.blockLabel(function_name, switch_term.default_target) orelse return CodeToAsmError.MissingLabel;
+        const table_store = self.layout.switch_table_store orelse return CodeToAsmError.UnsupportedSir;
+        const table_label = try self.bytecode.newLabel();
+
+        const out_of_range_label = try self.emitDenseIndex(switch_store, plan, context);
+        try self.emitJumpTableDispatch(table_label, jump_table_entry_width, table_store, context);
+
+        // Dead zone after the table JUMP: the range bounds check lands here
+        // to drop its index copy before taking the default edge, so the
+        // default block sees the same stack as every other route into it.
+        if (out_of_range_label) |label| {
+            try self.bytecode.markJumpDest(label);
+            try self.bytecode.pushOp(evm_asm.op.POP);
+            try self.emitDefaultSwitchJump(function_name, switch_term, context);
         }
-        try self.emitDefaultSwitchJump(function_name, switch_term, context);
+
+        const table_targets = try self.allocator.alloc(evm_asm.Label, plan.table_slots);
+        errdefer self.allocator.free(table_targets);
+        for (slot_labels, table_targets) |maybe_label, *target| {
+            target.* = maybe_label orelse default_label;
+        }
+        try self.queueJumpTable(table_label, table_targets, jump_table_entry_width);
 
         for (slot_labels, 0..) |maybe_label, slot| {
             const label = maybe_label orelse continue;
@@ -1029,20 +1042,40 @@ const GenericEmitter = struct {
         try self.emitBitWindowIndex(plan.bucket_bits, plan.bucket_shift);
     }
 
+    // Emits the dense slot-index computation, leaving the index on the stack
+    // for emitJumpTableDispatch. Range plans rebase with `selector - min`,
+    // which wraps mod 2^256 for selectors below min, so the single
+    // `index > span` guard catches both under- and overflow of the range;
+    // the returned label must be landed on a POP-then-default trampoline.
     fn emitDenseIndex(
         self: *GenericEmitter,
         switch_store: u32,
         plan: switch_routing.DensePlan,
-    ) !void {
-        try self.emitStoredSelector(switch_store);
+        context: EmitContext,
+    ) !?evm_asm.Label {
         switch (plan.kind) {
-            .bit_window => try self.emitBitWindowIndex(plan.index_bits.?, plan.index_shift.?),
+            .bit_window => {
+                try self.emitStoredSelector(switch_store);
+                try self.emitBitWindowIndex(plan.index_bits.?, plan.index_shift.?);
+                return null;
+            },
             .range => {
                 const min_selector = plan.range_min.?;
+                const span = plan.range_max.? - min_selector;
                 if (min_selector != 0) {
                     try self.bytecode.pushU32(min_selector);
+                    try self.emitStoredSelector(switch_store);
                     try self.bytecode.pushOp(evm_asm.op.SUB);
+                } else {
+                    try self.emitStoredSelector(switch_store);
                 }
+                const out_of_range = try self.bytecode.newLabel();
+                try self.bytecode.pushU32(span);
+                try self.bytecode.pushOp(evm_asm.op.DUP2);
+                try self.bytecode.pushOp(evm_asm.op.GT);
+                try self.pushLabelRef(out_of_range, context);
+                try self.bytecode.pushOp(evm_asm.op.JUMPI);
+                return out_of_range;
             },
         }
     }

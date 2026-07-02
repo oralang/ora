@@ -688,7 +688,7 @@ test "generic backend generates switch scratch layout" {
     try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.JUMPI) != null);
 }
 
-test "generic backend keeps dense candidates linear until table lowering is available" {
+test "generic backend keeps small switches linear despite perfect dense windows" {
     var program = try parseTestProgram(
         \\fn main:
         \\    entry {
@@ -789,6 +789,108 @@ test "generic backend lowers sparse switch routing" {
     try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.CODECOPY) != null);
     try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.AND) != null);
     try std.testing.expect(countByte(bytes, evm_asm.op.JUMPI) >= 260);
+}
+
+test "generic backend lowers dense range switch routing with wrap-safe bounds" {
+    var source: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer source.deinit();
+
+    try source.writer.writeAll(
+        \\fn main:
+        \\    entry {
+        \\        selector = const 0x05
+        \\        switch selector {
+        \\
+    );
+    for (0..20) |index| {
+        try source.writer.print("        0x{x} => @hit\n", .{index});
+    }
+    try source.writer.writeAll(
+        \\        default => @other
+        \\        }
+        \\    }
+        \\
+        \\    hit {
+        \\        stop
+        \\    }
+        \\
+        \\    other {
+        \\        invalid
+        \\    }
+    );
+
+    var program = try parseTestProgram(source.written());
+    defer program.deinit();
+
+    const plan = switch (program.functions[0].blocks[0].terminator) {
+        .switch_ => |switch_term| switch_routing.choosePlan(switch_term),
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(plan == .dense);
+    try std.testing.expectEqual(switch_routing.DensePlanKind.range, plan.dense.kind);
+
+    const bytes = try emitRelease(std.testing.allocator, program);
+    defer std.testing.allocator.free(bytes);
+
+    // Table route (CODECOPY + MLOAD + JUMP) plus the wrap-safe range bounds
+    // check (DUP2/GT/JUMPI) and its POP trampoline; one exact-check JUMPI per
+    // landing slot plus the bounds JUMPI.
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.CODECOPY) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.DUP2) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.GT) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.POP) != null);
+    try std.testing.expectEqual(@as(usize, 21), countByte(bytes, evm_asm.op.JUMPI));
+}
+
+test "generic backend lowers dense bit-window switch routing" {
+    var source: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer source.deinit();
+
+    try source.writer.writeAll(
+        \\fn main:
+        \\    entry {
+        \\        selector = const 0x21
+        \\        switch selector {
+        \\
+    );
+    // Stride 0x10 keeps bits [4,9) collision-free while the value span
+    // (0x131) exceeds the dense table cap, so only a bit-window plan exists.
+    for (0..20) |index| {
+        try source.writer.print("        0x{x} => @hit\n", .{index * 0x10 + 1});
+    }
+    try source.writer.writeAll(
+        \\        default => @other
+        \\        }
+        \\    }
+        \\
+        \\    hit {
+        \\        stop
+        \\    }
+        \\
+        \\    other {
+        \\        invalid
+        \\    }
+    );
+
+    var program = try parseTestProgram(source.written());
+    defer program.deinit();
+
+    const plan = switch (program.functions[0].blocks[0].terminator) {
+        .switch_ => |switch_term| switch_routing.choosePlan(switch_term),
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(plan == .dense);
+    try std.testing.expectEqual(switch_routing.DensePlanKind.bit_window, plan.dense.kind);
+
+    const bytes = try emitRelease(std.testing.allocator, program);
+    defer std.testing.allocator.free(bytes);
+
+    // Mask-bounded index: no bounds check, so exactly one exact-check JUMPI
+    // per landing slot and none for range guarding.
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.CODECOPY) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.AND) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.SHR) != null);
+    try std.testing.expectEqual(@as(usize, 20), countByte(bytes, evm_asm.op.JUMPI));
 }
 
 test "generic backend generates spill layout for deep stack schedule" {

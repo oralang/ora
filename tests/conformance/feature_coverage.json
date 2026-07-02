@@ -829,6 +829,14 @@
       ]
     },
     {
+      "id": "dispatcher.dense_table_routing",
+      "area": "dispatcher",
+      "behavior": "A 16-fn dispatcher routes through the dense jump table (collision-free 7-bit selector window): every fn executes via its table slot's exact-selector guard, unknown selectors and slot-aliasing selectors (same low 7 bits, different full selector) revert via the default edge",
+      "specs": [
+        "tests/conformance/dispatcher_dense_routing.spec.toml"
+      ]
+    },
+    {
       "id": "adversarial.short_calldata_dispatch",
       "area": "adversarial",
       "behavior": "Calldata shorter than 4 bytes must never select a function: a zero-arg public fn whose selector has a trailing zero byte (ping124() = 0x746e2900) is the alias target, and the 3-byte prefix 0x746e29 zero-pads to its exact selector word yet must revert, as must empty/1/2-byte calldata, while the full 4-byte selector still routes",
