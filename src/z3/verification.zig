@@ -5043,7 +5043,7 @@ pub const VerificationPass = struct {
                         try obligation_constraints.append(step_cond);
                     }
                 }
-                const negated = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition));
+                const negated = makeGoalCounterexample(self, ann.condition);
                 try obligation_constraints.append(negated);
                 try appendGoalTrackedAssumption(&tracked_obligation_assumptions, fn_name, ann, negated);
                 try materializeTrackedAssumptionProxies(self, &tracked_obligation_assumptions);
@@ -5171,7 +5171,7 @@ pub const VerificationPass = struct {
                                 try tracked_body_safety_assumptions.append(tracked);
                             }
 
-                            const negated_body_obligation = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(body_obligation));
+                            const negated_body_obligation = makeGoalCounterexample(self, body_obligation);
                             try body_safety_constraints.append(negated_body_obligation);
                             try appendGoalTrackedAssumption(&tracked_body_safety_assumptions, fn_name, ann, negated_body_obligation);
                             try materializeTrackedAssumptionProxies(self, &tracked_body_safety_assumptions);
@@ -5228,7 +5228,7 @@ pub const VerificationPass = struct {
                                     negated_backedge,
                                     makeTrackedAssumptionTag(.loop_invariant, ann),
                                 );
-                                const negated_exit_invariant = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(step_body_condition));
+                                const negated_exit_invariant = makeGoalCounterexample(self, step_body_condition);
                                 try exit_constraints.append(negated_exit_invariant);
                                 try appendGoalTrackedAssumption(&tracked_exit_assumptions, fn_name, ann, negated_exit_invariant);
                                 try materializeTrackedAssumptionProxies(self, &tracked_exit_assumptions);
@@ -5272,7 +5272,7 @@ pub const VerificationPass = struct {
                                 makeTrackedAssumptionTag(.loop_invariant, ann),
                             );
                         }
-                        const negated_step = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(step_body_condition));
+                        const negated_step = makeGoalCounterexample(self, step_body_condition);
                         try step_constraints.append(negated_step);
                         try appendGoalTrackedAssumption(&tracked_step_assumptions, fn_name, ann, negated_step);
                         try materializeTrackedAssumptionProxies(self, &tracked_step_assumptions);
@@ -5351,7 +5351,7 @@ pub const VerificationPass = struct {
                     }
 
                     try post_constraints.append(exit_condition);
-                    const negated_post = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ensure_ann.condition));
+                    const negated_post = makeGoalCounterexample(self, ensure_ann.condition);
                     try post_constraints.append(negated_post);
                     try appendGoalTrackedAssumption(&tracked_post_assumptions, fn_name, ensure_ann, negated_post);
                     try materializeTrackedAssumptionProxies(self, &tracked_post_assumptions);
@@ -8071,6 +8071,71 @@ fn appendGoalTrackedAssumption(
         .guard_id = ann.guard_id,
         .loop_owner = ann.loop_owner,
     });
+}
+
+fn makeGoalCounterexample(self: *VerificationPass, goal: z3.Z3_ast) z3.Z3_ast {
+    const instantiated = instantiateLeadingForallGoal(self, goal);
+    return z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(instantiated));
+}
+
+fn instantiateLeadingForallGoal(self: *VerificationPass, goal: z3.Z3_ast) z3.Z3_ast {
+    var current = self.encoder.coerceBoolean(goal);
+    var depth: u32 = 0;
+
+    while (z3.Z3_get_ast_kind(self.context.ctx, current) == z3.Z3_QUANTIFIER_AST and
+        z3.Z3_is_quantifier_forall(self.context.ctx, current))
+    {
+        const bound_count = z3.Z3_get_quantifier_num_bound(self.context.ctx, current);
+        if (bound_count != 1) return current;
+
+        const bound_sort = z3.Z3_get_quantifier_bound_sort(self.context.ctx, current, 0);
+        const quantifier_id = z3.Z3_get_ast_id(self.context.ctx, current);
+        var binder_name_buf: [48]u8 = undefined;
+        const binder_name = quantifierBoundNameForSkolem(self.context.ctx, current, 0, binder_name_buf[0..]);
+        var name_buf: [96]u8 = undefined;
+        const witness_name = std.fmt.bufPrintZ(
+            &name_buf,
+            "$ora.goal.skolem.{s}.{d}.{d}",
+            .{ binder_name, quantifier_id, depth },
+        ) catch "$ora.goal.skolem.overflow";
+        const witness = z3.Z3_mk_const(
+            self.context.ctx,
+            z3.Z3_mk_string_symbol(self.context.ctx, witness_name.ptr),
+            bound_sort,
+        );
+        var replacement = [_]z3.Z3_ast{witness};
+        const body = z3.Z3_get_quantifier_body(self.context.ctx, current);
+        current = self.encoder.coerceBoolean(
+            z3.Z3_substitute_vars(self.context.ctx, body, 1, replacement[0..].ptr),
+        );
+        depth += 1;
+    }
+
+    return current;
+}
+
+fn quantifierBoundNameForSkolem(ctx: z3.Z3_context, quantifier: z3.Z3_ast, index: c_uint, buffer: []u8) []const u8 {
+    const symbol = z3.Z3_get_quantifier_bound_name(ctx, quantifier, index);
+    return switch (z3.Z3_get_symbol_kind(ctx, symbol)) {
+        z3.Z3_STRING_SYMBOL => blk: {
+            const raw = z3.Z3_get_symbol_string(ctx, symbol) orelse break :blk "q";
+            break :blk sanitizeSkolemName(buffer, std.mem.span(raw));
+        },
+        z3.Z3_INT_SYMBOL => std.fmt.bufPrint(buffer, "q{d}", .{z3.Z3_get_symbol_int(ctx, symbol)}) catch "q",
+        else => "q",
+    };
+}
+
+fn sanitizeSkolemName(buffer: []u8, raw: []const u8) []const u8 {
+    if (buffer.len == 0) return "q";
+    var len: usize = 0;
+    for (raw) |ch| {
+        if (len == buffer.len) break;
+        buffer[len] = if (std.ascii.isAlphanumeric(ch) or ch == '_') ch else '_';
+        len += 1;
+    }
+    if (len == 0) return "q";
+    return buffer[0..len];
 }
 
 fn assertPreparedQueryConstraints(solver: *Solver, constraints: []const z3.Z3_ast) !void {
@@ -12114,6 +12179,31 @@ test "query fragment inference classifies solver fragments conservatively" {
     try testing.expectEqual(QuerySolverLogic.all, inferQuerySolverLogic(context.ctx, &[_]z3.Z3_ast{quant}));
 }
 
+test "goal-position forall counterexamples are skolemized without changing validity" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const bv8_sort = z3.Z3_mk_bv_sort(pass.context.ctx, 8);
+    const x = z3.Z3_mk_const(pass.context.ctx, z3.Z3_mk_string_symbol(pass.context.ctx, "goal_forall_x"), bv8_sort);
+    const bound = [_]z3.Z3_ast{x};
+
+    const tautology_body = z3.Z3_mk_eq(pass.context.ctx, x, x);
+    const tautology_goal = z3.Z3_mk_forall_const(pass.context.ctx, 0, 1, @ptrCast(&bound), 0, null, tautology_body);
+    const tautology_counterexample = makeGoalCounterexample(&pass, tautology_goal);
+    try testing.expectEqual(QueryFragment.qf_bv, inferQueryFragment(pass.context.ctx, &[_]z3.Z3_ast{tautology_counterexample}));
+    try pass.solver.assertChecked(tautology_counterexample);
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), try pass.solver.checkChecked());
+    try pass.solver.resetChecked();
+
+    const seven = z3.Z3_mk_numeral(pass.context.ctx, "7", bv8_sort);
+    const false_body = z3.Z3_mk_eq(pass.context.ctx, x, seven);
+    const false_goal = z3.Z3_mk_forall_const(pass.context.ctx, 0, 1, @ptrCast(&bound), 0, null, false_body);
+    const false_counterexample = makeGoalCounterexample(&pass, false_goal);
+    try testing.expectEqual(QueryFragment.qf_bv, inferQueryFragment(pass.context.ctx, &[_]z3.Z3_ast{false_counterexample}));
+    try pass.solver.assertChecked(false_counterexample);
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_TRUE), try pass.solver.checkChecked());
+}
+
 test "prepared queries route quantifier-free and quantified formulas to different solvers" {
     const mlir_ctx = mlir.oraContextCreate();
     defer mlir.oraContextDestroy(mlir_ctx);
@@ -12179,6 +12269,39 @@ test "prepared queries route quantifier-free and quantified formulas to differen
     }
     try testing.expect(saw_general);
     try testing.expect(saw_quantifier_fragment);
+
+    var quantified_goal_pass = try VerificationPass.init(testing.allocator);
+    defer quantified_goal_pass.deinit();
+    const goal_bv8_sort = z3.Z3_mk_bv_sort(quantified_goal_pass.context.ctx, 8);
+    const goal_x = z3.Z3_mk_const(quantified_goal_pass.context.ctx, z3.Z3_mk_string_symbol(quantified_goal_pass.context.ctx, "prepared_goal_quant_x"), goal_bv8_sort);
+    const goal_body = z3.Z3_mk_eq(quantified_goal_pass.context.ctx, goal_x, goal_x);
+    const goal_bound = [_]z3.Z3_ast{goal_x};
+    const quantified_goal = z3.Z3_mk_forall_const(quantified_goal_pass.context.ctx, 0, 1, @ptrCast(&goal_bound), 0, null, goal_body);
+    try quantified_goal_pass.encoded_annotations.append(.{
+        .function_name = "prepared_quantified_goal_test",
+        .kind = .Ensures,
+        .condition = quantified_goal,
+        .extra_constraints = &.{},
+        .file = "test.ora",
+        .line = 3,
+        .column = 1,
+    });
+    var quantified_goal_queries = try quantified_goal_pass.buildPreparedQueries();
+    defer {
+        for (quantified_goal_queries.items) |*q| q.deinit(testing.allocator);
+        quantified_goal_queries.deinit();
+    }
+    var saw_quantifier_free_goal = false;
+    for (quantified_goal_queries.items) |query| {
+        if (query.kind != .Obligation) continue;
+        saw_quantifier_free_goal = true;
+        try testing.expectEqual(QueryFragment.qf_bv, query.fragment);
+        try testing.expectEqual(QuerySolverLogic.qf_aufbv, query.solver_logic);
+        try quantified_goal_pass.solver.resetChecked();
+        try assertPreparedQueryConstraints(&quantified_goal_pass.solver, query.constraints);
+        try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), try quantified_goal_pass.solver.checkChecked());
+    }
+    try testing.expect(saw_quantifier_free_goal);
 }
 
 test "contract invariants from loop body obligations use loop constraints" {

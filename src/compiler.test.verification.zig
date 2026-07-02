@@ -165,6 +165,77 @@ test "verification loop invariant step excludes break exit paths" {
     try testing.expectEqualStrings("", result.error_kinds);
 }
 
+test "verification proves goal-position forall postconditions with skolem counterexamples" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract C {
+        \\    pub fn bounded_by_input(x: u256, k: u256) -> bool
+        \\        requires k < std.constants.U256_MAX / 2
+        \\        requires x < std.constants.U256_MAX - k
+        \\        ensures (forall i: u256 where i < x => i <= x + k)
+        \\    {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "bounded_by_input");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.error_kinds);
+}
+
+test "verification reports false goal-position forall postconditions with skolem readable witness" {
+    const source_text =
+        \\contract C {
+        \\    pub fn quantified_false(x: u256) -> bool
+        \\        requires x > 0
+        \\        ensures (forall i: u256 where i < x => i >= x)
+        \\    {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    var verifier = try z3_verification.VerificationPass.init(testing.allocator);
+    defer verifier.deinit();
+    verifier.filter_function_name = "quantified_false";
+
+    var result = try verifier.runVerificationPassPreparedSequential(hir_result.module.raw_module);
+    defer result.deinit();
+
+    try testing.expect(!result.success);
+    try testing.expectEqual(@as(usize, 1), result.errors.items.len);
+    const err = &result.errors.items[0];
+    try testing.expectEqualStrings("PostconditionViolation", @tagName(err.error_type));
+
+    var found_i_witness = false;
+    if (err.counterexample) |*ce| {
+        var iter = ce.variables.iterator();
+        while (iter.next()) |entry| {
+            if (std.mem.indexOf(u8, entry.key_ptr.*, "$ora.goal.skolem.i.") != null) {
+                found_i_witness = true;
+                break;
+            }
+        }
+    }
+    try testing.expect(found_i_witness);
+
+    var artifacts = try verifier.buildSmtReport(hir_result.module.raw_module, "/tmp/quantified_false.ora", &result);
+    defer artifacts.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"unknown\":0") != null);
+    try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"status\":\"UNKNOWN\"") == null);
+    try testing.expect(std.mem.indexOf(u8, artifacts.markdown, "assumptions inconsistent") == null);
+    try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"vacuous\":true") == null);
+}
+
 test "verification supports enum constants in stored struct fields without degradation" {
     const source_text =
         \\enum Status { Pending, Filled }
