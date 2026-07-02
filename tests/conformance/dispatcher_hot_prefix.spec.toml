@@ -1,0 +1,69 @@
+# Hot switch routes mutating fns; cold table routes views; unknown selectors
+# traverse both layers to the default revert.
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "bump()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = {}
+
+[[call]]
+fn = "bump()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = {}
+
+[[call]]
+fn = "count()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 2 }
+
+[[call]]
+fn = "v0()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 200 }
+
+[[call]]
+fn = "v7()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 207 }
+
+[[call]]
+fn = "v13()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 213 }
+
+[[call]]
+fn = "reset()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = {}
+
+# Unknown selector falls through hot and cold layers to the revert.
+[[call]]
+calldata = "0xdeadbeef"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+reverts = { any = true }
+
+[[call]]
+fn = "count()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 0 }

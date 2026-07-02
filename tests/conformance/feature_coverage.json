@@ -837,6 +837,14 @@
       ]
     },
     {
+      "id": "dispatcher.hot_prefix_split",
+      "area": "dispatcher",
+      "behavior": "With few mutating functions and a table-sized read-only remainder, the dispatcher emits a hot linear switch (mutating fns, 1-2 exact checks) whose default falls into the cold jump-table switch; both layers route correctly, state transitions hold across them, and unknown selectors traverse both to the revert",
+      "specs": [
+        "tests/conformance/dispatcher_hot_prefix.spec.toml"
+      ]
+    },
+    {
       "id": "dispatcher.dense_table_routing",
       "area": "dispatcher",
       "behavior": "A 16-fn dispatcher routes through the dense jump table (collision-free 7-bit selector window): every fn executes via its table slot's exact-selector guard, unknown selectors and slot-aliasing selectors (same low 7 bits, different full selector) revert via the default edge",

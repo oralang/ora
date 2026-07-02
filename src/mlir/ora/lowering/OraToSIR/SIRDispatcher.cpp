@@ -2324,9 +2324,48 @@ namespace mlir
                         caseValues.push_back(static_cast<int64_t>(info.selector));
                     }
 
-                    auto caseAttr = builder.getI64ArrayAttr(caseValues);
-                    auto sw = builder.create<sir::SwitchOp>(dispatcherMainLoc, selector, caseAttr, revertError, caseBlocks);
-                    sw->setAttr("sir.selector_switch", builder.getUnitAttr());
+                    // Hot-prefix split: with few mutating functions and a
+                    // table-sized cold remainder, a tiny leading switch (the
+                    // backend lowers < 4 cases as a linear chain) gives the
+                    // paying transactions 1-3 exact checks while everything
+                    // else falls through to the cold switch's jump table.
+                    // Read-only functions land behind it, but they are
+                    // normally reached via gas-free eth_call. The stable
+                    // sort above already put the mutating functions first.
+                    size_t mutatingCount = 0;
+                    for (auto &info : pubFuncs)
+                    {
+                        auto classAttr = info.func->getAttrOfType<StringAttr>("ora.dispatch_class");
+                        if (classAttr && classAttr.getValue() == "readonly")
+                            break;
+                        ++mutatingCount;
+                    }
+                    const size_t coldCount = pubFuncs.size() - mutatingCount;
+                    const bool splitHotPrefix = mutatingCount >= 1 && mutatingCount <= 3 && coldCount >= 12;
+
+                    if (splitHotPrefix)
+                    {
+                        Block *coldDispatch = mainFunc.addBlock();
+                        auto hotAttr = builder.getI64ArrayAttr(ArrayRef<int64_t>(caseValues).take_front(mutatingCount));
+                        auto hotSw = builder.create<sir::SwitchOp>(
+                            dispatcherMainLoc, selector, hotAttr, coldDispatch,
+                            ArrayRef<Block *>(caseBlocks).take_front(mutatingCount));
+                        hotSw->setAttr("sir.selector_switch", builder.getUnitAttr());
+
+                        builder.setInsertionPointToEnd(coldDispatch);
+                        auto coldAttr = builder.getI64ArrayAttr(ArrayRef<int64_t>(caseValues).drop_front(mutatingCount));
+                        auto coldSw = builder.create<sir::SwitchOp>(
+                            dispatcherMainLoc, selector, coldAttr, revertError,
+                            ArrayRef<Block *>(caseBlocks).drop_front(mutatingCount));
+                        coldSw->setAttr("sir.selector_switch", builder.getUnitAttr());
+                        setBlockName(coldDispatch, "cold_dispatch");
+                    }
+                    else
+                    {
+                        auto caseAttr = builder.getI64ArrayAttr(caseValues);
+                        auto sw = builder.create<sir::SwitchOp>(dispatcherMainLoc, selector, caseAttr, revertError, caseBlocks);
+                        sw->setAttr("sir.selector_switch", builder.getUnitAttr());
+                    }
                     setBlockName(loadSelector, "load_selector");
                     setBlockOrder(loadSelector, 1);
 

@@ -1,0 +1,76 @@
+// Hot-prefix dispatcher target: two mutating functions ride a tiny hot
+// switch (1-2 exact checks) while fourteen views and unknown selectors fall
+// through to the cold jump table. The SIR shape is pinned in
+// src/compiler.test.oratosir.zig; this spec proves both layers route
+// correctly and state transitions hold across them.
+contract DispatcherHotPrefix {
+    storage var counter: u256;
+
+    pub fn bump() {
+        counter = counter + 1;
+    }
+
+    pub fn reset() {
+        counter = 0;
+    }
+
+    pub fn v0() -> u256 {
+        return 200;
+    }
+
+    pub fn v1() -> u256 {
+        return 201;
+    }
+
+    pub fn v2() -> u256 {
+        return 202;
+    }
+
+    pub fn v3() -> u256 {
+        return 203;
+    }
+
+    pub fn v4() -> u256 {
+        return 204;
+    }
+
+    pub fn v5() -> u256 {
+        return 205;
+    }
+
+    pub fn v6() -> u256 {
+        return 206;
+    }
+
+    pub fn v7() -> u256 {
+        return 207;
+    }
+
+    pub fn v8() -> u256 {
+        return 208;
+    }
+
+    pub fn v9() -> u256 {
+        return 209;
+    }
+
+    pub fn v10() -> u256 {
+        return 210;
+    }
+
+    pub fn v11() -> u256 {
+        return 211;
+    }
+
+    pub fn v12() -> u256 {
+        return 212;
+    }
+
+    pub fn v13() -> u256 {
+        return 213;
+    }
+
+    pub fn count() -> u256 {
+        return counter;
+    }
+}

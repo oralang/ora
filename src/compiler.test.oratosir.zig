@@ -7358,6 +7358,59 @@ test "dispatcher orders state-mutating functions before read-only functions" {
     });
 }
 
+test "dispatcher splits a hot mutating prefix ahead of the cold jump table" {
+    // Two mutating functions and fourteen views: the dispatcher emits a tiny
+    // hot switch (linear chain, 1-2 exact checks for paying transactions)
+    // whose default falls through to the cold switch (table-routed views +
+    // unknown selectors). Both switches carry the mandatory exact guards.
+    var source: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer source.deinit();
+    try source.writer.writeAll(
+        \\contract HotPrefix {
+        \\    storage var counter: u256;
+        \\
+        \\    pub fn bump() {
+        \\        counter = counter + 1;
+        \\    }
+        \\
+        \\    pub fn reset() {
+        \\        counter = 0;
+        \\    }
+        \\
+    );
+    for (0..14) |i| {
+        try source.writer.print(
+            \\    pub fn v{d}() -> u256 {{
+            \\        return {d};
+            \\    }}
+            \\
+        , .{ i, 200 + i });
+    }
+    try source.writer.writeAll("}\n");
+
+    var compilation = try compileText(source.written());
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const main_fn = try functionSlice(rendered, "main");
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, main_fn, "switch selector"));
+    try expectOrderedNeedles(main_fn, &.{
+        "0x68110B2F", // bump() in the hot switch
+        "0xD826F88F", // reset() in the hot switch
+        "default => @cold_dispatch",
+        "cold_dispatch {",
+        "switch selector",
+        "default => @revert_error",
+    });
+}
+
 test "OraToSIR keeps private scalar helper calls word-shaped" {
     const source_text =
         \\contract PrivateScalarHelper {
