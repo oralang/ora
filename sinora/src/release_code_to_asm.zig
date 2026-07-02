@@ -886,7 +886,10 @@ const GenericEmitter = struct {
         switch (switch_routing.choosePlan(switch_term)) {
             .linear => try self.emitLinearSwitch(function_name, switch_store, switch_term, context),
             .sparse => |plan| try self.emitSparseSwitch(function_name, switch_store, switch_term, plan, context),
-            .dense => |plan| try self.emitDenseSwitch(function_name, switch_store, switch_term, plan, context),
+            // The chooser never returns dense until a real table-jump lowering
+            // exists; fail closed so a cost-model change alone can never
+            // resurrect the retired slot-guard-chain lowering.
+            .dense => return CodeToAsmError.UnsupportedSir,
         }
     }
 

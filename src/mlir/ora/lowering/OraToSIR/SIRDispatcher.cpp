@@ -2259,7 +2259,34 @@ namespace mlir
                     setResultName(cv.getDefiningOp(), "cv");
                     Value cv_zero = builder.create<sir::IsZeroOp>(dispatcherMainLoc, u256Type, cv);
                     setResultName(cv_zero.getDefiningOp(), "cv_nonzero");
-                    builder.create<sir::CondBrOp>(dispatcherMainLoc, cv_zero, ValueRange{}, ValueRange{}, loadSelector, revertError);
+                    // CALLDATALOAD(0) zero-pads, so calldata shorter than 4 bytes can
+                    // only alias a selector whose low byte(s) are zero — and only a
+                    // zero-argument function lacks the per-case min-calldatasize guard.
+                    // Guard the whole dispatcher iff such a function exists; every
+                    // other contract keeps its current byte-stable entry sequence.
+                    bool needsShortCalldataGuard = false;
+                    for (auto &info : pubFuncs)
+                    {
+                        int64_t caseMinSize = info.minHeadBytes > 0 ? info.minHeadBytes : (4 + 32 * static_cast<int64_t>(info.argCount));
+                        if (caseMinSize <= 4 && (info.selector & 0xFFu) == 0)
+                        {
+                            needsShortCalldataGuard = true;
+                            break;
+                        }
+                    }
+                    Value dispatchOk = cv_zero;
+                    if (needsShortCalldataGuard)
+                    {
+                        Value cds_entry = builder.create<sir::CallDataSizeOp>(dispatcherMainLoc, u256Type);
+                        setResultName(cds_entry.getDefiningOp(), "cdsize_guard");
+                        Value c4_entry = getConst(builder, dispatcherMainLoc, u256Type, i64Type, 4, constCache, entry, "selector_offset");
+                        Value shortCalldata = builder.create<sir::LtOp>(dispatcherMainLoc, u256Type, cds_entry, c4_entry);
+                        Value cdOk = builder.create<sir::IsZeroOp>(dispatcherMainLoc, u256Type, shortCalldata);
+                        setResultName(cdOk.getDefiningOp(), "cd_has_selector");
+                        dispatchOk = builder.create<sir::AndOp>(dispatcherMainLoc, u256Type, cv_zero, cdOk);
+                        setResultName(dispatchOk.getDefiningOp(), "dispatch_ok");
+                    }
+                    builder.create<sir::CondBrOp>(dispatcherMainLoc, dispatchOk, ValueRange{}, ValueRange{}, loadSelector, revertError);
                     setBlockName(entry, "main_entry");
                     setBlockOrder(entry, 0);
 

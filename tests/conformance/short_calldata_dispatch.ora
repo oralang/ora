@@ -1,0 +1,13 @@
+// Dispatcher short-calldata guard target. ping124() was mined so its selector
+// (0x746e2900) ends in a zero byte: CALLDATALOAD(0) zero-pads, so the 3-byte
+// calldata 0x746e29 produces the same selector word. The dispatcher must
+// revert on any calldata shorter than 4 bytes instead of routing the alias.
+contract ShortCalldataDispatch {
+    pub fn ping124() -> u256 {
+        return 42;
+    }
+
+    pub fn add(a: u256, b: u256) -> u256 {
+        return a + b;
+    }
+}
