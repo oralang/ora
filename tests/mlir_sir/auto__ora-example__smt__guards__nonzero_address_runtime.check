@@ -2,7 +2,7 @@
 // INPUT: ora-example/smt/guards/nonzero_address_runtime.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @runtimeNonZeroAddress(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/nonzero_address_runtime.ora":13:34)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["nonzero_address"], ora.abi_params = ["address"], ora.param_names = ["addr"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x34cfec0d", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @runtimeNonZeroAddress(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/nonzero_address_runtime.ora":13:34)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["nonzero_address"], ora.abi_params = ["address"], ora.param_binding_ids = ["file:0:pattern:0"], ora.param_names = ["addr"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x34cfec0d", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/nonzero_address_runtime.ora":13:34)
@@ -38,10 +38,10 @@
 // CHECK-NEXT:     %0 = sir.icall @getAddress() : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/smt/guards/nonzero_address_runtime.ora":32:29)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/guards/nonzero_address_runtime.ora":31:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/nonzero_address_runtime.ora":31:5)
-// CHECK-NEXT:   func.func @runtimeNonZeroFromAddressParam(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/nonzero_address_runtime.ora":38:43)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["address"], ora.param_names = ["addr"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xf245c855", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @runtimeNonZeroFromAddressParam(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/nonzero_address_runtime.ora":38:43)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["address"], ora.param_binding_ids = ["file:0:pattern:7"], ora.param_names = ["addr"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xf245c855", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/guards/nonzero_address_runtime.ora":38:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/nonzero_address_runtime.ora":38:5)
-// CHECK-NEXT:   func.func @runtimeNonZeroFromArithmetic(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/nonzero_address_runtime.ora":45:41), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/guards/nonzero_address_runtime.ora":45:53)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["address", "address"], ora.param_names = ["x", "y"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0xe8d5a786", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @runtimeNonZeroFromArithmetic(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/nonzero_address_runtime.ora":45:41), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/guards/nonzero_address_runtime.ora":45:53)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["address", "address"], ora.param_binding_ids = ["file:0:pattern:9", "file:0:pattern:10"], ora.param_names = ["x", "y"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0xe8d5a786", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/guards/nonzero_address_runtime.ora":45:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/nonzero_address_runtime.ora":45:5)
 // CHECK-NEXT: } loc("{{.*}}/ora-example/smt/guards/nonzero_address_runtime.ora":11:1)

@@ -2815,11 +2815,13 @@ pub const VerificationPass = struct {
             else
                 term_name_ref.data[0..term_name_ref.length];
             if (!std.mem.eql(u8, term_name, "scf.yield")) continue;
-            const loop_writes_state = self.encoder.operationMayWriteTrackedState(parent_op) catch false;
+            // Soundness default: write-analysis failure must over-havoc loop state,
+            // never preserve storage across a loop that might mutate it.
+            const loop_writes_state = self.encoder.operationMayWriteTrackedState(parent_op) catch true;
 
             try self.restoreEncoderBranchState(&base_encoder_state);
-            self.clearEncoderGlobalMap();
             if (loop_writes_state) {
+                self.clearEncoderGlobalMap();
                 try self.seedFreshLoopGlobalState(parent_op, "post");
             }
             self.encoder.value_map.clearRetainingCapacity();

@@ -18,7 +18,7 @@
 // CHECK-NEXT:     sir.tstore %0 : !sir.u256, %3 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/regions/effects/tstore_write_effect.ora":20:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/effects/tstore_write_effect.ora":18:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/effects/tstore_write_effect.ora":18:5)
-// CHECK-NEXT:   func.func @testTStoreWriteInConditional(%arg0: !sir.u256 loc("{{.*}}/ora-example/regions/effects/tstore_write_effect.ora":24:41)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.effect = "writes", ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x79687580", ora.visibility = "pub", ora.write_slots = ["transient:temp_counter"]} {
+// CHECK-NEXT:   func.func @testTStoreWriteInConditional(%arg0: !sir.u256 loc("{{.*}}/ora-example/regions/effects/tstore_write_effect.ora":24:41)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.effect = "writes", ora.param_binding_ids = ["file:4:pattern:3"], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x79687580", ora.visibility = "pub", ora.write_slots = ["transient:temp_counter"]} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.gt %arg0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/regions/effects/tstore_write_effect.ora":25:13)))

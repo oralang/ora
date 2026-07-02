@@ -2,7 +2,7 @@
 // INPUT: ora-example/refinements/guard_test.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @testMinValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/guard_test.ora":4:21)) attributes {ora.param_names = ["amount"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testMinValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/guard_test.ora":4:21)) attributes {ora.param_binding_ids = ["file:0:pattern:0"], ora.param_names = ["amount"], ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c1000 = sir.const 1000 : !sir.u256 loc("{{.*}}/ora-example/refinements/guard_test.ora":1:1)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
@@ -19,7 +19,7 @@
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/guard_test.ora":4:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/guard_test.ora":4:5)
-// CHECK-NEXT:   func.func @testMaxValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/guard_test.ora":8:21)) attributes {ora.param_names = ["limit"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testMaxValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/guard_test.ora":8:21)) attributes {ora.param_binding_ids = ["file:0:pattern:1"], ora.param_names = ["limit"], ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c10000 = sir.const 10000 : !sir.u256 loc("{{.*}}/ora-example/refinements/guard_test.ora":1:1)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
@@ -36,7 +36,7 @@
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/guard_test.ora":8:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/guard_test.ora":8:5)
-// CHECK-NEXT:   func.func @testInRange(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/guard_test.ora":12:20)) attributes {ora.param_names = ["rate"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testInRange(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/guard_test.ora":12:20)) attributes {ora.param_binding_ids = ["file:0:pattern:2"], ora.param_names = ["rate"], ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c10000 = sir.const 10000 : !sir.u256 loc("{{.*}}/ora-example/refinements/guard_test.ora":1:1)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)

@@ -111,7 +111,7 @@
 // CHECK-NEXT:     sir.sstore %slot_enum_value : !sir.u256, %slot_u8_value : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/types/basic_types.ora":50:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/types/basic_types.ora":36:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/types/basic_types.ora":36:5)
-// CHECK-NEXT:   func.func @test_type_checking(%arg0: !sir.u256 loc("{{.*}}/ora-example/types/basic_types.ora":54:31)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.abi_return = "bool", ora.abi_return_layout = "bool", ora.abi_return_words = 1 : i256, ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x31c061b8", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @test_type_checking(%arg0: !sir.u256 loc("{{.*}}/ora-example/types/basic_types.ora":54:31)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.abi_return = "bool", ora.abi_return_layout = "bool", ora.abi_return_words = 1 : i256, ora.param_binding_ids = ["file:0:pattern:11"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x31c061b8", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/types/basic_types.ora":56:21)))

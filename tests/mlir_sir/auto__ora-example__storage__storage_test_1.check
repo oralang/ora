@@ -110,22 +110,22 @@
 // CHECK-NEXT:     %21 = sir.add %20 : !sir.u256, %3 : !sir.u256 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/storage/storage_test_1.ora":35:9)))
 // CHECK-NEXT:     sir.return %6 : !sir.ptr<1>, %21 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/storage/storage_test_1.ora":35:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/storage/storage_test_1.ora":34:5)
-// CHECK-NEXT:   func.func @setCounter(%arg0: !sir.u256 loc("{{.*}}/ora-example/storage/storage_test_1.ora":39:19)) attributes {ora.effect = "writes", ora.param_names = ["value"], ora.visibility = "private", ora.write_slots = ["counter"]} {
+// CHECK-NEXT:   func.func @setCounter(%arg0: !sir.u256 loc("{{.*}}/ora-example/storage/storage_test_1.ora":39:19)) attributes {ora.effect = "writes", ora.param_binding_ids = ["file:0:pattern:4"], ora.param_names = ["value"], ora.visibility = "private", ora.write_slots = ["counter"]} {
 // CHECK-NEXT:     %slot_counter = sir.const 0 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/storage/storage_test_1.ora":40:9)))
 // CHECK-NEXT:     sir.sstore %slot_counter : !sir.u256, %arg0 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/storage/storage_test_1.ora":40:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/storage/storage_test_1.ora":39:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/storage/storage_test_1.ora":39:5)
-// CHECK-NEXT:   func.func @setActive(%arg0: !sir.u256 loc("{{.*}}/ora-example/storage/storage_test_1.ora":43:18)) attributes {ora.effect = "writes", ora.param_names = ["value"], ora.visibility = "private", ora.write_slots = ["active"]} {
+// CHECK-NEXT:   func.func @setActive(%arg0: !sir.u256 loc("{{.*}}/ora-example/storage/storage_test_1.ora":43:18)) attributes {ora.effect = "writes", ora.param_binding_ids = ["file:0:pattern:6"], ora.param_names = ["value"], ora.visibility = "private", ora.write_slots = ["active"]} {
 // CHECK-NEXT:     %slot_active = sir.const 1 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/storage/storage_test_1.ora":44:9)))
 // CHECK-NEXT:     sir.sstore %slot_active : !sir.u256, %arg0 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/storage/storage_test_1.ora":44:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/storage/storage_test_1.ora":43:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/storage/storage_test_1.ora":43:5)
-// CHECK-NEXT:   func.func @setOwner(%arg0: !sir.u256 loc("{{.*}}/ora-example/storage/storage_test_1.ora":47:17)) attributes {ora.effect = "writes", ora.param_names = ["value"], ora.visibility = "private", ora.write_slots = ["owner"]} {
+// CHECK-NEXT:   func.func @setOwner(%arg0: !sir.u256 loc("{{.*}}/ora-example/storage/storage_test_1.ora":47:17)) attributes {ora.effect = "writes", ora.param_binding_ids = ["file:0:pattern:8"], ora.param_names = ["value"], ora.visibility = "private", ora.write_slots = ["owner"]} {
 // CHECK-NEXT:     %slot_owner = sir.const 2 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/storage/storage_test_1.ora":48:9)))
 // CHECK-NEXT:     sir.sstore %slot_owner : !sir.u256, %arg0 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/storage/storage_test_1.ora":48:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/storage/storage_test_1.ora":47:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/storage/storage_test_1.ora":47:5)
-// CHECK-NEXT:   func.func @setName(%arg0: !sir.ptr<1> loc("{{.*}}/ora-example/storage/storage_test_1.ora":51:16)) attributes {ora.effect = "writes", ora.param_names = ["value"], ora.visibility = "private", ora.write_slots = ["name"]} {
+// CHECK-NEXT:   func.func @setName(%arg0: !sir.ptr<1> loc("{{.*}}/ora-example/storage/storage_test_1.ora":51:16)) attributes {ora.effect = "writes", ora.param_binding_ids = ["file:0:pattern:10"], ora.param_names = ["value"], ora.visibility = "private", ora.write_slots = ["name"]} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/storage/storage_test_1.ora":52:9)))
 // CHECK-NEXT:     %1 = sir.const 0 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/storage/storage_test_1.ora":52:9)))
 // CHECK-NEXT:     %2 = sir.const 32 : !sir.u256 loc(unknown)

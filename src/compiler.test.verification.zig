@@ -2814,6 +2814,82 @@ test "verification supports explicit loop-entry snapshot idiom" {
     try testing.expectEqualStrings("", result.soundness_losses);
 }
 
+fn expectExplainModeNoInconsistentAssumptionNote(source_text: []const u8) !void {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    var verifier = try z3_verification.VerificationPass.init(testing.allocator);
+    defer verifier.deinit();
+    verifier.filter_function_name = "f";
+    verifier.setExplainCores(true);
+
+    var result = try verifier.runVerificationPass(hir_result.module.raw_module);
+    defer result.deinit();
+
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors.items.len);
+
+    var artifacts = try verifier.buildSmtReport(hir_result.module.raw_module, "/tmp/loop_old_snapshot.ora", &result);
+    defer artifacts.deinit(testing.allocator);
+
+    try testing.expect(std.mem.indexOf(u8, artifacts.markdown, "assumptions inconsistent") == null);
+    try testing.expect(std.mem.indexOf(u8, artifacts.json, "assumptions inconsistent") == null);
+    try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"vacuous\":true") == null);
+}
+
+test "verification explain mode does not mark valid loop old snapshots inconsistent" {
+    const old_entry_source =
+        \\comptime const std = @import("std");
+        \\
+        \\contract V {
+        \\    storage var total: u256 = 0;
+        \\
+        \\    pub fn f(n: u256)
+        \\        requires(n <= 100)
+        \\        requires(total <= std.constants.U256_MAX - 101)
+        \\        ensures(total == old(total) + 1)
+        \\    {
+        \\        total = total + 1;
+        \\        var added: u256 = 0;
+        \\        while (added < n)
+        \\            invariant added <= n
+        \\            invariant total == old(total) + 1
+        \\        {
+        \\            added = added + 1;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    const loop_entry_source =
+        \\comptime const std = @import("std");
+        \\
+        \\contract V {
+        \\    storage var total: u256 = 0;
+        \\
+        \\    pub fn f(n: u256)
+        \\        requires(n <= 100)
+        \\        requires(total <= std.constants.U256_MAX - 101)
+        \\        ensures(total == old(total) + 1)
+        \\    {
+        \\        total = total + 1;
+        \\        let loop_start: u256 = total;
+        \\        var added: u256 = 0;
+        \\        while (added < n)
+        \\            invariant added <= n
+        \\            invariant total == loop_start
+        \\        {
+        \\            added = added + 1;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    try expectExplainModeNoInconsistentAssumptionNote(old_entry_source);
+    try expectExplainModeNoInconsistentAssumptionNote(loop_entry_source);
+}
+
 test "verification rejects loop-entry interpretation of old in loop invariants" {
     const source_text =
         \\comptime const std = @import("std");

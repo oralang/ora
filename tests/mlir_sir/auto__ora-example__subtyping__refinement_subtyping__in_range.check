@@ -2,7 +2,7 @@
 // INPUT: ora-example/subtyping/refinement_subtyping/in_range.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @testNarrowerToWider(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":14:28)) -> !sir.u256 attributes {ora.param_names = ["rate"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testNarrowerToWider(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":14:28)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:0:pattern:0"], ora.param_names = ["rate"], ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 0 : !sir.u256 loc(unknown)
@@ -27,7 +27,7 @@
 // CHECK-NEXT:     sir.store %14 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":15:9)))
 // CHECK-NEXT:     sir.return %14 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":15:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":14:5)
-// CHECK-NEXT:   func.func @testVeryNarrowToVeryWide(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":19:33)) -> !sir.u256 attributes {ora.param_names = ["rate"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testVeryNarrowToVeryWide(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":19:33)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:0:pattern:1"], ora.param_names = ["rate"], ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 0 : !sir.u256 loc(unknown)
@@ -52,7 +52,7 @@
 // CHECK-NEXT:     sir.store %14 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":20:9)))
 // CHECK-NEXT:     sir.return %14 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":20:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":19:5)
-// CHECK-NEXT:   func.func @testInRangeToMinValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":28:30)) -> !sir.u256 attributes {ora.param_names = ["rate"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testInRangeToMinValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":28:30)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:0:pattern:2"], ora.param_names = ["rate"], ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 0 : !sir.u256 loc(unknown)
@@ -77,7 +77,7 @@
 // CHECK-NEXT:     sir.store %14 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":29:9)))
 // CHECK-NEXT:     sir.return %14 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":29:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":28:5)
-// CHECK-NEXT:   func.func @testInRangeToLowerMinValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":33:35)) -> !sir.u256 attributes {ora.param_names = ["rate"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testInRangeToLowerMinValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":33:35)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:0:pattern:3"], ora.param_names = ["rate"], ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 0 : !sir.u256 loc(unknown)
@@ -102,7 +102,7 @@
 // CHECK-NEXT:     sir.store %14 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":34:9)))
 // CHECK-NEXT:     sir.return %14 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":34:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":33:5)
-// CHECK-NEXT:   func.func @testInRangeToMaxValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":42:30)) -> !sir.u256 attributes {ora.param_names = ["rate"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testInRangeToMaxValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":42:30)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:0:pattern:4"], ora.param_names = ["rate"], ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 0 : !sir.u256 loc(unknown)
@@ -126,7 +126,7 @@
 // CHECK-NEXT:     sir.store %14 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":43:9)))
 // CHECK-NEXT:     sir.return %14 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":43:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":42:5)
-// CHECK-NEXT:   func.func @testInRangeToHigherMaxValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":47:36)) -> !sir.u256 attributes {ora.param_names = ["rate"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testInRangeToHigherMaxValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":47:36)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:0:pattern:5"], ora.param_names = ["rate"], ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 0 : !sir.u256 loc(unknown)
@@ -150,7 +150,7 @@
 // CHECK-NEXT:     sir.store %14 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":48:9)))
 // CHECK-NEXT:     sir.return %14 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":48:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":47:5)
-// CHECK-NEXT:   func.func @testBasisPointsToWiderInRange(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":56:38)) -> !sir.u256 attributes {ora.param_names = ["fee"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testBasisPointsToWiderInRange(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":56:38)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:0:pattern:6"], ora.param_names = ["fee"], ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 0 : !sir.u256 loc(unknown)
@@ -174,7 +174,7 @@
 // CHECK-NEXT:     sir.store %14 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":57:9)))
 // CHECK-NEXT:     sir.return %14 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":57:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":56:5)
-// CHECK-NEXT:   func.func @testBasisPointsToMinValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":61:34)) -> !sir.u256 attributes {ora.param_names = ["fee"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testBasisPointsToMinValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":61:34)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:0:pattern:7"], ora.param_names = ["fee"], ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 0 : !sir.u256 loc(unknown)
@@ -198,7 +198,7 @@
 // CHECK-NEXT:     sir.store %14 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":62:9)))
 // CHECK-NEXT:     sir.return %14 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":62:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":61:5)
-// CHECK-NEXT:   func.func @testBasisPointsToMaxValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":66:34)) -> !sir.u256 attributes {ora.param_names = ["fee"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testBasisPointsToMaxValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/refinement_subtyping/in_range.ora":66:34)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:0:pattern:8"], ora.param_names = ["fee"], ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 0 : !sir.u256 loc(unknown)

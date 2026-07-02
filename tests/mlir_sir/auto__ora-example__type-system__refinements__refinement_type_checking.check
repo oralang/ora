@@ -2,7 +2,7 @@
 // INPUT: ora-example/type-system/refinements/refinement_type_checking.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @testMinValueChecking(%arg0: !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":9:33)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.param_names = ["amount"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x178123ea", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testMinValueChecking(%arg0: !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":9:33)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.param_binding_ids = ["file:0:pattern:0"], ora.param_names = ["amount"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x178123ea", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":1:1)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
@@ -19,7 +19,7 @@
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":9:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":9:5)
-// CHECK-NEXT:   func.func @testMaxValueChecking(%arg0: !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":15:33)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["max:u:0:0:0:1000"], ora.abi_params = ["uint256"], ora.param_names = ["limit"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xf88cd3d2", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testMaxValueChecking(%arg0: !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":15:33)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["max:u:0:0:0:1000"], ora.abi_params = ["uint256"], ora.param_binding_ids = ["file:0:pattern:2"], ora.param_names = ["limit"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xf88cd3d2", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c1000 = sir.const 1000 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":1:1)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
@@ -36,7 +36,7 @@
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":15:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":15:5)
-// CHECK-NEXT:   func.func @testInRangeChecking(%arg0: !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":21:32)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:0;max:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.param_names = ["rate"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xd194c1f2", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testInRangeChecking(%arg0: !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":21:32)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:0;max:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.param_binding_ids = ["file:0:pattern:4"], ora.param_names = ["rate"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xd194c1f2", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":1:1)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
@@ -57,7 +57,7 @@
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":21:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":21:5)
-// CHECK-NEXT:   func.func @testNonZeroAddressChecking(%arg0: !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":27:39)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["nonzero_address"], ora.abi_params = ["address"], ora.param_names = ["addr"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x7bfa99ab", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testNonZeroAddressChecking(%arg0: !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":27:39)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["nonzero_address"], ora.abi_params = ["address"], ora.param_binding_ids = ["file:0:pattern:6"], ora.param_names = ["addr"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x7bfa99ab", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":27:39)
@@ -74,10 +74,10 @@
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":27:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":27:5)
-// CHECK-NEXT:   func.func @testExactChecking(%arg0: !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":33:30)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.param_names = ["total"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x1c53026a", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testExactChecking(%arg0: !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":33:30)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.param_binding_ids = ["file:0:pattern:8"], ora.param_names = ["total"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x1c53026a", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":33:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":33:5)
-// CHECK-NEXT:   func.func @testScaledChecking(%arg0: !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":39:31)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.param_names = ["amount"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x43261025", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testScaledChecking(%arg0: !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":39:31)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.param_binding_ids = ["file:0:pattern:10"], ora.param_names = ["amount"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x43261025", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":39:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":39:5)
 // CHECK-NEXT:   func.func @testRefinementReturn() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.selector = "0xd179c847", ora.visibility = "pub"} {

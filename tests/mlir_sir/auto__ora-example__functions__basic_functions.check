@@ -5,7 +5,7 @@
 // CHECK-NEXT:   func.func @simple_function() attributes {ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/functions/basic_functions.ora":11:1)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/functions/basic_functions.ora":11:1)
-// CHECK-NEXT:   func.func @function_with_params(%arg0: !sir.u256 loc("{{.*}}/ora-example/functions/basic_functions.ora":16:25), %arg1: !sir.ptr<1> loc("{{.*}}/ora-example/functions/basic_functions.ora":16:34)) attributes {ora.param_names = ["a", "b"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @function_with_params(%arg0: !sir.u256 loc("{{.*}}/ora-example/functions/basic_functions.ora":16:25), %arg1: !sir.ptr<1> loc("{{.*}}/ora-example/functions/basic_functions.ora":16:34)) attributes {ora.param_binding_ids = ["file:4:pattern:0", "file:4:pattern:1"], ora.param_names = ["a", "b"], ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/functions/basic_functions.ora":16:1)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/functions/basic_functions.ora":16:1)
 // CHECK-NEXT:   func.func @function_with_return() -> !sir.u256 attributes {ora.visibility = "private"} {
@@ -15,7 +15,7 @@
 // CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %c42 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/functions/basic_functions.ora":22:5)))
 // CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/functions/basic_functions.ora":22:5)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/functions/basic_functions.ora":21:1)
-// CHECK-NEXT:   func.func @add(%arg0: !sir.u256 loc("{{.*}}/ora-example/functions/basic_functions.ora":26:8), %arg1: !sir.u256 loc("{{.*}}/ora-example/functions/basic_functions.ora":26:17)) -> !sir.u256 attributes {ora.param_names = ["a", "b"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @add(%arg0: !sir.u256 loc("{{.*}}/ora-example/functions/basic_functions.ora":26:8), %arg1: !sir.u256 loc("{{.*}}/ora-example/functions/basic_functions.ora":26:17)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:4:pattern:2", "file:4:pattern:3"], ora.param_names = ["a", "b"], ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 0 : !sir.u256 loc(unknown)
@@ -65,7 +65,7 @@
 // CHECK-NEXT:     sir.store %30 : !sir.ptr<1>, %22 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/functions/basic_functions.ora":29:5)))
 // CHECK-NEXT:     sir.return %30 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/functions/basic_functions.ora":29:5)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/functions/basic_functions.ora":26:1)
-// CHECK-NEXT:   func.func @calculate_fee(%arg0: !sir.u256 loc("{{.*}}/ora-example/functions/basic_functions.ora":33:18), %arg1: !sir.u256 loc("{{.*}}/ora-example/functions/basic_functions.ora":33:32)) -> !sir.u256 attributes {ora.param_names = ["amount", "rate"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @calculate_fee(%arg0: !sir.u256 loc("{{.*}}/ora-example/functions/basic_functions.ora":33:18), %arg1: !sir.u256 loc("{{.*}}/ora-example/functions/basic_functions.ora":33:32)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:4:pattern:4", "file:4:pattern:5"], ora.param_names = ["amount", "rate"], ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 56016217287220138543383237988819299768112786790290310538187226855197252780032 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
@@ -117,7 +117,7 @@
 // CHECK-NEXT:     sir.store %34 : !sir.ptr<1>, %33 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/functions/basic_functions.ora":37:5)))
 // CHECK-NEXT:     sir.return %34 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/functions/basic_functions.ora":37:5)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/functions/basic_functions.ora":33:1)
-// CHECK-NEXT:   func.func @safe_subtract(%arg0: !sir.u256 loc("{{.*}}/ora-example/functions/basic_functions.ora":41:18), %arg1: !sir.u256 loc("{{.*}}/ora-example/functions/basic_functions.ora":41:27)) -> !sir.u256 attributes {ora.param_names = ["a", "b"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @safe_subtract(%arg0: !sir.u256 loc("{{.*}}/ora-example/functions/basic_functions.ora":41:18), %arg1: !sir.u256 loc("{{.*}}/ora-example/functions/basic_functions.ora":41:27)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:4:pattern:6", "file:4:pattern:7"], ora.param_names = ["a", "b"], ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 6988570666312495752839002421695666563898142680323167511053911032881624383488 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)

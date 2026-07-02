@@ -2,7 +2,7 @@
 // INPUT: ora-example/logs/log_smoke.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @emitTransfer(%arg0: !sir.u256 loc("{{.*}}/ora-example/logs/log_smoke.ora":8:25), %arg1: !sir.u256 loc("{{.*}}/ora-example/logs/log_smoke.ora":8:38)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["address", "uint256"], ora.param_names = ["to", "amount"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0xb8be6222", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @emitTransfer(%arg0: !sir.u256 loc("{{.*}}/ora-example/logs/log_smoke.ora":8:25), %arg1: !sir.u256 loc("{{.*}}/ora-example/logs/log_smoke.ora":8:38)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["address", "uint256"], ora.param_binding_ids = ["file:4:pattern:0", "file:4:pattern:1"], ora.param_names = ["to", "amount"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0xb8be6222", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 100389287136786176327247604509743168900146139575972864366142685224231313322991 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/logs/log_smoke.ora":9:9)))
 // CHECK-NEXT:     %1 = sir.const 64 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/logs/log_smoke.ora":9:9)))
 // CHECK-NEXT:     %2 = sir.const 32 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/logs/log_smoke.ora":9:9)))

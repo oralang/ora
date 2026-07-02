@@ -112,7 +112,7 @@
 // CHECK-NEXT:     sir.sstore %4 : !sir.u256, %18 : !sir.u256 loc("ora.stmt.17"("ora.origin_stmt.17"("{{.*}}/ora-example/memory/basic_memory.ora":52:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/memory/basic_memory.ora":37:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/memory/basic_memory.ora":37:5)
-// CHECK-NEXT:   func.func @memory_declarations_side_effects_runtime_index(%arg0: !sir.u256 loc("{{.*}}/ora-example/memory/basic_memory.ora":56:59)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.effect = "writes", ora.param_names = ["idx"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x0a47a1bf", ora.visibility = "pub", ora.write_slots = ["dummy"]} {
+// CHECK-NEXT:   func.func @memory_declarations_side_effects_runtime_index(%arg0: !sir.u256 loc("{{.*}}/ora-example/memory/basic_memory.ora":56:59)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.effect = "writes", ora.param_binding_ids = ["file:0:pattern:17"], ora.param_names = ["idx"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x0a47a1bf", ora.visibility = "pub", ora.write_slots = ["dummy"]} {
 // CHECK-NEXT:     %0 = sir.const 128 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 96 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 64 : !sir.u256 loc(unknown)

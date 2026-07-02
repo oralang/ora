@@ -48,7 +48,7 @@
 // CHECK-NEXT:     sir.store %11 : !sir.ptr<1>, %9 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/errors/error_union_test.ora":22:9)))
 // CHECK-NEXT:     sir.return %10 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/errors/error_union_test.ora":22:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/errors/error_union_test.ora":20:5)
-// CHECK-NEXT:   func.func @test4(%arg0: !sir.u256 loc("{{.*}}/ora-example/errors/error_union_test.ora":26:14)) -> !sir.u256 attributes {ora.force_wide_error_union = true, ora.param_names = ["condition"], ora.returns_error_union = true, ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @test4(%arg0: !sir.u256 loc("{{.*}}/ora-example/errors/error_union_test.ora":26:14)) -> !sir.u256 attributes {ora.force_wide_error_union = true, ora.param_binding_ids = ["file:0:pattern:2"], ora.param_names = ["condition"], ora.returns_error_union = true, ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c50 = sir.const 50 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc(unknown)

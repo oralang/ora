@@ -2,7 +2,7 @@
 // INPUT: ora-example/smt/verification/ghost_variables.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {balance = 0 : ui64, max_balance = 1 : ui64, sumOfBalances = 2 : ui64, totalDeposits = 4 : ui64, totalWithdrawals = 5 : ui64, verifiedBalance = 3 : ui64}, ora.global_slots_built} {
-// CHECK-NEXT:   func.func @deposit(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":23:20)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.effect = "readwrites", ora.param_names = ["amount"], ora.read_slots = ["balance", "max_balance", "sumOfBalances", "totalDeposits"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xb6b55f25", ora.visibility = "pub", ora.write_slots = ["balance", "sumOfBalances", "totalDeposits"]} {
+// CHECK-NEXT:   func.func @deposit(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":23:20)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.effect = "readwrites", ora.param_binding_ids = ["file:4:pattern:0"], ora.param_names = ["amount"], ora.read_slots = ["balance", "max_balance", "sumOfBalances", "totalDeposits"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xb6b55f25", ora.visibility = "pub", ora.write_slots = ["balance", "sumOfBalances", "totalDeposits"]} {
 // CHECK-NEXT:     %0 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 6988570666312495752839002421695666563898142680323167511053911032881624383488 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c0 = sir.const 0 : !sir.u256 loc(unknown)
@@ -193,7 +193,7 @@
 // CHECK-NEXT:   ^bb24:  // pred: ^bb22
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":23:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":23:5)
-// CHECK-NEXT:   func.func @withdraw(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":39:21)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.effect = "readwrites", ora.param_names = ["amount"], ora.read_slots = ["balance", "totalWithdrawals"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x2e1a7d4d", ora.visibility = "pub", ora.write_slots = ["balance", "totalWithdrawals"]} {
+// CHECK-NEXT:   func.func @withdraw(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":39:21)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.effect = "readwrites", ora.param_binding_ids = ["file:4:pattern:4"], ora.param_names = ["amount"], ora.read_slots = ["balance", "totalWithdrawals"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x2e1a7d4d", ora.visibility = "pub", ora.write_slots = ["balance", "totalWithdrawals"]} {
 // CHECK-NEXT:     %0 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 6988570666312495752839002421695666563898142680323167511053911032881624383488 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
@@ -305,7 +305,7 @@
 // CHECK-NEXT:   ^bb14:  // pred: ^bb12
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":39:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":39:5)
-// CHECK-NEXT:   func.func @transfer(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":51:21)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.effect = "readwrites", ora.param_names = ["amount"], ora.read_slots = ["balance", "sumOfBalances"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x12514bba", ora.visibility = "pub", ora.write_slots = ["balance"]} {
+// CHECK-NEXT:   func.func @transfer(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":51:21)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.effect = "readwrites", ora.param_binding_ids = ["file:4:pattern:7"], ora.param_names = ["amount"], ora.read_slots = ["balance", "sumOfBalances"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x12514bba", ora.visibility = "pub", ora.write_slots = ["balance"]} {
 // CHECK-NEXT:     %0 = sir.const 6988570666312495752839002421695666563898142680323167511053911032881624383488 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 4 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c0 = sir.const 0 : !sir.u256 loc(unknown)
@@ -360,7 +360,7 @@
 // CHECK-NEXT:     %value_4 = sir.sload %slot_sumOfBalances : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":13:11)
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":51:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":51:5)
-// CHECK-NEXT:   func.func @setVerifiedBalance(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":62:31)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:0"], ora.abi_params = ["uint256"], ora.effect = "readwrites", ora.param_names = ["value"], ora.read_slots = ["verifiedBalance"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xb9603bdf", ora.visibility = "pub", ora.write_slots = ["verifiedBalance"]} {
+// CHECK-NEXT:   func.func @setVerifiedBalance(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":62:31)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:0"], ora.abi_params = ["uint256"], ora.effect = "readwrites", ora.param_binding_ids = ["file:4:pattern:9"], ora.param_names = ["value"], ora.read_slots = ["verifiedBalance"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xb9603bdf", ora.visibility = "pub", ora.write_slots = ["verifiedBalance"]} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_verifiedBalance = sir.const 3 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/smt/verification/ghost_variables.ora":67:9)))
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
@@ -389,7 +389,7 @@
 // CHECK-NEXT:     %value_0 = sir.sload %slot_verifiedBalance : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":16:11)
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":62:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":62:5)
-// CHECK-NEXT:   func.func @updateMultipleGhosts(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":71:33), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":71:48)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["uint256", "uint256"], ora.effect = "readwrites", ora.param_names = ["deposit", "withdrawal"], ora.read_slots = ["totalDeposits", "totalWithdrawals"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0xf55319a4", ora.visibility = "pub", ora.write_slots = ["totalDeposits", "totalWithdrawals"]} {
+// CHECK-NEXT:   func.func @updateMultipleGhosts(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":71:33), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":71:48)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["uint256", "uint256"], ora.effect = "readwrites", ora.param_binding_ids = ["file:4:pattern:11", "file:4:pattern:12"], ora.param_names = ["deposit", "withdrawal"], ora.read_slots = ["totalDeposits", "totalWithdrawals"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0xf55319a4", ora.visibility = "pub", ora.write_slots = ["totalDeposits", "totalWithdrawals"]} {
 // CHECK-NEXT:     %0 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 6988570666312495752839002421695666563898142680323167511053911032881624383488 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 0 : !sir.u256 loc(unknown)
@@ -576,7 +576,7 @@
 // CHECK-NEXT:     sir.store %25 : !sir.ptr<1>, %11 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/smt/verification/ghost_variables.ora":88:9)))
 // CHECK-NEXT:     sir.return %25 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/smt/verification/ghost_variables.ora":88:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":84:5)
-// CHECK-NEXT:   func.func @testGhostMemory(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":95:28)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x1be64add", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testGhostMemory(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":95:28)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.param_binding_ids = ["file:4:pattern:15"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x1be64add", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.gt %arg0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_variables.ora":96:18)
