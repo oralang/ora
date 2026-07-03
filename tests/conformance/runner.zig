@@ -269,7 +269,12 @@ fn runConformanceSpecImpl(
     }
 
     const io = std.Io.Threaded.global_single_threaded.io();
-    const tmp_path = try std.fmt.allocPrint(arena, ".zig-cache/tmp/conformance-{x}", .{std.hash.Wyhash.hash(0, spec_path)});
+    // Scoped per process as well as per spec: the conformance suite and the
+    // metrics harness walk the same corpus as sibling gate steps, and a
+    // shared deterministic path lets one process's entry/exit deleteTree
+    // vaporize the other's artifacts mid-read (observed as FileNotFound on
+    // abi.json and as vanished metrics rows).
+    const tmp_path = try std.fmt.allocPrint(arena, ".zig-cache/tmp/conformance-{x}-{d}", .{ std.hash.Wyhash.hash(0, spec_path), std.c.getpid() });
     std.Io.Dir.cwd().deleteTree(io, tmp_path) catch {};
     defer std.Io.Dir.cwd().deleteTree(io, tmp_path) catch {};
     try std.Io.Dir.cwd().createDirPath(io, tmp_path);
