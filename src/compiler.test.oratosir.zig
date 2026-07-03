@@ -7519,6 +7519,56 @@ test "callHint likely promotes an on-chain-read view ahead of mutating functions
     });
 }
 
+test "explicit callHint likely set splits even with a small cold remainder" {
+    // D7 discriminator: two likely fns + six others (< 12) — the mutability
+    // heuristic would not split here, but explicit hints are developer-
+    // asserted frequency and get the split whenever the remainder is >= 4.
+    var source: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer source.deinit();
+    try source.writer.writeAll(
+        \\contract HintedSmall {
+        \\    storage var x: u256;
+        \\
+        \\    pub fn poke(v: u256) {
+        \\        @callHint(likely);
+        \\        x = v;
+        \\    }
+        \\
+        \\    pub fn peek() -> u256 {
+        \\        @callHint(likely);
+        \\        return x;
+        \\    }
+        \\
+    );
+    for (0..6) |i| {
+        try source.writer.print(
+            \\    pub fn w{d}() -> u256 {{
+            \\        return {d};
+            \\    }}
+            \\
+        , .{ i, 400 + i });
+    }
+    try source.writer.writeAll("}\n");
+
+    var compilation = try compileText(source.written());
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const main_fn = try functionSlice(rendered, "main");
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, main_fn, "switch selector"));
+    try expectOrderedNeedles(main_fn, &.{
+        "default => @cold_dispatch",
+        "cold_dispatch {",
+    });
+}
+
 test "OraToSIR keeps private scalar helper calls word-shaped" {
     const source_text =
         \\contract PrivateScalarHelper {

@@ -2366,7 +2366,14 @@ namespace mlir
                         }
                     }
                     const size_t coldCount = pubFuncs.size() - hotCount;
-                    const bool splitHotPrefix = hotCount >= 1 && hotCount <= 3 && coldCount >= 12;
+                    // An explicit @callHint(likely) set is developer-asserted
+                    // call frequency — the author is deliberately opting out
+                    // of the defaults, so honor it with a split whenever the
+                    // cold remainder is still worth a second switch (>= 4
+                    // cases). The mutability heuristic keeps the conservative
+                    // table-sized threshold: it is a guess, hints are not.
+                    const size_t minColdForSplit = likelyCount >= 1 ? 4 : 12;
+                    const bool splitHotPrefix = hotCount >= 1 && hotCount <= 3 && coldCount >= minColdForSplit;
 
                     if (splitHotPrefix)
                     {

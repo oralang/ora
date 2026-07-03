@@ -140,6 +140,7 @@ contract ERC20Token {
     requires balances[recipient] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
     ensures totalSupply == old(totalSupply)
     {
+        @callHint(likely);
         let sender: NonZeroAddress = caller();
         try requireBalance(sender, amount);
         @move(balances[sender], balances[recipient], amount);
@@ -175,6 +176,7 @@ contract ERC20Token {
     requires balances[recipient] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
     ensures totalSupply == old(totalSupply)
     {
+        @callHint(likely);
         let spender: NonZeroAddress = caller();
         try requireAllowance(sender, spender, amount);
         try requireBalance(sender, amount);
@@ -196,6 +198,7 @@ contract ERC20Token {
     requires balances[to] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
     ensures totalSupply == old(totalSupply) + amount
     {
+        @callHint(cold);
         totalSupply += amount;
         @create(balances[to], amount);
         log Transfer(std.constants.ZERO_ADDRESS, to, tokenValue(amount));
@@ -210,6 +213,7 @@ contract ERC20Token {
     requires totalSupply >= amount
     ensures totalSupply == old(totalSupply) - amount
     {
+        @callHint(cold);
         let sender: NonZeroAddress = caller();
         try requireBalance(sender, amount);
         totalSupply -= amount;
