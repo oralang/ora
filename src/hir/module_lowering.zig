@@ -698,6 +698,14 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 else
                     "mutating";
                 try attrs.append(self.allocator, namedStringAttr(self.context, "ora.dispatch_class", dispatch_class));
+                // Developer @callHint refinement; absent attr == .none. Sema
+                // has already validated placement, so this is a plain read.
+                if (item_id.index() < self.typecheck.item_call_hints.len) {
+                    const hint = self.typecheck.item_call_hints[item_id.index()];
+                    if (hint != .none) {
+                        try attrs.append(self.allocator, namedStringAttr(self.context, "ora.dispatch_hint", @tagName(hint)));
+                    }
+                }
             }
             if (function.visibility == .private) {
                 if (return_type) |ret_type| {

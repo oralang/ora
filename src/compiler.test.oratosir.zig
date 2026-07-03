@@ -7411,6 +7411,114 @@ test "dispatcher splits a hot mutating prefix ahead of the cold jump table" {
     });
 }
 
+test "callHint cold demotion lets the hot-prefix split fire on token-shaped contracts" {
+    // Six mutating functions normally defeat the split (hot set > 3).
+    // Cold-hinting the rare setters shrinks the effective hot set to the
+    // three real traffic carriers.
+    var source: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer source.deinit();
+    try source.writer.writeAll(
+        \\contract HintedToken {
+        \\    storage var total: u256;
+        \\
+        \\    pub fn transfer(to: address, amount: u256) -> bool {
+        \\        total = total + amount;
+        \\        return true;
+        \\    }
+        \\
+        \\    pub fn transferFrom(from: address, to: address, amount: u256) -> bool {
+        \\        total = total + amount;
+        \\        return true;
+        \\    }
+        \\
+        \\    pub fn approve(spender: address, amount: u256) -> bool {
+        \\        total = total + amount;
+        \\        return true;
+        \\    }
+        \\
+        \\    pub fn mint(to: address, amount: u256) {
+        \\        @callHint(cold);
+        \\        total = total + amount;
+        \\    }
+        \\
+        \\    pub fn burn(amount: u256) {
+        \\        @callHint(cold);
+        \\        total = total - amount;
+        \\    }
+        \\
+        \\    pub fn pause() {
+        \\        @callHint(cold);
+        \\        total = 0;
+        \\    }
+        \\
+    );
+    for (0..12) |i| {
+        try source.writer.print(
+            \\    pub fn v{d}() -> u256 {{
+            \\        return {d};
+            \\    }}
+            \\
+        , .{ i, 300 + i });
+    }
+    try source.writer.writeAll("}\n");
+
+    var compilation = try compileText(source.written());
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const main_fn = try functionSlice(rendered, "main");
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, main_fn, "switch selector"));
+    try expectOrderedNeedles(main_fn, &.{
+        "0xA9059CBB", // transfer — hot switch
+        "0x23B872DD", // transferFrom
+        "0x095EA7B3", // approve
+        "default => @cold_dispatch",
+    });
+}
+
+test "callHint likely promotes an on-chain-read view ahead of mutating functions" {
+    // Oracle pattern: a view read on-chain via staticcall pays dispatch gas,
+    // and only the developer knows its volume — likely outranks mutability.
+    const source_text =
+        \\contract Oracle {
+        \\    storage var value: u256;
+        \\
+        \\    pub fn push(v: u256) {
+        \\        value = v;
+        \\    }
+        \\
+        \\    pub fn latest() -> u256 {
+        \\        @callHint(likely);
+        \\        return value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const main_fn = try functionSlice(rendered, "main");
+    try expectOrderedNeedles(main_fn, &.{
+        "0x52BFE789", // latest() — likely-hinted view, front of the chain
+        "0x959AC484", // push(uint256) — unhinted mutating, behind it
+    });
+}
+
 test "OraToSIR keeps private scalar helper calls word-shaped" {
     const source_text =
         \\contract PrivateScalarHelper {

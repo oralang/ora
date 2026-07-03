@@ -837,6 +837,14 @@
       ]
     },
     {
+      "id": "dispatcher.call_hint",
+      "area": "dispatcher",
+      "behavior": "@callHint(cold) demotes rare setters out of the hot set so transfer-shaped contracts get the hot-prefix split; hot-switch fns, cold-demoted setters, and table views all route correctly with state transitions across layers, and unknown selectors revert",
+      "specs": [
+        "tests/conformance/dispatcher_call_hint.spec.toml"
+      ]
+    },
+    {
       "id": "dispatcher.hot_prefix_split",
       "area": "dispatcher",
       "behavior": "With few mutating functions and a table-sized read-only remainder, the dispatcher emits a hot linear switch (mutating fns, 1-2 exact checks) whose default falls into the cold jump-table switch; both layers route correctly, state transitions hold across them, and unknown selectors traverse both to the revert",

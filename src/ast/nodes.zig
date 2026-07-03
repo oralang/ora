@@ -348,6 +348,7 @@ pub const Stmt = union(enum) {
     Log: LogStmt,
     Lock: LockStmt,
     Unlock: UnlockStmt,
+    CallHint: CallHintStmt,
     Assert: AssertStmt,
     Assume: AssumeStmt,
     Havoc: HavocStmt,
@@ -465,6 +466,23 @@ pub const LogStmt = struct {
 pub const LockStmt = struct {
     range: source.TextRange,
     path: ExprId,
+};
+
+/// Expected call-frequency scale for `@callHint` (Zig's BranchHint minus
+/// `unpredictable`, which has no dispatch meaning). A pure gas-layout hint:
+/// it may only reorder the dispatcher, never change behavior.
+pub const CallHint = enum {
+    none,
+    likely,
+    unlikely,
+    cold,
+};
+
+pub const CallHintStmt = struct {
+    range: source.TextRange,
+    /// Resolved at syntax lowering; null means the argument was not a
+    /// CallHint variant name and sema must reject it.
+    hint: ?CallHint,
 };
 
 pub const UnlockStmt = struct {

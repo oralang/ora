@@ -1521,20 +1521,34 @@ namespace mlir
                         pubFuncs.push_back(info);
                     }
 
-                    // Frequency-ordered dispatch: state-mutating functions get
-                    // the cheap chain positions; provably read-only functions
-                    // (ora.dispatch_class = "readonly", normally reached via
-                    // gas-free eth_call) sort last. Stable sort preserves
-                    // declaration order within each class, and a missing
-                    // attribute never demotes. Order is semantics-neutral —
-                    // it only shifts linear-chain gas.
+                    // Frequency-ordered dispatch. Sort key: developer
+                    // @callHint rank (likely < none < unlikely < cold), then
+                    // mutability class (state-mutating before provably
+                    // read-only — views are normally reached via gas-free
+                    // eth_call), then declaration order via stable sort.
+                    // Missing attributes never demote. Order is
+                    // semantics-neutral — it only shifts linear-chain gas.
+                    auto hintRankOf = [](const PubFuncInfo &info) {
+                        auto attr = info.func->getAttrOfType<StringAttr>("ora.dispatch_hint");
+                        if (!attr)
+                            return 1; // none
+                        if (attr.getValue() == "likely")
+                            return 0;
+                        if (attr.getValue() == "unlikely")
+                            return 2;
+                        if (attr.getValue() == "cold")
+                            return 3;
+                        return 1;
+                    };
+                    auto classRankOf = [](const PubFuncInfo &info) {
+                        auto attr = info.func->getAttrOfType<StringAttr>("ora.dispatch_class");
+                        return (attr && attr.getValue() == "readonly") ? 1 : 0;
+                    };
                     std::stable_sort(pubFuncs.begin(), pubFuncs.end(),
-                                     [](const PubFuncInfo &a, const PubFuncInfo &b) {
-                                         auto classOf = [](const PubFuncInfo &info) {
-                                             auto attr = info.func->getAttrOfType<StringAttr>("ora.dispatch_class");
-                                             return (attr && attr.getValue() == "readonly") ? 1 : 0;
-                                         };
-                                         return classOf(a) < classOf(b);
+                                     [&](const PubFuncInfo &a, const PubFuncInfo &b) {
+                                         if (hintRankOf(a) != hintRankOf(b))
+                                             return hintRankOf(a) < hintRankOf(b);
+                                         return classRankOf(a) < classRankOf(b);
                                      });
 
                     // Synthesize boilerplate init/main; user-defined versions are replaced.
@@ -2324,39 +2338,50 @@ namespace mlir
                         caseValues.push_back(static_cast<int64_t>(info.selector));
                     }
 
-                    // Hot-prefix split: with few mutating functions and a
-                    // table-sized cold remainder, a tiny leading switch (the
-                    // backend lowers < 4 cases as a linear chain) gives the
-                    // paying transactions 1-3 exact checks while everything
-                    // else falls through to the cold switch's jump table.
-                    // Read-only functions land behind it, but they are
-                    // normally reached via gas-free eth_call. The stable
-                    // sort above already put the mutating functions first.
-                    size_t mutatingCount = 0;
+                    // Hot-prefix split: a tiny leading switch (the backend
+                    // lowers < 4 cases as a linear chain) gives the hot set
+                    // 1-3 exact checks while everything else falls through to
+                    // the cold switch's jump table. The hot set is the
+                    // @callHint(likely) functions when any exist (developer
+                    // knowledge wins); otherwise the heuristic set: mutating
+                    // functions, with @callHint(cold) ones excluded so
+                    // demoting rare setters (mint/burn/pause) lets the split
+                    // fire for transfer-shaped contracts. The stable sort
+                    // above already placed the hot set first.
+                    size_t likelyCount = 0;
                     for (auto &info : pubFuncs)
                     {
-                        auto classAttr = info.func->getAttrOfType<StringAttr>("ora.dispatch_class");
-                        if (classAttr && classAttr.getValue() == "readonly")
+                        if (hintRankOf(info) != 0)
                             break;
-                        ++mutatingCount;
+                        ++likelyCount;
                     }
-                    const size_t coldCount = pubFuncs.size() - mutatingCount;
-                    const bool splitHotPrefix = mutatingCount >= 1 && mutatingCount <= 3 && coldCount >= 12;
+                    size_t hotCount = likelyCount;
+                    if (hotCount == 0)
+                    {
+                        for (auto &info : pubFuncs)
+                        {
+                            if (hintRankOf(info) >= 3 || classRankOf(info) != 0)
+                                break;
+                            ++hotCount;
+                        }
+                    }
+                    const size_t coldCount = pubFuncs.size() - hotCount;
+                    const bool splitHotPrefix = hotCount >= 1 && hotCount <= 3 && coldCount >= 12;
 
                     if (splitHotPrefix)
                     {
                         Block *coldDispatch = mainFunc.addBlock();
-                        auto hotAttr = builder.getI64ArrayAttr(ArrayRef<int64_t>(caseValues).take_front(mutatingCount));
+                        auto hotAttr = builder.getI64ArrayAttr(ArrayRef<int64_t>(caseValues).take_front(hotCount));
                         auto hotSw = builder.create<sir::SwitchOp>(
                             dispatcherMainLoc, selector, hotAttr, coldDispatch,
-                            ArrayRef<Block *>(caseBlocks).take_front(mutatingCount));
+                            ArrayRef<Block *>(caseBlocks).take_front(hotCount));
                         hotSw->setAttr("sir.selector_switch", builder.getUnitAttr());
 
                         builder.setInsertionPointToEnd(coldDispatch);
-                        auto coldAttr = builder.getI64ArrayAttr(ArrayRef<int64_t>(caseValues).drop_front(mutatingCount));
+                        auto coldAttr = builder.getI64ArrayAttr(ArrayRef<int64_t>(caseValues).drop_front(hotCount));
                         auto coldSw = builder.create<sir::SwitchOp>(
                             dispatcherMainLoc, selector, coldAttr, revertError,
-                            ArrayRef<Block *>(caseBlocks).drop_front(mutatingCount));
+                            ArrayRef<Block *>(caseBlocks).drop_front(hotCount));
                         coldSw->setAttr("sir.selector_switch", builder.getUnitAttr());
                         setBlockName(coldDispatch, "cold_dispatch");
                     }

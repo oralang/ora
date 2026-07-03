@@ -1336,6 +1336,7 @@ const Parser = struct {
         if (self.looksLikeDestructuringAssignStmt()) return self.parseDestructuringAssignStmtNode();
         if (self.looksLikeDirectiveStmt("lock")) return self.parseDirectiveStmtNode(SyntaxKind.LockStmt, "lock");
         if (self.looksLikeDirectiveStmt("unlock")) return self.parseDirectiveStmtNode(SyntaxKind.UnlockStmt, "unlock");
+        if (self.looksLikeDirectiveStmt("callHint")) return self.parseDirectiveStmtNode(SyntaxKind.CallHintStmt, "callHint");
         return switch (self.current().kind) {
             .Comptime => self.parseComptimeStmtNode(),
             .LeftBrace => self.parseBlockStmtNode(),

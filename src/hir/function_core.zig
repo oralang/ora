@@ -1702,6 +1702,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     try @This().lowerLockLikeStmt(self, lock_stmt.range, lock_stmt.path, locals, true);
                     return false;
                 },
+                // Dispatch-layout hint: consumed by sema/module lowering,
+                // erased here — it must never produce code.
+                .CallHint => return false,
                 .Unlock => |unlock_stmt| {
                     try @This().lowerLockLikeStmt(self, unlock_stmt.range, unlock_stmt.path, locals, false);
                     return false;
@@ -2243,6 +2246,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Try => |node| node.range,
                 .Log => |node| node.range,
                 .Lock => |node| node.range,
+                .CallHint => |node| node.range,
                 .Unlock => |node| node.range,
                 .Assert => |node| node.range,
                 .Assume => |node| node.range,

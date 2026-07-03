@@ -553,6 +553,7 @@ pub fn stmtRange(file: *const ast.AstFile, stmt_id: ast.StmtId) source.TextRange
         .Havoc => |node| node.range,
         .Log => |node| node.range,
         .Lock => |node| node.range,
+        .CallHint => |node| node.range,
         .Unlock => |node| node.range,
         .Block => |node| node.range,
         .LabeledBlock => |node| node.range,

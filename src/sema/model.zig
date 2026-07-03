@@ -810,6 +810,9 @@ pub const TypeCheckResult = struct {
     item_regions: []Region,
     item_effects: []Effect,
     item_modifies: []?[]EffectSlot,
+    /// Per-item `@callHint` value (.none when unhinted). Dispatch-layout
+    /// metadata only — consumed by HIR module lowering, never by codegen.
+    item_call_hints: []ast.nodes.CallHint,
     pattern_types: []LocatedType,
     pattern_initializers: []?ast.ExprId,
     pattern_binding_kinds: []?ast.BindingKind,

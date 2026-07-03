@@ -154,6 +154,67 @@ test "compiler accepts contextual short integer literals for address declaration
 // shape MUST be rejected at type-check, never slide through to the HIR lowering
 // fallback ("reached HIR lowering without ...") or an ICE. Each needle here was
 // confirmed against a freshly built `ora` binary (EXIT=1 at sema, not EXIT=0).
+test "callHint rejects every misplacement loudly (fail-closed gas hint)" {
+    // Not the first statement: a hint that silently stopped applying would
+    // lie to auditors, so placement is an error, never a no-op.
+    try expectDiagnosticProbeContains(
+        \\contract C {
+        \\    storage var x: u256;
+        \\    pub fn a() {
+        \\        x = 1;
+        \\        @callHint(likely);
+        \\    }
+        \\}
+    , .typecheck, "`@callHint` must be the first statement");
+
+    // Unknown scale value.
+    try expectDiagnosticProbeContains(
+        \\contract C {
+        \\    storage var x: u256;
+        \\    pub fn a() {
+        \\        @callHint(fastest);
+        \\        x = 1;
+        \\    }
+        \\}
+    , .typecheck, "invalid `@callHint` argument");
+
+    // Private functions never dispatch.
+    try expectDiagnosticProbeContains(
+        \\contract C {
+        \\    storage var x: u256;
+        \\    fn helper() {
+        \\        @callHint(likely);
+        \\        x = 1;
+        \\    }
+        \\    pub fn a() {
+        \\        helper();
+        \\    }
+        \\}
+    , .typecheck, "only allowed in public contract functions");
+
+    // Constructors are not dispatched.
+    try expectDiagnosticProbeContains(
+        \\contract C {
+        \\    storage var x: u256;
+        \\    pub fn init() {
+        \\        @callHint(likely);
+        \\        x = 1;
+        \\    }
+        \\}
+    , .typecheck, "not allowed on `init`");
+
+    // Expression position cannot re-order dispatch.
+    try expectDiagnosticProbeContains(
+        \\contract C {
+        \\    storage var x: u256;
+        \\    pub fn a() {
+        \\        let v = @callHint(likely);
+        \\        x = 1;
+        \\    }
+        \\}
+    , .typecheck, "cannot be used as an expression");
+}
+
 test "cast-like and overflow builtins reject malformed shapes at sema (fail-closed)" {
     // Overflow: wrong arity (binary form needs 2 operands).
     try expectDiagnosticProbeContains(

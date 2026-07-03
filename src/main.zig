@@ -36,6 +36,9 @@ const MlirOptions = struct {
     opt_level: ?[]const u8,
     output_dir: ?[]const u8,
     output_file: ?[]const u8 = null,
+    /// Final user-facing artifact directory when output_dir points at a
+    /// compiler-owned staging root.
+    artifact_display_dir: ?[]const u8 = null,
     debug_enabled: bool = false,
     debug_info: bool = false,
     canonicalize: bool = true,
@@ -1040,6 +1043,7 @@ pub fn main(init: std.process.Init) !void {
     emit_mlir_options.chain_id = compile_context.chain_id;
     emit_mlir_options.output_dir = emit_output_dir;
     emit_mlir_options.output_file = emit_output_file;
+    emit_mlir_options.artifact_display_dir = output_dir;
     if (direct_emit_staging_root != null) {
         emit_mlir_options.suppress_artifact_logs = true;
     }
@@ -1458,6 +1462,7 @@ fn runBuildArtifacts(
     build_mlir_options.emit_sir_text = true;
     build_mlir_options.emit_bytecode = true;
     build_mlir_options.output_dir = staging_root;
+    build_mlir_options.artifact_display_dir = verify_dir;
     build_mlir_options.verify_z3 = true;
     build_mlir_options.emit_smt_report = true;
     build_mlir_options.persist_ora_mlir = true;
@@ -1481,6 +1486,10 @@ fn runBuildArtifacts(
     const lean_proof_file = try std.fmt.allocPrint(allocator, "{s}.lean.proof.json", .{stem});
     defer allocator.free(lean_proof_file);
     try moveArtifactFileIfExists(allocator, staging_root, lean_proof_file, verify_dir);
+
+    const lean_obligations_file = try std.fmt.allocPrint(allocator, "{s}.lean.obligations.lean", .{stem});
+    defer allocator.free(lean_obligations_file);
+    try moveArtifactFileIfExists(allocator, staging_root, lean_obligations_file, verify_dir);
 
     if (verification_failed) {
         return error.VerificationFailed;
@@ -3447,6 +3456,7 @@ fn stmtRange(stmt: compiler.ast.Stmt) compiler.source.TextRange {
         .Try => |s| s.range,
         .Log => |s| s.range,
         .Lock => |s| s.range,
+        .CallHint => |s| s.range,
         .Unlock => |s| s.range,
         .Assert => |s| s.range,
         .Assume => |s| s.range,
@@ -3486,6 +3496,7 @@ fn statementUsesAnyName(
             for (l.args) |arg| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, arg, &names) catch return true;
         },
         .Lock => |s| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, s.path, &names) catch return true,
+        .CallHint => return true,
         .Unlock => |s| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, s.path, &names) catch return true,
         .Assert => |a| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, a.condition, &names) catch return true,
         .Assume => |a| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, a.condition, &names) catch return true,
@@ -4203,6 +4214,7 @@ fn collectExecutableStmtLines(
         .Assert => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, statement_id, node.range, .runtime_guard),
         .Log => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, statement_id, node.range, .runtime),
         .Lock => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, statement_id, node.range, .runtime),
+        .CallHint => {},
         .Unlock => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, statement_id, node.range, .runtime),
         .Block => |node| try collectExecutableBodyLines(allocator, sources, ast_file, file_id, node.body, line_map),
         .LabeledBlock => |node| try collectExecutableBodyLines(allocator, sources, ast_file, file_id, node.body, line_map),
@@ -4846,6 +4858,7 @@ fn runMlirEmitAdvanced(
     var verification_failed = false;
     var verification_report_blocked_artifacts = false;
     var pending_smt_report: ?z3_verification.SmtReportArtifacts = null;
+    var pending_smt_report_write_artifacts = false;
     defer {
         if (verification_result_opt) |*vr| vr.deinit();
         if (pending_smt_report) |*report| report.deinit(mlir_allocator);
@@ -4887,8 +4900,10 @@ fn runMlirEmitAdvanced(
         }
 
         const needs_lean_proof_gate = mlir_options.lean_proofs_path != null;
-        if (mlir_options.emit_smt_report or needs_lean_proof_gate) {
+        const needs_unknown_recipe = !verification_result.success and hasUnknownVerificationError(&verification_result);
+        if (mlir_options.emit_smt_report or needs_lean_proof_gate or needs_unknown_recipe) {
             pending_smt_report = try verifier.buildSmtReport(final_module, file_path, &verification_result);
+            pending_smt_report_write_artifacts = mlir_options.emit_smt_report or needs_lean_proof_gate;
             if (pending_smt_report) |report| {
                 verification_report_blocked_artifacts = report.blocksTrustedArtifacts();
             }
@@ -4917,6 +4932,20 @@ fn runMlirEmitAdvanced(
         }
         if (!verification_result.success and !lean_artifact_gate_allowed) {
             try printVerificationErrors(stdout, verification_result.errors.items);
+            if (needs_unknown_recipe) {
+                if (pending_smt_report) |*report| {
+                    maybeEmitLeanUnknownRecipe(
+                        allocator,
+                        file_path,
+                        final_module,
+                        report.*,
+                        mlir_options,
+                        stdout,
+                    ) catch |err| {
+                        try stdout.print("note: could not emit Lean proof recipe: {s}\n", .{@errorName(err)});
+                    };
+                }
+            }
             try stdout.flush();
             verification_failed = true;
         }
@@ -4948,7 +4977,9 @@ fn runMlirEmitAdvanced(
 
     if (verification_failed) {
         if (pending_smt_report) |*report| {
-            try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
+            if (pending_smt_report_write_artifacts) {
+                try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
+            }
             report.deinit(mlir_allocator);
             pending_smt_report = null;
         }
@@ -5248,7 +5279,9 @@ fn runMlirEmitAdvanced(
     }
 
     if (pending_smt_report) |*report| {
-        try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
+        if (pending_smt_report_write_artifacts) {
+            try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
+        }
         report.deinit(mlir_allocator);
         pending_smt_report = null;
     }
@@ -5657,6 +5690,183 @@ fn writeSmtReportArtifacts(
     }
 }
 
+const LeanObligationContext = struct {
+    allocator: std.mem.Allocator,
+    formal_result: @import("formal/obligation_from_mlir.zig").CollectResult,
+    merged_result: @import("formal/obligation_from_z3.zig").OverlayResult,
+    generated_namespace: []const u8,
+    obligations_source: []const u8,
+
+    fn deinit(self: *LeanObligationContext) void {
+        self.allocator.free(self.obligations_source);
+        self.allocator.free(self.generated_namespace);
+        self.merged_result.deinit();
+        self.formal_result.deinit();
+        self.* = undefined;
+    }
+};
+
+fn buildLeanObligationContext(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    final_module: @import("mlir_c_api").c.MlirModule,
+    smt_report: z3_verification.SmtReportArtifacts,
+) !LeanObligationContext {
+    const obligation_from_mlir = @import("formal/obligation_from_mlir.zig");
+    const obligation_from_z3 = @import("formal/obligation_from_z3.zig");
+    const obligation_to_lean = @import("formal/obligation_to_lean.zig");
+
+    const query_manifest = smt_report.query_manifest orelse return error.MissingPreparedQueryManifest;
+
+    var formal_result = try obligation_from_mlir.collect(allocator, final_module, .{});
+    errdefer formal_result.deinit();
+
+    var merged_result = try obligation_from_z3.overlayPreparedQueryResults(allocator, formal_result.set, query_manifest.rows);
+    errdefer merged_result.deinit();
+
+    const generated_namespace = try leanProofGeneratedNamespace(allocator, file_path);
+    errdefer allocator.free(generated_namespace);
+
+    var obligations_source_out = std.Io.Writer.Allocating.init(allocator);
+    errdefer obligations_source_out.deinit();
+    try obligation_to_lean.writeModule(&obligations_source_out.writer, merged_result.set, .{
+        .namespace = generated_namespace,
+    });
+    const obligations_source = try obligations_source_out.toOwnedSlice();
+
+    return .{
+        .allocator = allocator,
+        .formal_result = formal_result,
+        .merged_result = merged_result,
+        .generated_namespace = generated_namespace,
+        .obligations_source = obligations_source,
+    };
+}
+
+fn hasUnknownVerificationError(result: *const z3_verification.VerificationResult) bool {
+    for (result.errors.items) |err| {
+        if (err.error_type == .Unknown) return true;
+    }
+    return false;
+}
+
+fn isLeanUnknownRecipeTarget(query: @import("formal/obligation.zig").VerificationQuery) bool {
+    if (query.backend != .z3) return false;
+    if (query.obligation_ids.len == 0) return false;
+    const result = query.result orelse return false;
+    return result.status == .unknown and
+        !result.degraded and
+        !result.vacuous and
+        !result.vacuity_unknown;
+}
+
+fn writeLeanObligationModuleArtifact(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    output_dir: ?[]const u8,
+    display_dir: ?[]const u8,
+    source: []const u8,
+) ![]const u8 {
+    const base_name = std.fs.path.stem(file_path);
+    const filename = try std.fmt.allocPrint(allocator, "{s}.lean.obligations.lean", .{base_name});
+    defer allocator.free(filename);
+
+    var write_path_buf: ?[]u8 = null;
+    defer if (write_path_buf) |buf| allocator.free(buf);
+    var display_path_buf: ?[]u8 = null;
+
+    const write_path = if (output_dir) |dir| blk: {
+        try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), dir);
+        write_path_buf = try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
+        break :blk write_path_buf.?;
+    } else filename;
+
+    const display_path = if (display_dir) |dir| blk: {
+        display_path_buf = try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
+        break :blk display_path_buf.?;
+    } else if (output_dir) |dir| blk: {
+        display_path_buf = try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
+        break :blk display_path_buf.?;
+    } else try allocator.dupe(u8, filename);
+    errdefer allocator.free(display_path);
+
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = write_path,
+        .data = source,
+    });
+
+    return display_path;
+}
+
+fn printIdListInline(stdout: anytype, ids: []const @import("formal/obligation.zig").Id) !void {
+    try stdout.writeByte('[');
+    for (ids, 0..) |id, index| {
+        if (index != 0) try stdout.writeAll(", ");
+        try stdout.print("{d}", .{id});
+    }
+    try stdout.writeByte(']');
+}
+
+fn printLeanUnknownRecipeSource(stdout: anytype, source: @import("formal/obligation.zig").SourceRef) !void {
+    if (source.file) |file| {
+        try stdout.print("{s}", .{file});
+        if (source.line != 0) try stdout.print(":{d}", .{source.line});
+        if (source.column != 0) try stdout.print(":{d}", .{source.column});
+    } else if (source.line != 0) {
+        try stdout.print("line {d}", .{source.line});
+        if (source.column != 0) try stdout.print(":{d}", .{source.column});
+    } else {
+        try stdout.writeAll("unknown source");
+    }
+}
+
+fn maybeEmitLeanUnknownRecipe(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    final_module: @import("mlir_c_api").c.MlirModule,
+    smt_report: z3_verification.SmtReportArtifacts,
+    mlir_options: MlirOptions,
+    stdout: anytype,
+) !void {
+    var context = try buildLeanObligationContext(allocator, file_path, final_module, smt_report);
+    defer context.deinit();
+
+    var target_count: usize = 0;
+    for (context.merged_result.set.queries) |query| {
+        if (isLeanUnknownRecipeTarget(query)) target_count += 1;
+    }
+    if (target_count == 0) return;
+
+    const module_path = try writeLeanObligationModuleArtifact(
+        allocator,
+        file_path,
+        mlir_options.output_dir,
+        mlir_options.artifact_display_dir,
+        context.obligations_source,
+    );
+    defer allocator.free(module_path);
+
+    try stdout.writeAll("Lean proof recipe for Z3 UNKNOWN obligations:\n");
+    try stdout.print("  obligation module: {s}\n", .{module_path});
+    try stdout.print("  generated namespace: {s}\n", .{context.generated_namespace});
+    for (context.merged_result.set.queries) |query| {
+        if (!isLeanUnknownRecipeTarget(query)) continue;
+        try stdout.print("  - query: emittedQuery_{d} (", .{query.id});
+        try printLeanUnknownRecipeSource(stdout, query.source);
+        try stdout.writeAll(")\n");
+        try stdout.print(
+            "    theorem shape: theorem discharge_q{d} : {s}.emittedQuery_{d} := by ...\n",
+            .{ query.id, context.generated_namespace, query.id },
+        );
+        try stdout.print("    proof row: query_id={d}, obligation_ids=", .{query.id});
+        try printIdListInline(stdout, query.obligation_ids);
+        try stdout.writeAll(", assumption_ids=");
+        try printIdListInline(stdout, query.assumption_ids);
+        try stdout.writeByte('\n');
+    }
+    try stdout.writeAll("  pass the proof manifest with `--lean-proofs <proofs.json>`\n\n");
+}
+
 fn applyLeanProofArtifactGate(
     allocator: std.mem.Allocator,
     file_path: []const u8,
@@ -5668,27 +5878,9 @@ fn applyLeanProofArtifactGate(
 ) !bool {
     const proof_manifest = @import("formal/proof_manifest.zig");
     const proof_check = @import("formal/proof_check.zig");
-    const obligation_from_mlir = @import("formal/obligation_from_mlir.zig");
-    const obligation_from_z3 = @import("formal/obligation_from_z3.zig");
-    const obligation_to_lean = @import("formal/obligation_to_lean.zig");
 
-    const query_manifest = smt_report.query_manifest orelse return error.MissingPreparedQueryManifest;
-
-    var formal_result = try obligation_from_mlir.collect(allocator, final_module, .{});
-    defer formal_result.deinit();
-
-    var merged_result = try obligation_from_z3.overlayPreparedQueryResults(allocator, formal_result.set, query_manifest.rows);
-    defer merged_result.deinit();
-
-    const generated_namespace = try leanProofGeneratedNamespace(allocator, file_path);
-    defer allocator.free(generated_namespace);
-
-    var obligations_source_out = std.Io.Writer.Allocating.init(allocator);
-    defer obligations_source_out.deinit();
-    try obligation_to_lean.writeModule(&obligations_source_out.writer, merged_result.set, .{
-        .namespace = generated_namespace,
-    });
-    const obligations_source = obligations_source_out.written();
+    var context = try buildLeanObligationContext(allocator, file_path, final_module, smt_report);
+    defer context.deinit();
 
     const proof_manifest_bytes = try std.Io.Dir.cwd().readFileAlloc(
         std.Io.Threaded.global_single_threaded.io(),
@@ -5703,16 +5895,16 @@ fn applyLeanProofArtifactGate(
 
     var applied = try proof_check.applyProofRows(
         allocator,
-        merged_result.set,
+        context.merged_result.set,
         parsed_manifest.rows,
-        generated_namespace,
-        obligations_source,
+        context.generated_namespace,
+        context.obligations_source,
         mlir_options.process_environ,
         stdout,
     );
     defer if (applied) |*result| result.deinit();
 
-    const decided_set = if (applied) |*result| result.set else merged_result.set;
+    const decided_set = if (applied) |*result| result.set else context.merged_result.set;
     const decision = decided_set.artifactDecision();
     if (applied) |*result| {
         try writeLeanProofCertificate(

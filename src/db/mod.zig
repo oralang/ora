@@ -731,6 +731,8 @@ pub const CompilerDb = struct {
         for (item_regions) |*region| region.* = .none;
         for (item_effects) |*effect| effect.* = .pure;
         @memset(item_modifies, null);
+        const item_call_hints = try arena_allocator.alloc(ast.nodes.CallHint, ast_file.items.len);
+        @memset(item_call_hints, .none);
         for (pattern_types) |*pattern_type| pattern_type.* = sema.LocatedType.unlocated(.{ .unknown = {} });
         for (expr_types) |*expr_type| expr_type.* = .{ .unknown = {} };
         for (body_types) |*body_type| body_type.* = .{ .unknown = {} };
@@ -742,6 +744,7 @@ pub const CompilerDb = struct {
             .item_regions = item_regions,
             .item_effects = item_effects,
             .item_modifies = item_modifies,
+            .item_call_hints = item_call_hints,
             .pattern_types = pattern_types,
             .pattern_initializers = pattern_initializers,
             .pattern_binding_kinds = pattern_binding_kinds,

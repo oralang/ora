@@ -299,6 +299,16 @@ counter::c1:get()	2552
 counter::c2:credit(address,uint256)	22720
 counter::c3:balanceOf(address)	2807
 counter::c4:fail()	820
+dispatcher_call_hint::__bytecode_bytes	2349
+dispatcher_call_hint::__deploy_gas	464736
+dispatcher_call_hint::c0:transfer(address,uint256)	22721
+dispatcher_call_hint::c1:mint(address,uint256)	7788
+dispatcher_call_hint::c2:totalSupply()	2658
+dispatcher_call_hint::c3:burn(uint256)	7732
+dispatcher_call_hint::c4:v0()	554
+dispatcher_call_hint::c5:pause()	7599
+dispatcher_call_hint::c6:totalSupply()	2658
+dispatcher_call_hint::c7:calldata	485
 dispatcher_case_ordering::__bytecode_bytes	415
 dispatcher_case_ordering::__deploy_gas	77386
 dispatcher_case_ordering::c0:peek()	2503

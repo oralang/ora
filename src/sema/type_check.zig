@@ -588,6 +588,7 @@ pub fn typeCheck(
         .item_types = &.{},
         .item_regions = &.{},
         .item_effects = &.{},
+        .item_call_hints = &.{},
         .item_modifies = &.{},
         .pattern_types = &.{},
         .pattern_initializers = &.{},
@@ -615,6 +616,7 @@ pub fn typeCheck(
     var item_regions = try arena.alloc(Region, file.items.len);
     const item_effects = try arena.alloc(Effect, file.items.len);
     const item_modifies = try arena.alloc(?[]EffectSlot, file.items.len);
+    const item_call_hints = try arena.alloc(ast.nodes.CallHint, file.items.len);
     var pattern_types = try arena.alloc(LocatedType, file.patterns.len);
     var pattern_initializers: []?ast.ExprId = &.{};
     var pattern_binding_kinds: []?ast.BindingKind = &.{};
@@ -629,6 +631,7 @@ pub fn typeCheck(
     @memset(item_regions, .none);
     @memset(item_effects, .pure);
     @memset(item_modifies, null);
+    @memset(item_call_hints, .none);
     @memset(pattern_types, LocatedType.unlocated(.{ .unknown = {} }));
     @memset(expr_types, .{ .unknown = {} });
     @memset(body_types, .{ .void = {} });
@@ -704,6 +707,7 @@ pub fn typeCheck(
         .item_regions = item_regions,
         .item_effects = item_effects,
         .item_modifies = item_modifies,
+        .item_call_hints = item_call_hints,
         .pattern_types = pattern_types,
         .pattern_initializers = pattern_initializers,
         .pattern_binding_kinds = pattern_binding_kinds,
@@ -829,6 +833,7 @@ pub fn typeCheck(
     result.item_regions = item_regions;
     result.item_effects = item_effects;
     result.item_modifies = item_modifies;
+    result.item_call_hints = item_call_hints;
     result.pattern_types = pattern_types;
     result.pattern_initializers = pattern_initializers;
     result.pattern_binding_kinds = pattern_binding_kinds;
@@ -894,6 +899,7 @@ const TypeChecker = struct {
     item_regions: []Region,
     item_effects: []Effect,
     item_modifies: []?[]EffectSlot,
+    item_call_hints: []ast.nodes.CallHint,
     pattern_types: []LocatedType,
     pattern_initializers: []?ast.ExprId,
     pattern_binding_kinds: []?ast.BindingKind,
@@ -918,6 +924,9 @@ const TypeChecker = struct {
     current_spec_clause_kind: ?ast.SpecClauseKind = null,
     current_contract: ?ast.ItemId = null,
     current_function_item: ?ast.ItemId = null,
+    /// The one statement id where `@callHint` is legal in the function
+    /// currently being checked (its body's first statement), or null.
+    allowed_call_hint_stmt: ?ast.StmtId = null,
     comptime_depth: usize = 0,
     effect_scratch_depth: usize = 0,
     allow_resource_boundary_builtin_statement: bool = false,
@@ -1335,6 +1344,14 @@ const TypeChecker = struct {
                 self.current_function_item = item_id;
                 defer self.current_function_item = previous_function_item;
                 defer self.current_return_type = previous_return_type;
+                const previous_allowed_call_hint = self.allowed_call_hint_stmt;
+                self.allowed_call_hint_stmt = blk: {
+                    const body_stmts = self.file.body(function.body).statements;
+                    if (body_stmts.len == 0) break :blk null;
+                    if (self.file.statement(body_stmts[0]).* != .CallHint) break :blk null;
+                    break :blk body_stmts[0];
+                };
+                defer self.allowed_call_hint_stmt = previous_allowed_call_hint;
                 try self.validatePublicFunctionAbi(function);
                 try self.validateRuntimeMapFunctionBoundary(function);
                 try self.checkDuplicateTraitBounds(function.trait_bounds);
@@ -2915,6 +2932,49 @@ const TypeChecker = struct {
         }
     }
 
+    fn checkCallHintStatement(self: *TypeChecker, statement_id: ast.StmtId, hint_stmt: ast.nodes.CallHintStmt) !void {
+        // A silently ignored gas hint would lie to auditors, so every
+        // misplacement is an error, never a no-op.
+        const item_id = self.current_function_item orelse {
+            try self.emitRangeError(hint_stmt.range, "`@callHint` is only allowed as the first statement of a public contract function body", .{});
+            return;
+        };
+        const placement_ok = if (self.allowed_call_hint_stmt) |allowed| allowed.index() == statement_id.index() else false;
+        if (!placement_ok) {
+            try self.emitRangeError(hint_stmt.range, "`@callHint` must be the first statement of a public contract function body", .{});
+            return;
+        }
+        const function = switch (self.file.item(item_id).*) {
+            .Function => |function| function,
+            else => {
+                try self.emitRangeError(hint_stmt.range, "`@callHint` is only allowed in public contract functions", .{});
+                return;
+            },
+        };
+        if (function.visibility != .public or function.parent_contract == null) {
+            try self.emitRangeError(hint_stmt.range, "`@callHint` re-orders selector dispatch and is only allowed in public contract functions", .{});
+            return;
+        }
+        if (std.mem.eql(u8, function.name, "init")) {
+            try self.emitRangeError(hint_stmt.range, "`@callHint` is not allowed on `init`: constructors are not dispatched", .{});
+            return;
+        }
+        const hint = hint_stmt.hint orelse {
+            try self.emitRangeError(hint_stmt.range, "invalid `@callHint` argument; expected `likely`, `unlikely`, `cold`, or `none`", .{});
+            return;
+        };
+        if (hint == .likely) {
+            var likely_count: usize = 0;
+            for (self.item_call_hints) |recorded| {
+                if (recorded == .likely) likely_count += 1;
+            }
+            if (likely_count >= 4) {
+                try self.emitRangeWarning(hint_stmt.range, "more than 4 functions marked `@callHint(likely)`; a long hot prefix stops being hot — later entries pay for every check ahead of them", .{});
+            }
+        }
+        self.item_call_hints[item_id.index()] = hint;
+    }
+
     fn visitStmt(self: *TypeChecker, statement_id: ast.StmtId) anyerror!void {
         switch (self.file.statement(statement_id).*) {
             .VariableDecl => |decl| {
@@ -3049,6 +3109,7 @@ const TypeChecker = struct {
             },
             .Lock => |lock_stmt| try self.visitExpr(lock_stmt.path),
             .Unlock => |unlock_stmt| try self.visitExpr(unlock_stmt.path),
+            .CallHint => |hint_stmt| try self.checkCallHintStatement(statement_id, hint_stmt),
             .Assert => |assert_stmt| {
                 try self.visitExpr(assert_stmt.condition);
                 try self.checkBoolCondition(assert_stmt.condition, "assert condition");
@@ -3869,6 +3930,7 @@ const TypeChecker = struct {
             },
             .Log => |log_stmt| for (log_stmt.args) |arg| try self.validateGenericExprInstantiation(arg, bindings),
             .Lock => |lock_stmt| try self.validateGenericExprInstantiation(lock_stmt.path, bindings),
+            .CallHint => {},
             .Unlock => |unlock_stmt| try self.validateGenericExprInstantiation(unlock_stmt.path, bindings),
             .Assert => |assert_stmt| try self.validateGenericExprInstantiation(assert_stmt.condition, bindings),
             .Assume => |assume_stmt| try self.validateGenericExprInstantiation(assume_stmt.condition, bindings),
@@ -6993,6 +7055,12 @@ const TypeChecker = struct {
 
     fn builtinReturnType(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr) !Type {
         return switch (kind) {
+            // Statement-only directive: reaching it in expression position
+            // means it was written somewhere it cannot re-order dispatch.
+            .call_hint => {
+                try self.emitRangeError(builtin.range, "`@callHint` must be the first statement of a public contract function body; it cannot be used as an expression", .{});
+                return .{ .void = {} };
+            },
             .cast, .bit_cast, .truncate => {
                 if (builtin.type_arg) |type_expr| return try self.resolveTypeExprInCurrentContext(type_expr);
                 if (kind == .truncate and builtin.args.len > 0) {
@@ -7397,6 +7465,7 @@ const TypeChecker = struct {
             .Block => |block| try self.validateBodyExternalCalls(block.body, state),
             .LabeledBlock => |block| try self.validateBodyExternalCalls(block.body, state),
             .Lock => |lock_stmt| try self.validateExprExternalCalls(lock_stmt.path, state),
+            .CallHint => {},
             .Unlock => |unlock_stmt| try self.validateExprExternalCalls(unlock_stmt.path, state),
             .Assign => |assign| {
                 try self.validateExprExternalCalls(assign.value, state);
@@ -7583,6 +7652,7 @@ const TypeChecker = struct {
                 try self.validateExprLocks(lock_stmt.path, locked_slots);
                 if (try self.runtimeLockSlotForExpr(lock_stmt.path, "`@lock`")) |slot| try self.appendUniqueEffectSlot(locked_slots, slot);
             },
+            .CallHint => {},
             .Unlock => |unlock_stmt| {
                 try self.validateExprLocks(unlock_stmt.path, locked_slots);
                 if (try self.runtimeLockSlotForExpr(unlock_stmt.path, "`@unlock`")) |slot| self.removeLockedSlot(locked_slots, slot);

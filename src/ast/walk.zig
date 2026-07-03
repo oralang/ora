@@ -131,6 +131,7 @@ pub fn walkStmt(
         },
         .Log => |log_stmt| for (log_stmt.args) |arg| try walkExpr(Visitor, visitor, ast_file, arg, options),
         .Lock => |lock_stmt| try walkExpr(Visitor, visitor, ast_file, lock_stmt.path, options),
+        .CallHint => {},
         .Unlock => |unlock_stmt| try walkExpr(Visitor, visitor, ast_file, unlock_stmt.path, options),
         .Assert => |assert_stmt| try walkExpr(Visitor, visitor, ast_file, assert_stmt.condition, options),
         .Assume => |assume_stmt| try walkExpr(Visitor, visitor, ast_file, assume_stmt.condition, options),

@@ -40,6 +40,7 @@ pub const SyntaxKind = enum {
     LogStmt,
     LockStmt,
     UnlockStmt,
+    CallHintStmt,
     LabeledBlockStmt,
     DestructuringAssignStmt,
     CompoundAssignStmt,

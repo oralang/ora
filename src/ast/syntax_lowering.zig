@@ -969,6 +969,7 @@ pub fn mixin(Builder: type) type {
                 .TryStmt => Lowering.lowerTryStmtNode(self, node),
                 .LogStmt => Lowering.lowerLogStmtNode(self, node),
                 .LockStmt => Lowering.lowerLockStmtNode(self, node),
+                .CallHintStmt => Lowering.lowerCallHintStmtNode(self, node),
                 .UnlockStmt => Lowering.lowerUnlockStmtNode(self, node),
                 .AssertStmt => Lowering.lowerAssertStmtNode(self, node),
                 .AssumeStmt => Lowering.lowerAssumeStmtNode(self, node),
@@ -1384,6 +1385,24 @@ pub fn mixin(Builder: type) type {
             return Support.pushStmt(self, .{ .Lock = .{
                 .range = node.range(),
                 .path = path,
+            } });
+        }
+
+        fn lowerCallHintStmtNode(self: *Builder, node: SyntaxNode) !StmtId {
+            // The argument is a closed keyword set, resolved here so the
+            // hint never exists as an evaluable expression downstream.
+            var hint: ?nodes.CallHint = null;
+            if (firstDirectExprChild(node)) |expr_node| {
+                if (firstDirectTokenOfKind(expr_node, .Identifier)) |name_token| {
+                    const name = tokenText(name_token);
+                    inline for (@typeInfo(nodes.CallHint).@"enum".fields) |field| {
+                        if (std.mem.eql(u8, name, field.name)) hint = @field(nodes.CallHint, field.name);
+                    }
+                }
+            }
+            return Support.pushStmt(self, .{ .CallHint = .{
+                .range = node.range(),
+                .hint = hint,
             } });
         }
 

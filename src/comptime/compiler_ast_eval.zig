@@ -311,7 +311,7 @@ const ConstEvaluator = struct {
                 .Log => |log_stmt| {
                     for (log_stmt.args) |arg| _ = self.evalExpr(arg) catch null;
                 },
-                .Lock, .Unlock, .Break, .Continue, .Havoc => {},
+                .Lock, .Unlock, .Break, .Continue, .Havoc, .CallHint => {},
                 .Assert => |assert_stmt| _ = self.evalExpr(assert_stmt.condition) catch null,
                 .Assume => |assume_stmt| _ = self.evalExpr(assume_stmt.condition) catch null,
                 .Block => |block_stmt| self.visitBody(block_stmt.body),
@@ -3218,6 +3218,9 @@ const ConstEvaluator = struct {
             .Assert => |assert_stmt| self.exprStage(assert_stmt.condition),
             .Assume => |assume_stmt| self.exprStage(assume_stmt.condition),
             .Log, .Lock, .Unlock => .runtime_only,
+            // A dispatch-layout hint: no value, no effect, valid anywhere
+            // comptime looks at it.
+            .CallHint => .comptime_ok,
             .Havoc, .Break, .Continue, .Error => .comptime_ok,
         };
     }
@@ -3404,6 +3407,7 @@ const ConstEvaluator = struct {
             .Try => |stmt| stmt.range,
             .Log => |stmt| stmt.range,
             .Lock => |stmt| stmt.range,
+            .CallHint => |stmt| stmt.range,
             .Unlock => |stmt| stmt.range,
             .Assert => |stmt| stmt.range,
             .Assume => |stmt| stmt.range,
@@ -4373,7 +4377,7 @@ const ConstEvaluator = struct {
             },
             .Assert => |assert_stmt| _ = self.evalExpr(assert_stmt.condition) catch null,
             .Assume => |assume_stmt| _ = self.evalExpr(assume_stmt.condition) catch null,
-            .Lock, .Unlock, .Break, .Continue, .Havoc, .Error => {},
+            .Lock, .Unlock, .Break, .Continue, .Havoc, .Error, .CallHint => {},
         }
     }
 };
