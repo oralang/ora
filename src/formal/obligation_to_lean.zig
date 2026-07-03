@@ -11,6 +11,22 @@ pub const Options = struct {
     namespace: []const u8 = "Ora.Generated.ObligationSmoke",
 };
 
+pub const SemanticSupport = union(enum) {
+    supported,
+    unsupported: SemanticUnsupportedReason,
+};
+
+pub const SemanticUnsupportedReason = union(enum) {
+    empty_query,
+    invalid_dependency,
+    unsupported_obligation_kind,
+    unsupported_effect_frame_relation: obligation.EffectFrameRelation,
+    unsupported_origin_value,
+    unsupported_term_kind,
+    missing_type,
+    unsupported_type: obligation.TypeRef,
+};
+
 pub fn writeDataModule(writer: anytype, set: obligation.ObligationSet, options: Options) !void {
     try set.validateTermReferences();
     try set.validateIdReferences();
@@ -141,7 +157,10 @@ fn writeSemanticDefinitions(writer: anytype, set: obligation.ObligationSet) !voi
     try writeRowDefinitions(writer, set);
 
     for (set.obligations) |row| {
-        if (!kindSupportsSemantics(row.kind)) continue;
+        switch (kindSemanticSupport(set, row.kind)) {
+            .supported => {},
+            .unsupported => continue,
+        }
         if (!emitted_any) {
             try writer.writeAll("-- Semantic proposition names for proof attachment.\n");
             emitted_any = true;
@@ -217,18 +236,47 @@ fn findAssumption(set: obligation.ObligationSet, id: obligation.Id) ?obligation.
     return null;
 }
 
-fn querySupportsSemantics(set: obligation.ObligationSet, query: obligation.VerificationQuery) !bool {
-    if (query.obligation_ids.len == 0) return false;
-    for (query.obligation_ids) |obligation_id| {
-        const row = findObligation(set, obligation_id) orelse return error.InvalidDependency;
-        if (!kindSupportsSemantics(row.kind)) return false;
+pub fn querySemanticSupport(set: obligation.ObligationSet, query: obligation.VerificationQuery) SemanticSupport {
+    if (query.obligation_ids.len == 0) return .{ .unsupported = .empty_query };
+
+    for (query.assumption_ids) |assumption_id| {
+        const row = findAssumption(set, assumption_id) orelse return .{ .unsupported = .invalid_dependency };
+        if (row.formula) |formula| {
+            switch (formulaSemanticSupport(set, formula)) {
+                .supported => {},
+                .unsupported => |reason| return .{ .unsupported = reason },
+            }
+        } else {
+            return .{ .unsupported = .unsupported_origin_value };
+        }
     }
-    return true;
+
+    for (query.obligation_ids) |obligation_id| {
+        const row = findObligation(set, obligation_id) orelse return .{ .unsupported = .invalid_dependency };
+        switch (kindSemanticSupport(set, row.kind)) {
+            .supported => {},
+            .unsupported => |reason| return .{ .unsupported = reason },
+        }
+    }
+
+    return .supported;
 }
 
-fn kindSupportsSemantics(kind: obligation.Kind) bool {
+fn querySupportsSemantics(set: obligation.ObligationSet, query: obligation.VerificationQuery) !bool {
+    return switch (querySemanticSupport(set, query)) {
+        .supported => true,
+        .unsupported => |reason| switch (reason) {
+            .invalid_dependency => error.InvalidDependency,
+            else => false,
+        },
+    };
+}
+
+fn kindSemanticSupport(set: obligation.ObligationSet, kind: obligation.Kind) SemanticSupport {
     return switch (kind) {
-        .logical, .runtime_guard, .effect_frame => true,
+        .logical => |logical| formulaSemanticSupport(set, logical.formula),
+        .runtime_guard => |guard| formulaSemanticSupport(set, guard.formula),
+        .effect_frame => |effect| effectFrameSemanticSupport(effect),
         .type_wf,
         .type_relation,
         .region_relation,
@@ -236,7 +284,236 @@ fn kindSupportsSemantics(kind: obligation.Kind) bool {
         .quantifier,
         .filtered_input,
         .backend_fact,
-        => false,
+        => .{ .unsupported = .unsupported_obligation_kind },
+    };
+}
+
+fn effectFrameSemanticSupport(effect: obligation.EffectFrameGoal) SemanticSupport {
+    return switch (effect.relation) {
+        .write_covered_by_modifies,
+        .read_preserved_by_frame,
+        => .supported,
+        .lock_covers_write,
+        .external_call_frame,
+        => .{ .unsupported = .{ .unsupported_effect_frame_relation = effect.relation } },
+    };
+}
+
+fn formulaSemanticSupport(set: obligation.ObligationSet, formula: obligation.FormulaRef) SemanticSupport {
+    return switch (formula) {
+        .term => |id| formulaTermSemanticSupport(set, id, set.terms.len + 1),
+        .origin_value => .{ .unsupported = .unsupported_origin_value },
+    };
+}
+
+fn termById(set: obligation.ObligationSet, id: obligation.TermId) ?obligation.Term {
+    if (id >= set.terms.len) return null;
+    return set.terms[id];
+}
+
+fn formulaTermSemanticSupport(
+    set: obligation.ObligationSet,
+    id: obligation.TermId,
+    fuel: usize,
+) SemanticSupport {
+    if (fuel == 0) return .{ .unsupported = .unsupported_term_kind };
+    const term = termById(set, id) orelse return .{ .unsupported = .invalid_dependency };
+    return switch (term) {
+        .bool_lit => .supported,
+        .variable => |variable| varRefSupportsBoolFormula(variable),
+        .refinement_predicate => |predicate| refinementPredicateSemanticSupport(set, predicate, fuel - 1),
+        .unary => |unary| switch (unary.op) {
+            .not => formulaTermSemanticSupport(set, unary.operand, fuel - 1),
+            .neg => .{ .unsupported = .unsupported_term_kind },
+        },
+        .binary => |binary| binaryFormulaSemanticSupport(set, binary, fuel - 1),
+        .quantified => |quantified| quantifiedSemanticSupport(set, quantified, fuel - 1),
+        .int_lit,
+        .old,
+        .result,
+        .place_read,
+        => .{ .unsupported = .unsupported_term_kind },
+    };
+}
+
+fn valueTermSemanticSupport(
+    set: obligation.ObligationSet,
+    id: obligation.TermId,
+    fuel: usize,
+) SemanticSupport {
+    if (fuel == 0) return .{ .unsupported = .unsupported_term_kind };
+    const term = termById(set, id) orelse return .{ .unsupported = .invalid_dependency };
+    return switch (term) {
+        .bool_lit => .supported,
+        .int_lit => |literal| optionalTypeSupportsU256(literal.ty),
+        .variable => |variable| varRefSupportsBoolOrU256Value(variable),
+        .result => .supported,
+        .binary => |binary| switch (binary.op) {
+            .add, .sub => binaryU256ValueSemanticSupport(set, binary, fuel - 1),
+            else => .{ .unsupported = .unsupported_term_kind },
+        },
+        .old,
+        .place_read,
+        .unary,
+        .refinement_predicate,
+        .quantified,
+        => .{ .unsupported = .unsupported_term_kind },
+    };
+}
+
+fn u256ValueTermSemanticSupport(
+    set: obligation.ObligationSet,
+    id: obligation.TermId,
+    fuel: usize,
+) SemanticSupport {
+    if (fuel == 0) return .{ .unsupported = .unsupported_term_kind };
+    const term = termById(set, id) orelse return .{ .unsupported = .invalid_dependency };
+    return switch (term) {
+        .int_lit => |literal| optionalTypeSupportsU256(literal.ty),
+        .variable => |variable| varRefSupportsU256Value(variable),
+        .result => .supported,
+        .binary => |binary| switch (binary.op) {
+            .add, .sub => binaryU256ValueSemanticSupport(set, binary, fuel - 1),
+            else => .{ .unsupported = .unsupported_term_kind },
+        },
+        else => .{ .unsupported = .unsupported_term_kind },
+    };
+}
+
+fn binaryFormulaSemanticSupport(
+    set: obligation.ObligationSet,
+    binary: obligation.BinaryTerm,
+    fuel: usize,
+) SemanticSupport {
+    return switch (binary.op) {
+        .eq, .ne => firstUnsupported(.{
+            valueTermSemanticSupport(set, binary.lhs, fuel),
+            valueTermSemanticSupport(set, binary.rhs, fuel),
+        }),
+        .lt, .le, .gt, .ge => firstUnsupported(.{
+            u256ValueTermSemanticSupport(set, binary.lhs, fuel),
+            u256ValueTermSemanticSupport(set, binary.rhs, fuel),
+        }),
+        .and_, .or_, .implies => firstUnsupported(.{
+            formulaTermSemanticSupport(set, binary.lhs, fuel),
+            formulaTermSemanticSupport(set, binary.rhs, fuel),
+        }),
+        .add,
+        .sub,
+        .mul,
+        .div,
+        .mod,
+        => .{ .unsupported = .unsupported_term_kind },
+    };
+}
+
+fn binaryU256ValueSemanticSupport(
+    set: obligation.ObligationSet,
+    binary: obligation.BinaryTerm,
+    fuel: usize,
+) SemanticSupport {
+    return firstUnsupported(.{
+        u256ValueTermSemanticSupport(set, binary.lhs, fuel),
+        u256ValueTermSemanticSupport(set, binary.rhs, fuel),
+    });
+}
+
+fn refinementPredicateSemanticSupport(
+    set: obligation.ObligationSet,
+    predicate: obligation.RefinementPredicateTerm,
+    fuel: usize,
+) SemanticSupport {
+    switch (u256ValueTermSemanticSupport(set, predicate.value, fuel)) {
+        .supported => {},
+        .unsupported => |reason| return .{ .unsupported = reason },
+    }
+    for (predicate.args) |arg| {
+        switch (u256ValueTermSemanticSupport(set, arg, fuel)) {
+            .supported => {},
+            .unsupported => |reason| return .{ .unsupported = reason },
+        }
+    }
+    return .supported;
+}
+
+fn quantifiedSemanticSupport(
+    set: obligation.ObligationSet,
+    quantified: obligation.QuantifiedTerm,
+    fuel: usize,
+) SemanticSupport {
+    switch (optionalTypeSupportsU256(quantified.binder.ty)) {
+        .supported => {},
+        .unsupported => |reason| return .{ .unsupported = reason },
+    }
+    if (quantified.condition) |condition| {
+        switch (formulaTermSemanticSupport(set, condition, fuel)) {
+            .supported => {},
+            .unsupported => |reason| return .{ .unsupported = reason },
+        }
+    }
+    return formulaTermSemanticSupport(set, quantified.body, fuel);
+}
+
+fn firstUnsupported(results: anytype) SemanticSupport {
+    inline for (results) |result| {
+        switch (result) {
+            .supported => {},
+            .unsupported => |reason| return .{ .unsupported = reason },
+        }
+    }
+    return .supported;
+}
+
+fn varRefSupportsBoolFormula(variable: obligation.VarRef) SemanticSupport {
+    return switch (variable) {
+        .free => |free| optionalTypeSupportsBool(free.ty),
+        .bound => |bound| optionalTypeSupportsBool(bound.ty),
+    };
+}
+
+fn varRefSupportsBoolOrU256Value(variable: obligation.VarRef) SemanticSupport {
+    return switch (variable) {
+        .free => |free| optionalTypeSupportsBoolOrU256(free.ty),
+        .bound => |bound| optionalTypeSupportsBoolOrU256(bound.ty),
+    };
+}
+
+fn varRefSupportsU256Value(variable: obligation.VarRef) SemanticSupport {
+    return switch (variable) {
+        .free => |free| optionalTypeSupportsU256(free.ty),
+        .bound => |bound| optionalTypeSupportsU256(bound.ty),
+    };
+}
+
+fn optionalTypeSupportsBool(ty: ?obligation.TypeRef) SemanticSupport {
+    const value = ty orelse return .{ .unsupported = .missing_type };
+    if (typeRefIsBool(value)) return .supported;
+    return .{ .unsupported = .{ .unsupported_type = value } };
+}
+
+fn optionalTypeSupportsU256(ty: ?obligation.TypeRef) SemanticSupport {
+    const value = ty orelse return .{ .unsupported = .missing_type };
+    if (typeRefIsU256(value)) return .supported;
+    return .{ .unsupported = .{ .unsupported_type = value } };
+}
+
+fn optionalTypeSupportsBoolOrU256(ty: ?obligation.TypeRef) SemanticSupport {
+    const value = ty orelse return .{ .unsupported = .missing_type };
+    if (typeRefIsBool(value) or typeRefIsU256(value)) return .supported;
+    return .{ .unsupported = .{ .unsupported_type = value } };
+}
+
+fn typeRefIsBool(ty: obligation.TypeRef) bool {
+    return switch (ty) {
+        .spelling => |name| std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "i1"),
+        .compiler_type_id => false,
+    };
+}
+
+fn typeRefIsU256(ty: obligation.TypeRef) bool {
+    return switch (ty) {
+        .spelling => |name| std.mem.eql(u8, name, "u256") or std.mem.eql(u8, name, "uint256"),
+        .compiler_type_id => false,
     };
 }
 

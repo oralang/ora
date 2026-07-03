@@ -780,6 +780,50 @@ test "B3 lean proofs unblock source-level unknown without erasing runtime guard"
     try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "sorry/b3_lean_gate.lean.proof.json", .{}));
 }
 
+test "B4 unknown diagnostic rejects Lean recipe for unsupported semantic type" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const source =
+        \\contract B4UnsupportedLeanType {
+        \\    pub fn small(x: u32) -> bool
+        \\        ensures x <= x
+        \\    {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b4_unsupported_lean_type.ora", .data = source });
+
+    const source_path = try pathFromTmpAlloc(allocator, tmp, "b4_unsupported_lean_type.ora");
+    defer allocator.free(source_path);
+    const out_dir = try pathFromTmpAlloc(allocator, tmp, "b4-out");
+    defer allocator.free(out_dir);
+
+    const result = try runOraWithForcedUnknown(allocator, "obligation:2", &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=smt-report",
+        "--out-dir",
+        out_dir,
+        source_path,
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    try expectExited(result, 1);
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean proof recipe unavailable for some Z3 UNKNOWN obligations"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "unsupported Lean semantic type `u32`"));
+    try testing.expect(!std.mem.containsAtLeast(u8, result.stdout, 1, "Lean proof recipe for Z3 UNKNOWN obligations"));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "b4-out/b4_unsupported_lean_type.lean.obligations.lean", .{}));
+}
+
 test "B5 unknown diagnostic reports Lean projection coverage when no recipe is available" {
     std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,

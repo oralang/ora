@@ -22,6 +22,8 @@ const project_config = @import("config/mod.zig");
 const import_graph = @import("ora_imports");
 const log = @import("log");
 const runtime_checks = @import("mlir/runtime_checks.zig");
+const formal_obligation = @import("formal/obligation.zig");
+const formal_obligation_to_lean = @import("formal/obligation_to_lean.zig");
 const Metrics = lib.metrics.Metrics;
 const allocation_stats = lib.lsp.allocation_stats;
 const ManagedArrayList = std.array_list.Managed;
@@ -5872,28 +5874,6 @@ fn projectionSummaryForLeanSet(set: @import("formal/obligation.zig").ObligationS
     return summary;
 }
 
-fn leanQuerySupportsSemanticDefinition(
-    set: @import("formal/obligation.zig").ObligationSet,
-    query: @import("formal/obligation.zig").VerificationQuery,
-) bool {
-    if (query.obligation_ids.len == 0) return false;
-    for (query.obligation_ids) |id| {
-        const item = findLeanObligationById(set, id) orelse return false;
-        switch (item.kind) {
-            .logical, .runtime_guard, .effect_frame => {},
-            .type_wf,
-            .type_relation,
-            .region_relation,
-            .resource,
-            .quantifier,
-            .filtered_input,
-            .backend_fact,
-            => return false,
-        }
-    }
-    return true;
-}
-
 fn plainUnknownPreparedRows(report: z3_verification.SmtReportArtifacts) usize {
     const query_manifest = report.query_manifest orelse return 0;
     var count: usize = 0;
@@ -5911,6 +5891,43 @@ fn printLeanFormulaProjectionSummary(stdout: anytype, summary: LeanFormulaProjec
         "formula projection: term={d}, origin_value={d}, total={d}, term_ratio_basis_points={d}",
         .{ summary.term, summary.origin_value, summary.total(), summary.termRatioBasisPoints() },
     );
+}
+
+fn leanSemanticSupportAvailable(support: formal_obligation_to_lean.SemanticSupport) bool {
+    return switch (support) {
+        .supported => true,
+        .unsupported => false,
+    };
+}
+
+fn printLeanTypeRef(stdout: anytype, ty: formal_obligation.TypeRef) !void {
+    switch (ty) {
+        .spelling => |text| try stdout.print("`{s}`", .{text}),
+        .compiler_type_id => |id| try stdout.print("compiler_type_id:{d}", .{id}),
+    }
+}
+
+fn printLeanSemanticUnsupportedReason(
+    stdout: anytype,
+    reason: formal_obligation_to_lean.SemanticUnsupportedReason,
+) !void {
+    switch (reason) {
+        .empty_query => try stdout.writeAll("    reason: query has no obligation ids, so no Lean semantic proposition can be emitted\n"),
+        .invalid_dependency => try stdout.writeAll("    reason: query references a missing obligation or assumption row\n"),
+        .unsupported_obligation_kind => try stdout.writeAll("    reason: this obligation kind is not in the Lean semantic proof fragment yet\n"),
+        .unsupported_effect_frame_relation => |relation| try stdout.print(
+            "    reason: effect-frame relation `{s}` is not in the Lean semantic proof fragment yet\n",
+            .{@tagName(relation)},
+        ),
+        .unsupported_origin_value => try stdout.writeAll("    reason: formula is still an MLIR origin_value; Lean proof export only supports projected Term formulas today\n"),
+        .unsupported_term_kind => try stdout.writeAll("    reason: this term shape is not in the Lean semantic proof fragment yet\n"),
+        .missing_type => try stdout.writeAll("    reason: term is missing type metadata required by the Lean semantic proof fragment\n"),
+        .unsupported_type => |ty| {
+            try stdout.writeAll("    reason: unsupported Lean semantic type ");
+            try printLeanTypeRef(stdout, ty);
+            try stdout.writeAll("; the current Lean semantic proof fragment supports bool formulas and u256 values only\n");
+        },
+    }
 }
 
 fn writeLeanObligationModuleArtifact(
@@ -5989,7 +6006,8 @@ fn maybeEmitLeanUnknownRecipe(
     for (context.merged_result.set.queries) |query| {
         if (!isLeanUnknownRecipeTarget(query)) continue;
         const projection = projectionSummaryForLeanQuery(context.merged_result.set, query);
-        if (projection.hasOpaqueFormula() or !leanQuerySupportsSemanticDefinition(context.merged_result.set, query)) {
+        const semantic_support = formal_obligation_to_lean.querySemanticSupport(context.merged_result.set, query);
+        if (projection.hasOpaqueFormula() or !leanSemanticSupportAvailable(semantic_support)) {
             unavailable_count += 1;
         } else {
             recipe_count += 1;
@@ -6004,7 +6022,8 @@ fn maybeEmitLeanUnknownRecipe(
         for (context.merged_result.set.queries) |query| {
             if (!isLeanUnknownRecipeTarget(query)) continue;
             const projection = projectionSummaryForLeanQuery(context.merged_result.set, query);
-            if (!projection.hasOpaqueFormula() and leanQuerySupportsSemanticDefinition(context.merged_result.set, query)) continue;
+            const semantic_support = formal_obligation_to_lean.querySemanticSupport(context.merged_result.set, query);
+            if (!projection.hasOpaqueFormula() and leanSemanticSupportAvailable(semantic_support)) continue;
             try stdout.print("  - query: emittedQuery_{d} (", .{query.id});
             try printLeanUnknownRecipeSource(stdout, query.source);
             try stdout.writeAll(")\n    ");
@@ -6013,7 +6032,10 @@ fn maybeEmitLeanUnknownRecipe(
             if (projection.hasOpaqueFormula()) {
                 try stdout.writeAll("    reason: formula is still an MLIR origin_value; Lean proof export only supports projected Term formulas today\n");
             } else {
-                try stdout.writeAll("    reason: this obligation kind is not in the Lean semantic proof fragment yet\n");
+                switch (semantic_support) {
+                    .supported => try stdout.writeAll("    reason: this obligation kind is not in the Lean semantic proof fragment yet\n"),
+                    .unsupported => |reason| try printLeanSemanticUnsupportedReason(stdout, reason),
+                }
             }
         }
         if (unmatched_unknown_rows != 0) {
@@ -6070,7 +6092,8 @@ fn maybeEmitLeanUnknownRecipe(
     for (context.merged_result.set.queries) |query| {
         if (!isLeanUnknownRecipeTarget(query)) continue;
         const projection = projectionSummaryForLeanQuery(context.merged_result.set, query);
-        if (projection.hasOpaqueFormula() or !leanQuerySupportsSemanticDefinition(context.merged_result.set, query)) continue;
+        const semantic_support = formal_obligation_to_lean.querySemanticSupport(context.merged_result.set, query);
+        if (projection.hasOpaqueFormula() or !leanSemanticSupportAvailable(semantic_support)) continue;
         try stdout.print("  - query: emittedQuery_{d} (", .{query.id});
         try printLeanUnknownRecipeSource(stdout, query.source);
         try stdout.writeAll(")\n");
