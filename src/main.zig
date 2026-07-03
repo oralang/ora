@@ -5695,10 +5695,10 @@ const LeanObligationContext = struct {
     formal_result: @import("formal/obligation_from_mlir.zig").CollectResult,
     merged_result: @import("formal/obligation_from_z3.zig").OverlayResult,
     generated_namespace: []const u8,
-    obligations_source: []const u8,
+    obligations_source: ?[]const u8 = null,
 
     fn deinit(self: *LeanObligationContext) void {
-        self.allocator.free(self.obligations_source);
+        if (self.obligations_source) |source| self.allocator.free(source);
         self.allocator.free(self.generated_namespace);
         self.merged_result.deinit();
         self.formal_result.deinit();
@@ -5706,7 +5706,7 @@ const LeanObligationContext = struct {
     }
 };
 
-fn buildLeanObligationContext(
+fn collectLeanObligationContext(
     allocator: std.mem.Allocator,
     file_path: []const u8,
     final_module: @import("mlir_c_api").c.MlirModule,
@@ -5714,7 +5714,6 @@ fn buildLeanObligationContext(
 ) !LeanObligationContext {
     const obligation_from_mlir = @import("formal/obligation_from_mlir.zig");
     const obligation_from_z3 = @import("formal/obligation_from_z3.zig");
-    const obligation_to_lean = @import("formal/obligation_to_lean.zig");
 
     const query_manifest = smt_report.query_manifest orelse return error.MissingPreparedQueryManifest;
 
@@ -5727,20 +5726,44 @@ fn buildLeanObligationContext(
     const generated_namespace = try leanProofGeneratedNamespace(allocator, file_path);
     errdefer allocator.free(generated_namespace);
 
-    var obligations_source_out = std.Io.Writer.Allocating.init(allocator);
-    errdefer obligations_source_out.deinit();
-    try obligation_to_lean.writeModule(&obligations_source_out.writer, merged_result.set, .{
-        .namespace = generated_namespace,
-    });
-    const obligations_source = try obligations_source_out.toOwnedSlice();
-
     return .{
         .allocator = allocator,
         .formal_result = formal_result,
         .merged_result = merged_result,
         .generated_namespace = generated_namespace,
-        .obligations_source = obligations_source,
     };
+}
+
+fn renderLeanObligationsSource(
+    allocator: std.mem.Allocator,
+    set: @import("formal/obligation.zig").ObligationSet,
+    generated_namespace: []const u8,
+) ![]const u8 {
+    const obligation_to_lean = @import("formal/obligation_to_lean.zig");
+
+    var obligations_source_out = std.Io.Writer.Allocating.init(allocator);
+    errdefer obligations_source_out.deinit();
+    try obligation_to_lean.writeModule(&obligations_source_out.writer, set, .{
+        .namespace = generated_namespace,
+    });
+    return try obligations_source_out.toOwnedSlice();
+}
+
+fn buildLeanObligationContext(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    final_module: @import("mlir_c_api").c.MlirModule,
+    smt_report: z3_verification.SmtReportArtifacts,
+) !LeanObligationContext {
+    var context = try collectLeanObligationContext(allocator, file_path, final_module, smt_report);
+    errdefer context.deinit();
+
+    context.obligations_source = try renderLeanObligationsSource(
+        allocator,
+        context.merged_result.set,
+        context.generated_namespace,
+    );
+    return context;
 }
 
 fn hasUnknownVerificationError(result: *const z3_verification.VerificationResult) bool {
@@ -5758,6 +5781,136 @@ fn isLeanUnknownRecipeTarget(query: @import("formal/obligation.zig").Verificatio
         !result.degraded and
         !result.vacuous and
         !result.vacuity_unknown;
+}
+
+const LeanFormulaProjectionSummary = struct {
+    term: u32 = 0,
+    origin_value: u32 = 0,
+
+    fn addFormula(self: *LeanFormulaProjectionSummary, formula: @import("formal/obligation.zig").FormulaRef) void {
+        switch (formula) {
+            .term => self.term +|= 1,
+            .origin_value => self.origin_value +|= 1,
+        }
+    }
+
+    fn addKind(self: *LeanFormulaProjectionSummary, kind: @import("formal/obligation.zig").Kind) void {
+        switch (kind) {
+            .logical => |logical| self.addFormula(logical.formula),
+            .runtime_guard => |guard| self.addFormula(guard.formula),
+            .resource => |resource| if (resource.amount) |amount| self.addFormula(amount),
+            .type_wf,
+            .type_relation,
+            .region_relation,
+            .effect_frame,
+            .quantifier,
+            .filtered_input,
+            .backend_fact,
+            => {},
+        }
+    }
+
+    fn total(self: LeanFormulaProjectionSummary) u32 {
+        return self.term +| self.origin_value;
+    }
+
+    fn termRatioBasisPoints(self: LeanFormulaProjectionSummary) u32 {
+        const denominator = self.total();
+        if (denominator == 0) return 0;
+        return @intCast((@as(u64, self.term) * 10_000) / @as(u64, denominator));
+    }
+
+    fn hasOpaqueFormula(self: LeanFormulaProjectionSummary) bool {
+        return self.origin_value != 0;
+    }
+};
+
+fn findLeanObligationById(
+    set: @import("formal/obligation.zig").ObligationSet,
+    id: @import("formal/obligation.zig").Id,
+) ?@import("formal/obligation.zig").Obligation {
+    for (set.obligations) |item| {
+        if (item.id == id) return item;
+    }
+    return null;
+}
+
+fn findLeanAssumptionById(
+    set: @import("formal/obligation.zig").ObligationSet,
+    id: @import("formal/obligation.zig").Id,
+) ?@import("formal/obligation.zig").Assumption {
+    for (set.assumptions) |item| {
+        if (item.id == id) return item;
+    }
+    return null;
+}
+
+fn projectionSummaryForLeanQuery(
+    set: @import("formal/obligation.zig").ObligationSet,
+    query: @import("formal/obligation.zig").VerificationQuery,
+) LeanFormulaProjectionSummary {
+    var summary: LeanFormulaProjectionSummary = .{};
+    for (query.assumption_ids) |id| {
+        const assumption = findLeanAssumptionById(set, id) orelse continue;
+        if (assumption.formula) |formula| summary.addFormula(formula);
+    }
+    for (query.obligation_ids) |id| {
+        const item = findLeanObligationById(set, id) orelse continue;
+        summary.addKind(item.kind);
+    }
+    return summary;
+}
+
+fn projectionSummaryForLeanSet(set: @import("formal/obligation.zig").ObligationSet) LeanFormulaProjectionSummary {
+    var summary: LeanFormulaProjectionSummary = .{};
+    for (set.assumptions) |assumption| {
+        if (assumption.formula) |formula| summary.addFormula(formula);
+    }
+    for (set.obligations) |item| {
+        summary.addKind(item.kind);
+    }
+    return summary;
+}
+
+fn leanQuerySupportsSemanticDefinition(
+    set: @import("formal/obligation.zig").ObligationSet,
+    query: @import("formal/obligation.zig").VerificationQuery,
+) bool {
+    if (query.obligation_ids.len == 0) return false;
+    for (query.obligation_ids) |id| {
+        const item = findLeanObligationById(set, id) orelse return false;
+        switch (item.kind) {
+            .logical, .runtime_guard, .effect_frame => {},
+            .type_wf,
+            .type_relation,
+            .region_relation,
+            .resource,
+            .quantifier,
+            .filtered_input,
+            .backend_fact,
+            => return false,
+        }
+    }
+    return true;
+}
+
+fn plainUnknownPreparedRows(report: z3_verification.SmtReportArtifacts) usize {
+    const query_manifest = report.query_manifest orelse return 0;
+    var count: usize = 0;
+    for (query_manifest.rows) |row| {
+        const status = row.result_status orelse continue;
+        if (status != .unknown) continue;
+        if (row.vacuous or row.vacuity_unknown or row.verified_with_caveats) continue;
+        count += 1;
+    }
+    return count;
+}
+
+fn printLeanFormulaProjectionSummary(stdout: anytype, summary: LeanFormulaProjectionSummary) !void {
+    try stdout.print(
+        "formula projection: term={d}, origin_value={d}, total={d}, term_ratio_basis_points={d}",
+        .{ summary.term, summary.origin_value, summary.total(), summary.termRatioBasisPoints() },
+    );
 }
 
 fn writeLeanObligationModuleArtifact(
@@ -5828,21 +5981,86 @@ fn maybeEmitLeanUnknownRecipe(
     mlir_options: MlirOptions,
     stdout: anytype,
 ) !void {
-    var context = try buildLeanObligationContext(allocator, file_path, final_module, smt_report);
+    var context = try collectLeanObligationContext(allocator, file_path, final_module, smt_report);
     defer context.deinit();
 
-    var target_count: usize = 0;
+    var recipe_count: usize = 0;
+    var unavailable_count: usize = 0;
     for (context.merged_result.set.queries) |query| {
-        if (isLeanUnknownRecipeTarget(query)) target_count += 1;
+        if (!isLeanUnknownRecipeTarget(query)) continue;
+        const projection = projectionSummaryForLeanQuery(context.merged_result.set, query);
+        if (projection.hasOpaqueFormula() or !leanQuerySupportsSemanticDefinition(context.merged_result.set, query)) {
+            unavailable_count += 1;
+        } else {
+            recipe_count += 1;
+        }
     }
-    if (target_count == 0) return;
+
+    const unknown_rows = plainUnknownPreparedRows(smt_report);
+    const classified_targets = recipe_count + unavailable_count;
+    const unmatched_unknown_rows = if (unknown_rows > classified_targets) unknown_rows - classified_targets else 0;
+    if (unavailable_count != 0 or unmatched_unknown_rows != 0) {
+        try stdout.writeAll("Lean proof recipe unavailable for some Z3 UNKNOWN obligations:\n");
+        for (context.merged_result.set.queries) |query| {
+            if (!isLeanUnknownRecipeTarget(query)) continue;
+            const projection = projectionSummaryForLeanQuery(context.merged_result.set, query);
+            if (!projection.hasOpaqueFormula() and leanQuerySupportsSemanticDefinition(context.merged_result.set, query)) continue;
+            try stdout.print("  - query: emittedQuery_{d} (", .{query.id});
+            try printLeanUnknownRecipeSource(stdout, query.source);
+            try stdout.writeAll(")\n    ");
+            try printLeanFormulaProjectionSummary(stdout, projection);
+            try stdout.writeByte('\n');
+            if (projection.hasOpaqueFormula()) {
+                try stdout.writeAll("    reason: formula is still an MLIR origin_value; Lean proof export only supports projected Term formulas today\n");
+            } else {
+                try stdout.writeAll("    reason: this obligation kind is not in the Lean semantic proof fragment yet\n");
+            }
+        }
+        if (unmatched_unknown_rows != 0) {
+            const projection = projectionSummaryForLeanSet(context.merged_result.set);
+            try stdout.print("  - unmatched UNKNOWN prepared rows: {d}\n    ", .{unmatched_unknown_rows});
+            try printLeanFormulaProjectionSummary(stdout, projection);
+            try stdout.writeByte('\n');
+            try stdout.writeAll("    reason: no matching Lean-dischargeable obligation query was derived from the MLIR manifest\n");
+        }
+        try stdout.writeByte('\n');
+    }
+
+    if (recipe_count == 0) return;
+
+    const obligations_source = renderLeanObligationsSource(
+        allocator,
+        context.merged_result.set,
+        context.generated_namespace,
+    ) catch |err| switch (err) {
+        error.UnsupportedOriginValue => {
+            const projection = projectionSummaryForLeanSet(context.merged_result.set);
+            try stdout.writeAll("Lean proof recipe unavailable for some Z3 UNKNOWN obligations:\n");
+            try stdout.writeAll("  - manifest contains formulas outside the Lean Term fragment\n    ");
+            try printLeanFormulaProjectionSummary(stdout, projection);
+            try stdout.writeByte('\n');
+            try stdout.writeAll("    reason: formula is still an MLIR origin_value; Lean proof export only supports projected Term formulas today\n\n");
+            return;
+        },
+        error.UnsupportedObligationKind => {
+            const projection = projectionSummaryForLeanSet(context.merged_result.set);
+            try stdout.writeAll("Lean proof recipe unavailable for some Z3 UNKNOWN obligations:\n");
+            try stdout.writeAll("  - manifest contains obligation kinds outside the Lean semantic proof fragment\n    ");
+            try printLeanFormulaProjectionSummary(stdout, projection);
+            try stdout.writeByte('\n');
+            try stdout.writeAll("    reason: this obligation kind is not in the Lean semantic proof fragment yet\n\n");
+            return;
+        },
+        else => return err,
+    };
+    defer allocator.free(obligations_source);
 
     const module_path = try writeLeanObligationModuleArtifact(
         allocator,
         file_path,
         mlir_options.output_dir,
         mlir_options.artifact_display_dir,
-        context.obligations_source,
+        obligations_source,
     );
     defer allocator.free(module_path);
 
@@ -5851,6 +6069,8 @@ fn maybeEmitLeanUnknownRecipe(
     try stdout.print("  generated namespace: {s}\n", .{context.generated_namespace});
     for (context.merged_result.set.queries) |query| {
         if (!isLeanUnknownRecipeTarget(query)) continue;
+        const projection = projectionSummaryForLeanQuery(context.merged_result.set, query);
+        if (projection.hasOpaqueFormula() or !leanQuerySupportsSemanticDefinition(context.merged_result.set, query)) continue;
         try stdout.print("  - query: emittedQuery_{d} (", .{query.id});
         try printLeanUnknownRecipeSource(stdout, query.source);
         try stdout.writeAll(")\n");
@@ -5898,7 +6118,7 @@ fn applyLeanProofArtifactGate(
         context.merged_result.set,
         parsed_manifest.rows,
         context.generated_namespace,
-        context.obligations_source,
+        context.obligations_source.?,
         mlir_options.process_environ,
         stdout,
     );

@@ -763,6 +763,40 @@ test "B3 lean proofs unblock source-level unknown without erasing runtime guard"
     try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "sorry/b3_lean_gate.lean.proof.json", .{}));
 }
 
+test "B5 unknown diagnostic reports Lean projection coverage when no recipe is available" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const out_dir = try pathFromTmpAlloc(allocator, tmp, "b5-out");
+    defer allocator.free(out_dir);
+
+    const result = try runOraWithForcedUnknown(allocator, "obligation:3", &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=smt-report",
+        "--out-dir",
+        out_dir,
+        "ora-example/formal/obligation_report_logical.ora",
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    try expectExited(result, 1);
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean proof recipe unavailable for some Z3 UNKNOWN obligations"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "unmatched UNKNOWN prepared rows: 1"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "formula projection: term="));
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "origin_value="));
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "term_ratio_basis_points="));
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "no matching Lean-dischargeable obligation query"));
+    try testing.expect(!std.mem.containsAtLeast(u8, result.stdout, 1, "Lean proof recipe for Z3 UNKNOWN obligations"));
+}
+
 test "formal query vocabulary matches Z3 prepared query vocabulary" {
     inline for (std.meta.fields(z3_verification.QueryKind)) |field| {
         const z3_kind: z3_verification.QueryKind = @enumFromInt(field.value);
