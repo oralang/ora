@@ -889,6 +889,7 @@ pub const Lexer = struct {
             //    std.debug.print("Scanning at pos {}: '{}' (line {}, col {})\n", .{ self.current, current_char, self.line, self.column });
             //}
 
+            const tokens_before_scan = self.tokens.items.len;
             self.scanToken() catch |err| {
                 // if error recovery is enabled, continue scanning
                 if (self.hasErrorRecovery()) {
@@ -905,11 +906,15 @@ pub const Lexer = struct {
                 }
             };
 
-            // attach captured trivia as leading trivia for the token we just added
-            if (self.tokens.items.len > 0 and trivia_len > 0) {
-                var last = &self.tokens.items[self.tokens.items.len - 1];
-                last.leading_trivia_start = @as(u32, @intCast(trivia_start));
-                last.leading_trivia_len = trivia_len;
+            // Attach captured trivia as leading trivia of the FIRST token this
+            // scan step produced. Split scans (`@` + name) append two tokens;
+            // attaching to the last would hang a statement's leading comment
+            // on the name, where the formatter's post-`@` spacing rule then
+            // silently drops it.
+            if (self.tokens.items.len > tokens_before_scan and trivia_len > 0) {
+                var first = &self.tokens.items[tokens_before_scan];
+                first.leading_trivia_start = @as(u32, @intCast(trivia_start));
+                first.leading_trivia_len = trivia_len;
             }
         }
 

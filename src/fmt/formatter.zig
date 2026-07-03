@@ -22,6 +22,10 @@ pub const Formatter = struct {
     source: []const u8,
     tokens: []const lib.Token = &.{},
     trivia: []const lib.lexer.TriviaPiece = &.{},
+    /// High-water mark of trivia pieces already emitted inline (same-line
+    /// trailing comments hoisted by formatSemicolon), so emitLeadingComments
+    /// never re-emits them on the next line.
+    trivia_emitted_until: u32 = 0,
     paren_depth: usize = 0,
     bracket_depth: usize = 0,
     pending_space: bool = false,
@@ -94,7 +98,7 @@ pub const Formatter = struct {
         switch (token.type) {
             .LeftBrace => try self.formatLeftBrace(token),
             .RightBrace => try self.formatRightBrace(token, next),
-            .Semicolon => try self.formatSemicolon(),
+            .Semicolon => try self.formatSemicolon(token, next),
             .Comma => try self.formatComma(next),
             .Colon => try self.formatColon(next),
             .Arrow => try self.formatArrow(),
@@ -119,7 +123,7 @@ pub const Formatter = struct {
     }
 
     fn emitLeadingComments(self: *Formatter, token: lib.Token) FormatError!void {
-        var i = token.leading_trivia_start;
+        var i = @max(token.leading_trivia_start, self.trivia_emitted_until);
         const end = token.leading_trivia_start + token.leading_trivia_len;
         var newline_count: u32 = 0;
         while (i < end and i < self.trivia.len) : (i += 1) {
@@ -187,10 +191,37 @@ pub const Formatter = struct {
         self.pending_space = if (next) |n| isBraceTrailer(n.type) else false;
     }
 
-    fn formatSemicolon(self: *Formatter) FormatError!void {
+    fn formatSemicolon(self: *Formatter, token: lib.Token, next: ?lib.Token) FormatError!void {
         try self.writer.write(";");
         self.pending_space = false;
         if (self.paren_depth == 0 and self.bracket_depth == 0) {
+            // A comment on the same line as the semicolon lexes as leading
+            // trivia of the NEXT token; hoist it back before the newline so
+            // `x = 1; // why` keeps its author's layout.
+            if (next) |next_token| {
+                var i = @max(next_token.leading_trivia_start, self.trivia_emitted_until);
+                const end = next_token.leading_trivia_start + next_token.leading_trivia_len;
+                // Skip whitespace pieces; stop at the first newline, comment,
+                // or end — only a comment still on the semicolon's line hoists.
+                while (i < end and i < self.trivia.len and self.trivia[i].kind == .Whitespace) i += 1;
+                if (i < end and i < self.trivia.len) {
+                    const piece = self.trivia[i];
+                    const is_comment = switch (piece.kind) {
+                        .LineComment, .DocLineComment, .BlockComment, .DocBlockComment => true,
+                        else => false,
+                    };
+                    const ends_line = i + 1 >= end or i + 1 >= self.trivia.len or self.trivia[i + 1].kind == .Newline;
+                    if (is_comment and ends_line and piece.span.start_line == token.range.end_line) {
+                        const start: usize = @intCast(piece.span.start_offset);
+                        const stop: usize = @intCast(piece.span.end_offset);
+                        if (start < stop and stop <= self.source.len) {
+                            try self.writer.space();
+                            try self.writer.write(self.source[start..stop]);
+                            self.trivia_emitted_until = i + 1;
+                        }
+                    }
+                }
+            }
             try self.writer.newline();
         } else {
             try self.writer.space();

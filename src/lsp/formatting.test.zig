@@ -27,6 +27,64 @@ test "lsp formatting: formats and is idempotent" {
     try testing.expectEqualStrings(formatted_once, formatted_twice);
 }
 
+test "lsp formatting: preserves comments around directive statements" {
+    // Regression: the lexer attached a scan step trivia to its LAST token,
+    // so a comment before `@callHint` hung on the name token, where the
+    // formatter post-`@` spacing rule silently deleted it on save.
+    const source =
+        \\contract C {
+        \\    storage var x: u256;
+        \\
+        \\    pub fn transferFrom(v: u256) {
+        \\        // transferFrom is a hot path for ERC20 usage
+        \\        @callHint(likely);
+        \\        x = v;
+        \\    }
+        \\}
+    ;
+
+    const formatted = try formatting.formatSourceAlloc(testing.allocator, source, .{
+        .line_width = 100,
+        .indent_size = 4,
+    });
+    defer testing.allocator.free(formatted);
+
+    try testing.expect(std.mem.indexOf(u8, formatted, "// transferFrom is a hot path for ERC20 usage") != null);
+    // The comment stays on its own line, above the directive.
+    try testing.expect(std.mem.indexOf(u8, formatted, "usage\n        @callHint(likely);") != null);
+}
+
+test "lsp formatting: keeps same-line trailing comments on their line" {
+    // Regression: formatSemicolon wrote its newline eagerly, pushing
+    // `; // why` comments onto the next line.
+    const source =
+        \\contract C {
+        \\    storage var x: u256;
+        \\
+        \\    pub fn mint(v: u256) {
+        \\        @callHint(cold); // mint is not a hot-path priority
+        \\        x = v; // trailing on assign
+        \\    }
+        \\}
+    ;
+
+    const formatted = try formatting.formatSourceAlloc(testing.allocator, source, .{
+        .line_width = 100,
+        .indent_size = 4,
+    });
+    defer testing.allocator.free(formatted);
+
+    try testing.expect(std.mem.indexOf(u8, formatted, "@callHint(cold); // mint is not a hot-path priority") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted, "x = v; // trailing on assign") != null);
+
+    const twice = try formatting.formatSourceAlloc(testing.allocator, formatted, .{
+        .line_width = 100,
+        .indent_size = 4,
+    });
+    defer testing.allocator.free(twice);
+    try testing.expectEqualStrings(formatted, twice);
+}
+
 test "lsp formatting: parse errors surface as ParseError" {
     const invalid = "@import(\"std\");";
     try testing.expectError(
