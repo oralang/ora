@@ -291,13 +291,13 @@ fn runProcess(allocator: std.mem.Allocator, argv: []const []const u8) !std.proce
     });
 }
 
-fn runOraWithZ3Timeout(
+fn runOraWithForcedUnknown(
     allocator: std.mem.Allocator,
-    timeout_ms: []const u8,
+    forced_query: []const u8,
     args: []const []const u8,
 ) !std.process.RunResult {
-    const timeout_arg = try std.fmt.allocPrint(allocator, "ORA_Z3_TIMEOUT_MS={s}", .{timeout_ms});
-    defer allocator.free(timeout_arg);
+    const forced_unknown_arg = try std.fmt.allocPrint(allocator, "ORA_Z3_TEST_FORCE_UNKNOWN_QUERY={s}", .{forced_query});
+    defer allocator.free(forced_unknown_arg);
     const inherited_path = if (std.c.getenv("PATH")) |path| std.mem.span(path) else "/usr/bin:/bin:/opt/homebrew/bin";
     const path_arg = if (std.c.getenv("HOME")) |home| blk: {
         const home_slice = std.mem.span(home);
@@ -308,7 +308,7 @@ fn runOraWithZ3Timeout(
     var argv = try allocator.alloc([]const u8, args.len + 3);
     defer allocator.free(argv);
     argv[0] = "/usr/bin/env";
-    argv[1] = timeout_arg;
+    argv[1] = forced_unknown_arg;
     argv[2] = path_arg;
     @memcpy(argv[3..], args);
     return runProcess(allocator, argv);
@@ -555,7 +555,7 @@ test "B3 lean proofs unblock source-level unknown without erasing runtime guard"
     defer allocator.free(reference_out);
 
     {
-        const result = try runOraWithZ3Timeout(allocator, "10", &.{
+        const result = try runOraWithForcedUnknown(allocator, "obligation:2", &.{
             ORA_BINARY_REL,
             "emit",
             "--emit=smt-report,sir-text,bytecode",
@@ -574,6 +574,7 @@ test "B3 lean proofs unblock source-level unknown without erasing runtime guard"
     const fail_report = try readFileAllocForTest(allocator, fail_report_path);
     defer allocator.free(fail_report);
     try testing.expect(std.mem.containsAtLeast(u8, fail_report, 1, "\"status\": \"UNKNOWN\""));
+    try testing.expect(std.mem.containsAtLeast(u8, fail_report, 1, "\"vacuity_unknown\": false"));
     try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "fail/b3_lean_gate.hex", .{}));
 
     var formal_result = try collectPackageObligations(allocator, source_path);
@@ -624,7 +625,7 @@ test "B3 lean proofs unblock source-level unknown without erasing runtime guard"
     try writeProofManifestForTest(allocator, sorry_manifest, sorry_module, sorry_theorem, sorry_proof_path, ensures_query);
 
     {
-        const result = try runOraWithZ3Timeout(allocator, "10", &.{
+        const result = try runOraWithForcedUnknown(allocator, "obligation:2", &.{
             ORA_BINARY_REL,
             "emit",
             "--emit=smt-report,sir-text,bytecode",
@@ -687,7 +688,7 @@ test "B3 lean proofs unblock source-level unknown without erasing runtime guard"
     try testing.expectEqualStrings(reference_hex, valid_hex);
 
     {
-        const result = try runOraWithZ3Timeout(allocator, "10", &.{
+        const result = try runOraWithForcedUnknown(allocator, "obligation:2", &.{
             ORA_BINARY_REL,
             "emit",
             "--emit=smt-report,sir-text,bytecode",

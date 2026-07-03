@@ -203,6 +203,7 @@ pub const VerificationPass = struct {
     explain_cores: bool = false,
     proofs_enabled: bool = false,
     minimize_cores: bool = false,
+    force_unknown_query: ?ForcedUnknownQuery = null,
 
     /// Current function being processed (for MLIR extraction)
     current_function_name: ?[]const u8 = null,
@@ -272,6 +273,10 @@ pub const VerificationPass = struct {
         if (seed_env) |val| {
             random_seed = std.fmt.parseInt(u32, val, 10) catch random_seed;
         }
+        const force_unknown_query = if (libcEnv("ORA_Z3_TEST_FORCE_UNKNOWN_QUERY")) |val|
+            try parseForcedUnknownQuery(val)
+        else
+            null;
 
         const summary_depth_env = libcEnv("ORA_VERIFY_MAX_SUMMARY_INLINE_DEPTH");
         const max_summary_inline_depth = if (options.max_summary_inline_depth) |depth|
@@ -308,6 +313,7 @@ pub const VerificationPass = struct {
             .explain_cores = false,
             .proofs_enabled = proofs_enabled,
             .minimize_cores = false,
+            .force_unknown_query = force_unknown_query,
             .runtime_reachable_function_names = std.StringHashMap(void).init(allocator),
             .encoded_annotations = ManagedArrayList(EncodedAnnotation).init(allocator),
             .active_path_assumptions = ManagedArrayList(ActivePathAssume).init(allocator),
@@ -3304,7 +3310,7 @@ pub const VerificationPass = struct {
             var vacuous = false;
             var vacuity_unknown = false;
 
-            const status = if (self.explain_cores) blk: {
+            var status = if (self.explain_cores) blk: {
                 const explain = runExplainCheck(self, active_solver, query, query.log_prefix) catch |err| {
                     return try self.queryExecutionFailureResult(query, "explain-mode query execution", err, duplicateZ3ApiMessageOrNull(self.context, self.allocator, err));
                 };
@@ -3340,6 +3346,8 @@ pub const VerificationPass = struct {
                     return try self.queryExecutionFailureResult(query, "solver check", err, duplicateZ3ApiMessageOrNull(self.context, self.allocator, err));
                 };
             };
+            const forced_unknown = forcedUnknownApplies(self.force_unknown_query, idx, query, status, vacuous, vacuity_unknown);
+            status = maybeForceUnknownStatus(self.force_unknown_query, idx, query, status, vacuous, vacuity_unknown);
             results[idx].vacuous = vacuous;
             results[idx].vacuity_unknown = vacuity_unknown;
             results[idx].explain_str = vacuity_explain_copy;
@@ -3354,7 +3362,11 @@ pub const VerificationPass = struct {
                 elapsed_ms,
             });
             if (status == z3.Z3_L_UNDEF) {
-                std.debug.print("note: Z3 returned UNKNOWN (likely timeout). Consider adding stronger constraints or increasing ORA_Z3_TIMEOUT_MS.\n", .{});
+                if (forced_unknown) {
+                    std.debug.print("note: forced UNKNOWN by ORA_Z3_TEST_FORCE_UNKNOWN_QUERY\n", .{});
+                } else {
+                    std.debug.print("note: Z3 returned UNKNOWN (likely timeout). Consider adding stronger constraints or increasing ORA_Z3_TIMEOUT_MS.\n", .{});
+                }
             }
 
             results[idx].status = status;
@@ -3891,7 +3903,7 @@ pub const VerificationPass = struct {
             var core_minimized = false;
             var vacuous = false;
             var vacuity_unknown = false;
-            const status = if (self.explain_cores) blk: {
+            var status = if (self.explain_cores) blk: {
                 const explain = try runExplainCheck(self, &self.solver, query, null);
                 core_minimized = explain.core_minimized;
                 vacuous = explain.vacuous;
@@ -3922,6 +3934,7 @@ pub const VerificationPass = struct {
                 try assertPreparedQueryConstraints(&self.solver, query.constraints);
                 break :blk try self.solver.checkChecked();
             };
+            status = maybeForceUnknownStatus(self.force_unknown_query, idx, query, status, vacuous, vacuity_unknown);
             const elapsed_ms = elapsedNs(timer) / std.time.ns_per_ms;
             if (self.trace_smt) {
                 self.traceSmt(
@@ -6731,6 +6744,29 @@ pub const QueryKind = enum(u8) {
     GuardViolate,
 };
 
+const ForcedUnknownQuery = struct {
+    kind: QueryKind,
+    query_id: usize,
+};
+
+fn parseForcedUnknownQuery(value: []const u8) !ForcedUnknownQuery {
+    const separator = std.mem.indexOfScalar(u8, value, ':') orelse return error.InvalidForcedUnknownQuery;
+    if (separator == 0 or separator + 1 >= value.len) return error.InvalidForcedUnknownQuery;
+
+    const kind_text = value[0..separator];
+    const id_text = value[separator + 1 ..];
+    const query_id = try std.fmt.parseInt(usize, id_text, 10);
+    if (query_id == 0) return error.InvalidForcedUnknownQuery;
+
+    inline for (std.meta.fields(QueryKind)) |field| {
+        const kind: QueryKind = @enumFromInt(field.value);
+        if (std.mem.eql(u8, kind_text, formalQueryKindLabel(kind))) {
+            return .{ .kind = kind, .query_id = query_id };
+        }
+    }
+    return error.InvalidForcedUnknownQuery;
+}
+
 pub const PreparedQuerySummary = struct {
     total: u64 = 0,
     base: u64 = 0,
@@ -7564,6 +7600,39 @@ const PreparedQueryResult = struct {
     vacuous: bool = false,
     vacuity_unknown: bool = false,
 };
+
+fn forcedUnknownApplies(
+    target: ?ForcedUnknownQuery,
+    query_index: usize,
+    query: PreparedQuery,
+    status: z3.Z3_lbool,
+    vacuous: bool,
+    vacuity_unknown: bool,
+) bool {
+    const forced = target orelse return false;
+    if (forced.query_id != query_index + 1) return false;
+    if (forced.kind != query.kind) return false;
+    if (query.kind == .Base) return false;
+    if (vacuous or vacuity_unknown) return false;
+    // Test hook invariant: this may only turn a successful proof into UNKNOWN.
+    // It never changes SAT/failing queries and therefore cannot hide a
+    // counterexample or make artifact emission easier.
+    return status == z3.Z3_L_FALSE;
+}
+
+fn maybeForceUnknownStatus(
+    target: ?ForcedUnknownQuery,
+    query_index: usize,
+    query: PreparedQuery,
+    status: z3.Z3_lbool,
+    vacuous: bool,
+    vacuity_unknown: bool,
+) z3.Z3_lbool {
+    return if (forcedUnknownApplies(target, query_index, query, status, vacuous, vacuity_unknown))
+        z3.Z3_L_UNDEF
+    else
+        status;
+}
 
 fn firstFailClosedCoreAssumptionLabel(tags: []const AssumptionTag) ?[]const u8 {
     for (tags) |tag| {
@@ -12830,6 +12899,31 @@ test "prepared query result collection taints function on unknown base" {
     try testing.expectEqual(@as(usize, 1), collected.errors.items.len);
     try testing.expectEqual(errors.VerificationErrorType.Unknown, collected.errors.items[0].error_type);
     try testing.expect(std.mem.containsAtLeast(u8, collected.errors.items[0].message, 1, "verification assumptions are unknown in f"));
+}
+
+test "forced unknown test hook only downgrades successful proof results" {
+    const forced = try parseForcedUnknownQuery("obligation:1");
+    try testing.expectEqual(QueryKind.Obligation, forced.kind);
+    try testing.expectEqual(@as(usize, 1), forced.query_id);
+    try testing.expectError(error.InvalidForcedUnknownQuery, parseForcedUnknownQuery("obligation:0"));
+    try testing.expectError(error.InvalidForcedUnknownQuery, parseForcedUnknownQuery("base"));
+
+    const query = PreparedQuery{
+        .kind = .Obligation,
+        .function_name = "f",
+        .obligation_kind = .Ensures,
+        .file = "/tmp/test.ora",
+        .line = 1,
+        .column = 1,
+        .smtlib_z = "(check-sat)",
+        .log_prefix = "verification: f [ensures]",
+    };
+
+    try testing.expectEqual(z3.Z3_L_UNDEF, maybeForceUnknownStatus(forced, 0, query, z3.Z3_L_FALSE, false, false));
+    try testing.expectEqual(z3.Z3_L_TRUE, maybeForceUnknownStatus(forced, 0, query, z3.Z3_L_TRUE, false, false));
+    try testing.expectEqual(z3.Z3_L_FALSE, maybeForceUnknownStatus(forced, 0, query, z3.Z3_L_FALSE, true, false));
+    try testing.expectEqual(z3.Z3_L_FALSE, maybeForceUnknownStatus(forced, 0, query, z3.Z3_L_FALSE, false, true));
+    try testing.expectEqual(z3.Z3_L_FALSE, maybeForceUnknownStatus(forced, 1, query, z3.Z3_L_FALSE, false, false));
 }
 
 test "prepared query result collection fails closed on unknown for every query kind" {
