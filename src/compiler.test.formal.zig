@@ -205,6 +205,16 @@ fn expectFreeVarTerm(
     expected_pattern_id: u32,
     expected_name: []const u8,
 ) !void {
+    _ = try expectFreeVarTermRef(set, term_id, expected_file_id, expected_pattern_id, expected_name);
+}
+
+fn expectFreeVarTermRef(
+    set: obligation.ObligationSet,
+    term_id: obligation.TermId,
+    expected_file_id: u32,
+    expected_pattern_id: u32,
+    expected_name: []const u8,
+) !obligation.FreeVarRef {
     try testing.expect(term_id < set.terms.len);
     try testing.expect(set.terms[term_id] == .variable);
     const variable = set.terms[term_id].variable;
@@ -212,6 +222,13 @@ fn expectFreeVarTerm(
     try testing.expectEqual(expected_file_id, variable.free.id.file_id);
     try testing.expectEqual(expected_pattern_id, variable.free.id.pattern_id);
     try testing.expectEqualStrings(expected_name, variable.free.name);
+    return variable.free;
+}
+
+fn expectTypeRefSpelling(ty: ?obligation.TypeRef, expected: []const u8) !void {
+    const actual = ty orelse return error.TestUnexpectedResult;
+    try testing.expect(actual == .spelling);
+    try testing.expectEqualStrings(expected, actual.spelling);
 }
 
 fn expectBoundVarTerm(
@@ -1650,11 +1667,11 @@ test "formal obligation MLIR adapter binds function params by compiler id not di
 
     const text =
         \\module {
-        \\  func.func @same_display_name(%arg0: i256, %arg1: i256) attributes {
+        \\  func.func @same_display_name(%arg0: !ora.int<256, false>, %arg1: !ora.int<256, false>) attributes {
         \\    ora.param_names = ["same", "same"],
         \\    ora.param_binding_ids = ["file:7:pattern:10", "file:7:pattern:11"]
         \\  } {
-        \\    %cmp = arith.cmpi ule, %arg0, %arg1 : i256
+        \\    %cmp = ora.cmp "ule", %arg0, %arg1 : !ora.int<256, false>, !ora.int<256, false> -> i1
         \\    "ora.ensures"(%cmp) : (i1) -> ()
         \\    func.return
         \\  }
@@ -1671,7 +1688,9 @@ test "formal obligation MLIR adapter binds function params by compiler id not di
     try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
 
     const outer = try expectQuantifiedTerm(result.set, try expectLogicalTerm(result.set, .ensures), .forall, "same");
+    try expectTypeRefSpelling(outer.binder.ty, "u256");
     const inner = try expectQuantifiedTerm(result.set, outer.body, .forall, "same");
+    try expectTypeRefSpelling(inner.binder.ty, "u256");
     const body = try expectBinaryTerm(result.set, inner.body, .le);
     try expectBoundVarTerm(result.set, body.lhs, 1, "same");
     try expectBoundVarTerm(result.set, body.rhs, 0, "same");
@@ -1683,10 +1702,10 @@ test "formal obligation MLIR adapter blocks named params without compiler bindin
 
     const text =
         \\module {
-        \\  func.func @old_metadata(%arg0: i256) attributes {
+        \\  func.func @old_metadata(%arg0: !ora.int<256, false>) attributes {
         \\    ora.param_names = ["x"]
         \\  } {
-        \\    %cmp = arith.cmpi ule, %arg0, %arg0 : i256
+        \\    %cmp = ora.cmp "ule", %arg0, %arg0 : !ora.int<256, false>, !ora.int<256, false> -> i1
         \\    "ora.ensures"(%cmp) : (i1) -> ()
         \\    func.return
         \\  }
@@ -1710,14 +1729,13 @@ test "formal obligation MLIR adapter binds function params in inserted forall co
 
     const text =
         \\module {
-        \\  func.func @bounded_by_requires(%arg0: i256) attributes {
+        \\  func.func @bounded_by_requires(%arg0: !ora.int<256, false>) attributes {
         \\    ora.param_names = ["x"],
         \\    ora.param_binding_ids = ["file:9:pattern:3"]
         \\  } {
-        \\    %c10 = arith.constant 10 : i256
-        \\    %req = arith.cmpi ult, %arg0, %c10 : i256
+        \\    %req = ora.cmp "ult", %arg0, %arg0 : !ora.int<256, false>, !ora.int<256, false> -> i1
         \\    "ora.requires"(%req) : (i1) -> ()
-        \\    %ens = arith.cmpi ule, %arg0, %c10 : i256
+        \\    %ens = ora.cmp "ule", %arg0, %arg0 : !ora.int<256, false>, !ora.int<256, false> -> i1
         \\    "ora.ensures"(%ens) : (i1) -> ()
         \\    func.return
         \\  }
@@ -1737,14 +1755,75 @@ test "formal obligation MLIR adapter binds function params in inserted forall co
     const requires_formula = result.set.assumptions[0].formula orelse return error.TestUnexpectedResult;
     try testing.expect(requires_formula == .term);
     const requires_body = try expectBinaryTerm(result.set, requires_formula.term, .lt);
-    try expectFreeVarTerm(result.set, requires_body.lhs, 9, 3, "x");
+    const free = try expectFreeVarTermRef(result.set, requires_body.lhs, 9, 3, "x");
+    try expectTypeRefSpelling(free.ty, "u256");
 
     const outer = try expectQuantifiedTerm(result.set, try expectLogicalTerm(result.set, .ensures), .forall, "x");
+    try expectTypeRefSpelling(outer.binder.ty, "u256");
     const condition_id = outer.condition orelse return error.TestUnexpectedResult;
     const condition = try expectBinaryTerm(result.set, condition_id, .lt);
     try expectBoundVarTerm(result.set, condition.lhs, 0, "x");
     const body = try expectBinaryTerm(result.set, outer.body, .le);
     try expectBoundVarTerm(result.set, body.lhs, 0, "x");
+}
+
+test "formal obligation MLIR adapter derives term types from MLIR values" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @typed_terms(%arg0: !ora.int<64, true>, %arg1: !ora.int<32, false>, %arg2: !ora.address) attributes {
+        \\    ora.param_names = ["sx", "uy", "who"],
+        \\    ora.param_binding_ids = ["file:11:pattern:1", "file:11:pattern:2", "file:11:pattern:3"]
+        \\  } {
+        \\    %req = ora.cmp "ule", %arg1, %arg1 : !ora.int<32, false>, !ora.int<32, false> -> i1
+        \\    "ora.requires"(%req) : (i1) -> ()
+        \\    %addr = ora.cmp "eq", %arg2, %arg2 : !ora.address, !ora.address -> i1
+        \\    "ora.assume"(%addr) : (i1) -> ()
+        \\    %ens = ora.cmp "le", %arg0, %arg0 : !ora.int<64, true>, !ora.int<64, true> -> i1
+        \\    "ora.ensures"(%ens) : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countAssumption(result.set, .requires));
+    try testing.expectEqual(@as(usize, 1), countAssumption(result.set, .assume));
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
+
+    for (result.set.assumptions) |assumption| {
+        const formula = assumption.formula orelse return error.TestUnexpectedResult;
+        try testing.expect(formula == .term);
+        const binary = try expectBinaryTerm(result.set, formula.term, if (assumption.kind == .requires) .le else .eq);
+        switch (assumption.kind) {
+            .requires => {
+                const free = try expectFreeVarTermRef(result.set, binary.lhs, 11, 2, "uy");
+                try expectTypeRefSpelling(free.ty, "u32");
+                const rhs_free = try expectFreeVarTermRef(result.set, binary.rhs, 11, 2, "uy");
+                try expectTypeRefSpelling(rhs_free.ty, "u32");
+            },
+            .assume => {
+                const free = try expectFreeVarTermRef(result.set, binary.lhs, 11, 3, "who");
+                try expectTypeRefSpelling(free.ty, "address");
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+
+    const sx = try expectQuantifiedTerm(result.set, try expectLogicalTerm(result.set, .ensures), .forall, "sx");
+    try expectTypeRefSpelling(sx.binder.ty, "i64");
+    const uy = try expectQuantifiedTerm(result.set, sx.body, .forall, "uy");
+    try expectTypeRefSpelling(uy.binder.ty, "u32");
+    const who = try expectQuantifiedTerm(result.set, uy.body, .forall, "who");
+    try expectTypeRefSpelling(who.binder.ty, "address");
 }
 
 test "formal obligation MLIR adapter tracks nested forall binders with De Bruijn indexes" {

@@ -175,6 +175,7 @@ const Collector = struct {
     next_ordinal: u32 = 0,
     function_param_names: []const []const u8 = &.{},
     function_param_binding_ids: []const obligation.FreeVarId = &.{},
+    function_param_types: []const obligation.TypeRef = &.{},
 
     const synthetic_file_id = std.math.maxInt(u32);
 
@@ -202,11 +203,13 @@ const Collector = struct {
         const symbol = try self.symbolForOperation(op, op_name, inherited_symbol);
         const previous_param_names = self.function_param_names;
         const previous_param_binding_ids = self.function_param_binding_ids;
+        const previous_param_types = self.function_param_types;
         const previous_binder_len = self.active_binders.items.len;
         const is_function = std.mem.eql(u8, op_name, "func.func");
         if (is_function) {
             self.function_param_names = (try self.stringArrayAttr(op, "ora.param_names")) orelse &.{};
             self.function_param_binding_ids = (try self.freeVarIdArrayAttr(op, "ora.param_binding_ids")) orelse &.{};
+            self.function_param_types = try self.functionParamTypesFromFunctionOp(op, self.function_param_names.len);
             if (self.function_param_names.len != 0 and self.function_param_binding_ids.len == 0) {
                 try self.addBlockingDiagnostic(
                     .missing_type,
@@ -227,6 +230,7 @@ const Collector = struct {
         defer {
             if (is_function) {
                 self.active_binders.shrinkRetainingCapacity(previous_binder_len);
+                self.function_param_types = previous_param_types;
                 self.function_param_binding_ids = previous_param_binding_ids;
                 self.function_param_names = previous_param_names;
             }
@@ -1045,7 +1049,7 @@ const Collector = struct {
                 .free = .{
                     .id = self.freeVarIdForFunctionParam(arg_number),
                     .name = name,
-                    .ty = .{ .spelling = "u256" },
+                    .ty = try self.typeRefFromValue(value),
                 },
             } });
         }
@@ -1085,14 +1089,16 @@ const Collector = struct {
         const text = mlir.oraIntegerAttrGetValueString(value_attr);
         defer if (text.data != null) mlir.oraStringRefFree(text);
         if (text.data != null) {
+            const result_ty = self.operationResultType(op, 0);
             if (operationResultIsI1(op)) {
                 const literal = std.mem.trim(u8, text.data[0..text.length], " \t\n\r");
                 if (std.mem.eql(u8, literal, "0")) return try self.addTerm(.{ .bool_lit = false });
                 if (std.mem.eql(u8, literal, "1")) return try self.addTerm(.{ .bool_lit = true });
             }
+            const ty = try self.typeRefFromMlirType(result_ty);
             return try self.addTerm(.{ .int_lit = .{
-                .value = try normalizeU256LiteralText(self.allocator, text.data[0..text.length]),
-                .ty = .{ .spelling = "u256" },
+                .value = try normalizeIntegerLiteralText(self.allocator, text.data[0..text.length], integerTypeWidth(result_ty)),
+                .ty = ty,
             } });
         }
 
@@ -1131,6 +1137,102 @@ const Collector = struct {
         if (id >= self.terms.items.len) return false;
         const term = self.terms.items[id];
         return term == .bool_lit and term.bool_lit == value;
+    }
+
+    fn operationResultType(_: *Collector, op: mlir.MlirOperation, index: usize) mlir.MlirType {
+        if (mlir.oraOperationGetNumResults(op) <= index) return std.mem.zeroes(mlir.MlirType);
+        const result = mlir.oraOperationGetResult(op, index);
+        if (mlir.oraValueIsNull(result)) return std.mem.zeroes(mlir.MlirType);
+        return mlir.oraValueGetType(result);
+    }
+
+    fn functionParamTypesFromFunctionOp(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        expected_count: usize,
+    ) ![]const obligation.TypeRef {
+        if (expected_count == 0) return &.{};
+
+        const types = try self.allocator.alloc(obligation.TypeRef, expected_count);
+        const region = mlir.oraOperationGetRegion(op, 0);
+        const block = if (!mlir.oraRegionIsNull(region)) mlir.oraRegionGetFirstBlock(region) else std.mem.zeroes(mlir.MlirBlock);
+        const arg_count: usize = if (!mlir.oraBlockIsNull(block)) @intCast(mlir.oraBlockGetNumArguments(block)) else 0;
+        if (arg_count < expected_count) {
+            try self.addBlockingDiagnosticFmt(
+                .missing_type,
+                "func.func has {d} named parameters but only {d} MLIR block arguments",
+                .{ expected_count, arg_count },
+            );
+        }
+
+        for (types, 0..) |*ty, index| {
+            ty.* = if (index < arg_count)
+                try self.typeRefFromValue(mlir.oraBlockGetArgument(block, index))
+            else
+                try self.unknownTypeRef();
+        }
+        return types;
+    }
+
+    fn typeRefFromValue(self: *Collector, value: mlir.MlirValue) !obligation.TypeRef {
+        if (mlir.oraValueIsNull(value)) return self.unknownTypeRef();
+        return self.typeRefFromMlirType(mlir.oraValueGetType(value));
+    }
+
+    fn typeRefFromMlirType(self: *Collector, ty: mlir.MlirType) !obligation.TypeRef {
+        if (mlir.oraTypeIsNull(ty)) return self.unknownTypeRef();
+
+        const refinement_base = mlir.oraRefinementTypeGetBaseType(ty);
+        if (!mlir.oraTypeIsNull(refinement_base)) return self.typeRefFromMlirType(refinement_base);
+
+        if (mlir.oraTypeIsAddressType(ty)) return .{ .spelling = "address" };
+
+        if (integerTypeWidth(ty)) |width| {
+            return self.integerTypeRef(width, mlirIntegerTypeIsSigned(ty));
+        }
+
+        return self.printedTypeRef(ty);
+    }
+
+    fn integerTypeRef(self: *Collector, width: u32, signed: bool) !obligation.TypeRef {
+        if (width == 1) return .{ .spelling = "bool" };
+        return .{ .spelling = try std.fmt.allocPrint(
+            self.allocator,
+            "{c}{d}",
+            .{ if (signed) @as(u8, 'i') else @as(u8, 'u'), width },
+        ) };
+    }
+
+    fn unknownTypeRef(self: *Collector) !obligation.TypeRef {
+        return .{ .spelling = try self.allocator.dupe(u8, "<unknown>") };
+    }
+
+    const MlirPrintCollector = struct {
+        allocator: std.mem.Allocator,
+        buffer: std.ArrayList(u8),
+        failed: bool = false,
+    };
+
+    fn printMlirChunk(value: mlir.MlirStringRef, user_data: ?*anyopaque) callconv(.c) void {
+        const collector: *MlirPrintCollector = @ptrCast(@alignCast(user_data orelse return));
+        if (value.data == null or value.length == 0) return;
+        collector.buffer.appendSlice(collector.allocator, value.data[0..value.length]) catch {
+            collector.failed = true;
+        };
+    }
+
+    fn printedTypeRef(self: *Collector, ty: mlir.MlirType) !obligation.TypeRef {
+        var collector = MlirPrintCollector{
+            .allocator = self.allocator,
+            .buffer = .empty,
+        };
+        errdefer collector.buffer.deinit(self.allocator);
+        mlir.mlirTypePrint(ty, printMlirChunk, &collector);
+        if (collector.failed) {
+            try self.addBlockingDiagnostic(.missing_type, "failed to collect printed MLIR type");
+            return self.unknownTypeRef();
+        }
+        return .{ .spelling = try collector.buffer.toOwnedSlice(self.allocator) };
     }
 
     fn binaryTermFromOperands(self: *Collector, op: mlir.MlirOperation, binary_op: obligation.BinaryOp) anyerror!?obligation.TermId {
@@ -1188,7 +1290,10 @@ const Collector = struct {
         while (index != 0) {
             index -= 1;
             const param_id = self.freeVarIdForFunctionParam(index);
-            const param_ty: obligation.TypeRef = .{ .spelling = "u256" };
+            const param_ty = if (index < self.function_param_types.len)
+                self.function_param_types[index]
+            else
+                try self.unknownTypeRef();
             current = try self.bindFreeVariableInTerm(current, param_id, self.function_param_names[index], param_ty);
             if (condition_available) |condition_term| {
                 condition_available = try self.bindFreeVariableInTerm(condition_term, param_id, self.function_param_names[index], param_ty);
@@ -1629,18 +1734,43 @@ fn operationResultIsI1(op: mlir.MlirOperation) bool {
     const result = mlir.oraOperationGetResult(op, 0);
     if (mlir.oraValueIsNull(result)) return false;
     const ty = mlir.oraValueGetType(result);
-    if (mlir.oraTypeIsNull(ty)) return false;
-    if (!mlir.oraTypeIsAInteger(ty)) return false;
-    return mlir.oraIntegerTypeGetWidth(ty) == 1;
+    return integerTypeWidth(ty) == 1;
 }
 
-fn normalizeU256LiteralText(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+fn integerTypeWidth(ty: mlir.MlirType) ?u32 {
+    if (mlir.oraTypeIsNull(ty)) return null;
+    if (mlir.oraTypeIsIntegerType(ty)) {
+        const builtin = mlir.oraTypeToBuiltin(ty);
+        if (mlir.oraTypeIsNull(builtin)) return null;
+        return @intCast(mlir.oraIntegerTypeGetWidth(builtin));
+    }
+    if (mlir.oraTypeIsAInteger(ty)) {
+        return @intCast(mlir.oraIntegerTypeGetWidth(ty));
+    }
+    return null;
+}
+
+fn mlirIntegerTypeIsSigned(ty: mlir.MlirType) bool {
+    if (mlir.oraTypeIsNull(ty)) return false;
+    if (mlir.oraTypeIsIntegerType(ty) or mlir.oraTypeIsAInteger(ty)) {
+        return mlir.oraIntegerTypeIsSigned(ty);
+    }
+    return false;
+}
+
+fn normalizeIntegerLiteralText(allocator: std.mem.Allocator, text: []const u8, width: ?u32) ![]const u8 {
     const trimmed = std.mem.trim(u8, text, " \t\n\r");
     if (!std.mem.startsWith(u8, trimmed, "-")) return try allocator.dupe(u8, trimmed);
+    const bit_width = width orelse return try allocator.dupe(u8, trimmed);
+    if (bit_width == 0 or bit_width > 256) return try allocator.dupe(u8, trimmed);
 
     const signed = std.fmt.parseInt(i256, trimmed, 10) catch return try allocator.dupe(u8, trimmed);
     const unsigned: u256 = @bitCast(signed);
-    return try std.fmt.allocPrint(allocator, "{d}", .{unsigned});
+    const normalized = if (bit_width == 256)
+        unsigned
+    else
+        unsigned & ((@as(u256, 1) << @intCast(bit_width)) - 1);
+    return try std.fmt.allocPrint(allocator, "{d}", .{normalized});
 }
 
 fn effectSlotPathRootEnd(path: []const u8) usize {
