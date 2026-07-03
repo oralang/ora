@@ -1712,6 +1712,9 @@ pub fn build(b: *std.Build) void {
     gate_step.dependOn(oratosir_debloat_gate_step);
     gate_step.dependOn(check_resource_mutation_tripwires_step);
     gate_step.dependOn(check_mlir_ora_step);
+    // Bytecode-size baseline: without this in the bar the committed baseline
+    // rots silently (it once drifted for 78 commits unseen).
+    gate_step.dependOn(check_conformance_bytecode_size_step);
     gate_step.dependOn(check_negative_corpus_step);
     gate_step.dependOn(check_no_width_defaults_step);
     gate_step.dependOn(check_no_hir_op_null_fallbacks_step);

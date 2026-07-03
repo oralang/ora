@@ -830,6 +830,22 @@ test "switch routing policies pick distinct shapes for the dispatcher liveness c
     try std.testing.expect(size_plan == .linear);
 }
 
+test "switch routing keeps sparse as the large-switch strategy" {
+    // Retirement-watch close-out (verdict: KEEP). Above ~60 cases the
+    // 256-slot table cap plus birthday collisions defeat every dense
+    // candidate (P(collision-free) ~ exp(-n^2/512) per constant), so sparse
+    // buckets are the only sub-linear shape for large selector sets.
+    var value_bufs: [80][12]u8 = undefined;
+    var cases: [80]ir.SwitchCase = undefined;
+    for (&cases, 0..) |*case, i| {
+        const selector = multiplicativeCandidate(@intCast(i));
+        const text = std.fmt.bufPrint(&value_bufs[i], "0x{x:0>8}", .{selector}) catch unreachable;
+        case.* = .{ .value = text, .target = "hit", .line = @intCast(i + 1) };
+    }
+    const plan = choosePlan(.{ .selector = "selector", .cases = &cases, .default_target = "fallback" });
+    try std.testing.expect(plan == .sparse);
+}
+
 test "switch routing strategy fact table covers planner variants" {
     const plan_fields = @typeInfo(Plan).@"union".fields;
     try std.testing.expectEqual(plan_fields.len, dispatcher_strategy_facts.len);
