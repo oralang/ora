@@ -62,6 +62,11 @@ const MlirOptions = struct {
     persist_ora_mlir: bool = false,
     persist_sir_mlir: bool = false,
     suppress_artifact_logs: bool = false,
+    // D6 optimization profile (gas | balanced | size): the objective the
+    // backend optimizes dispatch shapes for. Orthogonal to opt_level, which
+    // controls MLIR pass effort. Resolution: --optimize > [[targets]] >
+    // [compiler] > balanced (applied at the sinora seam).
+    optimize: ?project_config.OptimizeProfile = null,
     chain_id: u64 = compiler.compile_options.default_chain_id,
     metrics: *Metrics = undefined,
     process_environ: std.process.Environ = std.process.Environ.empty,
@@ -108,6 +113,7 @@ const BuildFileContext = struct {
     init_args: ?[]project_config.InitArg = null,
     output_dir: ?[]u8 = null,
     chain_id: u64,
+    optimize: ?project_config.OptimizeProfile = null,
 
     fn deinit(self: *BuildFileContext, allocator: std.mem.Allocator) void {
         if (self.include_roots) |include_roots| {
@@ -800,6 +806,14 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    const cli_optimize: ?project_config.OptimizeProfile = if (parsed.optimize) |raw|
+        project_config.optimizeProfileFromString(raw) catch {
+            std.debug.print("error: invalid --optimize value '{s}' (expected gas|balanced|size)\n", .{raw});
+            exitCli(2);
+        }
+    else
+        null;
+
     // create MLIR options structure
     const mlir_options = MlirOptions{
         .emit_mlir = emit_mlir,
@@ -808,6 +822,7 @@ pub fn main(init: std.process.Init) !void {
         .emit_bytecode = emit_bytecode,
         .emit_cfg_mode = emit_cfg_mode,
         .opt_level = mlir_opt_level,
+        .optimize = cli_optimize,
         .output_dir = output_dir,
         .output_file = output_file,
         .debug_enabled = debug_enabled,
@@ -940,6 +955,7 @@ pub fn main(init: std.process.Init) !void {
         var build_mlir_options = mlir_options;
         if (build_file_context) |context| {
             build_mlir_options.chain_id = context.chain_id;
+            if (build_mlir_options.optimize == null) build_mlir_options.optimize = context.optimize;
         }
 
         const build_result = if (input_file) |build_file_path|
@@ -2046,6 +2062,7 @@ fn resolveBuildFileContext(
     defer loaded.deinit(allocator);
 
     context.init_args = try combineInitArgSlices(allocator, loaded.config.compiler_init_args, &.{});
+    context.optimize = loaded.config.compiler_optimize;
 
     const target_idx_opt = project_config.findMatchingTargetIndex(allocator, &loaded, build_file_path) catch |err| {
         std.debug.print("error: failed to match target in ora.toml: {s}\n", .{@errorName(err)});
@@ -2057,6 +2074,7 @@ fn resolveBuildFileContext(
 
     if (target_idx_opt) |target_idx| {
         const target = loaded.config.targets[target_idx];
+        if (target.optimize) |profile| context.optimize = profile;
         if (context.init_args) |init_args| {
             freeCombinedInitArgs(allocator, init_args);
             context.init_args = null;
@@ -2338,6 +2356,8 @@ fn runBuildFromDiscoveredConfig(
 
         var target_options = base_options;
         target_options.chain_id = chain_ids.resolve(loaded.config.compiler_chain_id, target.chain_id);
+        if (target_options.optimize == null)
+            target_options.optimize = target.optimize orelse loaded.config.compiler_optimize;
 
         try runBuildArtifacts(
             allocator,
@@ -2437,6 +2457,9 @@ fn printUsage(io: std.Io) !void {
     try stdout.print("  -O0, -Onone            - No optimization (default)\n", .{});
     try stdout.print("  -O1, -Obasic           - Basic optimizations\n", .{});
     try stdout.print("  -O2, -Oaggressive      - Aggressive optimizations\n", .{});
+    try stdout.print("  --optimize=<profile>   - Codegen objective: gas | balanced | size\n", .{});
+    try stdout.print("                           (runtime gas vs deploy size; default balanced;\n", .{});
+    try stdout.print("                           also ora.toml [compiler]/[[targets]] optimize)\n", .{});
     try stdout.print("\nMLIR Options:\n", .{});
     try stdout.print("  --no-validate-mlir     - Disable automatic MLIR validation (not recommended)\n", .{});
     try stdout.print("  --no-canonicalize      - Skip Ora MLIR canonicalization pass\n", .{});
@@ -5220,7 +5243,7 @@ fn runMlirEmitAdvanced(
         }
         if (mlir_options.emit_bytecode) {
             if (mlir_options.emit_sir_text and mlir_options.output_dir == null) try stdout.print("\n", .{});
-            try emitBytecodeFromSirText(allocator, &compilation.db, compilation.root_module_id, &compilation.db.sources, sir_text, file_path, mlir_options.output_dir, mlir_options.output_file, sir_locations, sir_line_map, sir_debug_info, source_scopes, stdout, mlir_options.suppress_artifact_logs);
+            try emitBytecodeFromSirText(allocator, &compilation.db, compilation.root_module_id, &compilation.db.sources, sir_text, file_path, mlir_options.output_dir, mlir_options.output_file, sir_locations, sir_line_map, sir_debug_info, source_scopes, stdout, mlir_options.suppress_artifact_logs, mlir_options.optimize);
         }
     }
 
@@ -5822,13 +5845,16 @@ fn runSinoraBytecode(
     sinora_path: []const u8,
     sir_file_path: []const u8,
     source_map_path: ?[]const u8,
+    optimize_arg: []const u8,
     stdout: anytype,
 ) ![]const u8 {
-    var argv_buf: [5][]const u8 = undefined;
+    var argv_buf: [6][]const u8 = undefined;
     var argc: usize = 0;
     argv_buf[argc] = sinora_path;
     argc += 1;
     argv_buf[argc] = "emit-release";
+    argc += 1;
+    argv_buf[argc] = optimize_arg;
     argc += 1;
     if (source_map_path) |path| {
         argv_buf[argc] = "--source-map";
@@ -5889,6 +5915,7 @@ fn emitBytecodeFromSirText(
     source_scopes: ?DebugSourceScopeBundle,
     stdout: anytype,
     suppress_log: bool,
+    optimize: ?project_config.OptimizeProfile,
 ) !void {
     const basename = std.fs.path.stem(file_path);
     const sir_extension = ".sir";
@@ -5923,11 +5950,18 @@ fn emitBytecodeFromSirText(
     };
     defer allocator.free(sinora_path);
 
+    // The profile is always passed explicitly so the subprocess invocation
+    // is self-documenting and independent of sinora's own default.
+    const resolved_optimize = optimize orelse .balanced;
+    const optimize_arg = try std.fmt.allocPrint(allocator, "--optimize={s}", .{resolved_optimize.name()});
+    defer allocator.free(optimize_arg);
+
     const sinora_stdout = try runSinoraBytecode(
         allocator,
         sinora_path,
         sir_file_path,
         sinora_srcmap_path,
+        optimize_arg,
         stdout,
     );
     defer allocator.free(sinora_stdout);
@@ -5969,6 +6003,19 @@ fn emitBytecodeFromSirText(
         if (!suppress_log) try stdout.print("Bytecode saved to {s}\n", .{output_path});
     } else {
         try stdout.print("{s}\n", .{sinora_bytecode});
+    }
+
+    // Build-provenance sidecar: records which optimization profile produced
+    // this bytecode so audits never have to guess.
+    if (bytecode_output_path) |bytecode_path| {
+        const build_info_path = try std.mem.concat(allocator, u8, &[_][]const u8{ bytecode_path, ".build.json" });
+        defer allocator.free(build_info_path);
+        const build_info = try std.fmt.allocPrint(allocator, "{{\n  \"optimize\": \"{s}\"\n}}\n", .{resolved_optimize.name()});
+        defer allocator.free(build_info);
+        try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+            .sub_path = build_info_path,
+            .data = build_info,
+        });
     }
 
     // Merge source maps: SIR locations (op_idx -> file:line:col) + Sinora's

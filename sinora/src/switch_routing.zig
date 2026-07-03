@@ -55,9 +55,19 @@ pub const DispatchPolicy = enum {
     }
 };
 
-/// Active policy. CLI surfacing is deferred; this constant is the single
-/// switch point and must stay comptime-known for byte-stable builds.
-pub const dispatch_policy: DispatchPolicy = .balanced;
+/// Active policy for this compilation. Sinora is a batch binary: main.zig
+/// sets this exactly once from `--optimize=<profile>` before any codegen or
+/// metrics run, so every choosePlan call in one invocation sees the same
+/// policy and builds stay byte-deterministic per (input, profile). Tests
+/// that override it must restore `.balanced` before returning.
+pub var dispatch_policy: DispatchPolicy = .balanced;
+
+pub fn parsePolicyName(name: []const u8) ?DispatchPolicy {
+    inline for (@typeInfo(DispatchPolicy).@"enum".fields) |field| {
+        if (std.mem.eql(u8, name, field.name)) return @field(DispatchPolicy, field.name);
+    }
+    return null;
+}
 
 pub const jump_table_entry_bytes: usize = 2;
 
@@ -777,6 +787,47 @@ test "switch routing chooser picks dense for the dispatcher liveness contract" {
     try std.testing.expect(plan == .dense);
     try std.testing.expectEqual(DensePlanKind.multiplicative, plan.dense.kind);
     try std.testing.expect(plan.dense.table_slots < 128);
+}
+
+test "switch routing policies pick distinct shapes for the dispatcher liveness contract" {
+    // Same 16 keccak selectors as the liveness pin. `gas` ignores bytes and
+    // takes the cheapest runtime (bit window, no MUL); `balanced` pays 8 gas
+    // of MUL for a table a third the size; `size` refuses the table bytes
+    // entirely and stays on the linear chain.
+    const cases = [_]ir.SwitchCase{
+        .{ .value = "0xa9874b2a", .target = "a", .line = 1 },
+        .{ .value = "0x8c18f2f1", .target = "b", .line = 2 },
+        .{ .value = "0x7ef1dbea", .target = "c", .line = 3 },
+        .{ .value = "0x1946b5be", .target = "d", .line = 4 },
+        .{ .value = "0x848ea577", .target = "e", .line = 5 },
+        .{ .value = "0x56f897ef", .target = "f", .line = 6 },
+        .{ .value = "0x5fc75cb5", .target = "g", .line = 7 },
+        .{ .value = "0x80b3bd9b", .target = "h", .line = 8 },
+        .{ .value = "0x8b7d553d", .target = "i", .line = 9 },
+        .{ .value = "0xbaf74a09", .target = "j", .line = 10 },
+        .{ .value = "0xe0265090", .target = "k", .line = 11 },
+        .{ .value = "0x13f2ec66", .target = "l", .line = 12 },
+        .{ .value = "0x1d12652e", .target = "m", .line = 13 },
+        .{ .value = "0xc57076af", .target = "n", .line = 14 },
+        .{ .value = "0x1b15e99d", .target = "o", .line = 15 },
+        .{ .value = "0x29a6a38d", .target = "p", .line = 16 },
+    };
+    const term = ir.SwitchTerminator{ .selector = "selector", .cases = &cases, .default_target = "fallback" };
+    defer dispatch_policy = .balanced;
+
+    dispatch_policy = .gas;
+    const gas_plan = choosePlan(term);
+    try std.testing.expect(gas_plan == .dense);
+    try std.testing.expectEqual(DensePlanKind.bit_window, gas_plan.dense.kind);
+
+    dispatch_policy = .balanced;
+    const balanced_plan = choosePlan(term);
+    try std.testing.expect(balanced_plan == .dense);
+    try std.testing.expectEqual(DensePlanKind.multiplicative, balanced_plan.dense.kind);
+
+    dispatch_policy = .size;
+    const size_plan = choosePlan(term);
+    try std.testing.expect(size_plan == .linear);
 }
 
 test "switch routing strategy fact table covers planner variants" {

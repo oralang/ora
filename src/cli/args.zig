@@ -56,6 +56,10 @@ pub const CliOptions = struct {
     show_help: bool = false,
     show_version: bool = false,
     metrics: bool = false,
+    // D6 optimization profile: what the backend optimizes dispatch shapes
+    // for (validated here; typed in config/mod.zig). Distinct from -O
+    // levels, which control MLIR pass effort.
+    optimize: ?[]const u8 = null,
     chain_id: ?u64 = null,
 };
 
@@ -183,6 +187,7 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
     var seen_debug = false;
     var seen_debug_info = false;
     var seen_opt_level = false;
+    var seen_optimize = false;
     var seen_validate_mlir = false;
     var seen_canonicalize = false;
     var seen_chain_id = false;
@@ -309,6 +314,17 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
         } else if (std.mem.eql(u8, arg, "--debug-info")) {
             try claim(&seen_debug_info);
             opts.debug_info = true;
+            i += 1;
+        } else if (std.mem.startsWith(u8, arg, "--optimize=")) {
+            try claim(&seen_optimize);
+            const value = arg["--optimize=".len..];
+            if (!std.mem.eql(u8, value, "gas") and
+                !std.mem.eql(u8, value, "balanced") and
+                !std.mem.eql(u8, value, "size"))
+            {
+                return ParseError.UnknownArgument;
+            }
+            opts.optimize = value;
             i += 1;
         } else if (std.mem.eql(u8, arg, "-O0") or std.mem.eql(u8, arg, "-Onone")) {
             try claim(&seen_opt_level);

@@ -84,6 +84,65 @@ test "config: parse ora.toml targets and compiler output" {
     try testing.expectEqualStrings("out/math", parsed.targets[1].output_dir.?);
 }
 
+test "config: parse optimize profile at compiler and target level" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "ora.toml",
+        .data =
+        \\schema_version = "0.1"
+        \\
+        \\[compiler]
+        \\optimize = "size"
+        \\
+        \\[[targets]]
+        \\name = "Router"
+        \\kind = "contract"
+        \\root = "contracts/Router.ora"
+        \\optimize = "gas"
+        \\
+        \\[[targets]]
+        \\name = "Child"
+        \\kind = "contract"
+        \\root = "contracts/Child.ora"
+        ,
+    });
+
+    const config_path = try pathFromTmpAlloc(allocator, tmp, "ora.toml");
+    defer allocator.free(config_path);
+
+    var parsed = try config.loadProjectConfigFile(allocator, config_path);
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(@as(?config.OptimizeProfile, .size), parsed.compiler_optimize);
+    try testing.expectEqual(@as(?config.OptimizeProfile, .gas), parsed.targets[0].optimize);
+    // Child has no override; the resolver falls back to [compiler].
+    try testing.expectEqual(@as(?config.OptimizeProfile, null), parsed.targets[1].optimize);
+}
+
+test "config: invalid optimize profile errors" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "ora.toml",
+        .data =
+        \\schema_version = "0.1"
+        \\
+        \\[compiler]
+        \\optimize = "fastest"
+        ,
+    });
+
+    const config_path = try pathFromTmpAlloc(allocator, tmp, "ora.toml");
+    defer allocator.free(config_path);
+
+    try testing.expectError(config.ConfigError.InvalidToml, config.loadProjectConfigFile(allocator, config_path));
+}
+
 test "config: schema_version is required" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});

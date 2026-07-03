@@ -61,6 +61,7 @@ pub fn main(init: std.process.Init) !void {
                     try usage(io, args[0]);
                     return err;
                 };
+                if (emit_options.optimize) |policy| sinora.switch_routing.dispatch_policy = policy;
                 try emitReleaseBytecode(allocator, io, emit_options.path, emit_options.source_map_path, emit_options.metrics_path);
             },
             .emit_release_generic => {
@@ -68,6 +69,7 @@ pub fn main(init: std.process.Init) !void {
                     try usage(io, args[0]);
                     return err;
                 };
+                if (emit_options.optimize) |policy| sinora.switch_routing.dispatch_policy = policy;
                 try emitGenericReleaseBytecode(allocator, io, emit_options.path, emit_options.source_map_path, emit_options.metrics_path);
             },
             .trace_release => {
@@ -195,8 +197,8 @@ fn usage(io: std.Io, argv0: []const u8) !void {
         \\  {s} check <file.sir>
         \\  {s} render <file.sir>
         \\  {s} emit-debug <file.sir> [function]
-        \\  {s} emit-release [--source-map <path>] [--metrics <path>] <file.sir>
-        \\  {s} emit-release-generic [--source-map <path>] [--metrics <path>] <file.sir>
+        \\  {s} emit-release [--source-map <path>] [--metrics <path>] [--optimize=<gas|balanced|size>] <file.sir>
+        \\  {s} emit-release-generic [--source-map <path>] [--metrics <path>] [--optimize=<gas|balanced|size>] <file.sir>
         \\  {s} trace-release <file.sir>
         \\
         \\emit-debug emits conservative debug bytecode for one supported root.
@@ -334,6 +336,7 @@ const EmitReleaseOptions = struct {
     path: []const u8,
     source_map_path: ?[]const u8 = null,
     metrics_path: ?[]const u8 = null,
+    optimize: ?sinora.switch_routing.DispatchPolicy = null,
 };
 
 fn parseEmitReleaseOptions(args: []const []const u8) !EmitReleaseOptions {
@@ -353,6 +356,12 @@ fn parseEmitReleaseOptions(args: []const []const u8) !EmitReleaseOptions {
             if (index >= args.len) return error.InvalidArguments;
             if (result.metrics_path != null) return error.InvalidArguments;
             result.metrics_path = args[index];
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--optimize=")) {
+            if (result.optimize != null) return error.InvalidArguments;
+            result.optimize = sinora.switch_routing.parsePolicyName(arg["--optimize=".len..]) orelse
+                return error.InvalidArguments;
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--")) return error.InvalidArguments;

@@ -17,6 +17,28 @@ pub const TargetKind = enum {
     library,
 };
 
+/// Optimization profile: how the backend weighs runtime gas against code
+/// size (deploy cost). `gas` optimizes runtime only, `size` suits
+/// deploy-constrained contracts (e.g. factory-deployed children),
+/// `balanced` is the default. Resolution order: --optimize CLI flag >
+/// [[targets]] optimize > [compiler] optimize > balanced.
+pub const OptimizeProfile = enum {
+    gas,
+    balanced,
+    size,
+
+    pub fn name(self: OptimizeProfile) []const u8 {
+        return @tagName(self);
+    }
+};
+
+pub fn optimizeProfileFromString(value: []const u8) ConfigError!OptimizeProfile {
+    inline for (@typeInfo(OptimizeProfile).@"enum".fields) |field| {
+        if (std.mem.eql(u8, value, field.name)) return @field(OptimizeProfile, field.name);
+    }
+    return ConfigError.InvalidToml;
+}
+
 pub const InitArg = struct {
     name: []const u8,
     value: []const u8,
@@ -35,6 +57,7 @@ pub const Target = struct {
     init_args: []InitArg,
     output_dir: ?[]const u8,
     chain_id: ?u64,
+    optimize: ?OptimizeProfile,
 
     fn deinit(self: *Target, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
@@ -58,6 +81,7 @@ pub const ProjectConfig = struct {
     compiler_output_dir: ?[]const u8,
     compiler_chain_id: ?u64,
     compiler_init_args: []InitArg,
+    compiler_optimize: ?OptimizeProfile,
     targets: []Target,
 
     pub fn deinit(self: *ProjectConfig, allocator: std.mem.Allocator) void {
@@ -105,6 +129,7 @@ const TargetBuilder = struct {
     init_args: std.ArrayList(InitArg) = .empty,
     output_dir: ?[]const u8 = null,
     chain_id: ?u64 = null,
+    optimize: ?OptimizeProfile = null,
 
     fn deinit(self: *TargetBuilder, allocator: std.mem.Allocator) void {
         if (self.name) |name| allocator.free(name);
@@ -230,6 +255,7 @@ const TargetBuilder = struct {
             .init_args = init_args,
             .output_dir = output_dir_copy,
             .chain_id = self.chain_id,
+            .optimize = self.optimize,
         };
     }
 };
@@ -424,6 +450,7 @@ pub fn loadProjectConfigFile(allocator: std.mem.Allocator, config_path: []const 
     var compiler_output_dir: ?[]const u8 = null;
     errdefer if (compiler_output_dir) |output_dir| allocator.free(output_dir);
     var compiler_chain_id: ?u64 = null;
+    var compiler_optimize: ?OptimizeProfile = null;
     var compiler_init_args = allocator.alloc(InitArg, 0) catch return ConfigError.OutOfMemory;
     errdefer {
         for (compiler_init_args) |*arg| arg.deinit(allocator);
@@ -556,6 +583,10 @@ pub fn loadProjectConfigFile(allocator: std.mem.Allocator, config_path: []const 
                     compiler_output_dir = parsed;
                 } else if (std.mem.eql(u8, key, "chain_id")) {
                     compiler_chain_id = try parseTomlUnsigned(value);
+                } else if (std.mem.eql(u8, key, "optimize")) {
+                    const parsed = try parseTomlStringOwned(allocator, value);
+                    defer allocator.free(parsed);
+                    compiler_optimize = try optimizeProfileFromString(parsed);
                 } else if (std.mem.eql(u8, key, "init_args")) {
                     const parsed = try parseTomlStringArrayOwned(allocator, value);
                     defer {
@@ -606,6 +637,10 @@ pub fn loadProjectConfigFile(allocator: std.mem.Allocator, config_path: []const 
                     current.setOutputDir(allocator, parsed);
                 } else if (std.mem.eql(u8, key, "chain_id")) {
                     current.setChainId(try parseTomlUnsigned(value));
+                } else if (std.mem.eql(u8, key, "optimize")) {
+                    const parsed = try parseTomlStringOwned(allocator, value);
+                    defer allocator.free(parsed);
+                    current.optimize = try optimizeProfileFromString(parsed);
                 } else if (std.mem.eql(u8, key, "include_paths")) {
                     const parsed = try parseTomlStringArrayOwned(allocator, value);
                     defer {
@@ -662,6 +697,7 @@ pub fn loadProjectConfigFile(allocator: std.mem.Allocator, config_path: []const 
         .compiler_output_dir = compiler_output_dir,
         .compiler_chain_id = compiler_chain_id,
         .compiler_init_args = compiler_init_args,
+        .compiler_optimize = compiler_optimize,
         .targets = targets,
     };
 }
