@@ -92,8 +92,11 @@ pub fn main() !void {
         const sink = runner.MetricSink{ .allocator = allocator, .list = &list };
 
         runner.runConformanceSpecMetricsWithExtraArgs(allocator, source_path, spec_path, sink, compiler_args) catch |err| {
-            std.debug.print("metrics-snapshot: spec failed (skipped): {s}: {s}\n", .{ spec_path, @errorName(err) });
-            continue;
+            // Fail closed: skipping would emit a partial snapshot whose
+            // missing rows read as bytecode-size drift in the gate — a
+            // confusing lie. Better one loud failure naming the spec.
+            std.debug.print("metrics-snapshot: spec failed: {s}: {s}\n", .{ spec_path, @errorName(err) });
+            return err;
         };
 
         var call_index: usize = 0;

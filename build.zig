@@ -677,6 +677,11 @@ pub fn build(b: *std.Build) void {
     });
     check_conformance_bytecode_size_cmd.step.dependOn(b.getInstallStep());
     check_conformance_bytecode_size_cmd.step.dependOn(&metrics_snapshot_install.step);
+    // Serialize behind the test bar: the harness shells the compiler per
+    // corpus spec, and under full gate parallelism resource contention can
+    // fail a heavy spec transiently. Running after tests costs seconds and
+    // removes the race window.
+    check_conformance_bytecode_size_cmd.step.dependOn(test_step);
     const check_conformance_bytecode_size_step = b.step("check-conformance-bytecode-size", "Check conformance bytecode-size metrics against the deterministic baseline");
     check_conformance_bytecode_size_step.dependOn(&check_conformance_bytecode_size_cmd.step);
     const check_metrics_report_cmd = b.addSystemCommand(&[_][]const u8{
