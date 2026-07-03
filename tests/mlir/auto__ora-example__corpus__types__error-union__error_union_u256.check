@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/error-union/error_union_u256.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @add
+// CHECK-LABEL: func.func @sub
+// CHECK-LABEL: func.func @add_and_sub
+// CHECK-LABEL: func.func @get_value

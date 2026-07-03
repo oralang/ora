@@ -1,0 +1,27 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/operators/comparison/ordered_all_widths.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @lt_u8
+// CHECK-LABEL: func.func @le_u8
+// CHECK-LABEL: func.func @gt_u8
+// CHECK-LABEL: func.func @ge_u8
+// CHECK-LABEL: func.func @lt_u16
+// CHECK-LABEL: func.func @le_u16
+// CHECK-LABEL: func.func @gt_u16
+// CHECK-LABEL: func.func @ge_u16
+// CHECK-LABEL: func.func @lt_u32
+// CHECK-LABEL: func.func @le_u32
+// CHECK-LABEL: func.func @gt_u32
+// CHECK-LABEL: func.func @ge_u32
+// CHECK-LABEL: func.func @lt_u64
+// CHECK-LABEL: func.func @le_u64
+// CHECK-LABEL: func.func @gt_u64
+// CHECK-LABEL: func.func @ge_u64
+// CHECK-LABEL: func.func @lt_u128
+// CHECK-LABEL: func.func @le_u128
+// CHECK-LABEL: func.func @gt_u128
+// CHECK-LABEL: func.func @ge_u128
+// CHECK-LABEL: func.func @lt_u256
+// CHECK-LABEL: func.func @le_u256
+// CHECK-LABEL: func.func @gt_u256
+// CHECK-LABEL: func.func @ge_u256

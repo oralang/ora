@@ -1,0 +1,6 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/error/error_guard_return.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @guarded_action
+// CHECK-LABEL: func.func @pause
+// CHECK-LABEL: func.func @unpause

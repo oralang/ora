@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/compound/tuple_multi.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @mixed_u256_bool
+// CHECK-LABEL: func.func @mixed_u8_u256
+// CHECK-LABEL: func.func @mixed_address_u256
+// CHECK-LABEL: func.func @mixed_bool_bool
+// CHECK-LABEL: func.func @wide_tuple
+// CHECK-LABEL: func.func @destructure_mixed
+// CHECK-LABEL: func.func @nested_tuple
+// CHECK-LABEL: func.func @tuple_in_computation

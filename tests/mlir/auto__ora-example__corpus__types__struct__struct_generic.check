@@ -1,0 +1,6 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/struct/struct_generic.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @u256_pair
+// CHECK-LABEL: func.func @bool_pair
+// CHECK-LABEL: func.func @address_pair

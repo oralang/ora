@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/struct/struct_nested.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @create_nested
+// CHECK-LABEL: func.func @create_inline
+// CHECK-LABEL: func.func @store_nested
+// CHECK-LABEL: func.func @read_nested
+// CHECK-LABEL: func.func @read_nested_flag

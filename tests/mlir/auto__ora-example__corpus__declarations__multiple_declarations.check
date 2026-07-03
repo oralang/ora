@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/declarations/multiple_declarations.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @multiple_lets
+// CHECK-LABEL: func.func @multiple_vars
+// CHECK-LABEL: func.func @mixed_let_var
+// CHECK-LABEL: func.func @sequential_declarations
+// CHECK-LABEL: func.func @shadowing_in_scope
+// CHECK-LABEL: func.func @many_types
+// CHECK-LABEL: func.func @var_chain
+// CHECK-LABEL: func.func @expression_lets

@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/control-flow/if/if_basic.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @test_if_only
+// CHECK-LABEL: func.func @test_if_else
+// CHECK-LABEL: func.func @test_if_bool
+// CHECK-LABEL: func.func @test_if_equality
+// CHECK-LABEL: func.func @test_if_negated

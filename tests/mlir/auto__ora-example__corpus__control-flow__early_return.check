@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/control-flow/early_return.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @guarded_divide
+// CHECK-LABEL: func.func @multi_guard
+// CHECK-LABEL: func.func @classify
+// CHECK-LABEL: func.func @find_first_above
+// CHECK-LABEL: func.func @switch_return
+// CHECK-LABEL: func.func @process
+// CHECK-LABEL: func.func @deep_return

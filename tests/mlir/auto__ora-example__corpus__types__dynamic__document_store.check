@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/dynamic/document_store.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @create
+// CHECK-LABEL: func.func @getTitle
+// CHECK-LABEL: func.func @getContent
+// CHECK-LABEL: func.func @getAuthor
+// CHECK-LABEL: func.func @getTimestamp
+// CHECK-LABEL: func.func @updateTitle
+// CHECK-LABEL: func.func @updateContent
+// CHECK-LABEL: func.func @getDocCount

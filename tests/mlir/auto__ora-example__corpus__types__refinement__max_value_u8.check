@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/refinement/max_value_u8.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @setPercentage
+// CHECK-LABEL: func.func @getPercentage
+// CHECK-LABEL: func.func @add
+// CHECK-LABEL: func.func @isHalf
+// CHECK-LABEL: func.func @passToPlain

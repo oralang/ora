@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/compound/array_fixed.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @create
+// CHECK-LABEL: func.func @access
+// CHECK-LABEL: func.func @modify
+// CHECK-LABEL: func.func @nested

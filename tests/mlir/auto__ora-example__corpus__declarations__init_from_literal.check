@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/declarations/init_from_literal.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @integer_literals
+// CHECK-LABEL: func.func @hex_literals
+// CHECK-LABEL: func.func @bool_literals
+// CHECK-LABEL: func.func @address_literals
+// CHECK-LABEL: func.func @string_literals
+// CHECK-LABEL: func.func @small_type_literals
+// CHECK-LABEL: func.func @signed_literals
+// CHECK-LABEL: func.func @underscore_literals

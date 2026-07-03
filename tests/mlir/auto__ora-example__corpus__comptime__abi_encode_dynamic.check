@@ -1,0 +1,21 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/comptime/abi_encode_dynamic.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @string_len
+// CHECK-LABEL: func.func @string_head_offset
+// CHECK-LABEL: func.func @string_payload_len
+// CHECK-LABEL: func.func @string_first_byte
+// CHECK-LABEL: func.func @bytes_aligned_len
+// CHECK-LABEL: func.func @mixed_tuple_second_offset
+// CHECK-LABEL: func.func @empty_dynamic_pair_len
+// CHECK-LABEL: func.func @dynamic_array_len
+// CHECK-LABEL: func.func @dynamic_array_head_offset
+// CHECK-LABEL: func.func @dynamic_array_payload_len
+// CHECK-LABEL: func.func @dynamic_array_first_value
+// CHECK-LABEL: func.func @dynamic_address_array_second_tail_byte
+// CHECK-LABEL: func.func @dynamic_string_array_len
+// CHECK-LABEL: func.func @dynamic_string_array_first_offset
+// CHECK-LABEL: func.func @nested_dynamic_array_second_value
+// CHECK-LABEL: func.func @nested_dynamic_string_arrays_len
+// CHECK-LABEL: func.func @dynamic_struct_len
+// CHECK-LABEL: func.func @dynamic_struct_array_len

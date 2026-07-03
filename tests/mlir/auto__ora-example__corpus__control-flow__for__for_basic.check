@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/control-flow/for/for_basic.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @test_range
+// CHECK-LABEL: func.func @test_range_offset
+// CHECK-LABEL: func.func @test_single_iteration
+// CHECK-LABEL: func.func @test_use_index
+// CHECK-LABEL: func.func @test_factorial_like

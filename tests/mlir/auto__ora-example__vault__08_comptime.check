@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/vault/08_comptime.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @maxAllowed
+// CHECK-LABEL: func.func @minAllowed
+// CHECK-LABEL: func.func @deposit
+// CHECK-LABEL: func.func @getVersion
+// CHECK-LABEL: func.func @balanceOf
+// CHECK-LABEL: func.func @getTotalDeposits

@@ -1,0 +1,15 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/storage/computed_fixed_size_record.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @recordSlot
+// CHECK-LABEL: func.func @save
+// CHECK-LABEL: func.func @std
+// CHECK-LABEL: func.func @clear
+// CHECK-LABEL: func.func @std
+// CHECK-LABEL: func.func @hasRecord
+// CHECK-LABEL: func.func @std
+// CHECK-LABEL: func.func @version
+// CHECK-LABEL: func.func @std
+// CHECK-LABEL: func.func @amount
+// CHECK-LABEL: func.func @timestamp
+// CHECK-LABEL: func.func @flags

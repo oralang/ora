@@ -1,0 +1,17 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/declarations/storage_struct_declarations.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @set_config
+// CHECK-LABEL: func.func @get_config
+// CHECK-LABEL: func.func @get_decimals
+// CHECK-LABEL: func.func @is_paused
+// CHECK-LABEL: func.func @set_paused
+// CHECK-LABEL: func.func @update_max_supply
+// CHECK-LABEL: func.func @set_user
+// CHECK-LABEL: func.func @add_user_balance
+// CHECK-LABEL: func.func @get_user_balance
+// CHECK-LABEL: func.func @update_pair
+// CHECK-LABEL: func.func @get_pair_sum
+// CHECK-LABEL: func.func @snapshot_pair
+// CHECK-LABEL: func.func @distance_sq
+// CHECK-LABEL: func.func @get_origin_distance_sq

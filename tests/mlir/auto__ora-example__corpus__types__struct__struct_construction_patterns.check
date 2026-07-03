@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/struct/struct_construction_patterns.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @from_literals
+// CHECK-LABEL: func.func @from_variables
+// CHECK-LABEL: func.func @from_expressions
+// CHECK-LABEL: func.func @from_parameters
+// CHECK-LABEL: func.func @from_function_calls
+// CHECK-LABEL: func.func @get_ten
+// CHECK-LABEL: func.func @get_twenty

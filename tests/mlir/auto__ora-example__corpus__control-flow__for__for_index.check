@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/control-flow/for/for_index.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @test_range_index
+// CHECK-LABEL: func.func @test_value_and_index
+// CHECK-LABEL: func.func @test_index_only
+// CHECK-LABEL: func.func @test_index_conditional
+// CHECK-LABEL: func.func @test_weighted_positions

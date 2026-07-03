@@ -1,0 +1,6 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/adt/enum_or_patterns.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @choose
+// CHECK-LABEL: func.func @shared_payload_binding
+// CHECK-LABEL: func.func @no_bind_or_pattern

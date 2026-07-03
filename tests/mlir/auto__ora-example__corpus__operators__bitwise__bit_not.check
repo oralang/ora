@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/operators/bitwise/bit_not.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @not_u8
+// CHECK-LABEL: func.func @not_u16
+// CHECK-LABEL: func.func @not_u32
+// CHECK-LABEL: func.func @not_u64
+// CHECK-LABEL: func.func @not_u128
+// CHECK-LABEL: func.func @not_u256
+// CHECK-LABEL: func.func @double_not_u256

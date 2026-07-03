@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/refinement/refinement_in_struct.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @setConfig
+// CHECK-LABEL: func.func @getMinStake
+// CHECK-LABEL: func.func @getMaxStake
+// CHECK-LABEL: func.func @getFeeRate
+// CHECK-LABEL: func.func @setAccount
+// CHECK-LABEL: func.func @getAccountOwner
+// CHECK-LABEL: func.func @getAccountBalance

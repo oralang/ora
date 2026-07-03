@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/operators/wrapping/wrapping_add_sub.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @wrapping_add_u8
+// CHECK-LABEL: func.func @wrapping_sub_u8
+// CHECK-LABEL: func.func @wrapping_add_u256
+// CHECK-LABEL: func.func @wrapping_sub_u256

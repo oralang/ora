@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/operators/logical/logical_in_conditions.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @if_and
+// CHECK-LABEL: func.func @if_or
+// CHECK-LABEL: func.func @if_not
+// CHECK-LABEL: func.func @if_complex
+// CHECK-LABEL: func.func @if_nested_logic
+// CHECK-LABEL: func.func @if_comparison_and_logic
+// CHECK-LABEL: func.func @if_comparison_chain

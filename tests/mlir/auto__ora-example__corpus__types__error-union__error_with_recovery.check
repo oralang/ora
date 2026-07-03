@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/error-union/error_with_recovery.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @lookup
+// CHECK-LABEL: func.func @fresh_lookup
+// CHECK-LABEL: func.func @lookup_or_default
+// CHECK-LABEL: func.func @lookup_or_compute
+// CHECK-LABEL: func.func @store
+// CHECK-LABEL: func.func @set_default

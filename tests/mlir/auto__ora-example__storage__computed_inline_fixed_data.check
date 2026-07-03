@@ -1,0 +1,14 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/storage/computed_inline_fixed_data.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @savePair
+// CHECK-LABEL: func.func @accountSlot
+// CHECK-LABEL: func.func @writePair
+// CHECK-LABEL: func.func @std
+// CHECK-LABEL: func.func @erasePair
+// CHECK-LABEL: func.func @std
+// CHECK-LABEL: func.func @hasPair
+// CHECK-LABEL: func.func @std
+// CHECK-LABEL: func.func @total
+// CHECK-LABEL: func.func @safeSumPair
+// CHECK-LABEL: func.func @std

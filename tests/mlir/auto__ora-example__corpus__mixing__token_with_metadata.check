@@ -1,0 +1,14 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/mixing/token_with_metadata.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @initialize
+// CHECK-LABEL: func.func @decimals
+// CHECK-LABEL: func.func @total_supply
+// CHECK-LABEL: func.func @balance_of
+// CHECK-LABEL: func.func @transfer
+// CHECK-LABEL: func.func @approve
+// CHECK-LABEL: func.func @allowance
+// CHECK-LABEL: func.func @transfer_from
+// CHECK-LABEL: func.func @mint
+// CHECK-LABEL: func.func @pause
+// CHECK-LABEL: func.func @unpause

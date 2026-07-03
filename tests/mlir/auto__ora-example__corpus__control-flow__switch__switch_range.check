@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/control-flow/switch/switch_range.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @test_basic_ranges
+// CHECK-LABEL: func.func @test_range_expression
+// CHECK-LABEL: func.func @test_mixed_literal_range
+// CHECK-LABEL: func.func @test_small_ranges
+// CHECK-LABEL: func.func @test_range_with_compute

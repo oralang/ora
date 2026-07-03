@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/error/try_chain.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @step_a
+// CHECK-LABEL: func.func @step_b
+// CHECK-LABEL: func.func @step_c
+// CHECK-LABEL: func.func @run_all

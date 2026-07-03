@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/tuple/tuple_in_let.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @basic_destructure
+// CHECK-LABEL: func.func @destructure_from_fn
+// CHECK-LABEL: func.func @destructure_three
+// CHECK-LABEL: func.func @destructure_mixed
+// CHECK-LABEL: func.func @get_pair

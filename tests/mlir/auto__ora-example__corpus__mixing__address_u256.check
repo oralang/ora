@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/mixing/address_u256.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @set_balance
+// CHECK-LABEL: func.func @get_balance
+// CHECK-LABEL: func.func @transfer
+// CHECK-LABEL: func.func @mint
+// CHECK-LABEL: func.func @burn

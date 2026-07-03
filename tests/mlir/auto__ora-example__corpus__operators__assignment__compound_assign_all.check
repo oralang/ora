@@ -1,0 +1,14 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/operators/assignment/compound_assign_all.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @add_assign
+// CHECK-LABEL: func.func @sub_assign
+// CHECK-LABEL: func.func @mul_assign
+// CHECK-LABEL: func.func @div_assign
+// CHECK-LABEL: func.func @mod_assign
+// CHECK-LABEL: func.func @and_assign
+// CHECK-LABEL: func.func @or_assign
+// CHECK-LABEL: func.func @xor_assign
+// CHECK-LABEL: func.func @shl_assign
+// CHECK-LABEL: func.func @shr_assign
+// CHECK-LABEL: func.func @all_in_sequence

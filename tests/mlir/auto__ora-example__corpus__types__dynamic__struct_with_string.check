@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/dynamic/struct_with_string.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @setProfile
+// CHECK-LABEL: func.func @getName
+// CHECK-LABEL: func.func @getAge
+// CHECK-LABEL: func.func @updateName
+// CHECK-LABEL: func.func @updateAge

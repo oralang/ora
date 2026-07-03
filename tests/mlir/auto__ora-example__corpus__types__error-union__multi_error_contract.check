@@ -1,0 +1,20 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/error-union/multi_error_contract.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @init
+// CHECK-LABEL: func.func @require_owner
+// CHECK-LABEL: func.func @require_operator
+// CHECK-LABEL: func.func @require_not_paused
+// CHECK-LABEL: func.func @set_paused
+// CHECK-LABEL: func.func @add_operator
+// CHECK-LABEL: func.func @remove_operator
+// CHECK-LABEL: func.func @create_item
+// CHECK-LABEL: func.func @get_item
+// CHECK-LABEL: func.func @update_item
+// CHECK-LABEL: func.func @delete_item
+// CHECK-LABEL: func.func @transfer_item
+// CHECK-LABEL: func.func @safe_get_item
+// CHECK-LABEL: func.func @safe_create_item
+// CHECK-LABEL: func.func @get_item_count
+// CHECK-LABEL: func.func @is_operator
+// CHECK-LABEL: func.func @get_paused

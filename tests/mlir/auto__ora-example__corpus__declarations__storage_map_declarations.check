@@ -1,0 +1,21 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/declarations/storage_map_declarations.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @set_balance
+// CHECK-LABEL: func.func @get_balance
+// CHECK-LABEL: func.func @add_balance
+// CHECK-LABEL: func.func @set_approved
+// CHECK-LABEL: func.func @is_approved
+// CHECK-LABEL: func.func @set_owner
+// CHECK-LABEL: func.func @get_owner
+// CHECK-LABEL: func.func @set_flag
+// CHECK-LABEL: func.func @get_flag
+// CHECK-LABEL: func.func @approve
+// CHECK-LABEL: func.func @get_allowance
+// CHECK-LABEL: func.func @increase_allowance
+// CHECK-LABEL: func.func @decrease_allowance
+// CHECK-LABEL: func.func @grant_permission
+// CHECK-LABEL: func.func @revoke_permission
+// CHECK-LABEL: func.func @has_permission
+// CHECK-LABEL: func.func @transfer
+// CHECK-LABEL: func.func @transfer_from

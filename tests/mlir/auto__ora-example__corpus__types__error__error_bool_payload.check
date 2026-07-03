@@ -1,0 +1,6 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/error/error_bool_payload.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @check_access
+// CHECK-LABEL: func.func @grant_access
+// CHECK-LABEL: func.func @revoke_access

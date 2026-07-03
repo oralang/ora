@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/mixing/bitfield_in_map.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @set_flags
+// CHECK-LABEL: func.func @is_transferable
+// CHECK-LABEL: func.func @is_frozen
+// CHECK-LABEL: func.func @freeze
+// CHECK-LABEL: func.func @unfreeze
+// CHECK-LABEL: func.func @can_transfer
+// CHECK-LABEL: func.func @default_flags

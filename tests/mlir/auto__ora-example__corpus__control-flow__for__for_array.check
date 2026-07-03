@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/control-flow/for/for_array.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @test_array_sum
+// CHECK-LABEL: func.func @test_array_with_index
+// CHECK-LABEL: func.func @test_find_max
+// CHECK-LABEL: func.func @test_count_matching

@@ -1,0 +1,13 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/declarations/init_from_expression.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @arithmetic_init
+// CHECK-LABEL: func.func @helper
+// CHECK-LABEL: func.func @function_call_init
+// CHECK-LABEL: func.func @field_access_init
+// CHECK-LABEL: func.func @index_access_init
+// CHECK-LABEL: func.func @map_access_init
+// CHECK-LABEL: func.func @comparison_init
+// CHECK-LABEL: func.func @nested_expression_init
+// CHECK-LABEL: func.func @struct_init
+// CHECK-LABEL: func.func @var_from_expression

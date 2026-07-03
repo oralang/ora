@@ -1,0 +1,15 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/operators/arithmetic/div_mod_all_widths.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @div_u8
+// CHECK-LABEL: func.func @mod_u8
+// CHECK-LABEL: func.func @div_u16
+// CHECK-LABEL: func.func @mod_u16
+// CHECK-LABEL: func.func @div_u32
+// CHECK-LABEL: func.func @mod_u32
+// CHECK-LABEL: func.func @div_u64
+// CHECK-LABEL: func.func @mod_u64
+// CHECK-LABEL: func.func @div_u128
+// CHECK-LABEL: func.func @mod_u128
+// CHECK-LABEL: func.func @div_u256
+// CHECK-LABEL: func.func @mod_u256

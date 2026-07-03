@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/dynamic/struct_mixed_dynamic.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @setRecord
+// CHECK-LABEL: func.func @getLabel
+// CHECK-LABEL: func.func @getPayload
+// CHECK-LABEL: func.func @getValue
+// CHECK-LABEL: func.func @updateLabel
+// CHECK-LABEL: func.func @updatePayload
+// CHECK-LABEL: func.func @updateValue

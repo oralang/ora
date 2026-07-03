@@ -1,0 +1,6 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/encoding/signed_arithmetic.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @addSigned
+// CHECK-LABEL: func.func @subSigned
+// CHECK-LABEL: func.func @maxSigned

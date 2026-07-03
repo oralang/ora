@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/error-union/try_catch_basic.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @divide
+// CHECK-LABEL: func.func @safe_divide
+// CHECK-LABEL: func.func @divide_with_default
+// CHECK-LABEL: func.func @get_last_result

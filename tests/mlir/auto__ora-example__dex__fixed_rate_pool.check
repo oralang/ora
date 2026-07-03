@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/dex/fixed_rate_pool.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @deposit_a
+// CHECK-LABEL: func.func @deposit_b
+// CHECK-LABEL: func.func @quote
+// CHECK-LABEL: func.func @swap_a_for_b
+// CHECK-LABEL: func.func @balance_of_a
+// CHECK-LABEL: func.func @balance_of_b
+// CHECK-LABEL: func.func @reserves

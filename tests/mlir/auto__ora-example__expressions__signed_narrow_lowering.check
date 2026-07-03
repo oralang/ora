@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/expressions/signed_narrow_lowering.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @div_i8
+// CHECK-LABEL: func.func @rem_i16
+// CHECK-LABEL: func.func @lt_i8
+// CHECK-LABEL: func.func @shr_i16

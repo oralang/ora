@@ -1,0 +1,6 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/patterns/assert_message_selector.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @checked
+// CHECK-LABEL: func.func @checked_private
+// CHECK-LABEL: func.func @private_check

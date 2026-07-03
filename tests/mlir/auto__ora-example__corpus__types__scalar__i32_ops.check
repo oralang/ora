@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/scalar/i32_ops.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @arithmetic
+// CHECK-LABEL: func.func @wrapping
+// CHECK-LABEL: func.func @comparison
+// CHECK-LABEL: func.func @bitwise
+// CHECK-LABEL: func.func @assignment
+// CHECK-LABEL: func.func @storage_ops

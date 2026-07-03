@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/refinement/min_value_large.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @stake
+// CHECK-LABEL: func.func @setMinStake
+// CHECK-LABEL: func.func @getMinStake
+// CHECK-LABEL: func.func @isAboveMinimum
+// CHECK-LABEL: func.func @doubleStake
+// CHECK-LABEL: func.func @getTotalStaked

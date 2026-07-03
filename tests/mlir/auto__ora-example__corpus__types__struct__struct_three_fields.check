@@ -1,0 +1,6 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/struct/struct_three_fields.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @create
+// CHECK-LABEL: func.func @check_active
+// CHECK-LABEL: func.func @get_owner

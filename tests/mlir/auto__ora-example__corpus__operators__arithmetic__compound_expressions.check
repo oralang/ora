@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/operators/arithmetic/compound_expressions.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @chain_add_mul_sub_div
+// CHECK-LABEL: func.func @nested_parens
+// CHECK-LABEL: func.func @left_associative
+// CHECK-LABEL: func.func @mixed_precedence
+// CHECK-LABEL: func.func @mod_in_chain
+// CHECK-LABEL: func.func @multi_step

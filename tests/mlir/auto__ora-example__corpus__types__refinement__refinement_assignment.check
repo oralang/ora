@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/refinement/refinement_assignment.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @refinedToPlain
+// CHECK-LABEL: func.func @refinedToStorage
+// CHECK-LABEL: func.func @maxToPlain
+// CHECK-LABEL: func.func @rangeToPlain
+// CHECK-LABEL: func.func @nonzeroToPlain
+// CHECK-LABEL: func.func @refinedInArithmetic
+// CHECK-LABEL: func.func @chainedAssignment

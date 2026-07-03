@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/operators/arithmetic/sub_all_widths.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @sub_u8
+// CHECK-LABEL: func.func @sub_u16
+// CHECK-LABEL: func.func @sub_u32
+// CHECK-LABEL: func.func @sub_u64
+// CHECK-LABEL: func.func @sub_u128
+// CHECK-LABEL: func.func @sub_u256

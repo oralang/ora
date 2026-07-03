@@ -1,0 +1,16 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/mixing/multi_map_contract.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @set_balance
+// CHECK-LABEL: func.func @get_balance
+// CHECK-LABEL: func.func @set_name_id
+// CHECK-LABEL: func.func @get_name_id
+// CHECK-LABEL: func.func @set_permission
+// CHECK-LABEL: func.func @has_permission
+// CHECK-LABEL: func.func @set_score
+// CHECK-LABEL: func.func @get_score
+// CHECK-LABEL: func.func @set_pair_value
+// CHECK-LABEL: func.func @get_pair_value
+// CHECK-LABEL: func.func @set_config
+// CHECK-LABEL: func.func @get_config
+// CHECK-LABEL: func.func @complex_lookup

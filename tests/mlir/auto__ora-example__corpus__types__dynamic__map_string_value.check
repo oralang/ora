@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/dynamic/map_string_value.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @setName
+// CHECK-LABEL: func.func @getName
+// CHECK-LABEL: func.func @setSelfName
+// CHECK-LABEL: func.func @getSelfName

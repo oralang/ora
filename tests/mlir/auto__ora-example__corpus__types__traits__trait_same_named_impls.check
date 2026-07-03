@@ -1,0 +1,6 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/traits/trait_same_named_impls.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @PausableView
+// CHECK-LABEL: func.func @FrozenView
+// CHECK-LABEL: func.func @ok

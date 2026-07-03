@@ -1,0 +1,6 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/dynamic/array_of_bytes.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @setChunk
+// CHECK-LABEL: func.func @getChunk
+// CHECK-LABEL: func.func @setBothChunks

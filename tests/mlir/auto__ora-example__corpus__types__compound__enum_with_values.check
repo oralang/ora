@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/compound/enum_with_values.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @set_standard
+// CHECK-LABEL: func.func @get_standard
+// CHECK-LABEL: func.func @standard_name
+// CHECK-LABEL: func.func @is_nft_standard
+// CHECK-LABEL: func.func @set_priority
+// CHECK-LABEL: func.func @priority_multiplier
+// CHECK-LABEL: func.func @is_urgent
+// CHECK-LABEL: func.func @compare_priority

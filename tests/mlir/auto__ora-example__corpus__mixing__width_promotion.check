@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/mixing/width_promotion.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @u8_add_to_u256
+// CHECK-LABEL: func.func @u16_mul_u32_to_u256
+// CHECK-LABEL: func.func @u8_to_u64
+// CHECK-LABEL: func.func @u16_to_u128
+// CHECK-LABEL: func.func @u32_to_u256
+// CHECK-LABEL: func.func @chain_widen
+// CHECK-LABEL: func.func @multi_width_sum
+// CHECK-LABEL: func.func @store_promoted

@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/control-flow/mixed_control_flow.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @test_if_in_while
+// CHECK-LABEL: func.func @test_while_in_if
+// CHECK-LABEL: func.func @test_switch_in_while
+// CHECK-LABEL: func.func @test_while_in_switch
+// CHECK-LABEL: func.func @test_triple_mix
+// CHECK-LABEL: func.func @test_for_in_if_in_switch

@@ -1,0 +1,23 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/declarations/inline_functions.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @set
+// CHECK-LABEL: func.func @save
+// CHECK-LABEL: func.func @identity
+// CHECK-LABEL: func.func @get
+// CHECK-LABEL: func.func @echo
+// CHECK-LABEL: func.func @chooseValue
+// CHECK-LABEL: func.func @choose
+// CHECK-LABEL: func.func @maybeSet
+// CHECK-LABEL: func.func @storeUnless
+// CHECK-LABEL: func.func @nestedChoice
+// CHECK-LABEL: func.func @chooseNested
+// CHECK-LABEL: func.func @modeOne
+// CHECK-LABEL: func.func @modeTwo
+// CHECK-LABEL: func.func @implicitOne
+// CHECK-LABEL: func.func @implicitTwo
+// CHECK-LABEL: func.func @literalFlagTrue
+// CHECK-LABEL: func.func @literalFlagFalse
+// CHECK-LABEL: func.func @structured
+// CHECK-LABEL: func.func @structuredChoice
+// CHECK-LABEL: func.func @loopThree

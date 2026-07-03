@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/declarations/declaration_in_if.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @let_in_if
+// CHECK-LABEL: func.func @let_in_both_branches
+// CHECK-LABEL: func.func @var_in_if
+// CHECK-LABEL: func.func @multi_decl_in_if
+// CHECK-LABEL: func.func @nested_if_decl
+// CHECK-LABEL: func.func @if_with_storage
+// CHECK-LABEL: func.func @bool_branch

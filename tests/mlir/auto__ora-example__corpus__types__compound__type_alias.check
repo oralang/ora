@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/compound/type_alias.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @scalar
+// CHECK-LABEL: func.func @pair_left
+// CHECK-LABEL: func.func @nested_left
+// CHECK-LABEL: func.func @fixed_array_first
+// CHECK-LABEL: func.func @generic_array_second
+// CHECK-LABEL: func.func @bounded_to_plain
+// CHECK-LABEL: func.func @store_pair
+// CHECK-LABEL: func.func @load_pair_left

@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/vault/03_refinements.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @deposit
+// CHECK-LABEL: func.func @withdraw
+// CHECK-LABEL: func.func @balanceOf
+// CHECK-LABEL: func.func @getTotalDeposits

@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/declarations/let_all_types.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @unsigned_integers
+// CHECK-LABEL: func.func @signed_integers
+// CHECK-LABEL: func.func @boolean_type
+// CHECK-LABEL: func.func @address_type
+// CHECK-LABEL: func.func @string_type
+// CHECK-LABEL: func.func @bytes_type
+// CHECK-LABEL: func.func @all_together

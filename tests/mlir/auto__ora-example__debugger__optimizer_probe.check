@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/debugger/optimizer_probe.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @init
+// CHECK-LABEL: func.func @normalize
+// CHECK-LABEL: func.func @rewardBoost
+// CHECK-LABEL: func.func @simulate
+// CHECK-LABEL: func.func @snapshot

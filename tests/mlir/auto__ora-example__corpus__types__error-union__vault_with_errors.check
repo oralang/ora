@@ -1,0 +1,13 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/error-union/vault_with_errors.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @init
+// CHECK-LABEL: func.func @require_not_locked
+// CHECK-LABEL: func.func @require_owner
+// CHECK-LABEL: func.func @deposit
+// CHECK-LABEL: func.func @withdraw
+// CHECK-LABEL: func.func @emergency_withdraw_all
+// CHECK-LABEL: func.func @balance_of
+// CHECK-LABEL: func.func @get_total_deposited
+// CHECK-LABEL: func.func @safe_deposit
+// CHECK-LABEL: func.func @safe_withdraw

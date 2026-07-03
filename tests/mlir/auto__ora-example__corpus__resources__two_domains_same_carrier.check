@@ -1,0 +1,5 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/resources/two_domains_same_carrier.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @mint_shares
+// CHECK-LABEL: func.func @mint_credits

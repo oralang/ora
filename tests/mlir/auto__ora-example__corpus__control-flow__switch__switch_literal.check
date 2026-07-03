@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/control-flow/switch/switch_literal.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @test_int_literals
+// CHECK-LABEL: func.func @test_bool_literal
+// CHECK-LABEL: func.func @test_single_arm
+// CHECK-LABEL: func.func @test_many_arms
+// CHECK-LABEL: func.func @test_block_bodies

@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/comptime/comptime_functions.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @square
+// CHECK-LABEL: func.func @double
+// CHECK-LABEL: func.func @test_comptime_fn
+// CHECK-LABEL: func.func @test_comptime_params

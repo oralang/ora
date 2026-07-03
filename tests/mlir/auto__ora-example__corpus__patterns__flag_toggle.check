@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/patterns/flag_toggle.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @toggle
+// CHECK-LABEL: func.func @turnOn
+// CHECK-LABEL: func.func @turnOff
+// CHECK-LABEL: func.func @isEnabled

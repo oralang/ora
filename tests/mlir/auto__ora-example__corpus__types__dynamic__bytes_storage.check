@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/dynamic/bytes_storage.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @setPayload
+// CHECK-LABEL: func.func @setSignature
+// CHECK-LABEL: func.func @setMetadata
+// CHECK-LABEL: func.func @getPayload
+// CHECK-LABEL: func.func @getSignature
+// CHECK-LABEL: func.func @getMetadata
+// CHECK-LABEL: func.func @setAll
+// CHECK-LABEL: func.func @copyPayloadToMetadata

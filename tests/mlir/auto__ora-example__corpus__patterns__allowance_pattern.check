@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/patterns/allowance_pattern.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @approve
+// CHECK-LABEL: func.func @increaseAllowance
+// CHECK-LABEL: func.func @decreaseAllowance
+// CHECK-LABEL: func.func @allowance
+// CHECK-LABEL: func.func @spend

@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/control-flow/while/while_continue.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @test_skip_evens
+// CHECK-LABEL: func.func @test_skip_value
+// CHECK-LABEL: func.func @test_continue_multi_condition
+// CHECK-LABEL: func.func @test_continue_with_pre_increment

@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/storage/computed_offset_wrap_guard.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @payloadSlot
+// CHECK-LABEL: func.func @writeZero
+// CHECK-LABEL: func.func @std
+// CHECK-LABEL: func.func @readAt
+// CHECK-LABEL: func.func @std

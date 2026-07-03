@@ -1,0 +1,21 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/comptime/comptime_edge_cases.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @add
+// CHECK-LABEL: func.func @mul
+// CHECK-LABEL: func.func @sum_of_squares
+// CHECK-LABEL: func.func @test_transitive
+// CHECK-LABEL: func.func @test_recursive
+// CHECK-LABEL: func.func @clamp
+// CHECK-LABEL: func.func @test_clamp
+// CHECK-LABEL: func.func @power
+// CHECK-LABEL: func.func @test_power
+// CHECK-LABEL: func.func @read_counter
+// CHECK-LABEL: func.func @test_impure
+// CHECK-LABEL: func.func @test_mixed
+// CHECK-LABEL: func.func @test_comptime_param_mixed
+// CHECK-LABEL: func.func @align_up__32
+// CHECK-LABEL: func.func @inc
+// CHECK-LABEL: func.func @test_deep_nesting
+// CHECK-LABEL: func.func @is_power_of_two
+// CHECK-LABEL: func.func @test_bool_comptime

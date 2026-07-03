@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/control-flow/match/result_helpers.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @choose_u256
+// CHECK-LABEL: func.func @choose_bytes
+// CHECK-LABEL: func.func @describe
+// CHECK-LABEL: func.func @std
+// CHECK-LABEL: func.func @std
+// CHECK-LABEL: func.func @std
+// CHECK-LABEL: func.func @bytes_or_self
+// CHECK-LABEL: func.func @std

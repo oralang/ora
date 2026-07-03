@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/comptime/abi_decode_dynamic.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @string_first_byte
+// CHECK-LABEL: func.func @bytes_edge_sum
+// CHECK-LABEL: func.func @mixed_tuple_sum
+// CHECK-LABEL: func.func @dynamic_array_sum
+// CHECK-LABEL: func.func @dynamic_string_array_sum
+// CHECK-LABEL: func.func @nested_dynamic_array_sum
+// CHECK-LABEL: func.func @dynamic_struct_sum
+// CHECK-LABEL: func.func @malformed_offset_is_err

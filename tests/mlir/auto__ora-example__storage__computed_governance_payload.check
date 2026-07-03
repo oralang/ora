@@ -1,0 +1,14 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/storage/computed_governance_payload.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @payloadSlot
+// CHECK-LABEL: func.func @save
+// CHECK-LABEL: func.func @std
+// CHECK-LABEL: func.func @clear
+// CHECK-LABEL: func.func @std
+// CHECK-LABEL: func.func @hasPayload
+// CHECK-LABEL: func.func @std
+// CHECK-LABEL: func.func @action
+// CHECK-LABEL: func.func @std
+// CHECK-LABEL: func.func @value
+// CHECK-LABEL: func.func @eta

@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/resources/many_places_same_domain.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @issue_user
+// CHECK-LABEL: func.func @collect_fee
+// CHECK-LABEL: func.func @fund_reserve
+// CHECK-LABEL: func.func @balanceOf
+// CHECK-LABEL: func.func @reserveBalance
+// CHECK-LABEL: func.func @feesBalance

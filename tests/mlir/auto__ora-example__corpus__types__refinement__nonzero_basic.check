@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/refinement/nonzero_basic.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @setOwner
+// CHECK-LABEL: func.func @getOwner
+// CHECK-LABEL: func.func @setAdmin
+// CHECK-LABEL: func.func @getAdmin
+// CHECK-LABEL: func.func @isOwner
+// CHECK-LABEL: func.func @isAdmin
+// CHECK-LABEL: func.func @ownerEqualsAdmin
+// CHECK-LABEL: func.func @senderIsOwner

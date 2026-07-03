@@ -1,0 +1,6 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/comptime/abi_builtins.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @transfer_selector
+// CHECK-LABEL: func.func @transfer_signature
+// CHECK-LABEL: func.func @transfer_hash

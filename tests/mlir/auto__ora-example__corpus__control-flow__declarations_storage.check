@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/control-flow/declarations_storage.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @init
+// CHECK-LABEL: func.func @get_counter
+// CHECK-LABEL: func.func @increment
+// CHECK-LABEL: func.func @add_to_counter
+// CHECK-LABEL: func.func @reset
+// CHECK-LABEL: func.func @set_active
+// CHECK-LABEL: func.func @compute_locally

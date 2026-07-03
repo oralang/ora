@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/error-union/result_constructors.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @make_ok
+// CHECK-LABEL: func.func @make_err
+// CHECK-LABEL: func.func @unwrap_or_zero
+// CHECK-LABEL: func.func @consume

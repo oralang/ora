@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/declarations/inline_refinement_storage.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @deposit
+// CHECK-LABEL: func.func @amountValue__inline__amount_refined_MinValue_T_1
+// CHECK-LABEL: func.func @checkedAdd
+// CHECK-LABEL: func.func @balanceOf
+// CHECK-LABEL: func.func @totalDeposited

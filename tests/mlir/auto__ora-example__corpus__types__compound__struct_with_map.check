@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/compound/struct_with_map.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @create_account
+// CHECK-LABEL: func.func @deposit
+// CHECK-LABEL: func.func @get_balance
+// CHECK-LABEL: func.func @get_nonce
+// CHECK-LABEL: func.func @is_active
+// CHECK-LABEL: func.func @deactivate
+// CHECK-LABEL: func.func @register_name
+// CHECK-LABEL: func.func @lookup_name

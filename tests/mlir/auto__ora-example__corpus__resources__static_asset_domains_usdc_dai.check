@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/resources/static_asset_domains_usdc_dai.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @issue_usdc
+// CHECK-LABEL: func.func @issue_dai
+// CHECK-LABEL: func.func @usdcOf
+// CHECK-LABEL: func.func @daiOf

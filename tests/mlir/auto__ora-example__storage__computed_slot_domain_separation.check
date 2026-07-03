@@ -1,0 +1,17 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/storage/computed_slot_domain_separation.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @rootSlot
+// CHECK-LABEL: func.func @ownerSlot
+// CHECK-LABEL: func.func @epochSlot
+// CHECK-LABEL: func.func @writeRoot
+// CHECK-LABEL: func.func @std
+// CHECK-LABEL: func.func @writeOwner
+// CHECK-LABEL: func.func @writeEpoch
+// CHECK-LABEL: func.func @writeNormalStorage
+// CHECK-LABEL: func.func @readRoot
+// CHECK-LABEL: func.func @std
+// CHECK-LABEL: func.func @readOwner
+// CHECK-LABEL: func.func @readEpoch
+// CHECK-LABEL: func.func @readMarker
+// CHECK-LABEL: func.func @readBalance

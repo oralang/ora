@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/refinement/nonzero_multiple.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @transferOwnership
+// CHECK-LABEL: func.func @areSame
+// CHECK-LABEL: func.func @areDifferent
+// CHECK-LABEL: func.func @threeParams
+// CHECK-LABEL: func.func @setOwnerChecked

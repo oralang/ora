@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/resources/signed_resource_guards.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @mint
+// CHECK-LABEL: func.func @settle
+// CHECK-LABEL: func.func @debtOf
+// CHECK-LABEL: func.func @settledTotal

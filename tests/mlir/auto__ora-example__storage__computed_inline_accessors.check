@@ -1,0 +1,15 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/storage/computed_inline_accessors.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @save
+// CHECK-LABEL: func.func @entrySlot
+// CHECK-LABEL: func.func @writeHeader
+// CHECK-LABEL: func.func @std
+// CHECK-LABEL: func.func @clear
+// CHECK-LABEL: func.func @amount
+// CHECK-LABEL: func.func @readWord__inline__offset_0
+// CHECK-LABEL: func.func @std
+// CHECK-LABEL: func.func @status
+// CHECK-LABEL: func.func @readWord__inline__offset_1
+// CHECK-LABEL: func.func @checksum
+// CHECK-LABEL: func.func @readWord__inline__offset_2

@@ -1,0 +1,32 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/declarations/storage_var_all_types.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @set_u8
+// CHECK-LABEL: func.func @get_u8
+// CHECK-LABEL: func.func @set_u16
+// CHECK-LABEL: func.func @get_u16
+// CHECK-LABEL: func.func @set_u32
+// CHECK-LABEL: func.func @get_u32
+// CHECK-LABEL: func.func @set_u64
+// CHECK-LABEL: func.func @get_u64
+// CHECK-LABEL: func.func @set_u128
+// CHECK-LABEL: func.func @get_u128
+// CHECK-LABEL: func.func @set_u256
+// CHECK-LABEL: func.func @get_u256
+// CHECK-LABEL: func.func @set_i8
+// CHECK-LABEL: func.func @get_i8
+// CHECK-LABEL: func.func @set_i16
+// CHECK-LABEL: func.func @get_i16
+// CHECK-LABEL: func.func @set_i32
+// CHECK-LABEL: func.func @get_i32
+// CHECK-LABEL: func.func @set_i64
+// CHECK-LABEL: func.func @get_i64
+// CHECK-LABEL: func.func @set_i128
+// CHECK-LABEL: func.func @get_i128
+// CHECK-LABEL: func.func @set_i256
+// CHECK-LABEL: func.func @get_i256
+// CHECK-LABEL: func.func @set_bool
+// CHECK-LABEL: func.func @get_bool
+// CHECK-LABEL: func.func @set_addr
+// CHECK-LABEL: func.func @get_addr
+// CHECK-LABEL: func.func @set_all

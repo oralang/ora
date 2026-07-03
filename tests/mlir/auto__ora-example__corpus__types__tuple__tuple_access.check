@@ -1,0 +1,6 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/tuple/tuple_access.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @access_two
+// CHECK-LABEL: func.func @access_in_expression
+// CHECK-LABEL: func.func @access_bool

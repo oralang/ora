@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/operators/comparison/eq_ne_all_types.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @eq_u256
+// CHECK-LABEL: func.func @ne_u256
+// CHECK-LABEL: func.func @eq_u8
+// CHECK-LABEL: func.func @ne_u8
+// CHECK-LABEL: func.func @eq_bool
+// CHECK-LABEL: func.func @ne_bool
+// CHECK-LABEL: func.func @eq_address
+// CHECK-LABEL: func.func @ne_address

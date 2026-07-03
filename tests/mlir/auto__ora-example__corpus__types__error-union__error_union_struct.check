@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/error-union/error_union_struct.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @get_token_balance
+// CHECK-LABEL: func.func @withdraw_token
+// CHECK-LABEL: func.func @deposit_token
+// CHECK-LABEL: func.func @safe_get_amount

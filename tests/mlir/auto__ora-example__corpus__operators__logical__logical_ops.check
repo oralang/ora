@@ -1,0 +1,13 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/operators/logical/logical_ops.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @and_op
+// CHECK-LABEL: func.func @or_op
+// CHECK-LABEL: func.func @not_op
+// CHECK-LABEL: func.func @and_short_circuit
+// CHECK-LABEL: func.func @or_short_circuit
+// CHECK-LABEL: func.func @double_negation
+// CHECK-LABEL: func.func @chained_and
+// CHECK-LABEL: func.func @chained_or
+// CHECK-LABEL: func.func @mixed_and_or
+// CHECK-LABEL: func.func @mixed_with_not

@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/scalar/u256_literal_boundaries.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @max_hex
+// CHECK-LABEL: func.func @max_decimal
+// CHECK-LABEL: func.func @max_is_positive
+// CHECK-LABEL: func.func @parameter_max_is_positive
+// CHECK-LABEL: func.func @wraps_to_zero

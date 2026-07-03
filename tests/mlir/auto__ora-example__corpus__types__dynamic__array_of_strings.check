@@ -1,0 +1,6 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/dynamic/array_of_strings.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @setTag
+// CHECK-LABEL: func.func @getTag
+// CHECK-LABEL: func.func @setAllTags
