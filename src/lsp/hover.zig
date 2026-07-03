@@ -33,6 +33,7 @@ pub fn hoverAtIndex(
     }
 
     if (try builtinHoverAt(allocator, source, position)) |hover| return hover;
+    if (try directiveArgHoverAt(allocator, source, position)) |hover| return hover;
     if (try keywordHoverAt(allocator, source, position)) |hover| return hover;
     if (try resourceTypeHoverAt(allocator, source, position)) |hover| return hover;
     return refinementHoverAt(allocator, source, position);
@@ -181,6 +182,33 @@ fn builtinHoverAt(allocator: Allocator, source: []const u8, position: frontend.P
     const value = try std.fmt.allocPrint(allocator, "```ora\n{s}\n```\n---\n{s}", .{ entry.signature, markdown });
     allocator.free(markdown);
     return .{ .contents = value, .range = word.range };
+}
+
+/// Hover on a keyword-like state inside a directive builtin's parens,
+/// e.g. `cold` in `@callHint(cold)`. The value set and docs come from the
+/// builtin registry, so this stays in lockstep with the language enum.
+fn directiveArgHoverAt(allocator: Allocator, source: []const u8, position: frontend.Position) !?Hover {
+    const word = wordAtPosition(source, position) orelse return null;
+    const line_start = lineStartOffset(source, position.line) orelse return null;
+    var i = line_start + @as(usize, @intCast(word.range.start.character));
+    while (i > line_start and (source[i - 1] == ' ' or source[i - 1] == '\t')) i -= 1;
+    if (i == line_start or source[i - 1] != '(') return null;
+    i -= 1;
+    while (i > line_start and (source[i - 1] == ' ' or source[i - 1] == '\t')) i -= 1;
+    const name_end = i;
+    while (i > line_start and isIdentChar(source[i - 1])) i -= 1;
+    if (i == name_end or i == line_start or source[i - 1] != '@') return null;
+    const entry = builtin_docs.entryForName(source[i..name_end]) orelse return null;
+    for (entry.arg_values) |value| {
+        if (!std.mem.eql(u8, value.name, word.text)) continue;
+        const contents = try std.fmt.allocPrint(
+            allocator,
+            "```ora\n@{s}({s})\n```\n---\n{s}",
+            .{ entry.name, value.name, value.documentation },
+        );
+        return .{ .contents = contents, .range = word.range };
+    }
+    return null;
 }
 
 fn resourceTypeHoverAt(allocator: Allocator, source: []const u8, position: frontend.Position) !?Hover {

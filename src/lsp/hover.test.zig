@@ -31,6 +31,53 @@ test "lsp hover: returns function signature at function name" {
     try testing.expect(std.mem.indexOf(u8, value.contents, "fn deposit(amount: u256) -> u256") != null);
 }
 
+test "lsp hover: explains a callHint state inside the directive parens" {
+    const source =
+        \\contract C {
+        \\    storage var x: u256;
+        \\    pub fn bump() {
+        \\        @callHint(cold);
+        \\        x = 1;
+        \\    }
+        \\}
+    ;
+
+    // Position on "cold" inside the parens of @callHint(cold).
+    const maybe_hover = try cachedHover(source, .{
+        .line = 3,
+        .character = 19,
+    });
+    try testing.expect(maybe_hover != null);
+
+    var value = maybe_hover.?;
+    defer value.deinit(testing.allocator);
+
+    try testing.expect(std.mem.indexOf(u8, value.contents, "@callHint(cold)") != null);
+    try testing.expect(std.mem.indexOf(u8, value.contents, "excluded from the hot-set count") != null);
+}
+
+test "lsp hover: callHint state name outside directive parens gets no state hover" {
+    const source =
+        \\contract C {
+        \\    storage var cold: u256;
+        \\    pub fn bump() {
+        \\        cold = 1;
+        \\    }
+        \\}
+    ;
+
+    // Position on the storage variable "cold" — must not claim directive docs.
+    const maybe_hover = try cachedHover(source, .{
+        .line = 3,
+        .character = 9,
+    });
+    if (maybe_hover) |*value_const| {
+        var value = value_const.*;
+        defer value.deinit(testing.allocator);
+        try testing.expect(std.mem.indexOf(u8, value.contents, "hot-set count") == null);
+    }
+}
+
 test "lsp hover: indexed path uses caller-owned semantic index" {
     const source =
         \\contract Wallet {

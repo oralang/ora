@@ -58,6 +58,13 @@ pub fn completionAtIndex(
 
     const prefix = identifierPrefixAtPosition(source, position);
 
+    // Inside the parens of a directive builtin with a closed argument set
+    // (e.g. `@callHint(<cursor>`), offer exactly those states — nothing else
+    // is valid there.
+    if (directiveArgContext(source, position, prefix)) |entry| {
+        return directiveArgCompletion(allocator, prefix, entry);
+    }
+
     var seen = std.StringHashMap(void).init(allocator);
     defer seen.deinit();
 
@@ -181,6 +188,41 @@ fn symbolDetailAlloc(allocator: Allocator, symbol: semantic_index.Symbol) !?[]u8
 
 fn isInlineFunction(symbol: semantic_index.Symbol) bool {
     return symbol.is_inline and (symbol.kind == .function or symbol.kind == .method);
+}
+
+fn directiveArgContext(source: []const u8, position: frontend.Position, prefix: []const u8) ?builtin_docs.Entry {
+    const cursor = positionToByteOffsetOnLine(source, position);
+    if (cursor < prefix.len) return null;
+    var i = cursor - prefix.len;
+    while (i > 0 and (source[i - 1] == ' ' or source[i - 1] == '\t')) i -= 1;
+    if (i == 0 or source[i - 1] != '(') return null;
+    i -= 1;
+    while (i > 0 and (source[i - 1] == ' ' or source[i - 1] == '\t')) i -= 1;
+    const name_end = i;
+    while (i > 0 and isIdentifierContinue(source[i - 1])) i -= 1;
+    if (i == name_end or i == 0 or source[i - 1] != '@') return null;
+    const entry = builtin_docs.entryForName(source[i..name_end]) orelse return null;
+    if (entry.arg_values.len == 0) return null;
+    return entry;
+}
+
+fn directiveArgCompletion(allocator: Allocator, prefix: []const u8, entry: builtin_docs.Entry) ![]Item {
+    var items = std.ArrayList(Item).empty;
+    errdefer {
+        for (items.items) |*item| item.deinit(allocator);
+        items.deinit(allocator);
+    }
+    for (entry.arg_values) |value| {
+        if (!builtin_docs.matchesPrefix(value.name, prefix)) continue;
+        try items.append(allocator, .{
+            .label = try allocator.dupe(u8, value.name),
+            .detail = try std.fmt.allocPrint(allocator, "@{s} state", .{entry.name}),
+            .documentation = try allocator.dupe(u8, value.documentation),
+            .kind = .enum_member,
+        });
+    }
+    std.sort.heap(Item, items.items, {}, lessItemByLabel);
+    return items.toOwnedSlice(allocator);
 }
 
 pub fn isDotTrigger(trigger_char: ?[]const u8, source: []const u8, position: frontend.Position) bool {

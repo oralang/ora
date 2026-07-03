@@ -70,6 +70,49 @@ test "lsp completion: includes keyword suggestions by prefix" {
     try testing.expect(hasLabel(items, "return"));
 }
 
+test "lsp completion: directive argument position offers exactly the callHint states" {
+    const source =
+        \\contract C {
+        \\    storage var x: u256;
+        \\    pub fn bump() {
+        \\        @callHint(
+        \\        x = 1;
+        \\    }
+        \\}
+    ;
+
+    const position = try positionAfterNth(source, "@callHint(", 0);
+
+    const items = try completionItems(source, position, null);
+    defer completion.deinitItems(testing.allocator, items);
+
+    try testing.expectEqual(@as(usize, 4), items.len);
+    try testing.expect(hasLabel(items, "likely"));
+    try testing.expect(hasLabel(items, "unlikely"));
+    try testing.expect(hasLabel(items, "cold"));
+    try testing.expect(hasLabel(items, "none"));
+}
+
+test "lsp completion: directive argument prefix narrows the state list" {
+    const source =
+        \\contract C {
+        \\    storage var x: u256;
+        \\    pub fn bump() {
+        \\        @callHint(co
+        \\        x = 1;
+        \\    }
+        \\}
+    ;
+
+    const position = try positionAfterNth(source, "@callHint(co", 0);
+
+    const items = try completionItems(source, position, null);
+    defer completion.deinitItems(testing.allocator, items);
+
+    try testing.expectEqual(@as(usize, 1), items.len);
+    try testing.expect(hasLabel(items, "cold"));
+}
+
 test "lsp completion: includes symbols from semantic index" {
     const source =
         \\pub fn helper(x: u256) -> u256 { return x; }

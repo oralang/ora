@@ -52,7 +52,38 @@ pub const Entry = struct {
     signature: []const u8,
     documentation: []const u8,
     example: []const u8,
+    /// Closed argument-value set for directive builtins whose argument is a
+    /// keyword-like state (e.g. @callHint). Drives LSP completion and hover
+    /// in argument position; empty for value-taking builtins.
+    arg_values: []const ArgValue = &.{},
 };
+
+pub const ArgValue = struct {
+    name: []const u8,
+    documentation: []const u8,
+};
+
+pub const call_hint_states = [_]ArgValue{
+    .{ .name = "likely", .documentation = "High call volume: candidate for the hot dispatch prefix (1-3 exact selector checks). Also legitimate on views that other contracts read on-chain via staticcall — they pay dispatch gas even though eth_call does not." },
+    .{ .name = "none", .documentation = "Default; identical to writing no hint. The dispatcher uses its heuristic: state-mutating functions ahead of read-only ones, declaration order within each class." },
+    .{ .name = "unlikely", .documentation = "Low call volume: sorted behind unhinted functions of its class." },
+    .{ .name = "cold", .documentation = "Almost never called (admin, migration, emergency paths): sorted last and excluded from the hot-set count, so demoting rare setters lets transfer-shaped contracts keep the hot-prefix split." },
+};
+
+comptime {
+    // Keep the LSP-facing state list in lockstep with the language enum —
+    // a state added to one but not the other must not compile.
+    const CallHint = @import("ast/nodes.zig").CallHint;
+    const fields = @typeInfo(CallHint).@"enum".fields;
+    if (call_hint_states.len != fields.len) @compileError("call_hint_states must cover every ast.nodes.CallHint state");
+    for (fields) |field| {
+        var found = false;
+        for (call_hint_states) |state| {
+            if (std.mem.eql(u8, state.name, field.name)) found = true;
+        }
+        if (!found) @compileError("call_hint_states missing CallHint state: " ++ field.name);
+    }
+}
 
 pub const entries = [_]Entry{
     .{ .name = "abiDecode", .kind = .abi_decode, .signature = "@abiDecode(T, bytes) -> Result<T, AbiDecodeError>", .documentation = "Decode ABI bytes into a typed value and report strict decoding errors.", .example = "const decoded = @abiDecode(u256, payload);" },
@@ -61,7 +92,7 @@ pub const entries = [_]Entry{
     .{ .name = "abiSignature", .kind = .abi_signature, .signature = "@abiSignature(function) -> string", .documentation = "Return the canonical ABI signature for a function reference.", .example = "const sig = @abiSignature(Token.transfer);" },
     .{ .name = "addWithOverflow", .kind = .add_with_overflow, .signature = "@addWithOverflow(lhs, rhs) -> (value, overflow)", .documentation = "Add two integers and return both the wrapped result and overflow flag.", .example = "const wrapped = @addWithOverflow(a, b);" },
     .{ .name = "bitCast", .kind = .bit_cast, .signature = "@bitCast(T, value) -> T", .documentation = "Reinterpret a value as another type with the same bit representation.", .example = "const raw = @bitCast(u256, value);" },
-    .{ .name = "callHint", .kind = .call_hint, .signature = "@callHint(hint) void", .documentation = "Hint the expected call frequency of a public contract function (likely, unlikely, cold, or none). Must be the function body's first statement; re-orders selector dispatch for gas and never changes behavior.", .example = "@callHint(likely);" },
+    .{ .name = "callHint", .kind = .call_hint, .signature = "@callHint(hint) void", .documentation = "Hint the expected call frequency of a public contract function (likely, unlikely, cold, or none). Must be the function body's first statement; re-orders selector dispatch for gas and never changes behavior.", .example = "@callHint(likely);", .arg_values = &call_hint_states },
     .{ .name = "cast", .kind = .cast, .signature = "@cast(T, value) -> T", .documentation = "Convert a value to a target type using Ora's checked conversion rules.", .example = "const wide = @cast(u256, small);" },
     .{ .name = "chainId", .kind = .chain_id, .signature = "@chainId() -> u256", .documentation = "Return the current EVM chain id.", .example = "const id = @chainId();" },
     .{ .name = "compileError", .kind = .compile_error, .signature = "@compileError(message) -> noreturn", .documentation = "Emit a compile-time error with the provided message.", .example = "@compileError(\"unsupported type\");" },
