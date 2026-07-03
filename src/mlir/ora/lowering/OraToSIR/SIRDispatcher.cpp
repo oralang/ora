@@ -2355,7 +2355,13 @@ namespace mlir
                             break;
                         ++likelyCount;
                     }
-                    size_t hotCount = likelyCount;
+                    // Cap the hot switch at 3 checks: beyond that, chain
+                    // position costs approach table cost and the split stops
+                    // paying. Overflow likely fns keep their hint rank and
+                    // lead the cold switch instead, which matters exactly
+                    // when the cold layer routes linear and is harmless when
+                    // the uniform planner tables it.
+                    size_t hotCount = std::min<size_t>(likelyCount, 3);
                     if (hotCount == 0)
                     {
                         for (auto &info : pubFuncs)

@@ -7569,6 +7569,63 @@ test "explicit callHint likely set splits even with a small cold remainder" {
     });
 }
 
+test "callHint likely overflow caps the hot switch and leads the cold layer" {
+    // Five likely fns: the hot switch takes the first three by declaration;
+    // the other two keep their hint rank and head the cold switch, ahead of
+    // every unhinted view.
+    var source: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer source.deinit();
+    try source.writer.writeAll(
+        \\contract HintOverflow {
+        \\    storage var x: u256;
+        \\
+    );
+    for (0..5) |i| {
+        try source.writer.print(
+            \\    pub fn h{d}(v: u256) {{
+            \\        @callHint(likely);
+            \\        x = x + v + {d};
+            \\    }}
+            \\
+        , .{ i, i });
+    }
+    for (0..14) |i| {
+        try source.writer.print(
+            \\    pub fn r{d}() -> u256 {{
+            \\        return {d};
+            \\    }}
+            \\
+        , .{ i, 600 + i });
+    }
+    try source.writer.writeAll("}\n");
+
+    var compilation = try compileText(source.written());
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const main_fn = try functionSlice(rendered, "main");
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, main_fn, "switch selector"));
+    const hot_end = std.mem.indexOf(u8, main_fn, "default => @cold_dispatch") orelse return error.TestUnexpectedResult;
+    const hot_slice = main_fn[0..hot_end];
+    // Exactly three hot cases: h0, h1, h2.
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, hot_slice, "=> @h"));
+    // Overflow likely fns h3/h4 appear right after the cold switch opens,
+    // before any view.
+    const cold_slice = main_fn[hot_end..];
+    const h3_pos = std.mem.indexOf(u8, cold_slice, "=> @h3_") orelse return error.TestUnexpectedResult;
+    const h4_pos = std.mem.indexOf(u8, cold_slice, "=> @h4_") orelse return error.TestUnexpectedResult;
+    const first_view_pos = std.mem.indexOf(u8, cold_slice, "=> @r0_") orelse return error.TestUnexpectedResult;
+    try testing.expect(h3_pos < first_view_pos);
+    try testing.expect(h4_pos < first_view_pos);
+}
+
 test "OraToSIR keeps private scalar helper calls word-shaped" {
     const source_text =
         \\contract PrivateScalarHelper {
