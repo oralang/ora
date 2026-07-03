@@ -291,6 +291,15 @@ fn runProcess(allocator: std.mem.Allocator, argv: []const []const u8) !std.proce
     });
 }
 
+fn leanPathEnvArgForTest(allocator: std.mem.Allocator) ![]const u8 {
+    const inherited_path = if (std.c.getenv("PATH")) |path| std.mem.span(path) else "/usr/bin:/bin:/opt/homebrew/bin";
+    if (std.c.getenv("HOME")) |home| {
+        const home_slice = std.mem.span(home);
+        return try std.fmt.allocPrint(allocator, "PATH={s}/.elan/bin:{s}", .{ home_slice, inherited_path });
+    }
+    return try std.fmt.allocPrint(allocator, "PATH={s}", .{inherited_path});
+}
+
 fn runOraWithForcedUnknown(
     allocator: std.mem.Allocator,
     forced_query: []const u8,
@@ -298,11 +307,7 @@ fn runOraWithForcedUnknown(
 ) !std.process.RunResult {
     const forced_unknown_arg = try std.fmt.allocPrint(allocator, "ORA_Z3_TEST_FORCE_UNKNOWN_QUERY={s}", .{forced_query});
     defer allocator.free(forced_unknown_arg);
-    const inherited_path = if (std.c.getenv("PATH")) |path| std.mem.span(path) else "/usr/bin:/bin:/opt/homebrew/bin";
-    const path_arg = if (std.c.getenv("HOME")) |home| blk: {
-        const home_slice = std.mem.span(home);
-        break :blk try std.fmt.allocPrint(allocator, "PATH={s}/.elan/bin:{s}", .{ home_slice, inherited_path });
-    } else try std.fmt.allocPrint(allocator, "PATH={s}", .{inherited_path});
+    const path_arg = try leanPathEnvArgForTest(allocator);
     defer allocator.free(path_arg);
 
     var argv = try allocator.alloc([]const u8, args.len + 3);
@@ -312,6 +317,30 @@ fn runOraWithForcedUnknown(
     argv[2] = path_arg;
     @memcpy(argv[3..], args);
     return runProcess(allocator, argv);
+}
+
+fn runLeanFileForTest(allocator: std.mem.Allocator, path_from_repo_root: []const u8) !std.process.RunResult {
+    const path_arg = try leanPathEnvArgForTest(allocator);
+    defer allocator.free(path_arg);
+    const lean_path = if (std.fs.path.isAbsolute(path_from_repo_root))
+        try allocator.dupe(u8, path_from_repo_root)
+    else
+        try std.fs.path.join(allocator, &.{ "..", path_from_repo_root });
+    defer allocator.free(lean_path);
+
+    var io_thread = std.Io.Threaded.init(allocator, .{
+        .async_limit = .nothing,
+        .concurrent_limit = .nothing,
+    });
+    defer io_thread.deinit();
+
+    const argv = [_][]const u8{ "/usr/bin/env", path_arg, "lake", "env", "lean", lean_path };
+    return std.process.run(allocator, io_thread.io(), .{
+        .argv = &argv,
+        .cwd = .{ .path = "formal" },
+        .stdout_limit = std.Io.Limit.limited(1024 * 1024),
+        .stderr_limit = std.Io.Limit.limited(1024 * 1024),
+    });
 }
 
 fn expectExited(result: std.process.RunResult, expected: u8) !void {
@@ -554,6 +583,25 @@ test "B3 lean proofs unblock source-level unknown without erasing runtime guard"
     const reference_out = try pathFromTmpAlloc(allocator, tmp, "reference");
     defer allocator.free(reference_out);
 
+    var formal_result = try collectPackageObligations(allocator, source_path);
+    defer formal_result.deinit();
+    const ensures_query = try findEnsuresQuery(formal_result.set);
+    const generated_namespace = try leanProofGeneratedNamespaceForTest(allocator, source_path);
+    defer allocator.free(generated_namespace);
+    var obligations_source_out = std.Io.Writer.Allocating.init(allocator);
+    defer obligations_source_out.deinit();
+    try obligation_to_lean.writeModule(&obligations_source_out.writer, formal_result.set, .{
+        .namespace = generated_namespace,
+    });
+    const obligations_source = obligations_source_out.written();
+
+    const expected_query_text = try std.fmt.allocPrint(allocator, "query: emittedQuery_{d}", .{ensures_query.id});
+    defer allocator.free(expected_query_text);
+    const expected_theorem_text = try std.fmt.allocPrint(allocator, "theorem discharge_q{d}", .{ensures_query.id});
+    defer allocator.free(expected_theorem_text);
+    const expected_query_def = try std.fmt.allocPrint(allocator, "def emittedQuery_{d} : Prop :=", .{ensures_query.id});
+    defer allocator.free(expected_query_def);
+
     {
         const result = try runOraWithForcedUnknown(allocator, "obligation:2", &.{
             ORA_BINARY_REL,
@@ -568,6 +616,11 @@ test "B3 lean proofs unblock source-level unknown without erasing runtime guard"
         try expectExited(result, 1);
         try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "could not prove ensures") or
             std.mem.containsAtLeast(u8, result.stderr, 1, "could not prove ensures"));
+        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean proof recipe for Z3 UNKNOWN obligations"));
+        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, expected_query_text));
+        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, expected_theorem_text));
+        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, generated_namespace));
+        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "--lean-proofs <proofs.json>"));
     }
     const fail_report_path = try pathFromTmpAlloc(allocator, tmp, "fail/b3_lean_gate.smt.report.json");
     defer allocator.free(fail_report_path);
@@ -575,19 +628,19 @@ test "B3 lean proofs unblock source-level unknown without erasing runtime guard"
     defer allocator.free(fail_report);
     try testing.expect(std.mem.containsAtLeast(u8, fail_report, 1, "\"status\": \"UNKNOWN\""));
     try testing.expect(std.mem.containsAtLeast(u8, fail_report, 1, "\"vacuity_unknown\": false"));
+    const fail_lean_obligations_path = try pathFromTmpAlloc(allocator, tmp, "fail/b3_lean_gate.lean.obligations.lean");
+    defer allocator.free(fail_lean_obligations_path);
+    const fail_lean_obligations = try readFileAllocForTest(allocator, fail_lean_obligations_path);
+    defer allocator.free(fail_lean_obligations);
+    try testing.expect(std.mem.containsAtLeast(u8, fail_lean_obligations, 1, expected_query_def));
+    try testing.expect(std.mem.containsAtLeast(u8, fail_lean_obligations, 1, generated_namespace));
+    {
+        const result = try runLeanFileForTest(allocator, fail_lean_obligations_path);
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try expectExited(result, 0);
+    }
     try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "fail/b3_lean_gate.hex", .{}));
-
-    var formal_result = try collectPackageObligations(allocator, source_path);
-    defer formal_result.deinit();
-    const ensures_query = try findEnsuresQuery(formal_result.set);
-    const generated_namespace = try leanProofGeneratedNamespaceForTest(allocator, source_path);
-    defer allocator.free(generated_namespace);
-    var obligations_source_out = std.Io.Writer.Allocating.init(allocator);
-    defer obligations_source_out.deinit();
-    try obligation_to_lean.writeModule(&obligations_source_out.writer, formal_result.set, .{
-        .namespace = generated_namespace,
-    });
-    const obligations_source = obligations_source_out.written();
 
     const module_suffix = try moduleSuffixFromTmp(allocator, tmp);
     defer allocator.free(module_suffix);

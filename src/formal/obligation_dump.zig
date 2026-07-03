@@ -132,6 +132,7 @@ const CoverageSummary = struct {
     query_obligation_links: u32 = 0,
     proof_obligation_links: u32 = 0,
     obligation_kinds: [enumFieldCount(obligation.KindTag)]u32 = [_]u32{0} ** enumFieldCount(obligation.KindTag),
+    formula_projection_by_kind: [enumFieldCount(obligation.KindTag)]FormulaProjectionCounts = [_]FormulaProjectionCounts{.{}} ** enumFieldCount(obligation.KindTag),
     query_backends: [enumFieldCount(obligation.VerificationBackend)]u32 = [_]u32{0} ** enumFieldCount(obligation.VerificationBackend),
     query_results: [enumFieldCount(obligation.VerificationQueryStatus)]u32 = [_]u32{0} ** enumFieldCount(obligation.VerificationQueryStatus),
     query_results_missing: u32 = 0,
@@ -148,6 +149,7 @@ const CoverageSummary = struct {
 
         for (set.obligations) |item| {
             summary.obligation_kinds[@intFromEnum(std.meta.activeTag(item.kind))] += 1;
+            summary.addFormulaProjection(item.kind);
         }
         for (set.queries) |query| {
             summary.query_backends[@intFromEnum(query.backend)] += 1;
@@ -164,6 +166,47 @@ const CoverageSummary = struct {
 
         return summary;
     }
+
+    fn addFormulaProjection(self: *CoverageSummary, kind: obligation.Kind) void {
+        const index = @intFromEnum(std.meta.activeTag(kind));
+        switch (kind) {
+            .logical => |logical| self.formula_projection_by_kind[index].add(logical.formula),
+            .runtime_guard => |guard| self.formula_projection_by_kind[index].add(guard.formula),
+            .resource => |resource| if (resource.amount) |amount| {
+                self.formula_projection_by_kind[index].add(amount);
+            },
+            .type_wf,
+            .type_relation,
+            .region_relation,
+            .effect_frame,
+            .quantifier,
+            .filtered_input,
+            .backend_fact,
+            => {},
+        }
+    }
+};
+
+const FormulaProjectionCounts = struct {
+    term: u32 = 0,
+    origin_value: u32 = 0,
+
+    fn add(self: *FormulaProjectionCounts, formula: obligation.FormulaRef) void {
+        switch (formula) {
+            .term => self.term +|= 1,
+            .origin_value => self.origin_value +|= 1,
+        }
+    }
+
+    fn total(self: FormulaProjectionCounts) u32 {
+        return self.term +| self.origin_value;
+    }
+
+    fn termRatioBasisPoints(self: FormulaProjectionCounts) u32 {
+        const denominator = self.total();
+        if (denominator == 0) return 0;
+        return @intCast((@as(u64, self.term) * 10_000) / @as(u64, denominator));
+    }
 };
 
 fn writeCoverageSummaryRecord(writer: anytype, set: obligation.ObligationSet) !void {
@@ -179,6 +222,7 @@ fn writeCoverageSummaryRecord(writer: anytype, set: obligation.ObligationSet) !v
     try writeNumberField(writer, "query_obligation_links", summary.query_obligation_links);
     try writeNumberField(writer, "proof_obligation_links", summary.proof_obligation_links);
     try writeEnumCountObjectField(writer, "obligation_kinds", obligation.KindTag, &summary.obligation_kinds);
+    try writeFormulaProjectionObjectField(writer, "formula_projection_by_kind", &summary.formula_projection_by_kind);
     try writeEnumCountObjectField(writer, "query_backends", obligation.VerificationBackend, &summary.query_backends);
     try writeQueryResultCountObjectField(writer, summary.query_results_missing, &summary.query_results);
     try writer.writeAll("}\n");
@@ -197,6 +241,29 @@ fn writeEnumCountObjectField(
         try writeJsonString(writer, field.name);
         try writer.writeByte(':');
         try writer.print("{d}", .{counts[index]});
+    }
+    try writer.writeByte('}');
+}
+
+fn writeFormulaProjectionObjectField(
+    writer: anytype,
+    comptime name: []const u8,
+    counts: *const [enumFieldCount(obligation.KindTag)]FormulaProjectionCounts,
+) !void {
+    try writeFieldPrefix(writer, name);
+    try writer.writeByte('{');
+    inline for (@typeInfo(obligation.KindTag).@"enum".fields, 0..) |field, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writeJsonString(writer, field.name);
+        try writer.writeAll(":{\"term\":");
+        try writer.print("{d}", .{counts[index].term});
+        try writer.writeAll(",\"origin_value\":");
+        try writer.print("{d}", .{counts[index].origin_value});
+        try writer.writeAll(",\"total\":");
+        try writer.print("{d}", .{counts[index].total()});
+        try writer.writeAll(",\"term_ratio_basis_points\":");
+        try writer.print("{d}", .{counts[index].termRatioBasisPoints()});
+        try writer.writeByte('}');
     }
     try writer.writeByte('}');
 }
@@ -623,29 +690,57 @@ fn dumpToOwnedString(allocator: std.mem.Allocator, set: obligation.ObligationSet
     return try buffer.toOwnedSlice();
 }
 
+const formula_projection_zero =
+    "\"formula_projection_by_kind\":{\"logical\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"runtime_guard\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"type_wf\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"type_relation\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"region_relation\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"effect_frame\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"resource\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"quantifier\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"filtered_input\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"backend_fact\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0}}";
+
+const formula_projection_logical_origin =
+    "\"formula_projection_by_kind\":{\"logical\":{\"term\":0,\"origin_value\":1,\"total\":1,\"term_ratio_basis_points\":0},\"runtime_guard\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"type_wf\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"type_relation\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"region_relation\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"effect_frame\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"resource\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"quantifier\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"filtered_input\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"backend_fact\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0}}";
+
+const formula_projection_logical_term =
+    "\"formula_projection_by_kind\":{\"logical\":{\"term\":1,\"origin_value\":0,\"total\":1,\"term_ratio_basis_points\":10000},\"runtime_guard\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"type_wf\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"type_relation\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"region_relation\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"effect_frame\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"resource\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"quantifier\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"filtered_input\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"backend_fact\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0}}";
+
+const formula_projection_logical_mixed =
+    "\"formula_projection_by_kind\":{\"logical\":{\"term\":1,\"origin_value\":1,\"total\":2,\"term_ratio_basis_points\":5000},\"runtime_guard\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"type_wf\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"type_relation\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"region_relation\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"effect_frame\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"resource\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"quantifier\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"filtered_input\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0},\"backend_fact\":{\"term\":0,\"origin_value\":0,\"total\":0,\"term_ratio_basis_points\":0}}";
+
 const coverage_zero =
-    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":0,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
+    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":0,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0}," ++
+    formula_projection_zero ++
+    ",\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
 
 const coverage_one_logical =
-    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":1,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":1,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
+    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":1,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":1,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0}," ++
+    formula_projection_logical_origin ++
+    ",\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
 
 const coverage_one_logical_three_terms =
-    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":1,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":3,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":1,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
+    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":1,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":3,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":1,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0}," ++
+    formula_projection_logical_term ++
+    ",\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
 
 const coverage_one_diagnostic =
-    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":0,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":1,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
+    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":0,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":1,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0}," ++
+    formula_projection_zero ++
+    ",\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
 
 const coverage_one_backend_fact =
-    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":1,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":1},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
+    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":1,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":1}," ++
+    formula_projection_zero ++
+    ",\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
 
 const coverage_one_z3_unknown_query =
-    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":0,\"queries\":1,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":1,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":1,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":1,\"proved\":0,\"failed\":0}}\n";
+    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":0,\"queries\":1,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":1,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0}," ++
+    formula_projection_zero ++
+    ",\"query_backends\":{\"unspecified\":0,\"z3\":1,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":1,\"proved\":0,\"failed\":0}}\n";
 
 const coverage_one_proof_artifact =
-    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":0,\"queries\":0,\"proof_artifacts\":1,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":1,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
+    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":0,\"queries\":0,\"proof_artifacts\":1,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":1,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0}," ++
+    formula_projection_zero ++
+    ",\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
 
 const coverage_one_z3_unsat_proof =
-    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":1,\"queries\":1,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":1,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":1,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0},\"query_backends\":{\"unspecified\":0,\"z3\":1,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":1,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
+    "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":0,\"obligations\":1,\"queries\":1,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":1,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":1,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0}," ++
+    formula_projection_logical_origin ++
+    ",\"query_backends\":{\"unspecified\":0,\"z3\":1,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":1,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
 
 test "json-lines dump of empty manifest is empty" {
     const actual = try dumpToOwnedString(std.testing.allocator, .{});
@@ -742,6 +837,44 @@ test "json-lines dump of canonical refinement predicate terms" {
             "{\"record\":\"term\",\"schema_version\":1,\"id\":2,\"term\":{\"tag\":\"refinement_predicate\",\"name\":\"MinValue\",\"value\":0,\"args\":[1]}}\n",
         actual,
     );
+}
+
+test "coverage summary counts term and origin_value formulas by obligation kind" {
+    const terms = [_]obligation.Term{
+        .{ .bool_lit = true },
+    };
+    const projected: obligation.Obligation = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "projected" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .{ .mlir_op = .{ .op_name = "ora.ensures", .symbol = "projected", .ordinal = 0 } },
+        .kind = .{ .logical = .{
+            .role = .ensures,
+            .formula = .{ .term = 0 },
+        } },
+    };
+    const opaque_obligation: obligation.Obligation = .{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "opaque" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .{ .mlir_op = .{ .op_name = "ora.ensures", .symbol = "opaque", .ordinal = 0 } },
+        .kind = .{ .logical = .{
+            .role = .ensures,
+            .formula = .{ .origin_value = .{
+                .origin = .{ .mlir_op = .{ .op_name = "ora.ensures", .symbol = "opaque", .ordinal = 0 } },
+            } },
+        } },
+    };
+    const set: obligation.ObligationSet = .{
+        .obligations = &.{ projected, opaque_obligation },
+        .terms = &terms,
+    };
+    const actual = try dumpToOwnedString(std.testing.allocator, set);
+    defer std.testing.allocator.free(actual);
+
+    try std.testing.expect(std.mem.containsAtLeast(u8, actual, 1, formula_projection_logical_mixed));
 }
 
 test "json-lines dump of blocking diagnostic" {
