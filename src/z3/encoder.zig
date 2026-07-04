@@ -1631,7 +1631,7 @@ pub const Encoder = struct {
         return self.sortFromPrintedType(type_text);
     }
 
-    pub fn quantifiedVarSortFromTypeStringForTesting(self: *Encoder, type_name: []const u8) z3.Z3_sort {
+    pub fn quantifiedVarSortFromTypeStringForTesting(self: *Encoder, type_name: []const u8) EncodeError!z3.Z3_sort {
         return self.quantifiedVarSortFromTypeString(type_name);
     }
 
@@ -16260,7 +16260,7 @@ pub const Encoder = struct {
         return error.UnsupportedOperation;
     }
 
-    fn quantifiedVarSortFromTypeString(self: *Encoder, type_name: []const u8) z3.Z3_sort {
+    fn quantifiedVarSortFromTypeString(self: *Encoder, type_name: []const u8) EncodeError!z3.Z3_sort {
         if (std.mem.eql(u8, type_name, "bool")) {
             return z3.Z3_mk_bool_sort(self.context.ctx);
         }
@@ -16275,28 +16275,73 @@ pub const Encoder = struct {
         }
 
         if (type_name.len >= 2 and (type_name[0] == 'u' or type_name[0] == 'i')) {
-            const width = std.fmt.parseInt(u32, type_name[1..], 10) catch 256;
+            const digits = type_name[1..];
+            for (digits) |byte| {
+                if (byte < '0' or byte > '9') {
+                    self.recordSoundnessLoss(.missing_type_metadata, "ora.quantified binder integer type has malformed width");
+                    return error.UnsupportedOperation;
+                }
+            }
+            const width = std.fmt.parseInt(u32, digits, 10) catch {
+                self.recordSoundnessLoss(.missing_type_metadata, "ora.quantified binder integer type width is out of range");
+                return error.UnsupportedOperation;
+            };
+            if (width == 0) {
+                self.recordSoundnessLoss(.missing_type_metadata, "ora.quantified binder integer type has zero width");
+                return error.UnsupportedOperation;
+            }
             return self.mkBitVectorSort(width);
         }
 
-        self.recordSoundnessLoss(.unsupported_operation, "unsupported quantified binder type encoded via opaque bv256 fallback");
-        return self.mkBitVectorSort(256);
+        self.recordSoundnessLoss(.unsupported_operation, "unsupported quantified binder type");
+        return error.UnsupportedOperation;
+    }
+
+    fn requiredQuantifiedStringAttr(
+        self: *Encoder,
+        mlir_op: mlir.MlirOperation,
+        primary_name: []const u8,
+        fallback_name: []const u8,
+        missing_detail: []const u8,
+    ) EncodeError![]const u8 {
+        return self.getStringAttr(mlir_op, primary_name) orelse
+            self.getStringAttr(mlir_op, fallback_name) orelse {
+            self.recordSoundnessLoss(.missing_type_metadata, missing_detail);
+            return error.UnsupportedOperation;
+        };
     }
 
     fn encodeQuantifiedOp(self: *Encoder, mlir_op: mlir.MlirOperation, mode: EncodeMode) EncodeError!z3.Z3_ast {
         const num_operands = mlir.oraOperationGetNumOperands(mlir_op);
         if (num_operands < 1) return error.InvalidOperandCount;
-        const quantifier = self.getStringAttr(mlir_op, "quantifier") orelse
-            self.getStringAttr(mlir_op, "ora.quantifier") orelse
-            "forall";
-        const variable = self.getStringAttr(mlir_op, "variable") orelse
-            self.getStringAttr(mlir_op, "ora.bound_variable") orelse
-            "q";
-        const variable_type = self.getStringAttr(mlir_op, "variable_type") orelse
-            self.getStringAttr(mlir_op, "ora.variable_type") orelse
-            "u256";
+        const quantifier = try self.requiredQuantifiedStringAttr(
+            mlir_op,
+            "quantifier",
+            "ora.quantifier",
+            "ora.quantified missing quantifier attribute",
+        );
+        const variable = try self.requiredQuantifiedStringAttr(
+            mlir_op,
+            "variable",
+            "ora.bound_variable",
+            "ora.quantified missing variable attribute",
+        );
+        const variable_type = try self.requiredQuantifiedStringAttr(
+            mlir_op,
+            "variable_type",
+            "ora.variable_type",
+            "ora.quantified missing variable_type attribute",
+        );
+        const quantifier_is_exists = if (std.ascii.eqlIgnoreCase(quantifier, "exists"))
+            true
+        else if (std.ascii.eqlIgnoreCase(quantifier, "forall"))
+            false
+        else {
+            self.recordSoundnessLoss(.unsupported_operation, "ora.quantified unsupported quantifier attribute");
+            return error.UnsupportedOperation;
+        };
 
-        const var_sort = self.quantifiedVarSortFromTypeString(variable_type);
+        const var_sort = try self.quantifiedVarSortFromTypeString(variable_type);
         const bound_var = try self.mkVariable(variable, var_sort);
         try self.pushQuantifiedBinding(variable, bound_var);
         defer self.popQuantifiedBinding();
@@ -16307,7 +16352,7 @@ pub const Encoder = struct {
         if (num_operands > 1) {
             const condition_value = mlir.oraOperationGetOperand(mlir_op, 0);
             const condition = self.coerceToBool(try self.encodeValueWithMode(condition_value, mode));
-            if (std.ascii.eqlIgnoreCase(quantifier, "exists")) {
+            if (quantifier_is_exists) {
                 quantified_body = z3.Z3_mk_and(self.context.ctx, 2, &[_]z3.Z3_ast{ condition, quantified_body });
             } else {
                 quantified_body = z3.Z3_mk_implies(self.context.ctx, condition, quantified_body);
@@ -16316,7 +16361,7 @@ pub const Encoder = struct {
 
         var bounds = [_]z3.Z3_app{z3.Z3_to_app(self.context.ctx, bound_var)};
         const no_patterns_reason = "user quantified expression trigger inference is not implemented yet";
-        if (std.ascii.eqlIgnoreCase(quantifier, "exists")) {
+        if (quantifier_is_exists) {
             return try self.mkQuantifier(.exists, &bounds, .{ .no_patterns = .{ .reason = no_patterns_reason } }, quantified_body);
         }
         return try self.mkQuantifier(.forall, &bounds, .{ .no_patterns = .{ .reason = no_patterns_reason } }, quantified_body);
