@@ -67,6 +67,11 @@ pub const BuiltinTypeSpec = struct {
     comptime_type_id: u32,
 };
 
+pub const BuiltinIntegerInfo = struct {
+    width: u16,
+    signed: bool,
+};
+
 pub const primitive_comptime_type_id_min: u32 = 1;
 pub const primitive_comptime_type_id_max: u32 = 18;
 
@@ -193,12 +198,13 @@ pub fn builtinByteWidth(id: BuiltinTypeId) ?u16 {
     return lookupBuiltinById(id).byte_width;
 }
 
-pub fn builtinBitWidth(id: BuiltinTypeId) ?u16 {
-    return lookupBuiltinById(id).bit_width;
-}
-
-pub fn builtinSignedness(id: BuiltinTypeId) ?bool {
-    return lookupBuiltinById(id).signed;
+pub fn integerInfoByComptimeTypeId(type_id: u32) ?BuiltinIntegerInfo {
+    const spec = lookupBuiltinByComptimeTypeId(type_id) orelse return null;
+    if (spec.category != .Integer) return null;
+    return .{
+        .width = spec.bit_width orelse return null,
+        .signed = spec.signed orelse return null,
+    };
 }
 
 pub fn parseIntegerBuiltin(name: []const u8) ?BuiltinTypeSpec {
@@ -354,6 +360,19 @@ test "integer builtin metadata is table-driven" {
     try std.testing.expect(parseIntegerBuiltin("bytes32") == null);
     try std.testing.expect(parseIntegerBuiltin("u24") == null);
     try std.testing.expect(parseIntegerBuiltin("i96") == null);
+}
+
+test "integer info lookup by frozen comptime id" {
+    const u256_info = integerInfoByComptimeTypeId(6) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 256), u256_info.width);
+    try std.testing.expectEqual(false, u256_info.signed);
+
+    const i256_info = integerInfoByComptimeTypeId(12) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 256), i256_info.width);
+    try std.testing.expectEqual(true, i256_info.signed);
+
+    try std.testing.expect(integerInfoByComptimeTypeId(13) == null);
+    try std.testing.expect(integerInfoByComptimeTypeId(19) == null);
 }
 
 test "supported integer type names text is table-driven" {
