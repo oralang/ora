@@ -385,7 +385,9 @@ test "compiler source loader injects embedded std modules" {
     defer compilation.deinit();
 
     const package = compilation.db.sources.package(compilation.package_id);
-    try testing.expectEqual(@as(usize, 5), package.modules.items.len);
+    // root + transitive closure of "std": std, constants, bytes, result,
+    // interfaces, erc, erc20, erc165, erc721, erc1155, erc2612.
+    try testing.expectEqual(@as(usize, 12), package.modules.items.len);
 
     const graph = try compilation.db.moduleGraph(compilation.package_id);
     const root_summary = for (graph.modules) |summary| {
