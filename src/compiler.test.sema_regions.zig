@@ -498,6 +498,7 @@ test "compiler includes guard clause reads in effect summaries" {
     defer testing.allocator.free(hir_text);
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.read_slots = [\"flags\"]"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots = []"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.effect = \"reads\""));
 }
 

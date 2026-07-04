@@ -163,6 +163,7 @@ inductive Term where
   | variable : VarRef → Term
   | old : TermId → Term
   | result : Term
+  | placeRead : PlaceRef → Term
   | unary : UnaryTerm → Term
   | binary : BinaryTerm → Term
   | refinementPredicate : RefinementPredicateTerm → Term
@@ -333,6 +334,7 @@ def Term.wf (terms : List Term) : Term → Bool
   | .variable _ => true
   | .old id => termRefInBounds terms id
   | .result => true
+  | .placeRead _ => true
   | .unary u => termRefInBounds terms u.operand
   | .binary b =>
       termRefInBounds terms b.lhs &&
@@ -357,6 +359,7 @@ def Term.refsBefore (id : TermId) : Term → Bool
   | .variable _ => true
   | .old ref => termRefBefore id ref
   | .result => true
+  | .placeRead _ => true
   | .unary u => termRefBefore id u.operand
   | .binary b =>
       termRefBefore id b.lhs &&

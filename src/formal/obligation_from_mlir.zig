@@ -176,6 +176,8 @@ const Collector = struct {
     function_param_names: []const []const u8 = &.{},
     function_param_binding_ids: []const obligation.FreeVarId = &.{},
     function_param_types: []const obligation.TypeRef = &.{},
+    function_write_slots: ?[]const obligation.PlaceRef = null,
+    function_has_external_call: bool = false,
 
     const synthetic_file_id = std.math.maxInt(u32);
 
@@ -204,12 +206,16 @@ const Collector = struct {
         const previous_param_names = self.function_param_names;
         const previous_param_binding_ids = self.function_param_binding_ids;
         const previous_param_types = self.function_param_types;
+        const previous_write_slots = self.function_write_slots;
+        const previous_has_external_call = self.function_has_external_call;
         const previous_binder_len = self.active_binders.items.len;
         const is_function = std.mem.eql(u8, op_name, "func.func");
         if (is_function) {
             self.function_param_names = (try self.stringArrayAttr(op, "ora.param_names")) orelse &.{};
             self.function_param_binding_ids = (try self.freeVarIdArrayAttr(op, "ora.param_binding_ids")) orelse &.{};
             self.function_param_types = try self.functionParamTypesFromFunctionOp(op, self.function_param_names.len);
+            self.function_write_slots = try self.placeArrayAttr(op, "ora.write_slots");
+            self.function_has_external_call = operationBodyHasExternalCall(op);
             if (self.function_param_names.len != 0 and self.function_param_binding_ids.len == 0) {
                 try self.addBlockingDiagnostic(
                     .missing_type,
@@ -233,6 +239,8 @@ const Collector = struct {
                 self.function_param_types = previous_param_types;
                 self.function_param_binding_ids = previous_param_binding_ids;
                 self.function_param_names = previous_param_names;
+                self.function_has_external_call = previous_has_external_call;
+                self.function_write_slots = previous_write_slots;
             }
         }
 
@@ -274,7 +282,7 @@ const Collector = struct {
         if (write_slots.len != 0 or modifies_slots.len != 0) {
             try self.addEffectFrameGoal(.write_covered_by_modifies, modifies_slots, write_slots, op_name, symbol, ordinal, source);
         }
-        if (read_slots.len != 0) {
+        if (read_slots.len != 0 and write_slots.len != 0) {
             const preserved_reads = try self.readsDisjointFromWrites(read_slots, write_slots);
             if (preserved_reads.len != 0) {
                 try self.addEffectFrameGoal(.read_preserved_by_frame, write_slots, preserved_reads, op_name, symbol, ordinal, source);
@@ -1063,6 +1071,8 @@ const Collector = struct {
             if (mlir.oraOperationGetNumOperands(owner) == 0) return null;
             return try self.termFromValue(mlir.oraOperationGetOperand(owner, 0));
         }
+        if (std.mem.eql(u8, owner_name, "ora.old")) return try self.oldTerm(owner);
+        if (std.mem.eql(u8, owner_name, "ora.sload")) return try self.scalarStorageLoadTerm(owner);
         if (std.mem.eql(u8, owner_name, "arith.constant")) return try self.constantTerm(owner);
         if (arithmetic_value_op_map.get(owner_name)) |binary_op| return try self.binaryTermFromOperands(owner, binary_op);
         if (std.mem.eql(u8, owner_name, "arith.xori")) return try self.xoriTerm(owner);
@@ -1070,6 +1080,50 @@ const Collector = struct {
         if (std.mem.eql(u8, owner_name, "ora.cmp")) return try self.oraCmpTerm(owner);
         if (std.mem.eql(u8, owner_name, "ora.quantified")) return try self.quantifiedTerm(owner);
         return null;
+    }
+
+    fn scalarStorageLoadTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
+        if (!mlirTypeIsSupportedU256(self.operationResultType(op, 0))) return null;
+        const root = try self.stringAttr(op, "global") orelse return null;
+        if (!self.canProjectScalarStorageLoad(root)) return null;
+        return try self.placeReadTerm(root);
+    }
+
+    fn canProjectScalarStorageLoad(self: *Collector, root: []const u8) bool {
+        if (self.function_has_external_call) return false;
+        const write_slots = self.function_write_slots orelse return false;
+        return !storageWriteSlotsContain(write_slots, root);
+    }
+
+    fn oldTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
+        if (mlir.oraOperationGetNumOperands(op) != 1) return null;
+        if (!mlirTypeIsSupportedU256(self.operationResultType(op, 0))) return null;
+        if (self.function_has_external_call) return null;
+        const write_slots = self.function_write_slots orelse return null;
+
+        const operand = mlir.oraOperationGetOperand(op, 0);
+        const root = (try self.scalarStorageLoadRootFromValue(operand)) orelse return null;
+
+        if (!storageWriteSlotsContain(write_slots, root)) return try self.placeReadTerm(root);
+
+        const place_read = try self.placeReadTerm(root);
+        return try self.addTerm(.{ .old = place_read });
+    }
+
+    fn scalarStorageLoadRootFromValue(self: *Collector, value: mlir.MlirValue) !?[]const u8 {
+        if (!mlir.oraValueIsAOpResult(value)) return null;
+        const owner = mlir.oraOpResultGetOwner(value);
+        if (mlir.oraOperationIsNull(owner)) return null;
+        if (!std.mem.eql(u8, operationName(owner), "ora.sload")) return null;
+        if (!mlirTypeIsSupportedU256(self.operationResultType(owner, 0))) return null;
+        return try self.stringAttr(owner, "global");
+    }
+
+    fn placeReadTerm(self: *Collector, root: []const u8) !obligation.TermId {
+        return try self.addTerm(.{ .place_read = .{
+            .root = root,
+            .region = .storage,
+        } });
     }
 
     fn constantTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
@@ -1750,6 +1804,13 @@ fn integerTypeWidth(ty: mlir.MlirType) ?u32 {
     return null;
 }
 
+fn mlirTypeIsSupportedU256(ty: mlir.MlirType) bool {
+    if (mlir.oraTypeIsNull(ty)) return false;
+    const refinement_base = mlir.oraRefinementTypeGetBaseType(ty);
+    if (!mlir.oraTypeIsNull(refinement_base)) return mlirTypeIsSupportedU256(refinement_base);
+    return integerTypeWidth(ty) == 256 and !mlirIntegerTypeIsSigned(ty);
+}
+
 fn mlirIntegerTypeIsSigned(ty: mlir.MlirType) bool {
     if (mlir.oraTypeIsNull(ty)) return false;
     if (mlir.oraTypeIsIntegerType(ty) or mlir.oraTypeIsAInteger(ty)) {
@@ -1822,6 +1883,32 @@ fn operationName(op: mlir.MlirOperation) []const u8 {
     const name = mlir.oraOperationGetName(op);
     if (name.data == null) return "";
     return name.data[0..name.length];
+}
+
+fn operationBodyHasExternalCall(op: mlir.MlirOperation) bool {
+    const num_regions = mlir.oraOperationGetNumRegions(op);
+    var region_index: usize = 0;
+    while (region_index < num_regions) : (region_index += 1) {
+        const region = mlir.oraOperationGetRegion(op, region_index);
+        if (mlir.oraRegionIsNull(region)) continue;
+
+        var block = mlir.oraRegionGetFirstBlock(region);
+        while (!mlir.oraBlockIsNull(block)) : (block = mlir.oraBlockGetNextInRegion(block)) {
+            var child = mlir.oraBlockGetFirstOperation(block);
+            while (!mlir.oraOperationIsNull(child)) : (child = mlir.oraOperationGetNextInBlock(child)) {
+                if (operationTreeHasExternalCall(child)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn operationTreeHasExternalCall(op: mlir.MlirOperation) bool {
+    if (mlir.oraOperationIsNull(op)) return false;
+    const op_name = operationName(op);
+    if (std.mem.eql(u8, op_name, "ora.external_call") or hasAttr(op, "ora.trusted_extern_frame")) return true;
+
+    return operationBodyHasExternalCall(op);
 }
 
 fn sourceRefFromLocationText(allocator: std.mem.Allocator, text: []const u8) !?obligation.SourceRef {
@@ -1930,6 +2017,13 @@ fn appendField(
 fn placeListContains(places: []const obligation.PlaceRef, needle: obligation.PlaceRef) bool {
     for (places) |place| {
         if (placeRefEql(place, needle)) return true;
+    }
+    return false;
+}
+
+fn storageWriteSlotsContain(places: []const obligation.PlaceRef, root: []const u8) bool {
+    for (places) |place| {
+        if (place.region == .storage and std.mem.eql(u8, place.root, root)) return true;
     }
     return false;
 }

@@ -163,6 +163,36 @@ fn expectPlaceRoot(place: obligation.PlaceRef, expected_root: []const u8, expect
     try testing.expectEqual(expected_region, place.region);
 }
 
+fn expectPlaceReadTerm(
+    set: obligation.ObligationSet,
+    term_id: obligation.TermId,
+    expected_root: []const u8,
+    expected_region: obligation.RegionRef,
+) !void {
+    try testing.expect(term_id < set.terms.len);
+    try testing.expect(set.terms[term_id] == .place_read);
+    try expectPlaceRoot(set.terms[term_id].place_read, expected_root, expected_region);
+}
+
+fn expectOldPlaceReadTerm(
+    set: obligation.ObligationSet,
+    term_id: obligation.TermId,
+    expected_root: []const u8,
+    expected_region: obligation.RegionRef,
+) !void {
+    try testing.expect(term_id < set.terms.len);
+    try testing.expect(set.terms[term_id] == .old);
+    try expectPlaceReadTerm(set, set.terms[term_id].old, expected_root, expected_region);
+}
+
+fn countOldTerms(set: obligation.ObligationSet) usize {
+    var count: usize = 0;
+    for (set.terms) |term| {
+        if (term == .old) count += 1;
+    }
+    return count;
+}
+
 fn expectLogicalTerm(set: obligation.ObligationSet, role: obligation.LogicalRole) !obligation.TermId {
     for (set.obligations) |item| {
         if (item.kind != .logical or item.kind.logical.role != role) continue;
@@ -425,6 +455,48 @@ fn findEnsuresQuery(set: obligation.ObligationSet) !obligation.VerificationQuery
     return error.TestUnexpectedResult;
 }
 
+fn findLogicalQuery(set: obligation.ObligationSet, role: obligation.LogicalRole) !obligation.VerificationQuery {
+    for (set.queries) |query| {
+        if (query.kind == .obligation and query.logical_role != null and query.logical_role.? == role) return query;
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn expectLogicalQueryUnsupported(
+    set: obligation.ObligationSet,
+    role: obligation.LogicalRole,
+    expected: obligation_to_lean.SemanticUnsupportedReason,
+) !void {
+    switch (obligation_to_lean.querySemanticSupport(set, try findLogicalQuery(set, role))) {
+        .supported => return error.TestUnexpectedResult,
+        .unsupported => |reason| try testing.expectEqual(expected, reason),
+    }
+}
+
+fn expectLogicalQuerySupported(set: obligation.ObligationSet, role: obligation.LogicalRole) !void {
+    switch (obligation_to_lean.querySemanticSupport(set, try findLogicalQuery(set, role))) {
+        .supported => {},
+        .unsupported => return error.TestUnexpectedResult,
+    }
+}
+
+fn expectEnsuresQueryUnsupported(
+    set: obligation.ObligationSet,
+    expected: obligation_to_lean.SemanticUnsupportedReason,
+) !void {
+    switch (obligation_to_lean.querySemanticSupport(set, try findEnsuresQuery(set))) {
+        .supported => return error.TestUnexpectedResult,
+        .unsupported => |reason| try testing.expectEqual(expected, reason),
+    }
+}
+
+fn expectEnsuresQuerySupported(set: obligation.ObligationSet) !void {
+    switch (obligation_to_lean.querySemanticSupport(set, try findEnsuresQuery(set))) {
+        .supported => {},
+        .unsupported => return error.TestUnexpectedResult,
+    }
+}
+
 fn writeJsonStringForTest(writer: anytype, value: []const u8) !void {
     try writer.writeByte('"');
     for (value) |byte| {
@@ -551,6 +623,73 @@ fn proofModuleFromGeneratedObligations(
             \\    ]
             \\    intro i hi
             \\    exact U256.ult_implies_ule i x hi
+            \\
+            \\
+        );
+    }
+    try writer.writeAll("end ");
+    try writer.writeAll(module_namespace);
+    try writer.writeByte('\n');
+    return try out.toOwnedSlice();
+}
+
+fn storageProofModuleFromGeneratedObligations(
+    allocator: std.mem.Allocator,
+    obligations_source: []const u8,
+    module_namespace: []const u8,
+    query_id: obligation.Id,
+    use_sorry: bool,
+) ![]const u8 {
+    const namespace_start = std.mem.indexOf(u8, obligations_source, "namespace ") orelse return error.TestUnexpectedResult;
+    const body_start = (std.mem.indexOfPos(u8, obligations_source, namespace_start, "\n") orelse return error.TestUnexpectedResult) + 1;
+    const end_start = std.mem.lastIndexOf(u8, obligations_source, "\nend ") orelse return error.TestUnexpectedResult;
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    errdefer out.deinit();
+    const writer = &out.writer;
+
+    try writer.writeAll(obligations_source[0..namespace_start]);
+    try writer.writeAll("namespace ");
+    try writer.writeAll(module_namespace);
+    try writer.writeByte('\n');
+    try writer.writeAll(obligations_source[body_start..end_start]);
+    try writer.writeByte('\n');
+
+    try writer.print("theorem discharge : emittedQuery_{d} := by\n", .{query_id});
+    if (use_sorry) {
+        try writer.writeAll("  sorry\n\n");
+    } else {
+        try writer.writeAll("  unfold ");
+        try writer.print("emittedQuery_{d}", .{query_id});
+        try writer.writeAll(
+            \\ obligationFollowsFromAssumptions
+            \\  constructor
+            \\  · refine ⟨Env.empty, ?_⟩
+            \\    simp [
+            \\      assumptionsDenoteInEnv,
+            \\      assumptionsDenoteInEnv?,
+            \\      assumptionAnd?,
+            \\      assumptionDenotesInEnv?,
+            \\      formulaDenotes?,
+            \\      denoteFormula?,
+            \\      emittedManifest,
+            \\      emittedAssumptions
+            \\    ]
+            \\  · intro env hAssumptions
+            \\    simp [
+            \\      obligationDenotesInEnv,
+            \\      obligationDenotesInEnv?,
+            \\      formulaDenotes?,
+            \\      denoteFormula?,
+            \\      denoteValue?,
+            \\      emittedManifest,
+            \\      emittedTerms,
+            \\      Env.lookupPlace,
+            \\      Value.eqProp?
+            \\    ]
+            \\    cases env.placeValue
+            \\      (PlaceBindingKey.stable { root := "balance", region := .storage, fields := [], keys := [] }) <;>
+            \\      simp [Value.eqProp?]
             \\
             \\
         );
@@ -778,6 +917,227 @@ test "B3 lean proofs unblock source-level unknown without erasing runtime guard"
     }
     try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "sorry/b3_lean_gate.hex", .{}));
     try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "sorry/b3_lean_gate.lean.proof.json", .{}));
+}
+
+test "B6 storage Lean proof fixture proves read-only old collapse without erasing guard" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const source =
+        \\contract B6StorageLeanProofGate {
+        \\    storage var balance: u256;
+        \\
+        \\    pub fn same_balance() -> bool
+        \\        ensures balance == old(balance)
+        \\    {
+        \\        return true;
+        \\    }
+        \\
+        \\    pub fn guarded(y: u256) -> bool
+        \\        guard y > 0
+        \\    {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b6_storage_lean_gate.ora", .data = source });
+
+    const source_path = try pathFromTmpAlloc(allocator, tmp, "b6_storage_lean_gate.ora");
+    defer allocator.free(source_path);
+    const fail_out = try pathFromTmpAlloc(allocator, tmp, "fail");
+    defer allocator.free(fail_out);
+    const valid_out = try pathFromTmpAlloc(allocator, tmp, "valid");
+    defer allocator.free(valid_out);
+    const sorry_out = try pathFromTmpAlloc(allocator, tmp, "sorry");
+    defer allocator.free(sorry_out);
+    const reference_out = try pathFromTmpAlloc(allocator, tmp, "reference");
+    defer allocator.free(reference_out);
+
+    var formal_result = try collectPackageObligations(allocator, source_path);
+    defer formal_result.deinit();
+    const ensures_query = try findEnsuresQuery(formal_result.set);
+    try expectEnsuresQuerySupported(formal_result.set);
+
+    const forced_query = "obligation:4";
+    const generated_namespace = try leanProofGeneratedNamespaceForTest(allocator, source_path);
+    defer allocator.free(generated_namespace);
+    var obligations_source_out = std.Io.Writer.Allocating.init(allocator);
+    defer obligations_source_out.deinit();
+    try obligation_to_lean.writeModule(&obligations_source_out.writer, formal_result.set, .{
+        .namespace = generated_namespace,
+    });
+    const obligations_source = obligations_source_out.written();
+    try testing.expect(std.mem.containsAtLeast(u8, obligations_source, 2, ".placeRead { root := \"balance\", region := .storage"));
+    try testing.expect(std.mem.indexOf(u8, obligations_source, ".old ") == null);
+
+    const expected_query_def = try std.fmt.allocPrint(allocator, "def emittedQuery_{d} : Prop :=", .{ensures_query.id});
+    defer allocator.free(expected_query_def);
+
+    {
+        const result = try runOraWithForcedUnknown(allocator, forced_query, &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=smt-report,sir-text,bytecode",
+            "--out-dir",
+            fail_out,
+            source_path,
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try expectExited(result, 1);
+        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean proof recipe for Z3 UNKNOWN obligations") or
+            std.mem.containsAtLeast(u8, result.stderr, 1, "Lean proof recipe for Z3 UNKNOWN obligations"));
+        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "query: emittedQuery_") or
+            std.mem.containsAtLeast(u8, result.stderr, 1, "query: emittedQuery_"));
+        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "theorem discharge_q") or
+            std.mem.containsAtLeast(u8, result.stderr, 1, "theorem discharge_q"));
+        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, generated_namespace) or
+            std.mem.containsAtLeast(u8, result.stderr, 1, generated_namespace));
+    }
+    const fail_report_path = try pathFromTmpAlloc(allocator, tmp, "fail/b6_storage_lean_gate.smt.report.json");
+    defer allocator.free(fail_report_path);
+    const fail_report = try readFileAllocForTest(allocator, fail_report_path);
+    defer allocator.free(fail_report);
+    try testing.expect(std.mem.containsAtLeast(u8, fail_report, 1, "\"status\": \"UNKNOWN\""));
+    try testing.expect(std.mem.containsAtLeast(u8, fail_report, 1, "\"vacuity_unknown\": false"));
+    const fail_lean_obligations_path = try pathFromTmpAlloc(allocator, tmp, "fail/b6_storage_lean_gate.lean.obligations.lean");
+    defer allocator.free(fail_lean_obligations_path);
+    const fail_lean_obligations = try readFileAllocForTest(allocator, fail_lean_obligations_path);
+    defer allocator.free(fail_lean_obligations);
+    try testing.expect(std.mem.containsAtLeast(u8, fail_lean_obligations, 1, expected_query_def));
+    try testing.expect(std.mem.containsAtLeast(u8, fail_lean_obligations, 2, ".placeRead { root := \"balance\", region := .storage"));
+    {
+        const result = try runLeanFileForTest(allocator, fail_lean_obligations_path);
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try expectExited(result, 0);
+    }
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "fail/b6_storage_lean_gate.hex", .{}));
+
+    const module_suffix = try moduleSuffixFromTmp(allocator, tmp);
+    defer allocator.free(module_suffix);
+    const fixture_dir = try std.fmt.allocPrint(allocator, "formal/Ora/B6StorageFixture/{s}", .{module_suffix});
+    defer allocator.free(fixture_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, fixture_dir);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, fixture_dir) catch {};
+    defer std.Io.Dir.cwd().deleteDir(std.testing.io, "formal/Ora/B6StorageFixture") catch {};
+
+    const valid_module = try std.fmt.allocPrint(allocator, "Ora.B6StorageFixture.{s}.Valid", .{module_suffix});
+    defer allocator.free(valid_module);
+    const sorry_module = try std.fmt.allocPrint(allocator, "Ora.B6StorageFixture.{s}.Sorry", .{module_suffix});
+    defer allocator.free(sorry_module);
+    const valid_theorem = try std.fmt.allocPrint(allocator, "{s}.discharge", .{valid_module});
+    defer allocator.free(valid_theorem);
+    const sorry_theorem = try std.fmt.allocPrint(allocator, "{s}.discharge", .{sorry_module});
+    defer allocator.free(sorry_theorem);
+    const valid_proof_path = try std.fmt.allocPrint(allocator, "{s}/Valid.lean", .{fixture_dir});
+    defer allocator.free(valid_proof_path);
+    const sorry_proof_path = try std.fmt.allocPrint(allocator, "{s}/Sorry.lean", .{fixture_dir});
+    defer allocator.free(sorry_proof_path);
+
+    const valid_proof = try storageProofModuleFromGeneratedObligations(allocator, obligations_source, valid_module, ensures_query.id, false);
+    defer allocator.free(valid_proof);
+    const sorry_proof = try storageProofModuleFromGeneratedObligations(allocator, obligations_source, sorry_module, ensures_query.id, true);
+    defer allocator.free(sorry_proof);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = valid_proof_path, .data = valid_proof });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = sorry_proof_path, .data = sorry_proof });
+
+    const valid_manifest = try pathFromTmpAlloc(allocator, tmp, "valid-proofs.json");
+    defer allocator.free(valid_manifest);
+    const sorry_manifest = try pathFromTmpAlloc(allocator, tmp, "sorry-proofs.json");
+    defer allocator.free(sorry_manifest);
+    try writeProofManifestForTest(allocator, valid_manifest, valid_module, valid_theorem, valid_proof_path, ensures_query);
+    try writeProofManifestForTest(allocator, sorry_manifest, sorry_module, sorry_theorem, sorry_proof_path, ensures_query);
+
+    {
+        const result = try runOraWithForcedUnknown(allocator, forced_query, &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=smt-report,sir-text,bytecode",
+            "--out-dir",
+            valid_out,
+            "--lean-proofs",
+            valid_manifest,
+            source_path,
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try expectExited(result, 0);
+    }
+
+    const valid_cert_path = try pathFromTmpAlloc(allocator, tmp, "valid/b6_storage_lean_gate.lean.proof.json");
+    defer allocator.free(valid_cert_path);
+    const valid_sir_path = try pathFromTmpAlloc(allocator, tmp, "valid/b6_storage_lean_gate.sir");
+    defer allocator.free(valid_sir_path);
+    const valid_hex_path = try pathFromTmpAlloc(allocator, tmp, "valid/b6_storage_lean_gate.hex");
+    defer allocator.free(valid_hex_path);
+    const valid_cert = try readFileAllocForTest(allocator, valid_cert_path);
+    defer allocator.free(valid_cert);
+    try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"schema_version\": 1"));
+    try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"proof_count\": 1"));
+    try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"axioms\""));
+    try testing.expect(!std.mem.containsAtLeast(u8, valid_cert, 1, "sorryAx"));
+
+    const valid_sir = try readFileAllocForTest(allocator, valid_sir_path);
+    defer allocator.free(valid_sir);
+    try testing.expect(std.mem.containsAtLeast(u8, valid_sir, 1, "fn guarded:"));
+    try testing.expect(std.mem.containsAtLeast(u8, valid_sir, 1, "gt v0 c0"));
+    try testing.expect(std.mem.containsAtLeast(u8, valid_sir, 1, "revert 0x0 0x0"));
+    const valid_hex = try readFileAllocForTest(allocator, valid_hex_path);
+    defer allocator.free(valid_hex);
+    try testing.expect(valid_hex.len > 0);
+
+    {
+        const result = try runProcess(allocator, &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=sir-text,bytecode",
+            "--out-dir",
+            reference_out,
+            source_path,
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try expectExited(result, 0);
+    }
+    const reference_sir_path = try pathFromTmpAlloc(allocator, tmp, "reference/b6_storage_lean_gate.sir");
+    defer allocator.free(reference_sir_path);
+    const reference_hex_path = try pathFromTmpAlloc(allocator, tmp, "reference/b6_storage_lean_gate.hex");
+    defer allocator.free(reference_hex_path);
+    const reference_sir = try readFileAllocForTest(allocator, reference_sir_path);
+    defer allocator.free(reference_sir);
+    const reference_hex = try readFileAllocForTest(allocator, reference_hex_path);
+    defer allocator.free(reference_hex);
+    try testing.expectEqualStrings(reference_sir, valid_sir);
+    try testing.expectEqualStrings(reference_hex, valid_hex);
+
+    {
+        const result = try runOraWithForcedUnknown(allocator, forced_query, &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=smt-report,sir-text,bytecode",
+            "--out-dir",
+            sorry_out,
+            "--lean-proofs",
+            sorry_manifest,
+            source_path,
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try expectExited(result, 1);
+        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "sorryAx") or
+            std.mem.containsAtLeast(u8, result.stderr, 1, "sorryAx") or
+            std.mem.containsAtLeast(u8, result.stdout, 1, "Lean proof gate failed") or
+            std.mem.containsAtLeast(u8, result.stderr, 1, "Lean proof gate failed"));
+    }
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "sorry/b6_storage_lean_gate.hex", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "sorry/b6_storage_lean_gate.lean.proof.json", .{}));
 }
 
 test "B4 unknown diagnostic rejects Lean recipe for unsupported semantic type" {
@@ -1868,6 +2228,486 @@ test "formal obligation MLIR adapter derives term types from MLIR values" {
     try expectTypeRefSpelling(uy.binder.ty, "u32");
     const who = try expectQuantifiedTerm(result.set, uy.body, .forall, "who");
     try expectTypeRefSpelling(who.binder.ty, "address");
+}
+
+test "formal obligation MLIR adapter projects u256 scalar sload as place_read term" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  ora.contract @StorageProofs {
+        \\    ora.global "reserve" : !ora.int<256, false>
+        \\    func.func @check() attributes {
+        \\      ora.write_slots = []
+        \\    } {
+        \\      %reserve = ora.sload "reserve" : !ora.int<256, false>
+        \\      %cmp = ora.cmp "ule", %reserve, %reserve : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\      "ora.ensures"(%cmp) : (i1) -> ()
+        \\      func.return
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
+
+    const body = try expectBinaryTerm(result.set, try expectLogicalTerm(result.set, .ensures), .le);
+    try expectPlaceReadTerm(result.set, body.lhs, "reserve", .storage);
+    try expectPlaceReadTerm(result.set, body.rhs, "reserve", .storage);
+
+    const report = try dumpManifestToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(report);
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"formula_projection_by_kind\":{\"logical\":{\"term\":1,\"origin_value\":0,\"total\":1,\"term_ratio_basis_points\":10000}"));
+
+    const rendered = try emitLeanToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, ".placeRead { root := \"reserve\", region := .storage"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "def emittedQuery_"));
+}
+
+test "formal obligation MLIR adapter requires explicit write set before scalar sload projection" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  ora.contract @StorageProofs {
+        \\    ora.global "reserve" : !ora.int<256, false>
+        \\    func.func @check() {
+        \\      %reserve = ora.sload "reserve" : !ora.int<256, false>
+        \\      %cmp = ora.cmp "ule", %reserve, %reserve : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\      "ora.ensures"(%cmp) : (i1) -> ()
+        \\      func.return
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
+    try expectEnsuresQueryUnsupported(result.set, .unsupported_origin_value);
+
+    const report = try dumpManifestToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(report);
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"formula_projection_by_kind\":{\"logical\":{\"term\":0,\"origin_value\":1,\"total\":1,\"term_ratio_basis_points\":0}"));
+}
+
+test "formal obligation MLIR adapter does not project scalar sload when function writes root" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  ora.contract @StorageProofs {
+        \\    ora.global "balance" : !ora.int<256, false>
+        \\    func.func @mutates(%arg0: !ora.int<256, false>, %arg1: !ora.int<256, false>) attributes {
+        \\      ora.param_names = ["k", "next"],
+        \\      ora.param_binding_ids = ["file:17:pattern:1", "file:17:pattern:2"],
+        \\      ora.write_slots = ["balance"]
+        \\    } {
+        \\      %before = ora.sload "balance" : !ora.int<256, false>
+        \\      %req = ora.cmp "eq", %before, %arg0 : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\      "ora.requires"(%req) : (i1) -> ()
+        \\      ora.sstore %arg1, "balance" : !ora.int<256, false>
+        \\      %after = ora.sload "balance" : !ora.int<256, false>
+        \\      %ens = ora.cmp "eq", %after, %arg0 : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\      "ora.ensures"(%ens) : (i1) -> ()
+        \\      func.return
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countAssumption(result.set, .requires));
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
+    try expectEnsuresQueryUnsupported(result.set, .unsupported_origin_value);
+
+    const report = try dumpManifestToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(report);
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"formula_projection_by_kind\":{\"logical\":{\"term\":0,\"origin_value\":1,\"total\":1,\"term_ratio_basis_points\":0}"));
+    try testing.expect(!std.mem.containsAtLeast(u8, report, 1, "\"tag\":\"place_read\""));
+}
+
+test "formal obligation MLIR adapter does not project scalar sload in functions with external calls" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  ora.contract @StorageProofs {
+        \\    ora.global "reserve" : !ora.int<256, false>
+        \\    func.func @calls(%target: !ora.address, %gas: !ora.int<256, false>, %calldata: !ora.bytes) attributes {
+        \\      ora.write_slots = []
+        \\    } {
+        \\      %reserve = ora.sload "reserve" : !ora.int<256, false>
+        \\      %success, %returndata = ora.external_call %target, %gas, %calldata {call_kind = "call", method_name = "ping", trait_name = "Remote"} : !ora.address, !ora.int<256, false>, !ora.bytes -> i1, !ora.bytes
+        \\      %cmp = ora.cmp "ule", %reserve, %reserve : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\      "ora.ensures"(%cmp) : (i1) -> ()
+        \\      func.return
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
+    try expectEnsuresQueryUnsupported(result.set, .unsupported_origin_value);
+
+    const report = try dumpManifestToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(report);
+    try testing.expect(!std.mem.containsAtLeast(u8, report, 1, "\"tag\":\"place_read\""));
+}
+
+test "formal obligation MLIR adapter keeps non-u256 scalar sload outside Lean term fragment" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  ora.contract @StorageProofs {
+        \\    ora.global "small" : !ora.int<32, false>
+        \\    func.func @check() attributes {
+        \\      ora.write_slots = []
+        \\    } {
+        \\      %small = ora.sload "small" : !ora.int<32, false>
+        \\      %cmp = ora.cmp "ule", %small, %small : !ora.int<32, false>, !ora.int<32, false> -> i1
+        \\      "ora.ensures"(%cmp) : (i1) -> ()
+        \\      func.return
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
+    for (result.set.obligations) |item| {
+        if (item.kind != .logical or item.kind.logical.role != .ensures) continue;
+        try testing.expect(item.kind.logical.formula == .origin_value);
+    }
+
+    const report = try dumpManifestToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(report);
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"formula_projection_by_kind\":{\"logical\":{\"term\":0,\"origin_value\":1,\"total\":1,\"term_ratio_basis_points\":0}"));
+    try testing.expect(!std.mem.containsAtLeast(u8, report, 1, "\"tag\":\"place_read\""));
+
+    try expectEnsuresQueryUnsupported(result.set, .unsupported_origin_value);
+}
+
+test "formal obligation MLIR adapter projects old written scalar sload as entry place read" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  ora.contract @StorageProofs {
+        \\    ora.global "counter" : !ora.int<256, false>
+        \\    func.func @snapshot() attributes {
+        \\      ora.write_slots = ["counter"]
+        \\    } {
+        \\      %counter = ora.sload "counter" : !ora.int<256, false>
+        \\      %old = ora.old %counter : !ora.int<256, false> -> !ora.int<256, false>
+        \\      %cmp = ora.cmp "ule", %old, %old : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\      "ora.ensures"(%cmp) : (i1) -> ()
+        \\      func.return
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
+    try expectEnsuresQuerySupported(result.set);
+
+    const body = try expectBinaryTerm(result.set, try expectLogicalTerm(result.set, .ensures), .le);
+    try expectOldPlaceReadTerm(result.set, body.lhs, "counter", .storage);
+    try expectOldPlaceReadTerm(result.set, body.rhs, "counter", .storage);
+    try testing.expectEqual(@as(usize, 2), countOldTerms(result.set));
+
+    const rendered = try emitLeanToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, ".old "));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, ".placeRead { root := \"counter\", region := .storage"));
+}
+
+test "formal obligation MLIR adapter collapses old unwritten scalar sload to stable place read" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  ora.contract @StorageProofs {
+        \\    ora.global "balance" : !ora.int<256, false>
+        \\    func.func @readonly() attributes {
+        \\      ora.write_slots = []
+        \\    } {
+        \\      %balance = ora.sload "balance" : !ora.int<256, false>
+        \\      %old = ora.old %balance : !ora.int<256, false> -> !ora.int<256, false>
+        \\      %cmp = ora.cmp "eq", %balance, %old : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\      "ora.ensures"(%cmp) : (i1) -> ()
+        \\      func.return
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
+    try expectEnsuresQuerySupported(result.set);
+
+    const body = try expectBinaryTerm(result.set, try expectLogicalTerm(result.set, .ensures), .eq);
+    try expectPlaceReadTerm(result.set, body.lhs, "balance", .storage);
+    try expectPlaceReadTerm(result.set, body.rhs, "balance", .storage);
+    try testing.expectEqual(@as(usize, 0), countOldTerms(result.set));
+
+    const rendered = try emitLeanToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, ".old ") == null);
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, ".placeRead { root := \"balance\", region := .storage"));
+}
+
+test "formal obligation MLIR adapter does not collapse old with bare written-root read" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  ora.contract @StorageProofs {
+        \\    ora.global "balance" : !ora.int<256, false>
+        \\    func.func @mutates() attributes {
+        \\      ora.write_slots = ["balance"]
+        \\    } {
+        \\      %balance = ora.sload "balance" : !ora.int<256, false>
+        \\      %old = ora.old %balance : !ora.int<256, false> -> !ora.int<256, false>
+        \\      %cmp = ora.cmp "eq", %balance, %old : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\      "ora.ensures"(%cmp) : (i1) -> ()
+        \\      func.return
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
+    try expectEnsuresQueryUnsupported(result.set, .unsupported_origin_value);
+    try testing.expectEqual(@as(usize, 0), countOldTerms(result.set));
+}
+
+test "formal obligation MLIR adapter requires write metadata before old scalar sload projection" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  ora.contract @StorageProofs {
+        \\    ora.global "counter" : !ora.int<256, false>
+        \\    func.func @snapshot() {
+        \\      %counter = ora.sload "counter" : !ora.int<256, false>
+        \\      %old = ora.old %counter : !ora.int<256, false> -> !ora.int<256, false>
+        \\      %cmp = ora.cmp "ule", %old, %old : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\      "ora.ensures"(%cmp) : (i1) -> ()
+        \\      func.return
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
+    try expectEnsuresQueryUnsupported(result.set, .unsupported_origin_value);
+    try testing.expectEqual(@as(usize, 0), countOldTerms(result.set));
+}
+
+test "formal obligation MLIR adapter does not project old scalar sload in functions with external calls" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  ora.contract @StorageProofs {
+        \\    ora.global "counter" : !ora.int<256, false>
+        \\    func.func @snapshot(%target: !ora.address, %gas: !ora.int<256, false>, %calldata: !ora.bytes) attributes {
+        \\      ora.write_slots = ["counter"]
+        \\    } {
+        \\      %counter = ora.sload "counter" : !ora.int<256, false>
+        \\      %old = ora.old %counter : !ora.int<256, false> -> !ora.int<256, false>
+        \\      %success, %returndata = ora.external_call %target, %gas, %calldata {call_kind = "call", method_name = "ping", trait_name = "Remote"} : !ora.address, !ora.int<256, false>, !ora.bytes -> i1, !ora.bytes
+        \\      %cmp = ora.cmp "ule", %old, %old : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\      "ora.ensures"(%cmp) : (i1) -> ()
+        \\      func.return
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
+    try expectEnsuresQueryUnsupported(result.set, .unsupported_origin_value);
+    try testing.expectEqual(@as(usize, 0), countOldTerms(result.set));
+}
+
+test "formal obligation MLIR adapter keeps arbitrary old expression outside Lean term fragment" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @old_expr(%arg0: !ora.int<256, false>) attributes {
+        \\    ora.param_names = ["x"],
+        \\    ora.param_binding_ids = ["file:23:pattern:1"],
+        \\    ora.write_slots = []
+        \\  } {
+        \\    %sum = ora.add_wrapping %arg0, %arg0 : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
+        \\    %old = ora.old %sum : !ora.int<256, false> -> !ora.int<256, false>
+        \\    %cmp = ora.cmp "ule", %old, %old : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\    "ora.ensures"(%cmp) : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
+    try expectEnsuresQueryUnsupported(result.set, .unsupported_origin_value);
+    try testing.expectEqual(@as(usize, 0), countOldTerms(result.set));
+}
+
+test "formal obligation MLIR adapter supports old written scalar sload in invariant formulas" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  ora.contract @StorageProofs {
+        \\    ora.global "total" : !ora.int<256, false>
+        \\    func.func @loop_snapshot() attributes {
+        \\      ora.write_slots = ["total"]
+        \\    } {
+        \\      %total = ora.sload "total" : !ora.int<256, false>
+        \\      %old = ora.old %total : !ora.int<256, false> -> !ora.int<256, false>
+        \\      %cmp = ora.cmp "ule", %old, %old : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\      "ora.invariant"(%cmp) : (i1) -> ()
+        \\      func.return
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .invariant));
+    try expectLogicalQuerySupported(result.set, .invariant);
+
+    const body = try expectBinaryTerm(result.set, try expectLogicalTerm(result.set, .invariant), .le);
+    try expectOldPlaceReadTerm(result.set, body.lhs, "total", .storage);
+    try expectOldPlaceReadTerm(result.set, body.rhs, "total", .storage);
+    try testing.expectEqual(@as(usize, 2), countOldTerms(result.set));
+}
+
+test "formal obligation MLIR adapter rejects invariant with old and bare written-root read" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  ora.contract @StorageProofs {
+        \\    ora.global "total" : !ora.int<256, false>
+        \\    func.func @loop_snapshot() attributes {
+        \\      ora.write_slots = ["total"]
+        \\    } {
+        \\      %total = ora.sload "total" : !ora.int<256, false>
+        \\      %old = ora.old %total : !ora.int<256, false> -> !ora.int<256, false>
+        \\      %cmp = ora.cmp "eq", %old, %total : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\      "ora.invariant"(%cmp) : (i1) -> ()
+        \\      func.return
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .invariant));
+    try expectLogicalQueryUnsupported(result.set, .invariant, .unsupported_origin_value);
+    try testing.expectEqual(@as(usize, 1), countOldTerms(result.set));
 }
 
 test "formal obligation MLIR adapter tracks nested forall binders with De Bruijn indexes" {

@@ -844,6 +844,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     if (try @This().appendEffectSlotAttrs(self, attrs, "ora.read_slots", read_effect.slots)) {
                         try attrs.append(self.allocator, namedStringAttr(self.context, "ora.effect", "reads"));
                     }
+                    _ = try @This().appendEffectSlotAttrs(self, attrs, "ora.write_slots", &.{});
                 },
                 .writes => |write_effect| {
                     if (try @This().appendEffectSlotAttrs(self, attrs, "ora.write_slots", write_effect.slots)) {
@@ -930,12 +931,16 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 }
             }
 
-            if (slot_attrs.items.len == 0) return false;
+            const has_slots = slot_attrs.items.len != 0;
             try attrs.append(self.allocator, .{
                 .name = identifier(self.context, attr_name),
-                .attribute = mlir.oraArrayAttrCreate(self.context, @intCast(slot_attrs.items.len), slot_attrs.items.ptr),
+                .attribute = mlir.oraArrayAttrCreate(
+                    self.context,
+                    @intCast(slot_attrs.items.len),
+                    if (slot_attrs.items.len == 0) null else slot_attrs.items.ptr,
+                ),
             });
-            return true;
+            return has_slots;
         }
 
         const TraitMethodMatch = struct {

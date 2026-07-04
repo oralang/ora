@@ -348,12 +348,12 @@ fn valueTermSemanticSupport(
         .int_lit => |literal| optionalTypeSupportsU256(literal.ty),
         .variable => |variable| varRefSupportsBoolOrU256Value(variable),
         .result => .supported,
+        .place_read => .supported,
         .binary => |binary| switch (binary.op) {
             .add, .sub => binaryU256ValueSemanticSupport(set, binary, fuel - 1),
             else => .{ .unsupported = .unsupported_term_kind },
         },
-        .old,
-        .place_read,
+        .old => |operand| oldPlaceReadSemanticSupport(set, operand),
         .unary,
         .refinement_predicate,
         .quantified,
@@ -372,10 +372,20 @@ fn u256ValueTermSemanticSupport(
         .int_lit => |literal| optionalTypeSupportsU256(literal.ty),
         .variable => |variable| varRefSupportsU256Value(variable),
         .result => .supported,
+        .place_read => .supported,
         .binary => |binary| switch (binary.op) {
             .add, .sub => binaryU256ValueSemanticSupport(set, binary, fuel - 1),
             else => .{ .unsupported = .unsupported_term_kind },
         },
+        .old => |operand| oldPlaceReadSemanticSupport(set, operand),
+        else => .{ .unsupported = .unsupported_term_kind },
+    };
+}
+
+fn oldPlaceReadSemanticSupport(set: obligation.ObligationSet, operand: obligation.TermId) SemanticSupport {
+    const term = termById(set, operand) orelse return .{ .unsupported = .invalid_dependency };
+    return switch (term) {
+        .place_read => .supported,
         else => .{ .unsupported = .unsupported_term_kind },
     };
 }
@@ -573,7 +583,10 @@ fn writeTerm(writer: anytype, term: obligation.Term) !void {
             try writer.print("{d}", .{id});
         },
         .result => try writer.writeAll(".result"),
-        .place_read => return error.UnsupportedPlaceReadTerm,
+        .place_read => |place| {
+            try writer.writeAll(".placeRead ");
+            try writePlaceRef(writer, place);
+        },
         .unary => |unary| {
             try writer.writeAll(".unary { op := .");
             try writer.writeAll(unaryOpName(unary.op));

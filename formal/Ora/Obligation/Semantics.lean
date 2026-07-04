@@ -5,6 +5,12 @@ Semantic interpretation for the supported obligation fragment.
 term fragment a fail-closed meaning. Unsupported syntax returns `none`;
 `obligationDenotes` maps that to `False`, so Lean cannot silently discharge an
 obligation whose manifest syntax is not interpreted here.
+
+Storage terms are deliberately narrow. A bare `placeRead` is emitted only after
+the compiler mutation gate proves that the root is stable across the query
+span. `old(placeRead root)` denotes function-entry storage for that root. The
+entry and stable place values are separate total-map keys; Lean does not assume
+a frame equality between them.
 -/
 
 import Ora.Obligation.Manifest
@@ -17,12 +23,17 @@ inductive Value where
   | u256 : U256 → Value
   deriving Repr
 
+inductive PlaceBindingKey where
+  | stable : PlaceRef → PlaceBindingKey
+  | entry : PlaceRef → PlaceBindingKey
+  deriving Repr, BEq, DecidableEq
+
 structure Env where
   freeBindings : List (FreeVarId × Value) := []
+  placeValue : PlaceBindingKey → Value := fun _ => .u256 (BitVec.ofNat 256 0)
   /-- Bound variables use De Bruijn order: head is index `0`. -/
   boundBindings : List Value := []
   result : Option Value := none
-  deriving Repr
 
 def Env.empty : Env := {}
 
@@ -39,6 +50,12 @@ def lookupFreeBinding (bindings : List (FreeVarId × Value)) (id : FreeVarId) :
 def Env.lookupFree (env : Env) (id : FreeVarId) : Option Value :=
   lookupFreeBinding env.freeBindings id
 
+def Env.lookupPlace (env : Env) (place : PlaceRef) : Option Value :=
+  some (env.placeValue (.stable place))
+
+def Env.lookupEntryPlace (env : Env) (place : PlaceRef) : Option Value :=
+  some (env.placeValue (.entry place))
+
 def Env.lookupBound (env : Env) (index : Nat) : Option Value :=
   env.boundBindings[index]?
 
@@ -48,6 +65,14 @@ def Env.lookupVar (env : Env) : VarRef → Option Value
 
 def Env.setFree (env : Env) (id : FreeVarId) (value : Value) : Env :=
   { env with freeBindings := (id, value) :: env.freeBindings }
+
+def Env.setPlace (env : Env) (place : PlaceRef) (value : Value) : Env :=
+  { env with placeValue := fun key =>
+      if key == .stable place then value else env.placeValue key }
+
+def Env.setEntryPlace (env : Env) (place : PlaceRef) (value : Value) : Env :=
+  { env with placeValue := fun key =>
+      if key == .entry place then value else env.placeValue key }
 
 def Env.pushBound (env : Env) (value : Value) : Env :=
   { env with boundBindings := value :: env.boundBindings }
@@ -71,6 +96,28 @@ theorem lookupVar_uses_debruijn_index_not_name (name : String) (lhs rhs : Value)
     (((Env.empty.pushBound lhs).pushBound rhs).lookupVar
       (.bound { index := 1, name := name })) = some lhs := by
   rfl
+
+theorem lookupPlace_uses_place_identity (value : Value) :
+    (Env.empty.setPlace { root := "reserve", region := .storage } value).lookupPlace
+      { root := "reserve", region := .storage } = some value := by
+  rfl
+
+theorem lookupEntryPlace_uses_entry_place_identity (value : Value) :
+    (Env.empty.setEntryPlace { root := "reserve", region := .storage } value).lookupEntryPlace
+      { root := "reserve", region := .storage } = some value := by
+  rfl
+
+theorem stable_place_does_not_link_entry_place (value : Value) :
+    (Env.empty.setPlace { root := "reserve", region := .storage } value).lookupEntryPlace
+      { root := "reserve", region := .storage } =
+        Env.empty.lookupEntryPlace { root := "reserve", region := .storage } := by
+  rfl
+
+def sampleStoragePlace : PlaceRef :=
+  { root := "reserve", region := .storage }
+
+def sampleOldPlaceReadManifest : Manifest :=
+  { terms := [.placeRead sampleStoragePlace, .old 0] }
 
 def TyRef.isU256 : TyRef → Bool
   | .spelling name => name == "u256" || name == "uint256"
@@ -146,7 +193,12 @@ def denoteValue? (manifest : Manifest) (env : Env) : Nat → TermId → Option V
       | some (.boolLit value) => some (.bool value)
       | some (.intLit lit) => lit.asU256?.map Value.u256
       | some (.variable var) => env.lookupVar var
+      | some (.old operand) =>
+          match manifest.terms[operand]? with
+          | some (.placeRead place) => env.lookupEntryPlace place
+          | _ => none
       | some .result => env.result
+      | some (.placeRead place) => env.lookupPlace place
       | some (.binary binary) =>
           match denoteValue? manifest env fuel binary.lhs,
                 denoteValue? manifest env fuel binary.rhs with
@@ -267,6 +319,20 @@ def denoteFormula? (manifest : Manifest) (env : Env) : Nat → TermId → Option
       | _ => none
 
 end
+
+theorem denoteValue_old_placeRead_uses_entry_place (value : Value) :
+    denoteValue? sampleOldPlaceReadManifest
+      (Env.empty.setEntryPlace sampleStoragePlace value) 3 1 = some value := by
+  rfl
+
+theorem denoteValue_old_non_place_operand_fails_closed :
+    denoteValue?
+      { terms := [
+          .intLit { value := "0", ty := some (.spelling "u256") },
+          .old 0
+        ] }
+      Env.empty 3 1 = none := by
+  rfl
 
 def formulaDenotes? (manifest : Manifest) (env : Env) : FormulaRef → Option Prop
   | .term id => denoteFormula? manifest env (manifest.terms.length + 1) id
