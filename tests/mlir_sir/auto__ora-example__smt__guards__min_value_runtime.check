@@ -54,7 +54,7 @@
 // CHECK-NEXT:   ^bb3:  // pred: ^bb2
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/guards/min_value_runtime.ora":24:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/min_value_runtime.ora":24:5)
-// CHECK-NEXT:   func.func @runtimeMinValueFromStorage() attributes {ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["stored_value"], ora.selector = "0x20124455", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @runtimeMinValueFromStorage() attributes {ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["stored_value"], ora.selector = "0x20124455", ora.visibility = "pub", ora.write_slots = []} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_stored_value = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/min_value_runtime.ora":33:34)

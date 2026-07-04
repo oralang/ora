@@ -38,7 +38,7 @@
 // CHECK-NEXT:   ^bb3:  // pred: ^bb1
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/enums/enum_usage_test.ora":28:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/enums/enum_usage_test.ora":28:5)
-// CHECK-NEXT:   func.func @getStatus() -> !sir.u256 attributes {ora.effect = "reads", ora.read_slots = ["current_status"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @getStatus() -> !sir.u256 attributes {ora.effect = "reads", ora.read_slots = ["current_status"], ora.visibility = "private", ora.write_slots = []} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/enums/enum_usage_test.ora":35:9)))
 // CHECK-NEXT:     %1 = sir.const 255 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/enums/enum_usage_test.ora":24:5)))
 // CHECK-NEXT:     %slot_current_status = sir.const 0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/enums/enum_usage_test.ora":24:5)))
@@ -53,7 +53,7 @@
 // CHECK-NEXT:     sir.sstore %slot_current_status : !sir.u256, %arg0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/enums/enum_usage_test.ora":40:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/enums/enum_usage_test.ora":39:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/enums/enum_usage_test.ora":39:5)
-// CHECK-NEXT:   func.func @isActive() -> !sir.u256 attributes {ora.effect = "reads", ora.read_slots = ["current_status"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @isActive() -> !sir.u256 attributes {ora.effect = "reads", ora.read_slots = ["current_status"], ora.visibility = "private", ora.write_slots = []} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/enums/enum_usage_test.ora":45:9)))
 // CHECK-NEXT:     %2 = sir.const 255 : !sir.u256 loc(unknown)
@@ -70,7 +70,7 @@
 // CHECK-NEXT:     sir.store %10 : !sir.ptr<1>, %9 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/enums/enum_usage_test.ora":45:9)))
 // CHECK-NEXT:     sir.return %10 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/enums/enum_usage_test.ora":45:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/enums/enum_usage_test.ora":44:5)
-// CHECK-NEXT:   func.func @processStatus() -> !sir.u256 attributes {ora.effect = "reads", ora.read_slots = ["current_status"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @processStatus() -> !sir.u256 attributes {ora.effect = "reads", ora.read_slots = ["current_status"], ora.visibility = "private", ora.write_slots = []} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 255 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_current_status = sir.const 0 : !sir.u256 loc(unknown)
@@ -146,7 +146,7 @@
 // CHECK-NEXT:   ^bb3:  // pred: ^bb1
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/enums/enum_usage_test.ora":60:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/enums/enum_usage_test.ora":60:5)
-// CHECK-NEXT:   func.func @getLastError() -> !sir.ptr<1> attributes {ora.effect = "reads", ora.read_slots = ["last_error"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @getLastError() -> !sir.ptr<1> attributes {ora.effect = "reads", ora.read_slots = ["last_error"], ora.visibility = "private", ora.write_slots = []} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/enums/enum_usage_test.ora":25:5)))
 // CHECK-NEXT:     %1 = sir.const 31 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/enums/enum_usage_test.ora":25:5)))
 // CHECK-NEXT:     %2 = sir.const 32 : !sir.u256 loc(unknown)

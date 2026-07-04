@@ -45,7 +45,7 @@
 // CHECK-NEXT:   ^bb3:  // pred: ^bb1
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/strings/string_test.ora":5:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/strings/string_test.ora":5:5)
-// CHECK-NEXT:   func.func @getStoredString() -> !sir.ptr<1> attributes {ora.abi_return = "string", ora.abi_return_layout = "string", ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["stored_string"], ora.selector = "0xdcb21d12", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @getStoredString() -> !sir.ptr<1> attributes {ora.abi_return = "string", ora.abi_return_layout = "string", ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["stored_string"], ora.selector = "0xdcb21d12", ora.visibility = "pub", ora.write_slots = []} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/strings/string_test.ora":3:5)))
 // CHECK-NEXT:     %1 = sir.const 31 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/strings/string_test.ora":3:5)))
 // CHECK-NEXT:     %2 = sir.const 32 : !sir.u256 loc(unknown)

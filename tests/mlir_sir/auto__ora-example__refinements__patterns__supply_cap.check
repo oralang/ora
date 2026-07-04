@@ -260,7 +260,7 @@
 // CHECK-NEXT:     sir.store %58 : !sir.ptr<1>, %56 : !sir.u256 loc("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/refinements/patterns/supply_cap.ora":65:9)))
 // CHECK-NEXT:     sir.return %57 : !sir.ptr<1>, %6 : !sir.u256 loc("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/refinements/patterns/supply_cap.ora":65:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/patterns/supply_cap.ora":47:5)
-// CHECK-NEXT:   func.func @getTotalSupply() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["total_supply"], ora.selector = "0xc4e41b22", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @getTotalSupply() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["total_supply"], ora.selector = "0xc4e41b22", ora.visibility = "pub", ora.write_slots = []} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/refinements/patterns/supply_cap.ora":73:9)))
 // CHECK-NEXT:     %slot_total_supply = sir.const 0 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/refinements/patterns/supply_cap.ora":9:5)))
 // CHECK-NEXT:     %value = sir.sload %slot_total_supply : !sir.u256 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/refinements/patterns/supply_cap.ora":9:5)))

@@ -7,7 +7,7 @@
 // CHECK-NEXT:     sir.tstore %0 : !sir.u256, %arg0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/regions/region_ok_tstore_assign.ora":5:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/region_ok_tstore_assign.ora":4:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/region_ok_tstore_assign.ora":4:5)
-// CHECK-NEXT:   func.func @getTemp() -> !sir.u256 attributes {ora.effect = "reads", ora.read_slots = ["transient:temp"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @getTemp() -> !sir.u256 attributes {ora.effect = "reads", ora.read_slots = ["transient:temp"], ora.visibility = "private", ora.write_slots = []} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/regions/region_ok_tstore_assign.ora":9:9)))
 // CHECK-NEXT:     %1 = sir.const 0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/regions/region_ok_tstore_assign.ora":2:5)))
 // CHECK-NEXT:     %2 = sir.tload %1 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/regions/region_ok_tstore_assign.ora":2:5)))

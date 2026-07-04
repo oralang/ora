@@ -2,7 +2,7 @@
 // INPUT: ora-example/regions/region_ok_storage_to_memory.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {counter = 0 : ui64}, ora.global_slots_built} {
-// CHECK-NEXT:   func.func @ok() attributes {ora.effect = "reads", ora.read_slots = ["counter"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @ok() attributes {ora.effect = "reads", ora.read_slots = ["counter"], ora.visibility = "private", ora.write_slots = []} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/region_ok_storage_to_memory.ora":4:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/region_ok_storage_to_memory.ora":4:5)
 // CHECK-NEXT: } loc("{{.*}}/ora-example/regions/region_ok_storage_to_memory.ora":1:1)

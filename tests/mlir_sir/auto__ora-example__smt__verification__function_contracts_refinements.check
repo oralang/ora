@@ -82,7 +82,7 @@
 // CHECK-NEXT:     %value_5 = sir.sload %slot_balance : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/function_contracts_refinements.ora":9:5)
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/verification/function_contracts_refinements.ora":13:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/function_contracts_refinements.ora":13:5)
-// CHECK-NEXT:   func.func @getRefinedBalance() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["balance"], ora.selector = "0x694ed409", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @getRefinedBalance() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["balance"], ora.selector = "0x694ed409", ora.visibility = "pub", ora.write_slots = []} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/smt/verification/function_contracts_refinements.ora":27:9)))
 // CHECK-NEXT:     %slot_balance = sir.const 0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/smt/verification/function_contracts_refinements.ora":9:5)))
 // CHECK-NEXT:     %value = sir.sload %slot_balance : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/smt/verification/function_contracts_refinements.ora":9:5)))

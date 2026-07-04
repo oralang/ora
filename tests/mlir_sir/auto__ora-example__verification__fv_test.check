@@ -152,7 +152,7 @@
 // CHECK-NEXT:     sir.store %46 : !sir.ptr<1>, %44 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/verification/fv_test.ora":33:9)))
 // CHECK-NEXT:     sir.return %45 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/verification/fv_test.ora":33:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/verification/fv_test.ora":24:5)
-// CHECK-NEXT:   func.func @getTotalBalance() -> !sir.u256 attributes {ora.effect = "reads", ora.formal = true, ora.ghost = true, ora.read_slots = ["balance", "sumOfBalances"], ora.verification = true, ora.verification_context = "ghost_function", ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @getTotalBalance() -> !sir.u256 attributes {ora.effect = "reads", ora.formal = true, ora.ghost = true, ora.read_slots = ["balance", "sumOfBalances"], ora.verification = true, ora.verification_context = "ghost_function", ora.visibility = "private", ora.write_slots = []} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_sumOfBalances = sir.const 2 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/verification/fv_test.ora":12:11)))

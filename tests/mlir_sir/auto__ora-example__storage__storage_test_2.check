@@ -36,7 +36,7 @@
 // CHECK-NEXT:     sir.sstore %12 : !sir.u256, %c500 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/storage/storage_test_2.ora":19:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/storage/storage_test_2.ora":17:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/storage/storage_test_2.ora":17:5)
-// CHECK-NEXT:   func.func @getBalance(%arg0: !sir.u256 loc("{{.*}}/ora-example/storage/storage_test_2.ora":23:19)) -> !sir.u256 attributes {ora.effect = "reads", ora.param_binding_ids = ["file:0:pattern:5"], ora.param_names = ["account"], ora.read_slots = ["balances"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @getBalance(%arg0: !sir.u256 loc("{{.*}}/ora-example/storage/storage_test_2.ora":23:19)) -> !sir.u256 attributes {ora.effect = "reads", ora.param_binding_ids = ["file:0:pattern:5"], ora.param_names = ["account"], ora.read_slots = ["balances"], ora.visibility = "private", ora.write_slots = []} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_balances = sir.const 0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/storage/storage_test_2.ora":4:5)))
 // CHECK-NEXT:     %1 = sir.const 64 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/storage/storage_test_2.ora":24:16)))
@@ -62,7 +62,7 @@
 // CHECK-NEXT:     sir.sstore %2 : !sir.u256, %arg1 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/storage/storage_test_2.ora":28:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/storage/storage_test_2.ora":27:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/storage/storage_test_2.ora":27:5)
-// CHECK-NEXT:   func.func @getAllowance(%arg0: !sir.u256 loc("{{.*}}/ora-example/storage/storage_test_2.ora":31:21), %arg1: !sir.u256 loc("{{.*}}/ora-example/storage/storage_test_2.ora":31:37)) -> !sir.u256 attributes {ora.effect = "reads", ora.param_binding_ids = ["file:0:pattern:10", "file:0:pattern:11"], ora.param_names = ["owner", "spender"], ora.read_slots = ["allowances"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @getAllowance(%arg0: !sir.u256 loc("{{.*}}/ora-example/storage/storage_test_2.ora":31:21), %arg1: !sir.u256 loc("{{.*}}/ora-example/storage/storage_test_2.ora":31:37)) -> !sir.u256 attributes {ora.effect = "reads", ora.param_binding_ids = ["file:0:pattern:10", "file:0:pattern:11"], ora.param_names = ["owner", "spender"], ora.read_slots = ["allowances"], ora.visibility = "private", ora.write_slots = []} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_allowances = sir.const 1 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/storage/storage_test_2.ora":7:5)))
 // CHECK-NEXT:     %1 = sir.const 64 : !sir.u256 loc(unknown)

@@ -22,7 +22,7 @@
 // CHECK-NEXT:     sir.tstore %1 : !sir.u256, %9 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":25:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/types/tstore_primitive.ora":20:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/types/tstore_primitive.ora":20:5)
-// CHECK-NEXT:   func.func @testTStoreRead() attributes {ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["transient:temp_counter", "transient:temp_flag"], ora.selector = "0x32bfcb93", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testTStoreRead() attributes {ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["transient:temp_counter", "transient:temp_flag"], ora.selector = "0x32bfcb93", ora.visibility = "pub", ora.write_slots = []} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/types/tstore_primitive.ora":28:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/types/tstore_primitive.ora":28:5)
 // CHECK-NEXT:   func.func @testReentrancyPattern() attributes {ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.read_slots = ["transient:reentrancy_guard"], ora.selector = "0x5f9d70dd", ora.visibility = "pub", ora.write_slots = ["transient:reentrancy_guard"]} {
