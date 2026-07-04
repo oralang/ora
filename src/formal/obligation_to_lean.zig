@@ -643,9 +643,11 @@ fn compilerIntegerInfo(ty: obligation.TypeRef) ?CompilerIntegerInfo {
         .compiler_type_id => |id| blk: {
             const spec = type_builtin.lookupBuiltinByComptimeTypeId(id) orelse break :blk null;
             if (spec.category != .Integer) break :blk null;
+            const width = type_builtin.builtinBitWidth(spec.id) orelse break :blk null;
+            const signed = type_builtin.builtinSignedness(spec.id) orelse break :blk null;
             break :blk .{
-                .width = spec.bit_width orelse return null,
-                .signed = spec.signed orelse return null,
+                .width = width,
+                .signed = signed,
             };
         },
         .spelling => null,

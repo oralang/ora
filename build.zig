@@ -1715,6 +1715,7 @@ pub fn build(b: *std.Build) void {
     // zig build gate — the full pre-push bar; every commit must pass this on the committed state.
     const gate_step = b.step("gate", "Run the full pre-push bar (test + OraToSIR gate + Ora MLIR checks + SMT corpus + LSP smoke)");
     gate_step.dependOn(test_step);
+    gate_step.dependOn(check_formal_sync_step);
     gate_step.dependOn(oratosir_debloat_gate_step);
     gate_step.dependOn(check_resource_mutation_tripwires_step);
     gate_step.dependOn(check_mlir_ora_step);

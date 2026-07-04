@@ -522,10 +522,14 @@ fn typeInfoFromCompilerTypeId(id: u32) EncodeError!TypeInfo {
     return switch (spec.category) {
         .Bool => .{ .kind = .bool },
         .Address => .{ .kind = .bitvector, .width = 160, .signed = false },
-        .Integer => .{
-            .kind = .bitvector,
-            .width = spec.bit_width orelse return error.UnsupportedCompilerTypeId,
-            .signed = spec.signed orelse return error.UnsupportedCompilerTypeId,
+        .Integer => blk: {
+            const width = type_builtin.builtinBitWidth(spec.id) orelse return error.UnsupportedCompilerTypeId;
+            const signed = type_builtin.builtinSignedness(spec.id) orelse return error.UnsupportedCompilerTypeId;
+            break :blk .{
+                .kind = .bitvector,
+                .width = width,
+                .signed = signed,
+            };
         },
         else => error.UnsupportedCompilerTypeId,
     };
