@@ -5362,12 +5362,15 @@ test "quantified operation rejects missing quantifier instead of defaulting to f
     const mlir_ctx = mlir.oraContextCreate();
     defer mlir.oraContextDestroy(mlir_ctx);
     loadAllDialects(mlir_ctx);
-    _ = mlir.oraDialectRegister(mlir_ctx);
+    // Deliberately unregistered: 'quantifier' is a required property, so a
+    // registered-dialect parse rejects this op before the encoder guard can
+    // fire. Unregistered parsing makes the encoder the rejecting component.
+    mlir.oraContextSetAllowUnregisteredDialects(mlir_ctx, true);
 
     const text =
         \\module {
         \\  func.func @bad(%flag: i1) {
-        \\    %q = "ora.quantified"(%flag) <{variable = "i", variable_type = "u256"}> : (i1) -> i1
+        \\    %q = "ora.quantified"(%flag) {variable = "i", variable_type = "u256"} : (i1) -> i1
         \\    func.return
         \\  }
         \\}
@@ -5391,12 +5394,15 @@ test "quantified operation rejects missing variable instead of defaulting to q" 
     const mlir_ctx = mlir.oraContextCreate();
     defer mlir.oraContextDestroy(mlir_ctx);
     loadAllDialects(mlir_ctx);
-    _ = mlir.oraDialectRegister(mlir_ctx);
+    // Deliberately unregistered: 'variable' is a required property, so a
+    // registered-dialect parse rejects this op before the encoder guard can
+    // fire. Unregistered parsing makes the encoder the rejecting component.
+    mlir.oraContextSetAllowUnregisteredDialects(mlir_ctx, true);
 
     const text =
         \\module {
         \\  func.func @bad(%flag: i1) {
-        \\    %q = "ora.quantified"(%flag) <{quantifier = "forall", variable_type = "u256"}> : (i1) -> i1
+        \\    %q = "ora.quantified"(%flag) {quantifier = "forall", variable_type = "u256"} : (i1) -> i1
         \\    func.return
         \\  }
         \\}

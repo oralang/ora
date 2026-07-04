@@ -1,0 +1,26 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/verification/refinement_fact_proven.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK: module {
+// CHECK-NEXT:   func.func @fromBuiltinSender() attributes {ora.dispatch_class = "readonly", ora.selector = "0x8aee9839", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 79369486526231419514744875203144007480878729631776241096743456637418750345216 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.const 4 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %3 = sir.const 0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/verification/refinement_fact_proven.ora":20:26)))
+// CHECK-NEXT:     %4 = sir.bitcast %3 : !sir.u256 : i160 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/verification/refinement_fact_proven.ora":20:26)))
+// CHECK-NEXT:     %5 = sir.bitcast %4 : i160 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/verification/refinement_fact_proven.ora":20:26)))
+// CHECK-NEXT:     %6 = sir.and %5 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/verification/refinement_fact_proven.ora":20:26)))
+// CHECK-NEXT:     %7 = sir.caller : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/smt/verification/refinement_fact_proven.ora":19:38)))
+// CHECK-NEXT:     %8 = sir.and %7 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/verification/refinement_fact_proven.ora":20:16)))
+// CHECK-NEXT:     %9 = sir.eq %8 : !sir.u256, %6 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/verification/refinement_fact_proven.ora":20:16)))
+// CHECK-NEXT:     %10 = sir.not %9 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/verification/refinement_fact_proven.ora":20:16)))
+// CHECK-NEXT:     %11 = sir.iszero %10 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/verification/refinement_fact_proven.ora":20:9)))
+// CHECK-NEXT:     sir.cond_br %11 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/verification/refinement_fact_proven.ora":20:9)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     %12 = sir.malloc %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/verification/refinement_fact_proven.ora":20:9)))
+// CHECK-NEXT:     sir.store %12 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/verification/refinement_fact_proven.ora":20:9)))
+// CHECK-NEXT:     sir.revert %12 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/verification/refinement_fact_proven.ora":20:9)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/verification/refinement_fact_proven.ora":18:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/refinement_fact_proven.ora":18:5)
+// CHECK-NEXT: } loc("{{.*}}/ora-example/smt/verification/refinement_fact_proven.ora":17:1)

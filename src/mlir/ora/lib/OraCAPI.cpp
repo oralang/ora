@@ -253,6 +253,11 @@ extern "C"
         delete unwrap(ctx);
     }
 
+    void oraContextSetAllowUnregisteredDialects(MlirContext ctx, bool allow)
+    {
+        unwrap(ctx)->allowUnregisteredDialects(allow);
+    }
+
     void oraSetDebugEnabled(bool enabled)
     {
         mlir::ora::setDebugEnabled(enabled);

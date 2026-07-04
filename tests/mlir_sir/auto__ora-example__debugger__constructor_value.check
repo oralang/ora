@@ -1,0 +1,18 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/debugger/constructor_value.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK: module attributes {ora.global_slots = {value = 0 : ui64}, ora.global_slots_built} {
+// CHECK-NEXT:   func.func @init(%arg0: !sir.u256 loc("{{.*}}/ora-example/debugger/constructor_value.ora":6:17)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "writes", ora.init = true, ora.param_binding_ids = ["file:11:pattern:0"], ora.param_names = ["initialValue"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.visibility = "pub", ora.write_slots = ["value"]} {
+// CHECK-NEXT:     %slot_value = sir.const 0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/debugger/constructor_value.ora":7:9)))
+// CHECK-NEXT:     sir.sstore %slot_value : !sir.u256, %arg0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/debugger/constructor_value.ora":7:9)))
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/debugger/constructor_value.ora":6:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/debugger/constructor_value.ora":6:5)
+// CHECK-NEXT:   func.func @get() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["value"], ora.selector = "0x6d4ce63c", ora.visibility = "pub", ora.write_slots = []} {
+// CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/debugger/constructor_value.ora":11:9)))
+// CHECK-NEXT:     %slot_value = sir.const 0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/debugger/constructor_value.ora":4:5)))
+// CHECK-NEXT:     %value = sir.sload %slot_value : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/debugger/constructor_value.ora":4:5)))
+// CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/debugger/constructor_value.ora":11:9)))
+// CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %value : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/debugger/constructor_value.ora":11:9)))
+// CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/debugger/constructor_value.ora":11:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/debugger/constructor_value.ora":10:5)
+// CHECK-NEXT: } loc("{{.*}}/ora-example/debugger/constructor_value.ora":3:1)

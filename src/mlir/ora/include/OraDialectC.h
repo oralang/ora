@@ -70,6 +70,11 @@ extern "C"
 
     MLIR_CAPI_EXPORTED MlirContext oraContextCreate();
     MLIR_CAPI_EXPORTED void oraContextDestroy(MlirContext ctx);
+    /// Allow parsing ops of unregistered dialects in this context. Test-only
+    /// escape hatch: malformed ops (e.g. missing required properties) cannot
+    /// be constructed textually under a registered dialect, so downstream
+    /// fail-closed guards need unregistered parsing to be exercisable.
+    MLIR_CAPI_EXPORTED void oraContextSetAllowUnregisteredDialects(MlirContext ctx, bool allow);
     MLIR_CAPI_EXPORTED void oraSetDebugEnabled(bool enabled);
     MLIR_CAPI_EXPORTED MlirDialectRegistry oraDialectRegistryCreate();
     MLIR_CAPI_EXPORTED void oraDialectRegistryDestroy(MlirDialectRegistry registry);

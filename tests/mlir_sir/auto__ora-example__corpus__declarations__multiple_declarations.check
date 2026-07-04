@@ -1,0 +1,193 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/declarations/multiple_declarations.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK: module {
+// CHECK-NEXT:   func.func @multiple_lets() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0xd33cee2b", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %c15 = sir.const 15 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":14:16)))
+// CHECK-NEXT:     %3 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %4 = sir.bitcast %3 : !sir.u256 : i1 loc(unknown)
+// CHECK-NEXT:     %5 = sir.bitcast %4 : i1 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":14:16)))
+// CHECK-NEXT:     %6 = sir.iszero %5 : !sir.u256 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":14:16)))
+// CHECK-NEXT:     sir.cond_br %6 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":14:16)))
+// CHECK-NEXT:   ^bb1:  // 4 preds: ^bb0, ^bb2, ^bb3, ^bb4
+// CHECK-NEXT:     %7 = sir.malloc %2 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":14:16)))
+// CHECK-NEXT:     sir.store %7 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":14:16)))
+// CHECK-NEXT:     sir.revert %7 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":14:16)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     %8 = sir.iszero %5 : !sir.u256 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":14:16)))
+// CHECK-NEXT:     sir.cond_br %8 : !sir.u256, ^bb1, ^bb3 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":14:16)))
+// CHECK-NEXT:   ^bb3:  // pred: ^bb2
+// CHECK-NEXT:     %9 = sir.iszero %5 : !sir.u256 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":14:16)))
+// CHECK-NEXT:     sir.cond_br %9 : !sir.u256, ^bb1, ^bb4 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":14:16)))
+// CHECK-NEXT:   ^bb4:  // pred: ^bb3
+// CHECK-NEXT:     %10 = sir.iszero %5 : !sir.u256 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":14:16)))
+// CHECK-NEXT:     sir.cond_br %10 : !sir.u256, ^bb1, ^bb5 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":14:16)))
+// CHECK-NEXT:   ^bb5:  // pred: ^bb4
+// CHECK-NEXT:     %11 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":14:9)))
+// CHECK-NEXT:     sir.store %11 : !sir.ptr<1>, %c15 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":14:9)))
+// CHECK-NEXT:     sir.return %11 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":14:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":8:5)
+// CHECK-NEXT:   func.func @multiple_vars() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x16e7bf03", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %c60 = sir.const 60 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":25:16)))
+// CHECK-NEXT:     %3 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %4 = sir.bitcast %3 : !sir.u256 : i1 loc(unknown)
+// CHECK-NEXT:     %5 = sir.bitcast %4 : i1 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":25:16)))
+// CHECK-NEXT:     %6 = sir.iszero %5 : !sir.u256 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":25:16)))
+// CHECK-NEXT:     sir.cond_br %6 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":25:16)))
+// CHECK-NEXT:   ^bb1:  // 2 preds: ^bb0, ^bb2
+// CHECK-NEXT:     %7 = sir.malloc %2 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":25:16)))
+// CHECK-NEXT:     sir.store %7 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":25:16)))
+// CHECK-NEXT:     sir.revert %7 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":25:16)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     %8 = sir.iszero %5 : !sir.u256 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":25:16)))
+// CHECK-NEXT:     sir.cond_br %8 : !sir.u256, ^bb1, ^bb3 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":25:16)))
+// CHECK-NEXT:   ^bb3:  // pred: ^bb2
+// CHECK-NEXT:     %9 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":25:9)))
+// CHECK-NEXT:     sir.store %9 : !sir.ptr<1>, %c60 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":25:9)))
+// CHECK-NEXT:     sir.return %9 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":25:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":18:5)
+// CHECK-NEXT:   func.func @mixed_let_var() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0xf5ce123c", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %c150 = sir.const 150 : !sir.u256 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":32:19)))
+// CHECK-NEXT:     %3 = sir.const 1 : !sir.u256 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":32:19)))
+// CHECK-NEXT:     %4 = sir.bitcast %3 : !sir.u256 : i1 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":32:19)))
+// CHECK-NEXT:     %5 = sir.bitcast %4 : i1 : !sir.u256 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":32:19)))
+// CHECK-NEXT:     %6 = sir.iszero %5 : !sir.u256 : !sir.u256 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":32:19)))
+// CHECK-NEXT:     sir.cond_br %6 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":32:19)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     %7 = sir.malloc %2 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":32:19)))
+// CHECK-NEXT:     sir.store %7 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":32:19)))
+// CHECK-NEXT:     sir.revert %7 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":32:19)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     %8 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.17"("ora.origin_stmt.17"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":34:9)))
+// CHECK-NEXT:     sir.store %8 : !sir.ptr<1>, %c150 : !sir.u256 loc("ora.stmt.17"("ora.origin_stmt.17"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":34:9)))
+// CHECK-NEXT:     sir.return %8 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.17"("ora.origin_stmt.17"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":34:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":29:5)
+// CHECK-NEXT:   func.func @sequential_declarations() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x8f93ea89", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.const 56016217287220138543383237988819299768112786790290310538187226855197252780032 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %3 = sir.const 4 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %c60 = sir.const 60 : !sir.u256 loc("ora.stmt.22"("ora.origin_stmt.22"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":43:25)))
+// CHECK-NEXT:     %4 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %5 = sir.bitcast %4 : !sir.u256 : i1 loc(unknown)
+// CHECK-NEXT:     %6 = sir.bitcast %5 : i1 : !sir.u256 loc("ora.stmt.19"("ora.origin_stmt.19"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":40:29)))
+// CHECK-NEXT:     %7 = sir.iszero %6 : !sir.u256 : !sir.u256 loc("ora.stmt.19"("ora.origin_stmt.19"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":40:29)))
+// CHECK-NEXT:     sir.cond_br %7 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.19"("ora.origin_stmt.19"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":40:29)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     %8 = sir.malloc %3 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.19"("ora.origin_stmt.19"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":40:29)))
+// CHECK-NEXT:     sir.store %8 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.19"("ora.origin_stmt.19"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":40:29)))
+// CHECK-NEXT:     sir.revert %8 : !sir.ptr<1>, %3 : !sir.u256 loc("ora.stmt.19"("ora.origin_stmt.19"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":40:29)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     %9 = sir.iszero %6 : !sir.u256 : !sir.u256 loc("ora.stmt.20"("ora.origin_stmt.20"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":41:29)))
+// CHECK-NEXT:     sir.cond_br %9 : !sir.u256, ^bb3, ^bb4 loc("ora.stmt.20"("ora.origin_stmt.20"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":41:29)))
+// CHECK-NEXT:   ^bb3:  // pred: ^bb2
+// CHECK-NEXT:     %10 = sir.malloc %3 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.20"("ora.origin_stmt.20"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":41:29)))
+// CHECK-NEXT:     sir.store %10 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.20"("ora.origin_stmt.20"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":41:29)))
+// CHECK-NEXT:     sir.revert %10 : !sir.ptr<1>, %3 : !sir.u256 loc("ora.stmt.20"("ora.origin_stmt.20"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":41:29)))
+// CHECK-NEXT:   ^bb4:  // pred: ^bb2
+// CHECK-NEXT:     %11 = sir.iszero %6 : !sir.u256 : !sir.u256 loc("ora.stmt.21"("ora.origin_stmt.21"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":42:25)))
+// CHECK-NEXT:     sir.cond_br %11 : !sir.u256, ^bb5, ^bb6 loc("ora.stmt.21"("ora.origin_stmt.21"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":42:25)))
+// CHECK-NEXT:   ^bb5:  // pred: ^bb4
+// CHECK-NEXT:     %12 = sir.malloc %3 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.21"("ora.origin_stmt.21"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":42:25)))
+// CHECK-NEXT:     sir.store %12 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.21"("ora.origin_stmt.21"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":42:25)))
+// CHECK-NEXT:     sir.revert %12 : !sir.ptr<1>, %3 : !sir.u256 loc("ora.stmt.21"("ora.origin_stmt.21"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":42:25)))
+// CHECK-NEXT:   ^bb6:  // pred: ^bb4
+// CHECK-NEXT:     %13 = sir.iszero %6 : !sir.u256 : !sir.u256 loc("ora.stmt.22"("ora.origin_stmt.22"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":43:25)))
+// CHECK-NEXT:     sir.cond_br %13 : !sir.u256, ^bb7, ^bb8 loc("ora.stmt.22"("ora.origin_stmt.22"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":43:25)))
+// CHECK-NEXT:   ^bb7:  // pred: ^bb6
+// CHECK-NEXT:     %14 = sir.malloc %3 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.22"("ora.origin_stmt.22"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":43:25)))
+// CHECK-NEXT:     sir.store %14 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.22"("ora.origin_stmt.22"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":43:25)))
+// CHECK-NEXT:     sir.revert %14 : !sir.ptr<1>, %3 : !sir.u256 loc("ora.stmt.22"("ora.origin_stmt.22"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":43:25)))
+// CHECK-NEXT:   ^bb8:  // pred: ^bb6
+// CHECK-NEXT:     %15 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.23"("ora.origin_stmt.23"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":44:9)))
+// CHECK-NEXT:     sir.store %15 : !sir.ptr<1>, %c60 : !sir.u256 loc("ora.stmt.23"("ora.origin_stmt.23"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":44:9)))
+// CHECK-NEXT:     sir.return %15 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.23"("ora.origin_stmt.23"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":44:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":38:5)
+// CHECK-NEXT:   func.func @shadowing_in_scope() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x35644398", ora.visibility = "pub"} {
+// CHECK-NEXT:     %c10 = sir.const 10 : !sir.u256 loc("ora.stmt.24"("ora.origin_stmt.24"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":49:23)))
+// CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %c20 = sir.const 20 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc("ora.stmt.28"("ora.origin_stmt.28"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":51:13)))
+// CHECK-NEXT:     %2 = sir.bitcast %1 : !sir.u256 : i1 loc("ora.stmt.28"("ora.origin_stmt.28"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":51:13)))
+// CHECK-NEXT:     %3 = sir.bitcast %2 : i1 : !sir.u256 loc("ora.stmt.28"("ora.origin_stmt.28"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":51:9)))
+// CHECK-NEXT:     sir.cond_br %3 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.28"("ora.origin_stmt.28"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":51:9)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     sir.br ^bb3(%c20 : !sir.u256) loc("ora.stmt.28"("ora.origin_stmt.28"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":51:9)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     sir.br ^bb3(%c10 : !sir.u256) loc("ora.stmt.28"("ora.origin_stmt.28"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":51:9)))
+// CHECK-NEXT:   ^bb3(%4: !sir.u256 loc("ora.stmt.28"("ora.origin_stmt.28"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":51:9)))):  // 2 preds: ^bb1, ^bb2
+// CHECK-NEXT:     %5 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.29"("ora.origin_stmt.29"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":55:9)))
+// CHECK-NEXT:     sir.store %5 : !sir.ptr<1>, %4 : !sir.u256 loc("ora.stmt.29"("ora.origin_stmt.29"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":55:9)))
+// CHECK-NEXT:     sir.return %5 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.29"("ora.origin_stmt.29"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":55:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":48:5)
+// CHECK-NEXT:   func.func @many_types() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0xb004c15b", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.36"("ora.origin_stmt.36"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":66:9)))
+// CHECK-NEXT:     %c42 = sir.const 42 : !sir.u256 loc("ora.stmt.30"("ora.origin_stmt.30"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":60:27)))
+// CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.36"("ora.origin_stmt.36"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":66:9)))
+// CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %c42 : !sir.u256 loc("ora.stmt.36"("ora.origin_stmt.36"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":66:9)))
+// CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.36"("ora.origin_stmt.36"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":66:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":59:5)
+// CHECK-NEXT:   func.func @var_chain() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x6964a2c2", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %c9 = sir.const 9 : !sir.u256 loc("ora.stmt.42"("ora.origin_stmt.42"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":76:13)))
+// CHECK-NEXT:     %3 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %4 = sir.bitcast %3 : !sir.u256 : i1 loc(unknown)
+// CHECK-NEXT:     %5 = sir.bitcast %4 : i1 : !sir.u256 loc("ora.stmt.38"("ora.origin_stmt.38"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":72:23)))
+// CHECK-NEXT:     %6 = sir.iszero %5 : !sir.u256 : !sir.u256 loc("ora.stmt.38"("ora.origin_stmt.38"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":72:23)))
+// CHECK-NEXT:     sir.cond_br %6 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.38"("ora.origin_stmt.38"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":72:23)))
+// CHECK-NEXT:   ^bb1:  // 4 preds: ^bb0, ^bb2, ^bb3, ^bb4
+// CHECK-NEXT:     %7 = sir.malloc %2 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.38"("ora.origin_stmt.38"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":72:23)))
+// CHECK-NEXT:     sir.store %7 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.38"("ora.origin_stmt.38"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":72:23)))
+// CHECK-NEXT:     sir.revert %7 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.38"("ora.origin_stmt.38"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":72:23)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     %8 = sir.iszero %5 : !sir.u256 : !sir.u256 loc("ora.stmt.39"("ora.origin_stmt.39"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":73:23)))
+// CHECK-NEXT:     sir.cond_br %8 : !sir.u256, ^bb1, ^bb3 loc("ora.stmt.39"("ora.origin_stmt.39"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":73:23)))
+// CHECK-NEXT:   ^bb3:  // pred: ^bb2
+// CHECK-NEXT:     %9 = sir.iszero %5 : !sir.u256 : !sir.u256 loc("ora.stmt.41"("ora.origin_stmt.41"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":75:13)))
+// CHECK-NEXT:     sir.cond_br %9 : !sir.u256, ^bb1, ^bb4 loc("ora.stmt.41"("ora.origin_stmt.41"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":75:13)))
+// CHECK-NEXT:   ^bb4:  // pred: ^bb3
+// CHECK-NEXT:     %10 = sir.iszero %5 : !sir.u256 : !sir.u256 loc("ora.stmt.42"("ora.origin_stmt.42"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":76:13)))
+// CHECK-NEXT:     sir.cond_br %10 : !sir.u256, ^bb1, ^bb5 loc("ora.stmt.42"("ora.origin_stmt.42"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":76:13)))
+// CHECK-NEXT:   ^bb5:  // pred: ^bb4
+// CHECK-NEXT:     %11 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.43"("ora.origin_stmt.43"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":77:9)))
+// CHECK-NEXT:     sir.store %11 : !sir.ptr<1>, %c9 : !sir.u256 loc("ora.stmt.43"("ora.origin_stmt.43"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":77:9)))
+// CHECK-NEXT:     sir.return %11 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.43"("ora.origin_stmt.43"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":77:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":70:5)
+// CHECK-NEXT:   func.func @expression_lets() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x1eaff4b2", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.const 6988570666312495752839002421695666563898142680323167511053911032881624383488 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.const 56016217287220138543383237988819299768112786790290310538187226855197252780032 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %3 = sir.const 4 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %4 = sir.bitcast %c1 : !sir.u256 : i1 loc(unknown)
+// CHECK-NEXT:     %5 = sir.bitcast %4 : i1 : !sir.u256 loc("ora.stmt.45"("ora.origin_stmt.45"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":83:23)))
+// CHECK-NEXT:     %6 = sir.iszero %5 : !sir.u256 : !sir.u256 loc("ora.stmt.45"("ora.origin_stmt.45"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":83:23)))
+// CHECK-NEXT:     sir.cond_br %6 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.45"("ora.origin_stmt.45"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":83:23)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     %7 = sir.malloc %3 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.45"("ora.origin_stmt.45"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":83:23)))
+// CHECK-NEXT:     sir.store %7 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.45"("ora.origin_stmt.45"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":83:23)))
+// CHECK-NEXT:     sir.revert %7 : !sir.ptr<1>, %3 : !sir.u256 loc("ora.stmt.45"("ora.origin_stmt.45"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":83:23)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     %8 = sir.iszero %5 : !sir.u256 : !sir.u256 loc("ora.stmt.46"("ora.origin_stmt.46"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":84:23)))
+// CHECK-NEXT:     sir.cond_br %8 : !sir.u256, ^bb3, ^bb4 loc("ora.stmt.46"("ora.origin_stmt.46"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":84:23)))
+// CHECK-NEXT:   ^bb3:  // pred: ^bb2
+// CHECK-NEXT:     %9 = sir.malloc %3 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.46"("ora.origin_stmt.46"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":84:23)))
+// CHECK-NEXT:     sir.store %9 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.46"("ora.origin_stmt.46"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":84:23)))
+// CHECK-NEXT:     sir.revert %9 : !sir.ptr<1>, %3 : !sir.u256 loc("ora.stmt.46"("ora.origin_stmt.46"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":84:23)))
+// CHECK-NEXT:   ^bb4:  // pred: ^bb2
+// CHECK-NEXT:     %10 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.49"("ora.origin_stmt.49"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":87:9)))
+// CHECK-NEXT:     sir.store %10 : !sir.ptr<1>, %c1 : !sir.u256 loc("ora.stmt.49"("ora.origin_stmt.49"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":87:9)))
+// CHECK-NEXT:     sir.return %10 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.49"("ora.origin_stmt.49"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":87:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":81:5)
+// CHECK-NEXT: } loc("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":6:1)

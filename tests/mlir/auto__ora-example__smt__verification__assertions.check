@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/verification/assertions.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @checkBalance
+// CHECK-LABEL: func.func @checkSum
+// CHECK-LABEL: func.func @verifyInvariant
+// CHECK-LABEL: func.func @checkRefinement
+// CHECK-LABEL: func.func @conditionalCheck
+// CHECK-LABEL: func.func @loopAssertion
+// CHECK-LABEL: func.func @multipleChecks

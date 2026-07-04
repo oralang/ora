@@ -1,0 +1,234 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/control-flow/match/result_helpers.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK: module attributes {sir.error_ids = {Failure = 4286488407 : i256}, sir.error_selectors = {Failure = "0xff7e9f57"}} {
+// CHECK-NEXT:   func.func @choose_u256(%arg0: !sir.u256 loc("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":5:20), %arg1: !sir.u256 loc("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":5:32)) -> (!sir.u256, !sir.u256) attributes {ora.param_binding_ids = ["file:11:pattern:0", "file:11:pattern:1"], ora.param_names = ["flag", "value"], ora.returns_error_union = true, ora.visibility = "private"} {
+// CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":9:9)))
+// CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.const 64 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %3 = sir.const 0 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %4 = sir.const 4286488407 {ora.error_id = 4286488407 : i256} : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":9:20)))
+// CHECK-NEXT:     %5 = sir.and %arg0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":5:20)
+// CHECK-NEXT:     sir.cond_br %5 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":6:9)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     %6 = sir.malloc %2 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":7:13)))
+// CHECK-NEXT:     sir.store %6 : !sir.ptr<1>, %3 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":7:13)))
+// CHECK-NEXT:     %7 = sir.addptr %6 : !sir.ptr<1>, %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":7:13)))
+// CHECK-NEXT:     sir.store %7 : !sir.ptr<1>, %arg1 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":7:13)))
+// CHECK-NEXT:     sir.return %6 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":7:13)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     sir.br ^bb3 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":6:9)))
+// CHECK-NEXT:   ^bb3:  // pred: ^bb2
+// CHECK-NEXT:     %8 = sir.malloc %2 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":9:9)))
+// CHECK-NEXT:     sir.store %8 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":9:9)))
+// CHECK-NEXT:     %9 = sir.addptr %8 : !sir.ptr<1>, %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":9:9)))
+// CHECK-NEXT:     sir.store %9 : !sir.ptr<1>, %4 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":9:9)))
+// CHECK-NEXT:     sir.return %8 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":9:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":5:5)
+// CHECK-NEXT:   func.func @choose_bytes(%arg0: !sir.u256 loc("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":12:21), %arg1: !sir.ptr<1> loc("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":12:33)) -> (!sir.u256, !sir.ptr<1>) attributes {ora.param_binding_ids = ["file:11:pattern:2", "file:11:pattern:3"], ora.param_names = ["flag", "value"], ora.returns_error_union = true, ora.visibility = "private"} {
+// CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":16:9)))
+// CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.const 64 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %3 = sir.const 0 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %4 = sir.const 4286488407 {ora.error_id = 4286488407 : i256} : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":16:20)))
+// CHECK-NEXT:     %5 = sir.and %arg0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":12:21)
+// CHECK-NEXT:     sir.cond_br %5 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":13:9)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     %6 = sir.bitcast %arg1 : !sir.ptr<1> : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":14:13)))
+// CHECK-NEXT:     %7 = sir.load %arg1 : !sir.ptr<1> : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":14:13)))
+// CHECK-NEXT:     %8 = sir.select %3 : !sir.u256, %7 : !sir.u256, %6 : !sir.u256 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":14:13)))
+// CHECK-NEXT:     %9 = sir.malloc %2 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":14:13)))
+// CHECK-NEXT:     sir.store %9 : !sir.ptr<1>, %3 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":14:13)))
+// CHECK-NEXT:     %10 = sir.addptr %9 : !sir.ptr<1>, %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":14:13)))
+// CHECK-NEXT:     sir.store %10 : !sir.ptr<1>, %8 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":14:13)))
+// CHECK-NEXT:     sir.return %9 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":14:13)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     sir.br ^bb3 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":13:9)))
+// CHECK-NEXT:   ^bb3:  // pred: ^bb2
+// CHECK-NEXT:     %11 = sir.malloc %2 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":16:9)))
+// CHECK-NEXT:     sir.store %11 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":16:9)))
+// CHECK-NEXT:     %12 = sir.addptr %11 : !sir.ptr<1>, %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":16:9)))
+// CHECK-NEXT:     sir.store %12 : !sir.ptr<1>, %4 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":16:9)))
+// CHECK-NEXT:     sir.return %11 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":16:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":12:5)
+// CHECK-NEXT:   func.func @describe(%arg0: !sir.u256 loc("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":19:21), %arg1: !sir.u256 loc("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":19:33)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["bool", "uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:4", "file:11:pattern:5"], ora.param_names = ["flag", "value"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x93cdffff", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %c11 = sir.const 11 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":23:48)))
+// CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.bitcast %c1 : !sir.u256 : i1 loc(unknown)
+// CHECK-NEXT:     %3 = sir.bitcast %0 : !sir.u256 : i1 loc(unknown)
+// CHECK-NEXT:     %4 = sir.and %arg0 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":19:21)
+// CHECK-NEXT:     %5:2 = sir.icall @choose_u256(%4, %arg1) : !sir.u256, !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":20:21)))
+// CHECK-NEXT:     %6 = sir.and %5#0 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:     %7 = sir.eq %6 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:     %8 = sir.and %7 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:     %9 = sir.bitcast %8 : !sir.u256 : i1 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:     %10 = sir.and %5#0 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))
+// CHECK-NEXT:     %11 = sir.eq %10 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))
+// CHECK-NEXT:     %12 = sir.and %11 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))
+// CHECK-NEXT:     %13 = sir.bitcast %12 : !sir.u256 : i1 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))
+// CHECK-NEXT:     %14 = sir.and %5#0 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":4:9)))
+// CHECK-NEXT:     %15 = sir.eq %14 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":4:9)))
+// CHECK-NEXT:     %16 = sir.and %15 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":4:9)))
+// CHECK-NEXT:     %17 = sir.bitcast %16 : !sir.u256 : i1 loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":4:9)))
+// CHECK-NEXT:     %18 = sir.bitcast %17 : i1 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":4:9)))
+// CHECK-NEXT:     sir.cond_br %18 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":4:9)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     %19 = sir.bitcast %3 : i1 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":4:9)))
+// CHECK-NEXT:     sir.br ^bb3(%19 : !sir.u256) loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":4:9)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     %20 = sir.bitcast %2 : i1 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":4:9)))
+// CHECK-NEXT:     sir.br ^bb3(%20 : !sir.u256) loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":4:9)))
+// CHECK-NEXT:   ^bb3(%21: !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":4:9)))):  // 2 preds: ^bb1, ^bb2
+// CHECK-NEXT:     %22 = sir.bitcast %13 : i1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))
+// CHECK-NEXT:     sir.cond_br %22 : !sir.u256, ^bb4, ^bb5 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))
+// CHECK-NEXT:   ^bb4:  // pred: ^bb3
+// CHECK-NEXT:     %23 = sir.bitcast %2 : i1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))
+// CHECK-NEXT:     sir.br ^bb6(%23 : !sir.u256) loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))
+// CHECK-NEXT:   ^bb5:  // pred: ^bb3
+// CHECK-NEXT:     %24 = sir.bitcast %3 : i1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))
+// CHECK-NEXT:     sir.br ^bb6(%24 : !sir.u256) loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))
+// CHECK-NEXT:   ^bb6(%25: !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))):  // 2 preds: ^bb4, ^bb5
+// CHECK-NEXT:     %26 = sir.and %25 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))
+// CHECK-NEXT:     %27 = sir.bitcast %9 : i1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:     sir.cond_br %27 : !sir.u256, ^bb7, ^bb8 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:   ^bb7:  // pred: ^bb6
+// CHECK-NEXT:     sir.br ^bb9(%c11 : !sir.u256) loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:   ^bb8:  // pred: ^bb6
+// CHECK-NEXT:     sir.br ^bb9(%5#1 : !sir.u256) loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:   ^bb9(%28: !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))):  // 2 preds: ^bb7, ^bb8
+// CHECK-NEXT:     sir.cond_br %21 : !sir.u256, ^bb10, ^bb11 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":24:13)))
+// CHECK-NEXT:   ^bb10:  // pred: ^bb9
+// CHECK-NEXT:     %29 = sir.xor %26 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":24:20)))
+// CHECK-NEXT:     %30 = sir.and %29 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":24:20)))
+// CHECK-NEXT:     %31 = sir.bitcast %30 : !sir.u256 : i1 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":24:20)))
+// CHECK-NEXT:     %32 = sir.bitcast %31 : i1 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":24:13)))
+// CHECK-NEXT:     sir.br ^bb12(%32 : !sir.u256) loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":24:13)))
+// CHECK-NEXT:   ^bb11:  // pred: ^bb9
+// CHECK-NEXT:     %33 = sir.bitcast %3 : i1 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":24:13)))
+// CHECK-NEXT:     sir.br ^bb12(%33 : !sir.u256) loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":24:13)))
+// CHECK-NEXT:   ^bb12(%34: !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":24:13)))):  // 2 preds: ^bb10, ^bb11
+// CHECK-NEXT:     sir.cond_br %34 : !sir.u256, ^bb13, ^bb14 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":24:9)))
+// CHECK-NEXT:   ^bb13:  // pred: ^bb12
+// CHECK-NEXT:     %35 = sir.malloc %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":25:13)))
+// CHECK-NEXT:     sir.store %35 : !sir.ptr<1>, %28 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":25:13)))
+// CHECK-NEXT:     sir.return %35 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":25:13)))
+// CHECK-NEXT:   ^bb14:  // pred: ^bb12
+// CHECK-NEXT:     sir.br ^bb15 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":24:9)))
+// CHECK-NEXT:   ^bb15:  // pred: ^bb14
+// CHECK-NEXT:     %36 = sir.malloc %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":27:9)))
+// CHECK-NEXT:     sir.store %36 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":27:9)))
+// CHECK-NEXT:     sir.return %36 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":27:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":19:5)
+// CHECK-NEXT:   func.func @std.result.is_ok__u256__Failure(%arg0: !sir.u256 {ora.force_wide_error_union = true} loc("embedded://std/result.ora":2:46), %arg1: !sir.u256 loc("embedded://std/result.ora":2:46)) -> !sir.u256 attributes {ora.inline = true, ora.param_binding_ids = ["file:9:pattern:2"], ora.param_names = ["value"], ora.visibility = "private"} {
+// CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %3 = sir.bitcast %2 : !sir.u256 : i1 loc(unknown)
+// CHECK-NEXT:     %4 = sir.bitcast %0 : !sir.u256 : i1 loc(unknown)
+// CHECK-NEXT:     %5 = sir.and %arg0 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":4:9)))
+// CHECK-NEXT:     %6 = sir.eq %5 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":4:9)))
+// CHECK-NEXT:     %7 = sir.and %6 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":4:9)))
+// CHECK-NEXT:     %8 = sir.bitcast %7 : !sir.u256 : i1 loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":4:9)))
+// CHECK-NEXT:     %9 = sir.bitcast %8 : i1 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":4:9)))
+// CHECK-NEXT:     sir.cond_br %9 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":4:9)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     %10 = sir.bitcast %4 : i1 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":4:9)))
+// CHECK-NEXT:     sir.br ^bb3(%10 : !sir.u256) loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":4:9)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     %11 = sir.bitcast %3 : i1 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":4:9)))
+// CHECK-NEXT:     sir.br ^bb3(%11 : !sir.u256) loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":4:9)))
+// CHECK-NEXT:   ^bb3(%12: !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":4:9)))):  // 2 preds: ^bb1, ^bb2
+// CHECK-NEXT:     %13 = sir.and %12 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":4:9)))
+// CHECK-NEXT:     %14 = sir.iszero %13 : !sir.u256 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":3:5)))
+// CHECK-NEXT:     %15 = sir.iszero %14 : !sir.u256 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":3:5)))
+// CHECK-NEXT:     %16 = sir.malloc %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":3:5)))
+// CHECK-NEXT:     sir.store %16 : !sir.ptr<1>, %15 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":3:5)))
+// CHECK-NEXT:     sir.return %16 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("embedded://std/result.ora":3:5)))
+// CHECK-NEXT:   } loc("embedded://std/result.ora":2:1)
+// CHECK-NEXT:   func.func @std.result.is_err__u256__Failure(%arg0: !sir.u256 {ora.force_wide_error_union = true} loc("embedded://std/result.ora":10:47), %arg1: !sir.u256 loc("embedded://std/result.ora":10:47)) -> !sir.u256 attributes {ora.inline = true, ora.param_binding_ids = ["file:9:pattern:7"], ora.param_names = ["value"], ora.visibility = "private"} {
+// CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %3 = sir.bitcast %2 : !sir.u256 : i1 loc(unknown)
+// CHECK-NEXT:     %4 = sir.bitcast %0 : !sir.u256 : i1 loc(unknown)
+// CHECK-NEXT:     %5 = sir.and %arg0 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))
+// CHECK-NEXT:     %6 = sir.eq %5 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))
+// CHECK-NEXT:     %7 = sir.and %6 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))
+// CHECK-NEXT:     %8 = sir.bitcast %7 : !sir.u256 : i1 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))
+// CHECK-NEXT:     %9 = sir.bitcast %8 : i1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))
+// CHECK-NEXT:     sir.cond_br %9 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     %10 = sir.bitcast %3 : i1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))
+// CHECK-NEXT:     sir.br ^bb3(%10 : !sir.u256) loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     %11 = sir.bitcast %4 : i1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))
+// CHECK-NEXT:     sir.br ^bb3(%11 : !sir.u256) loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))
+// CHECK-NEXT:   ^bb3(%12: !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))):  // 2 preds: ^bb1, ^bb2
+// CHECK-NEXT:     %13 = sir.and %12 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":12:9)))
+// CHECK-NEXT:     %14 = sir.iszero %13 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":11:5)))
+// CHECK-NEXT:     %15 = sir.iszero %14 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":11:5)))
+// CHECK-NEXT:     %16 = sir.malloc %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":11:5)))
+// CHECK-NEXT:     sir.store %16 : !sir.ptr<1>, %15 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":11:5)))
+// CHECK-NEXT:     sir.return %16 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("embedded://std/result.ora":11:5)))
+// CHECK-NEXT:   } loc("embedded://std/result.ora":10:1)
+// CHECK-NEXT:   func.func @std.result.unwrap_or__u256__Failure(%arg0: !sir.u256 {ora.force_wide_error_union = true} loc("embedded://std/result.ora":18:50), %arg1: !sir.u256 loc("embedded://std/result.ora":18:50), %arg2: !sir.u256 loc("embedded://std/result.ora":18:71)) -> !sir.u256 attributes {ora.inline = true, ora.param_binding_ids = ["file:9:pattern:12", "file:9:pattern:13"], ora.param_names = ["value", "fallback"], ora.visibility = "private"} {
+// CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.and %arg0 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:     %2 = sir.eq %1 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:     %3 = sir.and %2 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:     %4 = sir.bitcast %3 : !sir.u256 : i1 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:     %5 = sir.bitcast %4 : i1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:     sir.cond_br %5 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     sir.br ^bb3(%arg2 : !sir.u256) loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     sir.br ^bb3(%arg1 : !sir.u256) loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:   ^bb3(%6: !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))):  // 2 preds: ^bb1, ^bb2
+// CHECK-NEXT:     %7 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":19:5)))
+// CHECK-NEXT:     sir.store %7 : !sir.ptr<1>, %6 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":19:5)))
+// CHECK-NEXT:     sir.return %7 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":19:5)))
+// CHECK-NEXT:   } loc("embedded://std/result.ora":18:1)
+// CHECK-NEXT:   func.func @bytes_or_self(%arg0: !sir.u256 loc("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":30:26), %arg1: !sir.ptr<1> loc("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":30:38)) -> !sir.ptr<1> attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["bool", "bytes"], ora.abi_return = "bytes", ora.abi_return_layout = "bytes", ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:10", "file:11:pattern:11"], ora.param_names = ["flag", "value"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0xca1f6084", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.and %arg0 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":30:26)
+// CHECK-NEXT:     %3 = sir.bitcast %arg1 : !sir.ptr<1> : !sir.u256 loc("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":31:21)))
+// CHECK-NEXT:     %4:2 = sir.icall @choose_bytes(%2, %3) : !sir.u256, !sir.u256 loc("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":31:21)))
+// CHECK-NEXT:     %5 = sir.bitcast %4#1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":31:21)))
+// CHECK-NEXT:     %6 = sir.and %4#0 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:     %7 = sir.eq %6 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:     %8 = sir.and %7 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:     %9 = sir.bitcast %8 : !sir.u256 : i1 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:     %10 = sir.bitcast %9 : i1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:     sir.cond_br %10 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     sir.br ^bb3(%arg1 : !sir.ptr<1>) loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     sir.br ^bb3(%5 : !sir.ptr<1>) loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:   ^bb3(%11: !sir.ptr<1> loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))):  // 2 preds: ^bb1, ^bb2
+// CHECK-NEXT:     %12 = sir.load %11 : !sir.ptr<1> : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":32:9)))
+// CHECK-NEXT:     %13 = sir.add %12 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":32:9)))
+// CHECK-NEXT:     sir.return %11 : !sir.ptr<1>, %13 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":32:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":30:5)
+// CHECK-NEXT:   func.func @std.result.unwrap_or__bytes__Failure(%arg0: !sir.u256 {ora.force_wide_error_union = true} loc("embedded://std/result.ora":18:50), %arg1: !sir.ptr<1> loc("embedded://std/result.ora":18:50), %arg2: !sir.ptr<1> loc("embedded://std/result.ora":18:71)) -> !sir.ptr<1> attributes {ora.inline = true, ora.param_binding_ids = ["file:9:pattern:12", "file:9:pattern:13"], ora.param_names = ["value", "fallback"], ora.visibility = "private"} {
+// CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.and %arg0 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:     %2 = sir.eq %1 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:     %3 = sir.and %2 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:     %4 = sir.bitcast %3 : !sir.u256 : i1 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:     %5 = sir.bitcast %4 : i1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:     sir.cond_br %5 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     sir.br ^bb3(%arg2 : !sir.ptr<1>) loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     sir.br ^bb3(%arg1 : !sir.ptr<1>) loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))
+// CHECK-NEXT:   ^bb3(%6: !sir.ptr<1> loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":20:9)))):  // 2 preds: ^bb1, ^bb2
+// CHECK-NEXT:     %7 = sir.load %6 : !sir.ptr<1> : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":19:5)))
+// CHECK-NEXT:     %8 = sir.add %7 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":19:5)))
+// CHECK-NEXT:     sir.return %6 : !sir.ptr<1>, %8 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("embedded://std/result.ora":19:5)))
+// CHECK-NEXT:   } loc("embedded://std/result.ora":18:1)
+// CHECK-NEXT: } loc("{{.*}}/ora-example/corpus/control-flow/match/result_helpers.ora":4:1)
