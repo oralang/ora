@@ -28,6 +28,8 @@ const Metrics = lib.metrics.Metrics;
 const allocation_stats = lib.lsp.allocation_stats;
 const ManagedArrayList = std.array_list.Managed;
 
+const proof_sidecar_schema_version: u32 = 1;
+
 /// MLIR-related command line options
 const MlirOptions = struct {
     emit_mlir: bool,
@@ -3081,6 +3083,56 @@ test "debug artifact source paths strip cwd prefix only at path boundary" {
     try std.testing.expectEqualStrings("tests/main.ora", artifactRelativePath("/repo/ora", "tests/main.ora"));
 }
 
+test "FV proof sidecar uses versioned schema envelope" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "out");
+
+    const output_dir = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/out", .{tmp.sub_path});
+    defer std.testing.allocator.free(output_dir);
+
+    const cwd = try std.process.currentPathAlloc(std.Io.Threaded.global_single_threaded.io(), std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+    const source_path = try std.fs.path.join(std.testing.allocator, &.{ cwd, "contracts/main.ora" });
+    defer std.testing.allocator.free(source_path);
+
+    const positions = [_]z3_verification.ProvenGuardPosition{.{
+        .file = source_path,
+        .line = 7,
+        .column = 11,
+        .status = "proved_safe",
+    }};
+    try writeProofSidecar(std.testing.allocator, output_dir, "main", positions[0..]);
+
+    const json = try tmp.dir.readFileAlloc(std.testing.io, "out/main.proof.json", std.testing.allocator, std.Io.Limit.limited(4096));
+    defer std.testing.allocator.free(json);
+
+    try std.testing.expect(std.mem.startsWith(u8, json, "{\"schema_version\":1,\"proofs\":["));
+    try std.testing.expect(!std.mem.startsWith(u8, json, "["));
+
+    const Entry = struct {
+        file: []const u8,
+        line: u32,
+        column: u32,
+        status: []const u8,
+    };
+    const Sidecar = struct {
+        schema_version: u32,
+        proofs: []const Entry,
+    };
+    const parsed = try std.json.parseFromSlice(Sidecar, std.testing.allocator, json, .{
+        .ignore_unknown_fields = false,
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(proof_sidecar_schema_version, parsed.value.schema_version);
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.proofs.len);
+    try std.testing.expectEqualStrings("contracts/main.ora", parsed.value.proofs[0].file);
+    try std.testing.expectEqual(@as(u32, 7), parsed.value.proofs[0].line);
+    try std.testing.expectEqual(@as(u32, 11), parsed.value.proofs[0].column);
+    try std.testing.expectEqualStrings("proved_safe", parsed.value.proofs[0].status);
+}
+
 const DebugLocalInfo = struct {
     id: u32,
     scope_id: u32,
@@ -4991,10 +5043,9 @@ fn runMlirEmitAdvanced(
 
     // Write the FV proof sidecar before the canonicalize / cleanup
     // passes scrub proven guards from the MLIR module. The TUI's
-    // `fv` overlay reads `<stem>.proof.json` to mark proved-safe
-    // source lines (lib/evm/src/debug_info.zig:OpMeta.proof_status
-    // documents the schema; the sidecar uses the same string
-    // values).
+    // `fv` overlay reads the versioned `<stem>.proof.json` envelope
+    // to mark proved-safe source lines. The entries use the same
+    // status strings as lib/evm/src/debug_info.zig:OpMeta.proof_status.
     if (verification_result_opt) |*vr| {
         if (vr.proven_guard_positions.items.len > 0) {
             if (mlir_options.output_dir) |out_dir| {
@@ -6921,8 +6972,8 @@ fn mergeSourceMaps(
 
 /// Write the FV proof sidecar `<output_dir>/<stem>.proof.json`.
 ///
-/// Format: a flat JSON array of objects, one per proved guard:
-///   [{"file":"...", "line":N, "column":N, "status":"proved_safe"}, ...]
+/// Format: a versioned JSON envelope with one entry per proved guard:
+///   {"schema_version":1,"proofs":[{"file":"...","line":N,"column":N,"status":"proved_safe"}]}
 ///
 /// Today only `proved_safe` is emitted (UNSAT guards). The schema
 /// is open to `proved_unsafe` and `dynamic` once the verifier
@@ -6943,7 +6994,7 @@ fn writeProofSidecar(
     const artifact_path_root = try std.process.currentPathAlloc(std.Io.Threaded.global_single_threaded.io(), allocator);
     defer allocator.free(artifact_path_root);
 
-    try w.writeAll("[");
+    try w.print("{{\"schema_version\":{d},\"proofs\":[", .{proof_sidecar_schema_version});
     for (positions, 0..) |pos, i| {
         if (i != 0) try w.writeAll(",");
         try w.writeAll("{\"file\":");
@@ -6952,7 +7003,7 @@ fn writeProofSidecar(
         try writeJsonString(w, pos.status);
         try w.writeAll("}");
     }
-    try w.writeAll("]\n");
+    try w.writeAll("]}\n");
 
     try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
         .sub_path = filename,

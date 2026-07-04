@@ -45,6 +45,51 @@ const SecondaryAbiSpec = struct {
     }
 };
 
+const proof_sidecar_schema_version: u32 = 1;
+
+const ProofSidecarEntry = struct {
+    file: []const u8,
+    line: u32,
+    column: ?u32 = null,
+    status: []const u8,
+};
+
+const ProofSidecarJson = struct {
+    schema_version: u32,
+    proofs: []const ProofSidecarEntry,
+};
+
+fn parseProofSidecarJson(allocator: std.mem.Allocator, bytes: []const u8) !std.json.Parsed(ProofSidecarJson) {
+    var parsed = try std.json.parseFromSlice(ProofSidecarJson, allocator, bytes, .{
+        .ignore_unknown_fields = true,
+    });
+    errdefer parsed.deinit();
+    if (parsed.value.schema_version != proof_sidecar_schema_version) return error.UnsupportedProofSidecarSchema;
+    return parsed;
+}
+
+test "proof sidecar parser accepts versioned envelope" {
+    const json =
+        \\{"schema_version":1,"proofs":[{"file":"main.ora","line":4,"column":9,"status":"proved_safe"}]}
+    ;
+    const parsed = try parseProofSidecarJson(std.testing.allocator, json);
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(proof_sidecar_schema_version, parsed.value.schema_version);
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.proofs.len);
+    try std.testing.expectEqualStrings("main.ora", parsed.value.proofs[0].file);
+    try std.testing.expectEqual(@as(u32, 4), parsed.value.proofs[0].line);
+    try std.testing.expectEqual(@as(u32, 9), parsed.value.proofs[0].column.?);
+    try std.testing.expectEqualStrings("proved_safe", parsed.value.proofs[0].status);
+}
+
+test "proof sidecar parser rejects unsupported schema version" {
+    const json =
+        \\{"schema_version":2,"proofs":[]}
+    ;
+    try std.testing.expectError(error.UnsupportedProofSidecarSchema, parseProofSidecarJson(std.testing.allocator, json));
+}
+
 pub const AppConfig = struct {
     bytecode_path: []u8,
     source_map_path: []u8,
@@ -3198,25 +3243,17 @@ pub const Ui = struct {
     }
 
     /// Parse `<stem>.proof.json` and populate `proof_lines`. The
-    /// file is a flat array of objects with `file`, `line`,
-    /// `column`, `status`. Entries whose `file` doesn't match the
-    /// session's source path are ignored.
+    /// file is a versioned envelope with a `proofs` array of
+    /// `{file,line,column,status}` entries. Entries whose `file`
+    /// doesn't match the session's source path are ignored.
     fn loadProofSidecar(self: *Ui, path: []const u8) !void {
         const bytes = try ora_evm.loadDebuggerArtifact(self.allocator, path);
         defer self.allocator.free(bytes);
 
-        const ProofEntry = struct {
-            file: []const u8,
-            line: u32,
-            column: ?u32 = null,
-            status: []const u8,
-        };
-        const parsed = try std.json.parseFromSlice([]const ProofEntry, self.allocator, bytes, .{
-            .ignore_unknown_fields = true,
-        });
+        const parsed = try parseProofSidecarJson(self.allocator, bytes);
         defer parsed.deinit();
 
-        for (parsed.value) |entry| {
+        for (parsed.value.proofs) |entry| {
             // Compare against seed.source_path so the overlay
             // doesn't pick up entries for imported files we
             // aren't rendering.
