@@ -1,0 +1,90 @@
+// ERC-1155 (EIP-1155) multi-token external interfaces.
+// Bare ABI declarations: no trusted requires/ensures on foreign contracts.
+
+comptime const interfaces = @import("std/interfaces");
+
+/// ERC-1155 multi-token interface. Overload-free in the EIP, so the trait
+/// is complete and `INTERFACE_ID_ERC1155` is computed from it.
+extern trait IERC1155 {
+    /// Balance of `owner` for token `id`. `balanceOf(address,uint256)`,
+    /// selector `0x00fdd58e`.
+    staticcall fn balanceOf(self, owner: address, id: u256) -> u256;
+    /// Batched balances; `owners` and `ids` pair positionally.
+    /// `balanceOfBatch(address[],uint256[])`, selector `0x4e1273f4`.
+    staticcall fn balanceOfBatch(self, owners: slice[address], ids: slice[u256]) -> slice[u256];
+    /// True when `operator` is approved for all of `owner`'s tokens.
+    /// `isApprovedForAll(address,address)`, selector `0xe985e9c5`.
+    staticcall fn isApprovedForAll(self, owner: address, operator: address) -> bool;
+    /// Approves/revokes `operator` for all tokens. `setApprovalForAll(address,bool)`,
+    /// selector `0xa22cb465`.
+    call fn setApprovalForAll(self, operator: address, approved: bool);
+    /// Safe single transfer with receiver check.
+    /// `safeTransferFrom(address,address,uint256,uint256,bytes)`, selector `0xf242432a`.
+    call fn safeTransferFrom(self, from: address, to: address, id: u256, amount: u256, data: bytes);
+    /// Safe batched transfer with receiver check.
+    /// `safeBatchTransferFrom(address,address,uint256[],uint256[],bytes)`,
+    /// selector `0x2eb2c2d6`.
+    call fn safeBatchTransferFrom(self, from: address, to: address, ids: slice[u256], amounts: slice[u256], data: bytes);
+}
+
+/// Optional ERC-1155 metadata extension.
+extern trait IERC1155MetadataURI {
+    /// Metadata URI for token `id` (may contain the `{id}` placeholder).
+    /// `uri(uint256)`, selector `0x0e89341c`.
+    staticcall fn uri(self, id: u256) -> string;
+}
+
+/// Receiver hooks a contract must implement to accept safe transfers.
+extern trait IERC1155Receiver {
+    /// Must return its own selector (`0xf23a6e61`) to accept the transfer.
+    /// `onERC1155Received(address,address,uint256,uint256,bytes)`.
+    call fn onERC1155Received(self, operator: address, from: address, id: u256, amount: u256, data: bytes) -> bytes4;
+    /// Must return its own selector (`0xbc197c81`) to accept the batch.
+    /// `onERC1155BatchReceived(address,address,uint256[],uint256[],bytes)`.
+    call fn onERC1155BatchReceived(self, operator: address, from: address, ids: slice[u256], amounts: slice[u256], data: bytes) -> bytes4;
+}
+
+/// ERC-1155 interface id, computed as the selector XOR of the complete
+/// `IERC1155` trait and pinned to the EIP-1155 vector `0xd9b67a26`; a
+/// mismatch fails the build of every importer.
+///
+/// XORs `@selector` directly instead of `interfaces.interfaceId`:
+/// `@traitMethods` comptime evaluation currently fails on methods with
+/// `slice[...]` params (ComptimeValueRequiredForRuntimeLowering).
+comptime const INTERFACE_ID_ERC1155: bytes4 = comptime {
+    const id: bytes4 = @selector(IERC1155.balanceOf)
+        ^ @selector(IERC1155.balanceOfBatch)
+        ^ @selector(IERC1155.isApprovedForAll)
+        ^ @selector(IERC1155.setApprovalForAll)
+        ^ @selector(IERC1155.safeTransferFrom)
+        ^ @selector(IERC1155.safeBatchTransferFrom);
+    const expected: bytes4 = hex"d9b67a26";
+    if (id != expected) {
+        @compileError("IERC1155 interface id drifted from EIP-1155 vector 0xd9b67a26");
+    }
+    id;
+};
+
+/// ERC-1155 metadata-URI extension interface id, computed and pinned to
+/// the EIP-1155 vector `0x0e89341c` (single method: id == selector).
+comptime const INTERFACE_ID_ERC1155_METADATA_URI: bytes4 = comptime {
+    const id: bytes4 = interfaces.interfaceId(IERC1155MetadataURI);
+    const expected: bytes4 = hex"0e89341c";
+    if (id != expected) {
+        @compileError("IERC1155MetadataURI interface id drifted from EIP-1155 vector 0x0e89341c");
+    }
+    id;
+};
+
+/// ERC-1155 receiver interface id, computed as the selector XOR of
+/// `IERC1155Receiver` and pinned to the EIP-1155 vector `0x4e2312e0`.
+/// Direct XOR for the same `slice[...]`-param reason as above.
+comptime const INTERFACE_ID_ERC1155_RECEIVER: bytes4 = comptime {
+    const id: bytes4 = @selector(IERC1155Receiver.onERC1155Received)
+        ^ @selector(IERC1155Receiver.onERC1155BatchReceived);
+    const expected: bytes4 = hex"4e2312e0";
+    if (id != expected) {
+        @compileError("IERC1155Receiver interface id drifted from EIP-1155 vector 0x4e2312e0");
+    }
+    id;
+};

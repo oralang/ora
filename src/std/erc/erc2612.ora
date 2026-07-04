@@ -1,0 +1,35 @@
+// ERC-2612 (EIP-2612) permit extension for ERC-20 external interfaces.
+// This is the CALLER-side interface: implementing permit in an Ora token
+// additionally needs ecrecover and runtime chain-id/own-address access,
+// which are not yet exposed (std lib plan gaps G1/G2).
+
+/// ERC-2612 permit interface: gasless approvals via EIP-712 signatures.
+extern trait IERC2612 {
+    /// Sets allowance by owner signature; reverts past `deadline` or on a
+    /// bad signature. `permit(address,address,uint256,uint256,uint8,bytes32,bytes32)`,
+    /// selector `0xd505accf`.
+    call fn permit(self, owner: address, spender: address, value: u256, deadline: u256, v: u8, r: bytes32, s: bytes32);
+    /// Current permit nonce for `owner`. `nonces(address)`, selector `0x7ecebe00`.
+    staticcall fn nonces(self, owner: address) -> u256;
+    /// EIP-712 domain separator of the token. `DOMAIN_SEPARATOR()`,
+    /// selector `0x3644e515`.
+    staticcall fn DOMAIN_SEPARATOR(self) -> bytes32;
+}
+
+// Pins the derived selectors against the EIP-2612 vectors; a drift fails
+// the build of every importer.
+comptime const SELECTORS_PINNED: bool = comptime {
+    const permit: bytes4 = hex"d505accf";
+    const nonces: bytes4 = hex"7ecebe00";
+    const domain_separator: bytes4 = hex"3644e515";
+    if (@selector(IERC2612.permit) != permit) {
+        @compileError("IERC2612.permit selector drifted from EIP-2612 vector 0xd505accf");
+    }
+    if (@selector(IERC2612.nonces) != nonces) {
+        @compileError("IERC2612.nonces selector drifted from EIP-2612 vector 0x7ecebe00");
+    }
+    if (@selector(IERC2612.DOMAIN_SEPARATOR) != domain_separator) {
+        @compileError("IERC2612.DOMAIN_SEPARATOR selector drifted from EIP-2612 vector 0x3644e515");
+    }
+    true;
+};

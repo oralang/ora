@@ -1,0 +1,35 @@
+// std/erc standard-interface modules: imports must resolve embedded and
+// every selector/interface-id pin inside them must hold (a drift in any
+// pinned vector fails this build).
+
+comptime const std = @import("std");
+comptime const erc20 = @import("std/erc/erc20");
+comptime const erc165 = @import("std/erc/erc165");
+comptime const erc721 = @import("std/erc/erc721");
+comptime const erc1155 = @import("std/erc/erc1155");
+comptime const erc2612 = @import("std/erc/erc2612");
+
+contract StdErcInterfaces {
+    pub fn erc20_selectors() -> bytes4 {
+        return erc20.SELECTOR_TRANSFER
+            ^ erc20.SELECTOR_TRANSFER_FROM
+            ^ erc20.SELECTOR_APPROVE
+            ^ erc20.SELECTOR_BALANCE_OF
+            ^ erc20.SELECTOR_ALLOWANCE
+            ^ erc20.SELECTOR_TOTAL_SUPPLY;
+    }
+
+    pub fn interface_ids() -> bytes4 {
+        return erc165.INTERFACE_ID_ERC165
+            ^ erc721.INTERFACE_ID_ERC721
+            ^ erc721.INTERFACE_ID_ERC721_METADATA
+            ^ erc721.INTERFACE_ID_ERC721_RECEIVER
+            ^ erc1155.INTERFACE_ID_ERC1155
+            ^ erc1155.INTERFACE_ID_ERC1155_METADATA_URI
+            ^ erc1155.INTERFACE_ID_ERC1155_RECEIVER;
+    }
+
+    pub fn umbrella_reexport() -> bytes4 {
+        return std.erc.erc20.SELECTOR_TRANSFER;
+    }
+}

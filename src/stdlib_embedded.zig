@@ -16,6 +16,20 @@ const std_imports = [_]EmbeddedImport{
     .{ .alias = "constants", .specifier = "std/constants" },
     .{ .alias = "bytes", .specifier = "std/bytes" },
     .{ .alias = "result", .specifier = "std/result" },
+    .{ .alias = "interfaces", .specifier = "std/interfaces" },
+    .{ .alias = "erc", .specifier = "std/erc" },
+};
+
+const erc_imports = [_]EmbeddedImport{
+    .{ .alias = "erc20", .specifier = "std/erc/erc20" },
+    .{ .alias = "erc165", .specifier = "std/erc/erc165" },
+    .{ .alias = "erc721", .specifier = "std/erc/erc721" },
+    .{ .alias = "erc1155", .specifier = "std/erc/erc1155" },
+    .{ .alias = "erc2612", .specifier = "std/erc/erc2612" },
+};
+
+const erc_interfaces_imports = [_]EmbeddedImport{
+    .{ .alias = "interfaces", .specifier = "std/interfaces" },
 };
 
 const bytes_imports = [_]EmbeddedImport{
@@ -70,6 +84,40 @@ const modules = [_]EmbeddedModule{
         .logical_path = "std/interfaces",
         .resolved_path = "embedded://std/interfaces.ora",
         .source = @embedFile("std/interfaces.ora"),
+    },
+    .{
+        .logical_path = "std/erc",
+        .resolved_path = "embedded://std/erc.ora",
+        .source = @embedFile("std/erc.ora"),
+        .imports = &erc_imports,
+    },
+    .{
+        .logical_path = "std/erc/erc20",
+        .resolved_path = "embedded://std/erc/erc20.ora",
+        .source = @embedFile("std/erc/erc20.ora"),
+    },
+    .{
+        .logical_path = "std/erc/erc165",
+        .resolved_path = "embedded://std/erc/erc165.ora",
+        .source = @embedFile("std/erc/erc165.ora"),
+        .imports = &erc_interfaces_imports,
+    },
+    .{
+        .logical_path = "std/erc/erc721",
+        .resolved_path = "embedded://std/erc/erc721.ora",
+        .source = @embedFile("std/erc/erc721.ora"),
+        .imports = &erc_interfaces_imports,
+    },
+    .{
+        .logical_path = "std/erc/erc1155",
+        .resolved_path = "embedded://std/erc/erc1155.ora",
+        .source = @embedFile("std/erc/erc1155.ora"),
+        .imports = &erc_interfaces_imports,
+    },
+    .{
+        .logical_path = "std/erc/erc2612",
+        .resolved_path = "embedded://std/erc/erc2612.ora",
+        .source = @embedFile("std/erc/erc2612.ora"),
     },
 };
 

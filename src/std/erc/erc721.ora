@@ -1,0 +1,106 @@
+// ERC-721 (EIP-721) non-fungible token external interfaces.
+// Bare ABI declarations: no trusted requires/ensures on foreign contracts.
+//
+// KNOWN GAP: EIP-721 overloads `safeTransferFrom` (with and without a
+// `bytes` payload). Ora traits do not support method overloading, so
+// `IERC721` declares only the 3-argument form and `IERC721WithData` carries
+// the 4-argument form separately. Consequently `interfaceId(IERC721)` does
+// NOT equal the official ERC-721 id; use `INTERFACE_ID_ERC721` below.
+
+comptime const interfaces = @import("std/interfaces");
+
+/// ERC-721 NFT interface (3-argument `safeTransferFrom` form; see the
+/// module note on the overload gap).
+extern trait IERC721 {
+    /// Number of NFTs owned by `owner`. `balanceOf(address)`, selector `0x70a08231`.
+    staticcall fn balanceOf(self, owner: address) -> u256;
+    /// Owner of `token_id`. `ownerOf(uint256)`, selector `0x6352211e`.
+    staticcall fn ownerOf(self, token_id: u256) -> address;
+    /// Approved address for `token_id`. `getApproved(uint256)`, selector `0x081812fc`.
+    staticcall fn getApproved(self, token_id: u256) -> address;
+    /// True when `operator` is approved for all of `owner`'s NFTs.
+    /// `isApprovedForAll(address,address)`, selector `0xe985e9c5`.
+    staticcall fn isApprovedForAll(self, owner: address, operator: address) -> bool;
+    /// Safe transfer with receiver check. `safeTransferFrom(address,address,uint256)`,
+    /// selector `0x42842e0e`.
+    call fn safeTransferFrom(self, from: address, to: address, token_id: u256);
+    /// Unchecked transfer. `transferFrom(address,address,uint256)`, selector `0x23b872dd`.
+    call fn transferFrom(self, from: address, to: address, token_id: u256);
+    /// Approves `approved` for `token_id`. `approve(address,uint256)`, selector `0x095ea7b3`.
+    call fn approve(self, approved: address, token_id: u256);
+    /// Approves/revokes `operator` for all NFTs. `setApprovalForAll(address,bool)`,
+    /// selector `0xa22cb465`.
+    call fn setApprovalForAll(self, operator: address, approved: bool);
+}
+
+/// The 4-argument `safeTransferFrom` overload, split out because Ora traits
+/// have no method overloading (see module note).
+extern trait IERC721WithData {
+    /// Safe transfer forwarding `data` to the receiver hook.
+    /// `safeTransferFrom(address,address,uint256,bytes)`, selector `0xb88d4fde`.
+    call fn safeTransferFrom(self, from: address, to: address, token_id: u256, data: bytes);
+}
+
+/// Optional ERC-721 metadata extension.
+extern trait IERC721Metadata {
+    /// Collection name. `name()`, selector `0x06fdde03`.
+    staticcall fn name(self) -> string;
+    /// Collection symbol. `symbol()`, selector `0x95d89b41`.
+    staticcall fn symbol(self) -> string;
+    /// Metadata URI for `token_id`. `tokenURI(uint256)`, selector `0xc87b56dd`.
+    staticcall fn tokenURI(self, token_id: u256) -> string;
+}
+
+/// Receiver hook a contract must implement to accept safe transfers.
+extern trait IERC721Receiver {
+    /// Must return its own selector (`0x150b7a02`) to accept the token.
+    /// `onERC721Received(address,address,uint256,bytes)`.
+    call fn onERC721Received(self, operator: address, from: address, token_id: u256, data: bytes) -> bytes4;
+}
+
+/// Official ERC-721 interface id (EIP-721). Declared as a literal, NOT
+/// computed: the id XORs both `safeTransferFrom` overloads, and the split
+/// traits above cannot reproduce that until Ora supports overloading or a
+/// selector-rename attribute.
+comptime const INTERFACE_ID_ERC721: bytes4 = hex"80ac58cd";
+
+/// ERC-721 metadata-extension interface id, computed from `IERC721Metadata`
+/// (the trait is overload-free, so the XOR is faithful) and pinned to the
+/// EIP-721 vector `0x5b5e139f`.
+comptime const INTERFACE_ID_ERC721_METADATA: bytes4 = comptime {
+    const id: bytes4 = interfaces.interfaceId(IERC721Metadata);
+    const expected: bytes4 = hex"5b5e139f";
+    if (id != expected) {
+        @compileError("IERC721Metadata interface id drifted from EIP-721 vector 0x5b5e139f");
+    }
+    id;
+};
+
+/// ERC-721 receiver interface id, computed from `IERC721Receiver` and
+/// pinned to the EIP-721 vector `0x150b7a02` (single method: id == selector).
+comptime const INTERFACE_ID_ERC721_RECEIVER: bytes4 = comptime {
+    const id: bytes4 = interfaces.interfaceId(IERC721Receiver);
+    const expected: bytes4 = hex"150b7a02";
+    if (id != expected) {
+        @compileError("IERC721Receiver interface id drifted from EIP-721 vector 0x150b7a02");
+    }
+    id;
+};
+
+// Pins the per-method selectors of the split transfer traits against the
+// EIP-721 vectors; a drift fails the build of every importer.
+comptime const SELECTORS_PINNED: bool = comptime {
+    const safe_transfer: bytes4 = hex"42842e0e";
+    const safe_transfer_data: bytes4 = hex"b88d4fde";
+    const transfer_from: bytes4 = hex"23b872dd";
+    if (@selector(IERC721.safeTransferFrom) != safe_transfer) {
+        @compileError("IERC721.safeTransferFrom selector drifted from EIP-721 vector 0x42842e0e");
+    }
+    if (@selector(IERC721WithData.safeTransferFrom) != safe_transfer_data) {
+        @compileError("IERC721WithData.safeTransferFrom selector drifted from EIP-721 vector 0xb88d4fde");
+    }
+    if (@selector(IERC721.transferFrom) != transfer_from) {
+        @compileError("IERC721.transferFrom selector drifted from EIP-721 vector 0x23b872dd");
+    }
+    true;
+};

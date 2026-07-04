@@ -1,0 +1,25 @@
+// ERC-165 (EIP-165) standard interface detection.
+
+comptime const interfaces = @import("std/interfaces");
+
+/// ERC-165 interface detection for external calls.
+///
+/// Query support: `external<IERC165>(target, gas: g).supportsInterface(id)`.
+/// Interface ids for local traits come from `std/interfaces.interfaceId`.
+extern trait IERC165 {
+    /// True when `target` implements `interface_id`.
+    /// `supportsInterface(bytes4)`, selector `0x01ffc9a7`.
+    staticcall fn supportsInterface(self, interface_id: bytes4) -> bool;
+}
+
+/// ERC-165 interface id of `IERC165` itself, computed from the trait via
+/// `interfaceId` and pinned to the EIP-165 vector `0x01ffc9a7`; a mismatch
+/// fails the build of every importer.
+comptime const INTERFACE_ID_ERC165: bytes4 = comptime {
+    const id: bytes4 = interfaces.interfaceId(IERC165);
+    const expected: bytes4 = hex"01ffc9a7";
+    if (id != expected) {
+        @compileError("IERC165 interface id drifted from EIP-165 vector 0x01ffc9a7");
+    }
+    id;
+};

@@ -19,13 +19,13 @@
 //   TokenUnit destruction is reserved for burn; AllowanceUnit destruction clears
 //   or spends approval authorization
 //
-// totalSupply is an ordinary storage word. The verifier does not automatically
+// total_supply is an ordinary storage word. The verifier does not automatically
 // equate it with the global sum of balances, because that would be an unsound
 // hidden assumption about which map represents supply. Functions that change
 // token supply therefore prove the intended correspondence explicitly:
-// create/destroy over TokenUnit places plus arithmetic safety over totalSupply.
+// create/destroy over TokenUnit places plus arithmetic safety over total_supply.
 // AllowanceUnit state is separate authorization state and does not contribute to
-// totalSupply.
+// total_supply.
 //
 // Inline helpers below keep repeated checks and conversions named without adding
 // runtime helper calls. Their bodies are lowered at the call site, and their
@@ -43,12 +43,12 @@ error TransferToZeroAddress;
 contract ERC20Token {
     // Persistent token state.
     //
-    // totalSupply is an ordinary storage word that records supply for public
+    // total_supply is an ordinary storage word that records supply for public
     // queries. Resource conservation is tracked through balances; correspondence
     // between the two is maintained by the explicit init/mint/burn code below.
     // Allowances use a separate resource domain so approval accounting cannot be
     // confused with token supply.
-    storage var totalSupply: TokenUnit;
+    storage var total_supply: TokenUnit;
     storage var balances: map<address, Resource<TokenUnit>>;
     storage var allowances: map<address, map<address, Resource<AllowanceUnit>>>;
     storage var royal_mint: NonZeroAddress;
@@ -97,22 +97,30 @@ contract ERC20Token {
     // Constructor: creates the initial resource supply and records the account
     // allowed to mint more tokens later.
     pub fn init(initialSupply: TokenUnit)
-    modifies totalSupply, balances[msg.sender], royal_mint
-    requires totalSupply == 0
+    modifies total_supply, balances[msg.sender], royal_mint
+    requires total_supply == 0
     requires balances[std.msg.sender()] == 0
-    ensures totalSupply == initialSupply
+    ensures total_supply == initialSupply
     ensures balances[std.msg.sender()] == initialSupply
     {
         royal_mint = caller();
-        totalSupply = initialSupply;
+        total_supply = initialSupply;
         @create(balances[std.msg.sender()], initialSupply);
         log Transfer(std.constants.ZERO_ADDRESS, royal_mint, tokenValue(initialSupply));
     }
 
     // Read-only ERC20 metadata and views expose resource amounts as u256 ABI
     // words where needed. They do not move, create, or destroy resources.
-    pub fn getTotalSupply() -> u256 {
-        return tokenValue(totalSupply);
+    //
+    // The public surface matches the std ERC-20 interfaces
+    // (std/erc/erc20: IERC20 + IERC20Metadata): refinement and resource
+    // parameter types erase to their ABI carriers (NonZeroAddress -> address,
+    // TokenUnit -> uint256) and error-union returns erase to bool, so the
+    // emitted ABI is exactly the EIP-20 one. Conformance is by construction
+    // here; a comptime selector check against std.erc.erc20.SELECTOR_* needs
+    // @selector over contract methods (currently trait-methods-only).
+    pub fn totalSupply() -> u256 {
+        return tokenValue(total_supply);
     }
 
     pub fn name() -> string {
@@ -121,6 +129,10 @@ contract ERC20Token {
 
     pub fn symbol() -> string {
         return "EXT";
+    }
+
+    pub fn decimals() -> u8 {
+        return 18;
     }
 
     // balanceOf allows account(0) to fulfill the ERC20 standard.
@@ -138,9 +150,10 @@ contract ERC20Token {
     modifies balances[msg.sender], balances[recipient]
     requires recipient != std.constants.ZERO_ADDRESS
     requires balances[recipient] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
-    ensures totalSupply == old(totalSupply)
+    ensures total_supply == old(total_supply)
     {
         @callHint(likely);
+
         let sender: NonZeroAddress = caller();
         try requireBalance(sender, amount);
         @move(balances[sender], balances[recipient], amount);
@@ -174,9 +187,10 @@ contract ERC20Token {
     requires sender != std.constants.ZERO_ADDRESS
     requires recipient != std.constants.ZERO_ADDRESS
     requires balances[recipient] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
-    ensures totalSupply == old(totalSupply)
+    ensures total_supply == old(total_supply)
     {
         @callHint(likely);
+
         let spender: NonZeroAddress = caller();
         try requireAllowance(sender, spender, amount);
         try requireBalance(sender, amount);
@@ -188,35 +202,37 @@ contract ERC20Token {
     }
 
     // Minting is explicit resource creation. The @create operation introduces
-    // TokenUnit into a balance place, and totalSupply is updated in the same
+    // TokenUnit into a balance place, and total_supply is updated in the same
     // function so the public supply view tracks that creation.
     pub fn mint(to: NonZeroAddress, amount: TokenUnit) -> !bool | TransferToZeroAddress
-    modifies totalSupply, balances[to]
+    modifies total_supply, balances[to]
     requires caller() == royal_mint
     requires to != std.constants.ZERO_ADDRESS
-    requires totalSupply <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    requires total_supply <= @cast(TokenUnit, std.constants.U256_MAX) - amount
     requires balances[to] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
-    ensures totalSupply == old(totalSupply) + amount
+    ensures total_supply == old(total_supply) + amount
     {
+        // mint fn is not a priority for hot path optimization
         @callHint(cold);
-        totalSupply += amount;
+        total_supply += amount;
         @create(balances[to], amount);
         log Transfer(std.constants.ZERO_ADDRESS, to, tokenValue(amount));
         return true;
     }
 
     // Burning is explicit resource destruction. The @destroy operation removes
-    // TokenUnit from the caller's balance place, and totalSupply is updated in
+    // TokenUnit from the caller's balance place, and total_supply is updated in
     // the same function so the public supply view tracks that destruction.
     pub fn burn(amount: TokenUnit) -> !bool | InsufficientBalance
-    modifies totalSupply, balances[msg.sender]
-    requires totalSupply >= amount
-    ensures totalSupply == old(totalSupply) - amount
+    modifies total_supply, balances[msg.sender]
+    requires total_supply >= amount
+    ensures total_supply == old(total_supply) - amount
     {
         @callHint(cold);
+        // burn fn is not a priority for hot path optimization
         let sender: NonZeroAddress = caller();
         try requireBalance(sender, amount);
-        totalSupply -= amount;
+        total_supply -= amount;
         @destroy(balances[sender], amount);
         log Transfer(sender, std.constants.ZERO_ADDRESS, tokenValue(amount));
         return true;
