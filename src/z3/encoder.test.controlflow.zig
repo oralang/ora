@@ -5381,6 +5381,35 @@ test "quantified operation rejects missing quantifier instead of defaulting to f
     try testing.expectEqualStrings("ora.quantified missing quantifier attribute", encoder.degradationReason().?);
 }
 
+test "quantified operation rejects missing variable instead of defaulting to q" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const text =
+        \\module {
+        \\  func.func @bad(%flag: i1) {
+        \\    %q = "ora.quantified"(%flag) <{quantifier = "forall", variable_type = "u256"}> : (i1) -> i1
+        \\    func.return
+        \\  }
+        \\}
+    ;
+    const module = try parseModule(mlir_ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    const qop = findFirstOpByName(module, "ora.quantified") orelse return error.TestUnexpectedResult;
+    try testing.expectError(error.UnsupportedOperation, encoder.encodeOperation(qop));
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("ora.quantified missing variable attribute", encoder.degradationReason().?);
+}
+
 test "quantified forall and exists have expected solver semantics" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

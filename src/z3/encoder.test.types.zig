@@ -295,6 +295,18 @@ test "malformed quantified binder integer width fails closed instead of defaulti
     try testing.expectEqualStrings("ora.quantified binder integer type has malformed width", encoder.degradationReason().?);
 }
 
+test "zero-width quantified binder integer fails closed instead of defaulting to u256" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    try testing.expectError(error.UnsupportedOperation, encoder.quantifiedVarSortFromTypeStringForTesting("u0"));
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("ora.quantified binder integer type has zero width", encoder.degradationReason().?);
+}
+
 test "printed memref and slice sorts match shaped array encoding" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
