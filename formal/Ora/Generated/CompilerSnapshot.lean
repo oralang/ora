@@ -14,6 +14,9 @@ namespace Ora.Generated
 def compilerBuiltinTypeIds : List String :=
   ["u8", "u16", "u32", "u64", "u128", "u160", "u256", "i8", "i16", "i32", "i64", "i128", "i256", "bool", "address", "string", "bytes", "void"]
 
+def compilerBuiltinTypeComptimeIds : List (String × Nat) :=
+  [("u8", 1), ("u16", 2), ("u32", 3), ("u64", 4), ("u128", 5), ("u160", 18), ("u256", 6), ("i8", 7), ("i16", 8), ("i32", 9), ("i64", 10), ("i128", 11), ("i256", 12), ("bool", 13), ("address", 14), ("string", 15), ("bytes", 16), ("void", 17)]
+
 def compilerUIntWidths : List Nat := [8, 16, 32, 64, 128, 160, 256]
 def compilerSIntWidths : List Nat := [8, 16, 32, 64, 128, 256]
 

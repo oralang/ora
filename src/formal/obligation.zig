@@ -374,6 +374,7 @@ pub const ObligationDiagnostic = struct {
 pub const DiagnosticKind = enum(u8) {
     unsupported,
     missing_type,
+    comparison_signedness_mismatch,
     missing_region,
     missing_effect_path,
     missing_formula,
@@ -892,6 +893,7 @@ pub const BinaryTerm = struct {
     op: BinaryOp,
     lhs: TermId,
     rhs: TermId,
+    ty: ?TypeRef = null,
 };
 
 pub const BinaryOp = enum(u8) {
@@ -901,6 +903,10 @@ pub const BinaryOp = enum(u8) {
     le,
     gt,
     ge,
+    slt,
+    sle,
+    sgt,
+    sge,
     add,
     sub,
     mul,

@@ -105,6 +105,13 @@ pub fn main(init: std.process.Init) !void {
     // Spellable scalar builtins (BuiltinTypeId), in enum order.
     try emitStringList(out, "compilerBuiltinTypeIds", builtin.BuiltinTypeId);
 
+    try out.writeAll("def compilerBuiltinTypeComptimeIds : List (String × Nat) :=\n  [");
+    for (builtin.builtin_types, 0..) |spec, index| {
+        if (index != 0) try out.writeAll(", ");
+        try out.print("(\"{s}\", {d})", .{ spec.source_name, spec.comptime_type_id });
+    }
+    try out.writeAll("]\n\n");
+
     // Integer widths from the builtin spec table (fail-closed on bad specs).
     try out.writeAll("def compilerUIntWidths : List Nat := [");
     try writeIntegerWidths(out, .unsigned);

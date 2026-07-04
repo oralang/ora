@@ -86,6 +86,10 @@ inductive BinaryOp where
   | le
   | gt
   | ge
+  | slt
+  | sle
+  | sgt
+  | sge
   | add
   | sub
   | mul
@@ -142,6 +146,7 @@ structure BinaryTerm where
   op : BinaryOp
   lhs : TermId
   rhs : TermId
+  ty : Option TyRef := none
   deriving Repr, BEq, DecidableEq
 
 structure RefinementPredicateTerm where

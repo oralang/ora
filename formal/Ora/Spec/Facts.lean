@@ -82,29 +82,34 @@ but the semantic identity is `PrimTy`, not just the string.
 structure BuiltinTypeFact where
   name : String
   ty   : PrimTy
+  compilerTypeId : Nat
   deriving Repr
 
+def expectedCompilerTypeIdU256 : Nat := 6
+def expectedCompilerTypeIdI256 : Nat := 12
+def expectedCompilerTypeIdBool : Nat := 13
+
 def expectedBuiltinTypeFacts : List BuiltinTypeFact :=
-  [ { name := "u8",      ty := u8 },
-    { name := "u16",     ty := u16 },
-    { name := "u32",     ty := u32 },
-    { name := "u64",     ty := u64 },
-    { name := "u128",    ty := u128 },
-    { name := "u160",    ty := u160 },
-    { name := "u256",    ty := u256 },
+  [ { name := "u8",      ty := u8,       compilerTypeId := 1 },
+    { name := "u16",     ty := u16,      compilerTypeId := 2 },
+    { name := "u32",     ty := u32,      compilerTypeId := 3 },
+    { name := "u64",     ty := u64,      compilerTypeId := 4 },
+    { name := "u128",    ty := u128,     compilerTypeId := 5 },
+    { name := "u160",    ty := u160,     compilerTypeId := 18 },
+    { name := "u256",    ty := u256,     compilerTypeId := expectedCompilerTypeIdU256 },
 
-    { name := "i8",      ty := i8 },
-    { name := "i16",     ty := i16 },
-    { name := "i32",     ty := i32 },
-    { name := "i64",     ty := i64 },
-    { name := "i128",    ty := i128 },
-    { name := "i256",    ty := i256 },
+    { name := "i8",      ty := i8,       compilerTypeId := 7 },
+    { name := "i16",     ty := i16,      compilerTypeId := 8 },
+    { name := "i32",     ty := i32,      compilerTypeId := 9 },
+    { name := "i64",     ty := i64,      compilerTypeId := 10 },
+    { name := "i128",    ty := i128,     compilerTypeId := 11 },
+    { name := "i256",    ty := i256,     compilerTypeId := expectedCompilerTypeIdI256 },
 
-    { name := "bool",    ty := .bool },
-    { name := "address", ty := .address },
-    { name := "string",  ty := .string },
-    { name := "bytes",   ty := .bytes },
-    { name := "void",    ty := .void } ]
+    { name := "bool",    ty := .bool,    compilerTypeId := expectedCompilerTypeIdBool },
+    { name := "address", ty := .address, compilerTypeId := 14 },
+    { name := "string",  ty := .string,  compilerTypeId := 15 },
+    { name := "bytes",   ty := .bytes,   compilerTypeId := 16 },
+    { name := "void",    ty := .void,    compilerTypeId := 17 } ]
 
 /-! ## Fixed bytes -/
 
@@ -251,6 +256,9 @@ def expectedSIntWidths : List Nat :=
 
 def expectedBuiltinTypeIds : List String :=
   expectedBuiltinTypeFacts.map fun f => f.name
+
+def expectedBuiltinTypeComptimeIds : List (String × Nat) :=
+  expectedBuiltinTypeFacts.map fun f => (f.name, f.compilerTypeId)
 
 def expectedFixedBytesMin : Nat :=
   expectedFixedBytesBounds.min

@@ -10,6 +10,7 @@ const obligation_from_mlir = @import("formal/obligation_from_mlir.zig");
 const obligation_from_z3 = @import("formal/obligation_from_z3.zig");
 const obligation_to_lean = @import("formal/obligation_to_lean.zig");
 const obligation_to_z3 = @import("formal/obligation_to_z3.zig");
+const type_builtin = @import("ora_types").builtin;
 
 const test_helpers = @import("compiler.test.helpers.zig");
 const compilePackage = test_helpers.compilePackage;
@@ -259,6 +260,16 @@ fn expectTypeRefSpelling(ty: ?obligation.TypeRef, expected: []const u8) !void {
     const actual = ty orelse return error.TestUnexpectedResult;
     try testing.expect(actual == .spelling);
     try testing.expectEqualStrings(expected, actual.spelling);
+}
+
+fn expectTypeRefBuiltin(ty: ?obligation.TypeRef, expected: type_builtin.BuiltinTypeId) !void {
+    const actual = ty orelse return error.TestUnexpectedResult;
+    try testing.expect(actual == .compiler_type_id);
+    try testing.expectEqual(type_builtin.lookupBuiltinById(expected).comptime_type_id, actual.compiler_type_id);
+}
+
+fn builtinTypeRef(expected: type_builtin.BuiltinTypeId) obligation.TypeRef {
+    return .{ .compiler_type_id = type_builtin.lookupBuiltinById(expected).comptime_type_id };
 }
 
 fn expectBoundVarTerm(
@@ -619,7 +630,14 @@ fn proofModuleFromGeneratedObligations(
             \\      Value.eqProp?,
             \\      BinderRef.isU256,
             \\      BoundVarRef.isU256,
-            \\      TyRef.isU256
+            \\      TyRef.isU256,
+            \\      TyRef.isU256Carrier,
+            \\      compilerTypeIdU256,
+            \\      compilerTypeIdI256,
+            \\      compilerTypeIdBool,
+            \\      Ora.Spec.expectedCompilerTypeIdU256,
+            \\      Ora.Spec.expectedCompilerTypeIdI256,
+            \\      Ora.Spec.expectedCompilerTypeIdBool
             \\    ]
             \\    intro i hi
             \\    exact U256.ult_implies_ule i x hi
@@ -694,6 +712,80 @@ fn storageProofModuleFromGeneratedObligations(
             \\
         );
     }
+    try writer.writeAll("end ");
+    try writer.writeAll(module_namespace);
+    try writer.writeByte('\n');
+    return try out.toOwnedSlice();
+}
+
+fn signedComparisonProofModuleFromGeneratedObligations(
+    allocator: std.mem.Allocator,
+    obligations_source: []const u8,
+    module_namespace: []const u8,
+    query_id: obligation.Id,
+) ![]const u8 {
+    const namespace_start = std.mem.indexOf(u8, obligations_source, "namespace ") orelse return error.TestUnexpectedResult;
+    const body_start = (std.mem.indexOfPos(u8, obligations_source, namespace_start, "\n") orelse return error.TestUnexpectedResult) + 1;
+    const end_start = std.mem.lastIndexOf(u8, obligations_source, "\nend ") orelse return error.TestUnexpectedResult;
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    errdefer out.deinit();
+    const writer = &out.writer;
+
+    try writer.writeAll(obligations_source[0..namespace_start]);
+    try writer.writeAll("namespace ");
+    try writer.writeAll(module_namespace);
+    try writer.writeByte('\n');
+    try writer.writeAll(obligations_source[body_start..end_start]);
+    try writer.writeByte('\n');
+
+    try writer.print("theorem discharge : emittedQuery_{d} := by\n", .{query_id});
+    try writer.writeAll("  unfold ");
+    try writer.print("emittedQuery_{d}", .{query_id});
+    try writer.writeAll(
+        \\ obligationFollowsFromAssumptions
+        \\  constructor
+        \\  · refine ⟨Env.empty, ?_⟩
+        \\    simp [
+        \\      assumptionsDenoteInEnv,
+        \\      assumptionsDenoteInEnv?,
+        \\      assumptionAnd?,
+        \\      assumptionDenotesInEnv?,
+        \\      formulaDenotes?,
+        \\      denoteFormula?,
+        \\      emittedManifest,
+        \\      emittedAssumptions
+        \\    ]
+        \\  · intro env hAssumptions
+        \\    intro x
+        \\    simp [
+        \\      obligationDenotesInEnv,
+        \\      obligationDenotesInEnv?,
+        \\      formulaDenotes?,
+        \\      denoteFormula?,
+        \\      denoteValue?,
+        \\      emittedManifest,
+        \\      emittedTerms,
+        \\      Env.pushBound,
+        \\      Env.lookupVar,
+        \\      Env.lookupBound,
+        \\      Value.eqProp?,
+        \\      BinderRef.isU256,
+        \\      BoundVarRef.isU256,
+        \\      TyRef.isU256,
+        \\      TyRef.isI256,
+        \\      TyRef.isU256Carrier,
+        \\      compilerTypeIdU256,
+        \\      compilerTypeIdI256,
+        \\      compilerTypeIdBool,
+        \\      Ora.Spec.expectedCompilerTypeIdU256,
+        \\      Ora.Spec.expectedCompilerTypeIdI256,
+        \\      Ora.Spec.expectedCompilerTypeIdBool,
+        \\      U256.sle
+        \\    ]
+        \\
+        \\
+    );
     try writer.writeAll("end ");
     try writer.writeAll(module_namespace);
     try writer.writeByte('\n');
@@ -1140,6 +1232,120 @@ test "B6 storage Lean proof fixture proves read-only old collapse without erasin
     try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "sorry/b6_storage_lean_gate.lean.proof.json", .{}));
 }
 
+test "B6 signed comparison Lean proof unblocks source-level unknown" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const source =
+        \\contract B6SignedLeanProofGate {
+        \\    pub fn signed_reflexive(x: i256) -> bool
+        \\        ensures x <= x
+        \\    {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b6_signed_lean_gate.ora", .data = source });
+
+    const source_path = try pathFromTmpAlloc(allocator, tmp, "b6_signed_lean_gate.ora");
+    defer allocator.free(source_path);
+    const fail_out = try pathFromTmpAlloc(allocator, tmp, "fail");
+    defer allocator.free(fail_out);
+    const valid_out = try pathFromTmpAlloc(allocator, tmp, "valid");
+    defer allocator.free(valid_out);
+
+    var formal_result = try collectPackageObligations(allocator, source_path);
+    defer formal_result.deinit();
+    const ensures_query = try findEnsuresQuery(formal_result.set);
+    try expectEnsuresQuerySupported(formal_result.set);
+    const force_target = try std.fmt.allocPrint(allocator, "obligation:{d}", .{ensures_query.id});
+    defer allocator.free(force_target);
+
+    const generated_namespace = try leanProofGeneratedNamespaceForTest(allocator, source_path);
+    defer allocator.free(generated_namespace);
+    var obligations_source_out = std.Io.Writer.Allocating.init(allocator);
+    defer obligations_source_out.deinit();
+    try obligation_to_lean.writeModule(&obligations_source_out.writer, formal_result.set, .{
+        .namespace = generated_namespace,
+    });
+    const obligations_source = obligations_source_out.written();
+    try testing.expect(std.mem.containsAtLeast(u8, obligations_source, 1, ".sle"));
+    try testing.expect(std.mem.containsAtLeast(u8, obligations_source, 1, ".compilerTypeId 12"));
+
+    {
+        const result = try runOraWithForcedUnknown(allocator, force_target, &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=smt-report,bytecode",
+            "--out-dir",
+            fail_out,
+            source_path,
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try expectExited(result, 1);
+        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean proof recipe for Z3 UNKNOWN obligations"));
+    }
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "fail/b6_signed_lean_gate.hex", .{}));
+
+    const module_suffix = try moduleSuffixFromTmp(allocator, tmp);
+    defer allocator.free(module_suffix);
+    const fixture_dir = try std.fmt.allocPrint(allocator, "formal/Ora/B6SignedFixture/{s}", .{module_suffix});
+    defer allocator.free(fixture_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, fixture_dir);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, fixture_dir) catch {};
+    defer std.Io.Dir.cwd().deleteDir(std.testing.io, "formal/Ora/B6SignedFixture") catch {};
+
+    const valid_module = try std.fmt.allocPrint(allocator, "Ora.B6SignedFixture.{s}.Valid", .{module_suffix});
+    defer allocator.free(valid_module);
+    const valid_theorem = try std.fmt.allocPrint(allocator, "{s}.discharge", .{valid_module});
+    defer allocator.free(valid_theorem);
+    const valid_proof_path = try std.fmt.allocPrint(allocator, "{s}/Valid.lean", .{fixture_dir});
+    defer allocator.free(valid_proof_path);
+
+    const valid_proof = try signedComparisonProofModuleFromGeneratedObligations(allocator, obligations_source, valid_module, ensures_query.id);
+    defer allocator.free(valid_proof);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = valid_proof_path, .data = valid_proof });
+
+    const valid_manifest = try pathFromTmpAlloc(allocator, tmp, "valid-proofs.json");
+    defer allocator.free(valid_manifest);
+    try writeProofManifestForTest(allocator, valid_manifest, valid_module, valid_theorem, valid_proof_path, ensures_query);
+
+    {
+        const result = try runOraWithForcedUnknown(allocator, force_target, &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=smt-report,bytecode",
+            "--out-dir",
+            valid_out,
+            "--lean-proofs",
+            valid_manifest,
+            source_path,
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try expectExited(result, 0);
+    }
+
+    const valid_cert_path = try pathFromTmpAlloc(allocator, tmp, "valid/b6_signed_lean_gate.lean.proof.json");
+    defer allocator.free(valid_cert_path);
+    const valid_hex_path = try pathFromTmpAlloc(allocator, tmp, "valid/b6_signed_lean_gate.hex");
+    defer allocator.free(valid_hex_path);
+    const valid_cert = try readFileAllocForTest(allocator, valid_cert_path);
+    defer allocator.free(valid_cert);
+    try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"schema_version\": 1"));
+    try testing.expect(!std.mem.containsAtLeast(u8, valid_cert, 1, "sorryAx"));
+    const valid_hex = try readFileAllocForTest(allocator, valid_hex_path);
+    defer allocator.free(valid_hex);
+    try testing.expect(valid_hex.len > 0);
+}
+
 test "B4 unknown diagnostic rejects Lean recipe for unsupported semantic type" {
     std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
@@ -1489,6 +1695,76 @@ test "formal Z3 adapter proves canonical term obligation from assumptions" {
 
     var adapter = obligation_to_z3.Adapter.init(&z3_ctx, testing.allocator, set);
     try testing.expectEqual(obligation_to_z3.CheckStatus.proved, try adapter.checkObligation(2));
+}
+
+test "formal Z3 adapter distinguishes signed and unsigned comparison tags" {
+    var z3_ctx = try z3_verification.Z3Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    const max_u256 = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+    const terms = [_]obligation.Term{
+        .{ .int_lit = .{ .value = max_u256, .ty = builtinTypeRef(.i256) } },
+        .{ .int_lit = .{ .value = "0", .ty = builtinTypeRef(.i256) } },
+        .{ .binary = .{ .op = .slt, .lhs = 0, .rhs = 1, .ty = builtinTypeRef(.i256) } },
+        .{ .binary = .{ .op = .lt, .lhs = 0, .rhs = 1, .ty = builtinTypeRef(.u256) } },
+    };
+    const obligations = [_]obligation.Obligation{
+        .{
+            .id = 1,
+            .owner = .{ .function = .{ .name = "signed" } },
+            .source = .generated(),
+            .phase = .sema,
+            .origin = .{ .sema_fact = .{ .kind = "signed_cmp", .ordinal = 0 } },
+            .kind = .{ .logical = .{
+                .role = .ensures,
+                .formula = .{ .term = 2 },
+            } },
+        },
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "unsigned" } },
+            .source = .generated(),
+            .phase = .sema,
+            .origin = .{ .sema_fact = .{ .kind = "unsigned_cmp", .ordinal = 0 } },
+            .kind = .{ .logical = .{
+                .role = .ensures,
+                .formula = .{ .term = 3 },
+            } },
+        },
+    };
+    const signed_ids = [_]obligation.Id{1};
+    const unsigned_ids = [_]obligation.Id{2};
+    const queries = [_]obligation.VerificationQuery{
+        .{
+            .id = 3,
+            .owner = .{ .function = .{ .name = "signed" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .obligation_ids = &signed_ids,
+        },
+        .{
+            .id = 4,
+            .owner = .{ .function = .{ .name = "unsigned" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .obligation_ids = &unsigned_ids,
+        },
+    };
+    const set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &terms,
+    };
+
+    var adapter = obligation_to_z3.Adapter.init(&z3_ctx, testing.allocator, set);
+    try testing.expectEqual(obligation_to_z3.CheckStatus.proved, try adapter.checkObligation(1));
+    try testing.expectEqual(obligation_to_z3.CheckStatus.disproved, try adapter.checkObligation(2));
 }
 
 test "formal Z3 adapter finds counterexample for unassumed canonical obligation" {
@@ -2092,9 +2368,9 @@ test "formal obligation MLIR adapter binds function params by compiler id not di
     try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
 
     const outer = try expectQuantifiedTerm(result.set, try expectLogicalTerm(result.set, .ensures), .forall, "same");
-    try expectTypeRefSpelling(outer.binder.ty, "u256");
+    try expectTypeRefBuiltin(outer.binder.ty, .u256);
     const inner = try expectQuantifiedTerm(result.set, outer.body, .forall, "same");
-    try expectTypeRefSpelling(inner.binder.ty, "u256");
+    try expectTypeRefBuiltin(inner.binder.ty, .u256);
     const body = try expectBinaryTerm(result.set, inner.body, .le);
     try expectBoundVarTerm(result.set, body.lhs, 1, "same");
     try expectBoundVarTerm(result.set, body.rhs, 0, "same");
@@ -2160,10 +2436,10 @@ test "formal obligation MLIR adapter binds function params in inserted forall co
     try testing.expect(requires_formula == .term);
     const requires_body = try expectBinaryTerm(result.set, requires_formula.term, .lt);
     const free = try expectFreeVarTermRef(result.set, requires_body.lhs, 9, 3, "x");
-    try expectTypeRefSpelling(free.ty, "u256");
+    try expectTypeRefBuiltin(free.ty, .u256);
 
     const outer = try expectQuantifiedTerm(result.set, try expectLogicalTerm(result.set, .ensures), .forall, "x");
-    try expectTypeRefSpelling(outer.binder.ty, "u256");
+    try expectTypeRefBuiltin(outer.binder.ty, .u256);
     const condition_id = outer.condition orelse return error.TestUnexpectedResult;
     const condition = try expectBinaryTerm(result.set, condition_id, .lt);
     try expectBoundVarTerm(result.set, condition.lhs, 0, "x");
@@ -2185,7 +2461,7 @@ test "formal obligation MLIR adapter derives term types from MLIR values" {
         \\    "ora.requires"(%req) : (i1) -> ()
         \\    %addr = ora.cmp "eq", %arg2, %arg2 : !ora.address, !ora.address -> i1
         \\    "ora.assume"(%addr) : (i1) -> ()
-        \\    %ens = ora.cmp "le", %arg0, %arg0 : !ora.int<64, true>, !ora.int<64, true> -> i1
+        \\    %ens = ora.cmp "sle", %arg0, %arg0 : !ora.int<64, true>, !ora.int<64, true> -> i1
         \\    "ora.ensures"(%ens) : (i1) -> ()
         \\    func.return
         \\  }
@@ -2210,24 +2486,241 @@ test "formal obligation MLIR adapter derives term types from MLIR values" {
         switch (assumption.kind) {
             .requires => {
                 const free = try expectFreeVarTermRef(result.set, binary.lhs, 11, 2, "uy");
-                try expectTypeRefSpelling(free.ty, "u32");
+                try expectTypeRefBuiltin(free.ty, .u32);
                 const rhs_free = try expectFreeVarTermRef(result.set, binary.rhs, 11, 2, "uy");
-                try expectTypeRefSpelling(rhs_free.ty, "u32");
+                try expectTypeRefBuiltin(rhs_free.ty, .u32);
             },
             .assume => {
                 const free = try expectFreeVarTermRef(result.set, binary.lhs, 11, 3, "who");
-                try expectTypeRefSpelling(free.ty, "address");
+                try expectTypeRefBuiltin(free.ty, .address);
             },
             else => return error.TestUnexpectedResult,
         }
     }
 
     const sx = try expectQuantifiedTerm(result.set, try expectLogicalTerm(result.set, .ensures), .forall, "sx");
-    try expectTypeRefSpelling(sx.binder.ty, "i64");
+    try expectTypeRefBuiltin(sx.binder.ty, .i64);
     const uy = try expectQuantifiedTerm(result.set, sx.body, .forall, "uy");
-    try expectTypeRefSpelling(uy.binder.ty, "u32");
+    try expectTypeRefBuiltin(uy.binder.ty, .u32);
     const who = try expectQuantifiedTerm(result.set, uy.body, .forall, "who");
-    try expectTypeRefSpelling(who.binder.ty, "address");
+    try expectTypeRefBuiltin(who.binder.ty, .address);
+}
+
+test "formal obligation MLIR adapter projects signed i256 comparison tags" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @signed_cmp(%arg0: !ora.int<256, true>, %arg1: !ora.int<256, true>) attributes {
+        \\    ora.param_names = ["a", "b"],
+        \\    ora.param_binding_ids = ["file:21:pattern:1", "file:21:pattern:2"]
+        \\  } {
+        \\    %cmp = ora.cmp "slt", %arg0, %arg1 : !ora.int<256, true>, !ora.int<256, true> -> i1
+        \\    "ora.ensures"(%cmp) : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
+
+    const a = try expectQuantifiedTerm(result.set, try expectLogicalTerm(result.set, .ensures), .forall, "a");
+    try expectTypeRefBuiltin(a.binder.ty, .i256);
+    const b = try expectQuantifiedTerm(result.set, a.body, .forall, "b");
+    try expectTypeRefBuiltin(b.binder.ty, .i256);
+    const body = try expectBinaryTerm(result.set, b.body, .slt);
+    try expectTypeRefBuiltin(body.ty, .i256);
+    try expectBoundVarTerm(result.set, body.lhs, 1, "a");
+    try expectBoundVarTerm(result.set, body.rhs, 0, "b");
+    try expectEnsuresQuerySupported(result.set);
+
+    const lean = try emitLeanToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(lean);
+    try testing.expect(std.mem.containsAtLeast(u8, lean, 1, ".slt"));
+    try testing.expect(std.mem.containsAtLeast(u8, lean, 1, ".compilerTypeId 12"));
+}
+
+test "formal obligation Lean support rejects narrow signed comparison width" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @signed_narrow(%arg0: !ora.int<64, true>, %arg1: !ora.int<64, true>) attributes {
+        \\    ora.param_names = ["a", "b"],
+        \\    ora.param_binding_ids = ["file:22:pattern:1", "file:22:pattern:2"]
+        \\  } {
+        \\    %cmp = ora.cmp "slt", %arg0, %arg1 : !ora.int<64, true>, !ora.int<64, true> -> i1
+        \\    "ora.ensures"(%cmp) : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    const a = try expectQuantifiedTerm(result.set, try expectLogicalTerm(result.set, .ensures), .forall, "a");
+    try expectTypeRefBuiltin(a.binder.ty, .i64);
+    const b = try expectQuantifiedTerm(result.set, a.body, .forall, "b");
+    const body = try expectBinaryTerm(result.set, b.body, .slt);
+    try expectTypeRefBuiltin(body.ty, .i64);
+    try expectEnsuresQueryUnsupported(result.set, .unsupported_comparison_width);
+}
+
+test "formal obligation MLIR adapter blocks signed predicate on unsigned operands" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @bad_signedness(%arg0: !ora.int<256, false>, %arg1: !ora.int<256, false>) attributes {
+        \\    ora.param_names = ["a", "b"],
+        \\    ora.param_binding_ids = ["file:23:pattern:1", "file:23:pattern:2"]
+        \\  } {
+        \\    %cmp = ora.cmp "slt", %arg0, %arg1 : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\    "ora.ensures"(%cmp) : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), result.set.diagnostics.len);
+    try testing.expectEqual(obligation.DiagnosticKind.comparison_signedness_mismatch, result.set.diagnostics[0].kind);
+    try testing.expect(std.mem.containsAtLeast(u8, result.set.diagnostics[0].message, 1, "predicate signedness"));
+
+    const report = try dumpManifestToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(report);
+    try testing.expect(!std.mem.containsAtLeast(u8, report, 1, "\"op\":\"slt\""));
+}
+
+test "formal obligation Lean signed comparison support requires compiler type identity" {
+    const terms = [_]obligation.Term{
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 31, .pattern_id = 1 }, .name = "a", .ty = .{ .spelling = "i256" } } } },
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 31, .pattern_id = 2 }, .name = "b", .ty = .{ .spelling = "i256" } } } },
+        .{ .binary = .{ .op = .slt, .lhs = 0, .rhs = 1, .ty = .{ .spelling = "i256" } } },
+    };
+    const obligations = [_]obligation.Obligation{
+        .{
+            .id = 1,
+            .owner = .{ .function = .{ .name = "signed_cmp" } },
+            .source = .generated(),
+            .phase = .ora_mlir,
+            .origin = .{ .mlir_op = .{ .op_name = "ora.ensures", .symbol = "signed_cmp" } },
+            .kind = .{ .logical = .{
+                .role = .ensures,
+                .formula = .{ .term = 2 },
+            } },
+        },
+    };
+    const obligation_ids = [_]obligation.Id{1};
+    const queries = [_]obligation.VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "signed_cmp" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .logical_role = .ensures,
+            .obligation_ids = &obligation_ids,
+        },
+    };
+    const set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &terms,
+    };
+
+    try expectEnsuresQueryUnsupported(set, .unknown_signedness);
+}
+
+test "formal obligation Lean supports signed result, storage, and old operands" {
+    const terms = [_]obligation.Term{
+        .result,
+        .{ .place_read = .{ .root = "reserve", .region = .storage } },
+        .{ .old = 1 },
+        .{ .binary = .{ .op = .sle, .lhs = 1, .rhs = 2, .ty = builtinTypeRef(.i256) } },
+        .{ .binary = .{ .op = .sge, .lhs = 0, .rhs = 2, .ty = builtinTypeRef(.i256) } },
+    };
+    const obligations = [_]obligation.Obligation{
+        .{
+            .id = 1,
+            .owner = .{ .function = .{ .name = "signed_storage" } },
+            .source = .generated(),
+            .phase = .sema,
+            .origin = .{ .sema_fact = .{ .kind = "signed_storage", .ordinal = 0 } },
+            .kind = .{ .logical = .{
+                .role = .ensures,
+                .formula = .{ .term = 3 },
+            } },
+        },
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "signed_result" } },
+            .source = .generated(),
+            .phase = .sema,
+            .origin = .{ .sema_fact = .{ .kind = "signed_result", .ordinal = 0 } },
+            .kind = .{ .logical = .{
+                .role = .invariant,
+                .formula = .{ .term = 4 },
+            } },
+        },
+    };
+    const ensures_obligation_ids = [_]obligation.Id{1};
+    const invariant_obligation_ids = [_]obligation.Id{2};
+    const queries = [_]obligation.VerificationQuery{
+        .{
+            .id = 3,
+            .owner = .{ .function = .{ .name = "signed_storage" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .logical_role = .ensures,
+            .obligation_ids = &ensures_obligation_ids,
+        },
+        .{
+            .id = 4,
+            .owner = .{ .function = .{ .name = "signed_result" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .logical_role = .invariant,
+            .obligation_ids = &invariant_obligation_ids,
+        },
+    };
+    const set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &terms,
+    };
+
+    try expectEnsuresQuerySupported(set);
+    try expectLogicalQuerySupported(set, .invariant);
 }
 
 test "formal obligation MLIR adapter projects u256 scalar sload as place_read term" {
@@ -2271,6 +2764,47 @@ test "formal obligation MLIR adapter projects u256 scalar sload as place_read te
     defer testing.allocator.free(rendered);
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, ".placeRead { root := \"reserve\", region := .storage"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "def emittedQuery_"));
+}
+
+test "formal obligation MLIR adapter projects signed i256 scalar sload for signed comparison" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  ora.contract @StorageProofs {
+        \\    ora.global "reserve" : !ora.int<256, true>
+        \\    func.func @check() attributes {
+        \\      ora.write_slots = []
+        \\    } {
+        \\      %reserve = ora.sload "reserve" : !ora.int<256, true>
+        \\      %cmp = ora.cmp "sle", %reserve, %reserve : !ora.int<256, true>, !ora.int<256, true> -> i1
+        \\      "ora.ensures"(%cmp) : (i1) -> ()
+        \\      func.return
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
+
+    const body = try expectBinaryTerm(result.set, try expectLogicalTerm(result.set, .ensures), .sle);
+    try expectTypeRefBuiltin(body.ty, .i256);
+    try expectPlaceReadTerm(result.set, body.lhs, "reserve", .storage);
+    try expectPlaceReadTerm(result.set, body.rhs, "reserve", .storage);
+    try expectEnsuresQuerySupported(result.set);
+
+    const lean = try emitLeanToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(lean);
+    try testing.expect(std.mem.containsAtLeast(u8, lean, 1, ".sle"));
+    try testing.expect(std.mem.containsAtLeast(u8, lean, 1, ".compilerTypeId 12"));
 }
 
 test "formal obligation MLIR adapter requires explicit write set before scalar sload projection" {

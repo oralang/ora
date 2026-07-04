@@ -5903,7 +5903,13 @@ fn leanSemanticSupportAvailable(support: formal_obligation_to_lean.SemanticSuppo
 fn printLeanTypeRef(stdout: anytype, ty: formal_obligation.TypeRef) !void {
     switch (ty) {
         .spelling => |text| try stdout.print("`{s}`", .{text}),
-        .compiler_type_id => |id| try stdout.print("compiler_type_id:{d}", .{id}),
+        .compiler_type_id => |id| {
+            if (ora_types.builtin.lookupBuiltinByComptimeTypeId(id)) |spec| {
+                try stdout.print("`{s}`", .{spec.source_name});
+            } else {
+                try stdout.print("compiler_type_id:{d}", .{id});
+            }
+        },
     }
 }
 
@@ -5927,6 +5933,9 @@ fn printLeanSemanticUnsupportedReason(
             try printLeanTypeRef(stdout, ty);
             try stdout.writeAll("; the current Lean semantic proof fragment supports bool formulas and u256 values only\n");
         },
+        .unsupported_comparison_width => try stdout.writeAll("    reason: signed comparison width is outside the current Lean semantic proof fragment; only 256-bit signed comparisons are supported today\n"),
+        .unknown_signedness => try stdout.writeAll("    reason: signed comparison operand is missing compiler type-id signedness metadata\n"),
+        .mixed_signedness => try stdout.writeAll("    reason: comparison predicate signedness does not match both operand types\n"),
     }
 }
 

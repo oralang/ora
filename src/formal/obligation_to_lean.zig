@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const obligation = @import("obligation.zig");
+const type_builtin = @import("ora_types").builtin;
 
 pub const Options = struct {
     namespace: []const u8 = "Ora.Generated.ObligationSmoke",
@@ -25,6 +26,9 @@ pub const SemanticUnsupportedReason = union(enum) {
     unsupported_term_kind,
     missing_type,
     unsupported_type: obligation.TypeRef,
+    unsupported_comparison_width,
+    unknown_signedness,
+    mixed_signedness,
 };
 
 pub fn writeDataModule(writer: anytype, set: obligation.ObligationSet, options: Options) !void {
@@ -345,8 +349,8 @@ fn valueTermSemanticSupport(
     const term = termById(set, id) orelse return .{ .unsupported = .invalid_dependency };
     return switch (term) {
         .bool_lit => .supported,
-        .int_lit => |literal| optionalTypeSupportsU256(literal.ty),
-        .variable => |variable| varRefSupportsBoolOrU256Value(variable),
+        .int_lit => |literal| optionalTypeSupportsU256Carrier(literal.ty),
+        .variable => |variable| varRefSupportsBoolOrU256CarrierValue(variable),
         .result => .supported,
         .place_read => .supported,
         .binary => |binary| switch (binary.op) {
@@ -404,6 +408,7 @@ fn binaryFormulaSemanticSupport(
             u256ValueTermSemanticSupport(set, binary.lhs, fuel),
             u256ValueTermSemanticSupport(set, binary.rhs, fuel),
         }),
+        .slt, .sle, .sgt, .sge => signedComparisonSemanticSupport(set, binary, fuel),
         .and_, .or_, .implies => firstUnsupported(.{
             formulaTermSemanticSupport(set, binary.lhs, fuel),
             formulaTermSemanticSupport(set, binary.rhs, fuel),
@@ -415,6 +420,57 @@ fn binaryFormulaSemanticSupport(
         .mod,
         => .{ .unsupported = .unsupported_term_kind },
     };
+}
+
+fn i256ValueTermSemanticSupport(
+    set: obligation.ObligationSet,
+    id: obligation.TermId,
+    fuel: usize,
+) SemanticSupport {
+    if (fuel == 0) return .{ .unsupported = .unsupported_term_kind };
+    const term = termById(set, id) orelse return .{ .unsupported = .invalid_dependency };
+    return switch (term) {
+        .int_lit => |literal| optionalTypeSupportsI256(literal.ty),
+        .variable => |variable| varRefSupportsI256Value(variable),
+        .result => .supported,
+        .place_read => .supported,
+        .binary => |binary| switch (binary.op) {
+            .add, .sub => binaryI256ValueSemanticSupport(set, binary, fuel - 1),
+            else => .{ .unsupported = .unsupported_term_kind },
+        },
+        .old => |operand| oldPlaceReadSemanticSupport(set, operand),
+        else => .{ .unsupported = .unsupported_term_kind },
+    };
+}
+
+fn signedComparisonSemanticSupport(
+    set: obligation.ObligationSet,
+    binary: obligation.BinaryTerm,
+    fuel: usize,
+) SemanticSupport {
+    switch (optionalTypeSupportsI256(binary.ty)) {
+        .supported => {},
+        .unsupported => |reason| return .{ .unsupported = reason },
+    }
+    return firstUnsupported(.{
+        i256ValueTermSemanticSupport(set, binary.lhs, fuel),
+        i256ValueTermSemanticSupport(set, binary.rhs, fuel),
+    });
+}
+
+fn binaryI256ValueSemanticSupport(
+    set: obligation.ObligationSet,
+    binary: obligation.BinaryTerm,
+    fuel: usize,
+) SemanticSupport {
+    switch (optionalTypeSupportsI256(binary.ty)) {
+        .supported => {},
+        .unsupported => |reason| return .{ .unsupported = reason },
+    }
+    return firstUnsupported(.{
+        i256ValueTermSemanticSupport(set, binary.lhs, fuel),
+        i256ValueTermSemanticSupport(set, binary.rhs, fuel),
+    });
 }
 
 fn binaryU256ValueSemanticSupport(
@@ -451,17 +507,29 @@ fn quantifiedSemanticSupport(
     quantified: obligation.QuantifiedTerm,
     fuel: usize,
 ) SemanticSupport {
-    switch (optionalTypeSupportsU256(quantified.binder.ty)) {
+    var binder_reason: ?SemanticUnsupportedReason = null;
+    switch (optionalTypeSupportsU256Carrier(quantified.binder.ty)) {
         .supported => {},
-        .unsupported => |reason| return .{ .unsupported = reason },
+        .unsupported => |reason| binder_reason = reason,
     }
     if (quantified.condition) |condition| {
         switch (formulaTermSemanticSupport(set, condition, fuel)) {
             .supported => {},
-            .unsupported => |reason| return .{ .unsupported = reason },
+            .unsupported => |reason| {
+                if (reasonIsSignedComparisonTypeGate(reason)) return .{ .unsupported = reason };
+                return .{ .unsupported = binder_reason orelse reason };
+            },
         }
     }
-    return formulaTermSemanticSupport(set, quantified.body, fuel);
+    switch (formulaTermSemanticSupport(set, quantified.body, fuel)) {
+        .supported => {},
+        .unsupported => |reason| {
+            if (reasonIsSignedComparisonTypeGate(reason)) return .{ .unsupported = reason };
+            return .{ .unsupported = binder_reason orelse reason };
+        },
+    }
+    if (binder_reason) |reason| return .{ .unsupported = reason };
+    return .supported;
 }
 
 fn firstUnsupported(results: anytype) SemanticSupport {
@@ -474,6 +542,16 @@ fn firstUnsupported(results: anytype) SemanticSupport {
     return .supported;
 }
 
+fn reasonIsSignedComparisonTypeGate(reason: SemanticUnsupportedReason) bool {
+    return switch (reason) {
+        .unsupported_comparison_width,
+        .unknown_signedness,
+        .mixed_signedness,
+        => true,
+        else => false,
+    };
+}
+
 fn varRefSupportsBoolFormula(variable: obligation.VarRef) SemanticSupport {
     return switch (variable) {
         .free => |free| optionalTypeSupportsBool(free.ty),
@@ -481,10 +559,10 @@ fn varRefSupportsBoolFormula(variable: obligation.VarRef) SemanticSupport {
     };
 }
 
-fn varRefSupportsBoolOrU256Value(variable: obligation.VarRef) SemanticSupport {
+fn varRefSupportsBoolOrU256CarrierValue(variable: obligation.VarRef) SemanticSupport {
     return switch (variable) {
-        .free => |free| optionalTypeSupportsBoolOrU256(free.ty),
-        .bound => |bound| optionalTypeSupportsBoolOrU256(bound.ty),
+        .free => |free| optionalTypeSupportsBoolOrU256Carrier(free.ty),
+        .bound => |bound| optionalTypeSupportsBoolOrU256Carrier(bound.ty),
     };
 }
 
@@ -492,6 +570,13 @@ fn varRefSupportsU256Value(variable: obligation.VarRef) SemanticSupport {
     return switch (variable) {
         .free => |free| optionalTypeSupportsU256(free.ty),
         .bound => |bound| optionalTypeSupportsU256(bound.ty),
+    };
+}
+
+fn varRefSupportsI256Value(variable: obligation.VarRef) SemanticSupport {
+    return switch (variable) {
+        .free => |free| optionalTypeSupportsI256(free.ty),
+        .bound => |bound| optionalTypeSupportsI256(bound.ty),
     };
 }
 
@@ -507,24 +592,68 @@ fn optionalTypeSupportsU256(ty: ?obligation.TypeRef) SemanticSupport {
     return .{ .unsupported = .{ .unsupported_type = value } };
 }
 
-fn optionalTypeSupportsBoolOrU256(ty: ?obligation.TypeRef) SemanticSupport {
+fn optionalTypeSupportsI256(ty: ?obligation.TypeRef) SemanticSupport {
+    const value = ty orelse return .{ .unsupported = .unknown_signedness };
+    const info = compilerIntegerInfo(value) orelse return .{ .unsupported = .unknown_signedness };
+    if (info.width != 256) return .{ .unsupported = .unsupported_comparison_width };
+    if (!info.signed) return .{ .unsupported = .mixed_signedness };
+    return .supported;
+}
+
+fn optionalTypeSupportsU256Carrier(ty: ?obligation.TypeRef) SemanticSupport {
     const value = ty orelse return .{ .unsupported = .missing_type };
-    if (typeRefIsBool(value) or typeRefIsU256(value)) return .supported;
+    if (typeRefIsU256(value) or typeRefIsI256(value)) return .supported;
+    return .{ .unsupported = .{ .unsupported_type = value } };
+}
+
+fn optionalTypeSupportsBoolOrU256Carrier(ty: ?obligation.TypeRef) SemanticSupport {
+    const value = ty orelse return .{ .unsupported = .missing_type };
+    if (typeRefIsBool(value) or typeRefIsU256(value) or typeRefIsI256(value)) return .supported;
     return .{ .unsupported = .{ .unsupported_type = value } };
 }
 
 fn typeRefIsBool(ty: obligation.TypeRef) bool {
     return switch (ty) {
         .spelling => |name| std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "i1"),
-        .compiler_type_id => false,
+        .compiler_type_id => |id| compilerTypeIdIsBuiltin(id, .bool),
     };
 }
 
 fn typeRefIsU256(ty: obligation.TypeRef) bool {
     return switch (ty) {
         .spelling => |name| std.mem.eql(u8, name, "u256") or std.mem.eql(u8, name, "uint256"),
-        .compiler_type_id => false,
+        .compiler_type_id => |id| compilerTypeIdIsBuiltin(id, .u256),
     };
+}
+
+fn typeRefIsI256(ty: obligation.TypeRef) bool {
+    return switch (ty) {
+        .spelling => |name| std.mem.eql(u8, name, "i256") or std.mem.eql(u8, name, "int256"),
+        .compiler_type_id => |id| compilerTypeIdIsBuiltin(id, .i256),
+    };
+}
+
+const CompilerIntegerInfo = struct {
+    width: u32,
+    signed: bool,
+};
+
+fn compilerIntegerInfo(ty: obligation.TypeRef) ?CompilerIntegerInfo {
+    return switch (ty) {
+        .compiler_type_id => |id| blk: {
+            const spec = type_builtin.lookupBuiltinByComptimeTypeId(id) orelse break :blk null;
+            if (spec.category != .Integer) break :blk null;
+            break :blk .{
+                .width = spec.bit_width orelse return null,
+                .signed = spec.signed orelse return null,
+            };
+        },
+        .spelling => null,
+    };
+}
+
+fn compilerTypeIdIsBuiltin(id: u32, builtin: type_builtin.BuiltinTypeId) bool {
+    return id == type_builtin.lookupBuiltinById(builtin).comptime_type_id;
 }
 
 fn writeProofArtifacts(writer: anytype, rows: []const obligation.ProofArtifact) !void {
@@ -601,6 +730,8 @@ fn writeTerm(writer: anytype, term: obligation.Term) !void {
             try writer.print("{d}", .{binary.lhs});
             try writer.writeAll(", rhs := ");
             try writer.print("{d}", .{binary.rhs});
+            try writer.writeAll(", ty := ");
+            try writeOptionalTypeRef(writer, binary.ty);
             try writer.writeAll(" }");
         },
         .refinement_predicate => |predicate| {
@@ -984,6 +1115,10 @@ fn binaryOpName(op: obligation.BinaryOp) []const u8 {
         .le => "le",
         .gt => "gt",
         .ge => "ge",
+        .slt => "slt",
+        .sle => "sle",
+        .sgt => "sgt",
+        .sge => "sge",
         .add => "add",
         .sub => "sub",
         .mul => "mul",

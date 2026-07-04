@@ -15,6 +15,7 @@ a frame equality between them.
 
 import Ora.Obligation.Manifest
 import Ora.Obligation.BitVec
+import Ora.Spec.Facts
 
 namespace Ora.Obligation
 
@@ -119,23 +120,38 @@ def sampleStoragePlace : PlaceRef :=
 def sampleOldPlaceReadManifest : Manifest :=
   { terms := [.placeRead sampleStoragePlace, .old 0] }
 
+def compilerTypeIdU256 : Nat := Ora.Spec.expectedCompilerTypeIdU256
+def compilerTypeIdI256 : Nat := Ora.Spec.expectedCompilerTypeIdI256
+def compilerTypeIdBool : Nat := Ora.Spec.expectedCompilerTypeIdBool
+
 def TyRef.isU256 : TyRef → Bool
   | .spelling name => name == "u256" || name == "uint256"
-  | .compilerTypeId _ => false
+  | .compilerTypeId id => id == compilerTypeIdU256
+
+def TyRef.isI256 : TyRef → Bool
+  | .spelling name => name == "i256" || name == "int256"
+  | .compilerTypeId id => id == compilerTypeIdI256
+
+def TyRef.isBool : TyRef → Bool
+  | .spelling name => name == "bool" || name == "i1"
+  | .compilerTypeId id => id == compilerTypeIdBool
+
+def TyRef.isU256Carrier (ty : TyRef) : Bool :=
+  ty.isU256 || ty.isI256
 
 def FreeVarRef.isU256 (var : FreeVarRef) : Bool :=
   match var.ty with
-  | some ty => ty.isU256
+  | some ty => ty.isU256Carrier
   | none => false
 
 def BoundVarRef.isU256 (var : BoundVarRef) : Bool :=
   match var.ty with
-  | some ty => ty.isU256
+  | some ty => ty.isU256Carrier
   | none => false
 
 def BinderRef.isU256 (binder : BinderRef) : Bool :=
   match binder.ty with
-  | some ty => ty.isU256
+  | some ty => ty.isU256Carrier
   | none => false
 
 def VarRef.isU256 : VarRef → Bool
@@ -145,7 +161,7 @@ def VarRef.isU256 : VarRef → Bool
 def IntegerLiteralTerm.asU256? (lit : IntegerLiteralTerm) : Option U256 :=
   match lit.ty with
   | some ty =>
-      if ty.isU256 then
+      if ty.isU256Carrier then
         lit.value.toNat?.map (BitVec.ofNat 256)
       else
         none
@@ -274,6 +290,14 @@ def denoteFormula? (manifest : Manifest) (env : Env) : Nat → TermId → Option
               binU256? U256.ugt
           | .ge =>
               binU256? U256.uge
+          | .slt =>
+              binU256? U256.slt
+          | .sle =>
+              binU256? U256.sle
+          | .sgt =>
+              binU256? U256.sgt
+          | .sge =>
+              binU256? U256.sge
           | .and_ =>
               binFormula? (fun lhs rhs => lhs ∧ rhs)
           | .or_ =>

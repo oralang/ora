@@ -11,6 +11,7 @@ const z3 = z3_verification.z3_c;
 const Context = z3_verification.Z3Context;
 const Solver = z3_verification.Z3Solver;
 const obligation = @import("obligation.zig");
+const type_builtin = @import("ora_types").builtin;
 
 const RefinementBuiltin = enum(u8) {
     min_value,
@@ -302,10 +303,14 @@ pub const Adapter = struct {
                 else
                     z3.Z3_mk_bv_urem(self.context.ctx, lhs, rhs);
             },
-            .lt => try self.encodeComparison(binary, lhs, rhs, .lt),
-            .le => try self.encodeComparison(binary, lhs, rhs, .le),
-            .gt => try self.encodeComparison(binary, lhs, rhs, .gt),
-            .ge => try self.encodeComparison(binary, lhs, rhs, .ge),
+            .lt => try self.encodeComparison(lhs, rhs, .lt, false),
+            .le => try self.encodeComparison(lhs, rhs, .le, false),
+            .gt => try self.encodeComparison(lhs, rhs, .gt, false),
+            .ge => try self.encodeComparison(lhs, rhs, .ge, false),
+            .slt => try self.encodeComparison(lhs, rhs, .lt, true),
+            .sle => try self.encodeComparison(lhs, rhs, .le, true),
+            .sgt => try self.encodeComparison(lhs, rhs, .gt, true),
+            .sge => try self.encodeComparison(lhs, rhs, .ge, true),
         };
         try self.context.checkNoError();
         return ast;
@@ -320,12 +325,11 @@ pub const Adapter = struct {
 
     fn encodeComparison(
         self: *Adapter,
-        binary: obligation.BinaryTerm,
         lhs: z3.Z3_ast,
         rhs: z3.Z3_ast,
         comparison: Comparison,
+        signed: bool,
     ) EncodeError!z3.Z3_ast {
-        const signed = try self.binaryOperandsSigned(binary);
         return self.compareWithSignedness(comparison, lhs, rhs, signed);
     }
 
@@ -430,6 +434,10 @@ pub const Adapter = struct {
                 .le,
                 .gt,
                 .ge,
+                .slt,
+                .sle,
+                .sgt,
+                .sge,
                 .and_,
                 .or_,
                 .implies,
@@ -505,7 +513,21 @@ const TypeInfo = struct {
 fn typeInfo(ty: obligation.TypeRef) EncodeError!TypeInfo {
     return switch (ty) {
         .spelling => |spelling| typeInfoFromSpelling(spelling),
-        .compiler_type_id => error.UnsupportedCompilerTypeId,
+        .compiler_type_id => |id| typeInfoFromCompilerTypeId(id),
+    };
+}
+
+fn typeInfoFromCompilerTypeId(id: u32) EncodeError!TypeInfo {
+    const spec = type_builtin.lookupBuiltinByComptimeTypeId(id) orelse return error.UnsupportedCompilerTypeId;
+    return switch (spec.category) {
+        .Bool => .{ .kind = .bool },
+        .Address => .{ .kind = .bitvector, .width = 160, .signed = false },
+        .Integer => .{
+            .kind = .bitvector,
+            .width = spec.bit_width orelse return error.UnsupportedCompilerTypeId,
+            .signed = spec.signed orelse return error.UnsupportedCompilerTypeId,
+        },
+        else => error.UnsupportedCompilerTypeId,
     };
 }
 

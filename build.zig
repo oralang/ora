@@ -1371,6 +1371,7 @@ pub fn build(b: *std.Build) void {
     compiler_test_mod.addImport("ora_lib", lib_mod);
     compiler_test_mod.addImport("mlir_c_api", mlir_c_mod);
     compiler_test_mod.addImport("ora_z3_verification", z3_verification_mod);
+    compiler_test_mod.addImport("ora_types", ora_types_mod);
     const compiler_tests = b.addTest(.{
         .root_module = compiler_test_mod,
         .filters = compilerTestFilters(

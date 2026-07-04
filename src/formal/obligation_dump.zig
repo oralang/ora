@@ -649,6 +649,7 @@ fn writeTermField(writer: anytype, term: obligation.Term) !void {
             try writeStringField(writer, "op", @tagName(binary.op));
             try writeIdField(writer, "lhs", binary.lhs);
             try writeIdField(writer, "rhs", binary.rhs);
+            if (binary.ty) |ty| try writeTypeRefField(writer, "ty", ty);
         },
         .refinement_predicate => |predicate| {
             try writeStringField(writer, "name", predicate.name);

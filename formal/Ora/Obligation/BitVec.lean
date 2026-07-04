@@ -25,8 +25,38 @@ def ugt (lhs rhs : U256) : Prop :=
 def uge (lhs rhs : U256) : Prop :=
   rhs.ule lhs
 
+def toInt256 (value : U256) : Int :=
+  if value.toNat < 2^255 then
+    value.toNat
+  else
+    (value.toNat : Int) - 2^256
+
+def slt (lhs rhs : U256) : Prop :=
+  lhs.toInt256 < rhs.toInt256
+
+def sle (lhs rhs : U256) : Prop :=
+  lhs.toInt256 ≤ rhs.toInt256
+
+def sgt (lhs rhs : U256) : Prop :=
+  rhs.slt lhs
+
+def sge (lhs rhs : U256) : Prop :=
+  rhs.sle lhs
+
 def max : U256 :=
   BitVec.ofNat 256 (2^256 - 1)
+
+theorem slt_max_zero_and_not_ult :
+    slt max (BitVec.ofNat 256 0) ∧ ¬ ult max (BitVec.ofNat 256 0) := by
+  constructor
+  · unfold slt toInt256 max
+    have hMaxLt : 2^256 - 1 < 2^256 := by omega
+    have hMaxHigh : ¬ (BitVec.ofNat 256 (2^256 - 1)).toNat < 2^255 := by
+      simp [Nat.mod_eq_of_lt hMaxLt]
+    simp [Nat.mod_eq_of_lt hMaxLt, hMaxHigh]
+  · unfold ult max
+    have hMaxLt : 2^256 - 1 < 2^256 := by omega
+    simp [Nat.mod_eq_of_lt hMaxLt]
 
 def add (lhs rhs : U256) : U256 :=
   BitVec.ofNat 256 (lhs.toNat + rhs.toNat)

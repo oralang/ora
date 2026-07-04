@@ -20,6 +20,18 @@ open Ora.Spec Ora.Generated Ora.Types
 
 theorem builtin_types_match : compilerBuiltinTypeIds = expectedBuiltinTypeIds := by decide
 
+theorem builtin_type_comptime_ids_match :
+    compilerBuiltinTypeComptimeIds = expectedBuiltinTypeComptimeIds := by decide
+
+theorem obligation_semantics_u256_type_id_pinned :
+    ("u256", expectedCompilerTypeIdU256) ∈ compilerBuiltinTypeComptimeIds := by decide
+
+theorem obligation_semantics_i256_type_id_pinned :
+    ("i256", expectedCompilerTypeIdI256) ∈ compilerBuiltinTypeComptimeIds := by decide
+
+theorem obligation_semantics_bool_type_id_pinned :
+    ("bool", expectedCompilerTypeIdBool) ∈ compilerBuiltinTypeComptimeIds := by decide
+
 /-! ## 2. Integer widths — no missing, no extra -/
 
 theorem uint_widths_match : compilerUIntWidths = expectedUIntWidths := by decide
