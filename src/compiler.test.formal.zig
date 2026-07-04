@@ -835,6 +835,116 @@ fn signedComparisonProofModuleFromGeneratedObligations(
     return try out.toOwnedSlice();
 }
 
+fn divRemProofModuleFromGeneratedObligations(
+    allocator: std.mem.Allocator,
+    obligations_source: []const u8,
+    module_namespace: []const u8,
+    query_id: obligation.Id,
+    requires_nonzero_y: bool,
+) ![]const u8 {
+    const namespace_start = std.mem.indexOf(u8, obligations_source, "namespace ") orelse return error.TestUnexpectedResult;
+    const body_start = (std.mem.indexOfPos(u8, obligations_source, namespace_start, "\n") orelse return error.TestUnexpectedResult) + 1;
+    const end_start = std.mem.lastIndexOf(u8, obligations_source, "\nend ") orelse return error.TestUnexpectedResult;
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    errdefer out.deinit();
+    const writer = &out.writer;
+
+    try writer.writeAll(obligations_source[0..namespace_start]);
+    try writer.writeAll("namespace ");
+    try writer.writeAll(module_namespace);
+    try writer.writeByte('\n');
+    try writer.writeAll(obligations_source[body_start..end_start]);
+    try writer.writeByte('\n');
+
+    try writer.print("theorem discharge : emittedQuery_{d} := by\n", .{query_id});
+    try writer.writeAll("  unfold ");
+    try writer.print("emittedQuery_{d}", .{query_id});
+    try writer.writeAll(
+        \\ obligationFollowsFromAssumptions
+        \\  constructor
+        \\
+    );
+    if (requires_nonzero_y) {
+        try writer.writeAll(
+            \\  · refine ⟨Env.empty.setFree { file_id := 0, pattern_id := 1 } (.u256 (BitVec.ofNat 256 1)), ?_⟩
+            \\    have hY :
+            \\        (({ file_id := 0, pattern_id := 1 } : FreeVarId) ==
+            \\          { file_id := 0, pattern_id := 1 }) = true := by
+            \\      decide
+            \\    simp [
+            \\      assumptionsDenoteInEnv,
+            \\      assumptionsDenoteInEnv?,
+            \\      assumptionAnd?,
+            \\      assumptionDenotesInEnv?,
+            \\      formulaDenotes?,
+            \\      denoteFormula?,
+            \\      denoteValue?,
+            \\      emittedManifest,
+            \\      emittedTerms,
+            \\      emittedAssumptions,
+            \\      Env.setFree,
+            \\      Env.lookupVar,
+            \\      Env.lookupFree,
+            \\      lookupFreeBinding,
+            \\      Value.eqProp?,
+            \\      IntegerLiteralTerm.asU256?,
+            \\      compilerTypeIdU256,
+            \\      Ora.Spec.expectedCompilerTypeIdU256,
+            \\      TyRef.isU256,
+            \\      TyRef.isU256Carrier,
+            \\      hY
+            \\    ]
+            \\
+        );
+    } else {
+        try writer.writeAll(
+            \\  · refine ⟨Env.empty, ?_⟩
+            \\    simp [
+            \\      assumptionsDenoteInEnv,
+            \\      assumptionsDenoteInEnv?
+            \\    ]
+            \\
+        );
+    }
+    try writer.writeAll(
+        \\  · intro env hAssumptions
+        \\    intro x
+        \\    simp [
+        \\      obligationDenotesInEnv,
+        \\      obligationDenotesInEnv?,
+        \\      formulaDenotes?,
+        \\      denoteFormula?,
+        \\      denoteValue?,
+        \\      emittedManifest,
+        \\      emittedTerms,
+        \\      Env.pushBound,
+        \\      Env.lookupVar,
+        \\      Env.lookupBound,
+        \\      Value.eqProp?,
+        \\      Value.binaryU256?,
+        \\      IntegerLiteralTerm.asU256?,
+        \\      BinderRef.isU256,
+        \\      TyRef.isU256,
+        \\      TyRef.isI256,
+        \\      TyRef.isU256Carrier,
+        \\      compilerTypeIdU256,
+        \\      compilerTypeIdI256,
+        \\      compilerTypeIdBool,
+        \\      Ora.Spec.expectedCompilerTypeIdU256,
+        \\      Ora.Spec.expectedCompilerTypeIdI256,
+        \\      Ora.Spec.expectedCompilerTypeIdBool,
+        \\      U256.udivTotal
+        \\    ]
+        \\
+        \\
+    );
+    try writer.writeAll("end ");
+    try writer.writeAll(module_namespace);
+    try writer.writeByte('\n');
+    return try out.toOwnedSlice();
+}
+
 test "B3 lean proofs unblock source-level unknown without erasing runtime guard" {
     std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
@@ -1389,6 +1499,206 @@ test "B6 signed comparison Lean proof unblocks source-level unknown" {
     try testing.expect(valid_hex.len > 0);
 }
 
+test "B6 div rem Lean proof unblocks source-level unknown" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const source =
+        \\contract B6DivRemLeanProofGate {
+        \\    pub fn div_reflexive(x: u256) -> bool
+        \\        ensures (x / 1) == (x / 1)
+        \\    {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b6_div_rem_lean_gate.ora", .data = source });
+
+    const source_path = try pathFromTmpAlloc(allocator, tmp, "b6_div_rem_lean_gate.ora");
+    defer allocator.free(source_path);
+    const fail_out = try pathFromTmpAlloc(allocator, tmp, "fail");
+    defer allocator.free(fail_out);
+    const valid_out = try pathFromTmpAlloc(allocator, tmp, "valid");
+    defer allocator.free(valid_out);
+
+    var formal_result = try collectPackageObligations(allocator, source_path);
+    defer formal_result.deinit();
+    const ensures_query = try findEnsuresQuery(formal_result.set);
+    try expectEnsuresQuerySupported(formal_result.set);
+
+    const generated_namespace = try leanProofGeneratedNamespaceForTest(allocator, source_path);
+    defer allocator.free(generated_namespace);
+    var obligations_source_out = std.Io.Writer.Allocating.init(allocator);
+    defer obligations_source_out.deinit();
+    try obligation_to_lean.writeModule(&obligations_source_out.writer, formal_result.set, .{
+        .namespace = generated_namespace,
+        .proof_surface = true,
+    });
+    const obligations_source = obligations_source_out.written();
+    try testing.expect(std.mem.containsAtLeast(u8, obligations_source, 1, ".div"));
+    try testing.expect(std.mem.containsAtLeast(u8, obligations_source, 1, ".compilerTypeId 6"));
+
+    {
+        const result = try runOraWithForcedUnknown(allocator, "obligation:2", &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=smt-report,bytecode",
+            "--out-dir",
+            fail_out,
+            source_path,
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try expectExited(result, 1);
+        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean proof recipe for Z3 UNKNOWN obligations"));
+    }
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "fail/b6_div_rem_lean_gate.hex", .{}));
+
+    const module_suffix = try moduleSuffixFromTmp(allocator, tmp);
+    defer allocator.free(module_suffix);
+    const fixture_dir = try std.fmt.allocPrint(allocator, "formal/Ora/B6DivRemFixture/{s}", .{module_suffix});
+    defer allocator.free(fixture_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, fixture_dir);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, fixture_dir) catch {};
+    defer std.Io.Dir.cwd().deleteDir(std.testing.io, "formal/Ora/B6DivRemFixture") catch {};
+
+    const valid_module = try std.fmt.allocPrint(allocator, "Ora.B6DivRemFixture.{s}.Valid", .{module_suffix});
+    defer allocator.free(valid_module);
+    const valid_theorem = try std.fmt.allocPrint(allocator, "{s}.discharge", .{valid_module});
+    defer allocator.free(valid_theorem);
+    const valid_proof_path = try std.fmt.allocPrint(allocator, "{s}/Valid.lean", .{fixture_dir});
+    defer allocator.free(valid_proof_path);
+
+    const valid_proof = try divRemProofModuleFromGeneratedObligations(allocator, obligations_source, valid_module, ensures_query.id, false);
+    defer allocator.free(valid_proof);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = valid_proof_path, .data = valid_proof });
+
+    const valid_manifest = try pathFromTmpAlloc(allocator, tmp, "valid-proofs.json");
+    defer allocator.free(valid_manifest);
+    try writeProofManifestForTest(allocator, valid_manifest, valid_module, valid_theorem, valid_proof_path, ensures_query);
+
+    {
+        const result = try runOraWithForcedUnknown(allocator, "obligation:2", &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=smt-report,bytecode",
+            "--out-dir",
+            valid_out,
+            "--lean-proofs",
+            valid_manifest,
+            source_path,
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try expectExited(result, 0);
+    }
+
+    const valid_cert_path = try pathFromTmpAlloc(allocator, tmp, "valid/b6_div_rem_lean_gate.lean.proof.json");
+    defer allocator.free(valid_cert_path);
+    const valid_hex_path = try pathFromTmpAlloc(allocator, tmp, "valid/b6_div_rem_lean_gate.hex");
+    defer allocator.free(valid_hex_path);
+    const valid_cert = try readFileAllocForTest(allocator, valid_cert_path);
+    defer allocator.free(valid_cert);
+    try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"schema_version\": 1"));
+    try testing.expect(!std.mem.containsAtLeast(u8, valid_cert, 1, "sorryAx"));
+    const valid_hex = try readFileAllocForTest(allocator, valid_hex_path);
+    defer allocator.free(valid_hex);
+    try testing.expect(valid_hex.len > 0);
+}
+
+test "B6 div rem Lean proof does not discharge missing divisor guard" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const source =
+        \\contract B6DivRemGuardBoundary {
+        \\    pub fn div_reflexive(x: u256, y: u256) -> bool
+        \\        ensures (x / y) == (x / y)
+        \\    {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b6_div_rem_guard_boundary.ora", .data = source });
+
+    const source_path = try pathFromTmpAlloc(allocator, tmp, "b6_div_rem_guard_boundary.ora");
+    defer allocator.free(source_path);
+    const blocked_out = try pathFromTmpAlloc(allocator, tmp, "blocked");
+    defer allocator.free(blocked_out);
+
+    var formal_result = try collectPackageObligations(allocator, source_path);
+    defer formal_result.deinit();
+    const ensures_query = try findEnsuresQuery(formal_result.set);
+    try expectEnsuresQuerySupported(formal_result.set);
+
+    const generated_namespace = try leanProofGeneratedNamespaceForTest(allocator, source_path);
+    defer allocator.free(generated_namespace);
+    var obligations_source_out = std.Io.Writer.Allocating.init(allocator);
+    defer obligations_source_out.deinit();
+    try obligation_to_lean.writeModule(&obligations_source_out.writer, formal_result.set, .{
+        .namespace = generated_namespace,
+        .proof_surface = true,
+    });
+    const obligations_source = obligations_source_out.written();
+    try testing.expect(std.mem.containsAtLeast(u8, obligations_source, 1, ".div"));
+
+    const module_suffix = try moduleSuffixFromTmp(allocator, tmp);
+    defer allocator.free(module_suffix);
+    const fixture_dir = try std.fmt.allocPrint(allocator, "formal/Ora/B6DivRemBoundaryFixture/{s}", .{module_suffix});
+    defer allocator.free(fixture_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, fixture_dir);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, fixture_dir) catch {};
+    defer std.Io.Dir.cwd().deleteDir(std.testing.io, "formal/Ora/B6DivRemBoundaryFixture") catch {};
+
+    const valid_module = try std.fmt.allocPrint(allocator, "Ora.B6DivRemBoundaryFixture.{s}.Valid", .{module_suffix});
+    defer allocator.free(valid_module);
+    const valid_theorem = try std.fmt.allocPrint(allocator, "{s}.discharge", .{valid_module});
+    defer allocator.free(valid_theorem);
+    const valid_proof_path = try std.fmt.allocPrint(allocator, "{s}/Valid.lean", .{fixture_dir});
+    defer allocator.free(valid_proof_path);
+
+    const valid_proof = try divRemProofModuleFromGeneratedObligations(allocator, obligations_source, valid_module, ensures_query.id, false);
+    defer allocator.free(valid_proof);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = valid_proof_path, .data = valid_proof });
+
+    const valid_manifest = try pathFromTmpAlloc(allocator, tmp, "valid-proofs.json");
+    defer allocator.free(valid_manifest);
+    try writeProofManifestForTest(allocator, valid_manifest, valid_module, valid_theorem, valid_proof_path, ensures_query);
+
+    {
+        const result = try runOraWithForcedUnknown(allocator, "obligation:2", &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=smt-report,bytecode",
+            "--out-dir",
+            blocked_out,
+            "--lean-proofs",
+            valid_manifest,
+            source_path,
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try expectExited(result, 1);
+        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "failed_query") or
+            std.mem.containsAtLeast(u8, result.stderr, 1, "failed_query") or
+            std.mem.containsAtLeast(u8, result.stdout, 1, "failed to prove contract invariant") or
+            std.mem.containsAtLeast(u8, result.stderr, 1, "failed to prove contract invariant"));
+    }
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "blocked/b6_div_rem_guard_boundary.hex", .{}));
+}
+
 test "B4 unknown diagnostic rejects Lean recipe for unsupported semantic type" {
     std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
@@ -1679,6 +1989,39 @@ test "formal Z3 prepared query results overlay MLIR manifest queries" {
         try testing.expect(query.smtlib_hash != null);
         try testing.expect(query.result != null);
     }
+}
+
+test "formal Z3 overlay ignores only clean unmatched proved rows" {
+    const clean_rows = [_]z3_verification.PreparedQueryManifestRow{
+        .{
+            .kind = .Obligation,
+            .function_name = "checked",
+            .file = "test.ora",
+            .line = 1,
+            .column = 1,
+            .result_status = .unsat,
+        },
+    };
+    var clean_overlay = try obligation_from_z3.overlayPreparedQueryResults(testing.allocator, .{}, &clean_rows);
+    defer clean_overlay.deinit();
+    try testing.expectEqual(@as(usize, 0), clean_overlay.set.diagnostics.len);
+    try testing.expect(!clean_overlay.set.hasBlockingDiagnostic());
+
+    const vacuous_rows = [_]z3_verification.PreparedQueryManifestRow{
+        .{
+            .kind = .Obligation,
+            .function_name = "checked",
+            .file = "test.ora",
+            .line = 1,
+            .column = 1,
+            .result_status = .unsat,
+            .vacuous = true,
+        },
+    };
+    var vacuous_overlay = try obligation_from_z3.overlayPreparedQueryResults(testing.allocator, .{}, &vacuous_rows);
+    defer vacuous_overlay.deinit();
+    try testing.expectEqual(@as(usize, 1), vacuous_overlay.set.diagnostics.len);
+    try testing.expect(vacuous_overlay.set.hasBlockingDiagnostic());
 }
 
 test "formal Z3 adapter proves canonical term obligation from assumptions" {
@@ -2818,6 +3161,136 @@ test "formal obligation Lean supports signed result, storage, and old operands" 
 
     try expectEnsuresQuerySupported(set);
     try expectLogicalQuerySupported(set, .invariant);
+}
+
+test "formal obligation MLIR adapter projects div and rem value terms with opcode signedness" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @div_rem_terms(%arg0: i256, %arg1: i256) attributes {
+        \\    ora.param_names = ["x", "y"],
+        \\    ora.param_binding_ids = ["file:31:pattern:1", "file:31:pattern:2"]
+        \\  } {
+        \\    %udiv = arith.divui %arg0, %arg1 : i256
+        \\    %urem = arith.remui %arg0, %arg1 : i256
+        \\    %sdiv = arith.divsi %arg0, %arg1 : i256
+        \\    %srem = arith.remsi %arg0, %arg1 : i256
+        \\    %ucmp = arith.cmpi eq, %udiv, %urem : i256
+        \\    "ora.requires"(%ucmp) : (i1) -> ()
+        \\    %scmp = arith.cmpi eq, %sdiv, %srem : i256
+        \\    "ora.ensures"(%scmp) : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try expectEnsuresQuerySupported(result.set);
+
+    var unsigned_divs: usize = 0;
+    var unsigned_mods: usize = 0;
+    var signed_divs: usize = 0;
+    var signed_mods: usize = 0;
+    for (result.set.terms) |term| {
+        if (term != .binary) continue;
+        const binary = term.binary;
+        switch (binary.op) {
+            .div => {
+                if (binary.ty) |ty| {
+                    if (ty == .compiler_type_id and ty.compiler_type_id == type_builtin.lookupBuiltinById(.u256).comptime_type_id) {
+                        unsigned_divs += 1;
+                    } else if (ty == .compiler_type_id and ty.compiler_type_id == type_builtin.lookupBuiltinById(.i256).comptime_type_id) {
+                        signed_divs += 1;
+                    }
+                }
+            },
+            .mod => {
+                if (binary.ty) |ty| {
+                    if (ty == .compiler_type_id and ty.compiler_type_id == type_builtin.lookupBuiltinById(.u256).comptime_type_id) {
+                        unsigned_mods += 1;
+                    } else if (ty == .compiler_type_id and ty.compiler_type_id == type_builtin.lookupBuiltinById(.i256).comptime_type_id) {
+                        signed_mods += 1;
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+    try testing.expect(unsigned_divs >= 1);
+    try testing.expect(unsigned_mods >= 1);
+    try testing.expect(signed_divs >= 1);
+    try testing.expect(signed_mods >= 1);
+
+    const rendered = try emitLeanToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, ".div"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, ".mod_"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, ".compilerTypeId 6"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, ".compilerTypeId 12"));
+}
+
+test "formal obligation Lean rejects narrow div and rem arithmetic width" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @narrow_div(%arg0: i32, %arg1: i32) attributes {
+        \\    ora.param_names = ["x", "y"],
+        \\    ora.param_binding_ids = ["file:32:pattern:1", "file:32:pattern:2"]
+        \\  } {
+        \\    %q = arith.divui %arg0, %arg1 : i32
+        \\    %cmp = arith.cmpi eq, %q, %q : i32
+        \\    "ora.ensures"(%cmp) : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try expectEnsuresQueryUnsupported(result.set, .unsupported_arithmetic_width);
+}
+
+test "formal obligation Lean rejects signed comparison over unsigned div result" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @mixed_div_signedness(%arg0: i256, %arg1: i256) attributes {
+        \\    ora.param_names = ["x", "y"],
+        \\    ora.param_binding_ids = ["file:33:pattern:1", "file:33:pattern:2"]
+        \\  } {
+        \\    %q = arith.divui %arg0, %arg1 : i256
+        \\    %cmp = arith.cmpi slt, %q, %q : i256
+        \\    "ora.ensures"(%cmp) : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try expectEnsuresQueryUnsupported(result.set, .mixed_arithmetic_signedness);
 }
 
 test "formal obligation MLIR adapter projects u256 scalar sload as place_read term" {

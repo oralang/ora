@@ -10,6 +10,7 @@ const type_builtin = @import("ora_types").builtin;
 
 pub const Options = struct {
     namespace: []const u8 = "Ora.Generated.ObligationSmoke",
+    proof_surface: bool = false,
 };
 
 pub const SemanticSupport = union(enum) {
@@ -29,6 +30,9 @@ pub const SemanticUnsupportedReason = union(enum) {
     unsupported_comparison_width,
     unknown_signedness,
     mixed_signedness,
+    unsupported_arithmetic_width,
+    unknown_arithmetic_signedness,
+    mixed_arithmetic_signedness,
 };
 
 pub fn writeDataModule(writer: anytype, set: obligation.ObligationSet, options: Options) !void {
@@ -36,9 +40,9 @@ pub fn writeDataModule(writer: anytype, set: obligation.ObligationSet, options: 
     try set.validateIdReferences();
 
     try writeModulePreamble(writer, "Ora.Obligation.Manifest", options.namespace);
-    try writeManifestRows(writer, set);
+    try writeManifestRows(writer, set, false);
     try writeManifestDefinition(writer);
-    try writeRowDefinitions(writer, set);
+    try writeRowDefinitions(writer, set, false);
     try writeNamespaceEnd(writer, options.namespace);
 }
 
@@ -47,10 +51,10 @@ pub fn writeModule(writer: anytype, set: obligation.ObligationSet, options: Opti
     try set.validateIdReferences();
 
     try writeModulePreamble(writer, "Ora.Obligation.Semantics", options.namespace);
-    try writeManifestRows(writer, set);
+    try writeManifestRows(writer, set, options.proof_surface);
     try writeManifestDefinition(writer);
     try writer.writeAll("theorem emitted_manifest_wf : emittedManifest.wf = true := by decide\n\n");
-    try writeSemanticDefinitions(writer, set);
+    try writeSemanticDefinitions(writer, set, options.proof_surface);
     try writeNamespaceEnd(writer, options.namespace);
 }
 
@@ -62,12 +66,12 @@ fn writeModulePreamble(writer: anytype, import_name: []const u8, namespace: []co
     try writer.writeAll("\n\nopen Ora.Obligation\n\n");
 }
 
-fn writeManifestRows(writer: anytype, set: obligation.ObligationSet) !void {
+fn writeManifestRows(writer: anytype, set: obligation.ObligationSet, proof_surface: bool) !void {
     try writeTerms(writer, set.terms);
     try writer.writeByte('\n');
-    try writeAssumptions(writer, set.assumptions);
+    try writeAssumptions(writer, set, proof_surface);
     try writer.writeByte('\n');
-    try writeObligations(writer, set.obligations);
+    try writeObligations(writer, set, proof_surface);
     try writer.writeByte('\n');
     try writeProofArtifacts(writer, set.proof_artifacts);
     try writer.writeByte('\n');
@@ -101,30 +105,75 @@ fn writeTerms(writer: anytype, terms: []const obligation.Term) !void {
     try writer.writeAll("]\n");
 }
 
-fn writeAssumptions(writer: anytype, rows: []const obligation.Assumption) !void {
+fn writeAssumptions(writer: anytype, set: obligation.ObligationSet, proof_surface: bool) !void {
     try writer.writeAll("def emittedAssumptions : List AssumptionRow := ");
-    if (rows.len == 0) return writer.writeAll("[]\n");
+    const count = countWritableAssumptions(set, proof_surface);
+    if (count == 0) return writer.writeAll("[]\n");
 
     try writer.writeAll("[\n");
-    for (rows, 0..) |row, index| {
+    var emitted_index: usize = 0;
+    for (set.assumptions) |row| {
+        if (proof_surface and !assumptionWritableInProofSurface(row)) continue;
         try writer.writeAll("  ");
         try writeAssumptionRow(writer, row);
-        try writeListSeparator(writer, index, rows.len);
+        try writeListSeparator(writer, emitted_index, count);
+        emitted_index += 1;
     }
     try writer.writeAll("]\n");
 }
 
-fn writeObligations(writer: anytype, rows: []const obligation.Obligation) !void {
+fn writeObligations(writer: anytype, set: obligation.ObligationSet, proof_surface: bool) !void {
     try writer.writeAll("def emittedObligations : List ObligationRow := ");
-    if (rows.len == 0) return writer.writeAll("[]\n");
+    const count = countWritableObligations(set, proof_surface);
+    if (count == 0) return writer.writeAll("[]\n");
 
     try writer.writeAll("[\n");
-    for (rows, 0..) |row, index| {
+    var emitted_index: usize = 0;
+    for (set.obligations) |row| {
+        if (proof_surface and !obligationWritableInProofSurface(row)) continue;
         try writer.writeAll("  ");
         try writeObligationRow(writer, row);
-        try writeListSeparator(writer, index, rows.len);
+        try writeListSeparator(writer, emitted_index, count);
+        emitted_index += 1;
     }
     try writer.writeAll("]\n");
+}
+
+fn countWritableAssumptions(set: obligation.ObligationSet, proof_surface: bool) usize {
+    var count: usize = 0;
+    for (set.assumptions) |row| {
+        if (proof_surface and !assumptionWritableInProofSurface(row)) continue;
+        count += 1;
+    }
+    return count;
+}
+
+fn countWritableObligations(set: obligation.ObligationSet, proof_surface: bool) usize {
+    var count: usize = 0;
+    for (set.obligations) |row| {
+        if (proof_surface and !obligationWritableInProofSurface(row)) continue;
+        count += 1;
+    }
+    return count;
+}
+
+fn assumptionWritableInProofSurface(row: obligation.Assumption) bool {
+    return if (row.formula) |formula| formulaWritableInLeanModule(formula) else false;
+}
+
+fn obligationWritableInProofSurface(row: obligation.Obligation) bool {
+    return switch (row.kind) {
+        .logical => |logical| formulaWritableInLeanModule(logical.formula),
+        .runtime_guard => |guard| formulaWritableInLeanModule(guard.formula),
+        else => true,
+    };
+}
+
+fn formulaWritableInLeanModule(formula: obligation.FormulaRef) bool {
+    return switch (formula) {
+        .term => true,
+        .origin_value => false,
+    };
 }
 
 fn writeAssumptionRow(writer: anytype, row: obligation.Assumption) !void {
@@ -155,10 +204,10 @@ fn writeObligationRow(writer: anytype, row: obligation.Obligation) !void {
     try writer.writeAll(" }");
 }
 
-fn writeSemanticDefinitions(writer: anytype, set: obligation.ObligationSet) !void {
+fn writeSemanticDefinitions(writer: anytype, set: obligation.ObligationSet, proof_surface: bool) !void {
     var emitted_any = false;
 
-    try writeRowDefinitions(writer, set);
+    try writeRowDefinitions(writer, set, proof_surface);
 
     for (set.obligations) |row| {
         switch (kindSemanticSupport(set, row.kind)) {
@@ -197,8 +246,9 @@ fn writeSemanticDefinitions(writer: anytype, set: obligation.ObligationSet) !voi
     }
 }
 
-fn writeRowDefinitions(writer: anytype, set: obligation.ObligationSet) !void {
+fn writeRowDefinitions(writer: anytype, set: obligation.ObligationSet, proof_surface: bool) !void {
     for (set.assumptions) |row| {
+        if (proof_surface and !assumptionWritableInProofSurface(row)) continue;
         try writer.writeAll("def emittedAssumptionRow_");
         try writer.print("{d}", .{row.id});
         try writer.writeAll(" : AssumptionRow :=\n  ");
@@ -207,6 +257,7 @@ fn writeRowDefinitions(writer: anytype, set: obligation.ObligationSet) !void {
     }
 
     for (set.obligations) |row| {
+        if (proof_surface and !obligationWritableInProofSurface(row)) continue;
         try writer.writeAll("def emittedObligationRow_");
         try writer.print("{d}", .{row.id});
         try writer.writeAll(" : ObligationRow :=\n  ");
@@ -354,7 +405,7 @@ fn valueTermSemanticSupport(
         .result => .supported,
         .place_read => .supported,
         .binary => |binary| switch (binary.op) {
-            .add, .sub => binaryU256ValueSemanticSupport(set, binary, fuel - 1),
+            .add, .sub, .mul, .div, .mod => binaryCarrierArithmeticValueSemanticSupport(set, binary, fuel - 1),
             else => .{ .unsupported = .unsupported_term_kind },
         },
         .old => |operand| oldPlaceReadSemanticSupport(set, operand),
@@ -378,7 +429,7 @@ fn u256ValueTermSemanticSupport(
         .result => .supported,
         .place_read => .supported,
         .binary => |binary| switch (binary.op) {
-            .add, .sub => binaryU256ValueSemanticSupport(set, binary, fuel - 1),
+            .add, .sub, .mul, .div, .mod => binaryUnsignedArithmeticValueSemanticSupport(set, binary, fuel - 1),
             else => .{ .unsupported = .unsupported_term_kind },
         },
         .old => |operand| oldPlaceReadSemanticSupport(set, operand),
@@ -435,7 +486,7 @@ fn i256ValueTermSemanticSupport(
         .result => .supported,
         .place_read => .supported,
         .binary => |binary| switch (binary.op) {
-            .add, .sub => binaryI256ValueSemanticSupport(set, binary, fuel - 1),
+            .add, .sub, .mul, .div, .mod => binarySignedArithmeticValueSemanticSupport(set, binary, fuel - 1),
             else => .{ .unsupported = .unsupported_term_kind },
         },
         .old => |operand| oldPlaceReadSemanticSupport(set, operand),
@@ -458,29 +509,50 @@ fn signedComparisonSemanticSupport(
     });
 }
 
-fn binaryI256ValueSemanticSupport(
+fn binarySignedArithmeticValueSemanticSupport(
     set: obligation.ObligationSet,
     binary: obligation.BinaryTerm,
     fuel: usize,
 ) SemanticSupport {
-    switch (optionalTypeSupportsI256(binary.ty)) {
-        .supported => {},
+    const info = switch (arithmeticTypeSupport(binary.ty)) {
+        .supported => |info| info,
         .unsupported => |reason| return .{ .unsupported = reason },
-    }
+    };
+    if (!info.signed) return .{ .unsupported = .mixed_arithmetic_signedness };
     return firstUnsupported(.{
         i256ValueTermSemanticSupport(set, binary.lhs, fuel),
         i256ValueTermSemanticSupport(set, binary.rhs, fuel),
     });
 }
 
-fn binaryU256ValueSemanticSupport(
+fn binaryUnsignedArithmeticValueSemanticSupport(
     set: obligation.ObligationSet,
     binary: obligation.BinaryTerm,
     fuel: usize,
 ) SemanticSupport {
+    const info = switch (arithmeticTypeSupport(binary.ty)) {
+        .supported => |info| info,
+        .unsupported => |reason| return .{ .unsupported = reason },
+    };
+    if (info.signed) return .{ .unsupported = .mixed_arithmetic_signedness };
     return firstUnsupported(.{
         u256ValueTermSemanticSupport(set, binary.lhs, fuel),
         u256ValueTermSemanticSupport(set, binary.rhs, fuel),
+    });
+}
+
+fn binaryCarrierArithmeticValueSemanticSupport(
+    set: obligation.ObligationSet,
+    binary: obligation.BinaryTerm,
+    fuel: usize,
+) SemanticSupport {
+    _ = switch (arithmeticTypeSupport(binary.ty)) {
+        .supported => |info| info,
+        .unsupported => |reason| return .{ .unsupported = reason },
+    };
+    return firstUnsupported(.{
+        valueTermSemanticSupport(set, binary.lhs, fuel),
+        valueTermSemanticSupport(set, binary.rhs, fuel),
     });
 }
 
@@ -516,7 +588,7 @@ fn quantifiedSemanticSupport(
         switch (formulaTermSemanticSupport(set, condition, fuel)) {
             .supported => {},
             .unsupported => |reason| {
-                if (reasonIsSignedComparisonTypeGate(reason)) return .{ .unsupported = reason };
+                if (reasonIsTypedOperationGate(reason)) return .{ .unsupported = reason };
                 return .{ .unsupported = binder_reason orelse reason };
             },
         }
@@ -524,7 +596,7 @@ fn quantifiedSemanticSupport(
     switch (formulaTermSemanticSupport(set, quantified.body, fuel)) {
         .supported => {},
         .unsupported => |reason| {
-            if (reasonIsSignedComparisonTypeGate(reason)) return .{ .unsupported = reason };
+            if (reasonIsTypedOperationGate(reason)) return .{ .unsupported = reason };
             return .{ .unsupported = binder_reason orelse reason };
         },
     }
@@ -542,11 +614,14 @@ fn firstUnsupported(results: anytype) SemanticSupport {
     return .supported;
 }
 
-fn reasonIsSignedComparisonTypeGate(reason: SemanticUnsupportedReason) bool {
+fn reasonIsTypedOperationGate(reason: SemanticUnsupportedReason) bool {
     return switch (reason) {
         .unsupported_comparison_width,
         .unknown_signedness,
         .mixed_signedness,
+        .unsupported_arithmetic_width,
+        .unknown_arithmetic_signedness,
+        .mixed_arithmetic_signedness,
         => true,
         else => false,
     };
@@ -610,6 +685,18 @@ fn optionalTypeSupportsBoolOrU256Carrier(ty: ?obligation.TypeRef) SemanticSuppor
     const value = ty orelse return .{ .unsupported = .missing_type };
     if (typeRefIsBool(value) or typeRefIsU256(value) or typeRefIsI256(value)) return .supported;
     return .{ .unsupported = .{ .unsupported_type = value } };
+}
+
+const ArithmeticTypeSupport = union(enum) {
+    supported: CompilerIntegerInfo,
+    unsupported: SemanticUnsupportedReason,
+};
+
+fn arithmeticTypeSupport(ty: ?obligation.TypeRef) ArithmeticTypeSupport {
+    const value = ty orelse return .{ .unsupported = .missing_type };
+    const info = compilerIntegerInfo(value) orelse return .{ .unsupported = .unknown_arithmetic_signedness };
+    if (info.width != 256) return .{ .unsupported = .unsupported_arithmetic_width };
+    return .{ .supported = info };
 }
 
 fn typeRefIsBool(ty: obligation.TypeRef) bool {

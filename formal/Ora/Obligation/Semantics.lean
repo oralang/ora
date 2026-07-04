@@ -162,7 +162,10 @@ def IntegerLiteralTerm.asU256? (lit : IntegerLiteralTerm) : Option U256 :=
   match lit.ty with
   | some ty =>
       if ty.isU256Carrier then
-        lit.value.toNat?.map (BitVec.ofNat 256)
+        match lit.value with
+        | "0" => some (BitVec.ofNat 256 0)
+        | "1" => some (BitVec.ofNat 256 1)
+        | _ => lit.value.toNat?.map (BitVec.ofNat 256)
       else
         none
   | none => none
@@ -216,14 +219,61 @@ def denoteValue? (manifest : Manifest) (env : Env) : Nat → TermId → Option V
       | some .result => env.result
       | some (.placeRead place) => env.lookupPlace place
       | some (.binary binary) =>
-          match denoteValue? manifest env fuel binary.lhs,
-                denoteValue? manifest env fuel binary.rhs with
-          | some lhsValue, some rhsValue =>
-              match binary.op with
-              | .add => lhsValue.binaryU256? U256.add rhsValue
-              | .sub => lhsValue.binaryU256? U256.sub rhsValue
-              | _ => none
-          | _, _ => none
+          let binaryU256? (op : U256 → U256 → U256) :=
+            match binary.ty with
+            | some ty =>
+                if ty.isU256Carrier then
+                  match denoteValue? manifest env fuel binary.lhs,
+                        denoteValue? manifest env fuel binary.rhs with
+                  | some lhsValue, some rhsValue =>
+                      lhsValue.binaryU256? op rhsValue
+                  | _, _ => none
+                else
+                  none
+            | none => none
+          let div? :=
+            match binary.ty with
+            | some ty =>
+                if ty.isU256 then
+                  match denoteValue? manifest env fuel binary.lhs,
+                        denoteValue? manifest env fuel binary.rhs with
+                  | some lhsValue, some rhsValue =>
+                      lhsValue.binaryU256? U256.udivTotal rhsValue
+                  | _, _ => none
+                else if ty.isI256 then
+                  match denoteValue? manifest env fuel binary.lhs,
+                        denoteValue? manifest env fuel binary.rhs with
+                  | some lhsValue, some rhsValue =>
+                      lhsValue.binaryU256? U256.sdivTotal rhsValue
+                  | _, _ => none
+                else
+                  none
+            | none => none
+          let mod? :=
+            match binary.ty with
+            | some ty =>
+                if ty.isU256 then
+                  match denoteValue? manifest env fuel binary.lhs,
+                        denoteValue? manifest env fuel binary.rhs with
+                  | some lhsValue, some rhsValue =>
+                      lhsValue.binaryU256? U256.uremTotal rhsValue
+                  | _, _ => none
+                else if ty.isI256 then
+                  match denoteValue? manifest env fuel binary.lhs,
+                        denoteValue? manifest env fuel binary.rhs with
+                  | some lhsValue, some rhsValue =>
+                      lhsValue.binaryU256? U256.sremTotal rhsValue
+                  | _, _ => none
+                else
+                  none
+            | none => none
+          match binary.op with
+          | .add => binaryU256? U256.add
+          | .sub => binaryU256? U256.sub
+          | .mul => binaryU256? U256.mul
+          | .div => div?
+          | .mod_ => mod?
+          | _ => none
       | _ => none
 
 def denoteValueList? (manifest : Manifest) (env : Env) (fuel : Nat) :

@@ -62,7 +62,96 @@ def add (lhs rhs : U256) : U256 :=
   BitVec.ofNat 256 (lhs.toNat + rhs.toNat)
 
 def sub (lhs rhs : U256) : U256 :=
-  BitVec.ofNat 256 (lhs.toNat - rhs.toNat)
+  BitVec.ofNat 256 (lhs.toNat + 2^256 - rhs.toNat)
+
+theorem sub_underflow_wrap_example :
+    sub (BitVec.ofNat 256 3) (BitVec.ofNat 256 5) =
+      BitVec.ofNat 256 (2^256 - 2) := by
+  decide
+
+def mul (lhs rhs : U256) : U256 :=
+  BitVec.ofNat 256 (lhs.toNat * rhs.toNat)
+
+def zero : U256 :=
+  BitVec.ofNat 256 0
+
+def minSigned : U256 :=
+  BitVec.ofNat 256 (2^255)
+
+def negOne : U256 :=
+  BitVec.ofNat 256 (2^256 - 1)
+
+def modulusInt : Int :=
+  (2 : Int)^256
+
+def ofInt256 (value : Int) : U256 :=
+  BitVec.ofNat 256 ((value % modulusInt).toNat)
+
+def truncDivInt (lhs rhs : Int) : Int :=
+  let quotient : Nat := lhs.natAbs / rhs.natAbs
+  if (lhs < 0) == (rhs < 0) then
+    quotient
+  else
+    -((quotient : Nat) : Int)
+
+def signedRemInt (lhs rhs : Int) : Int :=
+  let remainder : Nat := lhs.natAbs % rhs.natAbs
+  if lhs < 0 then
+    -((remainder : Nat) : Int)
+  else
+    remainder
+
+def udivTotal (lhs rhs : U256) : U256 :=
+  if rhs = zero then
+    zero
+  else
+    BitVec.ofNat 256 (lhs.toNat / rhs.toNat)
+
+def uremTotal (lhs rhs : U256) : U256 :=
+  if rhs = zero then
+    zero
+  else
+    BitVec.ofNat 256 (lhs.toNat % rhs.toNat)
+
+def sdivTotal (lhs rhs : U256) : U256 :=
+  if rhs = zero then
+    zero
+  else if lhs = minSigned && rhs = negOne then
+    minSigned
+  else
+    ofInt256 (truncDivInt lhs.toInt256 rhs.toInt256)
+
+def sremTotal (lhs rhs : U256) : U256 :=
+  if rhs = zero then
+    zero
+  else if lhs = minSigned && rhs = negOne then
+    zero
+  else
+    ofInt256 (signedRemInt lhs.toInt256 rhs.toInt256)
+
+theorem udiv_zero_divisor_is_zero (lhs : U256) :
+    lhs.udivTotal zero = zero := by
+  simp [udivTotal]
+
+theorem urem_zero_divisor_is_zero (lhs : U256) :
+    lhs.uremTotal zero = zero := by
+  simp [uremTotal]
+
+theorem sdiv_min_neg_one_is_min :
+    sdivTotal minSigned negOne = minSigned := by
+  decide
+
+theorem srem_min_neg_one_is_zero :
+    sremTotal minSigned negOne = zero := by
+  decide
+
+set_option maxRecDepth 100000 in
+theorem srem_dividend_sign_examples :
+    sremTotal (BitVec.ofNat 256 (2^256 - 10)) (BitVec.ofNat 256 3) =
+        BitVec.ofNat 256 (2^256 - 1) ∧
+      sremTotal (BitVec.ofNat 256 10) (BitVec.ofNat 256 (2^256 - 3)) =
+        BitVec.ofNat 256 1 := by
+  decide
 
 theorem ult_implies_ule (lhs rhs : U256) :
     lhs.ult rhs → lhs.ule rhs := by
@@ -100,9 +189,14 @@ theorem lt_max_sub_add_ule (i x step : U256) :
     simp [Nat.mod_eq_of_lt hMaxLt]
   have hStepLeMax : step.toNat ≤ 2^256 - 1 := by omega
   have hBoundLt : 2^256 - 1 - step.toNat < 2^256 := by omega
+  have hBoundWrapped :
+      2^256 - 1 + 2^256 - step.toNat =
+        2^256 + (2^256 - 1 - step.toNat) := by
+    omega
   have hBound :
-      (BitVec.ofNat 256 (2^256 - 1 - step.toNat)).toNat =
+      (BitVec.ofNat 256 (2^256 - 1 + 2^256 - step.toNat)).toNat =
         2^256 - 1 - step.toNat := by
+    rw [hBoundWrapped]
     simp [Nat.mod_eq_of_lt hBoundLt]
   rw [hMax] at hx
   rw [hBound] at hx

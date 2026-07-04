@@ -141,6 +141,10 @@ pub fn overlayPreparedQueryResults(
         // obligation manifest only has proof-target rows, so an unmatched base
         // row is not proof-manifest drift.
         if (row.kind == .Base) continue;
+        // A clean proved row cannot be opened by a Lean proof and has already
+        // been discharged by the SMT gate. Vacuity/caveat flags are still
+        // artifact blockers, so those rows must remain visible.
+        if (unmatchedCleanUnsatRow(row)) continue;
         try appendUnmatchedRowDiagnostic(arena_allocator, &diagnostics, row);
     }
 
@@ -187,6 +191,13 @@ fn querySolverLogic(logic: z3_verification.QuerySolverLogic) obligation.Verifica
         .all => .all,
         .qf_aufbv => .qf_aufbv,
     };
+}
+
+fn unmatchedCleanUnsatRow(row: z3_verification.PreparedQueryManifestRow) bool {
+    return row.result_status == .unsat and
+        !row.vacuous and
+        !row.vacuity_unknown and
+        !row.verified_with_caveats;
 }
 
 fn queryResult(row: z3_verification.PreparedQueryManifestRow) ?obligation.VerificationQueryResult {

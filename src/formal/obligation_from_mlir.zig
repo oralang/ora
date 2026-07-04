@@ -91,6 +91,18 @@ const arithmetic_value_op_map = std.StaticStringMap(obligation.BinaryOp).initCom
     .{ "arith.muli", .mul },
 });
 
+const ArithmeticDivRemValueOp = struct {
+    op: obligation.BinaryOp,
+    signed: bool,
+};
+
+const arithmetic_div_rem_value_op_map = std.StaticStringMap(ArithmeticDivRemValueOp).initComptime(.{
+    .{ "arith.divui", ArithmeticDivRemValueOp{ .op = .div, .signed = false } },
+    .{ "arith.remui", ArithmeticDivRemValueOp{ .op = .mod, .signed = false } },
+    .{ "arith.divsi", ArithmeticDivRemValueOp{ .op = .div, .signed = true } },
+    .{ "arith.remsi", ArithmeticDivRemValueOp{ .op = .mod, .signed = true } },
+});
+
 const ResourceRootOp = enum(u8) {
     storage_load,
     transient_load,
@@ -249,7 +261,9 @@ const Collector = struct {
         if (op_kind_map.get(op_name)) |kind| {
             try self.collectOperation(op, kind, op_name, symbol, ordinal);
         } else if (arithmetic_op_map.get(op_name)) |safety| {
-            try self.addArithmeticSafetyOp(op_name, symbol, ordinal, safety, null, try self.sourceForOperation(op));
+            if (!self.operationFeedsOnlyFormalFormula(op)) {
+                try self.addArithmeticSafetyOp(op_name, symbol, ordinal, safety, null, try self.sourceForOperation(op));
+            }
         }
 
         const num_regions = mlir.oraOperationGetNumRegions(op);
@@ -1087,6 +1101,9 @@ const Collector = struct {
             if (signed_override) |signed| return try self.binaryTermFromOperands(owner, binary_op, .{ .explicit_signedness = signed });
             return try self.binaryTermFromOperands(owner, binary_op, .operand_signedness);
         }
+        if (arithmetic_div_rem_value_op_map.get(owner_name)) |spec| {
+            return try self.binaryTermFromOperands(owner, spec.op, .{ .explicit_signedness = spec.signed });
+        }
         if (std.mem.eql(u8, owner_name, "arith.xori")) return try self.xoriTerm(owner);
         if (std.mem.eql(u8, owner_name, "arith.cmpi")) return try self.cmpiTerm(owner);
         if (std.mem.eql(u8, owner_name, "ora.cmp")) return try self.oraCmpTerm(owner);
@@ -1211,6 +1228,16 @@ const Collector = struct {
         const result = mlir.oraOperationGetResult(op, index);
         if (mlir.oraValueIsNull(result)) return std.mem.zeroes(mlir.MlirType);
         return mlir.oraValueGetType(result);
+    }
+
+    fn operationFeedsOnlyFormalFormula(_: *Collector, op: mlir.MlirOperation) bool {
+        const result_count = mlir.oraOperationGetNumResults(op);
+        if (result_count == 0) return false;
+        var index: usize = 0;
+        while (index < result_count) : (index += 1) {
+            if (!valueFeedsOnlyFormalFormula(mlir.oraOperationGetResult(op, index), 0)) return false;
+        }
+        return true;
     }
 
     fn functionParamTypesFromFunctionOp(
@@ -2173,6 +2200,52 @@ fn placeKeyEql(lhs: obligation.PlaceKey, rhs: obligation.PlaceKey) bool {
 
 fn isTransparentValueOp(op_name: []const u8) bool {
     return transparent_value_ops.has(op_name);
+}
+
+fn valueFeedsOnlyFormalFormula(value: mlir.MlirValue, depth: u32) bool {
+    if (depth > 32) return false;
+    var use = mlir.mlirValueGetFirstUse(value);
+    if (mlir.mlirOpOperandIsNull(use)) return false;
+
+    while (!mlir.mlirOpOperandIsNull(use)) : (use = mlir.mlirOpOperandGetNextUse(use)) {
+        const user = mlir.mlirOpOperandGetOwner(use);
+        if (mlir.oraOperationIsNull(user)) return false;
+        const user_name = operationName(user);
+        if (isFormalFormulaSink(user_name)) continue;
+        if (!isFormalFormulaIntermediate(user_name)) return false;
+        if (!operationResultsFeedOnlyFormalFormula(user, depth + 1)) return false;
+    }
+    return true;
+}
+
+fn operationResultsFeedOnlyFormalFormula(op: mlir.MlirOperation, depth: u32) bool {
+    const result_count = mlir.oraOperationGetNumResults(op);
+    if (result_count == 0) return false;
+    var index: usize = 0;
+    while (index < result_count) : (index += 1) {
+        if (!valueFeedsOnlyFormalFormula(mlir.oraOperationGetResult(op, index), depth)) return false;
+    }
+    return true;
+}
+
+fn isFormalFormulaSink(op_name: []const u8) bool {
+    return std.mem.eql(u8, op_name, "ora.requires") or
+        std.mem.eql(u8, op_name, "ora.ensures") or
+        std.mem.eql(u8, op_name, "ora.invariant") or
+        std.mem.eql(u8, op_name, "ora.assert") or
+        std.mem.eql(u8, op_name, "cf.assert") or
+        std.mem.eql(u8, op_name, "ora.assume") or
+        std.mem.eql(u8, op_name, "ora.refinement_guard");
+}
+
+fn isFormalFormulaIntermediate(op_name: []const u8) bool {
+    return isTransparentValueOp(op_name) or
+        arithmetic_value_op_map.has(op_name) or
+        arithmetic_div_rem_value_op_map.has(op_name) or
+        std.mem.eql(u8, op_name, "arith.xori") or
+        std.mem.eql(u8, op_name, "arith.cmpi") or
+        std.mem.eql(u8, op_name, "ora.cmp") or
+        std.mem.eql(u8, op_name, "ora.quantified");
 }
 
 fn derivedFormula(op_name: []const u8, symbol: ?[]const u8, ordinal: u32) obligation.FormulaRef {

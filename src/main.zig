@@ -5798,6 +5798,7 @@ fn renderLeanObligationsSource(
     errdefer obligations_source_out.deinit();
     try obligation_to_lean.writeModule(&obligations_source_out.writer, set, .{
         .namespace = generated_namespace,
+        .proof_surface = true,
     });
     return try obligations_source_out.toOwnedSlice();
 }
@@ -5987,6 +5988,9 @@ fn printLeanSemanticUnsupportedReason(
         .unsupported_comparison_width => try stdout.writeAll("    reason: signed comparison width is outside the current Lean semantic proof fragment; only 256-bit signed comparisons are supported today\n"),
         .unknown_signedness => try stdout.writeAll("    reason: signed comparison operand is missing compiler type-id signedness metadata\n"),
         .mixed_signedness => try stdout.writeAll("    reason: comparison predicate signedness does not match both operand types\n"),
+        .unsupported_arithmetic_width => try stdout.writeAll("    reason: arithmetic value width is outside the current Lean semantic proof fragment; only 256-bit arithmetic values are supported today\n"),
+        .unknown_arithmetic_signedness => try stdout.writeAll("    reason: arithmetic value is missing compiler type-id signedness metadata\n"),
+        .mixed_arithmetic_signedness => try stdout.writeAll("    reason: arithmetic operation signedness does not match the value type\n"),
     }
 }
 
