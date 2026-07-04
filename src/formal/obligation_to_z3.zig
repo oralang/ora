@@ -291,17 +291,17 @@ pub const Adapter = struct {
                 try self.requireBitVector(lhs);
                 try self.requireBitVector(rhs);
                 break :blk if (try self.binaryOperandsSigned(binary))
-                    z3.Z3_mk_bvsdiv(self.context.ctx, lhs, rhs)
+                    self.encodeSignedDivTotal(lhs, rhs)
                 else
-                    z3.Z3_mk_bv_udiv(self.context.ctx, lhs, rhs);
+                    self.encodeUnsignedDivTotal(lhs, rhs);
             },
             .mod => blk: {
                 try self.requireBitVector(lhs);
                 try self.requireBitVector(rhs);
                 break :blk if (try self.binaryOperandsSigned(binary))
-                    z3.Z3_mk_bvsrem(self.context.ctx, lhs, rhs)
+                    self.encodeSignedRemTotal(lhs, rhs)
                 else
-                    z3.Z3_mk_bv_urem(self.context.ctx, lhs, rhs);
+                    self.encodeUnsignedRemTotal(lhs, rhs);
             },
             .lt => try self.encodeComparison(lhs, rhs, .lt, false),
             .le => try self.encodeComparison(lhs, rhs, .le, false),
@@ -314,6 +314,58 @@ pub const Adapter = struct {
         };
         try self.context.checkNoError();
         return ast;
+    }
+
+    fn signedMinIntAst(self: *Adapter, sort: z3.Z3_sort) z3.Z3_ast {
+        const width = z3.Z3_get_bv_sort_size(self.context.ctx, sort);
+        const one = z3.Z3_mk_unsigned_int64(self.context.ctx, 1, sort);
+        const shift_amount = z3.Z3_mk_unsigned_int64(self.context.ctx, width - 1, sort);
+        return z3.Z3_mk_bvshl(self.context.ctx, one, shift_amount);
+    }
+
+    fn signedMinDivNegOneCondition(self: *Adapter, lhs: z3.Z3_ast, rhs: z3.Z3_ast, sort: z3.Z3_sort) z3.Z3_ast {
+        const min_int = self.signedMinIntAst(sort);
+        const neg_one = z3.Z3_mk_numeral(self.context.ctx, "-1", sort);
+        const lhs_is_min = z3.Z3_mk_eq(self.context.ctx, lhs, min_int);
+        const rhs_is_neg_one = z3.Z3_mk_eq(self.context.ctx, rhs, neg_one);
+        return z3.Z3_mk_and(self.context.ctx, 2, &[_]z3.Z3_ast{ lhs_is_min, rhs_is_neg_one });
+    }
+
+    fn encodeUnsignedDivTotal(self: *Adapter, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
+        const sort = z3.Z3_get_sort(self.context.ctx, lhs);
+        const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
+        const divisor_zero = z3.Z3_mk_eq(self.context.ctx, rhs, zero);
+        const raw = z3.Z3_mk_bv_udiv(self.context.ctx, lhs, rhs);
+        return z3.Z3_mk_ite(self.context.ctx, divisor_zero, zero, raw);
+    }
+
+    fn encodeUnsignedRemTotal(self: *Adapter, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
+        const sort = z3.Z3_get_sort(self.context.ctx, lhs);
+        const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
+        const divisor_zero = z3.Z3_mk_eq(self.context.ctx, rhs, zero);
+        const raw = z3.Z3_mk_bv_urem(self.context.ctx, lhs, rhs);
+        return z3.Z3_mk_ite(self.context.ctx, divisor_zero, zero, raw);
+    }
+
+    fn encodeSignedDivTotal(self: *Adapter, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
+        const sort = z3.Z3_get_sort(self.context.ctx, lhs);
+        const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
+        const divisor_zero = z3.Z3_mk_eq(self.context.ctx, rhs, zero);
+        const min_int = self.signedMinIntAst(sort);
+        const special = self.signedMinDivNegOneCondition(lhs, rhs, sort);
+        const raw = z3.Z3_mk_bvsdiv(self.context.ctx, lhs, rhs);
+        const nonzero_result = z3.Z3_mk_ite(self.context.ctx, special, min_int, raw);
+        return z3.Z3_mk_ite(self.context.ctx, divisor_zero, zero, nonzero_result);
+    }
+
+    fn encodeSignedRemTotal(self: *Adapter, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
+        const sort = z3.Z3_get_sort(self.context.ctx, lhs);
+        const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
+        const divisor_zero = z3.Z3_mk_eq(self.context.ctx, rhs, zero);
+        const special = self.signedMinDivNegOneCondition(lhs, rhs, sort);
+        const raw = z3.Z3_mk_bvsrem(self.context.ctx, lhs, rhs);
+        const nonzero_result = z3.Z3_mk_ite(self.context.ctx, special, zero, raw);
+        return z3.Z3_mk_ite(self.context.ctx, divisor_zero, zero, nonzero_result);
     }
 
     const Comparison = enum(u8) {

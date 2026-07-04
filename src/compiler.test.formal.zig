@@ -272,6 +272,49 @@ fn builtinTypeRef(expected: type_builtin.BuiltinTypeId) obligation.TypeRef {
     return .{ .compiler_type_id = type_builtin.lookupBuiltinById(expected).comptime_type_id };
 }
 
+fn checkFormalZ3TermObligation(
+    terms: []const obligation.Term,
+    formula: obligation.TermId,
+) !obligation_to_z3.CheckStatus {
+    var z3_ctx = try z3_verification.Z3Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    const obligations = [_]obligation.Obligation{
+        .{
+            .id = 1,
+            .owner = .{ .function = .{ .name = "adapter_fixture" } },
+            .source = .generated(),
+            .phase = .sema,
+            .origin = .{ .sema_fact = .{ .kind = "adapter_fixture", .ordinal = 0 } },
+            .kind = .{ .logical = .{
+                .role = .ensures,
+                .formula = .{ .term = formula },
+            } },
+        },
+    };
+    const obligation_ids = [_]obligation.Id{1};
+    const queries = [_]obligation.VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "adapter_fixture" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids,
+        },
+    };
+    const set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = terms,
+    };
+
+    var adapter = obligation_to_z3.Adapter.init(&z3_ctx, testing.allocator, set);
+    return adapter.checkObligation(1);
+}
+
 fn expectBoundVarTerm(
     set: obligation.ObligationSet,
     term_id: obligation.TermId,
@@ -1765,6 +1808,60 @@ test "formal Z3 adapter distinguishes signed and unsigned comparison tags" {
     var adapter = obligation_to_z3.Adapter.init(&z3_ctx, testing.allocator, set);
     try testing.expectEqual(obligation_to_z3.CheckStatus.proved, try adapter.checkObligation(1));
     try testing.expectEqual(obligation_to_z3.CheckStatus.disproved, try adapter.checkObligation(2));
+}
+
+test "formal Z3 adapter totalizes unsigned div and rem by zero" {
+    const terms = [_]obligation.Term{
+        .{ .int_lit = .{ .value = "7", .ty = builtinTypeRef(.u256) } },
+        .{ .int_lit = .{ .value = "0", .ty = builtinTypeRef(.u256) } },
+        .{ .binary = .{ .op = .div, .lhs = 0, .rhs = 1, .ty = builtinTypeRef(.u256) } },
+        .{ .binary = .{ .op = .mod, .lhs = 0, .rhs = 1, .ty = builtinTypeRef(.u256) } },
+        .{ .int_lit = .{ .value = "0", .ty = builtinTypeRef(.u256) } },
+        .{ .binary = .{ .op = .eq, .lhs = 2, .rhs = 4 } },
+        .{ .binary = .{ .op = .eq, .lhs = 3, .rhs = 4 } },
+    };
+
+    try testing.expectEqual(obligation_to_z3.CheckStatus.proved, try checkFormalZ3TermObligation(&terms, 5));
+    try testing.expectEqual(obligation_to_z3.CheckStatus.proved, try checkFormalZ3TermObligation(&terms, 6));
+}
+
+test "formal Z3 adapter totalizes signed min divided by negative one" {
+    const max_u256 = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+    const min_i256 = "57896044618658097711785492504343953926634992332820282019728792003956564819968";
+    const terms = [_]obligation.Term{
+        .{ .int_lit = .{ .value = min_i256, .ty = builtinTypeRef(.i256) } },
+        .{ .int_lit = .{ .value = max_u256, .ty = builtinTypeRef(.i256) } },
+        .{ .binary = .{ .op = .div, .lhs = 0, .rhs = 1, .ty = builtinTypeRef(.i256) } },
+        .{ .binary = .{ .op = .mod, .lhs = 0, .rhs = 1, .ty = builtinTypeRef(.i256) } },
+        .{ .int_lit = .{ .value = min_i256, .ty = builtinTypeRef(.i256) } },
+        .{ .int_lit = .{ .value = "0", .ty = builtinTypeRef(.i256) } },
+        .{ .binary = .{ .op = .eq, .lhs = 2, .rhs = 4 } },
+        .{ .binary = .{ .op = .eq, .lhs = 3, .rhs = 5 } },
+    };
+
+    try testing.expectEqual(obligation_to_z3.CheckStatus.proved, try checkFormalZ3TermObligation(&terms, 6));
+    try testing.expectEqual(obligation_to_z3.CheckStatus.proved, try checkFormalZ3TermObligation(&terms, 7));
+}
+
+test "formal Z3 adapter signed remainder sign follows dividend" {
+    const max_u256 = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+    const neg_ten = "115792089237316195423570985008687907853269984665640564039457584007913129639926";
+    const neg_three = "115792089237316195423570985008687907853269984665640564039457584007913129639933";
+    const terms = [_]obligation.Term{
+        .{ .int_lit = .{ .value = neg_ten, .ty = builtinTypeRef(.i256) } },
+        .{ .int_lit = .{ .value = "3", .ty = builtinTypeRef(.i256) } },
+        .{ .binary = .{ .op = .mod, .lhs = 0, .rhs = 1, .ty = builtinTypeRef(.i256) } },
+        .{ .int_lit = .{ .value = max_u256, .ty = builtinTypeRef(.i256) } },
+        .{ .binary = .{ .op = .eq, .lhs = 2, .rhs = 3 } },
+        .{ .int_lit = .{ .value = "10", .ty = builtinTypeRef(.i256) } },
+        .{ .int_lit = .{ .value = neg_three, .ty = builtinTypeRef(.i256) } },
+        .{ .binary = .{ .op = .mod, .lhs = 5, .rhs = 6, .ty = builtinTypeRef(.i256) } },
+        .{ .int_lit = .{ .value = "1", .ty = builtinTypeRef(.i256) } },
+        .{ .binary = .{ .op = .eq, .lhs = 7, .rhs = 8 } },
+    };
+
+    try testing.expectEqual(obligation_to_z3.CheckStatus.proved, try checkFormalZ3TermObligation(&terms, 4));
+    try testing.expectEqual(obligation_to_z3.CheckStatus.proved, try checkFormalZ3TermObligation(&terms, 9));
 }
 
 test "formal Z3 adapter finds counterexample for unassumed canonical obligation" {
