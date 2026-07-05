@@ -27,19 +27,6 @@ theorem u256_inrange_implies_maxvalue (lo hi x : U256) :
   intro h
   exact h.2
 
-theorem u256_basispoints_implies_inrange (x : U256) :
-    (U256.ule (BitVec.ofNat 256 0) x ∧
-      U256.ule x (BitVec.ofNat 256 10000)) →
-    (U256.ule (BitVec.ofNat 256 0) x ∧
-      U256.ule x (BitVec.ofNat 256 10000)) := by
-  intro h
-  exact h
-
-theorem u256_nonzeroaddress_implies_nonzero (x : U256) :
-    x ≠ BitVec.ofNat 256 0 → x ≠ BitVec.ofNat 256 0 := by
-  intro h
-  exact h
-
 theorem u256_bounded_successor_preserves_order (i x : U256) :
     U256.ult x U256.max →
     U256.ult i x →
@@ -58,6 +45,14 @@ theorem u256_bounded_symbolic_add_preserves_order (i x step : U256) :
     U256.ult i x →
     U256.ule i (U256.add x step) :=
   U256.lt_max_sub_add_ule i x step
+
+/-! ## Storage-place facts -/
+
+theorem stable_place_read_self_eq_denotes (env : Env) (place : PlaceRef) :
+    match Value.eqProp? (env.placeValue (.stable place)) (env.placeValue (.stable place)) with
+    | some proposition => proposition
+    | none => False := by
+  cases env.placeValue (.stable place) <;> simp [Value.eqProp?]
 
 /-! ## Effect-frame facts over decoded manifests -/
 

@@ -859,12 +859,10 @@ fn storageProofModuleFromGeneratedObligations(
             \\      denoteValue?,
             \\      emittedManifest,
             \\      emittedTerms,
-            \\      Env.lookupPlace,
-            \\      Value.eqProp?
+            \\      Env.lookupPlace
             \\    ]
-            \\    cases env.placeValue
-            \\      (PlaceBindingKey.stable { root := "balance", region := .storage, fields := [], keys := [] }) <;>
-            \\      simp [Value.eqProp?]
+            \\    exact stable_place_read_self_eq_denotes env
+            \\      { root := "balance", region := .storage, fields := [], keys := [] }
             \\
             \\
         );
@@ -923,17 +921,13 @@ fn storagePlaceProofModuleFromGeneratedObligations(
         \\      denoteValue?,
         \\      emittedManifest,
         \\      emittedTerms,
-        \\      Env.lookupPlace,
-        \\      Value.eqProp?
+        \\      Env.lookupPlace
         \\    ]
-        \\    cases env.placeValue
-        \\      (PlaceBindingKey.stable
+        \\    exact stable_place_read_self_eq_denotes env
     );
     try writer.writeByte(' ');
     try writer.writeAll(place_expr);
     try writer.writeAll(
-        \\) <;>
-        \\      simp [Value.eqProp?]
         \\
         \\
     );
@@ -2714,7 +2708,7 @@ test "formal Lean emitter writes manifest rows from canonical obligations" {
     const actual = try emitLeanToOwnedString(testing.allocator, set);
     defer testing.allocator.free(actual);
 
-    try testing.expect(std.mem.containsAtLeast(u8, actual, 1, "import Ora.Obligation.Semantics"));
+    try testing.expect(std.mem.containsAtLeast(u8, actual, 1, "import Ora.Obligation.Theorems"));
     try testing.expect(std.mem.containsAtLeast(u8, actual, 1, ".variable (.free { id := { file_id := 0, pattern_id := 0 }, name := \"balance\""));
     try testing.expect(std.mem.containsAtLeast(u8, actual, 1, ".variable (.free { id := { file_id := 0, pattern_id := 1 }, name := \"amount\""));
     try testing.expect(std.mem.containsAtLeast(u8, actual, 1, "{ id := 1, owner := \"transfer\", kind := .requires, formula := some (.term 2) }"));

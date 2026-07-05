@@ -50,7 +50,7 @@ pub fn writeModule(writer: anytype, set: obligation.ObligationSet, options: Opti
     try set.validateTermReferences();
     try set.validateIdReferences();
 
-    try writeModulePreamble(writer, "Ora.Obligation.Semantics", options.namespace);
+    try writeModulePreamble(writer, "Ora.Obligation.Theorems", options.namespace);
     try writeManifestRows(writer, set, options.proof_surface);
     try writeManifestDefinition(writer);
     try writer.writeAll("theorem emitted_manifest_wf : emittedManifest.wf = true := by decide\n\n");
