@@ -125,7 +125,7 @@ pub fn overlayPreparedQueryResults(
             merged_query.constraint_count = row.constraint_count;
             merged_query.smtlib_hash = row.smtlib_hash;
             merged_query.result = queryResult(row);
-        } else {
+        } else if (queryRequiresPreparedRow(base, query)) {
             try appendUnmatchedFormalQueryDiagnostic(
                 arena_allocator,
                 &diagnostics,
@@ -156,6 +156,24 @@ pub fn overlayPreparedQueryResults(
         .arena = arena,
         .set = merged,
     };
+}
+
+fn queryRequiresPreparedRow(set: obligation.ObligationSet, query: obligation.VerificationQuery) bool {
+    if (query.backend == .lean) return false;
+    if (query.obligation_ids.len == 0) return true;
+
+    for (query.obligation_ids) |id| {
+        const item = findObligation(set, id) orelse return true;
+        if (item.kind != .effect_frame) return true;
+    }
+    return false;
+}
+
+fn findObligation(set: obligation.ObligationSet, id: obligation.Id) ?obligation.Obligation {
+    for (set.obligations) |item| {
+        if (item.id == id) return item;
+    }
+    return null;
 }
 
 fn optionalFile(allocator: std.mem.Allocator, file: []const u8) !?[]const u8 {

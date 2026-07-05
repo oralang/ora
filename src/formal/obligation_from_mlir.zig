@@ -288,6 +288,10 @@ const Collector = struct {
                 }
             }
         }
+
+        if (is_function) {
+            try self.collectEvidenceBackedEffectFrameAttrs(op, op_name, symbol, ordinal);
+        }
     }
 
     fn collectEffectFrameAttrs(
@@ -300,12 +304,13 @@ const Collector = struct {
         const write_slots = (try self.placeArrayAttr(op, "ora.write_slots")) orelse &.{};
         const read_slots = (try self.placeArrayAttr(op, "ora.read_slots")) orelse &.{};
         const modifies_slots = (try self.placeArrayAttr(op, "ora.modifies_slots")) orelse &.{};
+        const write_slots_complete = (try self.boolAttr(op, "ora.write_slots_complete")) orelse false;
         const source = try self.sourceForOperation(op);
 
         if (write_slots.len != 0 or modifies_slots.len != 0) {
             try self.addEffectFrameGoal(.write_covered_by_modifies, modifies_slots, write_slots, op_name, symbol, ordinal, source);
         }
-        if (read_slots.len != 0 and write_slots.len != 0) {
+        if (read_slots.len != 0 and write_slots.len != 0 and write_slots_complete) {
             const preserved_reads = try self.readsDisjointFromWrites(read_slots, write_slots);
             if (preserved_reads.len != 0) {
                 try self.addEffectFrameGoal(.read_preserved_by_frame, write_slots, preserved_reads, op_name, symbol, ordinal, source);
@@ -342,6 +347,21 @@ const Collector = struct {
         ordinal: u32,
         source: obligation.SourceRef,
     ) !void {
+        try self.addEffectFrameGoalWithEvidence(relation, declared, actual, &.{}, false, op_name, symbol, ordinal, source);
+    }
+
+    fn addEffectFrameGoalWithEvidence(
+        self: *Collector,
+        relation: obligation.EffectFrameRelation,
+        declared: []const obligation.PlaceRef,
+        actual: []const obligation.PlaceRef,
+        evidence: []const obligation.KeyDisjointEvidence,
+        with_assumptions: bool,
+        op_name: []const u8,
+        symbol: ?[]const u8,
+        ordinal: u32,
+        source: obligation.SourceRef,
+    ) !void {
         const origin = mlirOrigin(op_name, symbol, ordinal);
         const owner = self.ownerFor(symbol);
         const id = self.nextId();
@@ -355,9 +375,147 @@ const Collector = struct {
                 .relation = relation,
                 .declared = declared,
                 .actual = actual,
+                .evidence = evidence,
             } },
         });
-        try self.addQueryNoAssumptions(.obligation, null, null, id, owner, origin, source);
+        if (with_assumptions) {
+            try self.addQuery(.obligation, null, null, id, owner, origin, source);
+        } else {
+            try self.addQueryNoAssumptions(.obligation, null, null, id, owner, origin, source);
+        }
+    }
+
+    fn collectEvidenceBackedEffectFrameAttrs(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        op_name: []const u8,
+        symbol: ?[]const u8,
+        ordinal: u32,
+    ) !void {
+        const write_slots_complete = (try self.boolAttr(op, "ora.write_slots_complete")) orelse false;
+        if (!write_slots_complete) return;
+
+        const write_slots = (try self.placeArrayAttr(op, "ora.write_slots")) orelse &.{};
+        const read_slots = (try self.placeArrayAttr(op, "ora.read_slots")) orelse &.{};
+        if (read_slots.len == 0 or write_slots.len == 0) return;
+
+        var actual_reads: std.ArrayList(obligation.PlaceRef) = .empty;
+        var evidence_rows: std.ArrayList(obligation.KeyDisjointEvidence) = .empty;
+        const owner = self.ownerFor(symbol);
+
+        for (read_slots) |read| {
+            if (placeIsDefinitelyDisjointFromAll(read, write_slots)) continue;
+            const start = evidence_rows.items.len;
+            if (try self.appendEvidenceForRead(owner, read, write_slots, &evidence_rows)) {
+                try actual_reads.append(self.allocator, read);
+            } else {
+                evidence_rows.shrinkRetainingCapacity(start);
+            }
+        }
+
+        if (actual_reads.items.len == 0) return;
+        const source = try self.sourceForOperation(op);
+        try self.addEffectFrameGoalWithEvidence(
+            .read_preserved_by_key_evidence,
+            write_slots,
+            try actual_reads.toOwnedSlice(self.allocator),
+            try evidence_rows.toOwnedSlice(self.allocator),
+            true,
+            op_name,
+            symbol,
+            ordinal,
+            source,
+        );
+    }
+
+    fn appendEvidenceForRead(
+        self: *Collector,
+        owner: obligation.Owner,
+        read: obligation.PlaceRef,
+        writes: []const obligation.PlaceRef,
+        evidence_rows: *std.ArrayList(obligation.KeyDisjointEvidence),
+    ) !bool {
+        for (writes) |write| {
+            if (obligation.placeDefinitelyDisjoint(read, write)) continue;
+            const evidence = (try self.findKeyDisjointEvidence(owner, read, write)) orelse return false;
+            try evidence_rows.append(self.allocator, evidence);
+        }
+        return true;
+    }
+
+    fn findKeyDisjointEvidence(
+        self: *Collector,
+        owner: obligation.Owner,
+        read: obligation.PlaceRef,
+        write: obligation.PlaceRef,
+    ) !?obligation.KeyDisjointEvidence {
+        const key_pair = firstDifferingParameterKeyPair(read, write) orelse return null;
+        for (self.assumptions.items) |assumption| {
+            if (!ownerEqual(assumption.owner, owner)) continue;
+            if (assumption.kind != .requires) continue;
+            const formula = assumption.formula orelse continue;
+            if (formula != .term) continue;
+            const disequality = self.freeVarDisequality(formula.term) orelse continue;
+            if (!freeVarPairMatches(disequality.lhs.id, disequality.rhs.id, key_pair.read, key_pair.write)) continue;
+            if (!typeRefIsU256Carrier(disequality.lhs.ty) or !typeRefIsU256Carrier(disequality.rhs.ty)) continue;
+            return .{
+                .kind = .free_var_disequality,
+                .assumption_id = assumption.id,
+                .lhs = disequality.lhs.id,
+                .rhs = disequality.rhs.id,
+                .read = read,
+                .write = write,
+                .key_index = key_pair.index,
+            };
+        }
+        return null;
+    }
+
+    const ParameterKeyPair = struct {
+        index: u32,
+        read: obligation.FreeVarId,
+        write: obligation.FreeVarId,
+    };
+
+    fn firstDifferingParameterKeyPair(read: obligation.PlaceRef, write: obligation.PlaceRef) ?ParameterKeyPair {
+        if (read.region == .none or write.region == .none) return null;
+        if (std.mem.eql(u8, read.root, "$computed_storage") or std.mem.eql(u8, write.root, "$computed_storage")) return null;
+        if (read.region != write.region) return null;
+        if (!std.mem.eql(u8, read.root, write.root)) return null;
+        if (!stringSlicesEql(read.fields, write.fields)) return null;
+        if (read.keys.len != write.keys.len) return null;
+        for (read.keys, write.keys, 0..) |read_key, write_key, index| {
+            if (obligation.placeKeyEql(read_key, write_key)) continue;
+            if (read_key != .parameter or write_key != .parameter) return null;
+            if (obligation.freeVarIdEql(read_key.parameter, write_key.parameter)) return null;
+            return .{
+                .index = @intCast(index),
+                .read = read_key.parameter,
+                .write = write_key.parameter,
+            };
+        }
+        return null;
+    }
+
+    const FreeVarDisequality = struct {
+        lhs: obligation.FreeVarRef,
+        rhs: obligation.FreeVarRef,
+    };
+
+    fn freeVarDisequality(self: *Collector, id: obligation.TermId) ?FreeVarDisequality {
+        if (id >= self.terms.items.len) return null;
+        const term = self.terms.items[id];
+        if (term != .binary or term.binary.op != .ne) return null;
+        const lhs = self.freeVarRefFromTerm(term.binary.lhs) orelse return null;
+        const rhs = self.freeVarRefFromTerm(term.binary.rhs) orelse return null;
+        return .{ .lhs = lhs, .rhs = rhs };
+    }
+
+    fn freeVarRefFromTerm(self: *Collector, id: obligation.TermId) ?obligation.FreeVarRef {
+        if (id >= self.terms.items.len) return null;
+        const term = self.terms.items[id];
+        if (term != .variable or term.variable != .free) return null;
+        return term.variable.free;
     }
 
     fn readsDisjointFromWrites(
@@ -2014,6 +2172,38 @@ fn ownerEqual(lhs: obligation.Owner, rhs: obligation.Owner) bool {
             else => false,
         },
     };
+}
+
+fn freeVarPairMatches(
+    lhs: obligation.FreeVarId,
+    rhs: obligation.FreeVarId,
+    first: obligation.FreeVarId,
+    second: obligation.FreeVarId,
+) bool {
+    return (obligation.freeVarIdEql(lhs, first) and obligation.freeVarIdEql(rhs, second)) or
+        (obligation.freeVarIdEql(lhs, second) and obligation.freeVarIdEql(rhs, first));
+}
+
+fn typeRefIsU256Carrier(ty: ?obligation.TypeRef) bool {
+    const value = ty orelse return false;
+    return switch (value) {
+        .compiler_type_id => |id| blk: {
+            const info = type_builtin.integerInfoByComptimeTypeId(id) orelse break :blk false;
+            break :blk info.width == 256;
+        },
+        .spelling => |name| std.mem.eql(u8, name, "u256") or
+            std.mem.eql(u8, name, "uint256") or
+            std.mem.eql(u8, name, "i256") or
+            std.mem.eql(u8, name, "int256"),
+    };
+}
+
+fn stringSlicesEql(lhs: []const []const u8, rhs: []const []const u8) bool {
+    if (lhs.len != rhs.len) return false;
+    for (lhs, rhs) |left, right| {
+        if (!std.mem.eql(u8, left, right)) return false;
+    }
+    return true;
 }
 
 fn parseFreeVarId(text: []const u8) ?obligation.FreeVarId {

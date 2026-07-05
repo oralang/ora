@@ -4984,6 +4984,9 @@ fn runMlirEmitAdvanced(
         if (lean_artifact_gate_failed) {
             verification_failed = true;
         }
+        if (needs_lean_proof_gate and !lean_artifact_gate_allowed) {
+            verification_failed = true;
+        }
         if (!verification_result.success and !lean_artifact_gate_allowed) {
             try printVerificationErrors(stdout, verification_result.errors.items);
             if (needs_unknown_recipe) {
@@ -5991,6 +5994,12 @@ fn printLeanSemanticUnsupportedReason(
         .unsupported_arithmetic_width => try stdout.writeAll("    reason: arithmetic value width is outside the current Lean semantic proof fragment; only 256-bit arithmetic values are supported today\n"),
         .unknown_arithmetic_signedness => try stdout.writeAll("    reason: arithmetic value is missing compiler type-id signedness metadata\n"),
         .mixed_arithmetic_signedness => try stdout.writeAll("    reason: arithmetic operation signedness does not match the value type\n"),
+        .missing_key_disjoint_evidence => try stdout.writeAll("    reason: evidence-backed storage frame has no key-disjointness evidence rows\n"),
+        .unsupported_key_disjoint_evidence_formula => try stdout.writeAll("    reason: key-disjointness evidence must be a direct requires free-variable disequality in the Lean fragment\n"),
+        .unsupported_key_disjoint_evidence_kind => try stdout.writeAll("    reason: key-disjointness evidence kind is not supported by the Lean fragment\n"),
+        .key_disjoint_evidence_type_unsupported => try stdout.writeAll("    reason: key-disjointness evidence currently supports only 256-bit carrier free variables\n"),
+        .key_disjoint_evidence_owner_mismatch => try stdout.writeAll("    reason: key-disjointness evidence references an assumption from a different owner\n"),
+        .key_disjoint_evidence_path_mismatch => try stdout.writeAll("    reason: key-disjointness evidence does not match the first differing parameter keys of the read/write paths\n"),
     }
 }
 

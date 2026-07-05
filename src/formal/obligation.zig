@@ -12,7 +12,7 @@ const std = @import("std");
 pub const Id = u32;
 pub const TermId = u32;
 
-pub const obligation_dump_schema_version: u32 = 2;
+pub const obligation_dump_schema_version: u32 = 3;
 pub const proof_certificate_schema_version: u32 = 1;
 
 pub const ObligationSet = struct {
@@ -138,6 +138,11 @@ pub const ObligationSet = struct {
                 if (!self.obligationIdExists(id)) return error.InvalidDependency;
             }
             switch (item.kind) {
+                .effect_frame => |effect| {
+                    for (effect.evidence) |evidence| {
+                        if (!self.assumptionIdExists(evidence.assumption_id)) return error.InvalidDependency;
+                    }
+                },
                 .filtered_input => |filtered| for (filtered.accepted_by) |id| {
                     if (!self.obligationIdExists(id) and !self.assumptionIdExists(id)) return error.InvalidDependency;
                 },
@@ -685,13 +690,29 @@ pub const EffectFrameGoal = struct {
     relation: EffectFrameRelation,
     declared: []const PlaceRef = &.{},
     actual: []const PlaceRef = &.{},
+    evidence: []const KeyDisjointEvidence = &.{},
 };
 
 pub const EffectFrameRelation = enum(u8) {
     write_covered_by_modifies,
     read_preserved_by_frame,
+    read_preserved_by_key_evidence,
     lock_covers_write,
     external_call_frame,
+};
+
+pub const KeyDisjointEvidenceKind = enum(u8) {
+    free_var_disequality,
+};
+
+pub const KeyDisjointEvidence = struct {
+    kind: KeyDisjointEvidenceKind,
+    assumption_id: Id,
+    lhs: FreeVarId,
+    rhs: FreeVarId,
+    read: PlaceRef,
+    write: PlaceRef,
+    key_index: u32,
 };
 
 pub const ResourceGoal = struct {

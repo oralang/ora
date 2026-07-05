@@ -477,12 +477,140 @@ def placeListDisjoint (declared actual : List PlaceRef) : Bool :=
   actual.all (fun read => declared.all (fun write =>
     placeDefinitelyDisjoint read write))
 
-def EffectFrameGoal.denotes? (goal : EffectFrameGoal) : Option Prop :=
+def Manifest.assumptionById (manifest : Manifest) (id : Id) : Option AssumptionRow :=
+  manifest.assumptions.find? (fun row => row.id == id)
+
+def optionPropAnd? (lhs rhs : Option Prop) : Option Prop :=
+  match lhs, rhs with
+  | some lhsProp, some rhsProp => some (lhsProp ∧ rhsProp)
+  | _, _ => none
+
+def termFreeVarId? (manifest : Manifest) (id : TermId) : Option FreeVarId :=
+  match manifest.terms[id]? with
+  | some (.variable (.free free)) => some free.id
+  | _ => none
+
+def freeVarPairMatches (lhs rhs first second : FreeVarId) : Bool :=
+  (lhs == first && rhs == second) || (lhs == second && rhs == first)
+
+def placeKeysEqualBefore : Nat → List PlaceKey → List PlaceKey → Bool
+  | 0, _, _ => true
+  | n + 1, lhs :: lhsRest, rhs :: rhsRest =>
+      lhs == rhs && placeKeysEqualBefore n lhsRest rhsRest
+  | _ + 1, _, _ => false
+
+def keyEvidencePathMatches
+    (read write : PlaceRef)
+    (keyIndex : Nat)
+    (lhs rhs : FreeVarId) : Bool :=
+  if !read.region.isConcrete || !write.region.isConcrete then
+    false
+  else if read.root == computedStorageRoot || write.root == computedStorageRoot then
+    false
+  else if read.region != write.region then
+    false
+  else if read.root != write.root then
+    false
+  else if read.fields != write.fields then
+    false
+  else if read.keys.length != write.keys.length then
+    false
+  else if !placeKeysEqualBefore keyIndex read.keys write.keys then
+    false
+  else
+    match read.keys[keyIndex]?, write.keys[keyIndex]? with
+    | some (.parameter readId), some (.parameter writeId) =>
+        readId != writeId && freeVarPairMatches lhs rhs readId writeId
+    | _, _ => false
+
+def keyDisjointEvidenceFormulaDenotes?
+    (manifest : Manifest)
+    (env : Env)
+    (evidence : KeyDisjointEvidence) : Option Prop :=
+  match manifest.assumptionById evidence.assumptionId with
+  | some row =>
+      if row.kind != .requires then
+        none
+      else
+        match row.formula with
+        | some (.term termId) =>
+            match manifest.terms[termId]? with
+            | some (.binary binary) =>
+                if binary.op != .ne then
+                  none
+                else
+                  match termFreeVarId? manifest binary.lhs,
+                        termFreeVarId? manifest binary.rhs with
+                  | some lhs, some rhs =>
+                      if freeVarPairMatches lhs rhs evidence.lhs evidence.rhs then
+                        formulaDenotes? manifest env (.term termId)
+                      else
+                        none
+                  | _, _ => none
+            | _ => none
+        | _ => none
+  | none => none
+
+def keyDisjointEvidenceDenotes?
+    (manifest : Manifest)
+    (env : Env)
+    (evidence : KeyDisjointEvidence) : Option Prop :=
+  match evidence.kind with
+  | .freeVarDisequality =>
+      if keyEvidencePathMatches evidence.read evidence.write evidence.keyIndex
+          evidence.lhs evidence.rhs then
+        keyDisjointEvidenceFormulaDenotes? manifest env evidence
+      else
+        none
+
+def evidenceListDenotes? (manifest : Manifest) (env : Env) :
+    List KeyDisjointEvidence → Option Prop
+  | [] => some True
+  | evidence :: rest =>
+      optionPropAnd?
+        (keyDisjointEvidenceDenotes? manifest env evidence)
+        (evidenceListDenotes? manifest env rest)
+
+def evidenceMatchesPair (read write : PlaceRef) (evidence : KeyDisjointEvidence) : Bool :=
+  evidence.read == read && evidence.write == write
+
+def pairCoveredByEvidence (read write : PlaceRef) (evidence : List KeyDisjointEvidence) :
+    Bool :=
+  evidence.any (evidenceMatchesPair read write)
+
+def placePairDisjointWithEvidence?
+    (manifest : Manifest)
+    (env : Env)
+    (evidence : List KeyDisjointEvidence)
+    (read write : PlaceRef) : Option Prop :=
+  if placeDefinitelyDisjoint read write then
+    some True
+  else if pairCoveredByEvidence read write evidence then
+    evidenceListDenotes? manifest env evidence
+  else
+    some False
+
+def placeListDisjointWithEvidence? (manifest : Manifest) (env : Env)
+    (declared actual : List PlaceRef) (evidence : List KeyDisjointEvidence) :
+    Option Prop :=
+  actual.foldl
+    (fun acc read =>
+      declared.foldl
+        (fun inner write =>
+          optionPropAnd? inner
+            (placePairDisjointWithEvidence? manifest env evidence read write))
+        acc)
+    (some True)
+
+def effectFrameGoalDenotes? (manifest : Manifest) (env : Env) (goal : EffectFrameGoal) :
+    Option Prop :=
   match goal.relation with
   | .writeCoveredByModifies =>
       some (placeListCovers goal.declared goal.actual = true)
   | .readPreservedByFrame =>
       some (placeListDisjoint goal.declared goal.actual = true)
+  | .readPreservedByKeyEvidence =>
+      placeListDisjointWithEvidence? manifest env goal.declared goal.actual goal.evidence
   | .lockCoversWrite
   | .externalCallFrame =>
       none
@@ -498,7 +626,7 @@ def obligationDenotesInEnv? (manifest : Manifest) (env : Env) (row : ObligationR
   match row.kind with
   | .logical _ formula => formulaDenotes? manifest env formula
   | .runtimeGuard _ formula => formulaDenotes? manifest env formula
-  | .effectFrame goal => goal.denotes?
+  | .effectFrame goal => effectFrameGoalDenotes? manifest env goal
   | _ => none
 
 def obligationDenotes? (manifest : Manifest) (row : ObligationRow) : Option Prop :=

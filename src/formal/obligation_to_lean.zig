@@ -33,6 +33,12 @@ pub const SemanticUnsupportedReason = union(enum) {
     unsupported_arithmetic_width,
     unknown_arithmetic_signedness,
     mixed_arithmetic_signedness,
+    missing_key_disjoint_evidence,
+    unsupported_key_disjoint_evidence_formula,
+    unsupported_key_disjoint_evidence_kind,
+    key_disjoint_evidence_type_unsupported,
+    key_disjoint_evidence_owner_mismatch,
+    key_disjoint_evidence_path_mismatch,
 };
 
 pub fn writeDataModule(writer: anytype, set: obligation.ObligationSet, options: Options) !void {
@@ -210,7 +216,7 @@ fn writeSemanticDefinitions(writer: anytype, set: obligation.ObligationSet, proo
     try writeRowDefinitions(writer, set, proof_surface);
 
     for (set.obligations) |row| {
-        switch (kindSemanticSupport(set, row.kind)) {
+        switch (kindSemanticSupport(set, row.owner, row.kind)) {
             .supported => {},
             .unsupported => continue,
         }
@@ -308,7 +314,7 @@ pub fn querySemanticSupport(set: obligation.ObligationSet, query: obligation.Ver
 
     for (query.obligation_ids) |obligation_id| {
         const row = findObligation(set, obligation_id) orelse return .{ .unsupported = .invalid_dependency };
-        switch (kindSemanticSupport(set, row.kind)) {
+        switch (kindSemanticSupport(set, query.owner, row.kind)) {
             .supported => {},
             .unsupported => |reason| return .{ .unsupported = reason },
         }
@@ -327,11 +333,11 @@ fn querySupportsSemantics(set: obligation.ObligationSet, query: obligation.Verif
     };
 }
 
-fn kindSemanticSupport(set: obligation.ObligationSet, kind: obligation.Kind) SemanticSupport {
+fn kindSemanticSupport(set: obligation.ObligationSet, owner: obligation.Owner, kind: obligation.Kind) SemanticSupport {
     return switch (kind) {
         .logical => |logical| formulaSemanticSupport(set, logical.formula),
         .runtime_guard => |guard| formulaSemanticSupport(set, guard.formula),
-        .effect_frame => |effect| effectFrameSemanticSupport(effect),
+        .effect_frame => |effect| effectFrameSemanticSupport(set, owner, effect),
         .type_wf,
         .type_relation,
         .region_relation,
@@ -343,15 +349,129 @@ fn kindSemanticSupport(set: obligation.ObligationSet, kind: obligation.Kind) Sem
     };
 }
 
-fn effectFrameSemanticSupport(effect: obligation.EffectFrameGoal) SemanticSupport {
+fn effectFrameSemanticSupport(
+    set: obligation.ObligationSet,
+    owner: obligation.Owner,
+    effect: obligation.EffectFrameGoal,
+) SemanticSupport {
     return switch (effect.relation) {
         .write_covered_by_modifies,
         .read_preserved_by_frame,
         => .supported,
+        .read_preserved_by_key_evidence => keyEvidenceFrameSemanticSupport(set, owner, effect),
         .lock_covers_write,
         .external_call_frame,
         => .{ .unsupported = .{ .unsupported_effect_frame_relation = effect.relation } },
     };
+}
+
+fn keyEvidenceFrameSemanticSupport(
+    set: obligation.ObligationSet,
+    owner: obligation.Owner,
+    effect: obligation.EffectFrameGoal,
+) SemanticSupport {
+    if (effect.evidence.len == 0) return .{ .unsupported = .missing_key_disjoint_evidence };
+    for (effect.evidence) |evidence| {
+        switch (keyDisjointEvidenceSemanticSupport(set, owner, evidence)) {
+            .supported => {},
+            .unsupported => |reason| return .{ .unsupported = reason },
+        }
+    }
+    return .supported;
+}
+
+fn keyDisjointEvidenceSemanticSupport(
+    set: obligation.ObligationSet,
+    owner: obligation.Owner,
+    evidence: obligation.KeyDisjointEvidence,
+) SemanticSupport {
+    switch (evidence.kind) {
+        .free_var_disequality => {},
+    }
+    if (!keyEvidencePathMatches(evidence.read, evidence.write, evidence.key_index, evidence.lhs, evidence.rhs)) {
+        return .{ .unsupported = .key_disjoint_evidence_path_mismatch };
+    }
+    const assumption = findAssumption(set, evidence.assumption_id) orelse
+        return .{ .unsupported = .unsupported_key_disjoint_evidence_formula };
+    if (!ownerEqual(assumption.owner, owner)) {
+        return .{ .unsupported = .key_disjoint_evidence_owner_mismatch };
+    }
+    if (assumption.kind != .requires) {
+        return .{ .unsupported = .unsupported_key_disjoint_evidence_formula };
+    }
+    const formula = assumption.formula orelse return .{ .unsupported = .unsupported_key_disjoint_evidence_formula };
+    if (formula != .term) return .{ .unsupported = .unsupported_key_disjoint_evidence_formula };
+    const term = termById(set, formula.term) orelse return .{ .unsupported = .invalid_dependency };
+    if (term != .binary or term.binary.op != .ne) {
+        return .{ .unsupported = .unsupported_key_disjoint_evidence_formula };
+    }
+    const lhs = freeVariableByTermId(set, term.binary.lhs) orelse
+        return .{ .unsupported = .unsupported_key_disjoint_evidence_formula };
+    const rhs = freeVariableByTermId(set, term.binary.rhs) orelse
+        return .{ .unsupported = .unsupported_key_disjoint_evidence_formula };
+    if (!freeVarPairMatches(lhs.id, rhs.id, evidence.lhs, evidence.rhs)) {
+        return .{ .unsupported = .key_disjoint_evidence_path_mismatch };
+    }
+    if (!typeRefSupportsU256Carrier(lhs.ty) or !typeRefSupportsU256Carrier(rhs.ty)) {
+        return .{ .unsupported = .key_disjoint_evidence_type_unsupported };
+    }
+    return .supported;
+}
+
+fn keyEvidencePathMatches(
+    read: obligation.PlaceRef,
+    write: obligation.PlaceRef,
+    key_index: u32,
+    lhs: obligation.FreeVarId,
+    rhs: obligation.FreeVarId,
+) bool {
+    if (read.region == .none or write.region == .none) return false;
+    if (std.mem.eql(u8, read.root, "$computed_storage") or std.mem.eql(u8, write.root, "$computed_storage")) return false;
+    if (read.region != write.region) return false;
+    if (!std.mem.eql(u8, read.root, write.root)) return false;
+    if (!stringSlicesEql(read.fields, write.fields)) return false;
+    if (read.keys.len != write.keys.len) return false;
+    const index: usize = @intCast(key_index);
+    if (index >= read.keys.len) return false;
+    for (read.keys[0..index], write.keys[0..index]) |read_key, write_key| {
+        if (!obligation.placeKeyEql(read_key, write_key)) return false;
+    }
+    if (read.keys[index] != .parameter or write.keys[index] != .parameter) return false;
+    const read_id = read.keys[index].parameter;
+    const write_id = write.keys[index].parameter;
+    if (obligation.freeVarIdEql(read_id, write_id)) return false;
+    return freeVarPairMatches(lhs, rhs, read_id, write_id);
+}
+
+fn freeVarPairMatches(
+    lhs: obligation.FreeVarId,
+    rhs: obligation.FreeVarId,
+    first: obligation.FreeVarId,
+    second: obligation.FreeVarId,
+) bool {
+    return (obligation.freeVarIdEql(lhs, first) and obligation.freeVarIdEql(rhs, second)) or
+        (obligation.freeVarIdEql(lhs, second) and obligation.freeVarIdEql(rhs, first));
+}
+
+fn freeVariableByTermId(set: obligation.ObligationSet, id: obligation.TermId) ?obligation.FreeVarRef {
+    const term = termById(set, id) orelse return null;
+    if (term != .variable or term.variable != .free) return null;
+    return term.variable.free;
+}
+
+fn typeRefSupportsU256Carrier(ty: ?obligation.TypeRef) bool {
+    return switch (optionalTypeSupportsU256Carrier(ty)) {
+        .supported => true,
+        .unsupported => false,
+    };
+}
+
+fn stringSlicesEql(lhs: []const []const u8, rhs: []const []const u8) bool {
+    if (lhs.len != rhs.len) return false;
+    for (lhs, rhs) |left, right| {
+        if (!std.mem.eql(u8, left, right)) return false;
+    }
+    return true;
 }
 
 fn formulaSemanticSupport(set: obligation.ObligationSet, formula: obligation.FormulaRef) SemanticSupport {
@@ -936,6 +1056,36 @@ fn writeEffectFrameGoal(writer: anytype, effect: obligation.EffectFrameGoal) !vo
     try writePlaceRefList(writer, effect.declared);
     try writer.writeAll(", actual := ");
     try writePlaceRefList(writer, effect.actual);
+    try writer.writeAll(", evidence := ");
+    try writeKeyDisjointEvidenceList(writer, effect.evidence);
+    try writer.writeAll(" }");
+}
+
+fn writeKeyDisjointEvidenceList(writer: anytype, evidence: []const obligation.KeyDisjointEvidence) !void {
+    if (evidence.len == 0) return writer.writeAll("[]");
+    try writer.writeByte('[');
+    for (evidence, 0..) |item, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writeKeyDisjointEvidence(writer, item);
+    }
+    try writer.writeByte(']');
+}
+
+fn writeKeyDisjointEvidence(writer: anytype, evidence: obligation.KeyDisjointEvidence) !void {
+    try writer.writeAll("{ kind := .");
+    try writer.writeAll(keyDisjointEvidenceKindName(evidence.kind));
+    try writer.writeAll(", assumptionId := ");
+    try writer.print("{d}", .{evidence.assumption_id});
+    try writer.writeAll(", lhs := ");
+    try writeFreeVarId(writer, evidence.lhs);
+    try writer.writeAll(", rhs := ");
+    try writeFreeVarId(writer, evidence.rhs);
+    try writer.writeAll(", read := ");
+    try writePlaceRef(writer, evidence.read);
+    try writer.writeAll(", write := ");
+    try writePlaceRef(writer, evidence.write);
+    try writer.writeAll(", keyIndex := ");
+    try writer.print("{d}", .{evidence.key_index});
     try writer.writeAll(" }");
 }
 
@@ -1184,6 +1334,36 @@ fn ownerName(owner: obligation.Owner) []const u8 {
     };
 }
 
+fn ownerEqual(lhs: obligation.Owner, rhs: obligation.Owner) bool {
+    return switch (lhs) {
+        .module => |left| switch (rhs) {
+            .module => |right| std.mem.eql(u8, left, right),
+            else => false,
+        },
+        .contract => |left| switch (rhs) {
+            .contract => |right| std.mem.eql(u8, left, right),
+            else => false,
+        },
+        .function => |left| switch (rhs) {
+            .function => |right| std.mem.eql(u8, left.name, right.name),
+            else => false,
+        },
+        .trait_method => |left| switch (rhs) {
+            .trait_method => |right| std.mem.eql(u8, left.trait_name, right.trait_name) and
+                std.mem.eql(u8, left.method_name, right.method_name),
+            else => false,
+        },
+        .statement => |left| switch (rhs) {
+            .statement => |right| std.mem.eql(u8, left.function_name, right.function_name) and left.ordinal == right.ordinal,
+            else => false,
+        },
+        .backend => |left| switch (rhs) {
+            .backend => |right| left.component == right.component and std.mem.eql(u8, left.name, right.name),
+            else => false,
+        },
+    };
+}
+
 fn regionName(region: obligation.RegionRef) []const u8 {
     return switch (region) {
         .none => "none",
@@ -1334,8 +1514,15 @@ fn effectFrameRelationName(relation: obligation.EffectFrameRelation) []const u8 
     return switch (relation) {
         .write_covered_by_modifies => "writeCoveredByModifies",
         .read_preserved_by_frame => "readPreservedByFrame",
+        .read_preserved_by_key_evidence => "readPreservedByKeyEvidence",
         .lock_covers_write => "lockCoversWrite",
         .external_call_frame => "externalCallFrame",
+    };
+}
+
+fn keyDisjointEvidenceKindName(kind: obligation.KeyDisjointEvidenceKind) []const u8 {
+    return switch (kind) {
+        .free_var_disequality => "freeVarDisequality",
     };
 }
 

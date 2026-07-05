@@ -542,6 +542,18 @@ fn runOraWithForcedUnknown(
     return runProcess(allocator, argv);
 }
 
+fn runProcessWithLeanPath(allocator: std.mem.Allocator, args: []const []const u8) !std.process.RunResult {
+    const path_arg = try leanPathEnvArgForTest(allocator);
+    defer allocator.free(path_arg);
+
+    var argv = try allocator.alloc([]const u8, args.len + 2);
+    defer allocator.free(argv);
+    argv[0] = "/usr/bin/env";
+    argv[1] = path_arg;
+    @memcpy(argv[2..], args);
+    return runProcess(allocator, argv);
+}
+
 fn runLeanFileForTest(allocator: std.mem.Allocator, path_from_repo_root: []const u8) !std.process.RunResult {
     const path_arg = try leanPathEnvArgForTest(allocator);
     defer allocator.free(path_arg);
@@ -673,6 +685,108 @@ fn expectEnsuresQuerySupported(set: obligation.ObligationSet) !void {
     }
 }
 
+fn findEffectFrameQuery(set: obligation.ObligationSet, relation: obligation.EffectFrameRelation) !obligation.VerificationQuery {
+    for (set.obligations) |item| {
+        if (item.kind != .effect_frame or item.kind.effect_frame.relation != relation) continue;
+        for (set.queries) |query| {
+            for (query.obligation_ids) |id| {
+                if (id == item.id) return query;
+            }
+        }
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn expectEffectFrameQuerySupported(set: obligation.ObligationSet, relation: obligation.EffectFrameRelation) !void {
+    switch (obligation_to_lean.querySemanticSupport(set, try findEffectFrameQuery(set, relation))) {
+        .supported => {},
+        .unsupported => return error.TestUnexpectedResult,
+    }
+}
+
+fn expectEffectFrameQueryUnsupported(
+    set: obligation.ObligationSet,
+    relation: obligation.EffectFrameRelation,
+    expected: obligation_to_lean.SemanticUnsupportedReason,
+) !void {
+    switch (obligation_to_lean.querySemanticSupport(set, try findEffectFrameQuery(set, relation))) {
+        .supported => return error.TestUnexpectedResult,
+        .unsupported => |reason| try testing.expectEqual(expected, reason),
+    }
+}
+
+fn expectSyntheticKeyEvidenceUnsupported(
+    terms: []const obligation.Term,
+    formula_term: obligation.TermId,
+    assumption_kind: obligation.AssumptionKind,
+    query_assumption_ids: []const obligation.Id,
+    assumption_owner: obligation.Owner,
+    query_owner: obligation.Owner,
+    read: obligation.PlaceRef,
+    write: obligation.PlaceRef,
+    lhs: obligation.FreeVarId,
+    rhs: obligation.FreeVarId,
+    expected: obligation_to_lean.SemanticUnsupportedReason,
+) !void {
+    const assumption_id: obligation.Id = 10;
+    const obligation_id: obligation.Id = 20;
+    const obligation_ids = [_]obligation.Id{obligation_id};
+    const assumptions = [_]obligation.Assumption{.{
+        .id = assumption_id,
+        .owner = assumption_owner,
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .kind = assumption_kind,
+        .formula = .{ .term = formula_term },
+    }};
+    const evidence = [_]obligation.KeyDisjointEvidence{.{
+        .kind = .free_var_disequality,
+        .assumption_id = assumption_id,
+        .lhs = lhs,
+        .rhs = rhs,
+        .read = read,
+        .write = write,
+        .key_index = 0,
+    }};
+    const declared = [_]obligation.PlaceRef{write};
+    const actual = [_]obligation.PlaceRef{read};
+    const obligations = [_]obligation.Obligation{.{
+        .id = obligation_id,
+        .owner = query_owner,
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .kind = .{ .effect_frame = .{
+            .relation = .read_preserved_by_key_evidence,
+            .declared = &declared,
+            .actual = &actual,
+            .evidence = &evidence,
+        } },
+    }};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 30,
+        .owner = query_owner,
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .kind = .obligation,
+        .obligation_ids = &obligation_ids,
+        .assumption_ids = query_assumption_ids,
+    }};
+    const set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .assumptions = &assumptions,
+        .queries = &queries,
+        .terms = terms,
+    };
+
+    switch (obligation_to_lean.querySemanticSupport(set, queries[0])) {
+        .supported => return error.TestUnexpectedResult,
+        .unsupported => |reason| try testing.expectEqual(expected, reason),
+    }
+}
+
 fn writeJsonStringForTest(writer: anytype, value: []const u8) !void {
     try writer.writeByte('"');
     for (value) |byte| {
@@ -744,6 +858,43 @@ fn writeProofManifestIdsForTest(
     try writer.writeAll(",\n      \"path\": ");
     try writeJsonStringForTest(writer, proof_path);
     try writer.writeAll(",\n      \"content_sha256\": null\n    }\n  ]\n}\n");
+
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = out.written() });
+}
+
+fn writeTwoProofManifestForTest(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    module_name: []const u8,
+    first_theorem: []const u8,
+    first_proof_path: []const u8,
+    first_query: obligation.VerificationQuery,
+    second_theorem: []const u8,
+    second_proof_path: []const u8,
+    second_query: obligation.VerificationQuery,
+) !void {
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+    const writer = &out.writer;
+
+    try writer.writeAll("{\n  \"schema_version\": 1,\n  \"proofs\": [\n");
+    inline for (.{ .{ first_theorem, first_proof_path, first_query }, .{ second_theorem, second_proof_path, second_query } }, 0..) |row, index| {
+        if (index != 0) try writer.writeAll(",\n");
+        try writer.writeAll("    {\n      \"query_id\": ");
+        try writer.print("{d}", .{row[2].id});
+        try writer.writeAll(",\n      \"obligation_ids\": ");
+        try writeIdArrayForTest(writer, row[2].obligation_ids);
+        try writer.writeAll(",\n      \"assumption_ids\": ");
+        try writeIdArrayForTest(writer, row[2].assumption_ids);
+        try writer.writeAll(",\n      \"module_name\": ");
+        try writeJsonStringForTest(writer, module_name);
+        try writer.writeAll(",\n      \"theorem_name\": ");
+        try writeJsonStringForTest(writer, row[0]);
+        try writer.writeAll(",\n      \"path\": ");
+        try writeJsonStringForTest(writer, row[1]);
+        try writer.writeAll(",\n      \"content_sha256\": null\n    }");
+    }
+    try writer.writeAll("\n  ]\n}\n");
 
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = out.written() });
 }
@@ -1020,6 +1171,320 @@ fn storagePlaceProofModuleFromGeneratedObligations(
         \\
     );
 
+    try writer.writeAll("end ");
+    try writer.writeAll(module_namespace);
+    try writer.writeByte('\n');
+    return try out.toOwnedSlice();
+}
+
+fn writeLeanFreeVarIdForTest(writer: anytype, id: obligation.FreeVarId) !void {
+    try writer.print("{{ file_id := {d}, pattern_id := {d} }}", .{ id.file_id, id.pattern_id });
+}
+
+fn writeLeanFreeVarEqFactForTest(
+    writer: anytype,
+    indent: []const u8,
+    name: []const u8,
+    lhs: obligation.FreeVarId,
+    rhs: obligation.FreeVarId,
+) !void {
+    try writer.writeAll(indent);
+    try writer.writeAll("have ");
+    try writer.writeAll(name);
+    try writer.writeAll(" : ((");
+    try writeLeanFreeVarIdForTest(writer, lhs);
+    try writer.writeAll(" : FreeVarId) == ");
+    try writeLeanFreeVarIdForTest(writer, rhs);
+    try writer.writeAll(") = ");
+    try writer.writeAll(if (obligation.freeVarIdEql(lhs, rhs)) "true" else "false");
+    try writer.writeAll(" := by\n");
+    try writer.writeAll(indent);
+    try writer.writeAll("  decide\n");
+}
+
+fn writeLeanStringLiteralForTest(writer: anytype, value: []const u8) !void {
+    try writer.writeByte('"');
+    for (value) |byte| {
+        switch (byte) {
+            '\\' => try writer.writeAll("\\\\"),
+            '"' => try writer.writeAll("\\\""),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            else => try writer.writeByte(byte),
+        }
+    }
+    try writer.writeByte('"');
+}
+
+fn writeLeanRegionRefForTest(writer: anytype, region: obligation.RegionRef) !void {
+    try writer.writeAll(switch (region) {
+        .none => ".none",
+        .storage => ".storage",
+        .memory => ".memory",
+        .transient => ".transient",
+        .calldata => ".calldata",
+    });
+}
+
+fn writeLeanPlaceKeyForTest(writer: anytype, key: obligation.PlaceKey) !void {
+    switch (key) {
+        .parameter => |id| {
+            try writer.writeAll(".parameter ");
+            try writeLeanFreeVarIdForTest(writer, id);
+        },
+        .comptime_parameter => |index| try writer.print(".comptimeParameter {d}", .{index}),
+        .comptime_range_parameter => |index| try writer.print(".comptimeRangeParameter {d}", .{index}),
+        .constant => |value| {
+            try writer.writeAll(".constant ");
+            try writeLeanStringLiteralForTest(writer, value);
+        },
+        .msg_sender => try writer.writeAll(".msgSender"),
+        .tx_origin => try writer.writeAll(".txOrigin"),
+        .unknown => try writer.writeAll(".unknown"),
+    }
+}
+
+fn writeLeanPlaceRefForTest(writer: anytype, place: obligation.PlaceRef) !void {
+    try writer.writeAll("{ root := ");
+    try writeLeanStringLiteralForTest(writer, place.root);
+    try writer.writeAll(", region := ");
+    try writeLeanRegionRefForTest(writer, place.region);
+    try writer.writeAll(", fields := [");
+    for (place.fields, 0..) |field, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writeLeanStringLiteralForTest(writer, field);
+    }
+    try writer.writeAll("], keys := [");
+    for (place.keys, 0..) |key, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writeLeanPlaceKeyForTest(writer, key);
+    }
+    try writer.writeAll("] }");
+}
+
+fn writeLeanPlaceEqFactForTest(
+    writer: anytype,
+    indent: []const u8,
+    name: []const u8,
+    place: obligation.PlaceRef,
+) !void {
+    try writer.writeAll(indent);
+    try writer.writeAll("have ");
+    try writer.writeAll(name);
+    try writer.writeAll(" : ((");
+    try writeLeanPlaceRefForTest(writer, place);
+    try writer.writeAll(" : PlaceRef) == ");
+    try writeLeanPlaceRefForTest(writer, place);
+    try writer.writeAll(") = true := by\n");
+    try writer.writeAll(indent);
+    try writer.writeAll("  decide\n");
+}
+
+fn keyEvidenceFrameProofModuleFromGeneratedObligations(
+    allocator: std.mem.Allocator,
+    obligations_source: []const u8,
+    module_namespace: []const u8,
+    query_id: obligation.Id,
+    read: obligation.PlaceRef,
+    write: obligation.PlaceRef,
+    lhs: obligation.FreeVarId,
+    rhs: obligation.FreeVarId,
+    write_query_id: ?obligation.Id,
+    use_sorry: bool,
+) ![]const u8 {
+    const namespace_start = std.mem.indexOf(u8, obligations_source, "namespace ") orelse return error.TestUnexpectedResult;
+    const body_start = (std.mem.indexOfPos(u8, obligations_source, namespace_start, "\n") orelse return error.TestUnexpectedResult) + 1;
+    const end_start = std.mem.lastIndexOf(u8, obligations_source, "\nend ") orelse return error.TestUnexpectedResult;
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    errdefer out.deinit();
+    const writer = &out.writer;
+
+    try writer.writeAll(obligations_source[0..namespace_start]);
+    try writer.writeAll("namespace ");
+    try writer.writeAll(module_namespace);
+    try writer.writeByte('\n');
+    try writer.writeAll(obligations_source[body_start..end_start]);
+    try writer.writeByte('\n');
+
+    try writer.print("theorem discharge : emittedQuery_{d} := by\n", .{query_id});
+    if (use_sorry) {
+        try writer.writeAll("  sorry\n\n");
+    } else {
+        try writer.writeAll("  unfold ");
+        try writer.print("emittedQuery_{d}", .{query_id});
+        try writer.writeAll(" obligationFollowsFromAssumptions\n");
+        try writeLeanFreeVarEqFactForTest(writer, "  ", "hLhsLhs", lhs, lhs);
+        try writeLeanFreeVarEqFactForTest(writer, "  ", "hLhsRhs", lhs, rhs);
+        try writeLeanFreeVarEqFactForTest(writer, "  ", "hRhsLhs", rhs, lhs);
+        try writeLeanFreeVarEqFactForTest(writer, "  ", "hRhsRhs", rhs, rhs);
+        try writer.writeAll("  have hRhsNeLhs : ((");
+        try writeLeanFreeVarIdForTest(writer, rhs);
+        try writer.writeAll(" : FreeVarId) != ");
+        try writeLeanFreeVarIdForTest(writer, lhs);
+        try writer.writeAll(") = true := by\n    decide\n");
+        try writer.writeAll("  have hStorageSelfNe : (RegionRef.storage != RegionRef.storage) = false := by\n    decide\n");
+        try writer.writeAll("  have hRequiresSelfNe : (AssumptionKind.requires != AssumptionKind.requires) = false := by\n    decide\n");
+        try writer.writeAll("  have hBinaryNeSelfNe : (BinaryOp.ne != BinaryOp.ne) = false := by\n    decide\n");
+        try writeLeanPlaceEqFactForTest(writer, "  ", "hReadRead", read);
+        try writeLeanPlaceEqFactForTest(writer, "  ", "hWriteWrite", write);
+        try writer.writeAll(
+            \\  constructor
+            \\  · refine ⟨(Env.empty.setFree
+        );
+        try writer.writeAll(" ");
+        try writeLeanFreeVarIdForTest(writer, lhs);
+        try writer.writeAll(" (.u256 (BitVec.ofNat 256 0))).setFree ");
+        try writeLeanFreeVarIdForTest(writer, rhs);
+        try writer.writeAll(
+            \\ (.u256 (BitVec.ofNat 256 1)), ?_⟩
+            \\    have hNe : ¬(BitVec.ofNat 256 0 : U256) = BitVec.ofNat 256 1 := by
+            \\      decide
+            \\    simp [
+            \\      assumptionsDenoteInEnv,
+            \\      assumptionsDenoteInEnv?,
+            \\      assumptionAnd?,
+            \\      assumptionDenotesInEnv?,
+            \\      formulaDenotes?,
+            \\      denoteFormula?,
+            \\      denoteValue?,
+            \\      emittedManifest,
+            \\      emittedTerms,
+            \\      emittedAssumptions,
+            \\      Env.setFree,
+            \\      Env.lookupVar,
+            \\      Env.lookupFree,
+            \\      lookupFreeBinding,
+            \\      Value.eqProp?,
+            \\      hLhsLhs,
+            \\      hLhsRhs,
+            \\      hRhsLhs,
+            \\      hRhsRhs,
+            \\      hRhsNeLhs,
+            \\      hStorageSelfNe,
+            \\      hRequiresSelfNe,
+            \\      hBinaryNeSelfNe,
+            \\      hReadRead,
+            \\      hWriteWrite,
+            \\      hNe
+            \\    ]
+            \\  · intro env hAssumptions
+            \\    simp [
+            \\      assumptionsDenoteInEnv,
+            \\      assumptionsDenoteInEnv?,
+            \\      assumptionAnd?,
+            \\      assumptionDenotesInEnv?,
+            \\      formulaDenotes?,
+            \\      denoteFormula?,
+            \\      denoteValue?,
+            \\      emittedManifest,
+            \\      emittedTerms,
+            \\      emittedAssumptions,
+            \\      Env.lookupVar,
+            \\      Env.lookupFree,
+            \\      lookupFreeBinding,
+            \\      Value.eqProp?,
+            \\      hLhsLhs,
+            \\      hLhsRhs,
+            \\      hRhsLhs,
+            \\      hRhsRhs,
+            \\      hRhsNeLhs,
+            \\      hStorageSelfNe,
+            \\      hRequiresSelfNe,
+            \\      hBinaryNeSelfNe,
+            \\      hReadRead,
+            \\      hWriteWrite
+            \\    ] at hAssumptions
+            \\    simp [
+            \\      obligationDenotesInEnv,
+            \\      obligationDenotesInEnv?,
+            \\      effectFrameGoalDenotes?,
+            \\      placeListDisjointWithEvidence?,
+            \\      placePairDisjointWithEvidence?,
+            \\      placeDefinitelyDisjoint,
+            \\      placeKeyListsDefinitelyDisjoint,
+            \\      placeKeysDefinitelyDistinct,
+            \\      RegionRef.isConcrete,
+            \\      computedStorageRoot,
+            \\      pairCoveredByEvidence,
+            \\      evidenceMatchesPair,
+            \\      evidenceListDenotes?,
+            \\      keyDisjointEvidenceDenotes?,
+            \\      keyEvidencePathMatches,
+            \\      keyDisjointEvidenceFormulaDenotes?,
+            \\      Manifest.assumptionById,
+            \\      termFreeVarId?,
+            \\      freeVarPairMatches,
+            \\      placeKeysEqualBefore,
+            \\      optionPropAnd?,
+            \\      assumptionsDenoteInEnv,
+            \\      assumptionsDenoteInEnv?,
+            \\      assumptionAnd?,
+            \\      assumptionDenotesInEnv?,
+            \\      formulaDenotes?,
+            \\      denoteFormula?,
+            \\      denoteValue?,
+            \\      emittedManifest,
+            \\      emittedTerms,
+            \\      emittedAssumptions,
+            \\      emittedObligations,
+            \\      Env.lookupVar,
+            \\      Env.lookupFree,
+            \\      lookupFreeBinding,
+            \\      Value.eqProp?,
+            \\      TyRef.isU256,
+            \\      TyRef.isI256,
+            \\      TyRef.isU256Carrier,
+            \\      compilerTypeIdU256,
+            \\      compilerTypeIdI256,
+            \\      Ora.Spec.expectedCompilerTypeIdU256,
+            \\      Ora.Spec.expectedCompilerTypeIdI256,
+            \\      hLhsLhs,
+            \\      hLhsRhs,
+            \\      hRhsLhs,
+            \\      hRhsRhs,
+            \\      hRhsNeLhs,
+            \\      hStorageSelfNe,
+            \\      hRequiresSelfNe,
+            \\      hBinaryNeSelfNe,
+            \\      hReadRead,
+            \\      hWriteWrite,
+            \\      hAssumptions
+            \\    ]
+            \\    exact option_prop_and_true_left_intro _ hAssumptions
+            \\
+            \\
+        );
+    }
+
+    if (write_query_id) |id| {
+        try writer.print("theorem discharge_write : emittedQuery_{d} := by\n", .{id});
+        try writer.writeAll("  unfold ");
+        try writer.print("emittedQuery_{d}", .{id});
+        try writer.writeAll(" obligationFollowsFromAssumptions\n");
+        try writeLeanPlaceEqFactForTest(writer, "  ", "hWriteWrite", write);
+        try writer.writeAll(
+            \\  constructor
+            \\  · refine ⟨Env.empty, ?_⟩
+            \\    simp [
+            \\      assumptionsDenoteInEnv,
+            \\      assumptionsDenoteInEnv?
+            \\    ]
+            \\  · intro env hAssumptions
+            \\    simp [
+            \\      obligationDenotesInEnv,
+            \\      obligationDenotesInEnv?,
+            \\      effectFrameGoalDenotes?,
+            \\      placeListCovers,
+            \\      emittedManifest,
+            \\      emittedObligations,
+            \\      hWriteWrite
+            \\    ]
+            \\
+            \\
+        );
+    }
     try writer.writeAll("end ");
     try writer.writeAll(module_namespace);
     try writer.writeByte('\n');
@@ -1836,6 +2301,344 @@ test "B6 storage path Lean proof unblocks constant map read old collapse" {
     try testing.expectEqualStrings(reference_hex, valid_hex);
 }
 
+test "B6 storage key evidence Lean proof unblocks structural frame gate" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const source =
+        \\contract B6KeyEvidenceGate {
+        \\    storage var balances: map<u256, u256>;
+        \\
+        \\    pub fn copy_other(user: u256, other: u256)
+        \\        modifies balances[user]
+        \\        requires user != other
+        \\    {
+        \\        let observed: u256 = balances[other];
+        \\        balances[user] = observed;
+        \\    }
+        \\}
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b6_key_evidence_gate.ora", .data = source });
+
+    const source_path = try pathFromTmpAlloc(allocator, tmp, "b6_key_evidence_gate.ora");
+    defer allocator.free(source_path);
+    const empty_out = try pathFromTmpAlloc(allocator, tmp, "empty");
+    defer allocator.free(empty_out);
+    const valid_out = try pathFromTmpAlloc(allocator, tmp, "valid");
+    defer allocator.free(valid_out);
+    const sorry_out = try pathFromTmpAlloc(allocator, tmp, "sorry");
+    defer allocator.free(sorry_out);
+    const reference_out = try pathFromTmpAlloc(allocator, tmp, "reference");
+    defer allocator.free(reference_out);
+
+    var formal_result = try collectPackageObligations(allocator, source_path);
+    defer formal_result.deinit();
+    try testing.expectEqual(@as(usize, 1), countAssumption(formal_result.set, .requires));
+    try testing.expectEqual(@as(usize, 1), countEffectFrame(formal_result.set, .read_preserved_by_key_evidence));
+    const frame_query = try findEffectFrameQuery(formal_result.set, .read_preserved_by_key_evidence);
+    try testing.expectEqual(obligation.VerificationBackend.unspecified, frame_query.backend);
+    try testing.expect(frame_query.result == null);
+    try testing.expectEqual(@as(usize, 1), frame_query.assumption_ids.len);
+    try expectEffectFrameQuerySupported(formal_result.set, .read_preserved_by_key_evidence);
+    const write_query = try findEffectFrameQuery(formal_result.set, .write_covered_by_modifies);
+    try testing.expectEqual(@as(usize, 0), write_query.assumption_ids.len);
+
+    var frame_evidence: ?obligation.KeyDisjointEvidence = null;
+    for (formal_result.set.obligations) |item| {
+        if (item.kind != .effect_frame or item.kind.effect_frame.relation != .read_preserved_by_key_evidence) continue;
+        try testing.expectEqual(@as(usize, 1), item.kind.effect_frame.evidence.len);
+        frame_evidence = item.kind.effect_frame.evidence[0];
+    }
+    const evidence = frame_evidence orelse return error.TestUnexpectedResult;
+
+    const generated_namespace = try leanProofGeneratedNamespaceForTest(allocator, source_path);
+    defer allocator.free(generated_namespace);
+    var obligations_source_out = std.Io.Writer.Allocating.init(allocator);
+    defer obligations_source_out.deinit();
+    try obligation_to_lean.writeModule(&obligations_source_out.writer, formal_result.set, .{
+        .namespace = generated_namespace,
+        .proof_surface = true,
+    });
+    const obligations_source = obligations_source_out.written();
+    const expected_query_def = try std.fmt.allocPrint(allocator, "def emittedQuery_{d} : Prop :=", .{frame_query.id});
+    defer allocator.free(expected_query_def);
+    try testing.expect(std.mem.containsAtLeast(u8, obligations_source, 1, expected_query_def));
+    try testing.expect(std.mem.containsAtLeast(u8, obligations_source, 1, ".readPreservedByKeyEvidence"));
+    try testing.expect(std.mem.containsAtLeast(u8, obligations_source, 1, "keyIndex := 0"));
+
+    {
+        const result = try runProcessWithLeanPath(allocator, &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=smt-report,sir-text,bytecode",
+            "--out-dir",
+            reference_out,
+            source_path,
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try expectExited(result, 0);
+    }
+    const reference_sir_path = try pathFromTmpAlloc(allocator, tmp, "reference/b6_key_evidence_gate.sir");
+    defer allocator.free(reference_sir_path);
+    const reference_hex_path = try pathFromTmpAlloc(allocator, tmp, "reference/b6_key_evidence_gate.hex");
+    defer allocator.free(reference_hex_path);
+    const reference_sir = try readFileAllocForTest(allocator, reference_sir_path);
+    defer allocator.free(reference_sir);
+    const reference_hex = try readFileAllocForTest(allocator, reference_hex_path);
+    defer allocator.free(reference_hex);
+    try testing.expect(reference_hex.len > 0);
+
+    const module_suffix = try moduleSuffixFromTmp(allocator, tmp);
+    defer allocator.free(module_suffix);
+    const fixture_dir = try std.fmt.allocPrint(allocator, "formal/Ora/B6KeyEvidenceFixture/{s}", .{module_suffix});
+    defer allocator.free(fixture_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, fixture_dir);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, fixture_dir) catch {};
+    defer std.Io.Dir.cwd().deleteDir(std.testing.io, "formal/Ora/B6KeyEvidenceFixture") catch {};
+
+    const valid_module = try std.fmt.allocPrint(allocator, "Ora.B6KeyEvidenceFixture.{s}.Valid", .{module_suffix});
+    defer allocator.free(valid_module);
+    const sorry_module = try std.fmt.allocPrint(allocator, "Ora.B6KeyEvidenceFixture.{s}.Sorry", .{module_suffix});
+    defer allocator.free(sorry_module);
+    const valid_theorem = try std.fmt.allocPrint(allocator, "{s}.discharge", .{valid_module});
+    defer allocator.free(valid_theorem);
+    const sorry_theorem = try std.fmt.allocPrint(allocator, "{s}.discharge", .{sorry_module});
+    defer allocator.free(sorry_theorem);
+    const valid_proof_path = try std.fmt.allocPrint(allocator, "{s}/Valid.lean", .{fixture_dir});
+    defer allocator.free(valid_proof_path);
+    const sorry_proof_path = try std.fmt.allocPrint(allocator, "{s}/Sorry.lean", .{fixture_dir});
+    defer allocator.free(sorry_proof_path);
+
+    const valid_proof = try keyEvidenceFrameProofModuleFromGeneratedObligations(
+        allocator,
+        obligations_source,
+        valid_module,
+        frame_query.id,
+        evidence.read,
+        evidence.write,
+        evidence.lhs,
+        evidence.rhs,
+        write_query.id,
+        false,
+    );
+    defer allocator.free(valid_proof);
+    const sorry_proof = try keyEvidenceFrameProofModuleFromGeneratedObligations(
+        allocator,
+        obligations_source,
+        sorry_module,
+        frame_query.id,
+        evidence.read,
+        evidence.write,
+        evidence.lhs,
+        evidence.rhs,
+        write_query.id,
+        true,
+    );
+    defer allocator.free(sorry_proof);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = valid_proof_path, .data = valid_proof });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = sorry_proof_path, .data = sorry_proof });
+
+    const valid_manifest = try pathFromTmpAlloc(allocator, tmp, "valid-proofs.json");
+    defer allocator.free(valid_manifest);
+    const sorry_manifest = try pathFromTmpAlloc(allocator, tmp, "sorry-proofs.json");
+    defer allocator.free(sorry_manifest);
+    const empty_manifest = try pathFromTmpAlloc(allocator, tmp, "empty-proofs.json");
+    defer allocator.free(empty_manifest);
+    const valid_write_theorem = try std.fmt.allocPrint(allocator, "{s}.discharge_write", .{valid_module});
+    defer allocator.free(valid_write_theorem);
+    const sorry_write_theorem = try std.fmt.allocPrint(allocator, "{s}.discharge_write", .{sorry_module});
+    defer allocator.free(sorry_write_theorem);
+    try writeTwoProofManifestForTest(
+        allocator,
+        valid_manifest,
+        valid_module,
+        valid_theorem,
+        valid_proof_path,
+        frame_query,
+        valid_write_theorem,
+        valid_proof_path,
+        write_query,
+    );
+    try writeTwoProofManifestForTest(
+        allocator,
+        sorry_manifest,
+        sorry_module,
+        sorry_theorem,
+        sorry_proof_path,
+        frame_query,
+        sorry_write_theorem,
+        sorry_proof_path,
+        write_query,
+    );
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = empty_manifest,
+        .data = "{\n  \"schema_version\": 1,\n  \"proofs\": []\n}\n",
+    });
+
+    {
+        const result = try runProcessWithLeanPath(allocator, &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=smt-report,sir-text,bytecode",
+            "--out-dir",
+            empty_out,
+            "--lean-proofs",
+            empty_manifest,
+            source_path,
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try expectExited(result, 1);
+        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "missing_proof") or
+            std.mem.containsAtLeast(u8, result.stderr, 1, "missing_proof"));
+    }
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "empty/b6_key_evidence_gate.hex", .{}));
+
+    {
+        const result = try runProcessWithLeanPath(allocator, &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=smt-report,sir-text,bytecode",
+            "--out-dir",
+            valid_out,
+            "--lean-proofs",
+            valid_manifest,
+            source_path,
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try expectExited(result, 0);
+    }
+
+    const valid_cert_path = try pathFromTmpAlloc(allocator, tmp, "valid/b6_key_evidence_gate.lean.proof.json");
+    defer allocator.free(valid_cert_path);
+    const valid_sir_path = try pathFromTmpAlloc(allocator, tmp, "valid/b6_key_evidence_gate.sir");
+    defer allocator.free(valid_sir_path);
+    const valid_hex_path = try pathFromTmpAlloc(allocator, tmp, "valid/b6_key_evidence_gate.hex");
+    defer allocator.free(valid_hex_path);
+    const valid_cert = try readFileAllocForTest(allocator, valid_cert_path);
+    defer allocator.free(valid_cert);
+    try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"schema_version\": 1"));
+    try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"proof_count\": 2"));
+    try testing.expect(!std.mem.containsAtLeast(u8, valid_cert, 1, "sorryAx"));
+    const valid_sir = try readFileAllocForTest(allocator, valid_sir_path);
+    defer allocator.free(valid_sir);
+    const valid_hex = try readFileAllocForTest(allocator, valid_hex_path);
+    defer allocator.free(valid_hex);
+    try testing.expectEqualStrings(reference_sir, valid_sir);
+    try testing.expectEqualStrings(reference_hex, valid_hex);
+
+    {
+        const result = try runProcess(allocator, &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=smt-report,sir-text,bytecode",
+            "--out-dir",
+            sorry_out,
+            "--lean-proofs",
+            sorry_manifest,
+            source_path,
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try expectExited(result, 1);
+        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "sorryAx") or
+            std.mem.containsAtLeast(u8, result.stderr, 1, "sorryAx") or
+            std.mem.containsAtLeast(u8, result.stdout, 1, "Lean proof gate failed") or
+            std.mem.containsAtLeast(u8, result.stderr, 1, "Lean proof gate failed"));
+    }
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "sorry/b6_key_evidence_gate.hex", .{}));
+}
+
+test "B6 storage key evidence proof rejects contradictory assumptions" {
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const source =
+        \\contract B6KeyEvidenceContradiction {
+        \\    storage var balances: map<u256, u256>;
+        \\
+        \\    pub fn copy_other(user: u256, other: u256)
+        \\        modifies balances[user]
+        \\        requires user != other
+        \\        requires user == other
+        \\    {
+        \\        let observed: u256 = balances[other];
+        \\        balances[user] = observed;
+        \\    }
+        \\}
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "b6_key_evidence_contradiction.ora", .data = source });
+
+    const source_path = try pathFromTmpAlloc(allocator, tmp, "b6_key_evidence_contradiction.ora");
+    defer allocator.free(source_path);
+
+    var formal_result = try collectPackageObligations(allocator, source_path);
+    defer formal_result.deinit();
+    try testing.expectEqual(@as(usize, 2), countAssumption(formal_result.set, .requires));
+    try testing.expectEqual(@as(usize, 1), countEffectFrame(formal_result.set, .read_preserved_by_key_evidence));
+    const frame_query = try findEffectFrameQuery(formal_result.set, .read_preserved_by_key_evidence);
+    try testing.expectEqual(@as(usize, 2), frame_query.assumption_ids.len);
+    try expectEffectFrameQuerySupported(formal_result.set, .read_preserved_by_key_evidence);
+
+    var frame_evidence: ?obligation.KeyDisjointEvidence = null;
+    for (formal_result.set.obligations) |item| {
+        if (item.kind != .effect_frame or item.kind.effect_frame.relation != .read_preserved_by_key_evidence) continue;
+        frame_evidence = item.kind.effect_frame.evidence[0];
+    }
+    const evidence = frame_evidence orelse return error.TestUnexpectedResult;
+
+    const generated_namespace = try leanProofGeneratedNamespaceForTest(allocator, source_path);
+    defer allocator.free(generated_namespace);
+    var obligations_source_out = std.Io.Writer.Allocating.init(allocator);
+    defer obligations_source_out.deinit();
+    try obligation_to_lean.writeModule(&obligations_source_out.writer, formal_result.set, .{
+        .namespace = generated_namespace,
+        .proof_surface = true,
+    });
+    const obligations_source = obligations_source_out.written();
+
+    const module_suffix = try moduleSuffixFromTmp(allocator, tmp);
+    defer allocator.free(module_suffix);
+    const fixture_dir = try std.fmt.allocPrint(allocator, "formal/Ora/B6KeyEvidenceContradictionFixture/{s}", .{module_suffix});
+    defer allocator.free(fixture_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, fixture_dir);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, fixture_dir) catch {};
+    defer std.Io.Dir.cwd().deleteDir(std.testing.io, "formal/Ora/B6KeyEvidenceContradictionFixture") catch {};
+
+    const proof_module = try std.fmt.allocPrint(allocator, "Ora.B6KeyEvidenceContradictionFixture.{s}.Invalid", .{module_suffix});
+    defer allocator.free(proof_module);
+    const proof_path = try std.fmt.allocPrint(allocator, "{s}/Invalid.lean", .{fixture_dir});
+    defer allocator.free(proof_path);
+    const proof = try keyEvidenceFrameProofModuleFromGeneratedObligations(
+        allocator,
+        obligations_source,
+        proof_module,
+        frame_query.id,
+        evidence.read,
+        evidence.write,
+        evidence.lhs,
+        evidence.rhs,
+        null,
+        false,
+    );
+    defer allocator.free(proof);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = proof_path, .data = proof });
+
+    const result = try runLeanFileForTest(allocator, proof_path);
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try expectExited(result, 1);
+}
+
 test "B6 signed comparison Lean proof unblocks source-level unknown" {
     std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
@@ -2473,6 +3276,41 @@ test "formal Z3 overlay ignores only clean unmatched proved rows" {
     defer vacuous_overlay.deinit();
     try testing.expectEqual(@as(usize, 1), vacuous_overlay.set.diagnostics.len);
     try testing.expect(vacuous_overlay.set.hasBlockingDiagnostic());
+}
+
+test "formal Z3 overlay does not require prepared rows for structural effect frames" {
+    const obligation_ids = [_]obligation.Id{1};
+    const obligations = [_]obligation.Obligation{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "effect_surface" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .kind = .{ .effect_frame = .{
+            .relation = .read_preserved_by_key_evidence,
+        } },
+    }};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "effect_surface" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .kind = .obligation,
+        .obligation_ids = &obligation_ids,
+    }};
+    const set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &queries,
+    };
+
+    var overlay = try obligation_from_z3.overlayPreparedQueryResults(testing.allocator, set, &.{});
+    defer overlay.deinit();
+
+    try testing.expectEqual(@as(usize, 0), overlay.set.diagnostics.len);
+    try testing.expectEqual(@as(usize, 1), overlay.set.queries.len);
+    try testing.expectEqual(obligation.VerificationBackend.unspecified, overlay.set.queries[0].backend);
+    try testing.expect(overlay.set.queries[0].result == null);
 }
 
 test "formal Z3 adapter proves canonical term obligation from assumptions" {
@@ -4574,7 +5412,7 @@ test "formal obligation source collector projects statically disjoint constant m
     try testing.expect(std.mem.indexOf(u8, lean, ".old ") == null);
 }
 
-test "formal obligation source collector keeps parameter inequality map frame Z3-only" {
+test "formal obligation source collector keeps conditional map post-state equality outside Lean projection" {
     const source_text =
         \\contract StorageProjection {
         \\    storage balances: map<u256, u256>;
@@ -4606,6 +5444,8 @@ test "formal obligation source collector keeps parameter inequality map frame Z3
     try testing.expect(!result.set.hasBlockingDiagnostic());
     try testing.expectEqual(@as(usize, 1), countAssumption(result.set, .requires));
     try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
+    try testing.expectEqual(@as(usize, 1), countEffectFrame(result.set, .read_preserved_by_key_evidence));
+    try expectEffectFrameQuerySupported(result.set, .read_preserved_by_key_evidence);
     try expectEnsuresQueryUnsupported(result.set, .unsupported_origin_value);
 }
 
@@ -4891,7 +5731,8 @@ test "formal obligation MLIR adapter emits read preserved frame for static const
         \\    ora.effect = "readwrites",
         \\    ora.modifies_slots = ["buckets[1]"],
         \\    ora.read_slots = ["buckets[2]"],
-        \\    ora.write_slots = ["buckets[1]"]
+        \\    ora.write_slots = ["buckets[1]"],
+        \\    ora.write_slots_complete = true
         \\  } {
         \\    func.return
         \\  }
@@ -4921,6 +5762,435 @@ test "formal obligation MLIR adapter emits read preserved frame for static const
         try expectConstantKey(frame.actual[0].keys[0], "2");
     }
     try testing.expect(saw_read_preserved);
+}
+
+test "formal obligation MLIR adapter emits evidence-backed frame for parameter disequality" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @effect_surface(%user: !ora.int<256, false>, %other: !ora.int<256, false>) attributes {
+        \\    ora.effect = "readwrites",
+        \\    ora.param_names = ["user", "other"],
+        \\    ora.param_binding_ids = ["file:501:pattern:1", "file:501:pattern:2"],
+        \\    ora.modifies_slots = ["balances[param#0]"],
+        \\    ora.read_slots = ["balances[param#1]"],
+        \\    ora.write_slots = ["balances[param#0]"],
+        \\    ora.write_slots_complete = true
+        \\  } {
+        \\    %neq = ora.cmp "ne", %user, %other : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\    "ora.requires"(%neq) : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countAssumption(result.set, .requires));
+    try testing.expectEqual(@as(usize, 1), countEffectFrame(result.set, .write_covered_by_modifies));
+    try testing.expectEqual(@as(usize, 0), countEffectFrame(result.set, .read_preserved_by_frame));
+    try testing.expectEqual(@as(usize, 1), countEffectFrame(result.set, .read_preserved_by_key_evidence));
+
+    var evidence_obligation_id: ?obligation.Id = null;
+    var saw_evidence = false;
+    for (result.set.obligations) |item| {
+        if (item.kind != .effect_frame or item.kind.effect_frame.relation != .read_preserved_by_key_evidence) continue;
+        saw_evidence = true;
+        evidence_obligation_id = item.id;
+        const frame = item.kind.effect_frame;
+        try testing.expectEqual(@as(usize, 1), frame.declared.len);
+        try testing.expectEqual(@as(usize, 1), frame.actual.len);
+        try testing.expectEqual(@as(usize, 1), frame.evidence.len);
+        try testing.expectEqual(result.set.assumptions[0].id, frame.evidence[0].assumption_id);
+        try testing.expectEqual(@as(u32, 0), frame.evidence[0].key_index);
+        try testing.expect(obligation.freeVarIdEql(.{ .file_id = 501, .pattern_id = 1 }, frame.evidence[0].lhs));
+        try testing.expect(obligation.freeVarIdEql(.{ .file_id = 501, .pattern_id = 2 }, frame.evidence[0].rhs));
+        try expectParameterKey(frame.evidence[0].write.keys[0], .{ .file_id = 501, .pattern_id = 1 });
+        try expectParameterKey(frame.evidence[0].read.keys[0], .{ .file_id = 501, .pattern_id = 2 });
+    }
+    try testing.expect(saw_evidence);
+
+    var saw_query_with_assumption = false;
+    for (result.set.queries) |query| {
+        if (query.obligation_ids.len != 1 or query.obligation_ids[0] != evidence_obligation_id.?) continue;
+        saw_query_with_assumption = true;
+        try testing.expectEqual(@as(usize, 1), query.assumption_ids.len);
+        try testing.expectEqual(result.set.assumptions[0].id, query.assumption_ids[0]);
+        switch (obligation_to_lean.querySemanticSupport(result.set, query)) {
+            .supported => {},
+            .unsupported => return error.TestUnexpectedResult,
+        }
+    }
+    try testing.expect(saw_query_with_assumption);
+    try expectEffectFrameQuerySupported(result.set, .read_preserved_by_key_evidence);
+
+    const dump = try dumpManifestToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(dump);
+    try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"schema_version\":3"));
+    try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"relation\":\"read_preserved_by_key_evidence\""));
+    try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"evidence\":[{\"kind\":\"free_var_disequality\""));
+    try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"key_index\":0"));
+}
+
+test "formal obligation MLIR adapter accepts symmetric parameter disequality evidence" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @effect_surface(%user: !ora.int<256, false>, %other: !ora.int<256, false>) attributes {
+        \\    ora.effect = "readwrites",
+        \\    ora.param_names = ["user", "other"],
+        \\    ora.param_binding_ids = ["file:502:pattern:1", "file:502:pattern:2"],
+        \\    ora.modifies_slots = ["balances[param#0]"],
+        \\    ora.read_slots = ["balances[param#1]"],
+        \\    ora.write_slots = ["balances[param#0]"],
+        \\    ora.write_slots_complete = true
+        \\  } {
+        \\    %neq = ora.cmp "ne", %other, %user : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\    "ora.requires"(%neq) : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countEffectFrame(result.set, .read_preserved_by_key_evidence));
+}
+
+test "formal obligation MLIR adapter requires complete write slots for key evidence frame" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @effect_surface(%user: !ora.int<256, false>, %other: !ora.int<256, false>) attributes {
+        \\    ora.effect = "readwrites",
+        \\    ora.param_names = ["user", "other"],
+        \\    ora.param_binding_ids = ["file:504:pattern:1", "file:504:pattern:2"],
+        \\    ora.modifies_slots = ["balances[param#0]"],
+        \\    ora.read_slots = ["balances[param#1]"],
+        \\    ora.write_slots = ["balances[param#0]"]
+        \\  } {
+        \\    %neq = ora.cmp "ne", %user, %other : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\    "ora.requires"(%neq) : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countEffectFrame(result.set, .write_covered_by_modifies));
+    try testing.expectEqual(@as(usize, 0), countEffectFrame(result.set, .read_preserved_by_frame));
+    try testing.expectEqual(@as(usize, 0), countEffectFrame(result.set, .read_preserved_by_key_evidence));
+}
+
+test "formal obligation MLIR adapter requires evidence for every non-static read write pair" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @effect_surface(%user: !ora.int<256, false>, %other: !ora.int<256, false>, %admin: !ora.int<256, false>) attributes {
+        \\    ora.effect = "readwrites",
+        \\    ora.param_names = ["user", "other", "admin"],
+        \\    ora.param_binding_ids = ["file:503:pattern:1", "file:503:pattern:2", "file:503:pattern:3"],
+        \\    ora.modifies_slots = ["balances[param#0]", "balances[param#2]"],
+        \\    ora.read_slots = ["balances[param#1]"],
+        \\    ora.write_slots = ["balances[param#0]", "balances[param#2]"],
+        \\    ora.write_slots_complete = true
+        \\  } {
+        \\    %neq = ora.cmp "ne", %user, %other : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\    "ora.requires"(%neq) : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 0), countEffectFrame(result.set, .read_preserved_by_frame));
+    try testing.expectEqual(@as(usize, 0), countEffectFrame(result.set, .read_preserved_by_key_evidence));
+}
+
+test "formal obligation MLIR adapter rejects same-key evidence-backed frame" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @effect_surface(%user: !ora.int<256, false>, %other: !ora.int<256, false>) attributes {
+        \\    ora.effect = "readwrites",
+        \\    ora.param_names = ["user", "other"],
+        \\    ora.param_binding_ids = ["file:505:pattern:1", "file:505:pattern:2"],
+        \\    ora.modifies_slots = ["balances[param#0]"],
+        \\    ora.read_slots = ["balances[param#0]"],
+        \\    ora.write_slots = ["balances[param#0]"],
+        \\    ora.write_slots_complete = true
+        \\  } {
+        \\    %neq = ora.cmp "ne", %user, %other : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\    "ora.requires"(%neq) : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 0), countEffectFrame(result.set, .read_preserved_by_frame));
+    try testing.expectEqual(@as(usize, 0), countEffectFrame(result.set, .read_preserved_by_key_evidence));
+}
+
+test "formal obligation MLIR adapter rejects prefix-path evidence-backed frame" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @effect_surface(%owner: !ora.int<256, false>, %spender: !ora.int<256, false>) attributes {
+        \\    ora.effect = "readwrites",
+        \\    ora.param_names = ["owner", "spender"],
+        \\    ora.param_binding_ids = ["file:506:pattern:1", "file:506:pattern:2"],
+        \\    ora.modifies_slots = ["allowances[param#0]"],
+        \\    ora.read_slots = ["allowances[param#0][param#1]"],
+        \\    ora.write_slots = ["allowances[param#0]"],
+        \\    ora.write_slots_complete = true
+        \\  } {
+        \\    %neq = ora.cmp "ne", %owner, %spender : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\    "ora.requires"(%neq) : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 0), countEffectFrame(result.set, .read_preserved_by_frame));
+    try testing.expectEqual(@as(usize, 0), countEffectFrame(result.set, .read_preserved_by_key_evidence));
+}
+
+test "formal obligation MLIR adapter does not borrow key evidence across owners" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @provider(%user: !ora.int<256, false>, %other: !ora.int<256, false>) attributes {
+        \\    ora.param_names = ["user", "other"],
+        \\    ora.param_binding_ids = ["file:507:pattern:1", "file:507:pattern:2"]
+        \\  } {
+        \\    %neq = ora.cmp "ne", %user, %other : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\    "ora.requires"(%neq) : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\
+        \\  func.func @effect_surface(%user: !ora.int<256, false>, %other: !ora.int<256, false>) attributes {
+        \\    ora.effect = "readwrites",
+        \\    ora.param_names = ["user", "other"],
+        \\    ora.param_binding_ids = ["file:507:pattern:1", "file:507:pattern:2"],
+        \\    ora.modifies_slots = ["balances[param#0]"],
+        \\    ora.read_slots = ["balances[param#1]"],
+        \\    ora.write_slots = ["balances[param#0]"],
+        \\    ora.write_slots_complete = true
+        \\  } {
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countAssumption(result.set, .requires));
+    try testing.expectEqual(@as(usize, 0), countEffectFrame(result.set, .read_preserved_by_frame));
+    try testing.expectEqual(@as(usize, 0), countEffectFrame(result.set, .read_preserved_by_key_evidence));
+    try expectQueriesOwnerScoped(result.set);
+}
+
+test "formal obligation MLIR adapter emits evidence for nested differing parameter key" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @effect_surface(%owner: !ora.int<256, false>, %other: !ora.int<256, false>, %spender: !ora.int<256, false>) attributes {
+        \\    ora.effect = "readwrites",
+        \\    ora.param_names = ["owner", "other", "spender"],
+        \\    ora.param_binding_ids = ["file:508:pattern:1", "file:508:pattern:2", "file:508:pattern:3"],
+        \\    ora.modifies_slots = ["allowances[param#0][param#2]"],
+        \\    ora.read_slots = ["allowances[param#1][param#2]"],
+        \\    ora.write_slots = ["allowances[param#0][param#2]"],
+        \\    ora.write_slots_complete = true
+        \\  } {
+        \\    %neq = ora.cmp "ne", %owner, %other : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\    "ora.requires"(%neq) : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countEffectFrame(result.set, .read_preserved_by_key_evidence));
+
+    const query = try findEffectFrameQuery(result.set, .read_preserved_by_key_evidence);
+    try testing.expectEqual(@as(usize, 1), query.assumption_ids.len);
+    for (result.set.obligations) |item| {
+        if (item.kind != .effect_frame or item.kind.effect_frame.relation != .read_preserved_by_key_evidence) continue;
+        try testing.expectEqual(@as(usize, 1), item.kind.effect_frame.evidence.len);
+        try testing.expectEqual(@as(u32, 0), item.kind.effect_frame.evidence[0].key_index);
+    }
+}
+
+test "formal obligation Lean support rejects unsupported key evidence formulas" {
+    const owner: obligation.Owner = .{ .function = .{ .name = "effect_surface" } };
+    const lhs_id: obligation.FreeVarId = .{ .file_id = 601, .pattern_id = 1 };
+    const rhs_id: obligation.FreeVarId = .{ .file_id = 601, .pattern_id = 2 };
+    const read_keys = [_]obligation.PlaceKey{.{ .parameter = rhs_id }};
+    const write_keys = [_]obligation.PlaceKey{.{ .parameter = lhs_id }};
+    const read: obligation.PlaceRef = .{ .root = "balances", .region = .storage, .keys = &read_keys };
+    const write: obligation.PlaceRef = .{ .root = "balances", .region = .storage, .keys = &write_keys };
+    const assumption_ids = [_]obligation.Id{10};
+    const u256_ty: obligation.TypeRef = .{ .spelling = "u256" };
+    const user: obligation.Term = .{ .variable = .{ .free = .{ .id = lhs_id, .name = "user", .ty = u256_ty } } };
+    const other: obligation.Term = .{ .variable = .{ .free = .{ .id = rhs_id, .name = "other", .ty = u256_ty } } };
+
+    {
+        const terms = [_]obligation.Term{
+            user,
+            other,
+            .{ .binary = .{ .op = .eq, .lhs = 0, .rhs = 1 } },
+            .{ .unary = .{ .op = .not, .operand = 2 } },
+        };
+        try expectSyntheticKeyEvidenceUnsupported(
+            &terms,
+            3,
+            .requires,
+            &assumption_ids,
+            owner,
+            owner,
+            read,
+            write,
+            lhs_id,
+            rhs_id,
+            .unsupported_key_disjoint_evidence_formula,
+        );
+    }
+
+    {
+        const terms = [_]obligation.Term{
+            user,
+            .{ .int_lit = .{ .value = "42", .ty = u256_ty } },
+            .{ .binary = .{ .op = .ne, .lhs = 0, .rhs = 1 } },
+        };
+        try expectSyntheticKeyEvidenceUnsupported(
+            &terms,
+            2,
+            .requires,
+            &assumption_ids,
+            owner,
+            owner,
+            read,
+            write,
+            lhs_id,
+            rhs_id,
+            .unsupported_key_disjoint_evidence_formula,
+        );
+    }
+
+    {
+        const terms = [_]obligation.Term{
+            user,
+            other,
+            .{ .binary = .{ .op = .ne, .lhs = 0, .rhs = 1 } },
+        };
+        try expectSyntheticKeyEvidenceUnsupported(
+            &terms,
+            2,
+            .assume,
+            &assumption_ids,
+            owner,
+            owner,
+            read,
+            write,
+            lhs_id,
+            rhs_id,
+            .unsupported_key_disjoint_evidence_formula,
+        );
+    }
+}
+
+test "formal obligation Lean support rejects non-u256 key evidence variables" {
+    const owner: obligation.Owner = .{ .function = .{ .name = "effect_surface" } };
+    const lhs_id: obligation.FreeVarId = .{ .file_id = 602, .pattern_id = 1 };
+    const rhs_id: obligation.FreeVarId = .{ .file_id = 602, .pattern_id = 2 };
+    const read_keys = [_]obligation.PlaceKey{.{ .parameter = rhs_id }};
+    const write_keys = [_]obligation.PlaceKey{.{ .parameter = lhs_id }};
+    const read: obligation.PlaceRef = .{ .root = "balances", .region = .storage, .keys = &read_keys };
+    const write: obligation.PlaceRef = .{ .root = "balances", .region = .storage, .keys = &write_keys };
+    const address_ty: obligation.TypeRef = .{ .spelling = "address" };
+    const terms = [_]obligation.Term{
+        .{ .variable = .{ .free = .{ .id = lhs_id, .name = "user", .ty = address_ty } } },
+        .{ .variable = .{ .free = .{ .id = rhs_id, .name = "other", .ty = address_ty } } },
+        .{ .binary = .{ .op = .ne, .lhs = 0, .rhs = 1 } },
+    };
+
+    try expectSyntheticKeyEvidenceUnsupported(
+        &terms,
+        2,
+        .requires,
+        &.{},
+        owner,
+        owner,
+        read,
+        write,
+        lhs_id,
+        rhs_id,
+        .key_disjoint_evidence_type_unsupported,
+    );
 }
 
 test "formal obligation MLIR adapter does not project keyed map read with unknown key" {
@@ -5105,7 +6375,8 @@ test "formal obligation MLIR adapter records effect frame summaries" {
         \\    ora.param_binding_ids = ["file:88:pattern:1"],
         \\    ora.modifies_slots = ["balances[param#0]", "config.owner"],
         \\    ora.read_slots = ["balances[param#0]", "transient:scratch"],
-        \\    ora.write_slots = ["balances[param#0]"]
+        \\    ora.write_slots = ["balances[param#0]"],
+        \\    ora.write_slots_complete = true
         \\  } {
         \\    func.return
         \\  }
@@ -5461,13 +6732,13 @@ test "formal report coverage summarizes representative MLIR obligation classes" 
     const report = try dumpManifestToOwnedString(testing.allocator, result.set);
     defer testing.allocator.free(report);
 
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"artifact_decision\",\"schema_version\":2,\"status\":\"blocked\",\"reason\":\"missing_proof\"}"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":2,\"assumptions\":1,\"obligations\":13,\"queries\":14"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"artifact_decision\",\"schema_version\":3,\"status\":\"blocked\",\"reason\":\"missing_proof\"}"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":3,\"assumptions\":1,\"obligations\":13,\"queries\":14"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_obligation_links\":13"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"obligation_kinds\":{\"logical\":4,\"runtime_guard\":1,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":1,\"resource\":6,\"quantifier\":1,\"filtered_input\":0,\"backend_fact\":0}"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_backends\":{\"unspecified\":14,\"z3\":0,\"lean\":0}"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_results\":{\"missing\":14,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":2"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":3"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"logical\",\"role\":\"ensures\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"arithmetic_safety\":\"addition_overflow\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"arithmetic_safety\":\"division_by_zero\""));
@@ -5476,7 +6747,7 @@ test "formal report coverage summarizes representative MLIR obligation classes" 
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"resource\",\"op\":\"move\",\"domain\":\"TokenUnit\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"property\":\"conservation\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"quantifier\",\"quantifier\":\"forall\""));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"query\",\"schema_version\":2"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"query\",\"schema_version\":3"));
 }
 
 test "formal report coverage includes representative source contracts" {
@@ -5489,8 +6760,8 @@ test "formal report coverage includes representative source contracts" {
     {
         const report = try dumpManifestToOwnedString(testing.allocator, logical.set);
         defer testing.allocator.free(report);
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":2"));
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":2"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":3"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":3"));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"role\":\"ensures\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"role\":\"assert\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"arithmetic_safety\":\"subtraction_overflow\""));
@@ -5505,7 +6776,7 @@ test "formal report coverage includes representative source contracts" {
     {
         const report = try dumpManifestToOwnedString(testing.allocator, resource.set);
         defer testing.allocator.free(report);
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":2"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":3"));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"effect_frame\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"resource\",\"op\":\"move\",\"domain\":\"TokenUnit\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"property\":\"conservation\""));
@@ -5517,7 +6788,7 @@ test "formal report coverage includes representative source contracts" {
     {
         const report = try dumpManifestToOwnedString(testing.allocator, quantifier.set);
         defer testing.allocator.free(report);
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":2"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":3"));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"quantifier\",\"quantifier\":\"forall\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"binder_type\":{\"tag\":\"spelling\",\"value\":\"u256\"}"));
     }

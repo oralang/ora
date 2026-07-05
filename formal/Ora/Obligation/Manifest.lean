@@ -230,14 +230,30 @@ inductive BackendProperty where
 inductive EffectFrameRelation where
   | writeCoveredByModifies
   | readPreservedByFrame
+  | readPreservedByKeyEvidence
   | lockCoversWrite
   | externalCallFrame
+  deriving Repr, BEq, DecidableEq
+
+inductive KeyDisjointEvidenceKind where
+  | freeVarDisequality
+  deriving Repr, BEq, DecidableEq
+
+structure KeyDisjointEvidence where
+  kind : KeyDisjointEvidenceKind
+  assumptionId : Id
+  lhs : FreeVarId
+  rhs : FreeVarId
+  read : PlaceRef
+  write : PlaceRef
+  keyIndex : Nat
   deriving Repr, BEq, DecidableEq
 
 structure EffectFrameGoal where
   relation : EffectFrameRelation
   declared : List PlaceRef := []
   actual : List PlaceRef := []
+  evidence : List KeyDisjointEvidence := []
   deriving Repr, BEq, DecidableEq
 
 structure ResourceGoal where

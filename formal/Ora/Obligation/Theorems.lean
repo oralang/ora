@@ -56,27 +56,42 @@ theorem stable_place_read_self_eq_denotes (env : Env) (place : PlaceRef) :
 
 /-! ## Effect-frame facts over decoded manifests -/
 
+theorem option_prop_and_true_left_intro (candidate : Option Prop) :
+    (match candidate with
+    | some proposition => proposition
+    | none => False) →
+    (match optionPropAnd? (some True) candidate with
+    | some proposition => proposition
+    | none => False) := by
+  cases candidate <;> simp [optionPropAnd?]
+
 theorem effect_frame_write_covered_denotes
+    (manifest : Manifest)
+    (env : Env)
     (declared actual : List PlaceRef)
     (hCovered : placeListCovers declared actual = true) :
-    match EffectFrameGoal.denotes?
+    match effectFrameGoalDenotes? manifest env
       { relation := .writeCoveredByModifies, declared := declared, actual := actual } with
     | some proposition => proposition
     | none => False := by
-  simp [EffectFrameGoal.denotes?, hCovered]
+  simp [effectFrameGoalDenotes?, hCovered]
 
 theorem effect_frame_read_preserved_denotes
+    (manifest : Manifest)
+    (env : Env)
     (declared actual : List PlaceRef)
     (hDisjoint : placeListDisjoint declared actual = true) :
-    match EffectFrameGoal.denotes?
+    match effectFrameGoalDenotes? manifest env
       { relation := .readPreservedByFrame, declared := declared, actual := actual } with
     | some proposition => proposition
     | none => False := by
-  simp [EffectFrameGoal.denotes?, hDisjoint]
+  simp [effectFrameGoalDenotes?, hDisjoint]
 
 theorem unsupported_effect_frame_relation_fails_closed
+    (manifest : Manifest)
+    (env : Env)
     (declared actual : List PlaceRef) :
-    (EffectFrameGoal.denotes?
+    (effectFrameGoalDenotes? manifest env
       { relation := .lockCoversWrite, declared := declared, actual := actual }) = none := by
   rfl
 
