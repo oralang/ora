@@ -189,6 +189,7 @@ const Collector = struct {
     function_param_names: []const []const u8 = &.{},
     function_param_binding_ids: []const obligation.FreeVarId = &.{},
     function_param_types: []const obligation.TypeRef = &.{},
+    function_entry_block: mlir.MlirBlock = std.mem.zeroes(mlir.MlirBlock),
     function_write_slots: ?[]const obligation.PlaceRef = null,
     function_write_slots_complete: bool = false,
     function_has_external_call: bool = false,
@@ -220,6 +221,7 @@ const Collector = struct {
         const previous_param_names = self.function_param_names;
         const previous_param_binding_ids = self.function_param_binding_ids;
         const previous_param_types = self.function_param_types;
+        const previous_entry_block = self.function_entry_block;
         const previous_write_slots = self.function_write_slots;
         const previous_write_slots_complete = self.function_write_slots_complete;
         const previous_has_external_call = self.function_has_external_call;
@@ -228,6 +230,7 @@ const Collector = struct {
         if (is_function) {
             self.function_param_names = (try self.stringArrayAttr(op, "ora.param_names")) orelse &.{};
             self.function_param_binding_ids = (try self.freeVarIdArrayAttr(op, "ora.param_binding_ids")) orelse &.{};
+            self.function_entry_block = functionEntryBlock(op);
             self.function_param_types = try self.functionParamTypesFromFunctionOp(op, self.function_param_names.len);
             self.function_write_slots = try self.placeArrayAttr(op, "ora.write_slots");
             self.function_write_slots_complete = (try self.boolAttr(op, "ora.write_slots_complete")) orelse false;
@@ -255,6 +258,7 @@ const Collector = struct {
                 self.function_param_types = previous_param_types;
                 self.function_param_binding_ids = previous_param_binding_ids;
                 self.function_param_names = previous_param_names;
+                self.function_entry_block = previous_entry_block;
                 self.function_has_external_call = previous_has_external_call;
                 self.function_write_slots_complete = previous_write_slots_complete;
                 self.function_write_slots = previous_write_slots;
@@ -844,9 +848,15 @@ const Collector = struct {
     }
 
     fn placeKeyFromValue(self: *Collector, value: mlir.MlirValue) !obligation.PlaceKey {
+        return try self.placeKeyFromValueDepth(value, 0);
+    }
+
+    fn placeKeyFromValueDepth(self: *Collector, value: mlir.MlirValue, depth: u32) !obligation.PlaceKey {
+        if (depth > 32) return .{ .unknown = {} };
         if (mlir.oraValueIsNull(value)) return .{ .unknown = {} };
         if (mlir.mlirValueIsABlockArgument(value)) {
-            return .{ .parameter = @intCast(mlir.mlirBlockArgumentGetArgNumber(value)) };
+            const arg_number = self.functionEntryBlockArgumentNumber(value) orelse return .{ .unknown = {} };
+            return .{ .parameter = @intCast(arg_number) };
         }
         if (mlir.oraValueIsAOpResult(value)) {
             const owner = mlir.oraOpResultGetOwner(value);
@@ -860,8 +870,12 @@ const Collector = struct {
                         if (text.data != null) return .{ .constant = try self.allocator.dupe(u8, text.data[0..text.length]) };
                     }
                 }
+                if (mlir.oraTypeIsAddressType(mlir.oraValueGetType(value))) {
+                    if (std.mem.eql(u8, owner_name, "ora.evm.caller")) return .{ .msg_sender = {} };
+                    if (std.mem.eql(u8, owner_name, "ora.evm.origin")) return .{ .tx_origin = {} };
+                }
                 if (isTransparentValueOp(owner_name) and mlir.oraOperationGetNumOperands(owner) >= 1) {
-                    return try self.placeKeyFromValue(mlir.oraOperationGetOperand(owner, 0));
+                    return try self.placeKeyFromValueDepth(mlir.oraOperationGetOperand(owner, 0), depth + 1);
                 }
             }
         }
@@ -1073,9 +1087,7 @@ const Collector = struct {
         if (mlir.oraValueIsNull(value)) return null;
 
         if (mlir.mlirValueIsABlockArgument(value)) {
-            const raw_arg_number = mlir.mlirBlockArgumentGetArgNumber(value);
-            if (raw_arg_number < 0) return null;
-            const arg_number: usize = @intCast(raw_arg_number);
+            const arg_number: usize = self.functionEntryBlockArgumentNumber(value) orelse return null;
             const name = if (arg_number < self.function_param_names.len)
                 self.function_param_names[arg_number]
             else
@@ -1315,8 +1327,7 @@ const Collector = struct {
         if (expected_count == 0) return &.{};
 
         const types = try self.allocator.alloc(obligation.TypeRef, expected_count);
-        const region = mlir.oraOperationGetRegion(op, 0);
-        const block = if (!mlir.oraRegionIsNull(region)) mlir.oraRegionGetFirstBlock(region) else std.mem.zeroes(mlir.MlirBlock);
+        const block = functionEntryBlock(op);
         const arg_count: usize = if (!mlir.oraBlockIsNull(block)) @intCast(mlir.oraBlockGetNumArguments(block)) else 0;
         if (arg_count < expected_count) {
             try self.addBlockingDiagnosticFmt(
@@ -1333,6 +1344,17 @@ const Collector = struct {
                 try self.unknownTypeRef();
         }
         return types;
+    }
+
+    fn functionEntryBlockArgumentNumber(self: *Collector, value: mlir.MlirValue) ?usize {
+        if (!mlir.mlirValueIsABlockArgument(value)) return null;
+        if (mlir.oraBlockIsNull(self.function_entry_block)) return null;
+        const owner_block = mlir.mlirBlockArgumentGetOwner(value);
+        if (mlir.oraBlockIsNull(owner_block)) return null;
+        if (owner_block.ptr != self.function_entry_block.ptr) return null;
+        const raw_arg_number = mlir.mlirBlockArgumentGetArgNumber(value);
+        if (raw_arg_number < 0) return null;
+        return @intCast(raw_arg_number);
     }
 
     fn typeRefFromValue(self: *Collector, value: mlir.MlirValue) !obligation.TypeRef {
@@ -2101,6 +2123,12 @@ fn operationName(op: mlir.MlirOperation) []const u8 {
     const name = mlir.oraOperationGetName(op);
     if (name.data == null) return "";
     return name.data[0..name.length];
+}
+
+fn functionEntryBlock(op: mlir.MlirOperation) mlir.MlirBlock {
+    const region = mlir.oraOperationGetRegion(op, 0);
+    if (mlir.oraRegionIsNull(region)) return std.mem.zeroes(mlir.MlirBlock);
+    return mlir.oraRegionGetFirstBlock(region);
 }
 
 fn operationBodyHasExternalCall(op: mlir.MlirOperation) bool {

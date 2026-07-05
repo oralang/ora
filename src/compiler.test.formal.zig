@@ -3921,6 +3921,103 @@ test "formal obligation MLIR adapter projects read-only keyed map sload as place
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "keys := [.parameter 0]"));
 }
 
+test "formal obligation source collector rejects loop block argument map keys" {
+    const source_text =
+        \\contract StorageProjection {
+        \\    storage balances: map<u256, u256>;
+        \\
+        \\    pub fn check(x: u256, cap: u256)
+        \\        ensures balances[x] <= cap
+        \\    {
+        \\        var i: u256 = 0;
+        \\        while (i < x)
+        \\            invariant balances[i] <= cap
+        \\        {
+        \\            i = i + 1;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @check"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.invariant"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.write_slots_complete = true"));
+
+    const h = createContext();
+    defer destroyContext(h);
+
+    const module = try parseModule(h.ctx, rendered);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .invariant));
+    try expectEnsuresQuerySupported(result.set);
+    try expectLogicalQueryUnsupported(result.set, .invariant, .unsupported_origin_value);
+}
+
+test "formal obligation source collector projects environment map keys" {
+    const source_text =
+        \\contract EnvStorageProjection {
+        \\    storage balances: map<address, u256>;
+        \\    storage origins: map<address, u256>;
+        \\
+        \\    pub fn check()
+        \\        ensures balances[std.msg.sender()] == balances[std.msg.sender()]
+        \\        ensures origins[std.tx.origin()] == origins[std.tx.origin()]
+        \\    {
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.evm.caller"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.evm.origin"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.write_slots_complete = true"));
+
+    const h = createContext();
+    defer destroyContext(h);
+
+    const module = try parseModule(h.ctx, rendered);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 2), countLogical(result.set, .ensures));
+
+    var sender_reads: usize = 0;
+    var origin_reads: usize = 0;
+    for (result.set.terms) |term| {
+        if (term != .place_read) continue;
+        if (std.mem.eql(u8, term.place_read.root, "balances")) {
+            try testing.expectEqual(@as(usize, 1), term.place_read.keys.len);
+            try testing.expect(term.place_read.keys[0] == .msg_sender);
+            sender_reads += 1;
+        } else if (std.mem.eql(u8, term.place_read.root, "origins")) {
+            try testing.expectEqual(@as(usize, 1), term.place_read.keys.len);
+            try testing.expect(term.place_read.keys[0] == .tx_origin);
+            origin_reads += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), sender_reads);
+    try testing.expectEqual(@as(usize, 2), origin_reads);
+
+    const lean = try emitLeanToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(lean);
+    try testing.expect(std.mem.containsAtLeast(u8, lean, 1, ".msgSender"));
+    try testing.expect(std.mem.containsAtLeast(u8, lean, 1, ".txOrigin"));
+}
+
 test "formal obligation MLIR adapter requires complete write metadata before keyed map projection" {
     const h = createContext();
     defer destroyContext(h);
