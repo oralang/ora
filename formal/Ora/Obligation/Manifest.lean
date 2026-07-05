@@ -58,7 +58,7 @@ inductive VarRef where
   deriving Repr, BEq, DecidableEq
 
 inductive PlaceKey where
-  | parameter : Nat → PlaceKey
+  | parameter : FreeVarId → PlaceKey
   | comptimeParameter : Nat → PlaceKey
   | comptimeRangeParameter : Nat → PlaceKey
   | constant : String → PlaceKey

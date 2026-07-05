@@ -25,8 +25,34 @@ def decodeRegion : String → Option RegionRef
   | "calldata" => some .calldata
   | _ => none
 
+def parseDecimalPrefixUntilColon : List Char → Nat → Bool → Option (Nat × List Char)
+  | [], _, _ => none
+  | ':' :: rest, acc, seen => if seen then some (acc, rest) else none
+  | c :: rest, acc, _ =>
+      match decimalDigit? c with
+      | some digit => parseDecimalPrefixUntilColon rest (acc * 10 + digit) true
+      | none => none
+
+def stripPatternPrefix : List Char → Option (List Char)
+  | 'p' :: 'a' :: 't' :: 't' :: 'e' :: 'r' :: 'n' :: ':' :: rest => some rest
+  | _ => none
+
+def decodeFreeVarId (value : String) : Option FreeVarId :=
+  match value.toList with
+  | 'f' :: 'i' :: 'l' :: 'e' :: ':' :: rest =>
+      match parseDecimalPrefixUntilColon rest 0 false with
+      | some (file_id, suffix) =>
+          match stripPatternPrefix suffix with
+          | some patternChars =>
+              match parseDecimalNatAux patternChars 0 false with
+              | some pattern_id => some { file_id := file_id, pattern_id := pattern_id }
+              | none => none
+          | none => none
+      | none => none
+  | _ => none
+
 def decodeKey : String × String → Option PlaceKey
-  | ("parameter", value) => (parseDecimalNat? value).map .parameter
+  | ("parameter", value) => (decodeFreeVarId value).map .parameter
   | ("comptime_parameter", value) => (parseDecimalNat? value).map .comptimeParameter
   | ("comptime_range_parameter", value) => (parseDecimalNat? value).map .comptimeRangeParameter
   | ("constant", value) => some (.constant value)

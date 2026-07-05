@@ -856,7 +856,8 @@ const Collector = struct {
         if (mlir.oraValueIsNull(value)) return .{ .unknown = {} };
         if (mlir.mlirValueIsABlockArgument(value)) {
             const arg_number = self.functionEntryBlockArgumentNumber(value) orelse return .{ .unknown = {} };
-            return .{ .parameter = @intCast(arg_number) };
+            const id = (try self.functionParamBindingIdForPlaceKey(arg_number, "MLIR block argument")) orelse return .{ .unknown = {} };
+            return .{ .parameter = id };
         }
         if (mlir.oraValueIsAOpResult(value)) {
             const owner = mlir.oraOpResultGetOwner(value);
@@ -1627,7 +1628,7 @@ const Collector = struct {
             => term_id,
             .variable => |variable| switch (variable) {
                 .free => |free| {
-                    if (!freeVarIdEql(free.id, free_id)) return term_id;
+                    if (!obligation.freeVarIdEql(free.id, free_id)) return term_id;
                     return try self.addTerm(.{ .variable = .{ .bound = .{
                         .index = binder_depth,
                         .name = name,
@@ -1925,7 +1926,9 @@ const Collector = struct {
 
     fn placeKeyFromSegment(self: *Collector, segment: []const u8) !obligation.PlaceKey {
         if (std.mem.startsWith(u8, segment, "param#")) {
-            return .{ .parameter = try std.fmt.parseInt(u32, segment["param#".len..], 10) };
+            const index = try std.fmt.parseInt(usize, segment["param#".len..], 10);
+            const id = (try self.functionParamBindingIdForPlaceKey(index, segment)) orelse return .{ .unknown = {} };
+            return .{ .parameter = id };
         }
         if (std.mem.startsWith(u8, segment, "comptime_param#")) {
             return .{ .comptime_parameter = try std.fmt.parseInt(u32, segment["comptime_param#".len..], 10) };
@@ -1937,6 +1940,20 @@ const Collector = struct {
         if (std.mem.eql(u8, segment, "tx.origin")) return .{ .tx_origin = {} };
         if (std.mem.eql(u8, segment, "?")) return .{ .unknown = {} };
         return .{ .constant = try self.allocator.dupe(u8, segment) };
+    }
+
+    fn functionParamBindingIdForPlaceKey(
+        self: *Collector,
+        index: usize,
+        context: []const u8,
+    ) !?obligation.FreeVarId {
+        if (index < self.function_param_binding_ids.len) return self.function_param_binding_ids[index];
+        try self.addBlockingDiagnosticFmt(
+            .missing_effect_path,
+            "storage place key '{s}' references parameter {d} but ora.param_binding_ids is missing or too short",
+            .{ context, index },
+        );
+        return null;
     }
 
     fn symbolForOperation(
@@ -1997,10 +2014,6 @@ fn ownerEqual(lhs: obligation.Owner, rhs: obligation.Owner) bool {
             else => false,
         },
     };
-}
-
-fn freeVarIdEql(lhs: obligation.FreeVarId, rhs: obligation.FreeVarId) bool {
-    return lhs.file_id == rhs.file_id and lhs.pattern_id == rhs.pattern_id;
 }
 
 fn parseFreeVarId(text: []const u8) ?obligation.FreeVarId {

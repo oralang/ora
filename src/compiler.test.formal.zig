@@ -155,9 +155,14 @@ fn countQueryRole(set: obligation.ObligationSet, role: obligation.LogicalRole) u
     return count;
 }
 
-fn expectParameterKey(key: obligation.PlaceKey, expected: u32) !void {
+fn expectParameterKey(key: obligation.PlaceKey, expected: obligation.FreeVarId) !void {
     try testing.expect(key == .parameter);
-    try testing.expectEqual(expected, key.parameter);
+    try testing.expect(obligation.freeVarIdEql(expected, key.parameter));
+}
+
+fn expectAnyParameterKey(key: obligation.PlaceKey) !obligation.FreeVarId {
+    try testing.expect(key == .parameter);
+    return key.parameter;
 }
 
 fn expectConstantKey(key: obligation.PlaceKey, expected: []const u8) !void {
@@ -185,13 +190,27 @@ fn expectPlaceReadTermWithParameterKeys(
     set: obligation.ObligationSet,
     term_id: obligation.TermId,
     expected_root: []const u8,
-    expected_keys: []const u32,
+    expected_keys: []const obligation.FreeVarId,
 ) !void {
     try expectPlaceReadTerm(set, term_id, expected_root, .storage);
     const place = set.terms[term_id].place_read;
     try testing.expectEqual(expected_keys.len, place.keys.len);
     for (expected_keys, 0..) |expected, index| {
         try expectParameterKey(place.keys[index], expected);
+    }
+}
+
+fn expectPlaceReadTermWithParameterKeyCount(
+    set: obligation.ObligationSet,
+    term_id: obligation.TermId,
+    expected_root: []const u8,
+    expected_count: usize,
+) !void {
+    try expectPlaceReadTerm(set, term_id, expected_root, .storage);
+    const place = set.terms[term_id].place_read;
+    try testing.expectEqual(expected_count, place.keys.len);
+    for (place.keys) |key| {
+        _ = try expectAnyParameterKey(key);
     }
 }
 
@@ -406,6 +425,75 @@ fn collectPackageObligations(allocator: std.mem.Allocator, path: []const u8) !ob
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     try testing.expect(hir_result.diagnostics.isEmpty());
     return try obligation_from_mlir.collect(allocator, hir_result.module.raw_module, .{});
+}
+
+fn optionalStringEqualForTest(lhs: ?[]const u8, rhs: ?[]const u8) bool {
+    if (lhs) |left| {
+        if (rhs) |right| return std.mem.eql(u8, left, right);
+        return false;
+    }
+    return rhs == null;
+}
+
+fn ownerEqualForTest(lhs: obligation.Owner, rhs: obligation.Owner) bool {
+    return switch (lhs) {
+        .module => |left| switch (rhs) {
+            .module => |right| std.mem.eql(u8, left, right),
+            else => false,
+        },
+        .function => |left| switch (rhs) {
+            .function => |right| std.mem.eql(u8, left.name, right.name) and
+                optionalStringEqualForTest(left.module, right.module) and
+                optionalStringEqualForTest(left.contract, right.contract),
+            else => false,
+        },
+        .contract => |left| switch (rhs) {
+            .contract => |right| std.mem.eql(u8, left, right),
+            else => false,
+        },
+        .trait_method => |left| switch (rhs) {
+            .trait_method => |right| std.mem.eql(u8, left.trait_name, right.trait_name) and
+                std.mem.eql(u8, left.method_name, right.method_name) and
+                optionalStringEqualForTest(left.impl_name, right.impl_name),
+            else => false,
+        },
+        .statement => |left| switch (rhs) {
+            .statement => |right| left.ordinal == right.ordinal and
+                std.mem.eql(u8, left.function_name, right.function_name),
+            else => false,
+        },
+        .backend => |left| switch (rhs) {
+            .backend => |right| left.component == right.component and std.mem.eql(u8, left.name, right.name),
+            else => false,
+        },
+    };
+}
+
+fn obligationOwnerByIdForTest(set: obligation.ObligationSet, id: obligation.Id) ?obligation.Owner {
+    for (set.obligations) |item| {
+        if (item.id == id) return item.owner;
+    }
+    return null;
+}
+
+fn assumptionOwnerByIdForTest(set: obligation.ObligationSet, id: obligation.Id) ?obligation.Owner {
+    for (set.assumptions) |item| {
+        if (item.id == id) return item.owner;
+    }
+    return null;
+}
+
+fn expectQueriesOwnerScoped(set: obligation.ObligationSet) !void {
+    for (set.queries) |query| {
+        for (query.obligation_ids) |id| {
+            const owner = obligationOwnerByIdForTest(set, id) orelse return error.TestUnexpectedResult;
+            try testing.expect(ownerEqualForTest(query.owner, owner));
+        }
+        for (query.assumption_ids) |id| {
+            const owner = assumptionOwnerByIdForTest(set, id) orelse return error.TestUnexpectedResult;
+            try testing.expect(ownerEqualForTest(query.owner, owner));
+        }
+    }
 }
 
 fn pathFromTmpAlloc(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, rel_path: []const u8) ![]u8 {
@@ -2726,12 +2814,12 @@ test "formal Lean emitter writes resource rows with places" {
     const source_place: obligation.PlaceRef = .{
         .root = "balances",
         .region = .storage,
-        .keys = &.{.{ .parameter = 0 }},
+        .keys = &.{.{ .parameter = .{ .file_id = 0, .pattern_id = 0 } }},
     };
     const destination_place: obligation.PlaceRef = .{
         .root = "balances",
         .region = .storage,
-        .keys = &.{.{ .parameter = 1 }},
+        .keys = &.{.{ .parameter = .{ .file_id = 0, .pattern_id = 1 } }},
     };
     const obligations = [_]obligation.Obligation{
         .{
@@ -2773,8 +2861,8 @@ test "formal Lean emitter writes resource rows with places" {
     defer testing.allocator.free(actual);
 
     try testing.expect(std.mem.containsAtLeast(u8, actual, 1, ".resource { op := .move, domain := \"TokenUnit\""));
-    try testing.expect(std.mem.containsAtLeast(u8, actual, 1, "source := some { root := \"balances\", region := .storage, fields := [], keys := [.parameter 0] }"));
-    try testing.expect(std.mem.containsAtLeast(u8, actual, 1, "destination := some { root := \"balances\", region := .storage, fields := [], keys := [.parameter 1] }"));
+    try testing.expect(std.mem.containsAtLeast(u8, actual, 1, "source := some { root := \"balances\", region := .storage, fields := [], keys := [.parameter { file_id := 0, pattern_id := 0 }] }"));
+    try testing.expect(std.mem.containsAtLeast(u8, actual, 1, "destination := some { root := \"balances\", region := .storage, fields := [], keys := [.parameter { file_id := 0, pattern_id := 1 }] }"));
     try testing.expect(std.mem.containsAtLeast(u8, actual, 1, "amount := some (.term 2), property := .conservation"));
     try testing.expect(std.mem.containsAtLeast(u8, actual, 1, "theorem emitted_manifest_wf"));
 }
@@ -4260,13 +4348,85 @@ test "formal obligation MLIR adapter projects read-only keyed map sload as place
 
     const quantified = try expectQuantifiedTerm(result.set, try expectLogicalTerm(result.set, .ensures), .forall, "owner");
     const body = try expectBinaryTerm(result.set, quantified.body, .eq);
-    try expectPlaceReadTermWithParameterKeys(result.set, body.lhs, "balances", &.{0});
-    try expectPlaceReadTermWithParameterKeys(result.set, body.rhs, "balances", &.{0});
+    try expectPlaceReadTermWithParameterKeyCount(result.set, body.lhs, "balances", 1);
+    try expectPlaceReadTermWithParameterKeyCount(result.set, body.rhs, "balances", 1);
 
     const rendered = try emitLeanToOwnedString(testing.allocator, result.set);
     defer testing.allocator.free(rendered);
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "root := \"balances\""));
-    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "keys := [.parameter 0]"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "keys := [.parameter { file_id := "));
+}
+
+test "formal obligation MLIR adapter ties parameter place keys to free variable ids" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  ora.contract @StorageProofs {
+        \\    ora.global "balances" : !ora.map<!ora.int<256, false>, !ora.int<256, false>>
+        \\    func.func @check(%user: !ora.int<256, false>, %other: !ora.int<256, false>) attributes {
+        \\      ora.param_names = ["user", "other"],
+        \\      ora.param_binding_ids = ["file:77:pattern:1", "file:77:pattern:2"],
+        \\      ora.write_slots = [],
+        \\      ora.write_slots_complete = true
+        \\    } {
+        \\      %req = ora.cmp "ule", %user, %other : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\      "ora.requires"(%req) : (i1) -> ()
+        \\      %balances = ora.sload "balances" : !ora.map<!ora.int<256, false>, !ora.int<256, false>>
+        \\      %balance = "ora.map_get"(%balances, %user) : (!ora.map<!ora.int<256, false>, !ora.int<256, false>>, !ora.int<256, false>) -> !ora.int<256, false>
+        \\      %cmp = ora.cmp "eq", %balance, %balance : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\      "ora.ensures"(%cmp) : (i1) -> ()
+        \\      func.return
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countAssumption(result.set, .requires));
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
+    try expectEnsuresQuerySupported(result.set);
+
+    var user_var_id: ?obligation.FreeVarId = null;
+    var other_var_id: ?obligation.FreeVarId = null;
+    var place_key_id: ?obligation.FreeVarId = null;
+    for (result.set.terms) |term| {
+        switch (term) {
+            .variable => |variable| switch (variable) {
+                .free => |free| {
+                    if (std.mem.eql(u8, free.name, "user")) user_var_id = free.id;
+                    if (std.mem.eql(u8, free.name, "other")) other_var_id = free.id;
+                },
+                .bound => {},
+            },
+            .place_read => |place| {
+                if (std.mem.eql(u8, place.root, "balances")) {
+                    try testing.expectEqual(@as(usize, 1), place.keys.len);
+                    try testing.expect(place.keys[0] == .parameter);
+                    place_key_id = place.keys[0].parameter;
+                }
+            },
+            else => {},
+        }
+    }
+
+    const user_id = user_var_id orelse return error.TestUnexpectedResult;
+    const other_id = other_var_id orelse return error.TestUnexpectedResult;
+    const key_id = place_key_id orelse return error.TestUnexpectedResult;
+    try testing.expect(obligation.freeVarIdEql(user_id, key_id));
+    try testing.expect(!obligation.freeVarIdEql(other_id, key_id));
+
+    const lean = try emitLeanToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(lean);
+    try testing.expect(std.mem.containsAtLeast(u8, lean, 1, ".free { id := { file_id := 77, pattern_id := 1 }, name := \"user\""));
+    try testing.expect(std.mem.containsAtLeast(u8, lean, 1, "keys := [.parameter { file_id := 77, pattern_id := 1 }]"));
 }
 
 test "formal obligation source collector rejects loop block argument map keys" {
@@ -4449,6 +4609,47 @@ test "formal obligation source collector keeps parameter inequality map frame Z3
     try expectEnsuresQueryUnsupported(result.set, .unsupported_origin_value);
 }
 
+test "formal obligation source queries do not mix same-ordinal parameter owners" {
+    const source_text =
+        \\contract StorageProjection {
+        \\    storage balances: map<u256, u256>;
+        \\
+        \\    pub fn first(x: u256, cap: u256)
+        \\        requires x <= cap
+        \\        ensures balances[x] == old(balances[x])
+        \\    {
+        \\    }
+        \\
+        \\    pub fn second(x: u256, cap: u256)
+        \\        requires x <= cap
+        \\        ensures balances[x] == old(balances[x])
+        \\    {
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @first"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @second"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "ora.param_binding_ids"));
+
+    const h = createContext();
+    defer destroyContext(h);
+
+    const module = try parseModule(h.ctx, rendered);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 2), countAssumption(result.set, .requires));
+    try testing.expectEqual(@as(usize, 2), countLogical(result.set, .ensures));
+    try expectQueriesOwnerScoped(result.set);
+}
+
 test "formal obligation source collector does not split msg.sender from tx.origin" {
     const source_text =
         \\contract StorageProjection {
@@ -4516,6 +4717,51 @@ test "formal obligation MLIR adapter requires complete write metadata before key
     const report = try dumpManifestToOwnedString(testing.allocator, result.set);
     defer testing.allocator.free(report);
     try testing.expect(!std.mem.containsAtLeast(u8, report, 1, "\"tag\":\"place_read\""));
+}
+
+test "formal obligation MLIR adapter blocks parameter effect paths without binding ids" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  ora.contract @StorageProofs {
+        \\    ora.global "balances" : !ora.map<!ora.int<256, false>, !ora.int<256, false>>
+        \\    func.func @check(%owner: !ora.int<256, false>) attributes {
+        \\      ora.write_slots = ["balances[param#0]"],
+        \\      ora.write_slots_complete = true
+        \\    } {
+        \\      %balances = ora.sload "balances" : !ora.map<!ora.int<256, false>, !ora.int<256, false>>
+        \\      %balance = "ora.map_get"(%balances, %owner) : (!ora.map<!ora.int<256, false>, !ora.int<256, false>>, !ora.int<256, false>) -> !ora.int<256, false>
+        \\      %cmp = ora.cmp "eq", %balance, %balance : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\      "ora.ensures"(%cmp) : (i1) -> ()
+        \\      func.return
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(obligation.ArtifactBlockReason.blocking_diagnostic, result.set.artifactDecision().blocked);
+    var saw_missing_binding = false;
+    for (result.set.diagnostics) |diagnostic| {
+        if (diagnostic.kind != .missing_effect_path) continue;
+        if (std.mem.containsAtLeast(
+            u8,
+            diagnostic.message,
+            1,
+            "references parameter 0 but ora.param_binding_ids is missing or too short",
+        )) {
+            saw_missing_binding = true;
+        }
+    }
+    try testing.expect(saw_missing_binding);
 }
 
 test "formal obligation MLIR adapter does not project keyed map read when function writes root" {
@@ -4762,12 +5008,12 @@ test "formal obligation MLIR adapter projects nested read-only map paths as dist
         if (std.mem.eql(u8, term.place_read.root, "balances")) {
             saw_balances = true;
             try testing.expectEqual(@as(usize, 1), term.place_read.keys.len);
-            try expectParameterKey(term.place_read.keys[0], 0);
+            try expectParameterKey(term.place_read.keys[0], .{ .file_id = 45, .pattern_id = 1 });
         } else if (std.mem.eql(u8, term.place_read.root, "allowances")) {
             saw_allowances = true;
             try testing.expectEqual(@as(usize, 2), term.place_read.keys.len);
-            try expectParameterKey(term.place_read.keys[0], 0);
-            try expectParameterKey(term.place_read.keys[1], 1);
+            try expectParameterKey(term.place_read.keys[0], .{ .file_id = 45, .pattern_id = 1 });
+            try expectParameterKey(term.place_read.keys[1], .{ .file_id = 45, .pattern_id = 2 });
         }
     }
     try testing.expect(saw_balances);
@@ -4777,7 +5023,7 @@ test "formal obligation MLIR adapter projects nested read-only map paths as dist
     defer testing.allocator.free(lean);
     try testing.expect(std.mem.containsAtLeast(u8, lean, 1, "root := \"balances\""));
     try testing.expect(std.mem.containsAtLeast(u8, lean, 1, "root := \"allowances\""));
-    try testing.expect(std.mem.containsAtLeast(u8, lean, 1, "keys := [.parameter 0, .parameter 1]"));
+    try testing.expect(std.mem.containsAtLeast(u8, lean, 1, "keys := [.parameter { file_id := 45, pattern_id := 1 }, .parameter { file_id := 45, pattern_id := 2 }]"));
 }
 
 test "formal obligation MLIR adapter tracks nested forall binders with De Bruijn indexes" {
@@ -4853,8 +5099,10 @@ test "formal obligation MLIR adapter records effect frame summaries" {
 
     const text =
         \\module {
-        \\  func.func @effect_surface() attributes {
+        \\  func.func @effect_surface(%account: !ora.int<256, false>) attributes {
         \\    ora.effect = "readwrites",
+        \\    ora.param_names = ["account"],
+        \\    ora.param_binding_ids = ["file:88:pattern:1"],
         \\    ora.modifies_slots = ["balances[param#0]", "config.owner"],
         \\    ora.read_slots = ["balances[param#0]", "transient:scratch"],
         \\    ora.write_slots = ["balances[param#0]"]
@@ -4885,8 +5133,7 @@ test "formal obligation MLIR adapter records effect frame summaries" {
     try testing.expectEqualStrings("balances", writes.declared[0].root);
     try testing.expectEqual(obligation.RegionRef.storage, writes.declared[0].region);
     try testing.expectEqual(@as(usize, 1), writes.declared[0].keys.len);
-    try testing.expect(writes.declared[0].keys[0] == .parameter);
-    try testing.expectEqual(@as(u32, 0), writes.declared[0].keys[0].parameter);
+    try expectParameterKey(writes.declared[0].keys[0], .{ .file_id = 88, .pattern_id = 1 });
     try testing.expectEqualStrings("config", writes.declared[1].root);
     try testing.expectEqual(@as(usize, 1), writes.declared[1].fields.len);
     try testing.expectEqualStrings("owner", writes.declared[1].fields[0]);
@@ -5016,7 +5263,10 @@ test "formal obligation MLIR adapter expands resource op properties" {
 
     const text =
         \\module {
-        \\  func.func @transfer_resource(%balances: !ora.map<!ora.address, !ora.int<256, false>>, %from: !ora.address, %to: !ora.address, %amount: !ora.int<256, false>) {
+        \\  func.func @transfer_resource(%balances: !ora.map<!ora.address, !ora.int<256, false>>, %from: !ora.address, %to: !ora.address, %amount: !ora.int<256, false>) attributes {
+        \\    ora.param_names = ["balances", "from", "to", "amount"],
+        \\    ora.param_binding_ids = ["file:201:pattern:0", "file:201:pattern:1", "file:201:pattern:2", "file:201:pattern:3"]
+        \\  } {
         \\    "ora.move"(%balances, %from, %balances, %to, %amount) <{operand_segment_sizes = array<i32: 2, 2, 1>, domain = "TokenUnit", carrier_type = !ora.int<256, false>, carrier_signed = false}> : (!ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.int<256, false>) -> ()
         \\    func.return
         \\  }
@@ -5051,8 +5301,8 @@ test "formal obligation MLIR adapter expands resource op properties" {
         try expectPlaceRoot(destination, "arg#0", .storage);
         try testing.expectEqual(@as(usize, 1), source.keys.len);
         try testing.expectEqual(@as(usize, 1), destination.keys.len);
-        try expectParameterKey(source.keys[0], 1);
-        try expectParameterKey(destination.keys[0], 2);
+        try expectParameterKey(source.keys[0], .{ .file_id = 201, .pattern_id = 1 });
+        try expectParameterKey(destination.keys[0], .{ .file_id = 201, .pattern_id = 2 });
     }
 }
 
@@ -5158,6 +5408,8 @@ test "formal report coverage summarizes representative MLIR obligation classes" 
     const text =
         \\module {
         \\  func.func @coverage(%flag: i1, %balances: !ora.map<!ora.address, !ora.int<256, false>>, %from: !ora.address, %to: !ora.address, %amount: !ora.int<256, false>, %x: i256, %y: i256) attributes {
+        \\    ora.param_names = ["flag", "balances", "from", "to", "amount", "x", "y"],
+        \\    ora.param_binding_ids = ["file:202:pattern:0", "file:202:pattern:1", "file:202:pattern:2", "file:202:pattern:3", "file:202:pattern:4", "file:202:pattern:5", "file:202:pattern:6"],
         \\    ora.modifies_slots = ["balances[param#0]"],
         \\    ora.read_slots = ["balances[param#0]"],
         \\    ora.write_slots = ["balances[param#0]"]
@@ -5209,13 +5461,13 @@ test "formal report coverage summarizes representative MLIR obligation classes" 
     const report = try dumpManifestToOwnedString(testing.allocator, result.set);
     defer testing.allocator.free(report);
 
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"artifact_decision\",\"schema_version\":1,\"status\":\"blocked\",\"reason\":\"missing_proof\"}"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":1,\"assumptions\":1,\"obligations\":13,\"queries\":14"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"artifact_decision\",\"schema_version\":2,\"status\":\"blocked\",\"reason\":\"missing_proof\"}"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":2,\"assumptions\":1,\"obligations\":13,\"queries\":14"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_obligation_links\":13"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"obligation_kinds\":{\"logical\":4,\"runtime_guard\":1,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":1,\"resource\":6,\"quantifier\":1,\"filtered_input\":0,\"backend_fact\":0}"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_backends\":{\"unspecified\":14,\"z3\":0,\"lean\":0}"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_results\":{\"missing\":14,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":1"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":2"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"logical\",\"role\":\"ensures\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"arithmetic_safety\":\"addition_overflow\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"arithmetic_safety\":\"division_by_zero\""));
@@ -5224,7 +5476,7 @@ test "formal report coverage summarizes representative MLIR obligation classes" 
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"resource\",\"op\":\"move\",\"domain\":\"TokenUnit\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"property\":\"conservation\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"quantifier\",\"quantifier\":\"forall\""));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"query\",\"schema_version\":1"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"query\",\"schema_version\":2"));
 }
 
 test "formal report coverage includes representative source contracts" {
@@ -5237,8 +5489,8 @@ test "formal report coverage includes representative source contracts" {
     {
         const report = try dumpManifestToOwnedString(testing.allocator, logical.set);
         defer testing.allocator.free(report);
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":1"));
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":1"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":2"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":2"));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"role\":\"ensures\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"role\":\"assert\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"arithmetic_safety\":\"subtraction_overflow\""));
@@ -5253,7 +5505,7 @@ test "formal report coverage includes representative source contracts" {
     {
         const report = try dumpManifestToOwnedString(testing.allocator, resource.set);
         defer testing.allocator.free(report);
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":1"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":2"));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"effect_frame\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"resource\",\"op\":\"move\",\"domain\":\"TokenUnit\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"property\":\"conservation\""));
@@ -5265,7 +5517,7 @@ test "formal report coverage includes representative source contracts" {
     {
         const report = try dumpManifestToOwnedString(testing.allocator, quantifier.set);
         defer testing.allocator.free(report);
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":1"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":2"));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"quantifier\",\"quantifier\":\"forall\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"binder_type\":{\"tag\":\"spelling\",\"value\":\"u256\"}"));
     }

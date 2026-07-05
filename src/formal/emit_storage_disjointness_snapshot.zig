@@ -53,6 +53,10 @@ fn writeLeanString(out: anytype, value: []const u8) !void {
     try out.writeByte('"');
 }
 
+fn writeFreeVarIdString(out: anytype, id: obligation.FreeVarId) !void {
+    try out.print("\"file:{d}:pattern:{d}\"", .{ id.file_id, id.pattern_id });
+}
+
 fn writeStringList(out: anytype, values: []const []const u8) !void {
     if (values.len == 0) return out.writeAll("[]");
     try out.writeByte('[');
@@ -66,9 +70,10 @@ fn writeStringList(out: anytype, values: []const []const u8) !void {
 fn writePlaceKey(out: anytype, key: obligation.PlaceKey) !void {
     try out.writeByte('(');
     switch (key) {
-        .parameter => |index| {
+        .parameter => |id| {
             try writeLeanString(out, "parameter");
-            try out.print(", \"{d}\"", .{index});
+            try out.writeAll(", ");
+            try writeFreeVarIdString(out, id);
         },
         .comptime_parameter => |index| {
             try writeLeanString(out, "comptime_parameter");

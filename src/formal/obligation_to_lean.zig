@@ -1014,7 +1014,10 @@ fn writePlaceKeyList(writer: anytype, keys: []const obligation.PlaceKey) !void {
 
 fn writePlaceKey(writer: anytype, key: obligation.PlaceKey) !void {
     switch (key) {
-        .parameter => |index| try writer.print(".parameter {d}", .{index}),
+        .parameter => |id| {
+            try writer.writeAll(".parameter ");
+            try writeFreeVarId(writer, id);
+        },
         .comptime_parameter => |index| try writer.print(".comptimeParameter {d}", .{index}),
         .comptime_range_parameter => |index| try writer.print(".comptimeRangeParameter {d}", .{index}),
         .constant => |value| {
@@ -1025,6 +1028,14 @@ fn writePlaceKey(writer: anytype, key: obligation.PlaceKey) !void {
         .tx_origin => try writer.writeAll(".txOrigin"),
         .unknown => try writer.writeAll(".unknown"),
     }
+}
+
+fn writeFreeVarId(writer: anytype, id: obligation.FreeVarId) !void {
+    try writer.writeAll("{ file_id := ");
+    try writer.print("{d}", .{id.file_id});
+    try writer.writeAll(", pattern_id := ");
+    try writer.print("{d}", .{id.pattern_id});
+    try writer.writeAll(" }");
 }
 
 fn writeVarRef(writer: anytype, variable: obligation.VarRef) !void {
@@ -1041,11 +1052,8 @@ fn writeVarRef(writer: anytype, variable: obligation.VarRef) !void {
 }
 
 fn writeFreeVarRef(writer: anytype, variable: obligation.FreeVarRef) !void {
-    try writer.writeAll("{ id := { file_id := ");
-    try writer.print("{d}", .{variable.id.file_id});
-    try writer.writeAll(", pattern_id := ");
-    try writer.print("{d}", .{variable.id.pattern_id});
-    try writer.writeAll(" }");
+    try writer.writeAll("{ id := ");
+    try writeFreeVarId(writer, variable.id);
     try writer.writeAll(", name := ");
     try writeLeanString(writer, variable.name);
     try writer.writeAll(", ty := ");
@@ -1377,7 +1385,7 @@ test "Lean emitter writes locally nameless variable references" {
 }
 
 test "Lean emitter writes effect frame obligations" {
-    const declared_keys = [_]obligation.PlaceKey{.{ .parameter = 0 }};
+    const declared_keys = [_]obligation.PlaceKey{.{ .parameter = .{ .file_id = 0, .pattern_id = 0 } }};
     const declared = [_]obligation.PlaceRef{
         .{
             .root = "balances",
@@ -1421,7 +1429,7 @@ test "Lean emitter writes effect frame obligations" {
     const rendered = buffer.written();
     try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 1, ".effectFrame { relation := .writeCoveredByModifies"));
     try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "{ root := \"balances\", region := .storage"));
-    try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "keys := [.parameter 0]"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "keys := [.parameter { file_id := 0, pattern_id := 0 }]"));
     try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "def emittedQuery_2 : Prop :="));
     try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "obligationFollowsFromAssumptions emittedManifest"));
 }

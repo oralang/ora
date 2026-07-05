@@ -12,7 +12,7 @@ const std = @import("std");
 pub const Id = u32;
 pub const TermId = u32;
 
-pub const obligation_dump_schema_version: u32 = 1;
+pub const obligation_dump_schema_version: u32 = 2;
 pub const proof_certificate_schema_version: u32 = 1;
 
 pub const ObligationSet = struct {
@@ -848,6 +848,10 @@ pub const FreeVarId = struct {
     pattern_id: u32,
 };
 
+pub fn freeVarIdEql(lhs: FreeVarId, rhs: FreeVarId) bool {
+    return lhs.file_id == rhs.file_id and lhs.pattern_id == rhs.pattern_id;
+}
+
 pub const VarRefTag = enum(u8) {
     free,
     bound,
@@ -953,7 +957,7 @@ pub const PlaceKeyTag = enum(u8) {
 };
 
 pub const PlaceKey = union(PlaceKeyTag) {
-    parameter: u32,
+    parameter: FreeVarId,
     comptime_parameter: u32,
     comptime_range_parameter: u32,
     constant: []const u8,
@@ -979,7 +983,7 @@ pub fn placeRefEql(lhs: PlaceRef, rhs: PlaceRef) bool {
 pub fn placeKeyEql(lhs: PlaceKey, rhs: PlaceKey) bool {
     if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
     return switch (lhs) {
-        .parameter => |value| value == rhs.parameter,
+        .parameter => |value| freeVarIdEql(value, rhs.parameter),
         .comptime_parameter => |value| value == rhs.comptime_parameter,
         .comptime_range_parameter => |value| value == rhs.comptime_range_parameter,
         .constant => |value| std.mem.eql(u8, value, rhs.constant),
@@ -1052,12 +1056,14 @@ const fixture_key_const_2 = [_]PlaceKey{.{ .constant = "2" }};
 const fixture_key_const_1001 = [_]PlaceKey{.{ .constant = "1001" }};
 const fixture_key_const_1_000 = [_]PlaceKey{.{ .constant = "1_000" }};
 const fixture_key_const_bad = [_]PlaceKey{.{ .constant = "0..2" }};
-const fixture_key_param_0 = [_]PlaceKey{.{ .parameter = 0 }};
-const fixture_key_param_1 = [_]PlaceKey{.{ .parameter = 1 }};
+const fixture_param_0: FreeVarId = .{ .file_id = 0, .pattern_id = 0 };
+const fixture_param_1: FreeVarId = .{ .file_id = 0, .pattern_id = 1 };
+const fixture_key_param_0 = [_]PlaceKey{.{ .parameter = fixture_param_0 }};
+const fixture_key_param_1 = [_]PlaceKey{.{ .parameter = fixture_param_1 }};
 const fixture_key_msg_sender = [_]PlaceKey{.{ .msg_sender = {} }};
 const fixture_key_tx_origin = [_]PlaceKey{.{ .tx_origin = {} }};
 const fixture_key_unknown = [_]PlaceKey{.{ .unknown = {} }};
-const fixture_keys_prefix = [_]PlaceKey{ .{ .parameter = 0 }, .{ .constant = "1" } };
+const fixture_keys_prefix = [_]PlaceKey{ .{ .parameter = fixture_param_0 }, .{ .constant = "1" } };
 const fixture_field_owner = [_][]const u8{"owner"};
 const fixture_field_admin = [_][]const u8{"admin"};
 
