@@ -2,7 +2,7 @@
 // INPUT: ora-example/regions/transitions/valid/stack_to_storage.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {balance = 1 : ui64, counter = 0 : ui64, flag = 2 : ui64}, ora.global_slots_built} {
-// CHECK-NEXT:   func.func @testStackToStorage() attributes {ora.dispatch_class = "mutating", ora.effect = "writes", ora.selector = "0x1d175868", ora.visibility = "pub", ora.write_slots = ["counter", "balance", "flag"]} {
+// CHECK-NEXT:   func.func @testStackToStorage() attributes {ora.dispatch_class = "mutating", ora.effect = "writes", ora.selector = "0x1d175868", ora.visibility = "pub", ora.write_slots = ["counter", "balance", "flag"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %slot_counter = sir.const 0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/regions/transitions/valid/stack_to_storage.ora":16:9)))
 // CHECK-NEXT:     %slot_balance = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_flag = sir.const 2 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/regions/transitions/valid/stack_to_storage.ora":23:9)))
@@ -15,12 +15,12 @@
 // CHECK-NEXT:     sir.sstore %slot_flag : !sir.u256, %1 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/regions/transitions/valid/stack_to_storage.ora":23:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/transitions/valid/stack_to_storage.ora":13:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/transitions/valid/stack_to_storage.ora":13:5)
-// CHECK-NEXT:   func.func @testStackToStorageFromFunction(%arg0: !sir.u256 loc("{{.*}}/ora-example/regions/transitions/valid/stack_to_storage.ora":26:43)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "writes", ora.param_binding_ids = ["file:0:pattern:5"], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x040e5f95", ora.visibility = "pub", ora.write_slots = ["counter"]} {
+// CHECK-NEXT:   func.func @testStackToStorageFromFunction(%arg0: !sir.u256 loc("{{.*}}/ora-example/regions/transitions/valid/stack_to_storage.ora":26:43)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "writes", ora.param_binding_ids = ["file:0:pattern:5"], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x040e5f95", ora.visibility = "pub", ora.write_slots = ["counter"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %slot_counter = sir.const 0 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/regions/transitions/valid/stack_to_storage.ora":28:9)))
 // CHECK-NEXT:     sir.sstore %slot_counter : !sir.u256, %arg0 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/regions/transitions/valid/stack_to_storage.ora":28:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/transitions/valid/stack_to_storage.ora":26:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/transitions/valid/stack_to_storage.ora":26:5)
-// CHECK-NEXT:   func.func @testStackToStorageFromArithmetic() attributes {ora.dispatch_class = "mutating", ora.effect = "writes", ora.selector = "0xed868c30", ora.visibility = "pub", ora.write_slots = ["counter"]} {
+// CHECK-NEXT:   func.func @testStackToStorageFromArithmetic() attributes {ora.dispatch_class = "mutating", ora.effect = "writes", ora.selector = "0xed868c30", ora.visibility = "pub", ora.write_slots = ["counter"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %c30 = sir.const 30 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/regions/transitions/valid/stack_to_storage.ora":34:25)))
 // CHECK-NEXT:     %slot_counter = sir.const 0 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/regions/transitions/valid/stack_to_storage.ora":35:9)))
 // CHECK-NEXT:     %0 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)

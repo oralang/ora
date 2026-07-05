@@ -2,7 +2,7 @@
 // INPUT: ora-example/smt/verification/function_contracts_old.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {counter = 0 : ui64, last_value = 2 : ui64, total = 1 : ui64}, ora.global_slots_built} {
-// CHECK-NEXT:   func.func @increment() attributes {ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.read_slots = ["counter"], ora.selector = "0xd09de08a", ora.visibility = "pub", ora.write_slots = ["counter"]} {
+// CHECK-NEXT:   func.func @increment() attributes {ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.read_slots = ["counter"], ora.selector = "0xd09de08a", ora.visibility = "pub", ora.write_slots = ["counter"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 4 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_counter = sir.const 0 : !sir.u256 loc(unknown)
@@ -47,7 +47,7 @@
 // CHECK-NEXT:   ^bb5:  // pred: ^bb4
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/verification/function_contracts_old.ora":14:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/function_contracts_old.ora":14:5)
-// CHECK-NEXT:   func.func @add(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/function_contracts_old.ora":22:16)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:1"], ora.param_names = ["value"], ora.read_slots = ["total"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x1003e2d2", ora.visibility = "pub", ora.write_slots = ["total"]} {
+// CHECK-NEXT:   func.func @add(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/function_contracts_old.ora":22:16)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:1"], ora.param_names = ["value"], ora.read_slots = ["total"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x1003e2d2", ora.visibility = "pub", ora.write_slots = ["total"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 6988570666312495752839002421695666563898142680323167511053911032881624383488 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
@@ -119,7 +119,7 @@
 // CHECK-NEXT:   ^bb9:  // pred: ^bb7
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/verification/function_contracts_old.ora":22:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/function_contracts_old.ora":22:5)
-// CHECK-NEXT:   func.func @update(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/function_contracts_old.ora":31:19)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:3"], ora.param_names = ["value"], ora.read_slots = ["counter", "total", "last_value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x82ab890a", ora.visibility = "pub", ora.write_slots = ["counter", "total", "last_value"]} {
+// CHECK-NEXT:   func.func @update(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/function_contracts_old.ora":31:19)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:3"], ora.param_names = ["value"], ora.read_slots = ["counter", "total", "last_value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x82ab890a", ora.visibility = "pub", ora.write_slots = ["counter", "total", "last_value"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 6988570666312495752839002421695666563898142680323167511053911032881624383488 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
@@ -232,7 +232,7 @@
 // CHECK-NEXT:     %value_7 = sir.sload %slot_last_value : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/function_contracts_old.ora":11:5)
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/verification/function_contracts_old.ora":31:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/function_contracts_old.ora":31:5)
-// CHECK-NEXT:   func.func @multiplyAndAdd(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/function_contracts_old.ora":45:27), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/verification/function_contracts_old.ora":45:41)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["uint256", "uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:7", "file:11:pattern:8"], ora.param_names = ["factor", "addend"], ora.read_slots = ["total"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0xcd6d3060", ora.visibility = "pub", ora.write_slots = ["total"]} {
+// CHECK-NEXT:   func.func @multiplyAndAdd(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/function_contracts_old.ora":45:27), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/verification/function_contracts_old.ora":45:41)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["uint256", "uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:7", "file:11:pattern:8"], ora.param_names = ["factor", "addend"], ora.read_slots = ["total"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0xcd6d3060", ora.visibility = "pub", ora.write_slots = ["total"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 56016217287220138543383237988819299768112786790290310538187226855197252780032 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
@@ -345,7 +345,7 @@
 // CHECK-NEXT:   ^bb13:  // pred: ^bb11
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/verification/function_contracts_old.ora":45:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/function_contracts_old.ora":45:5)
-// CHECK-NEXT:   func.func @conditionalIncrement(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/function_contracts_old.ora":57:33)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["bool"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:10"], ora.param_names = ["condition"], ora.read_slots = ["counter"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x0887573d", ora.visibility = "pub", ora.write_slots = ["counter"]} {
+// CHECK-NEXT:   func.func @conditionalIncrement(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/function_contracts_old.ora":57:33)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["bool"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:10"], ora.param_names = ["condition"], ora.read_slots = ["counter"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x0887573d", ora.visibility = "pub", ora.write_slots = ["counter"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %slot_counter = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %0 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 4 : !sir.u256 loc(unknown)
@@ -401,7 +401,7 @@
 // CHECK-NEXT:   ^bb10:  // 2 preds: ^bb8, ^bb9
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/verification/function_contracts_old.ora":57:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/function_contracts_old.ora":57:5)
-// CHECK-NEXT:   func.func @incrementAndReturn() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.read_slots = ["counter"], ora.selector = "0x6058e06b", ora.visibility = "pub", ora.write_slots = ["counter"]} {
+// CHECK-NEXT:   func.func @incrementAndReturn() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.read_slots = ["counter"], ora.selector = "0x6058e06b", ora.visibility = "pub", ora.write_slots = ["counter"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)

@@ -103,7 +103,7 @@
 // CHECK-NEXT:   ^bb11:  // pred: ^bb10
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":10:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":10:5)
-// CHECK-NEXT:   func.func @transferWithConstraints(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":31:36)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:4"], ora.param_names = ["amount"], ora.read_slots = ["balance", "max_balance"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xc680488e", ora.visibility = "pub", ora.write_slots = ["balance"]} {
+// CHECK-NEXT:   func.func @transferWithConstraints(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":31:36)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:4"], ora.param_names = ["amount"], ora.read_slots = ["balance", "max_balance"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xc680488e", ora.visibility = "pub", ora.write_slots = ["balance"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 6988570666312495752839002421695666563898142680323167511053911032881624383488 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 4 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc(unknown)

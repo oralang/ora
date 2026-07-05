@@ -2,7 +2,7 @@
 // INPUT: ora-example/smt/verification/function_contracts_refinements.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {balance = 0 : ui64, max_balance = 1 : ui64}, ora.global_slots_built} {
-// CHECK-NEXT:   func.func @depositRefined(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/function_contracts_refinements.ora":13:27)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:1"], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:0"], ora.param_names = ["amount"], ora.read_slots = ["balance", "max_balance"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xdd80e0c3", ora.visibility = "pub", ora.write_slots = ["balance"]} {
+// CHECK-NEXT:   func.func @depositRefined(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/function_contracts_refinements.ora":13:27)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:1"], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:0"], ora.param_names = ["amount"], ora.read_slots = ["balance", "max_balance"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xdd80e0c3", ora.visibility = "pub", ora.write_slots = ["balance"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 6988570666312495752839002421695666563898142680323167511053911032881624383488 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
@@ -82,7 +82,7 @@
 // CHECK-NEXT:     %value_5 = sir.sload %slot_balance : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/function_contracts_refinements.ora":9:5)
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/verification/function_contracts_refinements.ora":13:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/function_contracts_refinements.ora":13:5)
-// CHECK-NEXT:   func.func @getRefinedBalance() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["balance"], ora.selector = "0x694ed409", ora.visibility = "pub", ora.write_slots = []} {
+// CHECK-NEXT:   func.func @getRefinedBalance() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["balance"], ora.selector = "0x694ed409", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/smt/verification/function_contracts_refinements.ora":27:9)))
 // CHECK-NEXT:     %slot_balance = sir.const 0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/smt/verification/function_contracts_refinements.ora":9:5)))
 // CHECK-NEXT:     %value = sir.sload %slot_balance : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/smt/verification/function_contracts_refinements.ora":9:5)))
@@ -156,7 +156,7 @@
 // CHECK-NEXT:   ^bb3:  // pred: ^bb2
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/verification/function_contracts_refinements.ora":42:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/function_contracts_refinements.ora":42:5)
-// CHECK-NEXT:   func.func @transferRefined(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/function_contracts_refinements.ora":50:28)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:7"], ora.param_names = ["amount"], ora.read_slots = ["balance"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xe794176e", ora.visibility = "pub", ora.write_slots = ["balance"]} {
+// CHECK-NEXT:   func.func @transferRefined(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/function_contracts_refinements.ora":50:28)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:7"], ora.param_names = ["amount"], ora.read_slots = ["balance"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xe794176e", ora.visibility = "pub", ora.write_slots = ["balance"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 6988570666312495752839002421695666563898142680323167511053911032881624383488 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 4 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc(unknown)

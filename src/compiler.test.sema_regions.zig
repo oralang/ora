@@ -417,8 +417,31 @@ test "compiler lowers sema effect summaries onto HIR functions" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.effect = \"readwrites\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.read_slots"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots_complete = true"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"total\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"transient:pending\""));
+}
+
+test "compiler omits complete write-slot marker for computed storage writes" {
+    const source_text =
+        \\contract Effects {
+        \\    pub fn write_raw(owner: u256, value: u256) {
+        \\        let slot: StorageSlot = @storageDerive("effects.raw", owner);
+        \\        @storageWordStore(slot, 0, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"$computed_storage"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots_complete = true"));
 }
 
 test "compiler does not report root locks as persistent storage reads" {
@@ -460,6 +483,7 @@ test "compiler does not report root locks as persistent storage reads" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.sload \"guard\""));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.read_slots = [\"guard\"]"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots = [\"total\"]"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots_complete = true"));
 }
 
 test "compiler includes guard clause reads in effect summaries" {
@@ -500,6 +524,7 @@ test "compiler includes guard clause reads in effect summaries" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.read_slots = [\"flags\"]"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots = []"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.effect = \"reads\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots_complete = true"));
 }
 
 test "compiler composes callee effects into caller summaries" {
@@ -579,6 +604,14 @@ test "compiler tracks keyed map effects by parameter" {
         },
         else => return error.TestUnexpectedResult,
     }
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"balances"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots_complete = true"));
 }
 
 test "compiler rejects direct writes to locked slots" {
@@ -1082,6 +1115,12 @@ test "compiler tracks log and havoc effect kinds" {
         },
         else => return error.TestUnexpectedResult,
     }
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots_complete = true"));
 }
 
 test "compiler tracks lock and unlock effect kinds" {

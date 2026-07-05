@@ -14,6 +14,7 @@ const type_builtin = @import("ora_types").builtin;
 
 const test_helpers = @import("compiler.test.helpers.zig");
 const compilePackage = test_helpers.compilePackage;
+const renderOraMlirForSource = test_helpers.renderOraMlirForSource;
 
 const ORA_BINARY_REL = "zig-out/bin/ora";
 
@@ -173,6 +174,20 @@ fn expectPlaceReadTerm(
     try testing.expect(term_id < set.terms.len);
     try testing.expect(set.terms[term_id] == .place_read);
     try expectPlaceRoot(set.terms[term_id].place_read, expected_root, expected_region);
+}
+
+fn expectPlaceReadTermWithParameterKeys(
+    set: obligation.ObligationSet,
+    term_id: obligation.TermId,
+    expected_root: []const u8,
+    expected_keys: []const u32,
+) !void {
+    try expectPlaceReadTerm(set, term_id, expected_root, .storage);
+    const place = set.terms[term_id].place_read;
+    try testing.expectEqual(expected_keys.len, place.keys.len);
+    for (expected_keys, 0..) |expected, index| {
+        try expectParameterKey(place.keys[index], expected);
+    }
 }
 
 fn expectOldPlaceReadTerm(
@@ -3302,7 +3317,8 @@ test "formal obligation MLIR adapter projects u256 scalar sload as place_read te
         \\  ora.contract @StorageProofs {
         \\    ora.global "reserve" : !ora.int<256, false>
         \\    func.func @check() attributes {
-        \\      ora.write_slots = []
+        \\      ora.write_slots = [],
+        \\      ora.write_slots_complete = true
         \\    } {
         \\      %reserve = ora.sload "reserve" : !ora.int<256, false>
         \\      %cmp = ora.cmp "ule", %reserve, %reserve : !ora.int<256, false>, !ora.int<256, false> -> i1
@@ -3345,7 +3361,8 @@ test "formal obligation MLIR adapter projects signed i256 scalar sload for signe
         \\  ora.contract @StorageProofs {
         \\    ora.global "reserve" : !ora.int<256, true>
         \\    func.func @check() attributes {
-        \\      ora.write_slots = []
+        \\      ora.write_slots = [],
+        \\      ora.write_slots_complete = true
         \\    } {
         \\      %reserve = ora.sload "reserve" : !ora.int<256, true>
         \\      %cmp = ora.cmp "sle", %reserve, %reserve : !ora.int<256, true>, !ora.int<256, true> -> i1
@@ -3421,7 +3438,8 @@ test "formal obligation MLIR adapter does not project scalar sload when function
         \\    func.func @mutates(%arg0: !ora.int<256, false>, %arg1: !ora.int<256, false>) attributes {
         \\      ora.param_names = ["k", "next"],
         \\      ora.param_binding_ids = ["file:17:pattern:1", "file:17:pattern:2"],
-        \\      ora.write_slots = ["balance"]
+        \\      ora.write_slots = ["balance"],
+        \\      ora.write_slots_complete = true
         \\    } {
         \\      %before = ora.sload "balance" : !ora.int<256, false>
         \\      %req = ora.cmp "eq", %before, %arg0 : !ora.int<256, false>, !ora.int<256, false> -> i1
@@ -3462,7 +3480,8 @@ test "formal obligation MLIR adapter does not project scalar sload in functions 
         \\  ora.contract @StorageProofs {
         \\    ora.global "reserve" : !ora.int<256, false>
         \\    func.func @calls(%target: !ora.address, %gas: !ora.int<256, false>, %calldata: !ora.bytes) attributes {
-        \\      ora.write_slots = []
+        \\      ora.write_slots = [],
+        \\      ora.write_slots_complete = true
         \\    } {
         \\      %reserve = ora.sload "reserve" : !ora.int<256, false>
         \\      %success, %returndata = ora.external_call %target, %gas, %calldata {call_kind = "call", method_name = "ping", trait_name = "Remote"} : !ora.address, !ora.int<256, false>, !ora.bytes -> i1, !ora.bytes
@@ -3498,7 +3517,8 @@ test "formal obligation MLIR adapter keeps non-u256 scalar sload outside Lean te
         \\  ora.contract @StorageProofs {
         \\    ora.global "small" : !ora.int<32, false>
         \\    func.func @check() attributes {
-        \\      ora.write_slots = []
+        \\      ora.write_slots = [],
+        \\      ora.write_slots_complete = true
         \\    } {
         \\      %small = ora.sload "small" : !ora.int<32, false>
         \\      %cmp = ora.cmp "ule", %small, %small : !ora.int<32, false>, !ora.int<32, false> -> i1
@@ -3539,7 +3559,8 @@ test "formal obligation MLIR adapter projects old written scalar sload as entry 
         \\  ora.contract @StorageProofs {
         \\    ora.global "counter" : !ora.int<256, false>
         \\    func.func @snapshot() attributes {
-        \\      ora.write_slots = ["counter"]
+        \\      ora.write_slots = ["counter"],
+        \\      ora.write_slots_complete = true
         \\    } {
         \\      %counter = ora.sload "counter" : !ora.int<256, false>
         \\      %old = ora.old %counter : !ora.int<256, false> -> !ora.int<256, false>
@@ -3581,7 +3602,8 @@ test "formal obligation MLIR adapter collapses old unwritten scalar sload to sta
         \\  ora.contract @StorageProofs {
         \\    ora.global "balance" : !ora.int<256, false>
         \\    func.func @readonly() attributes {
-        \\      ora.write_slots = []
+        \\      ora.write_slots = [],
+        \\      ora.write_slots_complete = true
         \\    } {
         \\      %balance = ora.sload "balance" : !ora.int<256, false>
         \\      %old = ora.old %balance : !ora.int<256, false> -> !ora.int<256, false>
@@ -3623,7 +3645,8 @@ test "formal obligation MLIR adapter does not collapse old with bare written-roo
         \\  ora.contract @StorageProofs {
         \\    ora.global "balance" : !ora.int<256, false>
         \\    func.func @mutates() attributes {
-        \\      ora.write_slots = ["balance"]
+        \\      ora.write_slots = ["balance"],
+        \\      ora.write_slots_complete = true
         \\    } {
         \\      %balance = ora.sload "balance" : !ora.int<256, false>
         \\      %old = ora.old %balance : !ora.int<256, false> -> !ora.int<256, false>
@@ -3678,6 +3701,41 @@ test "formal obligation MLIR adapter requires write metadata before old scalar s
     try testing.expectEqual(@as(usize, 0), countOldTerms(result.set));
 }
 
+test "formal obligation MLIR adapter requires complete write metadata before scalar sload projection" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  ora.contract @StorageProofs {
+        \\    ora.global "reserve" : !ora.int<256, false>
+        \\    func.func @check() attributes {
+        \\      ora.write_slots = []
+        \\    } {
+        \\      %reserve = ora.sload "reserve" : !ora.int<256, false>
+        \\      %cmp = ora.cmp "ule", %reserve, %reserve : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\      "ora.ensures"(%cmp) : (i1) -> ()
+        \\      func.return
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
+    try expectEnsuresQueryUnsupported(result.set, .unsupported_origin_value);
+
+    const report = try dumpManifestToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(report);
+    try testing.expect(!std.mem.containsAtLeast(u8, report, 1, "\"tag\":\"place_read\""));
+}
+
 test "formal obligation MLIR adapter does not project old scalar sload in functions with external calls" {
     const h = createContext();
     defer destroyContext(h);
@@ -3687,7 +3745,8 @@ test "formal obligation MLIR adapter does not project old scalar sload in functi
         \\  ora.contract @StorageProofs {
         \\    ora.global "counter" : !ora.int<256, false>
         \\    func.func @snapshot(%target: !ora.address, %gas: !ora.int<256, false>, %calldata: !ora.bytes) attributes {
-        \\      ora.write_slots = ["counter"]
+        \\      ora.write_slots = ["counter"],
+        \\      ora.write_slots_complete = true
         \\    } {
         \\      %counter = ora.sload "counter" : !ora.int<256, false>
         \\      %old = ora.old %counter : !ora.int<256, false> -> !ora.int<256, false>
@@ -3721,7 +3780,8 @@ test "formal obligation MLIR adapter keeps arbitrary old expression outside Lean
         \\  func.func @old_expr(%arg0: !ora.int<256, false>) attributes {
         \\    ora.param_names = ["x"],
         \\    ora.param_binding_ids = ["file:23:pattern:1"],
-        \\    ora.write_slots = []
+        \\    ora.write_slots = [],
+        \\    ora.write_slots_complete = true
         \\  } {
         \\    %sum = ora.add_wrapping %arg0, %arg0 : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
         \\    %old = ora.old %sum : !ora.int<256, false> -> !ora.int<256, false>
@@ -3753,7 +3813,8 @@ test "formal obligation MLIR adapter supports old written scalar sload in invari
         \\  ora.contract @StorageProofs {
         \\    ora.global "total" : !ora.int<256, false>
         \\    func.func @loop_snapshot() attributes {
-        \\      ora.write_slots = ["total"]
+        \\      ora.write_slots = ["total"],
+        \\      ora.write_slots_complete = true
         \\    } {
         \\      %total = ora.sload "total" : !ora.int<256, false>
         \\      %old = ora.old %total : !ora.int<256, false> -> !ora.int<256, false>
@@ -3790,7 +3851,8 @@ test "formal obligation MLIR adapter rejects invariant with old and bare written
         \\  ora.contract @StorageProofs {
         \\    ora.global "total" : !ora.int<256, false>
         \\    func.func @loop_snapshot() attributes {
-        \\      ora.write_slots = ["total"]
+        \\      ora.write_slots = ["total"],
+        \\      ora.write_slots_complete = true
         \\    } {
         \\      %total = ora.sload "total" : !ora.int<256, false>
         \\      %old = ora.old %total : !ora.int<256, false> -> !ora.int<256, false>
@@ -3812,6 +3874,271 @@ test "formal obligation MLIR adapter rejects invariant with old and bare written
     try testing.expectEqual(@as(usize, 1), countLogical(result.set, .invariant));
     try expectLogicalQueryUnsupported(result.set, .invariant, .unsupported_origin_value);
     try testing.expectEqual(@as(usize, 1), countOldTerms(result.set));
+}
+
+test "formal obligation MLIR adapter projects read-only keyed map sload as place_read term" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  ora.contract @StorageProofs {
+        \\    ora.global "balances" : !ora.map<!ora.int<256, false>, !ora.int<256, false>>
+        \\    func.func @check(%owner: !ora.int<256, false>) attributes {
+        \\      ora.param_names = ["owner"],
+        \\      ora.param_binding_ids = ["file:41:pattern:1"],
+        \\      ora.write_slots = [],
+        \\      ora.write_slots_complete = true
+        \\    } {
+        \\      %balances = ora.sload "balances" : !ora.map<!ora.int<256, false>, !ora.int<256, false>>
+        \\      %balance = "ora.map_get"(%balances, %owner) : (!ora.map<!ora.int<256, false>, !ora.int<256, false>>, !ora.int<256, false>) -> !ora.int<256, false>
+        \\      %cmp = ora.cmp "eq", %balance, %balance : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\      "ora.ensures"(%cmp) : (i1) -> ()
+        \\      func.return
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
+    try expectEnsuresQuerySupported(result.set);
+
+    const quantified = try expectQuantifiedTerm(result.set, try expectLogicalTerm(result.set, .ensures), .forall, "owner");
+    const body = try expectBinaryTerm(result.set, quantified.body, .eq);
+    try expectPlaceReadTermWithParameterKeys(result.set, body.lhs, "balances", &.{0});
+    try expectPlaceReadTermWithParameterKeys(result.set, body.rhs, "balances", &.{0});
+
+    const rendered = try emitLeanToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "root := \"balances\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "keys := [.parameter 0]"));
+}
+
+test "formal obligation MLIR adapter requires complete write metadata before keyed map projection" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  ora.contract @StorageProofs {
+        \\    ora.global "balances" : !ora.map<!ora.int<256, false>, !ora.int<256, false>>
+        \\    func.func @check(%owner: !ora.int<256, false>) attributes {
+        \\      ora.param_names = ["owner"],
+        \\      ora.param_binding_ids = ["file:42:pattern:1"],
+        \\      ora.write_slots = []
+        \\    } {
+        \\      %balances = ora.sload "balances" : !ora.map<!ora.int<256, false>, !ora.int<256, false>>
+        \\      %balance = "ora.map_get"(%balances, %owner) : (!ora.map<!ora.int<256, false>, !ora.int<256, false>>, !ora.int<256, false>) -> !ora.int<256, false>
+        \\      %cmp = ora.cmp "eq", %balance, %balance : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\      "ora.ensures"(%cmp) : (i1) -> ()
+        \\      func.return
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try expectEnsuresQueryUnsupported(result.set, .unsupported_origin_value);
+
+    const report = try dumpManifestToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(report);
+    try testing.expect(!std.mem.containsAtLeast(u8, report, 1, "\"tag\":\"place_read\""));
+}
+
+test "formal obligation MLIR adapter does not project keyed map read when function writes root" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  ora.contract @StorageProofs {
+        \\    ora.global "balances" : !ora.map<!ora.int<256, false>, !ora.int<256, false>>
+        \\    func.func @mutates(%owner: !ora.int<256, false>) attributes {
+        \\      ora.param_names = ["owner"],
+        \\      ora.param_binding_ids = ["file:43:pattern:1"],
+        \\      ora.write_slots = ["balances[param#0]"],
+        \\      ora.write_slots_complete = true
+        \\    } {
+        \\      %balances = ora.sload "balances" : !ora.map<!ora.int<256, false>, !ora.int<256, false>>
+        \\      %balance = "ora.map_get"(%balances, %owner) : (!ora.map<!ora.int<256, false>, !ora.int<256, false>>, !ora.int<256, false>) -> !ora.int<256, false>
+        \\      %cmp = ora.cmp "eq", %balance, %balance : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\      "ora.ensures"(%cmp) : (i1) -> ()
+        \\      func.return
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try expectEnsuresQueryUnsupported(result.set, .unsupported_origin_value);
+
+    const report = try dumpManifestToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(report);
+    try testing.expect(!std.mem.containsAtLeast(u8, report, 1, "\"tag\":\"place_read\""));
+}
+
+test "formal obligation source collector does not project map read when helper writes root" {
+    const source_text =
+        \\contract StorageProjection {
+        \\    storage balances: map<u256, u256>;
+        \\
+        \\    fn overwrite(owner: u256, value: u256) {
+        \\        balances[owner] = value;
+        \\    }
+        \\
+        \\    pub fn check(owner: u256)
+        \\        ensures balances[owner] == balances[owner]
+        \\    {
+        \\        overwrite(owner, 1);
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @check"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.write_slots"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"balances"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.write_slots_complete = true"));
+
+    const h = createContext();
+    defer destroyContext(h);
+
+    const module = try parseModule(h.ctx, rendered);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try expectEnsuresQueryUnsupported(result.set, .unsupported_origin_value);
+
+    const report = try dumpManifestToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(report);
+    try testing.expect(!std.mem.containsAtLeast(u8, report, 1, "\"tag\":\"place_read\""));
+}
+
+test "formal obligation MLIR adapter does not project keyed map read with unknown key" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  ora.contract @StorageProofs {
+        \\    ora.global "balances" : !ora.map<!ora.int<256, false>, !ora.int<256, false>>
+        \\    func.func @unknown_key(%owner: !ora.int<256, false>) attributes {
+        \\      ora.param_names = ["owner"],
+        \\      ora.param_binding_ids = ["file:44:pattern:1"],
+        \\      ora.write_slots = [],
+        \\      ora.write_slots_complete = true
+        \\    } {
+        \\      %balances = ora.sload "balances" : !ora.map<!ora.int<256, false>, !ora.int<256, false>>
+        \\      %key = ora.add_wrapping %owner, %owner : !ora.int<256, false>, !ora.int<256, false> -> !ora.int<256, false>
+        \\      %balance = "ora.map_get"(%balances, %key) : (!ora.map<!ora.int<256, false>, !ora.int<256, false>>, !ora.int<256, false>) -> !ora.int<256, false>
+        \\      %cmp = ora.cmp "eq", %balance, %balance : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\      "ora.ensures"(%cmp) : (i1) -> ()
+        \\      func.return
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try expectEnsuresQueryUnsupported(result.set, .unsupported_origin_value);
+
+    const report = try dumpManifestToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(report);
+    try testing.expect(!std.mem.containsAtLeast(u8, report, 1, "\"tag\":\"place_read\""));
+}
+
+test "formal obligation MLIR adapter projects nested read-only map paths as distinct roots" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  ora.contract @StorageProofs {
+        \\    ora.global "balances" : !ora.map<!ora.int<256, false>, !ora.int<256, false>>
+        \\    ora.global "allowances" : !ora.map<!ora.int<256, false>, !ora.map<!ora.int<256, false>, !ora.int<256, false>>>
+        \\    func.func @check(%owner: !ora.int<256, false>, %spender: !ora.int<256, false>) attributes {
+        \\      ora.param_names = ["owner", "spender"],
+        \\      ora.param_binding_ids = ["file:45:pattern:1", "file:45:pattern:2"],
+        \\      ora.write_slots = [],
+        \\      ora.write_slots_complete = true
+        \\    } {
+        \\      %balances = ora.sload "balances" : !ora.map<!ora.int<256, false>, !ora.int<256, false>>
+        \\      %balance = "ora.map_get"(%balances, %owner) : (!ora.map<!ora.int<256, false>, !ora.int<256, false>>, !ora.int<256, false>) -> !ora.int<256, false>
+        \\      %allowances = ora.sload "allowances" : !ora.map<!ora.int<256, false>, !ora.map<!ora.int<256, false>, !ora.int<256, false>>>
+        \\      %owner_allowances = "ora.map_get"(%allowances, %owner) : (!ora.map<!ora.int<256, false>, !ora.map<!ora.int<256, false>, !ora.int<256, false>>>, !ora.int<256, false>) -> !ora.map<!ora.int<256, false>, !ora.int<256, false>>
+        \\      %allowance = "ora.map_get"(%owner_allowances, %spender) : (!ora.map<!ora.int<256, false>, !ora.int<256, false>>, !ora.int<256, false>) -> !ora.int<256, false>
+        \\      %balance_cmp = ora.cmp "eq", %balance, %balance : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\      %allowance_cmp = ora.cmp "eq", %allowance, %allowance : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\      "ora.ensures"(%balance_cmp) : (i1) -> ()
+        \\      "ora.ensures"(%allowance_cmp) : (i1) -> ()
+        \\      func.return
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 2), countLogical(result.set, .ensures));
+
+    var saw_balances = false;
+    var saw_allowances = false;
+    for (result.set.terms) |term| {
+        if (term != .place_read) continue;
+        if (std.mem.eql(u8, term.place_read.root, "balances")) {
+            saw_balances = true;
+            try testing.expectEqual(@as(usize, 1), term.place_read.keys.len);
+            try expectParameterKey(term.place_read.keys[0], 0);
+        } else if (std.mem.eql(u8, term.place_read.root, "allowances")) {
+            saw_allowances = true;
+            try testing.expectEqual(@as(usize, 2), term.place_read.keys.len);
+            try expectParameterKey(term.place_read.keys[0], 0);
+            try expectParameterKey(term.place_read.keys[1], 1);
+        }
+    }
+    try testing.expect(saw_balances);
+    try testing.expect(saw_allowances);
+
+    const lean = try emitLeanToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(lean);
+    try testing.expect(std.mem.containsAtLeast(u8, lean, 1, "root := \"balances\""));
+    try testing.expect(std.mem.containsAtLeast(u8, lean, 1, "root := \"allowances\""));
+    try testing.expect(std.mem.containsAtLeast(u8, lean, 1, "keys := [.parameter 0, .parameter 1]"));
 }
 
 test "formal obligation MLIR adapter tracks nested forall binders with De Bruijn indexes" {

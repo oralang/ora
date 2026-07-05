@@ -16,7 +16,7 @@
 // CHECK-NEXT:     sir.store %2 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/math_operations.ora":13:9)))
 // CHECK-NEXT:     sir.return %2 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/math_operations.ora":13:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/math_operations.ora":11:5)
-// CHECK-NEXT:   func.func @incrementCounter() attributes {ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.read_slots = ["counter"], ora.selector = "0x5b34b966", ora.visibility = "pub", ora.write_slots = ["counter"]} {
+// CHECK-NEXT:   func.func @incrementCounter() attributes {ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.read_slots = ["counter"], ora.selector = "0x5b34b966", ora.visibility = "pub", ora.write_slots = ["counter"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %slot_counter = sir.const 0 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/math_operations.ora":3:5)))
 // CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/math_operations.ora":17:30)))
 // CHECK-NEXT:     %value = sir.sload %slot_counter : !sir.u256 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/math_operations.ora":3:5)))
@@ -24,7 +24,7 @@
 // CHECK-NEXT:     sir.sstore %slot_counter : !sir.u256, %0 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/math_operations.ora":17:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/math_operations.ora":16:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/math_operations.ora":16:5)
-// CHECK-NEXT:   func.func @getCounter() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["counter"], ora.selector = "0x8ada066e", ora.visibility = "pub", ora.write_slots = []} {
+// CHECK-NEXT:   func.func @getCounter() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["counter"], ora.selector = "0x8ada066e", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/math_operations.ora":22:9)))
 // CHECK-NEXT:     %slot_counter = sir.const 0 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/math_operations.ora":3:5)))
 // CHECK-NEXT:     %value = sir.sload %slot_counter : !sir.u256 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/math_operations.ora":3:5)))
@@ -32,7 +32,7 @@
 // CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %value : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/math_operations.ora":22:9)))
 // CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/math_operations.ora":22:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/math_operations.ora":21:5)
-// CHECK-NEXT:   func.func @accumulate(%arg0: !sir.u256 loc("{{.*}}/ora-example/math_operations.ora":25:23)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:0:pattern:7"], ora.param_names = ["value"], ora.read_slots = ["total"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xb4e7d02a", ora.visibility = "pub", ora.write_slots = ["total"]} {
+// CHECK-NEXT:   func.func @accumulate(%arg0: !sir.u256 loc("{{.*}}/ora-example/math_operations.ora":25:23)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:0:pattern:7"], ora.param_names = ["value"], ora.read_slots = ["total"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xb4e7d02a", ora.visibility = "pub", ora.write_slots = ["total"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %slot_total = sir.const 1 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/math_operations.ora":4:5)))
 // CHECK-NEXT:     %value = sir.sload %slot_total : !sir.u256 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/math_operations.ora":4:5)))
 // CHECK-NEXT:     %0 = sir.add %value : !sir.u256, %arg0 : !sir.u256 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/math_operations.ora":26:17)))

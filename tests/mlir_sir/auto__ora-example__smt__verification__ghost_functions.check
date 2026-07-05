@@ -2,7 +2,7 @@
 // INPUT: ora-example/smt/verification/ghost_functions.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {balance = 0 : ui64, counter = 0 : ui64, max_balance = 1 : ui64, sumOfBalances = 2 : ui64, total = 1 : ui64}, ora.global_slots_built} {
-// CHECK-NEXT:   func.func @getTotalBalance() -> !sir.u256 attributes {ora.effect = "reads", ora.formal = true, ora.ghost = true, ora.read_slots = ["balance", "sumOfBalances"], ora.verification = true, ora.verification_context = "ghost_function", ora.visibility = "private", ora.write_slots = []} {
+// CHECK-NEXT:   func.func @getTotalBalance() -> !sir.u256 attributes {ora.effect = "reads", ora.formal = true, ora.ghost = true, ora.read_slots = ["balance", "sumOfBalances"], ora.verification = true, ora.verification_context = "ghost_function", ora.visibility = "private", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_sumOfBalances = sir.const 2 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/smt/verification/ghost_functions.ora":12:11)))
@@ -27,7 +27,7 @@
 // CHECK-NEXT:     sir.store %9 : !sir.ptr<1>, %3 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/smt/verification/ghost_functions.ora":20:9)))
 // CHECK-NEXT:     sir.return %9 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/smt/verification/ghost_functions.ora":20:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":15:11)
-// CHECK-NEXT:   func.func @deposit(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":24:20)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:1"], ora.param_names = ["amount"], ora.read_slots = ["balance", "max_balance"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xb6b55f25", ora.visibility = "pub", ora.write_slots = ["balance"]} {
+// CHECK-NEXT:   func.func @deposit(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":24:20)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:1"], ora.param_names = ["amount"], ora.read_slots = ["balance", "max_balance"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xb6b55f25", ora.visibility = "pub", ora.write_slots = ["balance"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 6988570666312495752839002421695666563898142680323167511053911032881624383488 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
@@ -140,7 +140,7 @@
 // CHECK-NEXT:     sir.store %17 : !sir.ptr<1>, %16 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/smt/verification/ghost_functions.ora":35:9)))
 // CHECK-NEXT:     sir.return %17 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/smt/verification/ghost_functions.ora":35:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":34:11)
-// CHECK-NEXT:   func.func @transferWithFee(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":39:28), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":39:42)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["uint256", "uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:5", "file:11:pattern:6"], ora.param_names = ["amount", "rate"], ora.read_slots = ["balance"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x8b79788a", ora.visibility = "pub", ora.write_slots = ["balance"]} {
+// CHECK-NEXT:   func.func @transferWithFee(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":39:28), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":39:42)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["uint256", "uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:5", "file:11:pattern:6"], ora.param_names = ["amount", "rate"], ora.read_slots = ["balance"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x8b79788a", ora.visibility = "pub", ora.write_slots = ["balance"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 6988570666312495752839002421695666563898142680323167511053911032881624383488 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 56016217287220138543383237988819299768112786790290310538187226855197252780032 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
@@ -235,7 +235,7 @@
 // CHECK-NEXT:     %value_2 = sir.sload %c0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":9:5)
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":39:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":39:5)
-// CHECK-NEXT:   func.func @getVerifiedBalance() -> !sir.u256 attributes {ora.effect = "reads", ora.formal = true, ora.ghost = true, ora.read_slots = ["balance"], ora.verification = true, ora.verification_context = "ghost_function", ora.visibility = "private", ora.write_slots = []} {
+// CHECK-NEXT:   func.func @getVerifiedBalance() -> !sir.u256 attributes {ora.effect = "reads", ora.formal = true, ora.ghost = true, ora.read_slots = ["balance"], ora.verification = true, ora.verification_context = "ghost_function", ora.visibility = "private", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/smt/verification/ghost_functions.ora":52:9)))
 // CHECK-NEXT:     %slot_balance = sir.const 0 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/smt/verification/ghost_functions.ora":9:5)))
 // CHECK-NEXT:     %value = sir.sload %slot_balance : !sir.u256 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/smt/verification/ghost_functions.ora":9:5)))
@@ -243,7 +243,7 @@
 // CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %value : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/smt/verification/ghost_functions.ora":52:9)))
 // CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/smt/verification/ghost_functions.ora":52:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":51:11)
-// CHECK-NEXT:   func.func @setBalance(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":56:23)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:0"], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:9"], ora.param_names = ["value"], ora.read_slots = ["balance"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xfb1669ca", ora.visibility = "pub", ora.write_slots = ["balance"]} {
+// CHECK-NEXT:   func.func @setBalance(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":56:23)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:0"], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:9"], ora.param_names = ["value"], ora.read_slots = ["balance"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xfb1669ca", ora.visibility = "pub", ora.write_slots = ["balance"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %c0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.gt %arg0 : !sir.u256, %c0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":1:1)
@@ -413,7 +413,7 @@
 // CHECK-NEXT:   ^bb4:  // pred: ^bb3
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":95:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":95:5)
-// CHECK-NEXT:   func.func @getNetBalance() -> !sir.u256 attributes {ora.effect = "reads", ora.formal = true, ora.ghost = true, ora.read_slots = ["balance"], ora.verification = true, ora.verification_context = "ghost_function", ora.visibility = "private", ora.write_slots = []} {
+// CHECK-NEXT:   func.func @getNetBalance() -> !sir.u256 attributes {ora.effect = "reads", ora.formal = true, ora.ghost = true, ora.read_slots = ["balance"], ora.verification = true, ora.verification_context = "ghost_function", ora.visibility = "private", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/smt/verification/ghost_functions.ora":107:9)))
 // CHECK-NEXT:     %slot_balance = sir.const 0 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/smt/verification/ghost_functions.ora":9:5)))
 // CHECK-NEXT:     %value = sir.sload %slot_balance : !sir.u256 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/smt/verification/ghost_functions.ora":9:5)))
@@ -421,7 +421,7 @@
 // CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %value : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/smt/verification/ghost_functions.ora":107:9)))
 // CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/smt/verification/ghost_functions.ora":107:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":106:11)
-// CHECK-NEXT:   func.func @updateBalance(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":111:26)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:23"], ora.param_names = ["new_balance"], ora.read_slots = ["balance"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xba7b37d4", ora.visibility = "pub", ora.write_slots = ["balance"]} {
+// CHECK-NEXT:   func.func @updateBalance(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":111:26)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:23"], ora.param_names = ["new_balance"], ora.read_slots = ["balance"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xba7b37d4", ora.visibility = "pub", ora.write_slots = ["balance"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %c0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.gt %arg0 : !sir.u256, %c0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":112:18)
@@ -440,7 +440,7 @@
 // CHECK-NEXT:     %value = sir.sload %c0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":9:5)
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":111:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":111:5)
-// CHECK-NEXT:   func.func @getMaxBalance() -> !sir.u256 attributes {ora.effect = "reads", ora.formal = true, ora.ghost = true, ora.read_slots = ["balance", "max_balance"], ora.verification = true, ora.verification_context = "ghost_function", ora.visibility = "private", ora.write_slots = []} {
+// CHECK-NEXT:   func.func @getMaxBalance() -> !sir.u256 attributes {ora.effect = "reads", ora.formal = true, ora.ghost = true, ora.read_slots = ["balance", "max_balance"], ora.verification = true, ora.verification_context = "ghost_function", ora.visibility = "private", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_max_balance = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_balance = sir.const 0 : !sir.u256 loc(unknown)
@@ -477,7 +477,7 @@
 // CHECK-NEXT:   ^bb5:  // pred: ^bb3
 // CHECK-NEXT:     sir.br ^bb4 loc("ora.stmt.20"("ora.origin_stmt.20"("{{.*}}/ora-example/smt/verification/ghost_functions.ora":120:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/ghost_functions.ora":119:11)
-// CHECK-NEXT:   func.func @ensureMaxBalance() attributes {ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.read_slots = ["balance", "max_balance"], ora.selector = "0x80a03075", ora.visibility = "pub", ora.write_slots = ["balance"]} {
+// CHECK-NEXT:   func.func @ensureMaxBalance() attributes {ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.read_slots = ["balance", "max_balance"], ora.selector = "0x80a03075", ora.visibility = "pub", ora.write_slots = ["balance"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %slot_max_balance = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_balance = sir.const 0 : !sir.u256 loc("ora.stmt.22"("ora.origin_stmt.22"("{{.*}}/ora-example/smt/verification/ghost_functions.ora":9:5)))
 // CHECK-NEXT:     %value = sir.sload %slot_balance : !sir.u256 : !sir.u256 loc("ora.stmt.22"("ora.origin_stmt.22"("{{.*}}/ora-example/smt/verification/ghost_functions.ora":9:5)))

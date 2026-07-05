@@ -190,6 +190,7 @@ const Collector = struct {
     function_param_binding_ids: []const obligation.FreeVarId = &.{},
     function_param_types: []const obligation.TypeRef = &.{},
     function_write_slots: ?[]const obligation.PlaceRef = null,
+    function_write_slots_complete: bool = false,
     function_has_external_call: bool = false,
 
     const synthetic_file_id = std.math.maxInt(u32);
@@ -220,6 +221,7 @@ const Collector = struct {
         const previous_param_binding_ids = self.function_param_binding_ids;
         const previous_param_types = self.function_param_types;
         const previous_write_slots = self.function_write_slots;
+        const previous_write_slots_complete = self.function_write_slots_complete;
         const previous_has_external_call = self.function_has_external_call;
         const previous_binder_len = self.active_binders.items.len;
         const is_function = std.mem.eql(u8, op_name, "func.func");
@@ -228,6 +230,7 @@ const Collector = struct {
             self.function_param_binding_ids = (try self.freeVarIdArrayAttr(op, "ora.param_binding_ids")) orelse &.{};
             self.function_param_types = try self.functionParamTypesFromFunctionOp(op, self.function_param_names.len);
             self.function_write_slots = try self.placeArrayAttr(op, "ora.write_slots");
+            self.function_write_slots_complete = (try self.boolAttr(op, "ora.write_slots_complete")) orelse false;
             self.function_has_external_call = operationBodyHasExternalCall(op);
             if (self.function_param_names.len != 0 and self.function_param_binding_ids.len == 0) {
                 try self.addBlockingDiagnostic(
@@ -253,6 +256,7 @@ const Collector = struct {
                 self.function_param_binding_ids = previous_param_binding_ids;
                 self.function_param_names = previous_param_names;
                 self.function_has_external_call = previous_has_external_call;
+                self.function_write_slots_complete = previous_write_slots_complete;
                 self.function_write_slots = previous_write_slots;
             }
         }
@@ -1096,6 +1100,7 @@ const Collector = struct {
         }
         if (std.mem.eql(u8, owner_name, "ora.old")) return try self.oldTerm(owner);
         if (std.mem.eql(u8, owner_name, "ora.sload")) return try self.scalarStorageLoadTerm(owner);
+        if (std.mem.eql(u8, owner_name, "ora.map_get")) return try self.storageMapReadTerm(owner);
         if (std.mem.eql(u8, owner_name, "arith.constant")) return try self.constantTerm(owner, signed_override);
         if (arithmetic_value_op_map.get(owner_name)) |binary_op| {
             if (signed_override) |signed| return try self.binaryTermFromOperands(owner, binary_op, .{ .explicit_signedness = signed });
@@ -1114,12 +1119,20 @@ const Collector = struct {
     fn scalarStorageLoadTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
         if (!mlirTypeIsSupportedU256Carrier(self.operationResultType(op, 0))) return null;
         const root = try self.stringAttr(op, "global") orelse return null;
-        if (!self.canProjectScalarStorageLoad(root)) return null;
+        if (!self.canProjectStorageRoot(root)) return null;
         return try self.placeReadTerm(root);
     }
 
-    fn canProjectScalarStorageLoad(self: *Collector, root: []const u8) bool {
+    fn storageMapReadTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
+        if (!mlirTypeIsSupportedU256Carrier(self.operationResultType(op, 0))) return null;
+        const place = (try self.storageMapReadPlaceFromMapGet(op)) orelse return null;
+        if (!self.canProjectStorageRoot(place.root)) return null;
+        return try self.placeReadTermFromPlace(place);
+    }
+
+    fn canProjectStorageRoot(self: *Collector, root: []const u8) bool {
         if (self.function_has_external_call) return false;
+        if (!self.function_write_slots_complete) return false;
         const write_slots = self.function_write_slots orelse return false;
         return !storageWriteSlotsContain(write_slots, root);
     }
@@ -1128,9 +1141,15 @@ const Collector = struct {
         if (mlir.oraOperationGetNumOperands(op) != 1) return null;
         if (!mlirTypeIsSupportedU256Carrier(self.operationResultType(op, 0))) return null;
         if (self.function_has_external_call) return null;
+        if (!self.function_write_slots_complete) return null;
         const write_slots = self.function_write_slots orelse return null;
 
         const operand = mlir.oraOperationGetOperand(op, 0);
+        if (try self.storageMapReadPlaceFromValue(operand)) |place| {
+            if (!storageWriteSlotsContain(write_slots, place.root)) return try self.placeReadTermFromPlace(place);
+            return null;
+        }
+
         const root = (try self.scalarStorageLoadRootFromValue(operand)) orelse return null;
 
         if (!storageWriteSlotsContain(write_slots, root)) return try self.placeReadTerm(root);
@@ -1149,10 +1168,58 @@ const Collector = struct {
     }
 
     fn placeReadTerm(self: *Collector, root: []const u8) !obligation.TermId {
-        return try self.addTerm(.{ .place_read = .{
+        return try self.placeReadTermFromPlace(.{
             .root = root,
             .region = .storage,
-        } });
+        });
+    }
+
+    fn placeReadTermFromPlace(self: *Collector, place: obligation.PlaceRef) !obligation.TermId {
+        return try self.addTerm(.{ .place_read = place });
+    }
+
+    fn storageMapReadPlaceFromValue(self: *Collector, value: mlir.MlirValue) !?obligation.PlaceRef {
+        if (!mlir.oraValueIsAOpResult(value)) return null;
+        const owner = mlir.oraOpResultGetOwner(value);
+        if (mlir.oraOperationIsNull(owner)) return null;
+        if (!std.mem.eql(u8, operationName(owner), "ora.map_get")) return null;
+        return try self.storageMapReadPlaceFromMapGet(owner);
+    }
+
+    fn storageMapReadPlaceFromMapGet(self: *Collector, op: mlir.MlirOperation) !?obligation.PlaceRef {
+        var reversed_keys: std.ArrayList(obligation.PlaceKey) = .empty;
+        defer reversed_keys.deinit(self.allocator);
+
+        var current = op;
+        var depth: u32 = 0;
+        while (true) : (depth += 1) {
+            if (depth > 32) return null;
+            if (mlir.oraOperationGetNumOperands(current) < 2) return null;
+
+            const key = try self.placeKeyFromValue(mlir.oraOperationGetOperand(current, 1));
+            if (key == .unknown) return null;
+            try reversed_keys.append(self.allocator, key);
+
+            const source = mlir.oraOperationGetOperand(current, 0);
+            const source_owner = storageMapSourceOwner(source) orelse return null;
+            const source_name = operationName(source_owner);
+            if (std.mem.eql(u8, source_name, "ora.map_get")) {
+                current = source_owner;
+                continue;
+            }
+            if (!std.mem.eql(u8, source_name, "ora.sload")) return null;
+
+            const root = try self.stringAttr(source_owner, "global") orelse return null;
+            const keys = try self.allocator.alloc(obligation.PlaceKey, reversed_keys.items.len);
+            for (reversed_keys.items, 0..) |item, index| {
+                keys[keys.len - 1 - index] = item;
+            }
+            return .{
+                .root = root,
+                .region = .storage,
+                .keys = keys,
+            };
+        }
     }
 
     fn constantTerm(self: *Collector, op: mlir.MlirOperation, signed_override: ?bool) anyerror!?obligation.TermId {
@@ -1701,6 +1768,12 @@ const Collector = struct {
         return try self.allocator.dupe(u8, value.slice());
     }
 
+    fn boolAttr(_: *Collector, op: mlir.MlirOperation, name: []const u8) !?bool {
+        const attr = mlir.oraOperationGetAttributeByName(op, strRef(name));
+        if (mlir.oraAttributeIsNull(attr)) return null;
+        return mlir.oraBoolAttrGetValue(attr);
+    }
+
     fn stringArrayAttr(self: *Collector, op: mlir.MlirOperation, name: []const u8) !?[]const []const u8 {
         const attr = mlir.oraOperationGetAttributeByName(op, strRef(name));
         if (mlir.oraAttributeIsNull(attr)) return null;
@@ -2200,6 +2273,20 @@ fn placeKeyEql(lhs: obligation.PlaceKey, rhs: obligation.PlaceKey) bool {
 
 fn isTransparentValueOp(op_name: []const u8) bool {
     return transparent_value_ops.has(op_name);
+}
+
+fn storageMapSourceOwner(value: mlir.MlirValue) ?mlir.MlirOperation {
+    var current = value;
+    var depth: u32 = 0;
+    while (depth <= 32) : (depth += 1) {
+        if (!mlir.oraValueIsAOpResult(current)) return null;
+        const owner = mlir.oraOpResultGetOwner(current);
+        if (mlir.oraOperationIsNull(owner)) return null;
+        if (!isTransparentValueOp(operationName(owner))) return owner;
+        if (mlir.oraOperationGetNumOperands(owner) < 1) return null;
+        current = mlir.oraOperationGetOperand(owner, 0);
+    }
+    return null;
 }
 
 fn valueFeedsOnlyFormalFormula(value: mlir.MlirValue, depth: u32) bool {

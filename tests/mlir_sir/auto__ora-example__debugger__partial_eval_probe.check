@@ -24,7 +24,7 @@
 // CHECK-NEXT:     sir.store %11 : !sir.ptr<1>, %3 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/debugger/partial_eval_probe.ora":7:9)))
 // CHECK-NEXT:     sir.return %11 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/debugger/partial_eval_probe.ora":7:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/debugger/partial_eval_probe.ora":6:5)
-// CHECK-NEXT:   func.func @read_counter() -> !sir.u256 attributes {ora.effect = "reads", ora.read_slots = ["counter"], ora.visibility = "private", ora.write_slots = []} {
+// CHECK-NEXT:   func.func @read_counter() -> !sir.u256 attributes {ora.effect = "reads", ora.read_slots = ["counter"], ora.visibility = "private", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/debugger/partial_eval_probe.ora":11:9)))
 // CHECK-NEXT:     %slot_counter = sir.const 0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/debugger/partial_eval_probe.ora":4:5)))
 // CHECK-NEXT:     %value = sir.sload %slot_counter : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/debugger/partial_eval_probe.ora":4:5)))
@@ -106,7 +106,7 @@
 // CHECK-NEXT:     sir.store %21 : !sir.ptr<1>, %13 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/debugger/partial_eval_probe.ora":25:9)))
 // CHECK-NEXT:     sir.return %21 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/debugger/partial_eval_probe.ora":25:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/debugger/partial_eval_probe.ora":21:5)
-// CHECK-NEXT:   func.func @impure_boundary(%arg0: !sir.u256 loc("{{.*}}/ora-example/debugger/partial_eval_probe.ora":28:28)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.param_binding_ids = ["file:11:pattern:6"], ora.param_names = ["x"], ora.read_slots = ["counter"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x88b5a808", ora.visibility = "pub", ora.write_slots = []} {
+// CHECK-NEXT:   func.func @impure_boundary(%arg0: !sir.u256 loc("{{.*}}/ora-example/debugger/partial_eval_probe.ora":28:28)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.param_binding_ids = ["file:11:pattern:6"], ora.param_names = ["x"], ora.read_slots = ["counter"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x88b5a808", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 0 : !sir.u256 loc(unknown)

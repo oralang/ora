@@ -2,7 +2,7 @@
 // INPUT: ora-example/smt/summaries/callee_state_effects.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {counter = 0 : ui64, owner = 1 : ui64}, ora.global_slots_built} {
-// CHECK-NEXT:   func.func @incrementCounter() attributes {ora.effect = "readwrites", ora.read_slots = ["counter"], ora.visibility = "private", ora.write_slots = ["counter"]} {
+// CHECK-NEXT:   func.func @incrementCounter() attributes {ora.effect = "readwrites", ora.read_slots = ["counter"], ora.visibility = "private", ora.write_slots = ["counter"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 4 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_counter = sir.const 0 : !sir.u256 loc(unknown)
@@ -47,7 +47,7 @@
 // CHECK-NEXT:   ^bb5:  // pred: ^bb4
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/summaries/callee_state_effects.ora":10:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/summaries/callee_state_effects.ora":10:5)
-// CHECK-NEXT:   func.func @doIncrement() attributes {ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.read_slots = ["counter"], ora.selector = "0x4ebbe1cf", ora.visibility = "pub", ora.write_slots = ["counter"]} {
+// CHECK-NEXT:   func.func @doIncrement() attributes {ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.read_slots = ["counter"], ora.selector = "0x4ebbe1cf", ora.visibility = "pub", ora.write_slots = ["counter"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 4 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_counter = sir.const 0 : !sir.u256 loc(unknown)

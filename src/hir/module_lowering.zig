@@ -26,6 +26,7 @@ const descriptorFromPathName = sema.descriptorFromPathName;
 
 const no_public_result_input_error_id: i64 = 0;
 const no_abi_param_enum_count: usize = 0;
+const computed_storage_effect_root = "$computed_storage";
 
 pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSymbolKind: type) type {
     return struct {
@@ -845,10 +846,16 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                         try attrs.append(self.allocator, namedStringAttr(self.context, "ora.effect", "reads"));
                     }
                     _ = try @This().appendEffectSlotAttrs(self, attrs, "ora.write_slots", &.{});
+                    if (@This().effectWriteSlotsComplete(effect)) {
+                        try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.write_slots_complete", true));
+                    }
                 },
                 .writes => |write_effect| {
                     if (try @This().appendEffectSlotAttrs(self, attrs, "ora.write_slots", write_effect.slots)) {
                         try attrs.append(self.allocator, namedStringAttr(self.context, "ora.effect", "writes"));
+                    }
+                    if (@This().effectWriteSlotsComplete(effect)) {
+                        try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.write_slots_complete", true));
                     }
                 },
                 .reads_writes => |read_write| {
@@ -861,8 +868,38 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     } else if (has_writes) {
                         try attrs.append(self.allocator, namedStringAttr(self.context, "ora.effect", "writes"));
                     }
+                    if (@This().effectWriteSlotsComplete(effect)) {
+                        try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.write_slots_complete", true));
+                    }
                 },
             }
+        }
+
+        fn effectWriteSlotsComplete(effect: sema.Effect) bool {
+            return switch (effect) {
+                .pure => false,
+                .external, .side_effects => false,
+                .reads => |read_effect| effectFlagsAllowCompleteWriteSlots(read_effect.flags),
+                .writes => |write_effect| effectFlagsAllowCompleteWriteSlots(write_effect.flags) and
+                    writeSlotsRepresentCompleteStorage(write_effect.slots),
+                .reads_writes => |read_write| effectFlagsAllowCompleteWriteSlots(read_write.flags) and
+                    writeSlotsRepresentCompleteStorage(read_write.writes),
+            };
+        }
+
+        fn effectFlagsAllowCompleteWriteSlots(flags: anytype) bool {
+            // External calls and havoc may clobber storage outside the slot list.
+            // Log/lock/unlock effects do not write storage by themselves.
+            return !flags.has_external and !flags.has_havoc;
+        }
+
+        fn writeSlotsRepresentCompleteStorage(slots: []const sema.EffectSlot) bool {
+            for (slots) |slot| {
+                if (slot.region == .storage and std.mem.eql(u8, slot.name, computed_storage_effect_root)) {
+                    return false;
+                }
+            }
+            return true;
         }
 
         fn attachModifiesSummaryAttrs(

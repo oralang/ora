@@ -2,7 +2,7 @@
 // INPUT: ora-example/corpus/control-flow/declarations_storage.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {active = 2 : ui64, counter = 0 : ui64, name = 3 : ui64, owner = 1 : ui64}, ora.global_slots_built} {
-// CHECK-NEXT:   func.func @init() attributes {ora.dispatch_class = "mutating", ora.effect = "writes", ora.init = true, ora.visibility = "pub", ora.write_slots = ["counter", "owner", "active", "name"]} {
+// CHECK-NEXT:   func.func @init() attributes {ora.dispatch_class = "mutating", ora.effect = "writes", ora.init = true, ora.visibility = "pub", ora.write_slots = ["counter", "owner", "active", "name"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":17:18)))
 // CHECK-NEXT:     %slot_active = sir.const 2 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":17:9)))
 // CHECK-NEXT:     %slot_name = sir.const 3 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":18:9)))
@@ -50,7 +50,7 @@
 // CHECK-NEXT:   ^bb3:  // pred: ^bb1
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":14:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":14:5)
-// CHECK-NEXT:   func.func @get_counter() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["counter"], ora.selector = "0xea66cf6d", ora.visibility = "pub", ora.write_slots = []} {
+// CHECK-NEXT:   func.func @get_counter() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["counter"], ora.selector = "0xea66cf6d", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":23:9)))
 // CHECK-NEXT:     %slot_counter = sir.const 0 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":8:5)))
 // CHECK-NEXT:     %value = sir.sload %slot_counter : !sir.u256 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":8:5)))
@@ -58,7 +58,7 @@
 // CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %value : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":23:9)))
 // CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":23:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":22:5)
-// CHECK-NEXT:   func.func @increment() attributes {ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.read_slots = ["counter"], ora.selector = "0xd09de08a", ora.visibility = "pub", ora.write_slots = ["counter"]} {
+// CHECK-NEXT:   func.func @increment() attributes {ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.read_slots = ["counter"], ora.selector = "0xd09de08a", ora.visibility = "pub", ora.write_slots = ["counter"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 4 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_counter = sir.const 0 : !sir.u256 loc(unknown)
@@ -92,7 +92,7 @@
 // CHECK-NEXT:     sir.sstore %slot_counter : !sir.u256, %9 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":30:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":27:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":27:5)
-// CHECK-NEXT:   func.func @add_to_counter(%arg0: !sir.u256 loc("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":34:27)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:5"], ora.param_names = ["amount"], ora.read_slots = ["counter"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x19172a08", ora.visibility = "pub", ora.write_slots = ["counter"]} {
+// CHECK-NEXT:   func.func @add_to_counter(%arg0: !sir.u256 loc("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":34:27)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:5"], ora.param_names = ["amount"], ora.read_slots = ["counter"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x19172a08", ora.visibility = "pub", ora.write_slots = ["counter"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 6988570666312495752839002421695666563898142680323167511053911032881624383488 : !sir.u256 loc(unknown)
@@ -146,7 +146,7 @@
 // CHECK-NEXT:     sir.store %29 : !sir.ptr<1>, %value_1 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":39:9)))
 // CHECK-NEXT:     sir.return %29 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":39:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":34:5)
-// CHECK-NEXT:   func.func @reset() attributes {ora.dispatch_class = "mutating", ora.effect = "writes", ora.selector = "0xd826f88f", ora.visibility = "pub", ora.write_slots = ["counter", "active"]} {
+// CHECK-NEXT:   func.func @reset() attributes {ora.dispatch_class = "mutating", ora.effect = "writes", ora.selector = "0xd826f88f", ora.visibility = "pub", ora.write_slots = ["counter", "active"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %slot_active = sir.const 2 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":45:9)))
 // CHECK-NEXT:     %c0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %0 = sir.bitcast %c0 : !sir.u256 : i1 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":45:18)))
@@ -155,7 +155,7 @@
 // CHECK-NEXT:     sir.sstore %slot_active : !sir.u256, %1 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":45:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":43:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":43:5)
-// CHECK-NEXT:   func.func @set_active(%arg0: !sir.u256 loc("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":49:23)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["bool"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:10"], ora.param_names = ["value"], ora.read_slots = ["active"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x81c4d344", ora.visibility = "pub", ora.write_slots = ["active"]} {
+// CHECK-NEXT:   func.func @set_active(%arg0: !sir.u256 loc("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":49:23)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["bool"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:10"], ora.param_names = ["value"], ora.read_slots = ["active"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x81c4d344", ora.visibility = "pub", ora.write_slots = ["active"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %slot_active = sir.const 2 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":10:5)))
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.and %arg0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/corpus/control-flow/declarations_storage.ora":49:23)

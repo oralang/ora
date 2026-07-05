@@ -2,13 +2,13 @@
 // INPUT: ora-example/corpus/patterns/owner_check.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {owner = 0 : ui64}, ora.global_slots_built} {
-// CHECK-NEXT:   func.func @init() attributes {ora.dispatch_class = "mutating", ora.effect = "writes", ora.init = true, ora.visibility = "pub", ora.write_slots = ["owner"]} {
+// CHECK-NEXT:   func.func @init() attributes {ora.dispatch_class = "mutating", ora.effect = "writes", ora.init = true, ora.visibility = "pub", ora.write_slots = ["owner"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %slot_owner = sir.const 0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/corpus/patterns/owner_check.ora":9:9)))
 // CHECK-NEXT:     %0 = sir.caller : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/corpus/patterns/owner_check.ora":9:17)))
 // CHECK-NEXT:     sir.sstore %slot_owner : !sir.u256, %0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/corpus/patterns/owner_check.ora":9:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/corpus/patterns/owner_check.ora":8:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/patterns/owner_check.ora":8:5)
-// CHECK-NEXT:   func.func @getOwner() -> !sir.u256 attributes {ora.abi_return = "address", ora.abi_return_layout = "address", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["owner"], ora.selector = "0x893d20e8", ora.visibility = "pub", ora.write_slots = []} {
+// CHECK-NEXT:   func.func @getOwner() -> !sir.u256 attributes {ora.abi_return = "address", ora.abi_return_layout = "address", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["owner"], ora.selector = "0x893d20e8", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/corpus/patterns/owner_check.ora":13:9)))
 // CHECK-NEXT:     %1 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/corpus/patterns/owner_check.ora":13:9)))
 // CHECK-NEXT:     %slot_owner = sir.const 0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/corpus/patterns/owner_check.ora":6:5)))
@@ -18,7 +18,7 @@
 // CHECK-NEXT:     sir.store %3 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/corpus/patterns/owner_check.ora":13:9)))
 // CHECK-NEXT:     sir.return %3 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/corpus/patterns/owner_check.ora":13:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/patterns/owner_check.ora":12:5)
-// CHECK-NEXT:   func.func @isOwner() -> !sir.u256 attributes {ora.abi_return = "bool", ora.abi_return_layout = "bool", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["owner"], ora.selector = "0x8f32d59b", ora.visibility = "pub", ora.write_slots = []} {
+// CHECK-NEXT:   func.func @isOwner() -> !sir.u256 attributes {ora.abi_return = "bool", ora.abi_return_layout = "bool", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["owner"], ora.selector = "0x8f32d59b", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/corpus/patterns/owner_check.ora":18:9)))
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc(unknown)
@@ -36,7 +36,7 @@
 // CHECK-NEXT:     sir.store %11 : !sir.ptr<1>, %10 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/corpus/patterns/owner_check.ora":18:9)))
 // CHECK-NEXT:     sir.return %11 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/corpus/patterns/owner_check.ora":18:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/patterns/owner_check.ora":16:5)
-// CHECK-NEXT:   func.func @changeOwner(%arg0: !sir.u256 loc("{{.*}}/ora-example/corpus/patterns/owner_check.ora":21:24)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["address"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:2"], ora.param_names = ["newOwner"], ora.read_slots = ["owner"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xa6f9dae1", ora.visibility = "pub", ora.write_slots = ["owner"]} {
+// CHECK-NEXT:   func.func @changeOwner(%arg0: !sir.u256 loc("{{.*}}/ora-example/corpus/patterns/owner_check.ora":21:24)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["address"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:2"], ora.param_names = ["newOwner"], ora.read_slots = ["owner"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xa6f9dae1", ora.visibility = "pub", ora.write_slots = ["owner"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/corpus/patterns/owner_check.ora":23:13)))
 // CHECK-NEXT:     %1 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_owner = sir.const 0 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/corpus/patterns/owner_check.ora":6:5)))

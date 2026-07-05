@@ -2,7 +2,7 @@
 // INPUT: ora-example/corpus/patterns/registry.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {count = 2 : ui64, names = 0 : ui64, registered = 1 : ui64}, ora.global_slots_built} {
-// CHECK-NEXT:   func.func @register(%arg0: !sir.ptr<1> loc("{{.*}}/ora-example/corpus/patterns/registry.ora":10:21)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["string"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:0"], ora.param_names = ["name"], ora.read_slots = ["count", "registered", "names"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xf2c298be", ora.visibility = "pub", ora.write_slots = ["names", "registered", "count"]} {
+// CHECK-NEXT:   func.func @register(%arg0: !sir.ptr<1> loc("{{.*}}/ora-example/corpus/patterns/registry.ora":10:21)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["string"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:0"], ora.param_names = ["name"], ora.read_slots = ["count", "registered", "names"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xf2c298be", ora.visibility = "pub", ora.write_slots = ["names", "registered", "count"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 4 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 31 : !sir.u256 loc(unknown)
@@ -83,7 +83,7 @@
 // CHECK-NEXT:   ^bb10:  // 2 preds: ^bb3, ^bb9
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/corpus/patterns/registry.ora":10:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/patterns/registry.ora":10:5)
-// CHECK-NEXT:   func.func @update(%arg0: !sir.ptr<1> loc("{{.*}}/ora-example/corpus/patterns/registry.ora":21:19)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["string"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:7"], ora.param_names = ["name"], ora.read_slots = ["registered", "names"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x3d7403a3", ora.visibility = "pub", ora.write_slots = ["names"]} {
+// CHECK-NEXT:   func.func @update(%arg0: !sir.ptr<1> loc("{{.*}}/ora-example/corpus/patterns/registry.ora":21:19)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["string"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:7"], ora.param_names = ["name"], ora.read_slots = ["registered", "names"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x3d7403a3", ora.visibility = "pub", ora.write_slots = ["names"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 31 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 64 : !sir.u256 loc(unknown)
@@ -129,7 +129,7 @@
 // CHECK-NEXT:   ^bb5:  // pred: ^bb4
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/corpus/patterns/registry.ora":21:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/patterns/registry.ora":21:5)
-// CHECK-NEXT:   func.func @lookup(%arg0: !sir.u256 loc("{{.*}}/ora-example/corpus/patterns/registry.ora":28:19)) -> !sir.ptr<1> attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["address"], ora.abi_return = "string", ora.abi_return_layout = "string", ora.dispatch_class = "readonly", ora.effect = "reads", ora.param_binding_ids = ["file:11:pattern:11"], ora.param_names = ["account"], ora.read_slots = ["names"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xd4b6b5da", ora.visibility = "pub", ora.write_slots = []} {
+// CHECK-NEXT:   func.func @lookup(%arg0: !sir.u256 loc("{{.*}}/ora-example/corpus/patterns/registry.ora":28:19)) -> !sir.ptr<1> attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["address"], ora.abi_return = "string", ora.abi_return_layout = "string", ora.dispatch_class = "readonly", ora.effect = "reads", ora.param_binding_ids = ["file:11:pattern:11"], ora.param_names = ["account"], ora.read_slots = ["names"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xd4b6b5da", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/corpus/patterns/registry.ora":29:16)))
 // CHECK-NEXT:     %1 = sir.const 31 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/corpus/patterns/registry.ora":29:16)))
 // CHECK-NEXT:     %2 = sir.const 32 : !sir.u256 loc(unknown)
@@ -167,7 +167,7 @@
 // CHECK-NEXT:     %22 = sir.add %21 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/corpus/patterns/registry.ora":29:9)))
 // CHECK-NEXT:     sir.return %7 : !sir.ptr<1>, %22 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/corpus/patterns/registry.ora":29:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/patterns/registry.ora":28:5)
-// CHECK-NEXT:   func.func @isRegistered(%arg0: !sir.u256 loc("{{.*}}/ora-example/corpus/patterns/registry.ora":32:25)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["address"], ora.abi_return = "bool", ora.abi_return_layout = "bool", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.param_binding_ids = ["file:11:pattern:12"], ora.param_names = ["account"], ora.read_slots = ["registered"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xc3c5a547", ora.visibility = "pub", ora.write_slots = []} {
+// CHECK-NEXT:   func.func @isRegistered(%arg0: !sir.u256 loc("{{.*}}/ora-example/corpus/patterns/registry.ora":32:25)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["address"], ora.abi_return = "bool", ora.abi_return_layout = "bool", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.param_binding_ids = ["file:11:pattern:12"], ora.param_names = ["account"], ora.read_slots = ["registered"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xc3c5a547", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_registered = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 64 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/corpus/patterns/registry.ora":33:16)))
@@ -185,7 +185,7 @@
 // CHECK-NEXT:     sir.store %7 : !sir.ptr<1>, %6 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/corpus/patterns/registry.ora":33:9)))
 // CHECK-NEXT:     sir.return %7 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/corpus/patterns/registry.ora":33:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/patterns/registry.ora":32:5)
-// CHECK-NEXT:   func.func @getCount() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["count"], ora.selector = "0xa87d942c", ora.visibility = "pub", ora.write_slots = []} {
+// CHECK-NEXT:   func.func @getCount() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["count"], ora.selector = "0xa87d942c", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/corpus/patterns/registry.ora":37:9)))
 // CHECK-NEXT:     %slot_count = sir.const 2 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/corpus/patterns/registry.ora":8:5)))
 // CHECK-NEXT:     %value = sir.sload %slot_count : !sir.u256 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/corpus/patterns/registry.ora":8:5)))

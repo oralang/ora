@@ -12,7 +12,7 @@
 // CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %c100 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/type-system/regions/region_function_signatures.ora":21:9)))
 // CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/type-system/regions/region_function_signatures.ora":21:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/regions/region_function_signatures.ora":20:5)
-// CHECK-NEXT:   func.func @testStorageReturn() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["stored_value"], ora.selector = "0x65686bf2", ora.visibility = "pub", ora.write_slots = []} {
+// CHECK-NEXT:   func.func @testStorageReturn() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["stored_value"], ora.selector = "0x65686bf2", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/type-system/regions/region_function_signatures.ora":26:9)))
 // CHECK-NEXT:     %slot_stored_value = sir.const 0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/type-system/regions/region_function_signatures.ora":9:5)))
 // CHECK-NEXT:     %value = sir.sload %slot_stored_value : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/type-system/regions/region_function_signatures.ora":9:5)))
@@ -20,7 +20,7 @@
 // CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %value : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/type-system/regions/region_function_signatures.ora":26:9)))
 // CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/type-system/regions/region_function_signatures.ora":26:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/regions/region_function_signatures.ora":25:5)
-// CHECK-NEXT:   func.func @testStorageParam() attributes {ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["stored_value"], ora.selector = "0x95d518c6", ora.visibility = "pub", ora.write_slots = []} {
+// CHECK-NEXT:   func.func @testStorageParam() attributes {ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["stored_value"], ora.selector = "0x95d518c6", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %slot_stored_value = sir.const 0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/type-system/regions/region_function_signatures.ora":9:5)))
 // CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/type-system/regions/region_function_signatures.ora":32:39)))
 // CHECK-NEXT:     %value = sir.sload %slot_stored_value : !sir.u256 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/type-system/regions/region_function_signatures.ora":9:5)))

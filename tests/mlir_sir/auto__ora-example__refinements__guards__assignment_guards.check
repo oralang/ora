@@ -2,14 +2,14 @@
 // INPUT: ora-example/refinements/guards/assignment_guards.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {fee_rate = 3 : ui64, min_transfer = 2 : ui64, owner = 0 : ui64, total_supply = 1 : ui64}, ora.global_slots_built} {
-// CHECK-NEXT:   func.func @testStorageAssignment(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/guards/assignment_guards.ora":19:30)) attributes {ora.effect = "writes", ora.param_binding_ids = ["file:11:pattern:0"], ora.param_names = ["value"], ora.visibility = "private", ora.write_slots = ["total_supply", "min_transfer"]} {
+// CHECK-NEXT:   func.func @testStorageAssignment(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/guards/assignment_guards.ora":19:30)) attributes {ora.effect = "writes", ora.param_binding_ids = ["file:11:pattern:0"], ora.param_names = ["value"], ora.visibility = "private", ora.write_slots = ["total_supply", "min_transfer"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %slot_min_transfer = sir.const 2 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/refinements/guards/assignment_guards.ora":21:9)))
 // CHECK-NEXT:     %slot_total_supply = sir.const 1 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/refinements/guards/assignment_guards.ora":20:9)))
 // CHECK-NEXT:     sir.sstore %slot_total_supply : !sir.u256, %arg0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/refinements/guards/assignment_guards.ora":20:9)))
 // CHECK-NEXT:     sir.sstore %slot_min_transfer : !sir.u256, %arg0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/refinements/guards/assignment_guards.ora":21:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/guards/assignment_guards.ora":19:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/guards/assignment_guards.ora":19:5)
-// CHECK-NEXT:   func.func @testStorageAssignmentFromBuiltin() attributes {ora.effect = "writes", ora.visibility = "private", ora.write_slots = ["owner"]} {
+// CHECK-NEXT:   func.func @testStorageAssignmentFromBuiltin() attributes {ora.effect = "writes", ora.visibility = "private", ora.write_slots = ["owner"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %slot_owner = sir.const 0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/refinements/guards/assignment_guards.ora":26:9)))
 // CHECK-NEXT:     %0 = sir.caller : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/refinements/guards/assignment_guards.ora":26:17)))
 // CHECK-NEXT:     sir.sstore %slot_owner : !sir.u256, %0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/refinements/guards/assignment_guards.ora":26:9)))

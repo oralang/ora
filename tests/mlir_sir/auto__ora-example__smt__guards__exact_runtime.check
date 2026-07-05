@@ -20,7 +20,7 @@
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/guards/exact_runtime.ora":24:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/exact_runtime.ora":24:5)
-// CHECK-NEXT:   func.func @runtimeExactDivisionFromStorage() attributes {ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["stored_divisor", "stored_dividend"], ora.selector = "0x21472049", ora.visibility = "pub", ora.write_slots = []} {
+// CHECK-NEXT:   func.func @runtimeExactDivisionFromStorage() attributes {ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["stored_divisor", "stored_dividend"], ora.selector = "0x21472049", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/guards/exact_runtime.ora":33:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/exact_runtime.ora":33:5)
 // CHECK-NEXT:   func.func @getDividend(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/exact_runtime.ora":40:24)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:10"], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x0ecfcaa4", ora.visibility = "pub"} {

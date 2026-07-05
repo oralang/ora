@@ -2,7 +2,7 @@
 // INPUT: ora-example/corpus/types/refinement/nonzero_basic.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {admin = 1 : ui64, owner = 0 : ui64}, ora.global_slots_built} {
-// CHECK-NEXT:   func.func @setOwner(%arg0: !sir.u256 loc("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":8:21)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["nonzero_address"], ora.abi_params = ["address"], ora.dispatch_class = "mutating", ora.effect = "writes", ora.param_binding_ids = ["file:11:pattern:0"], ora.param_names = ["addr"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x13af4035", ora.visibility = "pub", ora.write_slots = ["owner"]} {
+// CHECK-NEXT:   func.func @setOwner(%arg0: !sir.u256 loc("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":8:21)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["nonzero_address"], ora.abi_params = ["address"], ora.dispatch_class = "mutating", ora.effect = "writes", ora.param_binding_ids = ["file:11:pattern:0"], ora.param_names = ["addr"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x13af4035", ora.visibility = "pub", ora.write_slots = ["owner"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_owner = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":8:21)
@@ -20,7 +20,7 @@
 // CHECK-NEXT:     sir.sstore %slot_owner : !sir.u256, %arg0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":9:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":8:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":8:5)
-// CHECK-NEXT:   func.func @getOwner() -> !sir.u256 attributes {ora.abi_return = "address", ora.abi_return_layout = "address", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["owner"], ora.selector = "0x893d20e8", ora.visibility = "pub", ora.write_slots = []} {
+// CHECK-NEXT:   func.func @getOwner() -> !sir.u256 attributes {ora.abi_return = "address", ora.abi_return_layout = "address", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["owner"], ora.selector = "0x893d20e8", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":13:9)))
 // CHECK-NEXT:     %1 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":13:9)))
 // CHECK-NEXT:     %slot_owner = sir.const 0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":5:5)))
@@ -30,7 +30,7 @@
 // CHECK-NEXT:     sir.store %3 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":13:9)))
 // CHECK-NEXT:     sir.return %3 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":13:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":12:5)
-// CHECK-NEXT:   func.func @setAdmin(%arg0: !sir.u256 loc("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":16:21)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["nonzero_address"], ora.abi_params = ["address"], ora.dispatch_class = "mutating", ora.effect = "writes", ora.param_binding_ids = ["file:11:pattern:2"], ora.param_names = ["addr"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x704b6c02", ora.visibility = "pub", ora.write_slots = ["admin"]} {
+// CHECK-NEXT:   func.func @setAdmin(%arg0: !sir.u256 loc("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":16:21)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["nonzero_address"], ora.abi_params = ["address"], ora.dispatch_class = "mutating", ora.effect = "writes", ora.param_binding_ids = ["file:11:pattern:2"], ora.param_names = ["addr"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x704b6c02", ora.visibility = "pub", ora.write_slots = ["admin"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_admin = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":16:21)
@@ -48,7 +48,7 @@
 // CHECK-NEXT:     sir.sstore %slot_admin : !sir.u256, %arg0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":17:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":16:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":16:5)
-// CHECK-NEXT:   func.func @getAdmin() -> !sir.u256 attributes {ora.abi_return = "address", ora.abi_return_layout = "address", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["admin"], ora.selector = "0x6e9960c3", ora.visibility = "pub", ora.write_slots = []} {
+// CHECK-NEXT:   func.func @getAdmin() -> !sir.u256 attributes {ora.abi_return = "address", ora.abi_return_layout = "address", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["admin"], ora.selector = "0x6e9960c3", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":21:9)))
 // CHECK-NEXT:     %1 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":21:9)))
 // CHECK-NEXT:     %slot_admin = sir.const 1 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":6:5)))
@@ -58,7 +58,7 @@
 // CHECK-NEXT:     sir.store %3 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":21:9)))
 // CHECK-NEXT:     sir.return %3 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":21:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":20:5)
-// CHECK-NEXT:   func.func @isOwner(%arg0: !sir.u256 loc("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":24:20)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["nonzero_address"], ora.abi_params = ["address"], ora.abi_return = "bool", ora.abi_return_layout = "bool", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.param_binding_ids = ["file:11:pattern:4"], ora.param_names = ["addr"], ora.read_slots = ["owner"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x2f54bf6e", ora.visibility = "pub", ora.write_slots = []} {
+// CHECK-NEXT:   func.func @isOwner(%arg0: !sir.u256 loc("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":24:20)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["nonzero_address"], ora.abi_params = ["address"], ora.abi_return = "bool", ora.abi_return_layout = "bool", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.param_binding_ids = ["file:11:pattern:4"], ora.param_names = ["addr"], ora.read_slots = ["owner"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x2f54bf6e", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_owner = sir.const 0 : !sir.u256 loc(unknown)
@@ -86,7 +86,7 @@
 // CHECK-NEXT:     sir.store %17 : !sir.ptr<1>, %16 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":25:9)))
 // CHECK-NEXT:     sir.return %17 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":25:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":24:5)
-// CHECK-NEXT:   func.func @isAdmin(%arg0: !sir.u256 loc("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":28:20)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["nonzero_address"], ora.abi_params = ["address"], ora.abi_return = "bool", ora.abi_return_layout = "bool", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.param_binding_ids = ["file:11:pattern:5"], ora.param_names = ["addr"], ora.read_slots = ["admin"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x24d7806c", ora.visibility = "pub", ora.write_slots = []} {
+// CHECK-NEXT:   func.func @isAdmin(%arg0: !sir.u256 loc("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":28:20)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["nonzero_address"], ora.abi_params = ["address"], ora.abi_return = "bool", ora.abi_return_layout = "bool", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.param_binding_ids = ["file:11:pattern:5"], ora.param_names = ["addr"], ora.read_slots = ["admin"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x24d7806c", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_admin = sir.const 1 : !sir.u256 loc(unknown)
@@ -114,7 +114,7 @@
 // CHECK-NEXT:     sir.store %17 : !sir.ptr<1>, %16 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":29:9)))
 // CHECK-NEXT:     sir.return %17 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":29:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":28:5)
-// CHECK-NEXT:   func.func @ownerEqualsAdmin() -> !sir.u256 attributes {ora.abi_return = "bool", ora.abi_return_layout = "bool", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["owner", "admin"], ora.selector = "0x8f0a1eba", ora.visibility = "pub", ora.write_slots = []} {
+// CHECK-NEXT:   func.func @ownerEqualsAdmin() -> !sir.u256 attributes {ora.abi_return = "bool", ora.abi_return_layout = "bool", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["owner", "admin"], ora.selector = "0x8f0a1eba", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":33:9)))
 // CHECK-NEXT:     %1 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_admin = sir.const 1 : !sir.u256 loc(unknown)
@@ -132,7 +132,7 @@
 // CHECK-NEXT:     sir.store %9 : !sir.ptr<1>, %8 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":33:9)))
 // CHECK-NEXT:     sir.return %9 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":33:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":32:5)
-// CHECK-NEXT:   func.func @senderIsOwner() -> !sir.u256 attributes {ora.abi_return = "bool", ora.abi_return_layout = "bool", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["owner"], ora.selector = "0x5172528c", ora.visibility = "pub", ora.write_slots = []} {
+// CHECK-NEXT:   func.func @senderIsOwner() -> !sir.u256 attributes {ora.abi_return = "bool", ora.abi_return_layout = "bool", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["owner"], ora.selector = "0x5172528c", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/corpus/types/refinement/nonzero_basic.ora":38:9)))
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc(unknown)
