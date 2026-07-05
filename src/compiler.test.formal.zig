@@ -109,6 +109,60 @@ fn countResource(set: obligation.ObligationSet, op: obligation.ResourceOperation
     return count;
 }
 
+fn findResourceQuery(
+    set: obligation.ObligationSet,
+    op: obligation.ResourceOperation,
+    property: obligation.ResourceProperty,
+) !obligation.VerificationQuery {
+    var resource_id: ?obligation.Id = null;
+    for (set.obligations) |item| {
+        if (item.kind == .resource and item.kind.resource.op == op and item.kind.resource.property == property) {
+            resource_id = item.id;
+            break;
+        }
+    }
+    const id = resource_id orelse return error.TestUnexpectedResult;
+    for (set.queries) |query| {
+        if (query.obligation_ids.len == 1 and query.obligation_ids[0] == id) return query;
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn expectSingleResourceSemanticSupport(
+    terms: []const obligation.Term,
+    goal: obligation.ResourceGoal,
+    expected_supported: bool,
+) !void {
+    const obligation_ids = [_]obligation.Id{1};
+    const obligations = [_]obligation.Obligation{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "resource_test" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .{ .resource_op = .{ .op = goal.op, .domain = goal.domain, .ordinal = 0 } },
+        .kind = .{ .resource = goal },
+    }};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "resource_test" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .kind = .obligation,
+        .obligation_ids = &obligation_ids,
+    }};
+    const set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = terms,
+    };
+    const supported = switch (obligation_to_lean.querySemanticSupport(set, queries[0])) {
+        .supported => true,
+        .unsupported => false,
+    };
+    try testing.expectEqual(expected_supported, supported);
+}
+
 fn countQuantifier(set: obligation.ObligationSet) usize {
     var count: usize = 0;
     for (set.obligations) |item| {
@@ -3646,8 +3700,6 @@ test "formal Lean emitter writes manifest rows from canonical obligations" {
 test "formal Lean emitter writes resource rows with places" {
     const terms = [_]obligation.Term{
         .{ .variable = .{ .free = .{ .id = .{ .file_id = 0, .pattern_id = 0 }, .name = "amount", .ty = .{ .spelling = "u256" } } } },
-        .{ .int_lit = .{ .value = "0", .ty = .{ .spelling = "u256" } } },
-        .{ .binary = .{ .op = .ge, .lhs = 0, .rhs = 1 } },
     };
     const source_place: obligation.PlaceRef = .{
         .root = "balances",
@@ -3671,7 +3723,7 @@ test "formal Lean emitter writes resource rows with places" {
                 .domain = "TokenUnit",
                 .source = source_place,
                 .destination = destination_place,
-                .amount = .{ .term = 2 },
+                .amount = .{ .term = 0 },
                 .property = .conservation,
             } },
         },
@@ -3701,8 +3753,119 @@ test "formal Lean emitter writes resource rows with places" {
     try testing.expect(std.mem.containsAtLeast(u8, actual, 1, ".resource { op := .move, domain := \"TokenUnit\""));
     try testing.expect(std.mem.containsAtLeast(u8, actual, 1, "source := some { root := \"balances\", region := .storage, fields := [], keys := [.parameter { file_id := 0, pattern_id := 0 }] }"));
     try testing.expect(std.mem.containsAtLeast(u8, actual, 1, "destination := some { root := \"balances\", region := .storage, fields := [], keys := [.parameter { file_id := 0, pattern_id := 1 }] }"));
-    try testing.expect(std.mem.containsAtLeast(u8, actual, 1, "amount := some (.term 2), property := .conservation"));
+    try testing.expect(std.mem.containsAtLeast(u8, actual, 1, "amount := some (.term 0), property := .conservation"));
     try testing.expect(std.mem.containsAtLeast(u8, actual, 1, "theorem emitted_manifest_wf"));
+}
+
+test "formal Lean support accepts u256 resource model properties" {
+    const terms = [_]obligation.Term{
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 0, .pattern_id = 2 }, .name = "amount", .ty = .{ .spelling = "u256" } } } },
+    };
+    const source_place: obligation.PlaceRef = .{
+        .root = "balances",
+        .region = .storage,
+        .keys = &.{.{ .parameter = .{ .file_id = 0, .pattern_id = 0 } }},
+    };
+    const destination_place: obligation.PlaceRef = .{
+        .root = "balances",
+        .region = .storage,
+        .keys = &.{.{ .parameter = .{ .file_id = 0, .pattern_id = 1 } }},
+    };
+    const properties = [_]obligation.ResourceProperty{
+        .amount_non_negative,
+        .source_sufficient,
+        .destination_no_overflow,
+        .same_place_identity,
+        .conservation,
+    };
+    var obligations: [properties.len]obligation.Obligation = undefined;
+    var queries: [properties.len]obligation.VerificationQuery = undefined;
+    var obligation_ids: [properties.len][1]obligation.Id = undefined;
+    for (properties, 0..) |property, index| {
+        const id: obligation.Id = @intCast(index + 1);
+        obligations[index] = .{
+            .id = id,
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .ora_mlir,
+            .origin = .{ .resource_op = .{ .op = .move, .domain = "TokenUnit", .ordinal = @intCast(index) } },
+            .kind = .{ .resource = .{
+                .op = .move,
+                .domain = "TokenUnit",
+                .source = source_place,
+                .destination = destination_place,
+                .amount = .{ .term = 0 },
+                .property = property,
+            } },
+        };
+        obligation_ids[index] = .{id};
+        queries[index] = .{
+            .id = @intCast(index + 10),
+            .owner = .{ .function = .{ .name = "transfer" } },
+            .source = .generated(),
+            .phase = .ora_mlir,
+            .origin = .source,
+            .kind = .obligation,
+            .obligation_ids = &obligation_ids[index],
+        };
+    }
+    const set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &terms,
+    };
+
+    for (queries) |query| {
+        switch (obligation_to_lean.querySemanticSupport(set, query)) {
+            .supported => {},
+            .unsupported => return error.TestUnexpectedResult,
+        }
+    }
+}
+
+test "formal Lean support treats move resource guards as self-move aware" {
+    const terms = [_]obligation.Term{
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 0, .pattern_id = 2 }, .name = "amount", .ty = .{ .spelling = "u256" } } } },
+    };
+    const source_place: obligation.PlaceRef = .{
+        .root = "balances",
+        .region = .storage,
+        .keys = &.{.{ .parameter = .{ .file_id = 0, .pattern_id = 0 } }},
+    };
+    const destination_place: obligation.PlaceRef = .{
+        .root = "balances",
+        .region = .storage,
+        .keys = &.{.{ .parameter = .{ .file_id = 0, .pattern_id = 1 } }},
+    };
+
+    try expectSingleResourceSemanticSupport(&terms, .{
+        .op = .move,
+        .domain = "TokenUnit",
+        .source = source_place,
+        .amount = .{ .term = 0 },
+        .property = .source_sufficient,
+    }, false);
+    try expectSingleResourceSemanticSupport(&terms, .{
+        .op = .move,
+        .domain = "TokenUnit",
+        .destination = destination_place,
+        .amount = .{ .term = 0 },
+        .property = .destination_no_overflow,
+    }, false);
+    try expectSingleResourceSemanticSupport(&terms, .{
+        .op = .destroy,
+        .domain = "TokenUnit",
+        .source = source_place,
+        .amount = .{ .term = 0 },
+        .property = .source_sufficient,
+    }, true);
+    try expectSingleResourceSemanticSupport(&terms, .{
+        .op = .create,
+        .domain = "TokenUnit",
+        .destination = destination_place,
+        .amount = .{ .term = 0 },
+        .property = .destination_no_overflow,
+    }, true);
 }
 
 test "formal Lean emitter writes quantifier metadata rows" {
@@ -6551,16 +6714,27 @@ test "formal obligation MLIR adapter expands resource op properties" {
     defer result.deinit();
 
     try testing.expect(!result.set.hasBlockingDiagnostic());
-    try testing.expectEqual(@as(usize, 6), result.set.obligations.len);
-    try testing.expectEqual(@as(usize, 7), result.set.queries.len);
+    try testing.expectEqual(@as(usize, 5), result.set.obligations.len);
+    try testing.expectEqual(@as(usize, 6), result.set.queries.len);
     try testing.expectEqual(@as(usize, 1), countQuery(result.set, .base));
-    try testing.expectEqual(@as(usize, 6), countQuery(result.set, .obligation));
+    try testing.expectEqual(@as(usize, 5), countQuery(result.set, .obligation));
     try testing.expectEqual(@as(usize, 1), countResource(result.set, .move, .amount_non_negative));
     try testing.expectEqual(@as(usize, 1), countResource(result.set, .move, .source_sufficient));
     try testing.expectEqual(@as(usize, 1), countResource(result.set, .move, .destination_no_overflow));
-    try testing.expectEqual(@as(usize, 1), countResource(result.set, .move, .same_place_net_zero));
+    try testing.expectEqual(@as(usize, 1), countResource(result.set, .move, .same_place_identity));
     try testing.expectEqual(@as(usize, 1), countResource(result.set, .move, .conservation));
-    try testing.expectEqual(@as(usize, 1), countResource(result.set, .move, .modifies_covered));
+    inline for (.{
+        obligation.ResourceProperty.amount_non_negative,
+        obligation.ResourceProperty.source_sufficient,
+        obligation.ResourceProperty.destination_no_overflow,
+        obligation.ResourceProperty.same_place_identity,
+        obligation.ResourceProperty.conservation,
+    }) |property| {
+        switch (obligation_to_lean.querySemanticSupport(result.set, try findResourceQuery(result.set, .move, property))) {
+            .supported => {},
+            .unsupported => return error.TestUnexpectedResult,
+        }
+    }
 
     for (result.set.obligations) |item| {
         try testing.expect(item.kind == .resource);
@@ -6603,9 +6777,25 @@ test "formal obligation MLIR adapter records direct resource create and destroy 
     defer result.deinit();
 
     try testing.expect(!result.set.hasBlockingDiagnostic());
-    try testing.expectEqual(@as(usize, 6), result.set.obligations.len);
+    try testing.expectEqual(@as(usize, 4), result.set.obligations.len);
     try testing.expectEqual(@as(usize, 1), countResource(result.set, .create, .destination_no_overflow));
     try testing.expectEqual(@as(usize, 1), countResource(result.set, .destroy, .source_sufficient));
+    switch (obligation_to_lean.querySemanticSupport(result.set, try findResourceQuery(result.set, .create, .amount_non_negative))) {
+        .supported => {},
+        .unsupported => return error.TestUnexpectedResult,
+    }
+    switch (obligation_to_lean.querySemanticSupport(result.set, try findResourceQuery(result.set, .create, .destination_no_overflow))) {
+        .supported => {},
+        .unsupported => return error.TestUnexpectedResult,
+    }
+    switch (obligation_to_lean.querySemanticSupport(result.set, try findResourceQuery(result.set, .destroy, .amount_non_negative))) {
+        .supported => {},
+        .unsupported => return error.TestUnexpectedResult,
+    }
+    switch (obligation_to_lean.querySemanticSupport(result.set, try findResourceQuery(result.set, .destroy, .source_sufficient))) {
+        .supported => {},
+        .unsupported => return error.TestUnexpectedResult,
+    }
 
     var saw_create = false;
     var saw_destroy = false;
@@ -6712,9 +6902,9 @@ test "formal report coverage summarizes representative MLIR obligation classes" 
     defer result.deinit();
 
     try testing.expect(!result.set.hasBlockingDiagnostic());
-    try testing.expectEqual(@as(usize, 13), result.set.obligations.len);
+    try testing.expectEqual(@as(usize, 12), result.set.obligations.len);
     try testing.expectEqual(@as(usize, 1), result.set.assumptions.len);
-    try testing.expectEqual(@as(usize, 14), result.set.queries.len);
+    try testing.expectEqual(@as(usize, 13), result.set.queries.len);
     try testing.expectEqual(@as(usize, 1), countAssumption(result.set, .requires));
     try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
     try testing.expectEqual(@as(usize, 1), countLogical(result.set, .assert));
@@ -6725,7 +6915,7 @@ test "formal report coverage summarizes representative MLIR obligation classes" 
     try testing.expectEqual(@as(usize, 1), countResource(result.set, .move, .conservation));
     try testing.expectEqual(@as(usize, 1), countQuantifier(result.set));
     try testing.expectEqual(@as(usize, 1), countQuery(result.set, .base));
-    try testing.expectEqual(@as(usize, 11), countQuery(result.set, .obligation));
+    try testing.expectEqual(@as(usize, 10), countQuery(result.set, .obligation));
     try testing.expectEqual(@as(usize, 1), countQuery(result.set, .guard_satisfy));
     try testing.expectEqual(@as(usize, 1), countQuery(result.set, .guard_violate));
 
@@ -6733,11 +6923,11 @@ test "formal report coverage summarizes representative MLIR obligation classes" 
     defer testing.allocator.free(report);
 
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"artifact_decision\",\"schema_version\":3,\"status\":\"blocked\",\"reason\":\"missing_proof\"}"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":3,\"assumptions\":1,\"obligations\":13,\"queries\":14"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_obligation_links\":13"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"obligation_kinds\":{\"logical\":4,\"runtime_guard\":1,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":1,\"resource\":6,\"quantifier\":1,\"filtered_input\":0,\"backend_fact\":0}"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_backends\":{\"unspecified\":14,\"z3\":0,\"lean\":0}"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_results\":{\"missing\":14,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":3,\"assumptions\":1,\"obligations\":12,\"queries\":13"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_obligation_links\":12"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"obligation_kinds\":{\"logical\":4,\"runtime_guard\":1,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":1,\"resource\":5,\"quantifier\":1,\"filtered_input\":0,\"backend_fact\":0}"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_backends\":{\"unspecified\":13,\"z3\":0,\"lean\":0}"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_results\":{\"missing\":13,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":3"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"logical\",\"role\":\"ensures\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"arithmetic_safety\":\"addition_overflow\""));

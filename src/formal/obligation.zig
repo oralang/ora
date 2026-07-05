@@ -734,9 +734,8 @@ pub const ResourceProperty = enum(u8) {
     amount_non_negative,
     source_sufficient,
     destination_no_overflow,
-    same_place_net_zero,
+    same_place_identity,
     conservation,
-    modifies_covered,
 };
 
 pub const QuantifierGoal = struct {

@@ -12,6 +12,7 @@ const builtin = formal.builtin;
 const refinements = formal.refinement_registry;
 const region_assign = formal.region_assign;
 const semantic = formal.semantic;
+const obligation = formal.obligation;
 
 const header =
     \\/-
@@ -22,7 +23,8 @@ const header =
     \\
     \\Regenerate with `scripts/check-formal-sync.sh`. Source:
     \\src/formal/emit_compiler_snapshot.zig, src/types/builtin.zig,
-    \\src/types/semantic.zig, src/types/region_assign.zig, src/refinements/root.zig.
+    \\src/types/semantic.zig, src/types/region_assign.zig, src/refinements/root.zig,
+    \\src/formal/obligation.zig.
     \\-/
     \\
     \\namespace Ora.Generated
@@ -128,6 +130,10 @@ pub fn main(init: std.process.Init) !void {
     // TypeKind universe + regions, in enum order.
     try emitStringList(out, "compilerTypeKinds", semantic.TypeKind);
     try emitStringList(out, "compilerRegions", semantic.Region);
+
+    // Resource obligation operation/property enums, in compiler enum order.
+    try emitStringList(out, "compilerResourceOperations", obligation.ResourceOperation);
+    try emitStringList(out, "compilerResourceProperties", obligation.ResourceProperty);
 
     // Closed refinement registry, emitted as self-describing per-property name
     // lists (not a positional tuple): membership in each list fully determines

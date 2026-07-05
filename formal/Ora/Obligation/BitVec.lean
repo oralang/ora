@@ -61,8 +61,28 @@ theorem slt_max_zero_and_not_ult :
 def add (lhs rhs : U256) : U256 :=
   BitVec.ofNat 256 (lhs.toNat + rhs.toNat)
 
+theorem toNat_add_noOverflow (lhs rhs : U256) :
+    lhs.toNat + rhs.toNat < 2^256 →
+      (lhs.add rhs).toNat = lhs.toNat + rhs.toNat := by
+  intro h
+  unfold add
+  simp [Nat.mod_eq_of_lt h]
+
 def sub (lhs rhs : U256) : U256 :=
   BitVec.ofNat 256 (lhs.toNat + 2^256 - rhs.toNat)
+
+theorem toNat_sub_noUnderflow (lhs rhs : U256) :
+    rhs.toNat ≤ lhs.toNat →
+      (lhs.sub rhs).toNat + rhs.toNat = lhs.toNat := by
+  intro h
+  unfold sub
+  have hDiffLt : lhs.toNat - rhs.toNat < 2^256 := by omega
+  have hRewrite :
+      lhs.toNat + 2^256 - rhs.toNat = 2^256 + (lhs.toNat - rhs.toNat) := by
+    omega
+  rw [hRewrite]
+  simp [Nat.mod_eq_of_lt hDiffLt]
+  omega
 
 theorem sub_underflow_wrap_example :
     sub (BitVec.ofNat 256 3) (BitVec.ofNat 256 5) =

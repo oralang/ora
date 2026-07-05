@@ -338,14 +338,57 @@ fn kindSemanticSupport(set: obligation.ObligationSet, owner: obligation.Owner, k
         .logical => |logical| formulaSemanticSupport(set, logical.formula),
         .runtime_guard => |guard| formulaSemanticSupport(set, guard.formula),
         .effect_frame => |effect| effectFrameSemanticSupport(set, owner, effect),
+        .resource => |resource| resourceSemanticSupport(set, resource),
         .type_wf,
         .type_relation,
         .region_relation,
-        .resource,
         .quantifier,
         .filtered_input,
         .backend_fact,
         => .{ .unsupported = .unsupported_obligation_kind },
+    };
+}
+
+fn resourceSemanticSupport(set: obligation.ObligationSet, resource: obligation.ResourceGoal) SemanticSupport {
+    const amount = resource.amount orelse return .{ .unsupported = .unsupported_origin_value };
+    switch (amount) {
+        .term => |id| switch (u256ValueTermSemanticSupport(set, id, set.terms.len + 1)) {
+            .supported => {},
+            .unsupported => |reason| return .{ .unsupported = reason },
+        },
+        .origin_value => return .{ .unsupported = .unsupported_origin_value },
+    }
+
+    return switch (resource.property) {
+        .amount_non_negative => .supported,
+        .source_sufficient => switch (resource.op) {
+            .move => if (resource.source != null and resource.destination != null)
+                .supported
+            else
+                .{ .unsupported = .invalid_dependency },
+            .destroy => if (resource.source != null)
+                .supported
+            else
+                .{ .unsupported = .invalid_dependency },
+            .create => .{ .unsupported = .invalid_dependency },
+        },
+        .destination_no_overflow => switch (resource.op) {
+            .move => if (resource.source != null and resource.destination != null)
+                .supported
+            else
+                .{ .unsupported = .invalid_dependency },
+            .create => if (resource.destination != null)
+                .supported
+            else
+                .{ .unsupported = .invalid_dependency },
+            .destroy => .{ .unsupported = .invalid_dependency },
+        },
+        .same_place_identity,
+        .conservation,
+        => if (resource.op == .move and resource.source != null and resource.destination != null)
+            .supported
+        else
+            .{ .unsupported = .invalid_dependency },
     };
 }
 
@@ -1504,9 +1547,8 @@ fn resourcePropertyName(property: obligation.ResourceProperty) []const u8 {
         .amount_non_negative => "amountNonNegative",
         .source_sufficient => "sourceSufficient",
         .destination_no_overflow => "destinationNoOverflow",
-        .same_place_net_zero => "samePlaceNetZero",
+        .same_place_identity => "samePlaceIdentity",
         .conservation => "conservation",
-        .modifies_covered => "modifiesCovered",
     };
 }
 

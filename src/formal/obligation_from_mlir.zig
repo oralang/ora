@@ -126,21 +126,18 @@ const resource_move_properties = [_]obligation.ResourceProperty{
     .amount_non_negative,
     .source_sufficient,
     .destination_no_overflow,
-    .same_place_net_zero,
+    .same_place_identity,
     .conservation,
-    .modifies_covered,
 };
 
 const resource_create_properties = [_]obligation.ResourceProperty{
     .amount_non_negative,
     .destination_no_overflow,
-    .modifies_covered,
 };
 
 const resource_destroy_properties = [_]obligation.ResourceProperty{
     .amount_non_negative,
     .source_sufficient,
-    .modifies_covered,
 };
 
 pub fn collect(
@@ -831,7 +828,7 @@ const Collector = struct {
             return;
         }
         const amount_index = operand_count - 1;
-        const amount = (try self.formulaOperand(op, op_name, symbol, ordinal, @intCast(amount_index))) orelse {
+        const amount = (try self.valueOperand(op, op_name, symbol, ordinal, @intCast(amount_index))) orelse {
             try self.addMissingFormulaDiagnostic(op_name, symbol, ordinal);
             return;
         };
@@ -1227,6 +1224,24 @@ const Collector = struct {
             }
             return formula;
         }
+        return .{ .origin_value = .{
+            .origin = mlirOrigin(op_name, symbol, ordinal),
+            .kind = .operand,
+            .index = operand_index,
+        } };
+    }
+
+    fn valueOperand(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        op_name: []const u8,
+        symbol: ?[]const u8,
+        ordinal: u32,
+        operand_index: u32,
+    ) !?obligation.FormulaRef {
+        if (mlir.oraOperationGetNumOperands(op) <= operand_index) return null;
+        const value = mlir.oraOperationGetOperand(op, operand_index);
+        if (try self.termFromValue(value)) |term| return .{ .term = term };
         return .{ .origin_value = .{
             .origin = mlirOrigin(op_name, symbol, ordinal),
             .kind = .operand,

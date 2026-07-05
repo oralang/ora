@@ -15,6 +15,7 @@ a frame equality between them.
 
 import Ora.Obligation.Manifest
 import Ora.Obligation.BitVec
+import Ora.Resource.Theorems
 import Ora.Spec.Facts
 
 namespace Ora.Obligation
@@ -411,6 +412,30 @@ theorem denoteValue_old_non_place_operand_fails_closed :
 def formulaDenotes? (manifest : Manifest) (env : Env) : FormulaRef → Option Prop
   | .term id => denoteFormula? manifest env (manifest.terms.length + 1) id
 
+def formulaValue? (manifest : Manifest) (env : Env) : FormulaRef → Option Value
+  | .term id => denoteValue? manifest env (manifest.terms.length + 1) id
+
+def formulaU256? (manifest : Manifest) (env : Env) (formula : FormulaRef) : Option U256 :=
+  match formulaValue? manifest env formula with
+  | some (.u256 value) => some value
+  | _ => none
+
+def Env.resourceState (env : Env) : Ora.Resource.State PlaceRef :=
+  fun place =>
+    match env.placeValue (.stable place) with
+    | .u256 value => value
+    | .bool _ => U256.zero
+
+def Env.resourcePlaceValue? (env : Env) (place : PlaceRef) : Option U256 :=
+  match env.placeValue (.stable place) with
+  | .u256 value => some value
+  | .bool _ => none
+
+def Env.resourcePlaceKnown? (env : Env) (place : PlaceRef) : Option PlaceRef :=
+  match env.resourcePlaceValue? place with
+  | some _ => some place
+  | none => none
+
 def placeListCovers (declared actual : List PlaceRef) : Bool :=
   actual.all (fun place => declared.contains place)
 
@@ -615,6 +640,70 @@ def effectFrameGoalDenotes? (manifest : Manifest) (env : Env) (goal : EffectFram
   | .externalCallFrame =>
       none
 
+def resourceGoalAmount? (manifest : Manifest) (env : Env) (goal : ResourceGoal) : Option U256 :=
+  match goal.amount with
+  | some formula => formulaU256? manifest env formula
+  | none => none
+
+def resourceGoalSource? (env : Env) (goal : ResourceGoal) : Option PlaceRef :=
+  match goal.source with
+  | some source => env.resourcePlaceKnown? source
+  | none => none
+
+def resourceGoalDestination? (env : Env) (goal : ResourceGoal) : Option PlaceRef :=
+  match goal.destination with
+  | some destination => env.resourcePlaceKnown? destination
+  | none => none
+
+def resourceGoalDenotes? (manifest : Manifest) (env : Env) (goal : ResourceGoal) :
+    Option Prop :=
+  let state := env.resourceState
+  match goal.property with
+  | .amountNonNegative =>
+      -- U256 values are structurally non-negative. Keep this as a proposition
+      -- rather than `some True` so the resource property remains explicitly
+      -- denoted and cannot disappear through the semantics seam.
+      match resourceGoalAmount? manifest env goal with
+      | some amount => some (Ora.Resource.amountNonNegative amount)
+      | none => none
+  | .sourceSufficient =>
+      match goal.op, resourceGoalSource? env goal, resourceGoalDestination? env goal,
+          resourceGoalAmount? manifest env goal with
+      | .move, some source, some destination, some amount =>
+          some (Ora.Resource.moveSourceSufficient state source destination amount)
+      | .destroy, some source, _, some amount =>
+          some (Ora.Resource.sourceSufficient state source amount)
+      | _, _, _, _ => none
+  | .destinationNoOverflow =>
+      match goal.op, resourceGoalSource? env goal, resourceGoalDestination? env goal,
+          resourceGoalAmount? manifest env goal with
+      | .move, some source, some destination, some amount =>
+          some (Ora.Resource.moveDestinationNoOverflow state source destination amount)
+      | .create, _, some destination, some amount =>
+          some (Ora.Resource.destinationNoOverflow state destination amount)
+      | _, _, _, _ => none
+  | .samePlaceIdentity =>
+      -- This is informative only in the alias case: for distinct places the
+      -- implication is vacuous, while equal places cite the model's self-move
+      -- identity behavior.
+      match goal.op, resourceGoalSource? env goal, resourceGoalDestination? env goal,
+          resourceGoalAmount? manifest env goal with
+      | .move, some source, some destination, some amount =>
+          some (source = destination →
+            Ora.Resource.move state source destination amount = state)
+      | _, _, _, _ => none
+  | .conservation =>
+      match goal.op, resourceGoalSource? env goal, resourceGoalDestination? env goal,
+          resourceGoalAmount? manifest env goal with
+      | .move, some source, some destination, some amount =>
+          some (source ≠ destination →
+            Ora.Resource.sourceSufficient state source amount →
+              Ora.Resource.destinationNoOverflow state destination amount →
+                (Ora.Resource.move state source destination amount source).toNat +
+                    (Ora.Resource.move state source destination amount destination).toNat =
+                  (state source).toNat + (state destination).toNat)
+      | _, _, _, _ => none
+
 def assumptionDenotesInEnv? (manifest : Manifest) (env : Env) (row : AssumptionRow) :
     Option Prop :=
   match row.formula with
@@ -627,6 +716,7 @@ def obligationDenotesInEnv? (manifest : Manifest) (env : Env) (row : ObligationR
   | .logical _ formula => formulaDenotes? manifest env formula
   | .runtimeGuard _ formula => formulaDenotes? manifest env formula
   | .effectFrame goal => effectFrameGoalDenotes? manifest env goal
+  | .resource goal => resourceGoalDenotes? manifest env goal
   | _ => none
 
 def obligationDenotes? (manifest : Manifest) (row : ObligationRow) : Option Prop :=

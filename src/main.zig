@@ -5136,6 +5136,10 @@ fn runMlirEmitAdvanced(
     if (!mlir_options.keep_proved_checks) {
         if (verification_result_opt) |*vr| {
             if (vr.success) {
+                // Resource runtime-check erasure is intentionally tied only to
+                // the original SMT verification result. Userland Lean proofs
+                // may unblock artifact emission, but must not set the marker
+                // consumed by OraToSIR's `resourceRuntimeChecksProved`.
                 runtime_checks.markVerifiedResourceRuntimeChecks(ctx, final_module);
             }
         }

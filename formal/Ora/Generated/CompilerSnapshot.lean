@@ -6,7 +6,8 @@ the compiler. The TRUSTED checks live in `Ora/Sync.lean`.
 
 Regenerate with `scripts/check-formal-sync.sh`. Source:
 src/formal/emit_compiler_snapshot.zig, src/types/builtin.zig,
-src/types/semantic.zig, src/types/region_assign.zig, src/refinements/root.zig.
+src/types/semantic.zig, src/types/region_assign.zig, src/refinements/root.zig,
+src/formal/obligation.zig.
 -/
 
 namespace Ora.Generated
@@ -28,6 +29,12 @@ def compilerTypeKinds : List String :=
 
 def compilerRegions : List String :=
   ["none", "storage", "memory", "transient", "calldata"]
+
+def compilerResourceOperations : List String :=
+  ["move", "create", "destroy"]
+
+def compilerResourceProperties : List String :=
+  ["amount_non_negative", "source_sufficient", "destination_no_overflow", "same_place_identity", "conservation"]
 
 def compilerRefinementNames : List String :=
   ["MinValue", "MaxValue", "InRange", "NonZeroAddress", "NonZero", "BasisPoints", "Exact", "Scaled"]

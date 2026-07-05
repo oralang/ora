@@ -206,9 +206,8 @@ inductive ResourceProperty where
   | amountNonNegative
   | sourceSufficient
   | destinationNoOverflow
-  | samePlaceNetZero
+  | samePlaceIdentity
   | conservation
-  | modifiesCovered
   deriving Repr, BEq, DecidableEq
 
 inductive BackendComponent where
