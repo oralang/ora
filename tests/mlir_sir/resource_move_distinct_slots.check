@@ -3,8 +3,8 @@
 // CHECK-NOT: ora.move
 //
 // CHECK-LABEL: func.func @settle
-// CHECK-SAME: ora.read_slots = ["pending", "settled"]
-// CHECK-SAME: ora.write_slots = ["pending", "settled"]
+// CHECK-SAME: ora.read_slots = ["pending[param#0]", "settled[param#1]"]
+// CHECK-SAME: ora.write_slots = ["pending[param#0]", "settled[param#1]"]
 // CHECK: %slot_pending = sir.const 0
 // CHECK: %hash_pending = sir.keccak256
 // CHECK: %hash_settled = sir.keccak256

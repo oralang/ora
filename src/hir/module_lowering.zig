@@ -946,11 +946,14 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             for (slots) |slot| {
                 switch (slot.region) {
                     .storage => {
-                        const slot_path = if (std.mem.eql(u8, slot.name, "$computed_storage"))
+                        const needs_full_path = std.mem.eql(u8, slot.name, "$computed_storage") or
+                            slot.field_path != null or
+                            slot.key_path != null;
+                        const slot_path = if (needs_full_path)
                             try sema.formatEffectSlotPath(self.allocator, slot)
                         else
                             slot.name;
-                        defer if (std.mem.eql(u8, slot.name, "$computed_storage")) self.allocator.free(slot_path);
+                        defer if (needs_full_path) self.allocator.free(slot_path);
                         try slot_attrs.append(
                             self.allocator,
                             mlir.oraStringAttrCreate(self.context, strRef(slot_path)),

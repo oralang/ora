@@ -51,3 +51,5 @@ import Ora.Obligation.Manifest
 import Ora.Obligation.BitVec
 import Ora.Obligation.Semantics
 import Ora.Obligation.Theorems
+import Ora.Generated.StorageDisjointnessSnapshot
+import Ora.StorageDisjointnessSync

@@ -3,7 +3,7 @@
 // CHECK-NOT: ora.create
 //
 // CHECK-LABEL: func.func @issue
-// CHECK-SAME: ora.write_slots = ["balances"]
+// CHECK-SAME: ora.write_slots = ["balances[param#0]"]
 // CHECK: %hash_balances = sir.keccak256
 // CHECK: [[BEFORE:%[0-9]+]] = sir.sload %hash_balances
 // CHECK: [[AFTER:%[0-9]+]] = sir.add [[BEFORE]]

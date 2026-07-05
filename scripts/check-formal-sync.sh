@@ -4,7 +4,8 @@
 # Lean spec (formal/). Four gates:
 #
 #   1. REGENERATE  all data-only snapshots from the compiler (`src/formal/*`):
-#      type universe, curated declaration environment, and type-relation rows.
+#      type universe, curated declaration environment, type-relation rows, and
+#      storage disjointness fixtures.
 #   2. DATA-ONLY LINT  every snapshot — each must contain ONLY `def … := <literal>`
 #      facts (no theorem/axiom/sorry/instance/import/…). This is the trust
 #      boundary: the untrusted compiler emits DATA; the trusted checks live in
@@ -90,6 +91,7 @@ SNAPSHOTS=(
   "formal/Ora/Generated/CompilerTypeRelations.lean"
   "formal/Ora/Generated/DispatcherStrategySnapshot.lean"
   "formal/Ora/Generated/SinoraBackendSnapshot.lean"
+  "formal/Ora/Generated/StorageDisjointnessSnapshot.lean"
 )
 
 echo "==> [1/4] regenerating formal snapshots from the compiler"
@@ -98,6 +100,7 @@ run_emitter "declaration environment" "src/formal/emit_declenv_snapshot.zig" "${
 run_emitter "type relations" "src/formal/emit_type_relations_snapshot.zig" "${SNAPSHOTS[2]}"
 run_sinora_emitter "dispatcher strategies" "src/formal/emit_dispatcher_strategy_snapshot.zig" "${SNAPSHOTS[3]}"
 run_sinora_emitter "sinora backend" "src/formal/emit_sinora_backend_snapshot.zig" "${SNAPSHOTS[4]}"
+run_emitter "storage disjointness" "src/formal/emit_storage_disjointness_snapshot.zig" "${SNAPSHOTS[5]}"
 
 echo "==> [2/4] data-only lint"
 for snapshot in "${SNAPSHOTS[@]}"; do

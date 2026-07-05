@@ -156,7 +156,7 @@
 // CHECK-NEXT:     sir.store %25 : !sir.ptr<1>, %24 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/types/basic_types.ora":66:9)))
 // CHECK-NEXT:     sir.return %25 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/types/basic_types.ora":66:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/types/basic_types.ora":54:5)
-// CHECK-NEXT:   func.func @test_map_operations() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.read_slots = ["address_value", "map_value", "doublemap_value"], ora.selector = "0x67478d22", ora.visibility = "pub", ora.write_slots = ["map_value", "doublemap_value"], ora.write_slots_complete = true} {
+// CHECK-NEXT:   func.func @test_map_operations() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.read_slots = ["address_value", "map_value[?]", "doublemap_value[?][1]"], ora.selector = "0x67478d22", ora.visibility = "pub", ora.write_slots = ["map_value[?]", "doublemap_value[?][1]"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_map_value = sir.const 10 : !sir.u256 loc("ora.stmt.17"("ora.origin_stmt.17"("{{.*}}/ora-example/types/basic_types.ora":72:9)))
 // CHECK-NEXT:     %slot_address_value = sir.const 7 : !sir.u256 loc("ora.stmt.17"("ora.origin_stmt.17"("{{.*}}/ora-example/types/basic_types.ora":26:5)))

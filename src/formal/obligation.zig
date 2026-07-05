@@ -962,6 +962,204 @@ pub const PlaceKey = union(PlaceKeyTag) {
     unknown,
 };
 
+pub fn placeRefEql(lhs: PlaceRef, rhs: PlaceRef) bool {
+    if (!std.mem.eql(u8, lhs.root, rhs.root)) return false;
+    if (lhs.region != rhs.region) return false;
+    if (lhs.fields.len != rhs.fields.len) return false;
+    if (lhs.keys.len != rhs.keys.len) return false;
+    for (lhs.fields, rhs.fields) |left, right| {
+        if (!std.mem.eql(u8, left, right)) return false;
+    }
+    for (lhs.keys, rhs.keys) |left, right| {
+        if (!placeKeyEql(left, right)) return false;
+    }
+    return true;
+}
+
+pub fn placeKeyEql(lhs: PlaceKey, rhs: PlaceKey) bool {
+    if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
+    return switch (lhs) {
+        .parameter => |value| value == rhs.parameter,
+        .comptime_parameter => |value| value == rhs.comptime_parameter,
+        .comptime_range_parameter => |value| value == rhs.comptime_range_parameter,
+        .constant => |value| std.mem.eql(u8, value, rhs.constant),
+        .msg_sender, .tx_origin, .unknown => true,
+    };
+}
+
+pub fn placeDefinitelyDisjoint(lhs: PlaceRef, rhs: PlaceRef) bool {
+    if (!regionIsConcrete(lhs.region) or !regionIsConcrete(rhs.region)) return false;
+    if (isComputedStorageRoot(lhs.root) or isComputedStorageRoot(rhs.root)) return false;
+    if (lhs.region != rhs.region) return true;
+    if (!std.mem.eql(u8, lhs.root, rhs.root)) return true;
+    if (!stringSlicesEql(lhs.fields, rhs.fields)) return false;
+    return placeKeysDefinitelyDisjoint(lhs.keys, rhs.keys);
+}
+
+pub fn placeKeysDefinitelyDistinct(lhs: PlaceKey, rhs: PlaceKey) bool {
+    if (lhs == .constant and rhs == .constant) {
+        const lhs_value = parseDecimalU256(lhs.constant) orelse return false;
+        const rhs_value = parseDecimalU256(rhs.constant) orelse return false;
+        return lhs_value != rhs_value;
+    }
+    return false;
+}
+
+fn placeKeysDefinitelyDisjoint(lhs: []const PlaceKey, rhs: []const PlaceKey) bool {
+    const limit = @min(lhs.len, rhs.len);
+    var index: usize = 0;
+    while (index < limit) : (index += 1) {
+        if (placeKeyEql(lhs[index], rhs[index])) continue;
+        return placeKeysDefinitelyDistinct(lhs[index], rhs[index]);
+    }
+    return false;
+}
+
+fn regionIsConcrete(region: RegionRef) bool {
+    return region != .none;
+}
+
+fn isComputedStorageRoot(root: []const u8) bool {
+    return std.mem.eql(u8, root, "$computed_storage");
+}
+
+fn stringSlicesEql(lhs: []const []const u8, rhs: []const []const u8) bool {
+    if (lhs.len != rhs.len) return false;
+    for (lhs, rhs) |left, right| {
+        if (!std.mem.eql(u8, left, right)) return false;
+    }
+    return true;
+}
+
+fn parseDecimalU256(value: []const u8) ?u256 {
+    if (value.len == 0) return null;
+    for (value) |byte| {
+        if (byte < '0' or byte > '9') return null;
+    }
+    return std.fmt.parseInt(u256, value, 10) catch null;
+}
+
+pub const StorageDisjointnessFixture = struct {
+    label: []const u8,
+    lhs: PlaceRef,
+    rhs: PlaceRef,
+    expected: bool,
+};
+
+const fixture_key_const_1 = [_]PlaceKey{.{ .constant = "1" }};
+const fixture_key_const_01 = [_]PlaceKey{.{ .constant = "01" }};
+const fixture_key_const_2 = [_]PlaceKey{.{ .constant = "2" }};
+const fixture_key_const_1001 = [_]PlaceKey{.{ .constant = "1001" }};
+const fixture_key_const_1_000 = [_]PlaceKey{.{ .constant = "1_000" }};
+const fixture_key_const_bad = [_]PlaceKey{.{ .constant = "0..2" }};
+const fixture_key_param_0 = [_]PlaceKey{.{ .parameter = 0 }};
+const fixture_key_param_1 = [_]PlaceKey{.{ .parameter = 1 }};
+const fixture_key_msg_sender = [_]PlaceKey{.{ .msg_sender = {} }};
+const fixture_key_tx_origin = [_]PlaceKey{.{ .tx_origin = {} }};
+const fixture_key_unknown = [_]PlaceKey{.{ .unknown = {} }};
+const fixture_keys_prefix = [_]PlaceKey{ .{ .parameter = 0 }, .{ .constant = "1" } };
+const fixture_field_owner = [_][]const u8{"owner"};
+const fixture_field_admin = [_][]const u8{"admin"};
+
+pub const storage_disjointness_fixtures = [_]StorageDisjointnessFixture{
+    .{
+        .label = "different_roots",
+        .lhs = .{ .root = "balances", .region = .storage },
+        .rhs = .{ .root = "allowances", .region = .storage },
+        .expected = true,
+    },
+    .{
+        .label = "same_root_exact_path",
+        .lhs = .{ .root = "balances", .region = .storage, .keys = &fixture_key_const_1 },
+        .rhs = .{ .root = "balances", .region = .storage, .keys = &fixture_key_const_1 },
+        .expected = false,
+    },
+    .{
+        .label = "whole_root_write_vs_keyed_read",
+        .lhs = .{ .root = "balances", .region = .storage, .keys = &fixture_key_const_1 },
+        .rhs = .{ .root = "balances", .region = .storage },
+        .expected = false,
+    },
+    .{
+        .label = "normalized_unequal_constants",
+        .lhs = .{ .root = "balances", .region = .storage, .keys = &fixture_key_const_1 },
+        .rhs = .{ .root = "balances", .region = .storage, .keys = &fixture_key_const_2 },
+        .expected = true,
+    },
+    .{
+        .label = "raw_noncanonical_equal_constants",
+        .lhs = .{ .root = "balances", .region = .storage, .keys = &fixture_key_const_1 },
+        .rhs = .{ .root = "balances", .region = .storage, .keys = &fixture_key_const_01 },
+        .expected = false,
+    },
+    .{
+        .label = "unparseable_constant_blocks",
+        .lhs = .{ .root = "balances", .region = .storage, .keys = &fixture_key_const_bad },
+        .rhs = .{ .root = "balances", .region = .storage, .keys = &fixture_key_const_2 },
+        .expected = false,
+    },
+    .{
+        .label = "underscore_constant_blocks",
+        .lhs = .{ .root = "balances", .region = .storage, .keys = &fixture_key_const_1_000 },
+        .rhs = .{ .root = "balances", .region = .storage, .keys = &fixture_key_const_1001 },
+        .expected = false,
+    },
+    .{
+        .label = "parameter_vs_parameter",
+        .lhs = .{ .root = "balances", .region = .storage, .keys = &fixture_key_param_0 },
+        .rhs = .{ .root = "balances", .region = .storage, .keys = &fixture_key_param_1 },
+        .expected = false,
+    },
+    .{
+        .label = "parameter_vs_constant",
+        .lhs = .{ .root = "balances", .region = .storage, .keys = &fixture_key_param_0 },
+        .rhs = .{ .root = "balances", .region = .storage, .keys = &fixture_key_const_2 },
+        .expected = false,
+    },
+    .{
+        .label = "msg_sender_vs_tx_origin",
+        .lhs = .{ .root = "balances", .region = .storage, .keys = &fixture_key_msg_sender },
+        .rhs = .{ .root = "balances", .region = .storage, .keys = &fixture_key_tx_origin },
+        .expected = false,
+    },
+    .{
+        .label = "unknown_key_blocks",
+        .lhs = .{ .root = "balances", .region = .storage, .keys = &fixture_key_unknown },
+        .rhs = .{ .root = "balances", .region = .storage, .keys = &fixture_key_const_2 },
+        .expected = false,
+    },
+    .{
+        .label = "same_prefix_blocks",
+        .lhs = .{ .root = "allowances", .region = .storage, .keys = &fixture_key_param_0 },
+        .rhs = .{ .root = "allowances", .region = .storage, .keys = &fixture_keys_prefix },
+        .expected = false,
+    },
+    .{
+        .label = "different_concrete_regions",
+        .lhs = .{ .root = "scratch", .region = .transient },
+        .rhs = .{ .root = "scratch", .region = .storage },
+        .expected = true,
+    },
+    .{
+        .label = "none_region_blocks",
+        .lhs = .{ .root = "scratch", .region = .none },
+        .rhs = .{ .root = "scratch", .region = .storage },
+        .expected = false,
+    },
+    .{
+        .label = "computed_storage_blocks",
+        .lhs = .{ .root = "$computed_storage", .region = .storage, .keys = &fixture_key_const_1 },
+        .rhs = .{ .root = "balances", .region = .storage, .keys = &fixture_key_const_2 },
+        .expected = false,
+    },
+    .{
+        .label = "different_fields_deferred",
+        .lhs = .{ .root = "config", .region = .storage, .fields = &fixture_field_owner },
+        .rhs = .{ .root = "config", .region = .storage, .fields = &fixture_field_admin },
+        .expected = false,
+    },
+};
+
 pub const RegionRef = enum(u8) {
     none,
     storage,
@@ -1022,6 +1220,19 @@ test "manifest enum tags stay byte-sized" {
         TypeRefTag,
     }) |T| {
         try std.testing.expectEqual(@as(usize, 1), @sizeOf(T));
+    }
+}
+
+test "storage place disjointness fixtures match Zig relation" {
+    for (storage_disjointness_fixtures) |fixture| {
+        try std.testing.expectEqual(
+            fixture.expected,
+            placeDefinitelyDisjoint(fixture.lhs, fixture.rhs),
+        );
+        try std.testing.expectEqual(
+            fixture.expected,
+            placeDefinitelyDisjoint(fixture.rhs, fixture.lhs),
+        );
     }
 }
 

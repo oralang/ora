@@ -369,7 +369,7 @@ const Collector = struct {
 
         var preserved: std.ArrayList(obligation.PlaceRef) = .empty;
         for (reads) |read| {
-            if (!placeListContains(writes, read)) try preserved.append(self.allocator, read);
+            if (placeIsDefinitelyDisjointFromAll(read, writes)) try preserved.append(self.allocator, read);
         }
         return try preserved.toOwnedSlice(self.allocator);
     }
@@ -1131,22 +1131,22 @@ const Collector = struct {
     fn scalarStorageLoadTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
         if (!mlirTypeIsSupportedU256Carrier(self.operationResultType(op, 0))) return null;
         const root = try self.stringAttr(op, "global") orelse return null;
-        if (!self.canProjectStorageRoot(root)) return null;
+        if (!self.canProjectStablePlace(.{ .root = root, .region = .storage })) return null;
         return try self.placeReadTerm(root);
     }
 
     fn storageMapReadTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
         if (!mlirTypeIsSupportedU256Carrier(self.operationResultType(op, 0))) return null;
         const place = (try self.storageMapReadPlaceFromMapGet(op)) orelse return null;
-        if (!self.canProjectStorageRoot(place.root)) return null;
+        if (!self.canProjectStablePlace(place)) return null;
         return try self.placeReadTermFromPlace(place);
     }
 
-    fn canProjectStorageRoot(self: *Collector, root: []const u8) bool {
+    fn canProjectStablePlace(self: *Collector, place: obligation.PlaceRef) bool {
         if (self.function_has_external_call) return false;
         if (!self.function_write_slots_complete) return false;
         const write_slots = self.function_write_slots orelse return false;
-        return !storageWriteSlotsContain(write_slots, root);
+        return placeIsDefinitelyDisjointFromAll(place, write_slots);
     }
 
     fn oldTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
@@ -1158,13 +1158,14 @@ const Collector = struct {
 
         const operand = mlir.oraOperationGetOperand(op, 0);
         if (try self.storageMapReadPlaceFromValue(operand)) |place| {
-            if (!storageWriteSlotsContain(write_slots, place.root)) return try self.placeReadTermFromPlace(place);
+            if (placeIsDefinitelyDisjointFromAll(place, write_slots)) return try self.placeReadTermFromPlace(place);
             return null;
         }
 
         const root = (try self.scalarStorageLoadRootFromValue(operand)) orelse return null;
+        const place: obligation.PlaceRef = .{ .root = root, .region = .storage };
 
-        if (!storageWriteSlotsContain(write_slots, root)) return try self.placeReadTerm(root);
+        if (placeIsDefinitelyDisjointFromAll(place, write_slots)) return try self.placeReadTerm(root);
 
         const place_read = try self.placeReadTerm(root);
         return try self.addTerm(.{ .old = place_read });
@@ -2260,43 +2261,11 @@ fn appendField(
     return updated;
 }
 
-fn placeListContains(places: []const obligation.PlaceRef, needle: obligation.PlaceRef) bool {
-    for (places) |place| {
-        if (placeRefEql(place, needle)) return true;
-    }
-    return false;
-}
-
-fn storageWriteSlotsContain(places: []const obligation.PlaceRef, root: []const u8) bool {
-    for (places) |place| {
-        if (place.region == .storage and std.mem.eql(u8, place.root, root)) return true;
-    }
-    return false;
-}
-
-fn placeRefEql(lhs: obligation.PlaceRef, rhs: obligation.PlaceRef) bool {
-    if (!std.mem.eql(u8, lhs.root, rhs.root)) return false;
-    if (lhs.region != rhs.region) return false;
-    if (lhs.fields.len != rhs.fields.len) return false;
-    if (lhs.keys.len != rhs.keys.len) return false;
-    for (lhs.fields, rhs.fields) |left, right| {
-        if (!std.mem.eql(u8, left, right)) return false;
-    }
-    for (lhs.keys, rhs.keys) |left, right| {
-        if (!placeKeyEql(left, right)) return false;
+fn placeIsDefinitelyDisjointFromAll(place: obligation.PlaceRef, writes: []const obligation.PlaceRef) bool {
+    for (writes) |write| {
+        if (!obligation.placeDefinitelyDisjoint(place, write)) return false;
     }
     return true;
-}
-
-fn placeKeyEql(lhs: obligation.PlaceKey, rhs: obligation.PlaceKey) bool {
-    if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
-    return switch (lhs) {
-        .parameter => |value| value == rhs.parameter,
-        .comptime_parameter => |value| value == rhs.comptime_parameter,
-        .comptime_range_parameter => |value| value == rhs.comptime_range_parameter,
-        .constant => |value| std.mem.eql(u8, value, rhs.constant),
-        .msg_sender, .tx_origin, .unknown => true,
-    };
 }
 
 fn isTransparentValueOp(op_name: []const u8) bool {

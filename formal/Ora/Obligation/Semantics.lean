@@ -414,8 +414,68 @@ def formulaDenotes? (manifest : Manifest) (env : Env) : FormulaRef → Option Pr
 def placeListCovers (declared actual : List PlaceRef) : Bool :=
   actual.all (fun place => declared.contains place)
 
+def RegionRef.isConcrete : RegionRef → Bool
+  | .none => false
+  | .storage
+  | .memory
+  | .transient
+  | .calldata => true
+
+def computedStorageRoot : String := "$computed_storage"
+
+def decimalDigit? (c : Char) : Option Nat :=
+  if '0' ≤ c ∧ c ≤ '9' then some (c.toNat - '0'.toNat) else none
+
+def parseDecimalNatAux : List Char → Nat → Bool → Option Nat
+  | [], acc, seen => if seen then some acc else none
+  | c :: rest, acc, _ =>
+      match decimalDigit? c with
+      | some digit => parseDecimalNatAux rest (acc * 10 + digit) true
+      | none => none
+
+def parseDecimalNat? (value : String) : Option Nat :=
+  parseDecimalNatAux value.toList 0 false
+
+def placeKeyConstantNat? (value : String) : Option Nat :=
+  match parseDecimalNat? value with
+  | some parsed =>
+      if parsed < 2^256 then some parsed else none
+  | none => none
+
+def placeKeysDefinitelyDistinct : PlaceKey → PlaceKey → Bool
+  | .constant lhs, .constant rhs =>
+      match placeKeyConstantNat? lhs, placeKeyConstantNat? rhs with
+      | some lhsValue, some rhsValue => lhsValue != rhsValue
+      | _, _ => false
+  | _, _ => false
+
+def placeKeyListsDefinitelyDisjoint : List PlaceKey → List PlaceKey → Bool
+  | [], [] => false
+  | [], _ :: _ => false
+  | _ :: _, [] => false
+  | lhs :: lhsRest, rhs :: rhsRest =>
+      if lhs == rhs then
+        placeKeyListsDefinitelyDisjoint lhsRest rhsRest
+      else
+        placeKeysDefinitelyDistinct lhs rhs
+
+def placeDefinitelyDisjoint (lhs rhs : PlaceRef) : Bool :=
+  if !lhs.region.isConcrete || !rhs.region.isConcrete then
+    false
+  else if lhs.root == computedStorageRoot || rhs.root == computedStorageRoot then
+    false
+  else if lhs.region != rhs.region then
+    true
+  else if lhs.root != rhs.root then
+    true
+  else if lhs.fields != rhs.fields then
+    false
+  else
+    placeKeyListsDefinitelyDisjoint lhs.keys rhs.keys
+
 def placeListDisjoint (declared actual : List PlaceRef) : Bool :=
-  actual.all (fun place => !(declared.contains place))
+  actual.all (fun read => declared.all (fun write =>
+    placeDefinitelyDisjoint read write))
 
 def EffectFrameGoal.denotes? (goal : EffectFrameGoal) : Option Prop :=
   match goal.relation with

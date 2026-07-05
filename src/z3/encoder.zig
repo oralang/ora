@@ -9338,14 +9338,15 @@ pub const Encoder = struct {
         is_write: bool,
         func_op: ?mlir.MlirOperation,
     ) EncodeError!void {
+        const state_name = effectSlotPathRoot(name);
         for (slots.items) |*existing| {
-            if (std.mem.eql(u8, existing.name, name)) {
+            if (std.mem.eql(u8, existing.name, state_name)) {
                 existing.is_write = existing.is_write or is_write;
                 return;
             }
         }
 
-        const slot_name = try self.allocator.dupe(u8, name);
+        const slot_name = try self.allocator.dupe(u8, state_name);
         var pre: z3.Z3_ast = undefined;
         var sort: z3.Z3_sort = undefined;
         if (self.global_map.get(slot_name)) |existing| {

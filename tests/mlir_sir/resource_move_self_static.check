@@ -3,8 +3,8 @@
 // CHECK-NOT: ora.move
 //
 // CHECK-LABEL: func.func @selfTransfer
-// CHECK-SAME: ora.read_slots = ["balances"]
-// CHECK-SAME: ora.write_slots = ["balances"]
+// CHECK-SAME: ora.read_slots = ["balances[param#0]"]
+// CHECK-SAME: ora.write_slots = ["balances[param#0]"]
 // CHECK: %hash_balances = sir.keccak256
 // CHECK: [[SAME_VALUE:%[0-9]+]] = sir.sload %hash_balances
 // CHECK: [[SAME_UNDERFLOW:%[0-9]+]] = sir.lt [[SAME_VALUE]]
