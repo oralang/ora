@@ -93,7 +93,7 @@ pub const StringPool = struct {
 /// String processing engine for handling escape sequences and string validation
 /// Simplified for smart contract language usage:
 /// - Only ASCII characters are supported
-/// - Limited escape sequences (\n, \t, \", \\)
+/// - Limited escape sequences (\n, \t, \r, \\, \", \', \0, \xNN)
 /// This simplification improves security and keeps the implementation small.
 pub const StringProcessor = struct {
     allocator: Allocator,
@@ -107,7 +107,7 @@ pub const StringProcessor = struct {
     /// Process a string literal with escape sequences
     /// Follows the simplified string model for smart contracts:
     /// - Only ASCII characters are allowed
-    /// - Only supports limited escape sequences: \n, \t, \", \\
+    /// - Only supports limited escape sequences: \n, \t, \r, \\, \", \', \0, \xNN
     pub fn processString(self: *StringProcessor, raw_string: []const u8) LexerError![]u8 {
         var result = std.ArrayList(u8).empty;
         defer result.deinit(self.allocator);
@@ -155,6 +155,12 @@ pub const StringProcessor = struct {
         }
     }
 
+    pub fn validateRawString(raw_string: []const u8) LexerError!void {
+        for (raw_string) |byte| {
+            if (byte > 127) return LexerError.InvalidCharacterInString;
+        }
+    }
+
     /// Process a single escape sequence starting after the backslash with simplified validation
     /// Only supports a minimal set of escape sequences appropriate for a smart contract language
     fn processEscapeSequence(sequence: []const u8) LexerError!struct { char: u8, consumed: usize } {
@@ -166,8 +172,17 @@ pub const StringProcessor = struct {
             // Intentionally minimal — matches Solidity's supported escapes
             'n' => return .{ .char = '\n', .consumed = 1 }, // Newline
             't' => return .{ .char = '\t', .consumed = 1 }, // Tab
+            'r' => return .{ .char = '\r', .consumed = 1 }, // Carriage return
             '\\' => return .{ .char = '\\', .consumed = 1 }, // Backslash
             '"' => return .{ .char = '"', .consumed = 1 }, // Double quote
+            '\'' => return .{ .char = '\'', .consumed = 1 }, // Single quote
+            '0' => return .{ .char = 0, .consumed = 1 }, // Null byte
+            'x' => {
+                if (sequence.len < 3) return LexerError.InvalidEscapeSequence;
+                const high = hexValue(sequence[1]) orelse return LexerError.InvalidEscapeSequence;
+                const low = hexValue(sequence[2]) orelse return LexerError.InvalidEscapeSequence;
+                return .{ .char = (high << 4) | low, .consumed = 3 };
+            },
 
             // all other escape sequences are invalid in our simplified string model
             else => return LexerError.InvalidEscapeSequence,
@@ -217,11 +232,19 @@ pub const StringProcessor = struct {
 
     /// Validate and process a raw string literal (future feature)
     pub fn processRawString(self: *StringProcessor, raw_string: []const u8) LexerError![]u8 {
-        // for now, just return a copy of the raw string
-        // this will be enhanced when raw string literals are implemented
+        try StringProcessor.validateRawString(raw_string);
         return self.allocator.dupe(u8, raw_string);
     }
 };
+
+fn hexValue(byte: u8) ?u8 {
+    return switch (byte) {
+        '0'...'9' => byte - '0',
+        'a'...'f' => byte - 'a' + 10,
+        'A'...'F' => byte - 'A' + 10,
+        else => null,
+    };
+}
 
 /// Capture leading trivia (whitespace and comments) before the next token
 pub fn captureLeadingTrivia(lexer: *Lexer) !void {

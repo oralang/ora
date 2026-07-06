@@ -882,6 +882,7 @@ test "compiler lowers string, bytes, and address literals through real ops" {
     const source_text =
         \\pub fn owner() -> address {
         \\    let note = "hello";
+        \\    let quoted = "a\"b";
         \\    let payload = hex"deadbeef";
         \\    let who = 0x1234567890abcdef1234567890abcdef12345678;
         \\    return who;

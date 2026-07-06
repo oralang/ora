@@ -12,11 +12,22 @@ const StringProcessor = @import("../trivia.zig").StringProcessor;
 /// Scan a "..." string literal.
 pub fn scanString(lexer: *Lexer) LexerError!void {
     while (lexer.peek() != '"' and !lexer.isAtEnd()) {
-        if (lexer.peek() == '\n') {
-            lexer.line += 1;
-            lexer.column = 1;
+        if (lexer.peek() == '\\') {
+            _ = lexer.advance();
+            if (!lexer.isAtEnd()) {
+                if (lexer.peek() == '\n') {
+                    lexer.line += 1;
+                    lexer.column = 1;
+                }
+                _ = lexer.advance();
+            }
+        } else {
+            if (lexer.peek() == '\n') {
+                lexer.line += 1;
+                lexer.column = 1;
+            }
+            _ = lexer.advance();
         }
-        _ = lexer.advance();
     }
 
     if (lexer.isAtEnd()) {
@@ -171,8 +182,32 @@ pub fn addStringToken(lexer: *Lexer) LexerError!void {
 
 pub fn addRawStringToken(lexer: *Lexer) LexerError!void {
     const text = lexer.source[lexer.start + 2 .. lexer.current - 1]; // strip r" and "
-    const token_value: ?TokenValue = if (lexer.config.store_token_values) .{ .string = text } else null;
-    try lexer.appendTokenWithValue(.RawStringLiteral, token_value);
+    const range = lexer.currentRange();
+
+    if (!lexer.config.store_token_values) {
+        StringProcessor.validateRawString(text) catch |err| {
+            if (lexer.error_recovery != null) {
+                try lexer.reportLexError(err, range, "Error processing raw string literal", "Raw string source text must be ASCII");
+                try lexer.appendTokenWithValue(.RawStringLiteral, null);
+                return;
+            }
+            return err;
+        };
+        try lexer.appendTokenWithValue(.RawStringLiteral, null);
+        return;
+    }
+
+    var string_processor = StringProcessor.init(lexer.arena.allocator());
+    const processed_text = string_processor.processRawString(text) catch |err| {
+        if (lexer.error_recovery != null) {
+            try lexer.reportLexError(err, range, "Error processing raw string literal", "Raw string source text must be ASCII");
+            try lexer.appendTokenWithValue(.RawStringLiteral, .{ .string = "" });
+            return;
+        }
+        return err;
+    };
+
+    try lexer.appendTokenWithValue(.RawStringLiteral, .{ .string = processed_text });
 }
 
 pub fn addCharacterToken(lexer: *Lexer) LexerError!void {

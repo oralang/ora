@@ -207,7 +207,7 @@ pub fn getErrorTemplate(error_type: LexerError) ErrorMessageTemplate {
         LexerError.InvalidEscapeSequence => ErrorMessageTemplate{
             .title = "invalid escape sequence",
             .description = "This escape sequence is not recognized",
-            .help = "Use valid escape sequences like \\n, \\t, \\r, \\\\, \\\", or \\xNN",
+            .help = "Use valid escape sequences like \\n, \\t, \\r, \\\\, \\\", \\', \\0, or \\xNN",
         },
         LexerError.InvalidBinaryLiteral => ErrorMessageTemplate{
             .title = "invalid binary literal",
@@ -435,7 +435,7 @@ pub const ErrorRecovery = struct {
             LexerError.NumberTooLarge => "Use a smaller number that fits within the supported range",
             LexerError.EmptyCharacterLiteral => "Add a character between the single quotes",
             LexerError.InvalidCharacterLiteral => "Character literals must contain exactly one character",
-            LexerError.InvalidEscapeSequence => "Use a valid escape sequence like \\n, \\t, \\r, \\\\, or \\\"",
+            LexerError.InvalidEscapeSequence => "Use a valid escape sequence like \\n, \\t, \\r, \\\\, \\\", \\', \\0, or \\xNN",
             else => null,
         };
     }
