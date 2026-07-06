@@ -1,5 +1,4 @@
 const std = @import("std");
-const testing = std.testing;
 const types = @import("types.zig");
 
 pub const ArgValue = types.ArgValue;
@@ -336,13 +335,13 @@ pub fn expectStaticReturn(wire_type: []const u8, expected: ArgValue, actual_word
 
     if (static_wire_map.get(wire_type)) |kind| switch (kind) {
         .bool => {
-            try testing.expectEqual(try argAsBool(expected), std.mem.readInt(u256, actual_word[0..32], .big) != 0);
+            if ((std.mem.readInt(u256, actual_word[0..32], .big) != 0) != try argAsBool(expected)) return error.StaticReturnMismatch;
             return;
         },
         .address => {
             const expected_bytes = try parseHexBytesFixed(20, try argAsLiteral(expected));
-            try testing.expect(std.mem.allEqual(u8, actual_word[0..12], 0));
-            try testing.expectEqualSlices(u8, &expected_bytes, actual_word[12..32]);
+            if (!std.mem.allEqual(u8, actual_word[0..12], 0)) return error.StaticReturnMismatch;
+            if (!std.mem.eql(u8, &expected_bytes, actual_word[12..32])) return error.StaticReturnMismatch;
             return;
         },
     };
@@ -351,7 +350,7 @@ pub fn expectStaticReturn(wire_type: []const u8, expected: ArgValue, actual_word
         const bits = try parseAbiIntBits(wire_type, "uint");
         const expected_value = try parseUnsignedArg(expected);
         if (expected_value > maxUnsignedValue(bits)) return error.ValueOutOfRange;
-        try testing.expectEqual(expected_value, std.mem.readInt(u256, actual_word[0..32], .big) & maxUnsignedValue(bits));
+        if ((std.mem.readInt(u256, actual_word[0..32], .big) & maxUnsignedValue(bits)) != expected_value) return error.StaticReturnMismatch;
         return;
     }
 
@@ -369,7 +368,7 @@ pub fn expectStaticReturn(wire_type: []const u8, expected: ArgValue, actual_word
     if (parseFixedBytesWireType(wire_type)) |len| {
         var expected_word: [32]u8 = undefined;
         try encodeStaticAbiWord(&expected_word, wire_type, expected);
-        try testing.expectEqualSlices(u8, expected_word[0..len], actual_word[0..len]);
+        if (!std.mem.eql(u8, expected_word[0..len], actual_word[0..len])) return error.StaticReturnMismatch;
         return;
     }
 

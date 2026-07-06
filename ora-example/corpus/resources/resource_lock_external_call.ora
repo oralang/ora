@@ -13,7 +13,7 @@ contract ResourceLockExternalCall {
 
     pub fn issue_then_call(owner: address, amount: TokenUnit) -> !bool | ExternalCallFailed
         modifies balances[owner]
-        requires balances[owner] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        requires @amount(balances[owner]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
     {
         @create(balances[owner], amount);
         @lock(balances[owner]);

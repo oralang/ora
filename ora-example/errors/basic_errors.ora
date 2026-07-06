@@ -22,7 +22,7 @@ contract ErrorHandlingTest {
     storage var owner: address;
     storage var balance: u256;
     pub fn init() {
-        owner = std.transaction.sender;
+        owner = std.msg.sender();
         balance = 1000;
     }
     // Function that can return errors
@@ -45,8 +45,8 @@ contract ErrorHandlingTest {
     // Function with multiple possible errors
     pub fn admin_operation(amount: u256) -> !bool|Unauthorized|InvalidAmount {
         // Check authorization
-        if (std.transaction.sender != owner) {
-            return Unauthorized(std.transaction.sender, owner);
+        if (std.msg.sender() != owner) {
+            return Unauthorized(std.msg.sender(), owner);
         }
         // Check amount
         if (amount == 0) {

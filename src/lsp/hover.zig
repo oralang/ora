@@ -216,7 +216,7 @@ fn resourceTypeHoverAt(allocator: Allocator, source: []const u8, position: front
     if (!std.mem.eql(u8, word.text, "Resource")) return null;
     const value = try allocator.dupe(
         u8,
-        "```ora\nResource<T>\n```\n---\nOpaque storage or transient resource place for a declared `resource` domain. `Resource<T>` values are capabilities: they are stored in contract state and mutated through `@create`, `@destroy`, and `@move`; they cannot be exposed through ABI parameters, returns, or logs.",
+        "```ora\nResource<T>\n```\n---\nOpaque storage or transient resource place for a declared `resource` domain. `Resource<T>` values are capabilities: they are stored in contract state, observed through `@amount`, and mutated through `@create`, `@destroy`, and `@move`; they cannot be exposed through ABI parameters, returns, or logs.",
     );
     return .{ .contents = value, .range = word.range };
 }

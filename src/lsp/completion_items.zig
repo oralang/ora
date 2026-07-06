@@ -129,7 +129,7 @@ pub fn buildFromSemanticIndexWithStats(
         prefix,
         "Resource",
         "Resource<T>",
-        "Opaque storage or transient resource place for a declared `resource` domain. Mutate resource places with `@create`, `@destroy`, and `@move`.",
+        "Opaque storage or transient resource place for a declared `resource` domain. Observe resource amounts with `@amount`; mutate places with `@create`, `@destroy`, and `@move`.",
         .type_alias,
     );
 

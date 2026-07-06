@@ -6,7 +6,7 @@ contract ResourceSmtFailWriteOutsideModifies {
 
     pub fn transfer(amount: TokenUnit)
         modifies left
-        requires left >= amount
+        requires @amount(left) >= amount
     {
         @move(left, right, amount);
     }

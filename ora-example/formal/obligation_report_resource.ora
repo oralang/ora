@@ -7,10 +7,10 @@ contract ObligationReportResource {
     pub fn transfer(from: address, to: address, amount: TokenUnit)
         modifies balances[from], balances[to]
         requires from != to
-        requires balances[from] >= amount
-        requires balances[to] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
-        ensures balances[from] == old(balances[from]) - amount
-        ensures balances[to] == old(balances[to]) + amount
+        requires @amount(balances[from]) >= amount
+        requires @amount(balances[to]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        ensures @amount(balances[from]) == old(@amount(balances[from])) - amount
+        ensures @amount(balances[to]) == old(@amount(balances[to])) + amount
     {
         @move(balances[from], balances[to], amount);
     }

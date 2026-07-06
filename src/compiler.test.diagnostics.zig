@@ -858,11 +858,11 @@ test "compiler accepts resource domains and storage resource places" {
         \\    }
         \\
         \\    pub fn balanceOf(owner: address) -> TokenUnit {
-        \\        return balances[owner];
+        \\        return @amount(balances[owner]);
         \\    }
         \\
         \\    pub fn reserveBalance() -> TokenUnit {
-        \\        return reserve;
+        \\        return @amount(reserve);
         \\    }
         \\
         \\    fn addSameDomain(lhs: TokenUnit, rhs: TokenUnit) -> TokenUnit {
@@ -977,7 +977,7 @@ test "compiler validates resource move create and destroy builtins" {
         \\    }
         \\
         \\    pub fn balanceOf(owner: address) -> TokenUnit {
-        \\        return balances[owner];
+        \\        return @amount(balances[owner]);
         \\    }
         \\}
     ;
@@ -1083,7 +1083,7 @@ test "compiler rejects invalid resource builtin calls" {
         \\    storage var balances: map<address, Resource<TokenUnit>>;
         \\
         \\    fn dynamicKey() -> address {
-        \\        return msg.sender;
+        \\        return std.msg.sender();
         \\    }
         \\
         \\    pub fn bad(to: address, amount: TokenUnit) {
@@ -1099,7 +1099,7 @@ test "compiler rejects invalid resource builtin calls" {
         \\    storage var nested: map<address, map<address, Resource<TokenUnit>>>;
         \\
         \\    fn dynamicKey() -> address {
-        \\        return msg.sender;
+        \\        return std.msg.sender();
         \\    }
         \\
         \\    pub fn bad(to: address, amount: TokenUnit) {
@@ -1119,6 +1119,40 @@ test "compiler rejects invalid resource builtin calls" {
         \\    }
         \\}
     , .typecheck, "resource amount must be non-negative");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(owner: address, amount: TokenUnit) {
+        \\        let current: TokenUnit = balances[owner];
+        \\    }
+        \\}
+    , .typecheck, "resource place is not a value; use @amount(place)");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    pub fn bad(amount: TokenUnit) -> TokenUnit {
+        \\        return @amount(amount);
+        \\    }
+        \\}
+    , .typecheck, "@amount expects a Resource<T> place");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(owner: address) -> TokenUnit {
+        \\        return @amount(balances[owner], balances[owner]);
+        \\    }
+        \\}
+    , .typecheck, "@amount expects 1 argument");
 }
 
 test "compiler rejects direct mutation of resource places" {
@@ -1216,27 +1250,27 @@ test "compiler tracks resource builtin effects for modifies and locks" {
         \\    }
         \\
         \\    pub fn direct(to: address, amount: TokenUnit)
-        \\        modifies balances[msg.sender], balances[to]
+        \\        modifies balances[std.msg.sender()], balances[to]
         \\    {
         \\        @move(balances[std.msg.sender()], balances[to], amount);
         \\    }
         \\
         \\    pub fn aliased(to: address, amount: TokenUnit)
-        \\        modifies balances[msg.sender], balances[to]
+        \\        modifies balances[std.msg.sender()], balances[to]
         \\    {
         \\        let sender: address = std.msg.sender();
         \\        @move(balances[sender], balances[to], amount);
         \\    }
         \\
         \\    pub fn inline_aliased(to: address, amount: TokenUnit)
-        \\        modifies balances[msg.sender], balances[to]
+        \\        modifies balances[std.msg.sender()], balances[to]
         \\    {
         \\        let sender: NonZeroAddress = caller();
         \\        @move(balances[sender], balances[to], amount);
         \\    }
         \\
         \\    pub fn nested(spender: address, amount: TokenUnit)
-        \\        modifies allowances[msg.sender][spender]
+        \\        modifies allowances[std.msg.sender()][spender]
         \\    {
         \\        let owner: address = std.msg.sender();
         \\        allowances[owner][spender] = amount;

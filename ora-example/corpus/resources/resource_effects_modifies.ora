@@ -7,15 +7,15 @@ contract ResourceEffectsModifies {
     storage var balances: map<address, Resource<TokenUnit>>;
 
     pub fn sweep(amount: TokenUnit)
-        requires reserve >= amount
-        requires treasury <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        requires @amount(reserve) >= amount
+        requires @amount(treasury) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
         modifies reserve, treasury
     {
         @move(reserve, treasury, amount);
     }
 
     pub fn deposit(to: address, amount: TokenUnit)
-        requires balances[to] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        requires @amount(balances[to]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
         modifies balances[to]
     {
         @create(balances[to], amount);

@@ -6,10 +6,10 @@ contract ResourceSmtMovePairSum {
 
     pub fn move_left_to_right(amount: TokenUnit)
         modifies left, right
-        requires left >= amount
-        requires left <= 100
-        requires right <= 100
-        ensures left + right == old(left) + old(right)
+        requires @amount(left) >= amount
+        requires @amount(left) <= 100
+        requires @amount(right) <= 100
+        ensures @amount(left) + @amount(right) == old(@amount(left)) + old(@amount(right))
     {
         @move(left, right, amount);
     }

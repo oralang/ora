@@ -7,9 +7,9 @@ contract ResourceSmtInitialCreateInInit {
 
     pub fn init(initial_supply: TokenUnit)
         modifies reserve, total_supply
-        requires reserve <= @cast(TokenUnit, std.constants.U256_MAX) - initial_supply
+        requires @amount(reserve) <= @cast(TokenUnit, std.constants.U256_MAX) - initial_supply
         requires total_supply <= @cast(TokenUnit, std.constants.U256_MAX) - initial_supply
-        ensures reserve == old(reserve) + initial_supply
+        ensures @amount(reserve) == old(@amount(reserve)) + initial_supply
         ensures total_supply == old(total_supply) + initial_supply
     {
         @create(reserve, initial_supply);

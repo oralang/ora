@@ -356,7 +356,7 @@ test "verification accepts lowered EVM environment builtins without degradation"
         \\        return std.msg.sender();
         \\    }
         \\
-        \\    pub fn origin() -> address {
+        \\    pub fn tx_origin() -> address {
         \\        return std.tx.origin();
         \\    }
         \\
@@ -371,7 +371,7 @@ test "verification accepts lowered EVM environment builtins without degradation"
         \\}
     ;
 
-    inline for (.{ "sender", "origin", "coinbase", "numeric_env" }) |function_name| {
+    inline for (.{ "sender", "tx_origin", "coinbase", "numeric_env" }) |function_name| {
         var result = try verifyTextWithoutDegradation(source_text, function_name);
         defer result.deinit(testing.allocator);
         try testing.expect(result.success);
@@ -458,8 +458,8 @@ test "verification models resource create as a map storage update" {
         \\
         \\    pub fn mint(owner: address, amount: TokenUnit)
         \\        modifies balances[owner]
-        \\        requires balances[owner] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
-        \\        ensures balances[owner] == old(balances[owner]) + amount
+        \\        requires @amount(balances[owner]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        \\        ensures @amount(balances[owner]) == old(@amount(balances[owner])) + amount
         \\    {
         \\        @create(balances[owner], amount);
         \\    }
@@ -487,8 +487,8 @@ test "verification rejects false frame claim after resource create" {
         \\    pub fn mint(owner: address, amount: TokenUnit)
         \\        modifies balances[owner]
         \\        requires amount > 0
-        \\        requires balances[owner] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
-        \\        ensures balances[owner] == old(balances[owner])
+        \\        requires @amount(balances[owner]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        \\        ensures @amount(balances[owner]) == old(@amount(balances[owner]))
         \\    {
         \\        @create(balances[owner], amount);
         \\    }
@@ -515,8 +515,8 @@ test "verification models resource create as a direct storage update" {
         \\
         \\    pub fn mint(amount: TokenUnit)
         \\        modifies reserve
-        \\        requires reserve <= @cast(TokenUnit, std.constants.U256_MAX) - amount
-        \\        ensures reserve == old(reserve) + amount
+        \\        requires @amount(reserve) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        \\        ensures @amount(reserve) == old(@amount(reserve)) + amount
         \\    {
         \\        @create(reserve, amount);
         \\    }
@@ -542,8 +542,8 @@ test "verification models resource create as a direct transient update" {
         \\    tstore var scratch: Resource<TokenUnit>;
         \\
         \\    pub fn mint(amount: TokenUnit)
-        \\        requires scratch <= @cast(TokenUnit, std.constants.U256_MAX) - amount
-        \\        ensures scratch == old(scratch) + amount
+        \\        requires @amount(scratch) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        \\        ensures @amount(scratch) == old(@amount(scratch)) + amount
         \\    {
         \\        @create(scratch, amount);
         \\    }
@@ -570,8 +570,8 @@ test "verification rejects false frame claim after direct transient resource cre
         \\
         \\    pub fn mint(amount: TokenUnit)
         \\        requires amount > 0
-        \\        requires scratch <= @cast(TokenUnit, std.constants.U256_MAX) - amount
-        \\        ensures scratch == old(scratch)
+        \\        requires @amount(scratch) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        \\        ensures @amount(scratch) == old(@amount(scratch))
         \\    {
         \\        @create(scratch, amount);
         \\    }
@@ -599,10 +599,10 @@ test "verification models resource move across distinct roots" {
         \\
         \\    pub fn settle(from: address, to: address, amount: TokenUnit)
         \\        modifies pending[from], settled[to]
-        \\        requires pending[from] >= amount
-        \\        requires settled[to] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
-        \\        ensures pending[from] == old(pending[from]) - amount
-        \\        ensures settled[to] == old(settled[to]) + amount
+        \\        requires @amount(pending[from]) >= amount
+        \\        requires @amount(settled[to]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        \\        ensures @amount(pending[from]) == old(@amount(pending[from])) - amount
+        \\        ensures @amount(settled[to]) == old(@amount(settled[to])) + amount
         \\    {
         \\        @move(pending[from], settled[to], amount);
         \\    }
@@ -630,10 +630,10 @@ test "verification models signed resource moves with non-negative amounts" {
         \\        modifies debts[from], settled
         \\        requires amount >= 0
         \\        requires amount <= 100
-        \\        requires debts[from] >= -100
-        \\        requires settled <= 100
-        \\        ensures debts[from] == old(debts[from]) - amount
-        \\        ensures settled == old(settled) + amount
+        \\        requires @amount(debts[from]) >= -100
+        \\        requires @amount(settled) <= 100
+        \\        ensures @amount(debts[from]) == old(@amount(debts[from])) - amount
+        \\        ensures @amount(settled) == old(@amount(settled)) + amount
         \\    {
         \\        @move(debts[from], settled, amount);
         \\    }
@@ -659,8 +659,8 @@ test "verification rejects signed resource create without non-negative amount pr
         \\    pub fn mint(owner: address, amount: DebtUnit)
         \\        modifies debts[owner]
         \\        requires amount <= 100
-        \\        requires debts[owner] <= 100
-        \\        ensures debts[owner] == old(debts[owner]) + amount
+        \\        requires @amount(debts[owner]) <= 100
+        \\        ensures @amount(debts[owner]) == old(@amount(debts[owner])) + amount
         \\    {
         \\        @create(debts[owner], amount);
         \\    }
@@ -688,9 +688,9 @@ test "verification rejects false frame claim after resource move" {
         \\    pub fn settle(from: address, to: address, amount: TokenUnit)
         \\        modifies pending[from], settled[to]
         \\        requires amount > 0
-        \\        requires pending[from] >= amount
-        \\        requires settled[to] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
-        \\        ensures pending[from] == old(pending[from])
+        \\        requires @amount(pending[from]) >= amount
+        \\        requires @amount(settled[to]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        \\        ensures @amount(pending[from]) == old(@amount(pending[from]))
         \\    {
         \\        @move(pending[from], settled[to], amount);
         \\    }

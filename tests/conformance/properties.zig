@@ -150,33 +150,33 @@ const property_source =
     \\    pub fn read(slot: u256) -> u256 { return slots[slot]; }
     \\
     \\    pub fn issue_resource(to: address, amount: PropertyUnit)
-    \\        requires resource_balances[to] <= 1000 - amount
+    \\        requires @amount(resource_balances[to]) <= 1000 - amount
     \\    {
     \\        @create(resource_balances[to], amount);
     \\    }
     \\
     \\    pub fn move_resource(from: address, to: address, amount: PropertyUnit)
     \\        requires from != to
-    \\        requires resource_balances[from] >= amount
-    \\        requires resource_balances[to] <= 1000 - amount
+    \\        requires @amount(resource_balances[from]) >= amount
+    \\        requires @amount(resource_balances[to]) <= 1000 - amount
     \\    {
     \\        @move(resource_balances[from], resource_balances[to], amount);
     \\    }
     \\
     \\    pub fn self_move_resource(owner: address, amount: PropertyUnit)
-    \\        requires resource_balances[owner] >= amount
+    \\        requires @amount(resource_balances[owner]) >= amount
     \\    {
     \\        @move(resource_balances[owner], resource_balances[owner], amount);
     \\    }
     \\
     \\    pub fn burn_resource(from: address, amount: PropertyUnit)
-    \\        requires resource_balances[from] >= amount
+    \\        requires @amount(resource_balances[from]) >= amount
     \\    {
     \\        @destroy(resource_balances[from], amount);
     \\    }
     \\
     \\    pub fn resource_balance(owner: address) -> PropertyUnit {
-    \\        return resource_balances[owner];
+    \\        return @amount(resource_balances[owner]);
     \\    }
     \\
     \\    fn may_fail(x: u256) -> !u256 | Failed {

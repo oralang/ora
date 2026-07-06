@@ -151,7 +151,7 @@ fn appendResourceTypeCompletion(
     try items.append(allocator, .{
         .label = try allocator.dupe(u8, label),
         .detail = try allocator.dupe(u8, "Resource<T>"),
-        .documentation = try allocator.dupe(u8, "Opaque storage or transient resource place for a declared `resource` domain. Mutate resource places with `@create`, `@destroy`, and `@move`."),
+        .documentation = try allocator.dupe(u8, "Opaque storage or transient resource place for a declared `resource` domain. Observe resource amounts with `@amount`; mutate places with `@create`, `@destroy`, and `@move`."),
         .kind = .type_alias,
     });
 }

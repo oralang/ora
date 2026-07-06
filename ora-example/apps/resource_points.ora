@@ -9,7 +9,7 @@ contract ResourcePoints {
 
     pub fn award(to: address, amount: PointUnit)
         modifies points[to], total_awarded
-        requires points[to] <= @cast(PointUnit, std.constants.U256_MAX) - amount
+        requires @amount(points[to]) <= @cast(PointUnit, std.constants.U256_MAX) - amount
         requires total_awarded <= @cast(PointUnit, std.constants.U256_MAX) - amount
     {
         @create(points[to], amount);
@@ -18,15 +18,15 @@ contract ResourcePoints {
 
     pub fn transfer(from: address, to: address, amount: PointUnit)
         modifies points[from], points[to]
-        requires points[from] >= amount
-        requires points[to] <= @cast(PointUnit, std.constants.U256_MAX) - amount
+        requires @amount(points[from]) >= amount
+        requires @amount(points[to]) <= @cast(PointUnit, std.constants.U256_MAX) - amount
     {
         @move(points[from], points[to], amount);
     }
 
     pub fn spend(from: address, amount: PointUnit)
         modifies points[from], total_spent
-        requires points[from] >= amount
+        requires @amount(points[from]) >= amount
         requires total_spent <= @cast(PointUnit, std.constants.U256_MAX) - amount
     {
         @destroy(points[from], amount);
@@ -34,7 +34,7 @@ contract ResourcePoints {
     }
 
     pub fn balanceOf(owner: address) -> PointUnit {
-        return points[owner];
+        return @amount(points[owner]);
     }
 
     pub fn totalAwarded() -> PointUnit {

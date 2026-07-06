@@ -180,7 +180,8 @@ test "lsp hover: builtin docs resolve from at-prefixed calls" {
         \\    storage var balances: map<address, Resource<TokenUnit>>;
         \\
         \\    pub fn run(to: address, amount: TokenUnit) {
-        \\        let wide: u256 = @cast(u256, amount);
+        \\        let current: TokenUnit = @amount(balances[to]);
+        \\        let wide: u256 = @cast(u256, current);
         \\        @create(balances[to], amount);
         \\        @move(balances[to], balances[to], amount);
         \\        @destroy(balances[to], amount);
@@ -189,10 +190,11 @@ test "lsp hover: builtin docs resolve from at-prefixed calls" {
     ;
 
     inline for (.{
-        .{ "cast", "@cast(T, value) -> T", "checked conversion rules" },
-        .{ "create", "@create(place, amount) -> void", "resource-domain boundary delta" },
-        .{ "move", "@move(from, to, amount) -> void", "same resource domain" },
-        .{ "destroy", "@destroy(place, amount) -> void", "resource place" },
+        .{ "@cast", "@cast(T, value) -> T", "checked conversion rules" },
+        .{ "@amount", "@amount(place) -> T", "without mutating" },
+        .{ "@create", "@create(place, amount) -> void", "resource-domain boundary delta" },
+        .{ "@move", "@move(from, to, amount) -> void", "same resource domain" },
+        .{ "@destroy", "@destroy(place, amount) -> void", "resource place" },
     }) |case| {
         const maybe_hover = try cachedHover(source, positionOf(source, case[0]));
         try testing.expect(maybe_hover != null);

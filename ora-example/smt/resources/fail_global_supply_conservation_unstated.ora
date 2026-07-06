@@ -7,8 +7,8 @@ contract ResourceSmtFailGlobalSupplyConservationUnstated {
 
     pub fn issue(amount: TokenUnit)
         modifies balance
-        requires balance <= @cast(TokenUnit, std.constants.U256_MAX) - amount
-        ensures balance == total_supply
+        requires @amount(balance) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        ensures @amount(balance) == total_supply
     {
         @create(balance, amount);
     }

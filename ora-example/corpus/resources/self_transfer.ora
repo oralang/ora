@@ -5,7 +5,7 @@ contract SelfTransfer {
     storage var balances: map<address, Resource<TokenUnit>>;
 
     pub fn transfer_self(account: address, amount: TokenUnit)
-        requires balances[account] >= amount
+        requires @amount(balances[account]) >= amount
     {
         @move(balances[account], balances[account], amount);
     }

@@ -583,7 +583,7 @@ test "compiler preserves typed local names in assignments" {
         \\    storage balances: map<address, u256>;
         \\
         \\    pub fn deposit(amount: u256) {
-        \\        const sender: address = std.msg.sender;
+        \\        const sender: address = std.msg.sender();
         \\        balances[sender] = amount;
         \\    }
         \\}
@@ -971,7 +971,7 @@ test "compiler resolves std environment intrinsics before HIR lowering" {
         \\
         \\    pub fn capture() -> u256 {
         \\        owner = std.msg.sender();
-        \\        let sender: address = std.msg.sender;
+        \\        let sender: address = std.msg.sender();
         \\        let origin: address = std.tx.origin();
         \\        let coinbase: address = std.block.coinbase;
         \\        let value: u256 = std.msg.value();
@@ -988,6 +988,28 @@ test "compiler resolves std environment intrinsics before HIR lowering" {
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     try testing.expectEqual(@as(usize, 0), hir_result.type_fallback_count);
+}
+
+test "compiler rejects field-form sender environment intrinsics" {
+    const source_text =
+        \\contract Env {
+        \\    pub fn capture() {
+        \\        let immediate: address = std.msg.sender;
+        \\        let transaction_sender: address = std.tx.sender();
+        \\        let legacy_sender: address = std.transaction.sender;
+        \\        let origin: address = std.tx.origin;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`std.msg.sender` must be called as `std.msg.sender()`"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`std.tx.sender` is not supported; use `std.tx.origin()`"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`std.transaction.sender` is not supported; use `std.msg.sender()`"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`std.tx.origin` must be called as `std.tx.origin()`"));
 }
 
 test "compiler resolves for-range integer bounds before HIR lowering" {

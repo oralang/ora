@@ -97,7 +97,7 @@ test "semantic tokens: Resource and at-prefixed builtins classify as default lib
 }
 
 test "semantic tokens: builtin environment namespaces and constants classify as default library" {
-    const source = "msg.sender i256.MAX std.msg.value std.constants.U256_MAX";
+    const source = "std.msg.sender() i256.MAX std.msg.value std.constants.U256_MAX";
     const tokens = try cachedTokens(testing.allocator, source, null);
     defer testing.allocator.free(tokens);
 

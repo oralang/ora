@@ -8,8 +8,8 @@ contract SignedResourceGuards {
         modifies debts[owner]
         requires amount >= 0
         requires amount <= 100
-        requires debts[owner] <= 100
-        ensures debts[owner] == old(debts[owner]) + amount
+        requires @amount(debts[owner]) <= 100
+        ensures @amount(debts[owner]) == old(@amount(debts[owner])) + amount
     {
         @create(debts[owner], amount);
     }
@@ -18,19 +18,19 @@ contract SignedResourceGuards {
         modifies debts[from], settled
         requires amount >= 0
         requires amount <= 100
-        requires debts[from] >= -100
-        requires settled <= 100
-        ensures debts[from] == old(debts[from]) - amount
-        ensures settled == old(settled) + amount
+        requires @amount(debts[from]) >= -100
+        requires @amount(settled) <= 100
+        ensures @amount(debts[from]) == old(@amount(debts[from])) - amount
+        ensures @amount(settled) == old(@amount(settled)) + amount
     {
         @move(debts[from], settled, amount);
     }
 
     pub fn debtOf(owner: address) -> DebtUnit {
-        return debts[owner];
+        return @amount(debts[owner]);
     }
 
     pub fn settledTotal() -> DebtUnit {
-        return settled;
+        return @amount(settled);
     }
 }

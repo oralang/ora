@@ -219,7 +219,7 @@ test "lsp completion: includes builtin functions and Resource type" {
     try testing.expect(std.mem.indexOf(u8, cast.documentation.?, "checked conversion rules") != null);
 }
 
-test "lsp completion: includes resource boundary builtins and Resource type" {
+test "lsp completion: includes resource builtins and Resource type" {
     const source =
         "pub fn run() {\n" ++
         "    \n" ++
@@ -230,7 +230,7 @@ test "lsp completion: includes resource boundary builtins and Resource type" {
     const items = try completionItems(source, position, null);
     defer completion.deinitItems(testing.allocator, items);
 
-    inline for (.{ "move", "create", "destroy", "Resource" }) |label| {
+    inline for (.{ "amount", "move", "create", "destroy", "Resource" }) |label| {
         try testing.expect(hasLabel(items, label));
     }
 

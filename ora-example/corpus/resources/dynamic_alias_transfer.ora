@@ -5,8 +5,8 @@ contract DynamicAliasTransfer {
     storage var balances: map<address, Resource<TokenUnit>>;
 
     pub fn transfer_maybe_same(from: address, to: address, amount: TokenUnit)
-        requires balances[from] >= amount
-        requires balances[to] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        requires @amount(balances[from]) >= amount
+        requires @amount(balances[to]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
     {
         @move(balances[from], balances[to], amount);
     }

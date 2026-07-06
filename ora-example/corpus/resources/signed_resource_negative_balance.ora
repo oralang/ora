@@ -8,8 +8,8 @@ contract ResourceSignedNegativeBalance {
         modifies pending
         requires amount >= 0
         requires amount <= 100
-        requires pending <= 100
-        ensures pending == old(pending) + amount
+        requires @amount(pending) <= 100
+        ensures @amount(pending) == old(@amount(pending)) + amount
     {
         @create(pending, amount);
     }
@@ -18,19 +18,19 @@ contract ResourceSignedNegativeBalance {
         modifies pending, settled
         requires amount >= 0
         requires amount <= 100
-        requires pending >= -100
-        requires settled <= 100
-        ensures pending == old(pending) - amount
-        ensures settled == old(settled) + amount
+        requires @amount(pending) >= -100
+        requires @amount(settled) <= 100
+        ensures @amount(pending) == old(@amount(pending)) - amount
+        ensures @amount(settled) == old(@amount(settled)) + amount
     {
         @move(pending, settled, amount);
     }
 
     pub fn pendingBalance() -> DebtUnit {
-        return pending;
+        return @amount(pending);
     }
 
     pub fn settledBalance() -> DebtUnit {
-        return settled;
+        return @amount(settled);
     }
 }

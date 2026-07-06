@@ -12,10 +12,10 @@ contract MapStringValue {
     }
 
     pub fn setSelfName(n: string) {
-        names[std.msg.sender] = n;
+        names[std.msg.sender()] = n;
     }
 
     pub fn getSelfName() -> string {
-        return names[std.msg.sender];
+        return names[std.msg.sender()];
     }
 }

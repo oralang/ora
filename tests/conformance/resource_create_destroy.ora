@@ -5,18 +5,18 @@ contract ResourceCreateDestroy {
     storage var balances: map<address, Resource<TokenUnit>>;
 
     pub fn issue(to: address, amount: TokenUnit)
-        requires balances[to] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        requires @amount(balances[to]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
     {
         @create(balances[to], amount);
     }
 
     pub fn retire(from: address, amount: TokenUnit)
-        requires balances[from] >= amount
+        requires @amount(balances[from]) >= amount
     {
         @destroy(balances[from], amount);
     }
 
     pub fn balanceOf(owner: address) -> TokenUnit {
-        return balances[owner];
+        return @amount(balances[owner]);
     }
 }

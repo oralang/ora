@@ -78,7 +78,7 @@ contract ERC20Token {
     }
 
     inline fn requireBalance(owner: NonZeroAddress, amount: TokenUnit) -> !bool | InsufficientBalance {
-        let available: TokenUnit = balances[owner];
+        let available: TokenUnit = @amount(balances[owner]);
         if (available<amount) {
             return InsufficientBalance(tokenValue(amount), tokenValue(available));
         }
@@ -86,7 +86,7 @@ contract ERC20Token {
     }
 
     inline fn requireAllowance(owner: NonZeroAddress, spender: NonZeroAddress, amount: TokenUnit) -> !bool | InsufficientAllowance {
-        let available: AllowanceUnit = allowances[owner][spender];
+        let available: AllowanceUnit = @amount(allowances[owner][spender]);
         let required: AllowanceUnit = allowanceAmount(amount);
         if (available<required) {
             return InsufficientAllowance(tokenValue(amount), allowanceValue(available));
@@ -97,11 +97,11 @@ contract ERC20Token {
     // Constructor: creates the initial resource supply and records the account
     // allowed to mint more tokens later.
     pub fn init(initialSupply: TokenUnit)
-    modifies total_supply, balances[msg.sender], royal_mint
+    modifies total_supply, balances[std.msg.sender()], royal_mint
     requires total_supply == 0
-    requires balances[std.msg.sender()] == 0
+    requires @amount(balances[std.msg.sender()]) == 0
     ensures total_supply == initialSupply
-    ensures balances[std.msg.sender()] == initialSupply
+    ensures @amount(balances[std.msg.sender()]) == initialSupply
     {
         royal_mint = caller();
         total_supply = initialSupply;
@@ -137,23 +137,22 @@ contract ERC20Token {
 
     // balanceOf allows account(0) to fulfill the ERC20 standard.
     pub fn balanceOf(account: address) -> u256 {
-        return tokenValue(balances[account]);
+        return tokenValue(@amount(balances[account]));
     }
 
     pub fn allowance(owner: address, spender: address) -> u256 {
-        return allowanceValue(allowances[owner][spender]);
+        return allowanceValue(@amount(allowances[owner][spender]));
     }
 
     // Transfer is a conservative resource transition: no TokenUnit is created or
     // destroyed, only moved between two balance places.
     pub fn transfer(recipient: NonZeroAddress, amount: TokenUnit) -> !bool | InsufficientBalance | TransferToZeroAddress
-    modifies balances[msg.sender], balances[recipient]
+    modifies balances[std.msg.sender()], balances[recipient]
     requires recipient != std.constants.ZERO_ADDRESS
-    requires balances[recipient] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    requires @amount(balances[recipient]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
     ensures total_supply == old(total_supply)
     {
         @callHint(likely);
-
         let sender: NonZeroAddress = caller();
         try requireBalance(sender, amount);
         @move(balances[sender], balances[recipient], amount);
@@ -167,12 +166,12 @@ contract ERC20Token {
     // approve replaces existing authorization by destroying the current allowance
     // and creating exactly the requested amount.
     pub fn approve(spender: NonZeroAddress, amount: TokenUnit) -> !bool | TransferToZeroAddress
-    modifies allowances[msg.sender][spender]
+    modifies allowances[std.msg.sender()][spender]
     requires spender != std.constants.ZERO_ADDRESS
-    ensures allowances[std.msg.sender()][spender] == allowanceAmount(amount)
+    ensures @amount(allowances[std.msg.sender()][spender]) == allowanceAmount(amount)
     {
         let owner: NonZeroAddress = caller();
-        @destroy(allowances[owner][spender], allowances[owner][spender]);
+        @destroy(allowances[owner][spender], @amount(allowances[owner][spender]));
         @create(allowances[owner][spender], allowanceAmount(amount));
 
         log Approval(owner, spender, tokenValue(amount));
@@ -183,10 +182,10 @@ contract ERC20Token {
     // resource move as transfer. The same numeric amount is destroyed from the
     // AllowanceUnit domain and moved in the TokenUnit domain.
     pub fn transferFrom(sender: NonZeroAddress, recipient: NonZeroAddress, amount: TokenUnit) -> !bool | InsufficientAllowance | InsufficientBalance | TransferToZeroAddress
-    modifies allowances[sender][msg.sender], balances[sender], balances[recipient]
+    modifies allowances[sender][std.msg.sender()], balances[sender], balances[recipient]
     requires sender != std.constants.ZERO_ADDRESS
     requires recipient != std.constants.ZERO_ADDRESS
-    requires balances[recipient] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    requires @amount(balances[recipient]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
     ensures total_supply == old(total_supply)
     {
         @callHint(likely);
@@ -209,7 +208,7 @@ contract ERC20Token {
     requires caller() == royal_mint
     requires to != std.constants.ZERO_ADDRESS
     requires total_supply <= @cast(TokenUnit, std.constants.U256_MAX) - amount
-    requires balances[to] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    requires @amount(balances[to]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
     ensures total_supply == old(total_supply) + amount
     {
         // mint fn is not a priority for hot path optimization
@@ -224,12 +223,11 @@ contract ERC20Token {
     // TokenUnit from the caller's balance place, and total_supply is updated in
     // the same function so the public supply view tracks that destruction.
     pub fn burn(amount: TokenUnit) -> !bool | InsufficientBalance
-    modifies total_supply, balances[msg.sender]
+    modifies total_supply, balances[std.msg.sender()]
     requires total_supply >= amount
     ensures total_supply == old(total_supply) - amount
     {
-        @callHint(cold);
-        // burn fn is not a priority for hot path optimization
+        @callHint(cold); // burn fn is not a priority for hot path optimization
         let sender: NonZeroAddress = caller();
         try requireBalance(sender, amount);
         total_supply -= amount;

@@ -6,17 +6,17 @@ contract ResourceDistinctRootsTransfer {
     storage var settled: map<address, Resource<TokenUnit>>;
 
     pub fn settle(from: address, to: address, amount: TokenUnit)
-        requires pending[from] >= amount
-        requires settled[to] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        requires @amount(pending[from]) >= amount
+        requires @amount(settled[to]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
     {
         @move(pending[from], settled[to], amount);
     }
 
     pub fn pendingOf(owner: address) -> TokenUnit {
-        return pending[owner];
+        return @amount(pending[owner]);
     }
 
     pub fn settledOf(owner: address) -> TokenUnit {
-        return settled[owner];
+        return @amount(settled[owner]);
     }
 }

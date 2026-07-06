@@ -7,13 +7,13 @@ contract TwoDomainsSameCarrier {
     storage var credits: map<address, Resource<Credits>>;
 
     pub fn mint_shares(to: address, amount: Shares)
-        requires shares[to] <= @cast(Shares, std.constants.U256_MAX) - amount
+        requires @amount(shares[to]) <= @cast(Shares, std.constants.U256_MAX) - amount
     {
         @create(shares[to], amount);
     }
 
     pub fn mint_credits(to: address, amount: Credits)
-        requires credits[to] <= @cast(Credits, std.constants.U256_MAX) - amount
+        requires @amount(credits[to]) <= @cast(Credits, std.constants.U256_MAX) - amount
     {
         @create(credits[to], amount);
     }

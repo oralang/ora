@@ -415,14 +415,11 @@ const Resolver = struct {
             },
             .Field => |field| {
                 if (self.emitDeprecatedErrorNamespace(expr_id, field)) return;
-                if (options.modifies_clause and self.isModifiesEnvironmentKey(expr_id)) return;
                 try self.resolveExprWithOptions(field.base, env, options);
             },
             .Index => |index| {
                 try self.resolveExprWithOptions(index.base, env, options);
-                if (!options.modifies_clause or !self.isModifiesEnvironmentKey(index.index)) {
-                    try self.resolveExprWithOptions(index.index, env, options);
-                }
+                try self.resolveExprWithOptions(index.index, env, options);
             },
             .Group => |group| try self.resolveExprWithOptions(group.expr, env, options),
             .Old => |old| try self.resolveExprWithOptions(old.expr, env, options),
@@ -434,18 +431,6 @@ const Resolver = struct {
             },
             else => {},
         }
-    }
-
-    fn isModifiesEnvironmentKey(self: *Resolver, expr_id: ast.ExprId) bool {
-        const field = switch (self.file.expression(expr_id).*) {
-            .Group => |group| return self.isModifiesEnvironmentKey(group.expr),
-            .Field => |field| field,
-            else => return false,
-        };
-        const base = self.file.expression(field.base).*;
-        return base == .Name and
-            ((std.mem.eql(u8, base.Name.name, "msg") and std.mem.eql(u8, field.name, "sender")) or
-                (std.mem.eql(u8, base.Name.name, "tx") and std.mem.eql(u8, field.name, "origin")));
     }
 
     fn bindPatternIfName(self: *Resolver, env: *Env, pattern_id: ast.PatternId) !void {

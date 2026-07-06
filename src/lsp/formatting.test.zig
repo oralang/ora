@@ -131,7 +131,7 @@ test "lsp formatting: preserves keyword boundaries for inline impl and modifies"
         \\    }
         \\
         \\    pub fn approve(spender: address, amount: u256)
-        \\        modifies allowances[msg.sender][spender]
+        \\        modifies allowances[std.msg.sender()][spender]
         \\    {
         \\        return;
         \\    }
@@ -153,7 +153,7 @@ test "lsp formatting: preserves keyword boundaries for inline impl and modifies"
     try testing.expectEqualStrings(formatted_once, formatted_twice);
     try testing.expect(std.mem.indexOf(u8, formatted_once, "inline fn amountDelta") != null);
     try testing.expect(std.mem.indexOf(u8, formatted_once, "impl SettledBalance for Settled") != null);
-    try testing.expect(std.mem.indexOf(u8, formatted_once, "modifies allowances[msg.sender][spender]") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted_once, "modifies allowances[std.msg.sender()][spender]") != null);
     try testing.expect(std.mem.indexOf(u8, formatted_twice, "forfor") == null);
     try testing.expect(std.mem.indexOf(u8, formatted_twice, "inlinefn") == null);
     try testing.expect(std.mem.indexOf(u8, formatted_twice, "modifiesallowances") == null);
@@ -161,7 +161,7 @@ test "lsp formatting: preserves keyword boundaries for inline impl and modifies"
     const corrupted =
         \\contract Token {
         \\    pub fn approve(spender: address, amount: u256)
-        \\    modifiesallowances[msg.sender][spender]
+        \\    modifiesallowances[std.msg.sender()][spender]
         \\    {
         \\        return;
         \\    }
@@ -174,7 +174,7 @@ test "lsp formatting: preserves keyword boundaries for inline impl and modifies"
     });
     defer testing.allocator.free(repaired);
 
-    try testing.expect(std.mem.indexOf(u8, repaired, "modifies allowances[msg.sender][spender]") != null);
+    try testing.expect(std.mem.indexOf(u8, repaired, "modifies allowances[std.msg.sender()][spender]") != null);
     try testing.expect(std.mem.indexOf(u8, repaired, "modifiesallowances") == null);
 }
 
@@ -190,7 +190,7 @@ test "lsp formatting: preserves resource error-union and builtin syntax" {
         \\    storage var balances: map<address, Resource<TokenUnit>>;
         \\
         \\    inline fn requireBalance(owner: address, amount: TokenUnit) -> !bool | InsufficientBalance {
-        \\        let available: TokenUnit = balances[owner];
+        \\        let available: TokenUnit = @amount(balances[owner]);
         \\        if (available < amount) {
         \\            return InsufficientBalance(amount, available);
         \\        }
@@ -219,6 +219,7 @@ test "lsp formatting: preserves resource error-union and builtin syntax" {
 
     try testing.expectEqualStrings(formatted_once, formatted_twice);
     try testing.expect(std.mem.indexOf(u8, formatted_once, "resource TokenUnit = u256;") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted_once, "@amount(balances[owner])") != null);
     try testing.expect(std.mem.indexOf(u8, formatted_once, "-> !bool | InsufficientBalance") != null);
     try testing.expect(std.mem.indexOf(u8, formatted_once, "@move(balances[std.msg.sender()], balances[recipient], amount);") != null);
     try testing.expect(std.mem.indexOf(u8, formatted_once, "resourceTokenUnit") == null);

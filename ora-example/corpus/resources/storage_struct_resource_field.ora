@@ -11,27 +11,27 @@ contract ResourceStorageStructField {
 
     pub fn issue(amount: TokenUnit)
         modifies ledger.reserve
-        requires ledger.reserve <= @cast(TokenUnit, std.constants.U256_MAX) - amount
-        ensures ledger.reserve == old(ledger.reserve) + amount
+        requires @amount(ledger.reserve) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        ensures @amount(ledger.reserve) == old(@amount(ledger.reserve)) + amount
     {
         @create(ledger.reserve, amount);
     }
 
     pub fn sweep(amount: TokenUnit)
         modifies ledger.reserve, ledger.treasury
-        requires ledger.reserve >= amount
-        requires ledger.treasury <= @cast(TokenUnit, std.constants.U256_MAX) - amount
-        ensures ledger.reserve == old(ledger.reserve) - amount
-        ensures ledger.treasury == old(ledger.treasury) + amount
+        requires @amount(ledger.reserve) >= amount
+        requires @amount(ledger.treasury) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        ensures @amount(ledger.reserve) == old(@amount(ledger.reserve)) - amount
+        ensures @amount(ledger.treasury) == old(@amount(ledger.treasury)) + amount
     {
         @move(ledger.reserve, ledger.treasury, amount);
     }
 
     pub fn reserveBalance() -> TokenUnit {
-        return ledger.reserve;
+        return @amount(ledger.reserve);
     }
 
     pub fn treasuryBalance() -> TokenUnit {
-        return ledger.treasury;
+        return @amount(ledger.treasury);
     }
 }

@@ -1332,7 +1332,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (callee_expr == .Field) {
                     const path = try @This().fieldExprPath(self, call.callee);
                     defer self.parent.allocator.free(path);
-                    if (try @This().lowerBuiltinFieldCall(self, callee_expr.Field, path)) |value| {
+                    if (try @This().lowerBuiltinFieldCall(self, callee_expr.Field, path, .call)) |value| {
                         return value;
                     }
                 }
@@ -2869,6 +2869,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (std.mem.eql(u8, builtin.name, "storageWordStore")) {
                 return try @This().lowerStorageWordStoreBuiltin(self, builtin, locals);
             }
+            if (std.mem.eql(u8, builtin.name, "amount")) {
+                return try @This().lowerResourceAmountObservationBuiltin(self, expr_id, builtin, locals);
+            }
             if (std.mem.eql(u8, builtin.name, "move")) {
                 return try @This().lowerResourceMoveBuiltin(self, builtin, locals);
             }
@@ -3242,6 +3245,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             appendOp(self.block, op);
             return try @This().voidValue(self, builtin.range);
+        }
+
+        fn lowerResourceAmountObservationBuiltin(self: *FunctionLowerer, expr_id: ast.ExprId, builtin: ast.BuiltinExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
+            if (builtin.args.len != 1) {
+                try self.parent.emitLoweringError(builtin.range, "@amount expects a Resource<T> place", .{});
+                return error.MlirOperationCreationFailed;
+            }
+            const value = try self.lowerExpr(builtin.args[0], locals);
+            return try self.convertValueForSemaFlow(value, self.parent.typecheck.exprType(expr_id), builtin.range);
         }
 
         fn lowerResourceMoveBuiltin(self: *FunctionLowerer, builtin: ast.BuiltinExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
@@ -4788,23 +4800,27 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         ) anyerror!?mlir.MlirValue {
             const path = try @This().fieldExprPath(self, expr_id);
             defer self.parent.allocator.free(path);
-            if (try @This().lowerBuiltinFieldCall(self, field, path)) |value| {
+            if (try @This().lowerBuiltinFieldCall(self, field, path, .field)) |value| {
                 return value;
             }
             return null;
         }
 
+        const BuiltinFieldUse = enum { field, call };
+
         fn lowerBuiltinFieldCall(
             self: *FunctionLowerer,
             field: ast.FieldExpr,
             path: []const u8,
+            use: BuiltinFieldUse,
         ) anyerror!?mlir.MlirValue {
-            const opcode_name = if (std.mem.eql(u8, path, "std.msg.sender") or
-                std.mem.eql(u8, path, "std.transaction.sender"))
-                "ora.evm.caller"
-            else if (std.mem.eql(u8, path, "std.tx.origin"))
-                "ora.evm.origin"
-            else if (std.mem.eql(u8, path, "std.msg.value"))
+            const opcode_name = if (std.mem.eql(u8, path, "std.msg.sender")) blk: {
+                if (use != .call) return null;
+                break :blk "ora.evm.caller";
+            } else if (std.mem.eql(u8, path, "std.tx.origin")) blk: {
+                if (use != .call) return null;
+                break :blk "ora.evm.origin";
+            } else if (std.mem.eql(u8, path, "std.msg.value"))
                 "ora.evm.callvalue"
             else if (std.mem.eql(u8, path, "std.transaction.gasprice"))
                 "ora.evm.gasprice"

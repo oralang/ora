@@ -930,6 +930,7 @@ const TypeChecker = struct {
     comptime_depth: usize = 0,
     effect_scratch_depth: usize = 0,
     allow_resource_boundary_builtin_statement: bool = false,
+    allow_resource_place_operand: bool = false,
     diagnostics: *diagnostics.DiagnosticList,
 
     fn setCallResolution(self: *TypeChecker, expr_id: ast.ExprId, resolved: ResolvedCall) !void {
@@ -3107,8 +3108,8 @@ const TypeChecker = struct {
             .Log => |log_stmt| {
                 try self.checkLogStatement(log_stmt);
             },
-            .Lock => |lock_stmt| try self.visitExpr(lock_stmt.path),
-            .Unlock => |unlock_stmt| try self.visitExpr(unlock_stmt.path),
+            .Lock => |lock_stmt| try self.visitResourcePlaceOperandExpr(lock_stmt.path),
+            .Unlock => |unlock_stmt| try self.visitResourcePlaceOperandExpr(unlock_stmt.path),
             .CallHint => |hint_stmt| try self.checkCallHintStatement(statement_id, hint_stmt),
             .Assert => |assert_stmt| {
                 try self.visitExpr(assert_stmt.condition);
@@ -3160,6 +3161,38 @@ const TypeChecker = struct {
             .Builtin => |builtin| if (builtinKind(builtin.name)) |kind| isResourceBoundaryBuiltin(kind) else false,
             else => false,
         };
+    }
+
+    fn visitResourcePlaceOperandExpr(self: *TypeChecker, expr_id: ast.ExprId) anyerror!void {
+        const previous = self.allow_resource_place_operand;
+        self.allow_resource_place_operand = true;
+        defer self.allow_resource_place_operand = previous;
+        try self.visitExpr(expr_id);
+    }
+
+    fn visitResourceBoundaryBuiltinArgumentExprs(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr) !void {
+        switch (kind) {
+            .resource_move => {
+                if (builtin.args.len > 0) try self.visitResourcePlaceOperandExpr(builtin.args[0]);
+                if (builtin.args.len > 1) try self.visitResourcePlaceOperandExpr(builtin.args[1]);
+                if (builtin.args.len > 2) try self.visitExpr(builtin.args[2]);
+                if (builtin.args.len > 3) for (builtin.args[3..]) |arg| try self.visitExpr(arg);
+            },
+            .resource_create, .resource_destroy => {
+                if (builtin.args.len > 0) try self.visitResourcePlaceOperandExpr(builtin.args[0]);
+                if (builtin.args.len > 1) try self.visitExpr(builtin.args[1]);
+                if (builtin.args.len > 2) for (builtin.args[2..]) |arg| try self.visitExpr(arg);
+            },
+            else => {
+                for (builtin.args) |arg| try self.visitExpr(arg);
+            },
+        }
+    }
+
+    fn emitImplicitResourceReadIfDisallowed(self: *TypeChecker, expr_id: ast.ExprId, ty: Type) !void {
+        if (self.allow_resource_place_operand) return;
+        if (ty.kind() != .resource_place) return;
+        try self.emitExprError(expr_id, "resource place is not a value; use @amount(place)", .{});
     }
 
     fn visitExpr(self: *TypeChecker, expr_id: ast.ExprId) anyerror!void {
@@ -3321,6 +3354,7 @@ const TypeChecker = struct {
                         self.typeValueNameType(name.name),
                     else => .{ .unknown = {} },
                 };
+                try self.emitImplicitResourceReadIfDisallowed(expr_id, resolved_type);
                 self.expr_types[expr_id.index()] = resourcePlaceReadType(resolved_type) orelse resolved_type;
             },
             .Result => {
@@ -3375,14 +3409,16 @@ const TypeChecker = struct {
                 }
             },
             .Call => |call| {
-                try self.visitExpr(call.callee);
-                for (call.args) |arg| try self.visitExpr(arg);
                 if (call.args.len == 0) {
-                    if (self.environmentIntrinsicValueType(call.callee)) |result_type| {
+                    if (self.environmentIntrinsicCallReturnType(call.callee)) |result_type| {
+                        self.expr_types[call.callee.index()] = result_type;
                         self.expr_types[expr_id.index()] = result_type;
                         return;
                     }
                 }
+
+                try self.visitExpr(call.callee);
+                for (call.args) |arg| try self.visitExpr(arg);
                 if (try self.stdStorageDeriveCall(call)) {
                     self.expr_types[expr_id.index()] = .{ .storage_slot = {} };
                     try self.checkStorageDeriveCallArguments(self.exprRange(expr_id), call.args, "std.storage.derive");
@@ -3473,13 +3509,24 @@ const TypeChecker = struct {
                     return;
                 }
 
+                if (kind == .resource_amount) {
+                    if (builtin.args.len == 1) {
+                        try self.visitResourcePlaceOperandExpr(builtin.args[0]);
+                    } else {
+                        for (builtin.args) |arg| try self.visitExpr(arg);
+                    }
+                    const place = try self.checkResourceAmountBuiltinArguments(builtin);
+                    self.expr_types[expr_id.index()] = if (place) |info| info.domain_type else .{ .unknown = {} };
+                    return;
+                }
+
                 if (isResourceBoundaryBuiltin(kind)) {
                     const allowed_as_statement = self.allow_resource_boundary_builtin_statement;
                     const previous = self.allow_resource_boundary_builtin_statement;
                     self.allow_resource_boundary_builtin_statement = false;
                     defer self.allow_resource_boundary_builtin_statement = previous;
 
-                    for (builtin.args) |arg| try self.visitExpr(arg);
+                    try self.visitResourceBoundaryBuiltinArgumentExprs(kind, builtin);
                     if (!allowed_as_statement) {
                         try self.emitExprError(expr_id, "@{s} is statement-only and cannot be used in expression position", .{
                             builtin.name,
@@ -3492,14 +3539,19 @@ const TypeChecker = struct {
                     return;
                 }
 
-                for (builtin.args) |arg| try self.visitExpr(arg);
                 if (kind == .lock or kind == .unlock) {
+                    if (builtin.args.len == 1) {
+                        try self.visitResourcePlaceOperandExpr(builtin.args[0]);
+                    } else {
+                        for (builtin.args) |arg| try self.visitExpr(arg);
+                    }
                     try self.emitExprError(expr_id, "@{s} is statement-only and cannot be used in expression position", .{
                         builtin.name,
                     });
                     self.expr_types[expr_id.index()] = .{ .unknown = {} };
                     return;
                 }
+                for (builtin.args) |arg| try self.visitExpr(arg);
                 const result_type = try self.builtinReturnType(kind, builtin);
                 self.expr_types[expr_id.index()] = result_type;
                 if (try self.emitBuiltinIntegerOverflowIfNeeded(expr_id, builtin, result_type)) {
@@ -3509,9 +3561,12 @@ const TypeChecker = struct {
             },
             .Field => |field| {
                 try self.visitExpr(field.base);
+                if (try self.emitInvalidEnvironmentFieldForm(expr_id)) return;
+
                 const base_type = self.expr_types[field.base.index()];
-                const place_or_value_type = self.environmentIntrinsicValueType(expr_id) orelse
+                const place_or_value_type = self.environmentIntrinsicFieldValueType(expr_id) orelse
                     try self.fieldAccessTypeForExpr(field.base, field.name);
+                try self.emitImplicitResourceReadIfDisallowed(expr_id, place_or_value_type);
                 const result_type = resourcePlaceReadType(place_or_value_type) orelse place_or_value_type;
                 self.expr_types[expr_id.index()] = result_type;
                 if (place_or_value_type.kind() == .unknown and base_type.kind() != .unknown) {
@@ -3528,6 +3583,7 @@ const TypeChecker = struct {
                 try self.visitExpr(index.index);
                 const base_type = self.expr_types[index.base.index()];
                 const place_or_value_type = self.indexAccessType(base_type, index.index);
+                try self.emitImplicitResourceReadIfDisallowed(expr_id, place_or_value_type);
                 const result_type = resourcePlaceReadType(place_or_value_type) orelse place_or_value_type;
                 self.expr_types[expr_id.index()] = result_type;
                 if (place_or_value_type.kind() == .unknown and base_type.kind() != .unknown) {
@@ -3552,6 +3608,30 @@ const TypeChecker = struct {
             },
             .Error => self.expr_types[expr_id.index()] = .{ .unknown = {} },
         }
+    }
+
+    fn emitInvalidEnvironmentFieldForm(self: *TypeChecker, expr_id: ast.ExprId) !bool {
+        if (self.exprPathMatches(expr_id, &.{ "std", "msg", "sender" })) {
+            try self.emitExprError(expr_id, "`std.msg.sender` must be called as `std.msg.sender()`", .{});
+            self.expr_types[expr_id.index()] = .{ .unknown = {} };
+            return true;
+        }
+        if (self.exprPathMatches(expr_id, &.{ "std", "tx", "sender" })) {
+            try self.emitExprError(expr_id, "`std.tx.sender` is not supported; use `std.tx.origin()`", .{});
+            self.expr_types[expr_id.index()] = .{ .unknown = {} };
+            return true;
+        }
+        if (self.exprPathMatches(expr_id, &.{ "std", "tx", "origin" })) {
+            try self.emitExprError(expr_id, "`std.tx.origin` must be called as `std.tx.origin()`", .{});
+            self.expr_types[expr_id.index()] = .{ .unknown = {} };
+            return true;
+        }
+        if (self.exprPathMatches(expr_id, &.{ "std", "transaction", "sender" })) {
+            try self.emitExprError(expr_id, "`std.transaction.sender` is not supported; use `std.msg.sender()`", .{});
+            self.expr_types[expr_id.index()] = .{ .unknown = {} };
+            return true;
+        }
+        return false;
     }
 
     fn typeForBinding(self: *const TypeChecker, binding: ?ResolvedBinding) Type {
@@ -4049,6 +4129,9 @@ const TypeChecker = struct {
         // exports them for verifier framing only after the caller stores them
         // in item_modifies, which happens after the compiler-derived write-set
         // subset check succeeds for the same body.
+        const previous = self.allow_resource_place_operand;
+        self.allow_resource_place_operand = true;
+        defer self.allow_resource_place_operand = previous;
         try self.visitModifiesExpr(clause.expr);
         try self.collectModifiesExprSlots(clause.expr, slots);
     }
@@ -4096,15 +4179,7 @@ const TypeChecker = struct {
     }
 
     fn isModifiesEnvironmentKey(self: *TypeChecker, expr_id: ast.ExprId) bool {
-        const field = switch (self.file.expression(expr_id).*) {
-            .Group => |group| return self.isModifiesEnvironmentKey(group.expr),
-            .Field => |field| field,
-            else => return false,
-        };
-        const base = self.file.expression(field.base).*;
-        return base == .Name and
-            ((std.mem.eql(u8, base.Name.name, "msg") and std.mem.eql(u8, field.name, "sender")) or
-                (std.mem.eql(u8, base.Name.name, "tx") and std.mem.eql(u8, field.name, "origin")));
+        return self.environmentKeySegmentForExpr(expr_id) != null;
     }
 
     fn collectModifiesExprSlots(self: *TypeChecker, expr_id: ast.ExprId, slots: *InlineEffectSlotList) !void {
@@ -4182,19 +4257,20 @@ const TypeChecker = struct {
                         .item => {},
                     }
                 }
-                try self.emitExprError(expr_id, "`modifies` map keys must be literals, function parameters, `msg.sender`, or `tx.origin` in v1", .{});
+                try self.emitExprError(expr_id, "`modifies` map keys must be literals, function parameters, `std.msg.sender()`, or `std.tx.origin()` in v1", .{});
             },
             .Field => |field| {
-                const base = self.file.expression(field.base).*;
-                if (base == .Name and
-                    ((std.mem.eql(u8, base.Name.name, "msg") and std.mem.eql(u8, field.name, "sender")) or
-                        (std.mem.eql(u8, base.Name.name, "tx") and std.mem.eql(u8, field.name, "origin"))))
-                {
+                if (self.environmentKeySegmentForExpr(expr_id) != null) {
                     return;
                 }
-                try self.emitExprError(expr_id, "`modifies` map keys must be literals, function parameters, `msg.sender`, or `tx.origin` in v1", .{});
+                _ = field;
+                try self.emitExprError(expr_id, "`modifies` map keys must be literals, function parameters, `std.msg.sender()`, or `std.tx.origin()` in v1", .{});
             },
-            else => try self.emitExprError(expr_id, "`modifies` map keys must be literals, function parameters, `msg.sender`, or `tx.origin` in v1", .{}),
+            .Call => {
+                if (self.environmentKeySegmentForExpr(expr_id) != null) return;
+                try self.emitExprError(expr_id, "`modifies` map keys must be literals, function parameters, `std.msg.sender()`, or `std.tx.origin()` in v1", .{});
+            },
+            else => try self.emitExprError(expr_id, "`modifies` map keys must be literals, function parameters, `std.msg.sender()`, or `std.tx.origin()` in v1", .{}),
         }
     }
 
@@ -4619,9 +4695,26 @@ const TypeChecker = struct {
             .storage_range_erase => try self.checkStorageRangeEraseBuiltinArguments(builtin),
             .storage_word_load => try self.checkStorageWordLoadBuiltinArguments(builtin),
             .storage_word_store => try self.checkStorageWordStoreBuiltinArguments(builtin),
+            .resource_amount => _ = try self.checkResourceAmountBuiltinArguments(builtin),
             .resource_move, .resource_create, .resource_destroy => try self.checkResourceBuiltinArguments(kind, builtin),
             else => {},
         }
+    }
+
+    fn checkResourceAmountBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !?ResourcePlaceInfo {
+        if (builtin.args.len != 1) {
+            try self.emitRangeError(builtin.range, "@amount expects 1 argument", .{});
+            return null;
+        }
+
+        const place = (self.resourcePlaceForExpr(builtin.args[0]) catch |err| switch (err) {
+            error.UnsupportedResourcePlaceShape => return null,
+            else => return err,
+        }) orelse {
+            try self.emitExprError(builtin.args[0], "@amount expects a Resource<T> place", .{});
+            return null;
+        };
+        return place;
     }
 
     fn checkResourceBuiltinArguments(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr) !void {
@@ -7107,6 +7200,8 @@ const TypeChecker = struct {
 
             .size_of, .keccak256, .chain_id, .storage_word_load => descriptorFromPathName(self.file, self.item_index, "u256"),
 
+            .resource_amount => if (builtin.args.len == 1) self.expr_types[builtin.args[0].index()] else .{ .unknown = {} },
+
             .storage_range_erase, .storage_word_store, .resource_move, .resource_create, .resource_destroy => .{ .void = {} },
 
             .storage_derive => .{ .storage_slot = {} },
@@ -8741,29 +8836,17 @@ const TypeChecker = struct {
         return switch (self.file.expression(expr_id).*) {
             .Group => |group| self.environmentKeySegmentForExpr(group.expr),
             .Call => |call| if (call.args.len == 0)
-                self.environmentKeySegmentForExpr(call.callee) orelse self.environmentKeySegmentReturnedByInlineCall(call)
+                self.environmentKeySegmentForCalledPath(call.callee) orelse self.environmentKeySegmentReturnedByInlineCall(call)
             else
                 null,
-            .Field => blk: {
-                const msg_sender_paths = [_][]const []const u8{
-                    &.{ "msg", "sender" },
-                    &.{ "std", "msg", "sender" },
-                    &.{ "std", "transaction", "sender" },
-                };
-                for (msg_sender_paths) |path| {
-                    if (self.exprPathMatches(expr_id, path)) break :blk .msg_sender;
-                }
-                const tx_origin_paths = [_][]const []const u8{
-                    &.{ "tx", "origin" },
-                    &.{ "std", "tx", "origin" },
-                };
-                for (tx_origin_paths) |path| {
-                    if (self.exprPathMatches(expr_id, path)) break :blk .tx_origin;
-                }
-                break :blk null;
-            },
             else => null,
         };
+    }
+
+    fn environmentKeySegmentForCalledPath(self: *TypeChecker, expr_id: ast.ExprId) ?KeySegment {
+        if (self.exprPathMatches(expr_id, &.{ "std", "msg", "sender" })) return .msg_sender;
+        if (self.exprPathMatches(expr_id, &.{ "std", "tx", "origin" })) return .tx_origin;
+        return null;
     }
 
     fn environmentKeySegmentReturnedByInlineCall(self: *TypeChecker, call: ast.CallExpr) ?KeySegment {
@@ -8777,11 +8860,31 @@ const TypeChecker = struct {
         return self.environmentKeySegmentForExpr(returned);
     }
 
-    fn environmentIntrinsicValueType(self: *TypeChecker, expr_id: ast.ExprId) ?Type {
+    fn environmentIntrinsicCallReturnType(self: *TypeChecker, expr_id: ast.ExprId) ?Type {
         const address_paths = [_][]const []const u8{
             &.{ "std", "msg", "sender" },
-            &.{ "std", "transaction", "sender" },
             &.{ "std", "tx", "origin" },
+            &.{ "std", "block", "coinbase" },
+        };
+        for (address_paths) |path| {
+            if (self.exprPathMatches(expr_id, path)) return addressType();
+        }
+
+        const integer_paths = [_][]const []const u8{
+            &.{ "std", "msg", "value" },
+            &.{ "std", "transaction", "gasprice" },
+            &.{ "std", "block", "timestamp" },
+            &.{ "std", "block", "number" },
+        };
+        for (integer_paths) |path| {
+            if (self.exprPathMatches(expr_id, path)) return u256Type();
+        }
+
+        return null;
+    }
+
+    fn environmentIntrinsicFieldValueType(self: *TypeChecker, expr_id: ast.ExprId) ?Type {
+        const address_paths = [_][]const []const u8{
             &.{ "std", "block", "coinbase" },
         };
         for (address_paths) |path| {

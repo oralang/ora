@@ -6,7 +6,7 @@ contract LogSmoke {
     log Ping();
 
     pub fn emitTransfer(to: address, amount: u256) {
-        log Transfer(std.transaction.sender, to, amount);
+        log Transfer(std.msg.sender(), to, amount);
     }
 
     pub fn emitPing() {

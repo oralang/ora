@@ -6876,13 +6876,13 @@ test "OraToSIR lowers direct transient resource places to tload and tstore" {
         \\    tstore var scratch: Resource<TokenUnit>;
         \\
         \\    pub fn issue(amount: TokenUnit)
-        \\        requires scratch <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        \\        requires @amount(scratch) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
         \\    {
         \\        @create(scratch, amount);
         \\    }
         \\
         \\    pub fn retire(amount: TokenUnit)
-        \\        requires scratch >= amount
+        \\        requires @amount(scratch) >= amount
         \\    {
         \\        @destroy(scratch, amount);
         \\    }
@@ -6923,7 +6923,7 @@ test "OraToSIR lowers signed resource guards with signed comparisons" {
         \\        modifies debts[owner]
         \\        requires amount >= 0
         \\        requires amount <= 100
-        \\        requires debts[owner] <= 100
+        \\        requires @amount(debts[owner]) <= 100
         \\    {
         \\        @create(debts[owner], amount);
         \\    }
@@ -6932,8 +6932,8 @@ test "OraToSIR lowers signed resource guards with signed comparisons" {
         \\        modifies debts[from], settled
         \\        requires amount >= 0
         \\        requires amount <= 100
-        \\        requires debts[from] >= -100
-        \\        requires settled <= 100
+        \\        requires @amount(debts[from]) >= -100
+        \\        requires @amount(settled) <= 100
         \\    {
         \\        @move(debts[from], settled, amount);
         \\    }
@@ -7001,7 +7001,7 @@ test "OraToSIR reuses resource map place hash for self move" {
         \\
         \\    pub fn self_move(owner: address, amount: TokenUnit)
         \\        modifies balances[owner]
-        \\        requires balances[owner] >= amount
+        \\        requires @amount(balances[owner]) >= amount
         \\    {
         \\        @move(balances[owner], balances[owner], amount);
         \\    }

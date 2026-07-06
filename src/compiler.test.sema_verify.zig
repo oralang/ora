@@ -90,11 +90,11 @@ test "compiler accepts v1 modifies storage paths" {
         \\        modifies total
         \\        modifies config.owner
         \\        modifies balances[owner]
-        \\        modifies balances[msg.sender]
-        \\        modifies balances[tx.origin]
+        \\        modifies balances[std.msg.sender()]
+        \\        modifies balances[std.tx.origin()]
         \\        modifies buckets[42]
         \\        modifies allowances[owner][spender]
-        \\        modifies std_storage.range(std_storage.derive("ora.test.modifies.computed", msg.sender, value), 4)
+        \\        modifies std_storage.range(std_storage.derive("ora.test.modifies.computed", std.msg.sender(), value), 4)
         \\        ensures total == value
         \\    {
         \\        total = value;
@@ -131,7 +131,51 @@ test "compiler rejects unsupported modifies map keys fail closed" {
     defer compilation.deinit();
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
-    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`modifies` map keys must be literals, function parameters, `msg.sender`, or `tx.origin` in v1"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`modifies` map keys must be literals, function parameters, `std.msg.sender()`, or `std.tx.origin()` in v1"));
+}
+
+test "compiler rejects bare environment keys in modifies paths" {
+    const source_text =
+        \\contract Vault {
+        \\    storage balances: map<address, u256>;
+        \\
+        \\    pub fn sender()
+        \\        modifies balances[msg.sender]
+        \\    {
+        \\    }
+        \\
+        \\    pub fn origin()
+        \\        modifies balances[tx.origin]
+        \\    {
+        \\    }
+        \\
+        \\    pub fn tx_sender_call()
+        \\        modifies balances[std.tx.sender()]
+        \\    {
+        \\    }
+        \\
+        \\    pub fn sender_without_call()
+        \\        modifies balances[std.msg.sender]
+        \\    {
+        \\    }
+        \\
+        \\    pub fn tx_origin_without_call()
+        \\        modifies balances[std.tx.origin]
+        \\    {
+        \\    }
+        \\
+        \\    pub fn tx_sender_without_call()
+        \\        modifies balances[std.tx.sender]
+        \\    {
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`modifies` map keys must be literals, function parameters, `std.msg.sender()`, or `std.tx.origin()` in v1"));
 }
 
 test "compiler rejects mixed indexed-field modifies paths fail closed" {
@@ -211,9 +255,9 @@ test "compiler enforces modifies declarations against storage writes" {
         \\    }
         \\
         \\    pub fn wrong_sender_origin(value: u256)
-        \\        modifies balances[msg.sender]
+        \\        modifies balances[std.msg.sender()]
         \\    {
-        \\        balances[tx.origin] = value;
+        \\        balances[std.tx.origin()] = value;
         \\    }
         \\
         \\    pub fn wrong_field(next_admin: address)
@@ -272,27 +316,27 @@ test "compiler matches modifies environment keys through direct uses and stable 
         \\    storage allowances: map<address, map<address, u256>>;
         \\
         \\    pub fn direct(value: u256)
-        \\        modifies balances[msg.sender]
+        \\        modifies balances[std.msg.sender()]
         \\    {
         \\        balances[std.msg.sender()] = value;
         \\    }
         \\
         \\    pub fn aliased(value: u256)
-        \\        modifies balances[msg.sender]
+        \\        modifies balances[std.msg.sender()]
         \\    {
         \\        let sender: address = std.msg.sender();
         \\        balances[sender] = value;
         \\    }
         \\
         \\    pub fn nested(spender: address, value: u256)
-        \\        modifies allowances[msg.sender][spender]
+        \\        modifies allowances[std.msg.sender()][spender]
         \\    {
         \\        let owner: address = std.msg.sender();
         \\        allowances[owner][spender] = value;
         \\    }
         \\
         \\    pub fn origin(value: u256)
-        \\        modifies balances[tx.origin]
+        \\        modifies balances[std.tx.origin()]
         \\    {
         \\        const origin: address = std.tx.origin();
         \\        balances[origin] = value;
@@ -429,7 +473,7 @@ test "compiler rejects reassigned stable modifies aliases" {
         \\    storage balances: map<address, u256>;
         \\
         \\    pub fn bad(other: address, value: u256)
-        \\        modifies balances[msg.sender]
+        \\        modifies balances[std.msg.sender()]
         \\    {
         \\        let sender: address = std.msg.sender();
         \\        sender = other;
@@ -451,7 +495,7 @@ test "compiler does not match modifies environment keys through mutable local al
         \\    storage balances: map<address, u256>;
         \\
         \\    pub fn bad(value: u256)
-        \\        modifies balances[msg.sender]
+        \\        modifies balances[std.msg.sender()]
         \\    {
         \\        var sender: address = std.msg.sender();
         \\        balances[sender] = value;
@@ -1077,7 +1121,7 @@ test "compiler corpus covers modifies sema matrix" {
         .{ .path = "ora-example/corpus/modifies/pass_empty_no_writes.ora" },
         .{
             .path = "ora-example/corpus/modifies/fail_unsupported_map_key.ora",
-            .expected_diagnostic = "`modifies` map keys must be literals, function parameters, `msg.sender`, or `tx.origin` in v1",
+            .expected_diagnostic = "`modifies` map keys must be literals, function parameters, `std.msg.sender()`, or `std.tx.origin()` in v1",
         },
         .{
             .path = "ora-example/corpus/modifies/fail_mixed_indexed_field_path.ora",

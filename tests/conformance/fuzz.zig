@@ -90,28 +90,28 @@ const fuzz_source =
     \\
     \\    pub fn issue(to: address, amount: FuzzUnit)
     \\        requires amount <= 1000
-    \\        requires balances[to] <= 1000 - amount
+    \\        requires @amount(balances[to]) <= 1000 - amount
     \\    {
     \\        @create(balances[to], amount);
     \\    }
     \\
     \\    pub fn transfer(from: address, to: address, amount: FuzzUnit)
     \\        requires amount <= 1000
-    \\        requires balances[from] >= amount
-    \\        requires balances[to] <= 1000 - amount
+    \\        requires @amount(balances[from]) >= amount
+    \\        requires @amount(balances[to]) <= 1000 - amount
     \\    {
     \\        @move(balances[from], balances[to], amount);
     \\    }
     \\
     \\    pub fn burn(from: address, amount: FuzzUnit)
     \\        requires amount <= 1000
-    \\        requires balances[from] >= amount
+    \\        requires @amount(balances[from]) >= amount
     \\    {
     \\        @destroy(balances[from], amount);
     \\    }
     \\
     \\    pub fn resource_balance(owner: address) -> FuzzUnit {
-    \\        return balances[owner];
+    \\        return @amount(balances[owner]);
     \\    }
     \\}
 ;

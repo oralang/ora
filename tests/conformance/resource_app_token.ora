@@ -9,7 +9,7 @@ contract ResourceToken {
 
     pub fn issue(to: address, amount: TokenUnit)
         modifies balances[to], total_supply
-        requires balances[to] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        requires @amount(balances[to]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
         requires total_supply <= @cast(TokenUnit, std.constants.U256_MAX) - amount
     {
         @create(balances[to], amount);
@@ -46,7 +46,7 @@ contract ResourceToken {
     }
 
     pub fn balanceOf(owner: address) -> TokenUnit {
-        return balances[owner];
+        return @amount(balances[owner]);
     }
 
     pub fn allowance(owner: address, spender: address) -> TokenUnit {

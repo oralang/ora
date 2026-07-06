@@ -6,7 +6,7 @@ contract ResourceModifiesLock {
 
     pub fn issueAndLock(to: address, amount: TokenUnit)
         modifies balances[to]
-        requires balances[to] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        requires @amount(balances[to]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
     {
         @create(balances[to], amount);
         @lock(balances[to]);
@@ -24,6 +24,6 @@ contract ResourceModifiesLock {
     }
 
     pub fn balanceOf(owner: address) -> TokenUnit {
-        return balances[owner];
+        return @amount(balances[owner]);
     }
 }

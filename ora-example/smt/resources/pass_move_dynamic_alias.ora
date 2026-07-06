@@ -5,8 +5,8 @@ contract ResourceSmtMoveDynamicAlias {
 
     pub fn self_transfer(owner: address, amount: TokenUnit)
         modifies balances[owner]
-        requires balances[owner] >= amount
-        ensures balances[owner] == old(balances[owner])
+        requires @amount(balances[owner]) >= amount
+        ensures @amount(balances[owner]) == old(@amount(balances[owner]))
     {
         @move(balances[owner], balances[owner], amount);
     }

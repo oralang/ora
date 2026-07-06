@@ -262,6 +262,34 @@ test "compiler lowers map-backed resource builtins to Ora resource ops" {
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.map_get"));
 }
 
+test "compiler lowers resource amount observation as a pure read" {
+    const source_text =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\    storage var reserve: Resource<TokenUnit>;
+        \\
+        \\    pub fn balanceOf(owner: address) -> TokenUnit {
+        \\        return @amount(balances[owner]);
+        \\    }
+        \\
+        \\    pub fn reserveBalance() -> TokenUnit {
+        \\        return @amount(reserve);
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.map_get"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.sload"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "\"ora.create\""));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "\"ora.destroy\""));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "\"ora.move\""));
+}
+
 test "compiler lowers direct storage resource places through OraToSIR" {
     const source_text =
         \\resource TokenUnit = u256;

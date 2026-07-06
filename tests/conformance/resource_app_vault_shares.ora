@@ -9,7 +9,7 @@ contract ResourceVaultShares {
 
     pub fn deposit(owner: address, assets: u256, minted_shares: ShareUnit)
         modifies shares[owner], total_shares, managed_assets
-        requires shares[owner] <= @cast(ShareUnit, std.constants.U256_MAX) - minted_shares
+        requires @amount(shares[owner]) <= @cast(ShareUnit, std.constants.U256_MAX) - minted_shares
         requires total_shares <= @cast(ShareUnit, std.constants.U256_MAX) - minted_shares
         requires managed_assets <= std.constants.U256_MAX - assets
     {
@@ -35,7 +35,7 @@ contract ResourceVaultShares {
     }
 
     pub fn shareBalance(owner: address) -> ShareUnit {
-        return shares[owner];
+        return @amount(shares[owner]);
     }
 
     pub fn totalShares() -> ShareUnit {

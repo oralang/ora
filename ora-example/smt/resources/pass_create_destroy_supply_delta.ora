@@ -7,9 +7,9 @@ contract ResourceSmtCreateDestroySupplyDelta {
 
     pub fn issue(amount: TokenUnit)
         modifies balance, total_supply
-        requires balance <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        requires @amount(balance) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
         requires total_supply <= @cast(TokenUnit, std.constants.U256_MAX) - amount
-        ensures balance == old(balance) + amount
+        ensures @amount(balance) == old(@amount(balance)) + amount
         ensures total_supply == old(total_supply) + amount
     {
         @create(balance, amount);
@@ -18,9 +18,9 @@ contract ResourceSmtCreateDestroySupplyDelta {
 
     pub fn retire(amount: TokenUnit)
         modifies balance, total_supply
-        requires balance >= amount
+        requires @amount(balance) >= amount
         requires total_supply >= amount
-        ensures balance == old(balance) - amount
+        ensures @amount(balance) == old(@amount(balance)) - amount
         ensures total_supply == old(total_supply) - amount
     {
         @destroy(balance, amount);

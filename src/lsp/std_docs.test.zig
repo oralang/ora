@@ -99,9 +99,9 @@ test "lsp std docs: hover resolves synthetic transaction environment members" {
     const source =
         \\comptime const std = @import("std");
         \\
-        \\contract Env {
-        \\    pub fn caller() -> address {
-        \\        return std.transaction.sender;
+        \\contract Fees {
+        \\    pub fn gas() -> u256 {
+        \\        return std.transaction.gasprice();
         \\    }
         \\}
     ;
@@ -118,15 +118,50 @@ test "lsp std docs: hover resolves synthetic transaction environment members" {
     const hover = (try std_docs.hoverAt(
         allocator,
         source,
-        positionOf(source, "sender;"),
+        positionOf(source, "gasprice();"),
         &index,
         aliases,
     )).?;
     defer allocator.free(hover.contents);
 
-    try std.testing.expect(std.mem.indexOf(u8, hover.contents, "std.transaction.sender: address") != null);
-    try std.testing.expect(std.mem.indexOf(u8, hover.contents, "Alias of `std.msg.sender`") != null);
-    try std.testing.expect(std_docs.definitionAt(source, positionOf(source, "sender;"), &index, aliases) == null);
+    try std.testing.expect(std.mem.indexOf(u8, hover.contents, "std.transaction.gasprice: u256") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hover.contents, "Gas price for the current transaction.") != null);
+    try std.testing.expect(std_docs.definitionAt(source, positionOf(source, "gasprice();"), &index, aliases) == null);
+}
+
+test "lsp std docs: hover resolves synthetic tx origin member" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\comptime const std = @import("std");
+        \\
+        \\contract Env {
+        \\    pub fn caller() -> address {
+        \\        return std.tx.origin();
+        \\    }
+        \\}
+    ;
+
+    var cache = try token_cache.Cache.init(allocator, source);
+    defer cache.deinit(allocator);
+
+    const aliases = try std_docs.collectImportAliases(allocator, cache.tokens);
+    defer freeAliases(allocator, aliases);
+
+    var index = try std_docs.Index.init(allocator);
+    defer index.deinit();
+
+    const hover = (try std_docs.hoverAt(
+        allocator,
+        source,
+        positionOf(source, "origin();"),
+        &index,
+        aliases,
+    )).?;
+    defer allocator.free(hover.contents);
+
+    try std.testing.expect(std.mem.indexOf(u8, hover.contents, "std.tx.origin: address") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hover.contents, "started the current transaction") != null);
+    try std.testing.expect(std_docs.definitionAt(source, positionOf(source, "origin();"), &index, aliases) == null);
 }
 
 test "lsp std docs: completion includes synthetic std namespaces and members" {
@@ -134,8 +169,8 @@ test "lsp std docs: completion includes synthetic std namespaces and members" {
     const source =
         \\comptime const std = @import("std");
         \\
-        \\pub fn caller() -> address {
-        \\    return std.transaction.se;
+        \\pub fn gas() -> u256 {
+        \\    return std.transaction.ga;
         \\}
     ;
 
@@ -151,15 +186,16 @@ test "lsp std docs: completion includes synthetic std namespaces and members" {
     const member_candidates = try std_docs.completionCandidatesAtPosition(
         allocator,
         source,
-        positionAfter(source, "se"),
+        positionAfter(source, "std.transaction.ga"),
         &index,
         aliases,
     );
     defer allocator.free(member_candidates);
 
-    const sender = symbolWithName(member_candidates, "sender") orelse return error.TestExpectedEqual;
-    try std.testing.expectEqualStrings("address", sender.detail.?);
-    try std.testing.expect(std.mem.indexOf(u8, sender.doc_comment.?, "Alias of `std.msg.sender`") != null);
+    const gasprice = symbolWithName(member_candidates, "gasprice") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("u256", gasprice.detail.?);
+    try std.testing.expect(std.mem.indexOf(u8, gasprice.doc_comment.?, "Gas price for the current transaction.") != null);
+    try std.testing.expect(symbolWithName(member_candidates, "sender") == null);
 
     const root_source =
         \\comptime const std = @import("std");
@@ -184,7 +220,35 @@ test "lsp std docs: completion includes synthetic std namespaces and members" {
     defer allocator.free(root_candidates);
 
     try std.testing.expect(symbolWithName(root_candidates, "transaction") != null);
+    try std.testing.expect(symbolWithName(root_candidates, "tx") != null);
     try std.testing.expect(symbolWithName(root_candidates, "constants") != null);
+
+    const tx_source =
+        \\comptime const std = @import("std");
+        \\
+        \\pub fn caller() -> address {
+        \\    return std.tx.or;
+        \\}
+    ;
+    var tx_cache = try token_cache.Cache.init(allocator, tx_source);
+    defer tx_cache.deinit(allocator);
+
+    const tx_aliases = try std_docs.collectImportAliases(allocator, tx_cache.tokens);
+    defer freeAliases(allocator, tx_aliases);
+
+    const tx_candidates = try std_docs.completionCandidatesAtPosition(
+        allocator,
+        tx_source,
+        positionAfter(tx_source, "std.tx.or"),
+        &index,
+        tx_aliases,
+    );
+    defer allocator.free(tx_candidates);
+
+    const tx_origin = symbolWithName(tx_candidates, "origin") orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("address", tx_origin.detail.?);
+    try std.testing.expect(std.mem.indexOf(u8, tx_origin.doc_comment.?, "started the current transaction") != null);
+    try std.testing.expect(symbolWithName(tx_candidates, "sender") == null);
 }
 
 fn positionOf(source: []const u8, needle: []const u8) frontend.Position {

@@ -139,7 +139,7 @@ contract OraPureSuperToken {
     }
 
     pub fn init(name: string, symbol: string, initial_supply: InitialSupply)
-    modifies admin, token_name, token_symbol, total_supply, shared_settled_balances[msg.sender]
+    modifies admin, token_name, token_symbol, total_supply, shared_settled_balances[std.msg.sender()]
     ensures(admin == std.msg.sender())
     ensures(total_supply == initial_supply)
     ensures(shared_settled_balances[std.msg.sender()] == @cast(i256, initial_supply))
@@ -249,7 +249,7 @@ contract OraPureSuperToken {
     }
 
     pub fn transfer(to: Recipient, amount: SuperTokenAmount) -> !bool | InsufficientBalance | SignedBalanceOverflow
-    modifies shared_settled_balances[msg.sender], shared_settled_balances[to]
+    modifies shared_settled_balances[std.msg.sender()], shared_settled_balances[to]
     ensures_ok(result == true)
     ensures_ok((std.msg.sender() == to && shared_settled_balances[std.msg.sender()] == old(shared_settled_balances[std.msg.sender()])) || (std.msg.sender() != to && shared_settled_balances[std.msg.sender()] == old(shared_settled_balances[std.msg.sender()]) - @cast(i256, amount)))
     ensures_ok(total_supply == old(total_supply))
@@ -275,7 +275,7 @@ contract OraPureSuperToken {
     }
 
     pub fn approve(spender: Spender, amount: u256) -> bool
-    modifies allowances[msg.sender][spender]
+    modifies allowances[std.msg.sender()][spender]
     ensures(result == true)
     ensures(allowances[std.msg.sender()][spender] == amount)
     ensures(total_supply == old(total_supply))
@@ -287,7 +287,7 @@ contract OraPureSuperToken {
     }
 
     pub fn increaseAllowance(spender: Spender, added_value: u256) -> !bool | U256Overflow
-    modifies allowances[msg.sender][spender]
+    modifies allowances[std.msg.sender()][spender]
     ensures_ok(result == true)
     ensures_ok(allowances[std.msg.sender()][spender] == old(allowances[std.msg.sender()][spender]) + added_value)
     ensures_ok(total_supply == old(total_supply))
@@ -300,7 +300,7 @@ contract OraPureSuperToken {
     }
 
     pub fn decreaseAllowance(spender: Spender, subtracted_value: u256) -> !bool | InsufficientAllowance
-    modifies allowances[msg.sender][spender]
+    modifies allowances[std.msg.sender()][spender]
     ensures_ok(result == true)
     ensures_ok(allowances[std.msg.sender()][spender] == old(allowances[std.msg.sender()][spender]) - subtracted_value)
     ensures_ok(total_supply == old(total_supply))
@@ -317,7 +317,7 @@ contract OraPureSuperToken {
     }
 
     pub fn transferFrom(from: Account, to: Recipient, amount: SuperTokenAmount) -> !bool | InsufficientAllowance | InsufficientBalance | SignedBalanceOverflow
-    modifies allowances[from][msg.sender], shared_settled_balances[from], shared_settled_balances[to]
+    modifies allowances[from][std.msg.sender()], shared_settled_balances[from], shared_settled_balances[to]
     ensures_ok(result == true)
     ensures_ok(allowances[from][std.msg.sender()] == old(allowances[from][std.msg.sender()]) - amount)
     ensures_ok((from == to && shared_settled_balances[from] == old(shared_settled_balances[from])) || (from != to && shared_settled_balances[from] == old(shared_settled_balances[from]) - @cast(i256, amount)))
@@ -351,7 +351,7 @@ contract OraPureSuperToken {
     }
 
     pub fn transferAll(to: Recipient) -> !bool | InsufficientBalance | SignedBalanceOverflow
-    modifies shared_settled_balances[msg.sender], shared_settled_balances[to]
+    modifies shared_settled_balances[std.msg.sender()], shared_settled_balances[to]
     ensures_ok(result == true)
     ensures_ok(total_supply == old(total_supply))
     {
@@ -398,7 +398,7 @@ contract OraPureSuperToken {
         data_length: AgreementWordLength,
         data: [u256; 4],
     ) -> !bool | OnlyAgreement | AgreementAlreadyExists
-    modifies std_storage.range(std_storage.derive("ora.superfluid.pure.agreement.data.v1", msg.sender, id), 4)
+    modifies std_storage.range(std_storage.derive("ora.superfluid.pure.agreement.data.v1", std.msg.sender(), id), 4)
     ensures_ok(result == true)
     ensures_ok(std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.data.v1", std.msg.sender(), id), 0) == data[0])
     ensures_ok(data_length < 2 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.data.v1", std.msg.sender(), id), 1) == data[1])
@@ -452,7 +452,7 @@ contract OraPureSuperToken {
         data_length: AgreementWordLength,
         data: [u256; 4],
     ) -> !bool | OnlyAgreement
-    modifies std_storage.range(std_storage.derive("ora.superfluid.pure.agreement.data.v1", msg.sender, id), 4)
+    modifies std_storage.range(std_storage.derive("ora.superfluid.pure.agreement.data.v1", std.msg.sender(), id), 4)
     ensures_ok(result == true)
     ensures_ok(std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.data.v1", std.msg.sender(), id), 0) == data[0])
     ensures_ok(data_length < 2 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.data.v1", std.msg.sender(), id), 1) == data[1])
@@ -490,7 +490,7 @@ contract OraPureSuperToken {
     }
 
     pub fn terminateAgreement(id: AgreementId, data_length: AgreementWordLength) -> !bool | OnlyAgreement | AgreementDoesNotExist
-    modifies std_storage.range(std_storage.derive("ora.superfluid.pure.agreement.data.v1", msg.sender, id), 4)
+    modifies std_storage.range(std_storage.derive("ora.superfluid.pure.agreement.data.v1", std.msg.sender(), id), 4)
     ensures_ok(result == true)
     ensures_ok(data_length < 1 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.data.v1", std.msg.sender(), id), 0) == 0)
     ensures_ok(data_length < 2 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.data.v1", std.msg.sender(), id), 1) == 0)
@@ -557,7 +557,7 @@ contract OraPureSuperToken {
         data_length: AgreementWordLength,
         slot_data: [u256; 4],
     ) -> !bool | OnlyAgreement
-    modifies std_storage.range(std_storage.derive("ora.superfluid.pure.agreement.state.v1", msg.sender, account, slot_id), 4)
+    modifies std_storage.range(std_storage.derive("ora.superfluid.pure.agreement.state.v1", std.msg.sender(), account, slot_id), 4)
     ensures_ok(result == true)
     ensures_ok(std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.state.v1", std.msg.sender(), account, slot_id), 0) == slot_data[0])
     ensures_ok(data_length < 2 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.state.v1", std.msg.sender(), account, slot_id), 1) == slot_data[1])
@@ -595,7 +595,7 @@ contract OraPureSuperToken {
     }
 
     pub fn clearAgreementStateSlot(account: Account, slot_id: AgreementSlotId, data_length: AgreementWordLength) -> !bool | OnlyAgreement | AgreementStateDoesNotExist
-    modifies std_storage.range(std_storage.derive("ora.superfluid.pure.agreement.state.v1", msg.sender, account, slot_id), 4)
+    modifies std_storage.range(std_storage.derive("ora.superfluid.pure.agreement.state.v1", std.msg.sender(), account, slot_id), 4)
     ensures_ok(result == true)
     ensures_ok(data_length < 1 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.state.v1", std.msg.sender(), account, slot_id), 0) == 0)
     ensures_ok(data_length < 2 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.state.v1", std.msg.sender(), account, slot_id), 1) == 0)

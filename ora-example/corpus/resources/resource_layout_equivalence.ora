@@ -14,8 +14,8 @@ contract ResourceLayoutEquivalence {
 
     pub fn issue_resource(owner: address, amount: TokenUnit)
         modifies resource_balances[owner]
-        requires resource_balances[owner] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
-        ensures resource_balances[owner] == old(resource_balances[owner]) + amount
+        requires @amount(resource_balances[owner]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        ensures @amount(resource_balances[owner]) == old(@amount(resource_balances[owner])) + amount
     {
         @create(resource_balances[owner], amount);
     }
@@ -25,6 +25,6 @@ contract ResourceLayoutEquivalence {
     }
 
     pub fn resourceBalance(owner: address) -> TokenUnit {
-        return resource_balances[owner];
+        return @amount(resource_balances[owner]);
     }
 }

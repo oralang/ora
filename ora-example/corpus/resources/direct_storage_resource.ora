@@ -6,29 +6,29 @@ contract ResourceDirectStorage {
     storage var treasury: Resource<TokenUnit>;
 
     pub fn issue(amount: TokenUnit)
-        requires reserve <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        requires @amount(reserve) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
     {
         @create(reserve, amount);
     }
 
     pub fn retire(amount: TokenUnit)
-        requires reserve >= amount
+        requires @amount(reserve) >= amount
     {
         @destroy(reserve, amount);
     }
 
     pub fn sweep(amount: TokenUnit)
-        requires reserve >= amount
-        requires treasury <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        requires @amount(reserve) >= amount
+        requires @amount(treasury) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
     {
         @move(reserve, treasury, amount);
     }
 
     pub fn reserveBalance() -> TokenUnit {
-        return reserve;
+        return @amount(reserve);
     }
 
     pub fn treasuryBalance() -> TokenUnit {
-        return treasury;
+        return @amount(treasury);
     }
 }

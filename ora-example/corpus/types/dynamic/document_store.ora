@@ -18,7 +18,7 @@ contract DocumentStore {
         documents[id] = Document {
             title: title,
             content: content,
-            author: std.msg.sender,
+            author: std.msg.sender(),
             timestamp: std.block.timestamp,
         };
         doc_count = id + 1;

@@ -5,24 +5,24 @@ contract ResourceTransientImmediate {
     tstore var scratch: Resource<TokenUnit>;
 
     pub fn issue(amount: TokenUnit)
-        requires scratch <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        requires @amount(scratch) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
     {
         @create(scratch, amount);
     }
 
     pub fn retire(amount: TokenUnit)
-        requires scratch >= amount
+        requires @amount(scratch) >= amount
     {
         @destroy(scratch, amount);
     }
 
     pub fn move_to_self(amount: TokenUnit)
-        requires scratch >= amount
+        requires @amount(scratch) >= amount
     {
         @move(scratch, scratch, amount);
     }
 
     pub fn balance() -> TokenUnit {
-        return scratch;
+        return @amount(scratch);
     }
 }

@@ -7,8 +7,8 @@ contract ResourceSmtSignedAmountGuard {
         modifies debt
         requires amount >= 0
         requires amount <= 100
-        requires debt <= 100
-        ensures debt == old(debt) + amount
+        requires @amount(debt) <= 100
+        ensures @amount(debt) == old(@amount(debt)) + amount
     {
         @create(debt, amount);
     }
