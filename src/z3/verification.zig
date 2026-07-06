@@ -16,6 +16,7 @@ const std = @import("std");
 pub const z3_c = @import("c.zig");
 pub const Z3Context = @import("context.zig").Context;
 pub const Z3Solver = @import("solver.zig").Solver;
+pub const state_symbols = @import("state_symbols.zig");
 
 const z3 = z3_c;
 const mlir = @import("mlir_c_api").c;

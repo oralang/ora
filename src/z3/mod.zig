@@ -29,6 +29,9 @@ pub const solver = @import("solver.zig");
 /// Verification pass coordinator
 pub const verification = @import("verification.zig");
 
+/// Shared names for SMT state symbols used by the live and canonical encoders.
+pub const state_symbols = @import("state_symbols.zig");
+
 /// Error handling and counterexample reporting
 pub const errors = @import("errors.zig");
 

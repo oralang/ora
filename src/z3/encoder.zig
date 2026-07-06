@@ -14,6 +14,7 @@ const z3 = @import("c.zig");
 const mlir = @import("mlir_c_api").c;
 const Context = @import("context.zig").Context;
 const mlir_helpers = @import("mlir_helpers.zig");
+const state_symbols = @import("state_symbols.zig");
 
 const finite_scf_for_unroll_limit: usize = 8;
 const finite_scf_while_unroll_limit: usize = 64;
@@ -3149,7 +3150,7 @@ pub const Encoder = struct {
             return existing;
         }
 
-        const prefixed = try std.fmt.allocPrint(self.allocator, "old_{s}", .{name});
+        const prefixed = try state_symbols.oldStorageName(self.allocator, name);
         defer self.allocator.free(prefixed);
         const symbol = try self.mkVariable(prefixed, sort);
         const key = try self.allocator.dupe(u8, name);
@@ -3169,7 +3170,7 @@ pub const Encoder = struct {
 
         // If current state doesn't exist yet, create a dedicated entry symbol.
         // getOrCreateGlobal() will reuse this symbol as the initial current state.
-        const entry_name = try std.fmt.allocPrint(self.allocator, "g_entry_{s}", .{name});
+        const entry_name = try state_symbols.entryStorageName(self.allocator, name);
         defer self.allocator.free(entry_name);
         const entry_symbol = try self.mkVariable(entry_name, sort);
         const key = try self.allocator.dupe(u8, name);
@@ -3481,7 +3482,7 @@ pub const Encoder = struct {
         const key = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(key);
 
-        const global_name = try std.fmt.allocPrint(self.allocator, "g_{s}", .{name});
+        const global_name = try state_symbols.currentStorageName(self.allocator, name);
         defer self.allocator.free(global_name);
         const ast = try self.mkVariable(global_name, sort);
         try self.global_map.put(key, ast);

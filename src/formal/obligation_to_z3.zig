@@ -756,21 +756,21 @@ pub const Adapter = struct {
         root: []const u8,
         kind: CanonicalPlaceSymbolKind,
     ) EncodeError!z3.Z3_ast {
-        const prefix: []const u8 = switch (kind) {
-            .global => "g",
-            .entry => "g_entry",
+        const name_text = switch (kind) {
+            .global => try z3_verification.state_symbols.currentStorageName(self.allocator, root),
+            .entry => try z3_verification.state_symbols.entryStorageName(self.allocator, root),
         };
-        return self.encodeStorageSymbol(prefix, root);
+        return self.encodeStorageSymbol(name_text);
     }
 
     fn encodeOldPlaceSymbol(self: *Adapter, root: []const u8) EncodeError!z3.Z3_ast {
-        return self.encodeStorageSymbol("old", root);
+        const name_text = try z3_verification.state_symbols.oldStorageName(self.allocator, root);
+        return self.encodeStorageSymbol(name_text);
     }
 
-    fn encodeStorageSymbol(self: *Adapter, prefix: []const u8, root: []const u8) EncodeError!z3.Z3_ast {
-        const sort = try self.sortForType(u256TypeInfo());
-        const name_text = try std.fmt.allocPrint(self.allocator, "{s}_{s}", .{ prefix, root });
+    fn encodeStorageSymbol(self: *Adapter, name_text: []const u8) EncodeError!z3.Z3_ast {
         defer self.allocator.free(name_text);
+        const sort = try self.sortForType(u256TypeInfo());
         const name = try self.allocator.dupeZ(u8, name_text);
         defer self.allocator.free(name);
 
