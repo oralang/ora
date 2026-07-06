@@ -157,12 +157,18 @@ fn termCanonicalSupport(set: obligation.ObligationSet, id: obligation.TermId, fu
         .variable => |variable| varRefCanonicalSupport(variable),
         .old => .{ .unsupported = .unsupported_old_term },
         .result => .{ .unsupported = .unsupported_result_term },
-        .place_read => .{ .unsupported = .unsupported_place_read_term },
+        .place_read => |place| placeReadCanonicalSupport(place),
         .unary => |unary| termCanonicalSupport(set, unary.operand, fuel - 1),
         .binary => |binary| binaryCanonicalSupport(set, binary, fuel - 1),
         .refinement_predicate => |predicate| refinementPredicateCanonicalSupport(set, predicate, fuel - 1),
         .quantified => .{ .unsupported = .unsupported_quantified_term },
     };
+}
+
+fn placeReadCanonicalSupport(place: obligation.PlaceRef) CanonicalSupport {
+    if (place.region != .storage) return .{ .unsupported = .unsupported_place_read_term };
+    if (place.fields.len != 0 or place.keys.len != 0) return .{ .unsupported = .unsupported_place_read_term };
+    return .supported;
 }
 
 fn binaryCanonicalSupport(
@@ -335,9 +341,11 @@ fn staticTermTypeInfo(set: obligation.ObligationSet, id: obligation.TermId) Enco
         .refinement_predicate,
         .quantified,
         => .{ .kind = .bool },
-        .result,
-        .place_read,
-        => error.MissingType,
+        .result => error.MissingType,
+        .place_read => |place| switch (placeReadCanonicalSupport(place)) {
+            .supported => u256TypeInfo(),
+            .unsupported => error.UnsupportedPlaceReadTerm,
+        },
     };
 }
 
@@ -624,7 +632,7 @@ pub const Adapter = struct {
             .variable => |variable| self.encodeVariable(variable),
             .old => error.UnsupportedOldTerm,
             .result => error.UnsupportedResultTerm,
-            .place_read => error.UnsupportedPlaceReadTerm,
+            .place_read => |place| self.encodePlaceRead(place),
             .unary => |unary| self.encodeUnary(unary),
             .binary => |binary| self.encodeBinary(binary),
             .refinement_predicate => |predicate| self.encodeRefinementPredicate(predicate),
@@ -635,6 +643,23 @@ pub const Adapter = struct {
     fn encodeResult(self: *Adapter, info: TypeInfo) EncodeError!z3.Z3_ast {
         const sort = try self.sortForType(info);
         const symbol = z3.Z3_mk_string_symbol(self.context.ctx, "$ora.result");
+        const ast = z3.Z3_mk_const(self.context.ctx, symbol, sort);
+        try self.context.checkNoError();
+        return ast;
+    }
+
+    fn encodePlaceRead(self: *Adapter, place: obligation.PlaceRef) EncodeError!z3.Z3_ast {
+        switch (placeReadCanonicalSupport(place)) {
+            .supported => {},
+            .unsupported => return error.UnsupportedPlaceReadTerm,
+        }
+        const sort = try self.sortForType(u256TypeInfo());
+        const name_text = try std.fmt.allocPrint(self.allocator, "g_{s}", .{place.root});
+        defer self.allocator.free(name_text);
+        const name = try self.allocator.dupeZ(u8, name_text);
+        defer self.allocator.free(name);
+
+        const symbol = z3.Z3_mk_string_symbol(self.context.ctx, name.ptr);
         const ast = z3.Z3_mk_const(self.context.ctx, symbol, sort);
         try self.context.checkNoError();
         return ast;
@@ -970,6 +995,10 @@ const TypeInfo = struct {
     signed: bool = false,
 };
 
+fn u256TypeInfo() TypeInfo {
+    return .{ .kind = .bitvector, .width = 256, .signed = false };
+}
+
 fn typeInfo(ty: obligation.TypeRef) EncodeError!TypeInfo {
     return switch (ty) {
         .spelling => |spelling| typeInfoFromSpelling(spelling),
@@ -1177,6 +1206,13 @@ test "canonical Z3 classifier matrix hashes every supported core formula shape" 
     };
     try expectCanonicalHashSucceeds(&z3_ctx, &result_comparison_terms, 2);
 
+    const scalar_place_terms = [_]obligation.Term{
+        .{ .place_read = .{ .root = "balance", .region = .storage } },
+        .{ .int_lit = .{ .value = "0", .ty = .{ .spelling = "u256" } } },
+        .{ .binary = .{ .op = .ge, .lhs = 0, .rhs = 1 } },
+    };
+    try expectCanonicalHashSucceeds(&z3_ctx, &scalar_place_terms, 2);
+
     const arithmetic_terms = [_]obligation.Term{
         .{ .variable = .{ .free = .{ .id = .{ .file_id = 1, .pattern_id = 3 }, .name = "lhs", .ty = .{ .spelling = "u256" } } } },
         .{ .variable = .{ .free = .{ .id = .{ .file_id = 1, .pattern_id = 4 }, .name = "rhs", .ty = .{ .spelling = "u256" } } } },
@@ -1227,12 +1263,21 @@ test "canonical Z3 classifier matrix names unsupported core formula shapes" {
     };
     try expectCanonicalHashUnsupported(&result_mismatched_width_terms, 2, .unsupported_type);
 
-    const place_terms = [_]obligation.Term{
+    const place_keys = [_]obligation.PlaceKey{.{ .constant = "1" }};
+    const keyed_place_terms = [_]obligation.Term{
         .{ .place_read = .{ .root = "balance", .region = .storage } },
+        .{ .int_lit = .{ .value = "0", .ty = .{ .spelling = "u256" } } },
+        .{ .place_read = .{ .root = "balance", .region = .storage, .keys = &place_keys } },
+        .{ .binary = .{ .op = .eq, .lhs = 2, .rhs = 1 } },
+    };
+    try expectCanonicalHashUnsupported(&keyed_place_terms, 3, .unsupported_place_read_term);
+
+    const transient_place_terms = [_]obligation.Term{
+        .{ .place_read = .{ .root = "scratch", .region = .transient } },
         .{ .int_lit = .{ .value = "0", .ty = .{ .spelling = "u256" } } },
         .{ .binary = .{ .op = .eq, .lhs = 0, .rhs = 1 } },
     };
-    try expectCanonicalHashUnsupported(&place_terms, 2, .unsupported_place_read_term);
+    try expectCanonicalHashUnsupported(&transient_place_terms, 2, .unsupported_place_read_term);
 
     const quantified_terms = [_]obligation.Term{
         .{ .variable = .{ .bound = .{ .index = 0, .name = "i", .ty = .{ .spelling = "u256" } } } },
@@ -1244,6 +1289,44 @@ test "canonical Z3 classifier matrix names unsupported core formula shapes" {
         } },
     };
     try expectCanonicalHashUnsupported(&quantified_terms, 2, .unsupported_quantified_term);
+}
+
+test "canonical Z3 adapter gives repeated scalar place reads one storage symbol" {
+    var z3_ctx = try z3_verification.Z3Context.init(std.testing.allocator);
+    defer z3_ctx.deinit();
+
+    const terms = [_]obligation.Term{
+        .{ .place_read = .{ .root = "balance", .region = .storage } },
+        .{ .place_read = .{ .root = "balance", .region = .storage } },
+        .{ .binary = .{ .op = .eq, .lhs = 0, .rhs = 1 } },
+    };
+    const obligations = [_]obligation.Obligation{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "place" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+        .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = 2 } } },
+    }};
+    const obligation_ids = [_]obligation.Id{1};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "place" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .obligation,
+        .obligation_ids = &obligation_ids,
+    }};
+    const set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &terms,
+    };
+
+    try expectCanonicalSupported(set, queries[0]);
+    var adapter = Adapter.init(&z3_ctx, std.testing.allocator, set);
+    try std.testing.expectEqual(CheckStatus.proved, try adapter.checkObligation(1));
 }
 
 test "canonical Z3 classifier agrees with hash adapter on supported and unsupported rows" {
