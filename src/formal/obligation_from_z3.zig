@@ -196,6 +196,13 @@ fn appendCanonicalSmtCrosscheckDiagnostic(
     canonical_context: *?z3_verification.Z3Context,
 ) !void {
     if (!queryEligibleForCanonicalSmtCrosscheck(query)) return;
+    switch (obligation_to_z3.queryCanonicalSupport(set, query)) {
+        .supported => {},
+        .unsupported => |reason| {
+            try appendCanonicalUnavailableDiagnostic(allocator, diagnostics, query, @tagName(reason));
+            return;
+        },
+    }
 
     if (canonical_context.* == null) {
         canonical_context.* = try z3_verification.Z3Context.init(allocator);
@@ -203,7 +210,7 @@ fn appendCanonicalSmtCrosscheckDiagnostic(
 
     var adapter = obligation_to_z3.Adapter.init(&canonical_context.*.?, allocator, set);
     const canonical = adapter.queryHashForRow(query) catch |err| {
-        try appendCanonicalUnavailableDiagnostic(allocator, diagnostics, query, err);
+        try appendCanonicalUnavailableDiagnostic(allocator, diagnostics, query, @errorName(err));
         return;
     };
 
@@ -221,12 +228,12 @@ fn appendCanonicalUnavailableDiagnostic(
     allocator: std.mem.Allocator,
     diagnostics: *std.ArrayList(obligation.ObligationDiagnostic),
     query: obligation.VerificationQuery,
-    err: anyerror,
+    reason: []const u8,
 ) !void {
     const message = try std.fmt.allocPrint(
         allocator,
         "canonical_z3_unavailable: query id={d} kind={s} reason={s}",
-        .{ query.id, @tagName(query.kind), @errorName(err) },
+        .{ query.id, @tagName(query.kind), reason },
     );
     try diagnostics.append(allocator, .{
         .kind = .canonical_z3_unavailable,
@@ -718,6 +725,12 @@ test "canonical SMT hash crosscheck reports storage old query unavailable withou
 
     try std.testing.expectEqual(@as(usize, 1), overlay.set.diagnostics.len);
     try std.testing.expectEqual(obligation.DiagnosticKind.canonical_z3_unavailable, overlay.set.diagnostics[0].kind);
+    try std.testing.expect(std.mem.containsAtLeast(
+        u8,
+        overlay.set.diagnostics[0].message,
+        1,
+        "reason=unsupported_old_term",
+    ));
     try std.testing.expect(!overlay.set.diagnostics[0].blocks_artifacts);
     try std.testing.expect(!overlay.set.hasBlockingDiagnostic());
 }
