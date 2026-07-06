@@ -159,13 +159,199 @@ fn termCanonicalSupport(set: obligation.ObligationSet, id: obligation.TermId, fu
         .result => .{ .unsupported = .unsupported_result_term },
         .place_read => .{ .unsupported = .unsupported_place_read_term },
         .unary => |unary| termCanonicalSupport(set, unary.operand, fuel - 1),
-        .binary => |binary| firstUnsupported(.{
-            termCanonicalSupport(set, binary.lhs, fuel - 1),
-            termCanonicalSupport(set, binary.rhs, fuel - 1),
-        }),
+        .binary => |binary| binaryCanonicalSupport(set, binary, fuel - 1),
         .refinement_predicate => |predicate| refinementPredicateCanonicalSupport(set, predicate, fuel - 1),
         .quantified => .{ .unsupported = .unsupported_quantified_term },
     };
+}
+
+fn binaryCanonicalSupport(
+    set: obligation.ObligationSet,
+    binary: obligation.BinaryTerm,
+    fuel: usize,
+) CanonicalSupport {
+    const expected = expectedInfoForBinaryOperands(set, binary) catch |err| return canonicalReasonForTypeError(err);
+    const support = firstUnsupported(.{
+        termCanonicalSupportWithExpected(set, binary.lhs, fuel, expected),
+        termCanonicalSupportWithExpected(set, binary.rhs, fuel, expected),
+    });
+    switch (support) {
+        .supported => {},
+        .unsupported => return support,
+    }
+    return binaryResultOperandTypesMatchExpected(set, binary, expected, fuel);
+}
+
+fn termCanonicalSupportWithExpected(
+    set: obligation.ObligationSet,
+    id: obligation.TermId,
+    fuel: usize,
+    expected: ?TypeInfo,
+) CanonicalSupport {
+    if (fuel == 0 or id >= set.terms.len) return .{ .unsupported = .unsupported_obligation_kind };
+    // `result` carries no TypeRef of its own; only a typed parent may pick its sort.
+    if (set.terms[id] == .result) {
+        const info = expected orelse return .{ .unsupported = .unsupported_result_term };
+        if (info.kind != .bitvector) return .{ .unsupported = .unsupported_result_term };
+        return .supported;
+    }
+    return termCanonicalSupport(set, id, fuel);
+}
+
+fn binaryResultOperandTypesMatchExpected(
+    set: obligation.ObligationSet,
+    binary: obligation.BinaryTerm,
+    expected: ?TypeInfo,
+    fuel: usize,
+) CanonicalSupport {
+    const expected_info = expected orelse return .supported;
+    if (!termContainsResult(set, binary.lhs, fuel) and !termContainsResult(set, binary.rhs, fuel)) {
+        return .supported;
+    }
+    return firstUnsupported(.{
+        termTypeMatchesExpected(set, binary.lhs, expected_info),
+        termTypeMatchesExpected(set, binary.rhs, expected_info),
+    });
+}
+
+fn termTypeMatchesExpected(set: obligation.ObligationSet, id: obligation.TermId, expected: TypeInfo) CanonicalSupport {
+    if (id >= set.terms.len) return .{ .unsupported = .unsupported_obligation_kind };
+    if (set.terms[id] == .result) return .supported;
+    const actual = staticTermTypeInfo(set, id) catch |err| return canonicalReasonForTypeError(err);
+    if (!typeInfoEql(expected, actual)) return .{ .unsupported = .unsupported_type };
+    return .supported;
+}
+
+fn termContainsResult(set: obligation.ObligationSet, id: obligation.TermId, fuel: usize) bool {
+    if (fuel == 0 or id >= set.terms.len) return false;
+    return switch (set.terms[id]) {
+        .result => true,
+        .old => |operand| termContainsResult(set, operand, fuel - 1),
+        .unary => |unary| termContainsResult(set, unary.operand, fuel - 1),
+        .binary => |binary| termContainsResult(set, binary.lhs, fuel - 1) or
+            termContainsResult(set, binary.rhs, fuel - 1),
+        .refinement_predicate => |predicate| blk: {
+            if (termContainsResult(set, predicate.value, fuel - 1)) break :blk true;
+            for (predicate.args) |arg| {
+                if (termContainsResult(set, arg, fuel - 1)) break :blk true;
+            }
+            break :blk false;
+        },
+        .quantified => |quantified| blk: {
+            if (quantified.condition) |condition| {
+                if (termContainsResult(set, condition, fuel - 1)) break :blk true;
+            }
+            break :blk termContainsResult(set, quantified.body, fuel - 1);
+        },
+        .bool_lit,
+        .int_lit,
+        .variable,
+        .place_read,
+        => false,
+    };
+}
+
+fn expectedInfoFromBinaryType(ty: ?obligation.TypeRef) EncodeError!?TypeInfo {
+    const value = ty orelse return null;
+    const info = try typeInfo(value);
+    if (info.kind != .bitvector) return error.ExpectedBitVector;
+    return info;
+}
+
+fn expectedInfoForEquality(set: obligation.ObligationSet, binary: obligation.BinaryTerm) EncodeError!?TypeInfo {
+    if (try expectedInfoFromBinaryType(binary.ty)) |info| return info;
+
+    const lhs_result = termIsResult(set, binary.lhs);
+    const rhs_result = termIsResult(set, binary.rhs);
+    if (lhs_result and !rhs_result) return try staticTermTypeInfo(set, binary.rhs);
+    if (rhs_result and !lhs_result) return try staticTermTypeInfo(set, binary.lhs);
+    return null;
+}
+
+fn expectedInfoForBinaryOperands(set: obligation.ObligationSet, binary: obligation.BinaryTerm) EncodeError!?TypeInfo {
+    return switch (binary.op) {
+        .lt,
+        .le,
+        .gt,
+        .ge,
+        => .{ .kind = .bitvector, .width = 256, .signed = false },
+        .slt,
+        .sle,
+        .sgt,
+        .sge,
+        .add,
+        .sub,
+        .mul,
+        .div,
+        .mod,
+        => if (try expectedInfoFromBinaryType(binary.ty)) |info| info else null,
+        .eq,
+        .ne,
+        => try expectedInfoForEquality(set, binary),
+        .and_,
+        .or_,
+        .implies,
+        => null,
+    };
+}
+
+fn termIsResult(set: obligation.ObligationSet, id: obligation.TermId) bool {
+    return id < set.terms.len and set.terms[id] == .result;
+}
+
+fn staticTermTypeInfo(set: obligation.ObligationSet, id: obligation.TermId) EncodeError!TypeInfo {
+    if (id >= set.terms.len) return error.InvalidTermReference;
+    return switch (set.terms[id]) {
+        .bool_lit => .{ .kind = .bool },
+        .int_lit => |literal| typeInfo(literal.ty orelse return error.MissingType),
+        .variable => |variable| typeInfo(variableTypeRef(variable) orelse return error.MissingType),
+        .old => |operand| staticTermTypeInfo(set, operand),
+        .unary => |unary| switch (unary.op) {
+            .not => .{ .kind = .bool },
+            .neg => staticTermTypeInfo(set, unary.operand),
+        },
+        .binary => |nested| switch (nested.op) {
+            .eq,
+            .ne,
+            .lt,
+            .le,
+            .gt,
+            .ge,
+            .slt,
+            .sle,
+            .sgt,
+            .sge,
+            .and_,
+            .or_,
+            .implies,
+            => .{ .kind = .bool },
+            .add,
+            .sub,
+            .mul,
+            .div,
+            .mod,
+            => if (try expectedInfoFromBinaryType(nested.ty)) |info| info else try staticTermTypeInfo(set, nested.lhs),
+        },
+        .refinement_predicate,
+        .quantified,
+        => .{ .kind = .bool },
+        .result,
+        .place_read,
+        => error.MissingType,
+    };
+}
+
+fn canonicalReasonForTypeError(err: EncodeError) CanonicalSupport {
+    return .{ .unsupported = switch (err) {
+        error.MissingType => .missing_type,
+        error.UnsupportedCompilerTypeId => .unsupported_compiler_type_id,
+        error.UnsupportedType => .unsupported_type,
+        else => .unsupported_type,
+    } };
+}
+
+fn typeInfoEql(lhs: TypeInfo, rhs: TypeInfo) bool {
+    return lhs.kind == rhs.kind and lhs.width == rhs.width and lhs.signed == rhs.signed;
 }
 
 fn varRefCanonicalSupport(variable: obligation.VarRef) CanonicalSupport {
@@ -408,6 +594,26 @@ pub const Adapter = struct {
         return self.encodeTerm(self.set.terms[id]);
     }
 
+    fn encodeTermIdWithExpected(
+        self: *Adapter,
+        id: obligation.TermId,
+        expected: ?TypeInfo,
+        enforce_expected_type: bool,
+    ) EncodeError!z3.Z3_ast {
+        if (id >= self.set.terms.len) return error.InvalidTermReference;
+        if (self.set.terms[id] == .result) {
+            const info = expected orelse return error.UnsupportedResultTerm;
+            if (info.kind != .bitvector) return error.UnsupportedResultTerm;
+            return self.encodeResult(info);
+        }
+        if (enforce_expected_type) {
+            const expected_info = expected orelse return error.UnsupportedResultTerm;
+            const actual = try staticTermTypeInfo(self.set, id);
+            if (!typeInfoEql(expected_info, actual)) return error.TypeMismatch;
+        }
+        return self.encodeTerm(self.set.terms[id]);
+    }
+
     fn encodeTerm(self: *Adapter, term: obligation.Term) EncodeError!z3.Z3_ast {
         return switch (term) {
             .bool_lit => |value| if (value)
@@ -424,6 +630,14 @@ pub const Adapter = struct {
             .refinement_predicate => |predicate| self.encodeRefinementPredicate(predicate),
             .quantified => error.UnsupportedQuantifiedTerm,
         };
+    }
+
+    fn encodeResult(self: *Adapter, info: TypeInfo) EncodeError!z3.Z3_ast {
+        const sort = try self.sortForType(info);
+        const symbol = z3.Z3_mk_string_symbol(self.context.ctx, "$ora.result");
+        const ast = z3.Z3_mk_const(self.context.ctx, symbol, sort);
+        try self.context.checkNoError();
+        return ast;
     }
 
     fn encodeIntegerLiteral(self: *Adapter, literal: obligation.IntegerLiteralTerm) EncodeError!z3.Z3_ast {
@@ -474,8 +688,12 @@ pub const Adapter = struct {
     }
 
     fn encodeBinary(self: *Adapter, binary: obligation.BinaryTerm) EncodeError!z3.Z3_ast {
-        const lhs = try self.encodeTermId(binary.lhs);
-        const rhs = try self.encodeTermId(binary.rhs);
+        const expected = try expectedInfoForBinaryOperands(self.set, binary);
+        const enforce_expected_type = expected != null and
+            (termContainsResult(self.set, binary.lhs, self.set.terms.len + 1) or
+                termContainsResult(self.set, binary.rhs, self.set.terms.len + 1));
+        const lhs = try self.encodeTermIdWithExpected(binary.lhs, expected, enforce_expected_type);
+        const rhs = try self.encodeTermIdWithExpected(binary.rhs, expected, enforce_expected_type);
 
         const ast = switch (binary.op) {
             .eq => z3.Z3_mk_eq(self.context.ctx, lhs, rhs),
@@ -513,7 +731,7 @@ pub const Adapter = struct {
             .div => blk: {
                 try self.requireBitVector(lhs);
                 try self.requireBitVector(rhs);
-                break :blk if (try self.binaryOperandsSigned(binary))
+                break :blk if (try self.binaryOperandsSigned(binary, expected))
                     self.encodeSignedDivTotal(lhs, rhs)
                 else
                     self.encodeUnsignedDivTotal(lhs, rhs);
@@ -521,7 +739,7 @@ pub const Adapter = struct {
             .mod => blk: {
                 try self.requireBitVector(lhs);
                 try self.requireBitVector(rhs);
-                break :blk if (try self.binaryOperandsSigned(binary))
+                break :blk if (try self.binaryOperandsSigned(binary, expected))
                     self.encodeSignedRemTotal(lhs, rhs)
                 else
                     self.encodeUnsignedRemTotal(lhs, rhs);
@@ -682,7 +900,11 @@ pub const Adapter = struct {
         return result;
     }
 
-    fn binaryOperandsSigned(self: *Adapter, binary: obligation.BinaryTerm) EncodeError!bool {
+    fn binaryOperandsSigned(self: *Adapter, binary: obligation.BinaryTerm, expected: ?TypeInfo) EncodeError!bool {
+        if (expected) |info| {
+            if (info.kind != .bitvector) return error.ExpectedBitVector;
+            return info.signed;
+        }
         const lhs = try self.termTypeInfo(binary.lhs);
         const rhs = try self.termTypeInfo(binary.rhs);
         if (lhs.kind != .bitvector or rhs.kind != .bitvector) return error.ExpectedBitVector;
@@ -692,44 +914,7 @@ pub const Adapter = struct {
     }
 
     fn termTypeInfo(self: *Adapter, id: obligation.TermId) EncodeError!TypeInfo {
-        if (id >= self.set.terms.len) return error.InvalidTermReference;
-        return switch (self.set.terms[id]) {
-            .bool_lit => .{ .kind = .bool },
-            .int_lit => |literal| typeInfo(literal.ty orelse return error.MissingType),
-            .variable => |variable| typeInfo(variableTypeRef(variable) orelse return error.MissingType),
-            .old => |operand| self.termTypeInfo(operand),
-            .unary => |unary| switch (unary.op) {
-                .not => .{ .kind = .bool },
-                .neg => self.termTypeInfo(unary.operand),
-            },
-            .binary => |binary| switch (binary.op) {
-                .eq,
-                .ne,
-                .lt,
-                .le,
-                .gt,
-                .ge,
-                .slt,
-                .sle,
-                .sgt,
-                .sge,
-                .and_,
-                .or_,
-                .implies,
-                => .{ .kind = .bool },
-                .add,
-                .sub,
-                .mul,
-                .div,
-                .mod,
-                => self.termTypeInfo(binary.lhs),
-            },
-            .refinement_predicate => .{ .kind = .bool },
-            .quantified => .{ .kind = .bool },
-            .result,
-            .place_read,
-            => error.MissingType,
-        };
+        return staticTermTypeInfo(self.set, id);
     }
 
     fn integerLiteralForType(self: *Adapter, value: []const u8, info: TypeInfo) EncodeError!z3.Z3_ast {
@@ -985,6 +1170,13 @@ test "canonical Z3 classifier matrix hashes every supported core formula shape" 
     };
     try expectCanonicalHashSucceeds(&z3_ctx, &signed_comparison_terms, 2);
 
+    const result_comparison_terms = [_]obligation.Term{
+        .result,
+        .{ .int_lit = .{ .value = "0", .ty = .{ .spelling = "u256" } } },
+        .{ .binary = .{ .op = .ge, .lhs = 0, .rhs = 1 } },
+    };
+    try expectCanonicalHashSucceeds(&z3_ctx, &result_comparison_terms, 2);
+
     const arithmetic_terms = [_]obligation.Term{
         .{ .variable = .{ .free = .{ .id = .{ .file_id = 1, .pattern_id = 3 }, .name = "lhs", .ty = .{ .spelling = "u256" } } } },
         .{ .variable = .{ .free = .{ .id = .{ .file_id = 1, .pattern_id = 4 }, .name = "rhs", .ty = .{ .spelling = "u256" } } } },
@@ -1016,12 +1208,24 @@ test "canonical Z3 classifier matrix names unsupported core formula shapes" {
     };
     try expectCanonicalHashUnsupported(&old_terms, 2, .unsupported_old_term);
 
-    const result_terms = [_]obligation.Term{
-        .{ .result = {} },
-        .{ .int_lit = .{ .value = "0", .ty = .{ .spelling = "u256" } } },
+    const bare_result_terms = [_]obligation.Term{
+        .result,
+    };
+    try expectCanonicalHashUnsupported(&bare_result_terms, 0, .unsupported_result_term);
+
+    const untyped_result_equality_terms = [_]obligation.Term{
+        .result,
+        .result,
         .{ .binary = .{ .op = .eq, .lhs = 0, .rhs = 1 } },
     };
-    try expectCanonicalHashUnsupported(&result_terms, 2, .unsupported_result_term);
+    try expectCanonicalHashUnsupported(&untyped_result_equality_terms, 2, .unsupported_result_term);
+
+    const result_mismatched_width_terms = [_]obligation.Term{
+        .result,
+        .{ .int_lit = .{ .value = "0", .ty = .{ .spelling = "u32" } } },
+        .{ .binary = .{ .op = .ge, .lhs = 0, .rhs = 1 } },
+    };
+    try expectCanonicalHashUnsupported(&result_mismatched_width_terms, 2, .unsupported_type);
 
     const place_terms = [_]obligation.Term{
         .{ .place_read = .{ .root = "balance", .region = .storage } },
@@ -1052,6 +1256,9 @@ test "canonical Z3 classifier agrees with hash adapter on supported and unsuppor
         .{ .binary = .{ .op = .ge, .lhs = 0, .rhs = 1 } },
         .{ .old = 0 },
         .{ .binary = .{ .op = .eq, .lhs = 3, .rhs = 0 } },
+        .result,
+        .result,
+        .{ .binary = .{ .op = .eq, .lhs = 5, .rhs = 6 } },
     };
     const assumptions = [_]obligation.Assumption{.{
         .id = 1,
@@ -1079,10 +1286,19 @@ test "canonical Z3 classifier agrees with hash adapter on supported and unsuppor
             .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 1 } },
             .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = 4 } } },
         },
+        .{
+            .id = 6,
+            .owner = .{ .function = .{ .name = "checked" } },
+            .source = .generated(),
+            .phase = .sema,
+            .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 2 } },
+            .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = 7 } } },
+        },
     };
     const assumption_ids = [_]obligation.Id{1};
     const supported_obligation_ids = [_]obligation.Id{2};
     const unsupported_obligation_ids = [_]obligation.Id{3};
+    const unsupported_result_obligation_ids = [_]obligation.Id{6};
     const queries = [_]obligation.VerificationQuery{
         .{
             .id = 4,
@@ -1104,6 +1320,16 @@ test "canonical Z3 classifier agrees with hash adapter on supported and unsuppor
             .obligation_ids = &unsupported_obligation_ids,
             .assumption_ids = &assumption_ids,
         },
+        .{
+            .id = 7,
+            .owner = .{ .function = .{ .name = "checked" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .kind = .obligation,
+            .obligation_ids = &unsupported_result_obligation_ids,
+            .assumption_ids = &assumption_ids,
+        },
     };
     const set: obligation.ObligationSet = .{
         .assumptions = &assumptions,
@@ -1119,6 +1345,8 @@ test "canonical Z3 classifier agrees with hash adapter on supported and unsuppor
 
     try expectCanonicalUnsupported(set, queries[1], .unsupported_old_term);
     try std.testing.expectError(error.UnsupportedOldTerm, adapter.queryHash(5));
+    try expectCanonicalUnsupported(set, queries[2], .unsupported_result_term);
+    try std.testing.expectError(error.UnsupportedResultTerm, adapter.queryHash(7));
 }
 
 test "canonical Z3 hash contract sorts stored assumptions by formal id" {
