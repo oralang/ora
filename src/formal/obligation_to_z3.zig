@@ -95,6 +95,35 @@ pub const EncodeError = std.mem.Allocator.Error || error{
     Z3ApiError,
 };
 
+const CanonicalPlaceSymbolKind = enum(u8) {
+    global,
+    entry,
+};
+
+const CanonicalPlaceRootState = struct {
+    root: []const u8,
+    current: ?CanonicalPlaceSymbolKind = null,
+    entry: ?CanonicalPlaceSymbolKind = null,
+};
+
+const CanonicalQueryState = struct {
+    place_roots: std.ArrayList(CanonicalPlaceRootState) = .empty,
+    side_constraints: std.ArrayList(z3.Z3_ast) = .empty,
+
+    fn deinit(self: *CanonicalQueryState, allocator: std.mem.Allocator) void {
+        self.place_roots.deinit(allocator);
+        self.side_constraints.deinit(allocator);
+    }
+
+    fn getOrPutPlaceRoot(self: *CanonicalQueryState, allocator: std.mem.Allocator, root: []const u8) !*CanonicalPlaceRootState {
+        for (self.place_roots.items) |*item| {
+            if (std.mem.eql(u8, item.root, root)) return item;
+        }
+        try self.place_roots.append(allocator, .{ .root = root });
+        return &self.place_roots.items[self.place_roots.items.len - 1];
+    }
+};
+
 pub fn queryCanonicalSupport(set: obligation.ObligationSet, query: obligation.VerificationQuery) CanonicalSupport {
     if (query.kind != .obligation) return .{ .unsupported = .unsupported_query_kind };
     if (query.obligation_ids.len != 1) return .{ .unsupported = .query_not_single_obligation };
@@ -155,7 +184,7 @@ fn termCanonicalSupport(set: obligation.ObligationSet, id: obligation.TermId, fu
         .bool_lit => .supported,
         .int_lit => |literal| typeRefCanonicalSupport(literal.ty),
         .variable => |variable| varRefCanonicalSupport(variable),
-        .old => .{ .unsupported = .unsupported_old_term },
+        .old => |operand| oldCanonicalSupport(set, operand, fuel - 1),
         .result => .{ .unsupported = .unsupported_result_term },
         .place_read => |place| placeReadCanonicalSupport(place),
         .unary => |unary| termCanonicalSupport(set, unary.operand, fuel - 1),
@@ -169,6 +198,17 @@ fn placeReadCanonicalSupport(place: obligation.PlaceRef) CanonicalSupport {
     if (place.region != .storage) return .{ .unsupported = .unsupported_place_read_term };
     if (place.fields.len != 0 or place.keys.len != 0) return .{ .unsupported = .unsupported_place_read_term };
     return .supported;
+}
+
+fn oldCanonicalSupport(set: obligation.ObligationSet, operand: obligation.TermId, fuel: usize) CanonicalSupport {
+    if (fuel == 0 or operand >= set.terms.len) return .{ .unsupported = .unsupported_old_term };
+    return switch (set.terms[operand]) {
+        .place_read => |place| switch (placeReadCanonicalSupport(place)) {
+            .supported => .supported,
+            .unsupported => .{ .unsupported = .unsupported_old_term },
+        },
+        else => .{ .unsupported = .unsupported_old_term },
+    };
 }
 
 fn binaryCanonicalSupport(
@@ -421,6 +461,7 @@ pub const Adapter = struct {
     context: *Context,
     allocator: std.mem.Allocator,
     set: obligation.ObligationSet,
+    query_state: ?*CanonicalQueryState,
 
     pub fn init(
         context: *Context,
@@ -431,6 +472,7 @@ pub const Adapter = struct {
             .context = context,
             .allocator = allocator,
             .set = set,
+            .query_state = null,
         };
     }
 
@@ -487,9 +529,13 @@ pub const Adapter = struct {
         constraints: *std.ArrayList(z3.Z3_ast),
         query: obligation.VerificationQuery,
     ) EncodeError!void {
+        var query_state: CanonicalQueryState = .{};
+        defer query_state.deinit(self.allocator);
+        self.query_state = &query_state;
+        defer self.query_state = null;
+
         if (query.obligation_ids.len != 1) return error.UnsupportedObligationKind;
         const target = self.findObligation(query.obligation_ids[0]) orelse return error.UnknownObligation;
-        const goal = try self.formulaForObligation(target.kind);
 
         // The canonical byte-parity contract is order-sensitive over formal
         // ids, independent of the query builder's stored slice order.
@@ -504,10 +550,14 @@ pub const Adapter = struct {
         for (assumption_ids) |assumption_id| {
             const assumption = self.findAssumption(assumption_id) orelse return error.UnknownAssumption;
             if (assumption.formula) |formula| {
-                try constraints.append(self.allocator, try self.encodeFormula(formula));
+                const assumption_ast = try self.encodeFormula(formula);
+                try self.appendSideConstraints(constraints);
+                try constraints.append(self.allocator, assumption_ast);
             }
         }
 
+        const goal = try self.formulaForObligation(target.kind);
+        try self.appendSideConstraints(constraints);
         const negated_goal = z3.Z3_mk_not(self.context.ctx, goal);
         try self.context.checkNoError();
         try constraints.append(self.allocator, negated_goal);
@@ -630,7 +680,7 @@ pub const Adapter = struct {
                 z3.Z3_mk_false(self.context.ctx),
             .int_lit => |literal| self.encodeIntegerLiteral(literal),
             .variable => |variable| self.encodeVariable(variable),
-            .old => error.UnsupportedOldTerm,
+            .old => |operand| self.encodeOld(operand),
             .result => error.UnsupportedResultTerm,
             .place_read => |place| self.encodePlaceRead(place),
             .unary => |unary| self.encodeUnary(unary),
@@ -653,8 +703,73 @@ pub const Adapter = struct {
             .supported => {},
             .unsupported => return error.UnsupportedPlaceReadTerm,
         }
+        const root_state = try self.canonicalQueryState().getOrPutPlaceRoot(self.allocator, place.root);
+        const current = root_state.current orelse blk: {
+            const created = root_state.entry orelse .global;
+            root_state.current = created;
+            if (root_state.entry == null) root_state.entry = created;
+            break :blk created;
+        };
+        return self.encodePlaceSymbol(place.root, current);
+    }
+
+    fn encodeOld(self: *Adapter, operand: obligation.TermId) EncodeError!z3.Z3_ast {
+        if (operand >= self.set.terms.len) return error.InvalidTermReference;
+        const place = switch (self.set.terms[operand]) {
+            .place_read => |place| place,
+            else => return error.UnsupportedOldTerm,
+        };
+        switch (placeReadCanonicalSupport(place)) {
+            .supported => {},
+            .unsupported => return error.UnsupportedOldTerm,
+        }
+
+        const root_state = try self.canonicalQueryState().getOrPutPlaceRoot(self.allocator, place.root);
+        const entry = root_state.entry orelse blk: {
+            const created = root_state.current orelse .entry;
+            root_state.entry = created;
+            break :blk created;
+        };
+        const old_ast = try self.encodeOldPlaceSymbol(place.root);
+        const entry_ast = try self.encodePlaceSymbol(place.root, entry);
+        const linkage = z3.Z3_mk_eq(self.context.ctx, old_ast, entry_ast);
+        try self.context.checkNoError();
+        try self.canonicalQueryState().side_constraints.append(self.allocator, linkage);
+        return old_ast;
+    }
+
+    fn appendSideConstraints(
+        self: *Adapter,
+        constraints: *std.ArrayList(z3.Z3_ast),
+    ) EncodeError!void {
+        const state = self.canonicalQueryState();
+        try constraints.appendSlice(self.allocator, state.side_constraints.items);
+        state.side_constraints.clearRetainingCapacity();
+    }
+
+    fn canonicalQueryState(self: *Adapter) *CanonicalQueryState {
+        return self.query_state orelse unreachable;
+    }
+
+    fn encodePlaceSymbol(
+        self: *Adapter,
+        root: []const u8,
+        kind: CanonicalPlaceSymbolKind,
+    ) EncodeError!z3.Z3_ast {
+        const prefix: []const u8 = switch (kind) {
+            .global => "g",
+            .entry => "g_entry",
+        };
+        return self.encodeStorageSymbol(prefix, root);
+    }
+
+    fn encodeOldPlaceSymbol(self: *Adapter, root: []const u8) EncodeError!z3.Z3_ast {
+        return self.encodeStorageSymbol("old", root);
+    }
+
+    fn encodeStorageSymbol(self: *Adapter, prefix: []const u8, root: []const u8) EncodeError!z3.Z3_ast {
         const sort = try self.sortForType(u256TypeInfo());
-        const name_text = try std.fmt.allocPrint(self.allocator, "g_{s}", .{place.root});
+        const name_text = try std.fmt.allocPrint(self.allocator, "{s}_{s}", .{ prefix, root });
         defer self.allocator.free(name_text);
         const name = try self.allocator.dupeZ(u8, name_text);
         defer self.allocator.free(name);
@@ -1213,6 +1328,14 @@ test "canonical Z3 classifier matrix hashes every supported core formula shape" 
     };
     try expectCanonicalHashSucceeds(&z3_ctx, &scalar_place_terms, 2);
 
+    const old_place_terms = [_]obligation.Term{
+        .{ .place_read = .{ .root = "balance", .region = .storage } },
+        .{ .old = 0 },
+        .{ .int_lit = .{ .value = "0", .ty = .{ .spelling = "u256" } } },
+        .{ .binary = .{ .op = .ge, .lhs = 1, .rhs = 2 } },
+    };
+    try expectCanonicalHashSucceeds(&z3_ctx, &old_place_terms, 3);
+
     const arithmetic_terms = [_]obligation.Term{
         .{ .variable = .{ .free = .{ .id = .{ .file_id = 1, .pattern_id = 3 }, .name = "lhs", .ty = .{ .spelling = "u256" } } } },
         .{ .variable = .{ .free = .{ .id = .{ .file_id = 1, .pattern_id = 4 }, .name = "rhs", .ty = .{ .spelling = "u256" } } } },
@@ -1327,6 +1450,65 @@ test "canonical Z3 adapter gives repeated scalar place reads one storage symbol"
     try expectCanonicalSupported(set, queries[0]);
     var adapter = Adapter.init(&z3_ctx, std.testing.allocator, set);
     try std.testing.expectEqual(CheckStatus.proved, try adapter.checkObligation(1));
+}
+
+test "canonical Z3 adapter links old scalar place reads to entry storage" {
+    var z3_ctx = try z3_verification.Z3Context.init(std.testing.allocator);
+    defer z3_ctx.deinit();
+
+    const old_first_terms = [_]obligation.Term{
+        .{ .place_read = .{ .root = "balance", .region = .storage } },
+        .{ .old = 0 },
+        .{ .binary = .{ .op = .eq, .lhs = 1, .rhs = 0 } },
+    };
+    const current_first_terms = [_]obligation.Term{
+        .{ .place_read = .{ .root = "balance", .region = .storage } },
+        .{ .old = 0 },
+        .{ .binary = .{ .op = .eq, .lhs = 0, .rhs = 1 } },
+    };
+
+    const obligations = [_]obligation.Obligation{
+        .{
+            .id = 1,
+            .owner = .{ .function = .{ .name = "place" } },
+            .source = .generated(),
+            .phase = .sema,
+            .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+            .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = 2 } } },
+        },
+    };
+    const obligation_ids = [_]obligation.Id{1};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "place" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .obligation,
+        .obligation_ids = &obligation_ids,
+    }};
+
+    const old_first_set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &old_first_terms,
+    };
+    try expectCanonicalSupported(old_first_set, queries[0]);
+    var old_first_adapter = Adapter.init(&z3_ctx, std.testing.allocator, old_first_set);
+    const old_first_hash = try old_first_adapter.queryHash(2);
+    try std.testing.expectEqual(@as(u32, 2), old_first_hash.constraint_count);
+    try std.testing.expectEqual(CheckStatus.proved, try old_first_adapter.checkObligation(1));
+
+    const current_first_set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &current_first_terms,
+    };
+    try expectCanonicalSupported(current_first_set, queries[0]);
+    var current_first_adapter = Adapter.init(&z3_ctx, std.testing.allocator, current_first_set);
+    const current_first_hash = try current_first_adapter.queryHash(2);
+    try std.testing.expectEqual(@as(u32, 2), current_first_hash.constraint_count);
+    try std.testing.expectEqual(CheckStatus.proved, try current_first_adapter.checkObligation(1));
 }
 
 test "canonical Z3 classifier agrees with hash adapter on supported and unsupported rows" {

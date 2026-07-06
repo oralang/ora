@@ -676,7 +676,10 @@ test "canonical SMT hash crosscheck accepts matching supported formula row" {
     try std.testing.expectEqual(canonical.smtlib_hash, overlay.set.queries[0].smtlib_hash.?);
 }
 
-test "canonical SMT hash crosscheck reports storage old query unavailable without blocking" {
+test "canonical SMT hash crosscheck accepts storage old query when hash matches" {
+    var z3_ctx = try z3_verification.Z3Context.init(std.testing.allocator);
+    defer z3_ctx.deinit();
+
     const terms = [_]obligation.Term{
         .{ .place_read = .{ .root = "balance", .region = .storage } },
         .{ .old = 0 },
@@ -701,38 +704,34 @@ test "canonical SMT hash crosscheck reports storage old query unavailable withou
         .kind = .obligation,
         .obligation_ids = &obligation_ids,
     }};
+    const set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &terms,
+    };
+    var adapter = obligation_to_z3.Adapter.init(&z3_ctx, std.testing.allocator, set);
+    const canonical = try adapter.queryHash(2);
+
     const rows = [_]z3_verification.PreparedQueryManifestRow{.{
         .kind = .Obligation,
         .function_name = "view_balance",
         .file = "",
         .line = 0,
         .column = 0,
-        .constraint_count = 3,
-        .smtlib_hash = 123,
+        .constraint_count = canonical.constraint_count,
+        .smtlib_hash = canonical.smtlib_hash,
         .result_status = .unknown,
         .formal_query_id = 2,
         .formal_obligation_ids = &obligation_ids,
         .formal_match_status = .matched,
     }};
-    const set: obligation.ObligationSet = .{
-        .obligations = &obligations,
-        .queries = &queries,
-        .terms = &terms,
-    };
 
     var overlay = try overlayPreparedQueryResults(std.testing.allocator, set, &rows);
     defer overlay.deinit();
 
-    try std.testing.expectEqual(@as(usize, 1), overlay.set.diagnostics.len);
-    try std.testing.expectEqual(obligation.DiagnosticKind.canonical_z3_unavailable, overlay.set.diagnostics[0].kind);
-    try std.testing.expect(std.mem.containsAtLeast(
-        u8,
-        overlay.set.diagnostics[0].message,
-        1,
-        "reason=unsupported_old_term",
-    ));
-    try std.testing.expect(!overlay.set.diagnostics[0].blocks_artifacts);
-    try std.testing.expect(!overlay.set.hasBlockingDiagnostic());
+    try std.testing.expectEqual(@as(usize, 0), overlay.set.diagnostics.len);
+    try std.testing.expectEqual(canonical.constraint_count, overlay.set.queries[0].constraint_count);
+    try std.testing.expectEqual(canonical.smtlib_hash, overlay.set.queries[0].smtlib_hash.?);
 }
 
 test "canonical SMT hash mismatch blocks only when crosscheck is required" {
