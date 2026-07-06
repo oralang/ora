@@ -51,6 +51,7 @@ import Ora.Obligation.Manifest
 import Ora.Obligation.BitVec
 import Ora.Obligation.Semantics
 import Ora.Obligation.Theorems
+import Ora.Obligation.Agreement
 import Ora.Resource.Model
 import Ora.Resource.Theorems
 import Ora.Resource.Sync

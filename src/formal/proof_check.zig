@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const obligation = @import("obligation.zig");
+const obligation_to_lean = @import("obligation_to_lean.zig");
 const proof_manifest = @import("proof_manifest.zig");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -116,6 +117,17 @@ fn applyRows(
             .query_id = row.query_id,
             .module_name = module_name,
             .theorem_name = theorem_name,
+            .obligation_ids = proof_obligation_ids,
+            .assumption_ids = proof_assumption_ids,
+            .requires_agreement = proofTargetRequiresAgreement(target_query),
+            .z3_row_matched = target_query.smtlib_hash != null,
+            .z3_plain_unknown = proofTargetIsPlainUnknown(target_query),
+            .zig_semantic_supported = switch (obligation_to_lean.querySemanticSupport(set, target_query)) {
+                .supported => true,
+                .unsupported => false,
+            },
+            .target_smtlib_hash = target_query.smtlib_hash,
+            .target_constraint_count = target_query.constraint_count,
         });
         try certificate_rows.append(arena_allocator, .{
             .target_query_id = row.query_id,
@@ -137,7 +149,7 @@ fn applyRows(
     for (certificate_rows.items, proof_check.axiom_audits) |*row, audit| {
         row.axioms = audit.axioms;
     }
-    const certificate_json = try buildCertificateJson(arena_allocator, generated_namespace, obligations_source, proof_check.source, certificate_rows.items, process_environ);
+    const certificate_json = try buildCertificateJson(arena_allocator, generated_namespace, obligations_source, proof_check.source, proof_check.agreement_source, certificate_rows.items, process_environ);
 
     var merged = set;
     merged.proof_artifacts = try concat(obligation.ProofArtifact, arena_allocator, set.proof_artifacts, artifacts.items);
@@ -166,6 +178,19 @@ fn validateProofTarget(target_query: obligation.VerificationQuery) !void {
     if (target_query.backend == .z3) return error.ProofRowTargetMissingResult;
 }
 
+fn proofTargetIsPlainUnknown(target_query: obligation.VerificationQuery) bool {
+    if (target_query.backend != .z3) return false;
+    const result = target_query.result orelse return false;
+    return result.status == .unknown and
+        !result.degraded and
+        !result.vacuous and
+        !result.vacuity_unknown;
+}
+
+fn proofTargetRequiresAgreement(target_query: obligation.VerificationQuery) bool {
+    return proofTargetIsPlainUnknown(target_query);
+}
+
 fn validateProofRowSyntax(row: ProofRow) !void {
     try validateLeanModulePath(row.module_name);
     try validateLeanTheoremPath(row.theorem_name);
@@ -177,10 +202,19 @@ const CheckedProofRow = struct {
     query_id: obligation.Id,
     module_name: []const u8,
     theorem_name: []const u8,
+    obligation_ids: []const obligation.Id = &.{},
+    assumption_ids: []const obligation.Id = &.{},
+    requires_agreement: bool = false,
+    z3_row_matched: bool = false,
+    z3_plain_unknown: bool = false,
+    zig_semantic_supported: bool = false,
+    target_smtlib_hash: ?u64 = null,
+    target_constraint_count: u32 = 0,
 };
 
 const LeanCheckResult = struct {
     source: []const u8,
+    agreement_source: []const u8,
     axiom_audits: []const AxiomAuditRow,
 };
 
@@ -208,6 +242,7 @@ fn buildCertificateJson(
     generated_namespace: []const u8,
     obligations_source: []const u8,
     proof_check_source: []const u8,
+    agreement_source: []const u8,
     rows: []const CertificateRow,
     process_environ: std.process.Environ,
 ) ![]const u8 {
@@ -219,6 +254,7 @@ fn buildCertificateJson(
         generated_namespace,
         obligations_source,
         proof_check_source,
+        agreement_source,
         rows,
         lean_version,
     );
@@ -229,6 +265,7 @@ fn buildCertificateJsonWithLeanVersion(
     generated_namespace: []const u8,
     obligations_source: []const u8,
     proof_check_source: []const u8,
+    agreement_source: []const u8,
     rows: []const CertificateRow,
     lean_version: []const u8,
 ) ![]const u8 {
@@ -240,6 +277,8 @@ fn buildCertificateJsonWithLeanVersion(
     defer allocator.free(obligations_sha256);
     const proof_check_sha256 = try sha256HexAlloc(allocator, proof_check_source);
     defer allocator.free(proof_check_sha256);
+    const agreement_sha256 = try sha256HexAlloc(allocator, agreement_source);
+    defer allocator.free(agreement_sha256);
 
     try writer.writeAll("{\n  \"schema_version\": ");
     try writer.print("{d}", .{obligation.proof_certificate_schema_version});
@@ -251,6 +290,8 @@ fn buildCertificateJsonWithLeanVersion(
     try writeJsonString(writer, obligations_sha256);
     try writer.writeAll(",\n  \"proof_check_sha256\": ");
     try writeJsonString(writer, proof_check_sha256);
+    try writer.writeAll(",\n  \"agreement_check_sha256\": ");
+    try writeJsonString(writer, agreement_sha256);
     try writer.print(",\n  \"proof_count\": {d},\n  \"proofs\": [", .{rows.len});
     for (rows, 0..) |row, index| {
         if (index != 0) try writer.writeByte(',');
@@ -392,6 +433,8 @@ fn runLeanChecker(
 
     const obligations_rel = try std.fmt.allocPrint(allocator, "{s}/Obligations.lean", .{scratch_rel});
     defer allocator.free(obligations_rel);
+    const agreement_rel = try std.fmt.allocPrint(allocator, "{s}/Agreement.lean", .{scratch_rel});
+    defer allocator.free(agreement_rel);
     const checker_rel = try std.fmt.allocPrint(allocator, "{s}/Checker.lean", .{scratch_rel});
     defer allocator.free(checker_rel);
 
@@ -403,6 +446,12 @@ fn runLeanChecker(
         .{scratch_segment},
     );
     defer allocator.free(obligations_module);
+    const agreement_module = try std.fmt.allocPrint(
+        allocator,
+        "Ora.ProofCheckScratch.{s}.Agreement",
+        .{scratch_segment},
+    );
+    defer allocator.free(agreement_module);
     const checker_path = try std.fmt.allocPrint(
         allocator,
         "Ora/ProofCheckScratch/{s}/Checker.lean",
@@ -410,10 +459,14 @@ fn runLeanChecker(
     );
     defer allocator.free(checker_path);
 
-    const checker_source = try buildLeanCheckerSource(result_allocator, generated_namespace, obligations_module, rows);
+    const agreement_source = try buildLeanAgreementSource(result_allocator, generated_namespace, obligations_module, rows, .{});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = agreement_rel, .data = agreement_source });
+
+    const checker_source = try buildLeanCheckerSource(result_allocator, generated_namespace, obligations_module, agreement_module, rows);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = checker_rel, .data = checker_source });
 
     try runLeanCommand(allocator, &.{ "lake", "build", obligations_module }, process_environ, stdout, quiet);
+    try runLeanCommand(allocator, &.{ "lake", "build", agreement_module }, process_environ, stdout, quiet);
     for (rows) |row| {
         try runLeanCommand(allocator, &.{ "lake", "build", row.module_name }, process_environ, stdout, quiet);
     }
@@ -423,14 +476,163 @@ fn runLeanChecker(
 
     return .{
         .source = checker_source,
+        .agreement_source = agreement_source,
         .axiom_audits = try parseLeanAxiomAuditOutput(result_allocator, checker_output.stdout, rows),
     };
+}
+
+const AgreementSourceOptions = struct {
+    omit_agreement_rows_for_testing: bool = false,
+    duplicate_agreement_rows_for_testing: bool = false,
+};
+
+fn buildLeanAgreementSource(
+    allocator: std.mem.Allocator,
+    generated_namespace: []const u8,
+    obligations_module: []const u8,
+    rows: []const CheckedProofRow,
+    options: AgreementSourceOptions,
+) ![]const u8 {
+    var agreement = std.Io.Writer.Allocating.init(allocator);
+    defer agreement.deinit();
+    const writer = &agreement.writer;
+
+    if (!hasAgreementTargets(rows)) {
+        try writer.writeAll(
+            \\-- Generated Lean proof-target agreement check. No accepted proof
+            \\-- row targets a Z3 plain-UNKNOWN query in this checker run.
+            \\
+            \\namespace Ora.ProofCheckAgreement
+            \\
+            \\def acceptedProofTargetIds : List Nat := []
+            \\def agreementRowsMatch : Bool := true
+            \\def proofTargetsCovered : Bool := true
+            \\
+            \\theorem agreement_rows_match : agreementRowsMatch = true := by decide
+            \\theorem proof_targets_covered : proofTargetsCovered = true := by decide
+            \\
+            \\end Ora.ProofCheckAgreement
+            \\
+        );
+        return try allocator.dupe(u8, agreement.written());
+    }
+
+    try writer.writeAll(
+        \\-- Generated Lean proof-target agreement check. This file is emitted
+        \\-- and kernel-checked during proof acceptance; it is not user input.
+        \\
+    );
+    try writer.writeAll("import Ora.Obligation.Agreement\n");
+    try writer.print("import {s}\n\n", .{obligations_module});
+    try writer.writeAll(
+        \\namespace Ora.ProofCheckAgreement
+        \\
+    );
+
+    try writer.writeAll("def acceptedProofTargetIds : List Nat := ");
+    try writeLeanNatListForAgreement(writer, rows, .accepted_targets);
+    try writer.writeAll("\n\n");
+
+    try writer.writeAll("def agreementRows : List Ora.Obligation.Agreement.Row := ");
+    try writeAgreementRows(writer, rows, options);
+    try writer.writeAll("\n\n");
+
+    try writer.print(
+        \\def proofTargetsCovered : Bool :=
+        \\  Ora.Obligation.Agreement.targetsCovered acceptedProofTargetIds agreementRows
+        \\
+        \\def agreementRowsMatch : Bool :=
+        \\  Ora.Obligation.Agreement.rowsMatch {s}.emittedManifest agreementRows
+        \\
+        \\theorem agreement_rows_match : agreementRowsMatch = true := by decide
+        \\theorem proof_targets_covered : proofTargetsCovered = true := by decide
+        \\
+        \\end Ora.ProofCheckAgreement
+        \\
+    , .{generated_namespace});
+
+    return try allocator.dupe(u8, agreement.written());
+}
+
+fn hasAgreementTargets(rows: []const CheckedProofRow) bool {
+    for (rows) |row| {
+        if (row.requires_agreement) return true;
+    }
+    return false;
+}
+
+const LeanNatListMode = enum { accepted_targets };
+
+fn writeLeanNatListForAgreement(writer: anytype, rows: []const CheckedProofRow, mode: LeanNatListMode) !void {
+    try writer.writeByte('[');
+    var emitted_any = false;
+    for (rows) |row| {
+        const include = switch (mode) {
+            .accepted_targets => row.requires_agreement,
+        };
+        if (!include) continue;
+        if (emitted_any) try writer.writeAll(", ");
+        emitted_any = true;
+        try writer.print("{d}", .{row.query_id});
+    }
+    try writer.writeByte(']');
+}
+
+fn writeAgreementRows(writer: anytype, rows: []const CheckedProofRow, options: AgreementSourceOptions) !void {
+    if (options.omit_agreement_rows_for_testing) return writer.writeAll("[]");
+    try writer.writeByte('[');
+    var emitted_any = false;
+    for (0..if (options.duplicate_agreement_rows_for_testing) 2 else 1) |_| {
+        for (rows) |row| {
+            if (!row.requires_agreement) continue;
+            if (emitted_any) try writer.writeAll(", ");
+            emitted_any = true;
+            try writeAgreementRow(writer, row);
+        }
+    }
+    try writer.writeByte(']');
+}
+
+fn writeAgreementRow(writer: anytype, row: CheckedProofRow) !void {
+    try writer.writeAll("{ queryId := ");
+    try writer.print("{d}", .{row.query_id});
+    try writer.writeAll(", assumptionIds := ");
+    try writeLeanIdList(writer, row.assumption_ids);
+    try writer.writeAll(", obligationIds := ");
+    try writeLeanIdList(writer, row.obligation_ids);
+    try writer.writeAll(", z3RowMatched := ");
+    try writer.writeAll(if (row.z3_row_matched) "true" else "false");
+    try writer.writeAll(", z3PlainUnknown := ");
+    try writer.writeAll(if (row.z3_plain_unknown) "true" else "false");
+    try writer.writeAll(", constraintCount := ");
+    try writer.print("{d}", .{row.target_constraint_count});
+    try writer.writeAll(", smtlibHash := ");
+    if (row.target_smtlib_hash) |hash| {
+        var hash_buf: [32]u8 = undefined;
+        const hash_text = try std.fmt.bufPrint(&hash_buf, "0x{x}", .{hash});
+        try writeJsonString(writer, hash_text);
+    } else {
+        try writeJsonString(writer, "");
+    }
+    try writer.writeAll(", zigSemanticSupported := ");
+    try writer.writeAll(if (row.zig_semantic_supported) "true" else "false");
+    try writer.writeAll(" }");
+}
+
+fn writeLeanIdList(writer: anytype, ids: []const obligation.Id) !void {
+    try writer.writeByte('[');
+    for (ids, 0..) |id, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writer.print("{d}", .{id});
+    }
+    try writer.writeByte(']');
 }
 
 fn buildLeanCheckerSource(
     allocator: std.mem.Allocator,
     generated_namespace: []const u8,
     obligations_module: []const u8,
+    agreement_module: []const u8,
     rows: []const CheckedProofRow,
 ) ![]const u8 {
     var checker = std.Io.Writer.Allocating.init(allocator);
@@ -447,6 +649,7 @@ fn buildLeanCheckerSource(
         \\
     );
     try writer.print("import {s}\n", .{obligations_module});
+    try writer.print("import {s}\n", .{agreement_module});
     for (rows) |row| {
         try writer.print("import {s}\n", .{row.module_name});
     }
@@ -890,6 +1093,7 @@ test "proof certificate JSON exposes stable schema fields" {
         "Ora.Generated.Obligations.Transfer",
         "def emittedQuery_11 : Prop := True\n",
         "theorem check_query_11_0 : True := by trivial\n",
+        "theorem agreement_rows_match : True := by trivial\n",
         &rows,
         "Lean test version",
     );
@@ -899,6 +1103,7 @@ test "proof certificate JSON exposes stable schema fields" {
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"version\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"hash_algorithm\": \"sha256\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"lean_version\": \"Lean test version\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"agreement_check_sha256\": ") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"proof_count\": 1") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"target_query_id\": 11") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"lean_query_id\": 12") != null);
@@ -918,6 +1123,7 @@ test "Lean checker source audits proof-row theorem axiom dependencies" {
         allocator,
         "Ora.Generated.Obligations.Transfer",
         "Ora.ProofCheckScratch.Run_test.Obligations",
+        "Ora.ProofCheckScratch.Run_test.Agreement",
         &rows,
     );
     defer allocator.free(checker);
@@ -927,6 +1133,307 @@ test "Lean checker source audits proof-row theorem axiom dependencies" {
     try std.testing.expect(std.mem.indexOf(u8, checker, "ORA_AXIOM_AUDIT\\t{decl}\\t{formatAxioms normalized}") != null);
     try std.testing.expect(std.mem.indexOf(u8, checker, "theorem check_query_17_0") != null);
     try std.testing.expect(std.mem.indexOf(u8, checker, "#ora_audit_axioms [\n  check_query_17_0\n]") != null);
+}
+
+test "agreement checker rejects empty rows for accepted proof targets" {
+    const allocator = std.testing.allocator;
+    const process_environ = try leanTestProcessEnviron(allocator);
+    defer process_environ.block.deinit(allocator);
+
+    try expectBoolAgreementFixture(
+        allocator,
+        process_environ,
+        "RunAgreementEmptyRowsFixture",
+        .{},
+        .{ .omit_agreement_rows_for_testing = true },
+        .fails,
+    );
+}
+
+test "agreement checker rejects duplicate rows for accepted proof targets" {
+    const allocator = std.testing.allocator;
+    const process_environ = try leanTestProcessEnviron(allocator);
+    defer process_environ.block.deinit(allocator);
+
+    try expectBoolAgreementFixture(
+        allocator,
+        process_environ,
+        "RunAgreementDuplicateRowsFixture",
+        .{},
+        .{ .duplicate_agreement_rows_for_testing = true },
+        .fails,
+    );
+}
+
+test "agreement checker accepts matching supported proof target row" {
+    const allocator = std.testing.allocator;
+    const process_environ = try leanTestProcessEnviron(allocator);
+    defer process_environ.block.deinit(allocator);
+
+    try expectBoolAgreementFixture(
+        allocator,
+        process_environ,
+        "RunAgreementPositiveFixture",
+        .{},
+        .{},
+        .succeeds,
+    );
+}
+
+test "agreement checker rejects mutated Z3 row attestation" {
+    const allocator = std.testing.allocator;
+    const process_environ = try leanTestProcessEnviron(allocator);
+    defer process_environ.block.deinit(allocator);
+
+    try expectBoolAgreementFixture(
+        allocator,
+        process_environ,
+        "RunAgreementMutatedRowFixture",
+        .{ .z3_row_matched = false },
+        .{},
+        .fails,
+    );
+}
+
+const AgreementRowFlags = struct {
+    z3_row_matched: bool = true,
+    z3_plain_unknown: bool = true,
+    zig_semantic_supported: bool = true,
+};
+
+fn expectBoolAgreementFixture(
+    allocator: std.mem.Allocator,
+    process_environ: std.process.Environ,
+    scratch_name: []const u8,
+    flags: AgreementRowFlags,
+    options: AgreementSourceOptions,
+    expectation: AgreementFixtureExpectation,
+) !void {
+    const terms = [_]obligation.Term{.{ .bool_lit = true }};
+    const obligation_ids = [_]obligation.Id{1};
+    const obligations = [_]obligation.Obligation{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "fixture" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .{ .logical = .{
+            .role = .ensures,
+            .formula = .{ .term = 0 },
+        } },
+    }};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "fixture" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .backend = .z3,
+        .kind = .obligation,
+        .logical_role = .ensures,
+        .obligation_ids = &obligation_ids,
+        .result = .{ .status = .unknown },
+        .smtlib_hash = 99,
+        .constraint_count = 3,
+    }};
+    const set = obligation.ObligationSet{
+        .terms = &terms,
+        .obligations = &obligations,
+        .queries = &queries,
+    };
+
+    try std.testing.expect(switch (obligation_to_lean.querySemanticSupport(set, queries[0])) {
+        .supported => true,
+        .unsupported => false,
+    });
+
+    const rows = [_]CheckedProofRow{.{
+        .query_id = 2,
+        .module_name = "Ora.Proofs.Fixture",
+        .theorem_name = "Ora.Proofs.Fixture.ok",
+        .obligation_ids = &obligation_ids,
+        .requires_agreement = true,
+        .z3_row_matched = flags.z3_row_matched,
+        .z3_plain_unknown = flags.z3_plain_unknown,
+        .zig_semantic_supported = flags.zig_semantic_supported,
+        .target_smtlib_hash = 99,
+        .target_constraint_count = 3,
+    }};
+    try expectAgreementFixtureCheck(
+        allocator,
+        process_environ,
+        scratch_name,
+        set,
+        &rows,
+        options,
+        expectation,
+    );
+}
+
+test "agreement checker rejects unsupported semantic proof target row" {
+    const allocator = std.testing.allocator;
+
+    const process_environ = try leanTestProcessEnviron(allocator);
+    defer process_environ.block.deinit(allocator);
+
+    const obligation_ids = [_]obligation.Id{1};
+    const obligations = [_]obligation.Obligation{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "fixture" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .{ .logical = .{
+            .role = .ensures,
+            .formula = .{ .origin_value = .{
+                .origin = .source,
+                .kind = .result,
+                .index = 0,
+            } },
+        } },
+    }};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "fixture" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .backend = .z3,
+        .kind = .obligation,
+        .logical_role = .ensures,
+        .obligation_ids = &obligation_ids,
+        .result = .{ .status = .unknown },
+        .smtlib_hash = 99,
+        .constraint_count = 3,
+    }};
+    const set = obligation.ObligationSet{
+        .obligations = &obligations,
+        .queries = &queries,
+    };
+
+    try std.testing.expect(switch (obligation_to_lean.querySemanticSupport(set, queries[0])) {
+        .supported => false,
+        .unsupported => true,
+    });
+
+    const rows = [_]CheckedProofRow{.{
+        .query_id = 2,
+        .module_name = "Ora.Proofs.Fixture",
+        .theorem_name = "Ora.Proofs.Fixture.ok",
+        .obligation_ids = &obligation_ids,
+        .requires_agreement = true,
+        .z3_row_matched = true,
+        .z3_plain_unknown = true,
+        .zig_semantic_supported = false,
+        .target_smtlib_hash = 99,
+        .target_constraint_count = 3,
+    }};
+    try expectAgreementFixtureCheck(
+        allocator,
+        process_environ,
+        "RunAgreementUnsupportedFixture",
+        set,
+        &rows,
+        .{},
+        .fails,
+    );
+}
+
+const AgreementFixtureExpectation = enum { succeeds, fails };
+
+fn leanTestProcessEnviron(allocator: std.mem.Allocator) !std.process.Environ {
+    var env_map = std.process.Environ.Map.init(allocator);
+    defer env_map.deinit();
+    const home = std.c.getenv("HOME") orelse return error.SkipZigTest;
+    const home_slice = std.mem.span(home);
+    try env_map.put("HOME", home_slice);
+    const inherited_path = if (std.c.getenv("PATH")) |path| std.mem.span(path) else "/usr/bin:/bin:/opt/homebrew/bin";
+    const path = try std.fmt.allocPrint(allocator, "{s}/.elan/bin:{s}", .{ home_slice, inherited_path });
+    defer allocator.free(path);
+    try env_map.put("PATH", path);
+    return .{ .block = try env_map.createPosixBlock(allocator, .{}) };
+}
+
+fn expectAgreementFixtureCheck(
+    allocator: std.mem.Allocator,
+    process_environ: std.process.Environ,
+    scratch_name: []const u8,
+    set: obligation.ObligationSet,
+    rows: []const CheckedProofRow,
+    options: AgreementSourceOptions,
+    expectation: AgreementFixtureExpectation,
+) !void {
+    const io = std.testing.io;
+
+    const dir = try std.fmt.allocPrint(allocator, "formal/Ora/ProofCheckScratch/{s}", .{scratch_name});
+    defer allocator.free(dir);
+    try std.Io.Dir.cwd().createDirPath(io, dir);
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+
+    const generated_namespace = try std.fmt.allocPrint(allocator, "Ora.Generated.Obligations.{s}", .{scratch_name});
+    defer allocator.free(generated_namespace);
+    const obligations_module = try std.fmt.allocPrint(allocator, "Ora.ProofCheckScratch.{s}.Obligations", .{scratch_name});
+    defer allocator.free(obligations_module);
+    const agreement_module = try std.fmt.allocPrint(allocator, "Ora.ProofCheckScratch.{s}.Agreement", .{scratch_name});
+    defer allocator.free(agreement_module);
+
+    var obligations_source = std.Io.Writer.Allocating.init(allocator);
+    defer obligations_source.deinit();
+    try obligation_to_lean.writeModule(&obligations_source.writer, set, .{
+        .namespace = generated_namespace,
+        .proof_surface = true,
+    });
+
+    const obligations_path = try std.fmt.allocPrint(allocator, "{s}/Obligations.lean", .{dir});
+    defer allocator.free(obligations_path);
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = obligations_path,
+        .data = obligations_source.written(),
+    });
+
+    const agreement_source = try buildLeanAgreementSource(
+        allocator,
+        generated_namespace,
+        obligations_module,
+        rows,
+        options,
+    );
+    defer allocator.free(agreement_source);
+
+    const agreement_path = try std.fmt.allocPrint(allocator, "{s}/Agreement.lean", .{dir});
+    defer allocator.free(agreement_path);
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = agreement_path,
+        .data = agreement_source,
+    });
+
+    var stdout = std.Io.Writer.Allocating.init(allocator);
+    defer stdout.deinit();
+
+    try runLeanCommand(
+        allocator,
+        &.{ "lake", "build", obligations_module },
+        process_environ,
+        &stdout.writer,
+        true,
+    );
+
+    switch (expectation) {
+        .succeeds => try runLeanCommand(
+            allocator,
+            &.{ "lake", "build", agreement_module },
+            process_environ,
+            &stdout.writer,
+            true,
+        ),
+        .fails => try std.testing.expectError(error.LeanProofCheckFailed, runLeanCommand(
+            allocator,
+            &.{ "lake", "build", agreement_module },
+            process_environ,
+            &stdout.writer,
+            true,
+        )),
+    }
 }
 
 test "Lean axiom audit output maps rows and rejects drift" {
@@ -1055,11 +1562,10 @@ fn expectLeanFixtureProof(
         .source = .generated(),
         .phase = .report,
         .origin = .source,
-        .backend = .z3,
+        .backend = .lean,
         .kind = .obligation,
         .logical_role = .ensures,
         .obligation_ids = &obligation_ids,
-        .result = .{ .status = .unknown },
     }};
     const set = obligation.ObligationSet{
         .obligations = &obligations,

@@ -875,6 +875,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    proof_check_test_mod.addImport("ora_types", ora_types_mod);
     const proof_check_tests = b.addTest(.{
         .name = "formal-proof-check-tests",
         .root_module = proof_check_test_mod,
