@@ -158,6 +158,7 @@ pub fn collect(
 
     try collector.walkOperation(mlir.oraModuleGetOperation(module), null);
     try collector.addBaseQueriesForFunctionOwners();
+    try collector.verifyResourceGoalCompleteness();
 
     const set: obligation.ObligationSet = .{
         .terms = try collector.terms.toOwnedSlice(collector.allocator),
@@ -183,6 +184,7 @@ const Collector = struct {
     queries: std.ArrayList(obligation.VerificationQuery) = .empty,
     query_bindings: std.ArrayList(obligation.FormalQueryBinding) = .empty,
     diagnostics: std.ArrayList(obligation.ObligationDiagnostic) = .empty,
+    resource_sites: std.ArrayList(ResourceCompletenessSite) = .empty,
     active_binders: std.ArrayList(BinderFrame) = .empty,
     next_id: obligation.Id = 1,
     next_ordinal: u32 = 0,
@@ -210,6 +212,14 @@ const Collector = struct {
     const MoveOperandSegments = struct {
         source_len: usize,
         destination_len: usize,
+    };
+
+    const ResourceCompletenessSite = struct {
+        op: obligation.ResourceOperation,
+        domain: []const u8,
+        ordinal: u32,
+        expected_mask: u32,
+        emitted_mask: u32 = 0,
     };
 
     fn walkOperation(self: *Collector, op: mlir.MlirOperation, inherited_symbol: ?[]const u8) !void {
@@ -837,9 +847,10 @@ const Collector = struct {
         };
         const places = try self.resourcePlaces(op, resource_op, operand_count, op_name) orelse return;
         const source = try self.sourceForOperation(op);
+        const site_index = try self.recordResourceSite(resource_op, domain, ordinal);
 
         for (resourceProperties(resource_op)) |property| {
-            try self.addResourceGoal(resource_op, domain, places, amount, symbol, ordinal, property, source);
+            try self.addResourceGoal(resource_op, domain, places, amount, symbol, ordinal, site_index, property, source);
         }
     }
 
@@ -1049,6 +1060,7 @@ const Collector = struct {
         amount: obligation.FormulaRef,
         symbol: ?[]const u8,
         ordinal: u32,
+        site_index: usize,
         property: obligation.ResourceProperty,
         source: obligation.SourceRef,
     ) !void {
@@ -1075,6 +1087,65 @@ const Collector = struct {
             } },
         });
         try self.addQuery(.obligation, null, null, id, owner, origin, source);
+        try self.markResourcePropertyEmitted(site_index, property);
+    }
+
+    fn recordResourceSite(
+        self: *Collector,
+        resource_op: obligation.ResourceOperation,
+        domain: []const u8,
+        ordinal: u32,
+    ) !usize {
+        const index = self.resource_sites.items.len;
+        try self.resource_sites.append(self.allocator, .{
+            .op = resource_op,
+            .domain = domain,
+            .ordinal = ordinal,
+            .expected_mask = expectedResourcePropertyMask(resource_op),
+        });
+        return index;
+    }
+
+    fn markResourcePropertyEmitted(
+        self: *Collector,
+        site_index: usize,
+        property: obligation.ResourceProperty,
+    ) !void {
+        if (site_index >= self.resource_sites.items.len) {
+            try self.addBlockingDiagnostic(.incomplete_resource_goals, "resource goal emitted for unknown resource operation site");
+            return;
+        }
+
+        const bit = resourcePropertyBit(property);
+        const site = &self.resource_sites.items[site_index];
+        if ((site.expected_mask & bit) == 0) {
+            try self.addBlockingDiagnosticFmt(.incomplete_resource_goals, "resource {s} emitted unexpected {s} goal", .{
+                @tagName(site.op),
+                @tagName(property),
+            });
+            return;
+        }
+        if ((site.emitted_mask & bit) != 0) {
+            try self.addBlockingDiagnosticFmt(.incomplete_resource_goals, "resource {s} emitted duplicate {s} goal", .{
+                @tagName(site.op),
+                @tagName(property),
+            });
+            return;
+        }
+        site.emitted_mask |= bit;
+    }
+
+    fn verifyResourceGoalCompleteness(self: *Collector) !void {
+        for (self.resource_sites.items) |site| {
+            if (resourceSiteComplete(site)) continue;
+            try self.addBlockingDiagnosticFmt(.incomplete_resource_goals, "resource {s} op #{d} in domain '{s}' is missing verifier goals: expected mask 0x{x}, emitted mask 0x{x}", .{
+                @tagName(site.op),
+                site.ordinal,
+                site.domain,
+                site.expected_mask,
+                site.emitted_mask,
+            });
+        }
     }
 
     fn addArithmeticSafetyOp(
@@ -2683,6 +2754,110 @@ fn resourceProperties(op: obligation.ResourceOperation) []const obligation.Resou
         .create => &resource_create_properties,
         .destroy => &resource_destroy_properties,
     };
+}
+
+fn resourcePropertyBit(property: obligation.ResourceProperty) u32 {
+    const shift: u5 = @intCast(@intFromEnum(property));
+    return @as(u32, 1) << shift;
+}
+
+fn resourcePropertyMask(properties: []const obligation.ResourceProperty) u32 {
+    var mask: u32 = 0;
+    for (properties) |property| mask |= resourcePropertyBit(property);
+    return mask;
+}
+
+fn expectedResourcePropertyMask(op: obligation.ResourceOperation) u32 {
+    return switch (op) {
+        .move => resourcePropertyBit(.amount_non_negative) |
+            resourcePropertyBit(.source_sufficient) |
+            resourcePropertyBit(.destination_no_overflow) |
+            resourcePropertyBit(.same_place_identity) |
+            resourcePropertyBit(.conservation),
+        .create => resourcePropertyBit(.amount_non_negative) |
+            resourcePropertyBit(.destination_no_overflow),
+        .destroy => resourcePropertyBit(.amount_non_negative) |
+            resourcePropertyBit(.source_sufficient),
+    };
+}
+
+fn resourceSiteComplete(site: Collector.ResourceCompletenessSite) bool {
+    return site.emitted_mask == site.expected_mask;
+}
+
+test "resource goal completeness masks pin every operation property set" {
+    try std.testing.expectEqual(
+        expectedResourcePropertyMask(.move),
+        resourcePropertyMask(&resource_move_properties),
+    );
+    try std.testing.expectEqual(
+        expectedResourcePropertyMask(.create),
+        resourcePropertyMask(&resource_create_properties),
+    );
+    try std.testing.expectEqual(
+        expectedResourcePropertyMask(.destroy),
+        resourcePropertyMask(&resource_destroy_properties),
+    );
+
+    const missing_move_conservation = expectedResourcePropertyMask(.move) & ~resourcePropertyBit(.conservation);
+    try std.testing.expect(!resourceSiteComplete(.{
+        .op = .move,
+        .domain = "TokenUnit",
+        .ordinal = 0,
+        .expected_mask = expectedResourcePropertyMask(.move),
+        .emitted_mask = missing_move_conservation,
+    }));
+}
+
+test "resource goal completeness failures use dedicated diagnostic kind" {
+    {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var collector = Collector{ .allocator = arena.allocator(), .options = .{} };
+
+        try collector.markResourcePropertyEmitted(0, .amount_non_negative);
+
+        try std.testing.expectEqual(@as(usize, 1), collector.diagnostics.items.len);
+        try std.testing.expectEqual(obligation.DiagnosticKind.incomplete_resource_goals, collector.diagnostics.items[0].kind);
+    }
+    {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var collector = Collector{ .allocator = arena.allocator(), .options = .{} };
+        const site = try collector.recordResourceSite(.create, "TokenUnit", 7);
+
+        try collector.markResourcePropertyEmitted(site, .source_sufficient);
+
+        try std.testing.expectEqual(@as(usize, 1), collector.diagnostics.items.len);
+        try std.testing.expectEqual(obligation.DiagnosticKind.incomplete_resource_goals, collector.diagnostics.items[0].kind);
+    }
+    {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var collector = Collector{ .allocator = arena.allocator(), .options = .{} };
+        const site = try collector.recordResourceSite(.destroy, "TokenUnit", 8);
+
+        try collector.markResourcePropertyEmitted(site, .amount_non_negative);
+        try collector.markResourcePropertyEmitted(site, .amount_non_negative);
+
+        try std.testing.expectEqual(@as(usize, 1), collector.diagnostics.items.len);
+        try std.testing.expectEqual(obligation.DiagnosticKind.incomplete_resource_goals, collector.diagnostics.items[0].kind);
+    }
+    {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var collector = Collector{ .allocator = arena.allocator(), .options = .{} };
+        const site = try collector.recordResourceSite(.move, "TokenUnit", 9);
+
+        try collector.markResourcePropertyEmitted(site, .amount_non_negative);
+        try collector.markResourcePropertyEmitted(site, .source_sufficient);
+        try collector.markResourcePropertyEmitted(site, .destination_no_overflow);
+        try collector.markResourcePropertyEmitted(site, .same_place_identity);
+        try collector.verifyResourceGoalCompleteness();
+
+        try std.testing.expectEqual(@as(usize, 1), collector.diagnostics.items.len);
+        try std.testing.expectEqual(obligation.DiagnosticKind.incomplete_resource_goals, collector.diagnostics.items[0].kind);
+    }
 }
 
 fn classifyQuantifierBinder(type_text: []const u8) QuantifierBinderClassification {

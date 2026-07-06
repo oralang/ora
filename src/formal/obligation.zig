@@ -395,6 +395,7 @@ pub const DiagnosticKind = enum(u8) {
     missing_effect_path,
     missing_formula,
     invalid_dependency,
+    incomplete_resource_goals,
     unmatched_report_row,
     canonical_z3_unavailable,
     canonical_z3_mismatch,
