@@ -37,6 +37,11 @@ pub const CheckStatus = enum(u8) {
     unknown,
 };
 
+pub const QueryHash = struct {
+    constraint_count: u32,
+    smtlib_hash: u64,
+};
+
 pub const EncodeError = std.mem.Allocator.Error || error{
     AmbiguousQuery,
     ExpectedBitVector,
@@ -92,33 +97,88 @@ pub const Adapter = struct {
         return self.checkQueryRow(query);
     }
 
-    fn checkQueryRow(self: *Adapter, query: obligation.VerificationQuery) EncodeError!CheckStatus {
+    pub fn queryHash(self: *Adapter, id: obligation.Id) EncodeError!QueryHash {
+        const query = self.findQuery(id) orelse return error.UnknownQuery;
+        return self.queryHashForRow(query);
+    }
+
+    pub fn queryHashForRow(self: *Adapter, query: obligation.VerificationQuery) EncodeError!QueryHash {
         try self.set.validateTermReferences();
 
-        if (query.obligation_ids.len != 1) return error.UnsupportedObligationKind;
-        const target = self.findObligation(query.obligation_ids[0]) orelse return error.UnknownObligation;
-        const goal = try self.formulaForObligation(target.kind);
+        var constraints: std.ArrayList(z3.Z3_ast) = .empty;
+        defer constraints.deinit(self.allocator);
+        try self.appendQueryConstraints(&constraints, query);
+
+        const smtlib_hash = try self.hashConstraints(constraints.items, query.solver_logic);
+        return .{
+            .constraint_count = std.math.cast(u32, constraints.items.len) orelse return error.Overflow,
+            .smtlib_hash = smtlib_hash,
+        };
+    }
+
+    fn checkQueryRow(self: *Adapter, query: obligation.VerificationQuery) EncodeError!CheckStatus {
+        try self.set.validateTermReferences();
 
         var solver = try Solver.init(self.context, self.allocator);
         defer solver.deinit();
 
-        for (query.assumption_ids) |assumption_id| {
-            const assumption = self.findAssumption(assumption_id) orelse return error.UnknownAssumption;
-            if (assumption.formula) |formula| {
-                const ast = try self.encodeFormula(formula);
-                try solver.assertChecked(ast);
-            }
-        }
+        var constraints: std.ArrayList(z3.Z3_ast) = .empty;
+        defer constraints.deinit(self.allocator);
+        try self.appendQueryConstraints(&constraints, query);
 
-        const negated_goal = z3.Z3_mk_not(self.context.ctx, goal);
-        try self.context.checkNoError();
-        try solver.assertChecked(negated_goal);
+        for (constraints.items) |constraint| try solver.assertChecked(constraint);
 
         return switch (try solver.checkChecked()) {
             z3.Z3_L_FALSE => .proved,
             z3.Z3_L_TRUE => .disproved,
             else => .unknown,
         };
+    }
+
+    fn appendQueryConstraints(
+        self: *Adapter,
+        constraints: *std.ArrayList(z3.Z3_ast),
+        query: obligation.VerificationQuery,
+    ) EncodeError!void {
+        if (query.obligation_ids.len != 1) return error.UnsupportedObligationKind;
+        const target = self.findObligation(query.obligation_ids[0]) orelse return error.UnknownObligation;
+        const goal = try self.formulaForObligation(target.kind);
+
+        for (query.assumption_ids) |assumption_id| {
+            const assumption = self.findAssumption(assumption_id) orelse return error.UnknownAssumption;
+            if (assumption.formula) |formula| {
+                try constraints.append(self.allocator, try self.encodeFormula(formula));
+            }
+        }
+
+        const negated_goal = z3.Z3_mk_not(self.context.ctx, goal);
+        try self.context.checkNoError();
+        try constraints.append(self.allocator, negated_goal);
+    }
+
+    fn hashConstraints(
+        self: *Adapter,
+        constraints: []const z3.Z3_ast,
+        logic: obligation.VerificationSolverLogic,
+    ) EncodeError!u64 {
+        var temp_solver = switch (logic) {
+            .all => try Solver.init(self.context, self.allocator),
+            .qf_aufbv => try Solver.initForLogic(self.context, self.allocator, "QF_AUFBV"),
+        };
+        defer temp_solver.deinit();
+
+        for (constraints) |constraint| try temp_solver.assertChecked(constraint);
+
+        const raw = z3.Z3_solver_to_string(self.context.ctx, temp_solver.solver);
+        const text = if (raw == null) "" else std.mem.span(raw);
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(self.allocator);
+        try out.appendSlice(self.allocator, text);
+        if (!std.mem.endsWith(u8, text, "\n")) {
+            try out.appendSlice(self.allocator, "\n");
+        }
+        try out.appendSlice(self.allocator, "(check-sat)\n");
+        return std.hash.Wyhash.hash(0, out.items);
     }
 
     fn findUniqueQueryForObligation(

@@ -265,6 +265,7 @@ pub const VerificationQuery = struct {
     solver_logic: VerificationSolverLogic = .all,
     constraint_count: u32 = 0,
     smtlib_hash: ?u64 = null,
+    canonical_smt_crosscheck_required: bool = false,
     proof_artifact_id: ?Id = null,
     discharges_query_id: ?Id = null,
     result: ?VerificationQueryResult = null,
@@ -395,6 +396,8 @@ pub const DiagnosticKind = enum(u8) {
     missing_formula,
     invalid_dependency,
     unmatched_report_row,
+    canonical_z3_unavailable,
+    canonical_z3_mismatch,
 };
 
 pub const Phase = enum(u8) {

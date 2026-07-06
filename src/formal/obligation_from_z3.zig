@@ -8,6 +8,7 @@
 const std = @import("std");
 const z3_verification = @import("ora_z3_verification");
 const obligation = @import("obligation.zig");
+const obligation_to_z3 = @import("obligation_to_z3.zig");
 
 pub const CollectResult = struct {
     arena: std.heap.ArenaAllocator,
@@ -92,6 +93,8 @@ pub fn overlayPreparedQueryResults(
     var diagnostics: std.ArrayList(obligation.ObligationDiagnostic) = .empty;
     errdefer diagnostics.deinit(arena_allocator);
     try diagnostics.appendSlice(arena_allocator, base.diagnostics);
+    var canonical_context: ?z3_verification.Z3Context = null;
+    defer if (canonical_context) |*ctx| ctx.deinit();
 
     for (base.queries) |query| {
         var match_index: ?usize = null;
@@ -125,6 +128,14 @@ pub fn overlayPreparedQueryResults(
             merged_query.constraint_count = row.constraint_count;
             merged_query.smtlib_hash = row.smtlib_hash;
             merged_query.result = queryResult(row);
+            try appendCanonicalSmtCrosscheckDiagnostic(
+                arena_allocator,
+                &diagnostics,
+                base,
+                query,
+                row,
+                &canonical_context,
+            );
         } else if (queryRequiresPreparedRow(base, query)) {
             try appendUnmatchedFormalQueryDiagnostic(
                 arena_allocator,
@@ -174,6 +185,75 @@ fn findObligation(set: obligation.ObligationSet, id: obligation.Id) ?obligation.
         if (item.id == id) return item;
     }
     return null;
+}
+
+fn appendCanonicalSmtCrosscheckDiagnostic(
+    allocator: std.mem.Allocator,
+    diagnostics: *std.ArrayList(obligation.ObligationDiagnostic),
+    set: obligation.ObligationSet,
+    query: obligation.VerificationQuery,
+    row: z3_verification.PreparedQueryManifestRow,
+    canonical_context: *?z3_verification.Z3Context,
+) !void {
+    if (!queryEligibleForCanonicalSmtCrosscheck(query)) return;
+
+    if (canonical_context.* == null) {
+        canonical_context.* = try z3_verification.Z3Context.init(allocator);
+    }
+
+    var adapter = obligation_to_z3.Adapter.init(&canonical_context.*.?, allocator, set);
+    const canonical = adapter.queryHashForRow(query) catch |err| {
+        try appendCanonicalUnavailableDiagnostic(allocator, diagnostics, query, err);
+        return;
+    };
+
+    if (canonical.constraint_count == row.constraint_count and canonical.smtlib_hash == row.smtlib_hash) return;
+    try appendCanonicalMismatchDiagnostic(allocator, diagnostics, query, row, canonical);
+}
+
+fn queryEligibleForCanonicalSmtCrosscheck(
+    query: obligation.VerificationQuery,
+) bool {
+    return query.kind == .obligation and query.obligation_ids.len == 1;
+}
+
+fn appendCanonicalUnavailableDiagnostic(
+    allocator: std.mem.Allocator,
+    diagnostics: *std.ArrayList(obligation.ObligationDiagnostic),
+    query: obligation.VerificationQuery,
+    err: anyerror,
+) !void {
+    const message = try std.fmt.allocPrint(
+        allocator,
+        "canonical_z3_unavailable: query id={d} kind={s} reason={s}",
+        .{ query.id, @tagName(query.kind), @errorName(err) },
+    );
+    try diagnostics.append(allocator, .{
+        .kind = .canonical_z3_unavailable,
+        .source = query.source,
+        .message = message,
+        .blocks_artifacts = query.canonical_smt_crosscheck_required,
+    });
+}
+
+fn appendCanonicalMismatchDiagnostic(
+    allocator: std.mem.Allocator,
+    diagnostics: *std.ArrayList(obligation.ObligationDiagnostic),
+    query: obligation.VerificationQuery,
+    row: z3_verification.PreparedQueryManifestRow,
+    canonical: obligation_to_z3.QueryHash,
+) !void {
+    const message = try std.fmt.allocPrint(
+        allocator,
+        "canonical Z3 hash mismatch for query id={d}: live=0x{x}/c={d} canonical=0x{x}/c={d}",
+        .{ query.id, row.smtlib_hash, row.constraint_count, canonical.smtlib_hash, canonical.constraint_count },
+    );
+    try diagnostics.append(allocator, .{
+        .kind = .canonical_z3_mismatch,
+        .source = query.source,
+        .message = message,
+        .blocks_artifacts = query.canonical_smt_crosscheck_required,
+    });
 }
 
 fn optionalFile(allocator: std.mem.Allocator, file: []const u8) !?[]const u8 {
@@ -518,4 +598,206 @@ test "guard violate rows remain outside proof target formal identity" {
     };
 
     try std.testing.expect(queryMatchesPreparedRow(query, row));
+}
+
+test "canonical SMT hash crosscheck accepts matching supported formula row" {
+    var z3_ctx = try z3_verification.Z3Context.init(std.testing.allocator);
+    defer z3_ctx.deinit();
+
+    const terms = [_]obligation.Term{
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 1, .pattern_id = 2 }, .name = "amount", .ty = .{ .spelling = "u256" } } } },
+        .{ .int_lit = .{ .value = "0", .ty = .{ .spelling = "u256" } } },
+        .{ .binary = .{ .op = .ge, .lhs = 0, .rhs = 1 } },
+    };
+    const assumptions = [_]obligation.Assumption{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "checked" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "requires", .ordinal = 0 } },
+        .kind = .requires,
+        .formula = .{ .term = 2 },
+    }};
+    const obligations = [_]obligation.Obligation{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "checked" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+        .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = 2 } } },
+    }};
+    const assumption_ids = [_]obligation.Id{1};
+    const obligation_ids = [_]obligation.Id{2};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 3,
+        .owner = .{ .function = .{ .name = "checked" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .obligation,
+        .obligation_ids = &obligation_ids,
+        .assumption_ids = &assumption_ids,
+    }};
+    const set: obligation.ObligationSet = .{
+        .assumptions = &assumptions,
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &terms,
+    };
+
+    var adapter = obligation_to_z3.Adapter.init(&z3_ctx, std.testing.allocator, set);
+    const canonical = try adapter.queryHash(3);
+    const rows = [_]z3_verification.PreparedQueryManifestRow{.{
+        .kind = .Obligation,
+        .function_name = "checked",
+        .file = "",
+        .line = 0,
+        .column = 0,
+        .constraint_count = canonical.constraint_count,
+        .smtlib_hash = canonical.smtlib_hash,
+        .result_status = .unknown,
+        .formal_query_id = 3,
+        .formal_assumption_ids = &assumption_ids,
+        .formal_obligation_ids = &obligation_ids,
+        .formal_match_status = .matched,
+    }};
+
+    var overlay = try overlayPreparedQueryResults(std.testing.allocator, set, &rows);
+    defer overlay.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), overlay.set.diagnostics.len);
+    try std.testing.expectEqual(canonical.smtlib_hash, overlay.set.queries[0].smtlib_hash.?);
+}
+
+test "canonical SMT hash crosscheck reports storage old query unavailable without blocking" {
+    const terms = [_]obligation.Term{
+        .{ .place_read = .{ .root = "balance", .region = .storage } },
+        .{ .old = 0 },
+        .{ .int_lit = .{ .value = "0", .ty = .{ .spelling = "u256" } } },
+        .{ .binary = .{ .op = .eq, .lhs = 1, .rhs = 2 } },
+    };
+    const obligations = [_]obligation.Obligation{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "view_balance" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+        .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = 3 } } },
+    }};
+    const obligation_ids = [_]obligation.Id{1};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "view_balance" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .obligation,
+        .obligation_ids = &obligation_ids,
+    }};
+    const rows = [_]z3_verification.PreparedQueryManifestRow{.{
+        .kind = .Obligation,
+        .function_name = "view_balance",
+        .file = "",
+        .line = 0,
+        .column = 0,
+        .constraint_count = 3,
+        .smtlib_hash = 123,
+        .result_status = .unknown,
+        .formal_query_id = 2,
+        .formal_obligation_ids = &obligation_ids,
+        .formal_match_status = .matched,
+    }};
+    const set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &terms,
+    };
+
+    var overlay = try overlayPreparedQueryResults(std.testing.allocator, set, &rows);
+    defer overlay.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), overlay.set.diagnostics.len);
+    try std.testing.expectEqual(obligation.DiagnosticKind.canonical_z3_unavailable, overlay.set.diagnostics[0].kind);
+    try std.testing.expect(!overlay.set.diagnostics[0].blocks_artifacts);
+    try std.testing.expect(!overlay.set.hasBlockingDiagnostic());
+}
+
+test "canonical SMT hash mismatch blocks only when crosscheck is required" {
+    var z3_ctx = try z3_verification.Z3Context.init(std.testing.allocator);
+    defer z3_ctx.deinit();
+
+    const terms = [_]obligation.Term{
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 1, .pattern_id = 2 }, .name = "amount", .ty = .{ .spelling = "u256" } } } },
+        .{ .int_lit = .{ .value = "0", .ty = .{ .spelling = "u256" } } },
+        .{ .binary = .{ .op = .ge, .lhs = 0, .rhs = 1 } },
+    };
+    const obligations = [_]obligation.Obligation{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "checked" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+        .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = 2 } } },
+    }};
+    const obligation_ids = [_]obligation.Id{1};
+    const optional_queries = [_]obligation.VerificationQuery{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "checked" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .obligation,
+        .obligation_ids = &obligation_ids,
+    }};
+    const optional_set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &optional_queries,
+        .terms = &terms,
+    };
+
+    var adapter = obligation_to_z3.Adapter.init(&z3_ctx, std.testing.allocator, optional_set);
+    const canonical = try adapter.queryHash(2);
+    const wrong_hash = canonical.smtlib_hash +% 1;
+    const rows = [_]z3_verification.PreparedQueryManifestRow{.{
+        .kind = .Obligation,
+        .function_name = "checked",
+        .file = "",
+        .line = 0,
+        .column = 0,
+        .constraint_count = canonical.constraint_count,
+        .smtlib_hash = wrong_hash,
+        .result_status = .unsat,
+        .formal_query_id = 2,
+        .formal_obligation_ids = &obligation_ids,
+        .formal_match_status = .matched,
+    }};
+
+    var optional_overlay = try overlayPreparedQueryResults(std.testing.allocator, optional_set, &rows);
+    defer optional_overlay.deinit();
+    try std.testing.expectEqual(@as(usize, 1), optional_overlay.set.diagnostics.len);
+    try std.testing.expectEqual(obligation.DiagnosticKind.canonical_z3_mismatch, optional_overlay.set.diagnostics[0].kind);
+    try std.testing.expect(!optional_overlay.set.diagnostics[0].blocks_artifacts);
+    try std.testing.expect(optional_overlay.set.artifactDecision().isAllowed());
+
+    const required_queries = [_]obligation.VerificationQuery{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "checked" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .obligation,
+        .obligation_ids = &obligation_ids,
+        .canonical_smt_crosscheck_required = true,
+    }};
+    const required_set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &required_queries,
+        .terms = &terms,
+    };
+    var required_overlay = try overlayPreparedQueryResults(std.testing.allocator, required_set, &rows);
+    defer required_overlay.deinit();
+    try std.testing.expectEqual(@as(usize, 1), required_overlay.set.diagnostics.len);
+    try std.testing.expectEqual(obligation.DiagnosticKind.canonical_z3_mismatch, required_overlay.set.diagnostics[0].kind);
+    try std.testing.expect(required_overlay.set.diagnostics[0].blocks_artifacts);
+    try std.testing.expectEqual(obligation.ArtifactDecision{ .blocked = .blocking_diagnostic }, required_overlay.set.artifactDecision());
 }

@@ -3291,7 +3291,7 @@ test "formal Z3 prepared query results overlay MLIR manifest queries" {
     defer overlay.deinit();
 
     try testing.expectEqual(formal_result.set.queries.len, overlay.set.queries.len);
-    try testing.expectEqual(formal_result.set.diagnostics.len, overlay.set.diagnostics.len);
+    try testing.expect(!overlay.set.hasBlockingDiagnostic());
     for (overlay.set.queries) |query| {
         try testing.expectEqual(obligation.VerificationBackend.z3, query.backend);
         try testing.expect(query.smtlib_hash != null);
