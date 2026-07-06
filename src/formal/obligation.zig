@@ -270,6 +270,16 @@ pub const VerificationQuery = struct {
     result: ?VerificationQueryResult = null,
 };
 
+pub const FormalQueryBinding = struct {
+    source_op_id: usize,
+    kind: VerificationQueryKind,
+    logical_role: ?LogicalRole = null,
+    guard_id: ?[]const u8 = null,
+    query_id: Id,
+    assumption_ids: []const Id = &.{},
+    obligation_ids: []const Id = &.{},
+};
+
 pub const VerificationBackend = enum(u8) {
     unspecified,
     z3,
@@ -431,7 +441,7 @@ fn containsId(ids: []const Id, needle: Id) bool {
     return false;
 }
 
-fn equalIdSlices(lhs: []const Id, rhs: []const Id) bool {
+pub fn equalIdSlices(lhs: []const Id, rhs: []const Id) bool {
     if (lhs.len != rhs.len) return false;
     for (lhs, rhs) |left, right| {
         if (left != right) return false;

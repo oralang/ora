@@ -23,6 +23,8 @@ const import_graph = @import("ora_imports");
 const log = @import("log");
 const runtime_checks = @import("mlir/runtime_checks.zig");
 const formal_obligation = @import("formal/obligation.zig");
+const formal_obligation_from_mlir = @import("formal/obligation_from_mlir.zig");
+const formal_obligation_from_z3 = @import("formal/obligation_from_z3.zig");
 const formal_obligation_to_lean = @import("formal/obligation_to_lean.zig");
 const Metrics = lib.metrics.Metrics;
 const allocation_stats = lib.lsp.allocation_stats;
@@ -4913,9 +4915,13 @@ fn runMlirEmitAdvanced(
     var verification_report_blocked_artifacts = false;
     var pending_smt_report: ?z3_verification.SmtReportArtifacts = null;
     var pending_smt_report_write_artifacts = false;
+    var formal_result_for_smt_report: ?formal_obligation_from_mlir.CollectResult = null;
+    var z3_formal_query_bindings: []const z3_verification.FormalQueryBinding = &.{};
     defer {
         if (verification_result_opt) |*vr| vr.deinit();
         if (pending_smt_report) |*report| report.deinit(mlir_allocator);
+        if (z3_formal_query_bindings.len > 0) allocator.free(z3_formal_query_bindings);
+        if (formal_result_for_smt_report) |*result| result.deinit();
     }
 
     if (mlir_options.lean_proofs_path != null and !mlir_options.verify_z3) {
@@ -4955,6 +4961,11 @@ fn runMlirEmitAdvanced(
 
         const needs_lean_proof_gate = mlir_options.lean_proofs_path != null;
         const needs_unknown_recipe = !verification_result.success and hasUnknownVerificationError(&verification_result);
+        if (needs_lean_proof_gate) {
+            formal_result_for_smt_report = try formal_obligation_from_mlir.collect(allocator, final_module, .{});
+            z3_formal_query_bindings = try z3FormalQueryBindingsFromFormal(allocator, formal_result_for_smt_report.?.query_bindings);
+            verifier.setFormalQueryBindings(z3_formal_query_bindings);
+        }
         if (mlir_options.emit_smt_report or needs_lean_proof_gate or needs_unknown_recipe) {
             pending_smt_report = try verifier.buildSmtReport(final_module, file_path, &verification_result);
             pending_smt_report_write_artifacts = mlir_options.emit_smt_report or needs_lean_proof_gate;
@@ -4969,7 +4980,7 @@ fn runMlirEmitAdvanced(
             lean_artifact_gate_allowed = applyLeanProofArtifactGate(
                 allocator,
                 file_path,
-                final_module,
+                &formal_result_for_smt_report.?,
                 mlir_options.lean_proofs_path.?,
                 pending_smt_report.?,
                 mlir_options,
@@ -4995,6 +5006,7 @@ fn runMlirEmitAdvanced(
                         allocator,
                         file_path,
                         final_module,
+                        if (formal_result_for_smt_report) |*result| result else null,
                         report.*,
                         mlir_options,
                         stdout,
@@ -5752,8 +5764,8 @@ fn writeSmtReportArtifacts(
 
 const LeanObligationContext = struct {
     allocator: std.mem.Allocator,
-    formal_result: @import("formal/obligation_from_mlir.zig").CollectResult,
-    merged_result: @import("formal/obligation_from_z3.zig").OverlayResult,
+    owned_formal_result: ?formal_obligation_from_mlir.CollectResult = null,
+    merged_result: formal_obligation_from_z3.OverlayResult,
     generated_namespace: []const u8,
     obligations_source: ?[]const u8 = null,
 
@@ -5761,7 +5773,7 @@ const LeanObligationContext = struct {
         if (self.obligations_source) |source| self.allocator.free(source);
         self.allocator.free(self.generated_namespace);
         self.merged_result.deinit();
-        self.formal_result.deinit();
+        if (self.owned_formal_result) |*result| result.deinit();
         self.* = undefined;
     }
 };
@@ -5772,15 +5784,23 @@ fn collectLeanObligationContext(
     final_module: @import("mlir_c_api").c.MlirModule,
     smt_report: z3_verification.SmtReportArtifacts,
 ) !LeanObligationContext {
-    const obligation_from_mlir = @import("formal/obligation_from_mlir.zig");
-    const obligation_from_z3 = @import("formal/obligation_from_z3.zig");
-
-    const query_manifest = smt_report.query_manifest orelse return error.MissingPreparedQueryManifest;
-
-    var formal_result = try obligation_from_mlir.collect(allocator, final_module, .{});
+    var formal_result = try formal_obligation_from_mlir.collect(allocator, final_module, .{});
     errdefer formal_result.deinit();
 
-    var merged_result = try obligation_from_z3.overlayPreparedQueryResults(allocator, formal_result.set, query_manifest.rows);
+    var context = try collectLeanObligationContextFromFormalResult(allocator, file_path, &formal_result, smt_report);
+    context.owned_formal_result = formal_result;
+    return context;
+}
+
+fn collectLeanObligationContextFromFormalResult(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    formal_result: *const formal_obligation_from_mlir.CollectResult,
+    smt_report: z3_verification.SmtReportArtifacts,
+) !LeanObligationContext {
+    const query_manifest = smt_report.query_manifest orelse return error.MissingPreparedQueryManifest;
+
+    var merged_result = try formal_obligation_from_z3.overlayPreparedQueryResults(allocator, formal_result.set, query_manifest.rows);
     errdefer merged_result.deinit();
 
     const generated_namespace = try leanProofGeneratedNamespace(allocator, file_path);
@@ -5788,7 +5808,6 @@ fn collectLeanObligationContext(
 
     return .{
         .allocator = allocator,
-        .formal_result = formal_result,
         .merged_result = merged_result,
         .generated_namespace = generated_namespace,
     };
@@ -5796,14 +5815,12 @@ fn collectLeanObligationContext(
 
 fn renderLeanObligationsSource(
     allocator: std.mem.Allocator,
-    set: @import("formal/obligation.zig").ObligationSet,
+    set: formal_obligation.ObligationSet,
     generated_namespace: []const u8,
 ) ![]const u8 {
-    const obligation_to_lean = @import("formal/obligation_to_lean.zig");
-
     var obligations_source_out = std.Io.Writer.Allocating.init(allocator);
     errdefer obligations_source_out.deinit();
-    try obligation_to_lean.writeModule(&obligations_source_out.writer, set, .{
+    try formal_obligation_to_lean.writeModule(&obligations_source_out.writer, set, .{
         .namespace = generated_namespace,
         .proof_surface = true,
     });
@@ -5813,10 +5830,10 @@ fn renderLeanObligationsSource(
 fn buildLeanObligationContext(
     allocator: std.mem.Allocator,
     file_path: []const u8,
-    final_module: @import("mlir_c_api").c.MlirModule,
+    formal_result: *const formal_obligation_from_mlir.CollectResult,
     smt_report: z3_verification.SmtReportArtifacts,
 ) !LeanObligationContext {
-    var context = try collectLeanObligationContext(allocator, file_path, final_module, smt_report);
+    var context = try collectLeanObligationContextFromFormalResult(allocator, file_path, formal_result, smt_report);
     errdefer context.deinit();
 
     context.obligations_source = try renderLeanObligationsSource(
@@ -5825,6 +5842,28 @@ fn buildLeanObligationContext(
         context.generated_namespace,
     );
     return context;
+}
+
+fn z3FormalQueryBindingsFromFormal(
+    allocator: std.mem.Allocator,
+    bindings: []const formal_obligation.FormalQueryBinding,
+) ![]const z3_verification.FormalQueryBinding {
+    if (bindings.len == 0) return &.{};
+    // Keep the Z3 layer independent of the formal obligation module. This
+    // adapter is the only mirror-type bridge between the two packages.
+    const converted = try allocator.alloc(z3_verification.FormalQueryBinding, bindings.len);
+    for (bindings, converted) |binding, *out| {
+        out.* = .{
+            .source_op_id = binding.source_op_id,
+            .kind = @tagName(binding.kind),
+            .logical_role = if (binding.logical_role) |role| @tagName(role) else null,
+            .guard_id = binding.guard_id,
+            .query_id = binding.query_id,
+            .assumption_ids = binding.assumption_ids,
+            .obligation_ids = binding.obligation_ids,
+        };
+    }
+    return converted;
 }
 
 fn hasUnknownVerificationError(result: *const z3_verification.VerificationResult) bool {
@@ -6045,7 +6084,7 @@ fn writeLeanObligationModuleArtifact(
     return display_path;
 }
 
-fn printIdListInline(stdout: anytype, ids: []const @import("formal/obligation.zig").Id) !void {
+fn printIdListInline(stdout: anytype, ids: []const formal_obligation.Id) !void {
     try stdout.writeByte('[');
     for (ids, 0..) |id, index| {
         if (index != 0) try stdout.writeAll(", ");
@@ -6071,11 +6110,15 @@ fn maybeEmitLeanUnknownRecipe(
     allocator: std.mem.Allocator,
     file_path: []const u8,
     final_module: @import("mlir_c_api").c.MlirModule,
+    precollected_formal_result: ?*const formal_obligation_from_mlir.CollectResult,
     smt_report: z3_verification.SmtReportArtifacts,
     mlir_options: MlirOptions,
     stdout: anytype,
 ) !void {
-    var context = try collectLeanObligationContext(allocator, file_path, final_module, smt_report);
+    var context = if (precollected_formal_result) |formal_result|
+        try collectLeanObligationContextFromFormalResult(allocator, file_path, formal_result, smt_report)
+    else
+        try collectLeanObligationContext(allocator, file_path, final_module, smt_report);
     defer context.deinit();
 
     var recipe_count: usize = 0;
@@ -6190,7 +6233,7 @@ fn maybeEmitLeanUnknownRecipe(
 fn applyLeanProofArtifactGate(
     allocator: std.mem.Allocator,
     file_path: []const u8,
-    final_module: @import("mlir_c_api").c.MlirModule,
+    formal_result: *const formal_obligation_from_mlir.CollectResult,
     proof_manifest_path: []const u8,
     smt_report: z3_verification.SmtReportArtifacts,
     mlir_options: MlirOptions,
@@ -6199,7 +6242,7 @@ fn applyLeanProofArtifactGate(
     const proof_manifest = @import("formal/proof_manifest.zig");
     const proof_check = @import("formal/proof_check.zig");
 
-    var context = try buildLeanObligationContext(allocator, file_path, final_module, smt_report);
+    var context = try buildLeanObligationContext(allocator, file_path, formal_result, smt_report);
     defer context.deinit();
 
     const proof_manifest_bytes = try std.Io.Dir.cwd().readFileAlloc(

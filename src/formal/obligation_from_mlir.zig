@@ -18,6 +18,7 @@ pub const CollectOptions = struct {
 pub const CollectResult = struct {
     arena: std.heap.ArenaAllocator,
     set: obligation.ObligationSet,
+    query_bindings: []const obligation.FormalQueryBinding = &.{},
 
     pub fn deinit(self: *CollectResult) void {
         self.arena.deinit();
@@ -169,6 +170,7 @@ pub fn collect(
     return .{
         .arena = arena,
         .set = set,
+        .query_bindings = try collector.query_bindings.toOwnedSlice(collector.allocator),
     };
 }
 
@@ -179,6 +181,7 @@ const Collector = struct {
     obligations: std.ArrayList(obligation.Obligation) = .empty,
     assumptions: std.ArrayList(obligation.Assumption) = .empty,
     queries: std.ArrayList(obligation.VerificationQuery) = .empty,
+    query_bindings: std.ArrayList(obligation.FormalQueryBinding) = .empty,
     diagnostics: std.ArrayList(obligation.ObligationDiagnostic) = .empty,
     active_binders: std.ArrayList(BinderFrame) = .empty,
     next_id: obligation.Id = 1,
@@ -679,8 +682,8 @@ const Collector = struct {
                     .erasure = .may_elide_if_proven,
                 } },
             });
-            try self.addQuery(.guard_satisfy, null, guard_id, id, owner, origin, source);
-            try self.addQuery(.guard_violate, null, guard_id, id, owner, origin, source);
+            try self.addQueryForOperation(.guard_satisfy, null, guard_id, id, owner, origin, source, op);
+            try self.addQueryForOperation(.guard_violate, null, guard_id, id, owner, origin, source, op);
         } else {
             const id = self.nextId();
             try self.obligations.append(self.allocator, .{
@@ -694,7 +697,7 @@ const Collector = struct {
                     .formula = formula,
                 } },
             });
-            try self.addQuery(.obligation, .guard, null, id, owner, origin, source);
+            try self.addQueryForOperation(.obligation, .guard, null, id, owner, origin, source, op);
         }
     }
 
@@ -747,7 +750,7 @@ const Collector = struct {
                 .formula = formula,
             } },
         });
-        try self.addQuery(.obligation, role, null, id, owner, origin, source);
+        try self.addQueryForOperation(.obligation, role, null, id, owner, origin, source, op);
     }
 
     fn addAssumptionOp(
@@ -806,8 +809,8 @@ const Collector = struct {
                 .erasure = .may_elide_if_proven,
             } },
         });
-        try self.addQuery(.guard_satisfy, null, guard_id, id, owner, origin, source);
-        try self.addQuery(.guard_violate, null, guard_id, id, owner, origin, source);
+        try self.addQueryForOperation(.guard_satisfy, null, guard_id, id, owner, origin, source, op);
+        try self.addQueryForOperation(.guard_violate, null, guard_id, id, owner, origin, source, op);
     }
 
     fn addResourceOp(
@@ -1112,7 +1115,32 @@ const Collector = struct {
         source: obligation.SourceRef,
     ) !void {
         const assumption_ids = try self.assumptionIdsForOwner(owner);
-        try self.appendQuery(kind, logical_role, guard_id, obligation_id, owner, origin, source, assumption_ids);
+        try self.appendQuery(kind, logical_role, guard_id, obligation_id, owner, origin, source, assumption_ids, null);
+    }
+
+    fn addQueryForOperation(
+        self: *Collector,
+        kind: obligation.VerificationQueryKind,
+        logical_role: ?obligation.LogicalRole,
+        guard_id: ?[]const u8,
+        obligation_id: obligation.Id,
+        owner: obligation.Owner,
+        origin: obligation.Origin,
+        source: obligation.SourceRef,
+        op: mlir.MlirOperation,
+    ) !void {
+        const assumption_ids = try self.assumptionIdsForOwner(owner);
+        try self.appendQuery(
+            kind,
+            logical_role,
+            guard_id,
+            obligation_id,
+            owner,
+            origin,
+            source,
+            assumption_ids,
+            sourceOpId(op),
+        );
     }
 
     fn addQueryNoAssumptions(
@@ -1125,7 +1153,7 @@ const Collector = struct {
         origin: obligation.Origin,
         source: obligation.SourceRef,
     ) !void {
-        try self.appendQuery(kind, logical_role, guard_id, obligation_id, owner, origin, source, &.{});
+        try self.appendQuery(kind, logical_role, guard_id, obligation_id, owner, origin, source, &.{}, null);
     }
 
     fn appendQuery(
@@ -1138,11 +1166,13 @@ const Collector = struct {
         origin: obligation.Origin,
         source: obligation.SourceRef,
         assumption_ids: []const obligation.Id,
+        source_op_id: ?usize,
     ) !void {
         const obligation_ids = try self.allocator.alloc(obligation.Id, 1);
         obligation_ids[0] = obligation_id;
-        try self.queries.append(self.allocator, .{
-            .id = self.nextId(),
+        const query_id = self.nextId();
+        const query: obligation.VerificationQuery = .{
+            .id = query_id,
             .owner = owner,
             .source = source,
             .phase = .report,
@@ -1152,7 +1182,30 @@ const Collector = struct {
             .guard_id = guard_id,
             .obligation_ids = obligation_ids,
             .assumption_ids = assumption_ids,
+        };
+        try self.queries.append(self.allocator, .{
+            .id = query.id,
+            .owner = query.owner,
+            .source = query.source,
+            .phase = query.phase,
+            .origin = query.origin,
+            .kind = query.kind,
+            .logical_role = query.logical_role,
+            .guard_id = query.guard_id,
+            .obligation_ids = query.obligation_ids,
+            .assumption_ids = query.assumption_ids,
         });
+        if (source_op_id) |id| {
+            try self.query_bindings.append(self.allocator, .{
+                .source_op_id = id,
+                .kind = kind,
+                .logical_role = logical_role,
+                .guard_id = guard_id,
+                .query_id = query_id,
+                .assumption_ids = assumption_ids,
+                .obligation_ids = obligation_ids,
+            });
+        }
     }
 
     fn assumptionIdsForOwner(self: *Collector, owner: obligation.Owner) ![]const obligation.Id {
@@ -2336,6 +2389,11 @@ fn mlirOrigin(op_name: []const u8, symbol: ?[]const u8, ordinal: u32) obligation
         .symbol = symbol,
         .ordinal = ordinal,
     } };
+}
+
+fn sourceOpId(op: mlir.MlirOperation) ?usize {
+    if (mlir.oraOperationIsNull(op)) return null;
+    return @intFromPtr(op.ptr);
 }
 
 fn operationName(op: mlir.MlirOperation) []const u8 {

@@ -204,6 +204,7 @@ pub const VerificationPass = struct {
     proofs_enabled: bool = false,
     minimize_cores: bool = false,
     force_unknown_query: ?ForcedUnknownQuery = null,
+    formal_query_bindings: []const FormalQueryBinding = &.{},
 
     /// Current function being processed (for MLIR extraction)
     current_function_name: ?[]const u8 = null,
@@ -363,6 +364,10 @@ pub const VerificationPass = struct {
 
     pub fn setMinimizeCores(self: *VerificationPass, enabled: bool) void {
         self.minimize_cores = enabled;
+    }
+
+    pub fn setFormalQueryBindings(self: *VerificationPass, bindings: []const FormalQueryBinding) void {
+        self.formal_query_bindings = bindings;
     }
 
     pub fn deinit(self: *VerificationPass) void {
@@ -3251,6 +3256,11 @@ pub const VerificationPass = struct {
                 .constraint_count = std.math.cast(u32, query.constraint_count) orelse std.math.maxInt(u32),
                 .smtlib_hash = query.smtlib_hash,
                 .references_loop_post_state = query.references_loop_post_state,
+                .formal_query_id = query.formal_query_id,
+                .formal_assumption_ids = try cloneU32SliceArena(arena_allocator, query.formal_assumption_ids),
+                .formal_obligation_ids = try cloneU32SliceArena(arena_allocator, query.formal_obligation_ids),
+                .formal_match_status = query.formal_match_status,
+                .formal_match_key = if (query.formal_match_key) |key| try arena_allocator.dupe(u8, key) else null,
             };
             if (runs) |run_items| {
                 const run = run_items[index];
@@ -5081,6 +5091,7 @@ pub const VerificationPass = struct {
                     "{s} [{s}]{s}{s}",
                     .{ fn_name, obligationKindLabel(ann.kind), obligation_log_suffix, obligation_tag },
                 );
+                const formal_identity = try formalIdentityForAnnotation(self, ann, .Obligation);
                 try appendPreparedQueryUnique(&queries, self.allocator, .{
                     .kind = .Obligation,
                     .fragment = obligation_fragment,
@@ -5099,6 +5110,11 @@ pub const VerificationPass = struct {
                     .smtlib_bytes = obligation_smtlib.len,
                     .smtlib_hash = obligation_hash,
                     .log_prefix = obligation_log_prefix,
+                    .formal_query_id = formal_identity.formal_query_id,
+                    .formal_assumption_ids = formal_identity.formal_assumption_ids,
+                    .formal_obligation_ids = formal_identity.formal_obligation_ids,
+                    .formal_match_status = formal_identity.formal_match_status,
+                    .formal_match_key = formal_identity.formal_match_key,
                 });
 
                 if (isImportedCalleeObligationAnnotation(ann)) {
@@ -6201,6 +6217,135 @@ fn formatQueryTag(allocator: std.mem.Allocator, constraint_count: usize, smtlib_
     return std.fmt.allocPrint(allocator, " [q={x:0>8} c={d}]", .{ shortQueryHash(smtlib_hash), constraint_count });
 }
 
+const FormalPreparedQueryIdentity = struct {
+    formal_query_id: ?u32 = null,
+    formal_assumption_ids: []const u32 = &.{},
+    formal_obligation_ids: []const u32 = &.{},
+    formal_match_status: FormalMatchStatus = .not_applicable,
+    formal_match_key: ?[]const u8 = null,
+};
+
+fn sourceOpId(op: ?mlir.MlirOperation) ?usize {
+    const value = op orelse return null;
+    if (mlir.oraOperationIsNull(value)) return null;
+    return @intFromPtr(value.ptr);
+}
+
+fn formalLogicalRoleForAnnotation(kind: AnnotationKind) ?[]const u8 {
+    return switch (kind) {
+        .Requires => "requires",
+        .CalleePrecondition => "callee_precondition",
+        .Ensures => "ensures",
+        .Guard => "guard",
+        .LoopInvariant => "invariant",
+        .ContractInvariant => "contract_invariant",
+        .RefinementGuard => "refinement",
+        .Assume, .PathAssume => null,
+    };
+}
+
+fn formalQueryKindForPrepared(kind: QueryKind) ?[]const u8 {
+    return switch (kind) {
+        .Obligation => "obligation",
+        .Base,
+        .LoopInvariantStep,
+        .LoopBodySafety,
+        .LoopInvariantPost,
+        .GuardSatisfy,
+        .GuardViolate,
+        => null,
+    };
+}
+
+fn formatFormalMatchKey(
+    allocator: std.mem.Allocator,
+    source_op_id: usize,
+    kind: []const u8,
+    role: ?[]const u8,
+    guard_id: ?[]const u8,
+) ![]const u8 {
+    const role_text = role orelse "none";
+    const guard_text = guard_id orelse "none";
+    return try std.fmt.allocPrint(
+        allocator,
+        "source_op=0x{x} kind={s} role={s} guard={s}",
+        .{ source_op_id, kind, role_text, guard_text },
+    );
+}
+
+fn bindingMatchesPreparedQuery(
+    binding: FormalQueryBinding,
+    source_op_id: usize,
+    kind: []const u8,
+    role: ?[]const u8,
+    guard_id: ?[]const u8,
+) bool {
+    if (binding.source_op_id != source_op_id) return false;
+    if (!std.mem.eql(u8, binding.kind, kind)) return false;
+    if (!optionalStringEqual(binding.logical_role, role)) return false;
+    if (!optionalStringEqual(binding.guard_id, guard_id)) return false;
+    return true;
+}
+
+fn optionalStringEqual(lhs: ?[]const u8, rhs: ?[]const u8) bool {
+    if (lhs == null or rhs == null) return lhs == null and rhs == null;
+    return std.mem.eql(u8, lhs.?, rhs.?);
+}
+
+fn formalIdentityForAnnotation(
+    self: *VerificationPass,
+    ann: EncodedAnnotation,
+    prepared_kind: QueryKind,
+) !FormalPreparedQueryIdentity {
+    const formal_kind = formalQueryKindForPrepared(prepared_kind) orelse return .{};
+    switch (ann.kind) {
+        .Ensures, .ContractInvariant => {},
+        .Requires,
+        .CalleePrecondition,
+        .Guard,
+        .LoopInvariant,
+        .RefinementGuard,
+        .Assume,
+        .PathAssume,
+        => return .{},
+    }
+    if (self.formal_query_bindings.len == 0) return .{};
+    const source_op_id = sourceOpId(ann.source_op) orelse return .{};
+    const role = formalLogicalRoleForAnnotation(ann.kind);
+    const key_text = try formatFormalMatchKey(self.allocator, source_op_id, formal_kind, role, ann.guard_id);
+
+    var match: ?FormalQueryBinding = null;
+    var duplicate = false;
+    for (self.formal_query_bindings) |binding| {
+        if (!bindingMatchesPreparedQuery(binding, source_op_id, formal_kind, role, ann.guard_id)) continue;
+        if (match != null) {
+            duplicate = true;
+            break;
+        }
+        match = binding;
+    }
+
+    if (duplicate) {
+        return .{
+            .formal_match_status = .ambiguous,
+            .formal_match_key = key_text,
+        };
+    }
+
+    const binding = match orelse return .{
+        .formal_match_status = .missing,
+        .formal_match_key = key_text,
+    };
+
+    self.allocator.free(key_text);
+    return .{
+        .formal_query_id = binding.query_id,
+        .formal_assumption_ids = try cloneU32SliceArena(self.allocator, binding.assumption_ids),
+        .formal_obligation_ids = try cloneU32SliceArena(self.allocator, binding.obligation_ids),
+        .formal_match_status = .matched,
+    };
+}
+
 fn buildQueryMetadata(self: *VerificationPass, constraints: []const z3.Z3_ast) !struct { constraint_count: usize, smtlib_hash: u64 } {
     const built = try buildSmtlibForConstraints(
         self.allocator,
@@ -6814,6 +6959,28 @@ pub const PreparedQueryManifestRow = struct {
     vacuous: bool = false,
     vacuity_unknown: bool = false,
     verified_with_caveats: bool = false,
+    formal_query_id: ?u32 = null,
+    formal_assumption_ids: []const u32 = &.{},
+    formal_obligation_ids: []const u32 = &.{},
+    formal_match_status: FormalMatchStatus = .not_applicable,
+    formal_match_key: ?[]const u8 = null,
+};
+
+pub const FormalMatchStatus = enum(u8) {
+    not_applicable,
+    matched,
+    missing,
+    ambiguous,
+};
+
+pub const FormalQueryBinding = struct {
+    source_op_id: usize,
+    kind: []const u8,
+    logical_role: ?[]const u8 = null,
+    guard_id: ?[]const u8 = null,
+    query_id: u32,
+    assumption_ids: []const u32 = &.{},
+    obligation_ids: []const u32 = &.{},
 };
 
 pub const PreparedQueryManifest = struct {
@@ -7499,10 +7666,18 @@ const PreparedQuery = struct {
     smtlib_bytes: usize = 0,
     smtlib_hash: u64 = 0,
     log_prefix: []const u8,
+    formal_query_id: ?u32 = null,
+    formal_assumption_ids: []const u32 = &.{},
+    formal_obligation_ids: []const u32 = &.{},
+    formal_match_status: FormalMatchStatus = .not_applicable,
+    formal_match_key: ?[]const u8 = null,
 
     fn deinit(self: *PreparedQuery, allocator: std.mem.Allocator) void {
         if (self.constraints.len > 0) allocator.free(self.constraints);
         if (self.tracked_assumptions.len > 0) allocator.free(self.tracked_assumptions);
+        if (self.formal_assumption_ids.len > 0) allocator.free(self.formal_assumption_ids);
+        if (self.formal_obligation_ids.len > 0) allocator.free(self.formal_obligation_ids);
+        if (self.formal_match_key) |key| allocator.free(key);
         allocator.free(self.smtlib_z);
         allocator.free(self.log_prefix);
     }
@@ -7522,6 +7697,10 @@ fn preparedQueryEquivalent(lhs: PreparedQuery, rhs: PreparedQuery) bool {
     if (!std.mem.eql(u8, lhs.file, rhs.file)) return false;
     if (lhs.line != rhs.line or lhs.column != rhs.column) return false;
     if (lhs.smtlib_hash != rhs.smtlib_hash) return false;
+    if (lhs.formal_query_id != rhs.formal_query_id) return false;
+    if (lhs.formal_match_status != rhs.formal_match_status) return false;
+    if (!std.mem.eql(u32, lhs.formal_assumption_ids, rhs.formal_assumption_ids)) return false;
+    if (!std.mem.eql(u32, lhs.formal_obligation_ids, rhs.formal_obligation_ids)) return false;
     if (lhs.tracked_assumptions.len != rhs.tracked_assumptions.len) return false;
     return std.mem.eql(u8, lhs.smtlib_z, rhs.smtlib_z);
 }
@@ -7902,6 +8081,10 @@ fn addConstraintSlice(list: *ManagedArrayList(z3.Z3_ast), constraints: []const z
 
 fn cloneConstraintAstSlice(allocator: std.mem.Allocator, constraints: []const z3.Z3_ast) ![]const z3.Z3_ast {
     return if (constraints.len == 0) &.{} else try allocator.dupe(z3.Z3_ast, constraints);
+}
+
+fn cloneU32SliceArena(allocator: std.mem.Allocator, values: []const u32) ![]const u32 {
+    return if (values.len == 0) &.{} else try allocator.dupe(u32, values);
 }
 
 const QueryFragmentFeatures = struct {

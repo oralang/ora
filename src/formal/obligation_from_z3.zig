@@ -239,6 +239,12 @@ fn logicalRole(kind: ?z3_verification.AnnotationKind) ?obligation.LogicalRole {
 }
 
 fn queryMatchesPreparedRow(query: obligation.VerificationQuery, row: z3_verification.PreparedQueryManifestRow) bool {
+    if (row.formal_query_id) |id| {
+        return query.id == id and
+            obligation.equalIdSlices(query.assumption_ids, row.formal_assumption_ids) and
+            obligation.equalIdSlices(query.obligation_ids, row.formal_obligation_ids);
+    }
+    if (row.formal_match_status == .missing or row.formal_match_status == .ambiguous) return false;
     if (queryMatchesSourceGuardSatisfyRow(query, row)) return true;
     if (queryMatchesSourceGuardViolateRow(query, row)) return true;
     if (query.kind != queryKind(row.kind)) return false;
@@ -272,12 +278,15 @@ fn queryMatchesSourceGuardViolateRow(
     row: z3_verification.PreparedQueryManifestRow,
 ) bool {
     if (query.kind != .guard_violate) return false;
-    if (row.kind != .Obligation) return false;
-    const role = logicalRole(row.obligation_kind) orelse return false;
-    if (role != .guard) return false;
+    if (row.kind == .GuardViolate) {
+        // Explicit guard-violate prepared rows are outside the Lean proof-target
+        // identity lane; they keep the old guard-erasure matching path.
+    } else if (row.kind == .Obligation) {
+        const role = logicalRole(row.obligation_kind) orelse return false;
+        if (role != .guard) return false;
+    } else return false;
     if (!optionalStringEqual(query.guard_id, row.guard_id)) return false;
     if (!ownerMatchesFunctionName(query.owner, row.function_name)) return false;
-    if (!sourceMatchesPreparedRow(query.source, row)) return false;
     return true;
 }
 
@@ -331,11 +340,24 @@ fn appendUnmatchedRowDiagnostic(
     diagnostics: *std.ArrayList(obligation.ObligationDiagnostic),
     row: z3_verification.PreparedQueryManifestRow,
 ) !void {
-    const message = try std.fmt.allocPrint(
-        allocator,
-        "SMT prepared-query row was not matched by the formal MLIR manifest: {s} in {s}",
-        .{ @tagName(row.kind), row.function_name },
-    );
+    const message = if (row.formal_match_status == .missing or row.formal_match_status == .ambiguous)
+        try std.fmt.allocPrint(
+            allocator,
+            "SMT prepared-query row was not matched by formal identity: {s} in {s} status={s} key={s} smtlib_hash=0x{x}",
+            .{
+                @tagName(row.kind),
+                row.function_name,
+                @tagName(row.formal_match_status),
+                row.formal_match_key orelse "<none>",
+                row.smtlib_hash,
+            },
+        )
+    else
+        try std.fmt.allocPrint(
+            allocator,
+            "SMT prepared-query row was not matched by the formal MLIR manifest: {s} in {s}",
+            .{ @tagName(row.kind), row.function_name },
+        );
     try diagnostics.append(allocator, .{
         .kind = .unmatched_report_row,
         .source = .{
@@ -388,4 +410,112 @@ fn ownerName(owner: obligation.Owner) []const u8 {
         .statement => |statement| statement.function_name,
         .backend => |backend| backend.name,
     };
+}
+
+test "prepared row formal id matches query without fuzzy metadata" {
+    const assumptions = [_]obligation.Id{ 1, 2 };
+    const obligations = [_]obligation.Id{3};
+    const query: obligation.VerificationQuery = .{
+        .id = 42,
+        .owner = .{ .function = .{ .name = "transfer" } },
+        .source = .{ .file = "contract.ora", .line = 10, .column = 5 },
+        .phase = .report,
+        .origin = .source,
+        .kind = .obligation,
+        .logical_role = .ensures,
+        .assumption_ids = &assumptions,
+        .obligation_ids = &obligations,
+    };
+    const row: z3_verification.PreparedQueryManifestRow = .{
+        .kind = .Obligation,
+        .function_name = "different_function",
+        .obligation_kind = .ContractInvariant,
+        .file = "different.ora",
+        .line = 99,
+        .column = 1,
+        .formal_query_id = 42,
+        .formal_assumption_ids = &assumptions,
+        .formal_obligation_ids = &obligations,
+        .formal_match_status = .matched,
+    };
+
+    try std.testing.expect(queryMatchesPreparedRow(query, row));
+}
+
+test "prepared row formal id mismatch does not fall back to source matching" {
+    const assumptions = [_]obligation.Id{1};
+    const obligations = [_]obligation.Id{2};
+    const query: obligation.VerificationQuery = .{
+        .id = 7,
+        .owner = .{ .function = .{ .name = "bounded" } },
+        .source = .{ .file = "same.ora", .line = 4, .column = 9 },
+        .phase = .report,
+        .origin = .source,
+        .kind = .obligation,
+        .logical_role = .ensures,
+        .assumption_ids = &assumptions,
+        .obligation_ids = &obligations,
+    };
+    const row: z3_verification.PreparedQueryManifestRow = .{
+        .kind = .Obligation,
+        .function_name = "bounded",
+        .obligation_kind = .Ensures,
+        .file = "same.ora",
+        .line = 4,
+        .column = 9,
+        .formal_query_id = 8,
+        .formal_assumption_ids = &assumptions,
+        .formal_obligation_ids = &obligations,
+        .formal_match_status = .matched,
+    };
+
+    try std.testing.expect(!queryMatchesPreparedRow(query, row));
+}
+
+test "missing formal identity disables fuzzy proof target matching" {
+    const query: obligation.VerificationQuery = .{
+        .id = 7,
+        .owner = .{ .function = .{ .name = "bounded" } },
+        .source = .{ .file = "same.ora", .line = 4, .column = 9 },
+        .phase = .report,
+        .origin = .source,
+        .kind = .obligation,
+        .logical_role = .ensures,
+        .obligation_ids = &[_]obligation.Id{2},
+    };
+    const row: z3_verification.PreparedQueryManifestRow = .{
+        .kind = .Obligation,
+        .function_name = "bounded",
+        .obligation_kind = .Ensures,
+        .file = "same.ora",
+        .line = 4,
+        .column = 9,
+        .formal_match_status = .missing,
+        .formal_match_key = "source_op=0x1 kind=obligation role=ensures guard=none",
+    };
+
+    try std.testing.expect(!queryMatchesPreparedRow(query, row));
+}
+
+test "guard violate rows remain outside proof target formal identity" {
+    const query: obligation.VerificationQuery = .{
+        .id = 9,
+        .owner = .{ .function = .{ .name = "guarded" } },
+        .source = .{ .file = "formal.ora", .line = 10, .column = 9 },
+        .phase = .report,
+        .origin = .source,
+        .kind = .guard_violate,
+        .guard_id = "guard:file.ora:10:9:11:guard_clause",
+        .obligation_ids = &[_]obligation.Id{8},
+    };
+    const row: z3_verification.PreparedQueryManifestRow = .{
+        .kind = .GuardViolate,
+        .function_name = "guarded",
+        .guard_id = "guard:file.ora:10:9:11:guard_clause",
+        .file = "z3.ora",
+        .line = 1,
+        .column = 1,
+    };
+
+    try std.testing.expect(queryMatchesPreparedRow(query, row));
 }
