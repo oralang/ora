@@ -15,6 +15,6 @@
 // CHECK-SAME: domain = "TokenUnit"
 
 // CHECK-LABEL: func.func @rawBalance
-// CHECK-SAME: ora.read_slots = ["raw_balances"]
+// CHECK-SAME: ora.read_slots = ["raw_balances[param#0]"]
 // CHECK-LABEL: func.func @resourceBalance
-// CHECK-SAME: ora.read_slots = ["resource_balances"]
+// CHECK-SAME: ora.read_slots = ["resource_balances[param#0]"]

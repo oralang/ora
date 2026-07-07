@@ -3,8 +3,8 @@
 // CHECK: ora.global "balances" : !ora.map<!ora.address, i256>
 //
 // CHECK-LABEL: func.func @transfer
-// CHECK-SAME: ora.read_slots = ["balances", "balances"]
-// CHECK-SAME: ora.write_slots = ["balances", "balances"]
+// CHECK-SAME: ora.read_slots = ["balances[param#0]", "balances[param#1]"]
+// CHECK-SAME: ora.write_slots = ["balances[param#0]", "balances[param#1]"]
 // CHECK: %balances
 // CHECK-SAME: ora.sload "balances"
 // CHECK: %balances_{{[0-9]+}}

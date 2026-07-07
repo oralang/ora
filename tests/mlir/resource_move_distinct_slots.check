@@ -5,8 +5,8 @@
 
 // CHECK-LABEL: func.func @settle
 // CHECK-SAME: ora.effect = "readwrites"
-// CHECK-SAME: ora.read_slots = ["pending", "settled"]
-// CHECK-SAME: ora.write_slots = ["pending", "settled"]
+// CHECK-SAME: ora.read_slots = ["pending[param#0]", "settled[param#1]"]
+// CHECK-SAME: ora.write_slots = ["pending[param#0]", "settled[param#1]"]
 // CHECK: %pending
 // CHECK-SAME: ora.sload "pending"
 // CHECK: %settled
@@ -18,6 +18,6 @@
 // CHECK-SAME: operandSegmentSizes = array<i32: 2, 2, 1>
 
 // CHECK-LABEL: func.func @pendingOf
-// CHECK-SAME: ora.read_slots = ["pending"]
+// CHECK-SAME: ora.read_slots = ["pending[param#0]"]
 // CHECK-LABEL: func.func @settledOf
-// CHECK-SAME: ora.read_slots = ["settled"]
+// CHECK-SAME: ora.read_slots = ["settled[param#0]"]

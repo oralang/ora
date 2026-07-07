@@ -5,8 +5,8 @@
 // CHECK-LABEL: func.func @credit
 // CHECK-SAME: ora.abi_params = ["address", "int256"]
 // CHECK-SAME: ora.modifies_slots = ["debts[param#0]"]
-// CHECK-SAME: ora.read_slots = ["debts"]
-// CHECK-SAME: ora.write_slots = ["debts"]
+// CHECK-SAME: ora.read_slots = ["debts[param#0]"]
+// CHECK-SAME: ora.write_slots = ["debts[param#0]"]
 // CHECK: arith.cmpi sge
 // CHECK: "ora.create"
 // CHECK-SAME: carrier_signed = true

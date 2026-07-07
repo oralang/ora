@@ -4,8 +4,8 @@
 
 // CHECK-LABEL: func.func @transferUnchecked
 // CHECK-SAME: ora.effect = "readwrites"
-// CHECK-SAME: ora.read_slots = ["balances", "balances"]
-// CHECK-SAME: ora.write_slots = ["balances", "balances"]
+// CHECK-SAME: ora.read_slots = ["balances[param#0]", "balances[param#1]"]
+// CHECK-SAME: ora.write_slots = ["balances[param#0]", "balances[param#1]"]
 // CHECK: "ora.move"
 // CHECK-SAME: carrier_signed = false
 // CHECK-SAME: carrier_type = i256
@@ -14,4 +14,4 @@
 
 // CHECK-LABEL: func.func @balanceOf
 // CHECK-SAME: ora.effect = "reads"
-// CHECK-SAME: ora.read_slots = ["balances"]
+// CHECK-SAME: ora.read_slots = ["balances[param#0]"]

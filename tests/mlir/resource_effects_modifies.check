@@ -16,8 +16,8 @@
 //
 // CHECK-LABEL: func.func @deposit
 // CHECK-SAME: ora.modifies_slots = ["balances[param#0]"]
-// CHECK-SAME: ora.read_slots = ["balances"]
-// CHECK-SAME: ora.write_slots = ["balances"]
+// CHECK-SAME: ora.read_slots = ["balances[param#0]"]
+// CHECK-SAME: ora.write_slots = ["balances[param#0]"]
 // CHECK: "ora.create"
 // CHECK-SAME: carrier_signed = false
 // CHECK-SAME: carrier_type = i256

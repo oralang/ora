@@ -4,8 +4,8 @@
 
 // CHECK-LABEL: func.func @transfer_maybe_same
 // CHECK-SAME: ora.effect = "readwrites"
-// CHECK-SAME: ora.read_slots = ["balances", "balances"]
-// CHECK-SAME: ora.write_slots = ["balances", "balances"]
+// CHECK-SAME: ora.read_slots = ["balances[param#0]", "balances[param#1]"]
+// CHECK-SAME: ora.write_slots = ["balances[param#0]", "balances[param#1]"]
 // CHECK: %balances
 // CHECK-SAME: ora.sload "balances"
 // CHECK: %balances_{{[0-9]+}}

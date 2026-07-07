@@ -372,8 +372,8 @@
         "tests/conformance/resource_self_transfer.spec.toml"
       ],
       "ora_goldens": [
-        "tests/mlir/resource_move_dynamic_alias.check#ora.read_slots = [\"balances\", \"balances\"]",
-        "tests/mlir/resource_move_dynamic_alias.check#ora.write_slots = [\"balances\", \"balances\"]",
+        "tests/mlir/resource_move_dynamic_alias.check#ora.read_slots = [\"balances[param#0]\", \"balances[param#1]\"]",
+        "tests/mlir/resource_move_dynamic_alias.check#ora.write_slots = [\"balances[param#0]\", \"balances[param#1]\"]",
         "tests/mlir/resource_move_dynamic_alias.check#operandSegmentSizes = array<i32: 2, 2, 1>"
       ],
       "sir_goldens": [
