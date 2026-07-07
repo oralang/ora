@@ -1529,6 +1529,24 @@ pub fn build(b: *std.Build) void {
     const check_formal_sync_step = b.step("check-formal-sync", "Regenerate formal snapshots and run Lean verification checks");
     check_formal_sync_step.dependOn(&formal_sync_cmd.step);
 
+    // zig build check-canonical-z3-required
+    const canonical_z3_required_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/measure-canonical-z3-corpus.py",
+        "--out-dir",
+        "/tmp/ora-canonical-z3-required-gate",
+        "--json-out",
+        "/tmp/ora-canonical-z3-required-gate/report.json",
+        "--fail-required",
+        "--min-required",
+        "1",
+        "--ora",
+    });
+    canonical_z3_required_cmd.addArtifactArg(exe);
+    canonical_z3_required_cmd.addArg("ora-example/formal");
+    const check_canonical_z3_required_step = b.step("check-canonical-z3-required", "Gate required canonical SMT hash rows on the formal corpus");
+    check_canonical_z3_required_step.dependOn(&canonical_z3_required_cmd.step);
+
     // zig build check-lock-guarding
     const lock_guarding_cmd = b.addSystemCommand(&[_][]const u8{
         "sh",
@@ -1717,6 +1735,7 @@ pub fn build(b: *std.Build) void {
     const gate_step = b.step("gate", "Run the full pre-push bar (test + OraToSIR gate + Ora MLIR checks + SMT corpus + LSP smoke)");
     gate_step.dependOn(test_step);
     gate_step.dependOn(check_formal_sync_step);
+    gate_step.dependOn(check_canonical_z3_required_step);
     gate_step.dependOn(oratosir_debloat_gate_step);
     gate_step.dependOn(check_resource_mutation_tripwires_step);
     gate_step.dependOn(check_mlir_ora_step);

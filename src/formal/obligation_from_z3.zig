@@ -129,6 +129,10 @@ pub fn overlayPreparedQueryResults(
             merged_query.constraint_count = row.constraint_count;
             merged_query.smtlib_hash = row.smtlib_hash;
             merged_query.canonical_smt_annotation_pure = row.annotation_pure;
+            if (row.annotation_pure and !merged_query.canonical_smt_crosscheck_required) {
+                merged_query.canonical_smt_crosscheck_required =
+                    obligation_to_z3.queryCanonicalCrosscheckRequiredByPolicy(base, merged_query);
+            }
             merged_query.result = queryResult(row);
             try appendCanonicalSmtCrosscheckDiagnostic(
                 arena_allocator,
@@ -833,7 +837,7 @@ test "canonical SMT hash crosscheck keeps formula combinations diagnostic-only" 
     try std.testing.expect(mismatch_overlay.set.artifactDecision().isAllowed());
 }
 
-test "canonical SMT hash mismatch blocks only when crosscheck is required" {
+test "canonical SMT hash mismatch blocks for rollout-enabled core formula" {
     var z3_ctx = try z3_verification.Z3Context.init(std.testing.allocator);
     defer z3_ctx.deinit();
 
@@ -851,7 +855,7 @@ test "canonical SMT hash mismatch blocks only when crosscheck is required" {
         .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = 2 } } },
     }};
     const obligation_ids = [_]obligation.Id{1};
-    const optional_queries = [_]obligation.VerificationQuery{.{
+    const queries = [_]obligation.VerificationQuery{.{
         .id = 2,
         .owner = .{ .function = .{ .name = "checked" } },
         .source = .generated(),
@@ -860,18 +864,19 @@ test "canonical SMT hash mismatch blocks only when crosscheck is required" {
         .kind = .obligation,
         .obligation_ids = &obligation_ids,
     }};
-    const optional_set: obligation.ObligationSet = .{
+    const set: obligation.ObligationSet = .{
         .obligations = &obligations,
-        .queries = &optional_queries,
+        .queries = &queries,
         .terms = &terms,
     };
     try std.testing.expectEqual(
         obligation_to_z3.CanonicalPromotionShape.core_formula,
-        obligation_to_z3.queryCanonicalPromotionShape(optional_set, optional_queries[0]).?,
+        obligation_to_z3.queryCanonicalPromotionShape(set, queries[0]).?,
     );
-    try std.testing.expect(!obligation_to_z3.queryCanonicalRequiredModePromoted(optional_set, optional_queries[0]));
+    try std.testing.expect(obligation_to_z3.queryCanonicalCrosscheckRequiredByPolicy(set, queries[0]));
+    try std.testing.expect(!obligation_to_z3.queryCanonicalRequiredModePromoted(set, queries[0]));
 
-    var adapter = obligation_to_z3.Adapter.init(&z3_ctx, std.testing.allocator, optional_set);
+    var adapter = obligation_to_z3.Adapter.init(&z3_ctx, std.testing.allocator, set);
     const canonical = try adapter.queryHash(2);
     const wrong_hash = canonical.smtlib_hash +% 1;
     const rows = [_]z3_verification.PreparedQueryManifestRow{.{
@@ -889,36 +894,13 @@ test "canonical SMT hash mismatch blocks only when crosscheck is required" {
         .formal_match_status = .matched,
     }};
 
-    var optional_overlay = try overlayPreparedQueryResults(std.testing.allocator, optional_set, &rows);
-    defer optional_overlay.deinit();
-    try std.testing.expectEqual(@as(usize, 1), optional_overlay.set.diagnostics.len);
-    try std.testing.expectEqual(obligation.DiagnosticKind.canonical_z3_mismatch, optional_overlay.set.diagnostics[0].kind);
-    try std.testing.expect(!optional_overlay.set.diagnostics[0].blocks_artifacts);
-    try std.testing.expect(optional_overlay.set.artifactDecision().isAllowed());
-
-    const required_queries = [_]obligation.VerificationQuery{.{
-        .id = 2,
-        .owner = .{ .function = .{ .name = "checked" } },
-        .source = .generated(),
-        .phase = .report,
-        .origin = .source,
-        .kind = .obligation,
-        .obligation_ids = &obligation_ids,
-        .canonical_smt_crosscheck_required = true,
-    }};
-    const required_set: obligation.ObligationSet = .{
-        .obligations = &obligations,
-        .queries = &required_queries,
-        .terms = &terms,
-    };
-    try std.testing.expect(!obligation_to_z3.queryCanonicalRequiredModePromoted(required_set, required_queries[0]));
-    var required_overlay = try overlayPreparedQueryResults(std.testing.allocator, required_set, &rows);
-    defer required_overlay.deinit();
-    try std.testing.expect(obligation_to_z3.queryCanonicalRequiredModePromoted(required_overlay.set, required_overlay.set.queries[0]));
-    try std.testing.expectEqual(@as(usize, 1), required_overlay.set.diagnostics.len);
-    try std.testing.expectEqual(obligation.DiagnosticKind.canonical_z3_mismatch, required_overlay.set.diagnostics[0].kind);
-    try std.testing.expect(required_overlay.set.diagnostics[0].blocks_artifacts);
-    try std.testing.expectEqual(obligation.ArtifactDecision{ .blocked = .blocking_diagnostic }, required_overlay.set.artifactDecision());
+    var overlay = try overlayPreparedQueryResults(std.testing.allocator, set, &rows);
+    defer overlay.deinit();
+    try std.testing.expect(obligation_to_z3.queryCanonicalRequiredModePromoted(overlay.set, overlay.set.queries[0]));
+    try std.testing.expectEqual(@as(usize, 1), overlay.set.diagnostics.len);
+    try std.testing.expectEqual(obligation.DiagnosticKind.canonical_z3_mismatch, overlay.set.diagnostics[0].kind);
+    try std.testing.expect(overlay.set.diagnostics[0].blocks_artifacts);
+    try std.testing.expectEqual(obligation.ArtifactDecision{ .blocked = .blocking_diagnostic }, overlay.set.artifactDecision());
 }
 
 test "canonical SMT hash crosscheck skips non annotation pure rows" {

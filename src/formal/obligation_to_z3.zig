@@ -78,21 +78,22 @@ pub const CanonicalPromotionShape = enum(u8) {
 pub const CanonicalPromotionPolicy = struct {
     shape: CanonicalPromotionShape,
     required_mode: bool,
+    rollout_enabled: bool,
 };
 
 // Required mode is currently three-key: the query row must explicitly request
 // canonical SMT crosscheck, the live prepared row must attest that it is
 // annotation-pure, and its syntax must be present in this table. The table is
-// the audit surface for which shapes may block; the row flag is the rollout
-// switch for when production starts arming those shapes.
+// the audit surface for which shapes may block; rollout_enabled is the
+// compiler-side policy for which shapes set the row flag today.
 pub const canonical_promotion_table = [_]CanonicalPromotionPolicy{
-    .{ .shape = .core_formula, .required_mode = true },
-    .{ .shape = .result_term, .required_mode = true },
-    .{ .shape = .scalar_place_read, .required_mode = true },
-    .{ .shape = .old_scalar_place_read, .required_mode = true },
+    .{ .shape = .core_formula, .required_mode = true, .rollout_enabled = true },
+    .{ .shape = .result_term, .required_mode = true, .rollout_enabled = false },
+    .{ .shape = .scalar_place_read, .required_mode = true, .rollout_enabled = false },
+    .{ .shape = .old_scalar_place_read, .required_mode = true, .rollout_enabled = false },
     // Full-corpus measurement showed formula combinations often lack live rows;
     // promoted mismatches still need diagnosis before this shape can block.
-    .{ .shape = .formula_combination, .required_mode = false },
+    .{ .shape = .formula_combination, .required_mode = false, .rollout_enabled = false },
 };
 
 pub const EncodeError = std.mem.Allocator.Error || error{
@@ -197,11 +198,25 @@ pub fn queryCanonicalRequiredModePromoted(
     return canonicalPromotionShapeRequired(shape);
 }
 
+pub fn queryCanonicalCrosscheckRequiredByPolicy(
+    set: obligation.ObligationSet,
+    query: obligation.VerificationQuery,
+) bool {
+    const shape = queryCanonicalPromotionShape(set, query) orelse return false;
+    const policy = canonicalPromotionPolicy(shape) orelse return false;
+    return policy.required_mode and policy.rollout_enabled;
+}
+
 fn canonicalPromotionShapeRequired(shape: CanonicalPromotionShape) bool {
+    const policy = canonicalPromotionPolicy(shape) orelse return false;
+    return policy.required_mode;
+}
+
+fn canonicalPromotionPolicy(shape: CanonicalPromotionShape) ?CanonicalPromotionPolicy {
     for (canonical_promotion_table) |row| {
-        if (row.shape == shape) return row.required_mode;
+        if (row.shape == shape) return row;
     }
-    return false;
+    return null;
 }
 
 const PromotionFeatures = struct {
@@ -1516,14 +1531,20 @@ fn expectCanonicalHashUnsupported(
 test "canonical Z3 required promotion table covers every shape exactly once" {
     const shape_count = std.meta.fields(CanonicalPromotionShape).len;
     var seen: [shape_count]bool = .{false} ** shape_count;
+    var rollout_count: usize = 0;
 
     for (canonical_promotion_table) |row| {
         const index: usize = @intFromEnum(row.shape);
         try std.testing.expect(index < shape_count);
         try std.testing.expect(!seen[index]);
         seen[index] = true;
+        if (row.rollout_enabled) {
+            rollout_count += 1;
+            try std.testing.expectEqual(CanonicalPromotionShape.core_formula, row.shape);
+        }
     }
     for (seen) |item| try std.testing.expect(item);
+    try std.testing.expectEqual(@as(usize, 1), rollout_count);
 }
 
 test "canonical Z3 classifier matrix hashes every supported core formula shape" {

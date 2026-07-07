@@ -78,7 +78,9 @@ def run_source(ora: Path, source: Path, out_root: Path, timeout: int) -> tuple[i
 
 def aggregate_measurement(aggregate: dict, source: Path, data: dict, returncode: int) -> None:
     aggregate["files_measured"] += 1
-    aggregate["queries"] += int(data.get("summary", {}).get("queries", 0))
+    summary = data.get("summary", {})
+    aggregate["queries"] += int(summary.get("queries", 0))
+    aggregate["required"] += int(summary.get("required", 0))
     if returncode != 0:
         aggregate["measured_after_failure"] += 1
 
@@ -101,7 +103,16 @@ def aggregate_measurement(aggregate: dict, source: Path, data: dict, returncode:
         {name: int(count) for name, count in data.get("hash_errors", {}).items() if int(count) != 0}
     )
     for query in data.get("queries", []):
-        aggregate["outcomes"][query.get("outcome", "unknown")] += 1
+        outcome = query.get("outcome", "unknown")
+        aggregate["outcomes"][outcome] += 1
+        if query.get("required") is True and outcome != "match":
+            aggregate["required_failures"].append({
+                "source": str(source),
+                "query_id": query.get("id"),
+                "shape": query.get("shape"),
+                "outcome": outcome,
+                "reason": query.get("reason"),
+            })
 
 
 def print_summary(aggregate: dict) -> None:
@@ -111,6 +122,7 @@ def print_summary(aggregate: dict) -> None:
     print(f"  measured after failure:   {aggregate['measured_after_failure']}")
     print(f"  failed without measure:   {len(aggregate['failures'])}")
     print(f"  queries measured:         {aggregate['queries']}")
+    print(f"  required rows:            {aggregate['required']}")
     print()
 
     print("per-shape counts")
@@ -138,6 +150,18 @@ def print_summary(aggregate: dict) -> None:
         for name, count in sorted(aggregate["hash_errors"].items(), key=lambda item: (-item[1], item[0])):
             print(f"  {name:<40} {count}")
 
+    if aggregate["required_failures"]:
+        print()
+        print("required row failures")
+        for failure in aggregate["required_failures"][:20]:
+            print(
+                f"  {failure['source']} query={failure['query_id']} "
+                f"shape={failure['shape']} outcome={failure['outcome']} "
+                f"reason={failure['reason']}"
+            )
+        if len(aggregate["required_failures"]) > 20:
+            print(f"  ... {len(aggregate['required_failures']) - 20} more")
+
     if aggregate["failures"]:
         print()
         print("failures without measurement")
@@ -155,6 +179,8 @@ def main() -> int:
     parser.add_argument("--json-out", help="write aggregate JSON report")
     parser.add_argument("--timeout", type=int, default=120, help="per-file timeout in seconds")
     parser.add_argument("--limit", type=int, help="limit number of sources for smoke runs")
+    parser.add_argument("--fail-required", action="store_true", help="fail if any required canonical row does not match")
+    parser.add_argument("--min-required", type=int, default=0, help="minimum required rows expected when --fail-required is set")
     args = parser.parse_args()
 
     ora = Path(args.ora)
@@ -178,10 +204,12 @@ def main() -> int:
         "files_measured": 0,
         "measured_after_failure": 0,
         "queries": 0,
+        "required": 0,
         "shapes": defaultdict(zero_counts),
         "unsupported_reasons": Counter(),
         "hash_errors": Counter(),
         "outcomes": Counter(),
+        "required_failures": [],
         "failures": [],
         "files": [],
     }
@@ -222,6 +250,26 @@ def main() -> int:
         with json_path.open("w", encoding="utf-8") as handle:
             json.dump(serializable, handle, indent=2, sort_keys=True)
             handle.write("\n")
+
+    if args.fail_required:
+        failed = False
+        if serializable["failures"]:
+            print("error: corpus measurement had files without measurement", file=sys.stderr)
+            failed = True
+        if serializable["required"] < args.min_required:
+            print(
+                f"error: required row count {serializable['required']} below minimum {args.min_required}",
+                file=sys.stderr,
+            )
+            failed = True
+        if serializable["required_failures"]:
+            print(
+                f"error: {len(serializable['required_failures'])} required canonical rows did not match",
+                file=sys.stderr,
+            )
+            failed = True
+        if failed:
+            return 1
 
     return 0
 
