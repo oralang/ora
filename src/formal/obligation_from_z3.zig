@@ -199,7 +199,7 @@ fn appendCanonicalSmtCrosscheckDiagnostic(
     switch (obligation_to_z3.queryCanonicalSupport(set, query)) {
         .supported => {},
         .unsupported => |reason| {
-            try appendCanonicalUnavailableDiagnostic(allocator, diagnostics, query, @tagName(reason));
+            try appendCanonicalUnavailableDiagnostic(allocator, diagnostics, set, query, @tagName(reason));
             return;
         },
     }
@@ -210,12 +210,12 @@ fn appendCanonicalSmtCrosscheckDiagnostic(
 
     var adapter = obligation_to_z3.Adapter.init(&canonical_context.*.?, allocator, set);
     const canonical = adapter.queryHashForRow(query) catch |err| {
-        try appendCanonicalUnavailableDiagnostic(allocator, diagnostics, query, @errorName(err));
+        try appendCanonicalUnavailableDiagnostic(allocator, diagnostics, set, query, @errorName(err));
         return;
     };
 
     if (canonical.constraint_count == row.constraint_count and canonical.smtlib_hash == row.smtlib_hash) return;
-    try appendCanonicalMismatchDiagnostic(allocator, diagnostics, query, row, canonical);
+    try appendCanonicalMismatchDiagnostic(allocator, diagnostics, set, query, row, canonical);
 }
 
 fn queryEligibleForCanonicalSmtCrosscheck(
@@ -227,6 +227,7 @@ fn queryEligibleForCanonicalSmtCrosscheck(
 fn appendCanonicalUnavailableDiagnostic(
     allocator: std.mem.Allocator,
     diagnostics: *std.ArrayList(obligation.ObligationDiagnostic),
+    set: obligation.ObligationSet,
     query: obligation.VerificationQuery,
     reason: []const u8,
 ) !void {
@@ -239,13 +240,14 @@ fn appendCanonicalUnavailableDiagnostic(
         .kind = .canonical_z3_unavailable,
         .source = query.source,
         .message = message,
-        .blocks_artifacts = query.canonical_smt_crosscheck_required,
+        .blocks_artifacts = obligation_to_z3.queryCanonicalRequiredModePromoted(set, query),
     });
 }
 
 fn appendCanonicalMismatchDiagnostic(
     allocator: std.mem.Allocator,
     diagnostics: *std.ArrayList(obligation.ObligationDiagnostic),
+    set: obligation.ObligationSet,
     query: obligation.VerificationQuery,
     row: z3_verification.PreparedQueryManifestRow,
     canonical: obligation_to_z3.QueryHash,
@@ -259,7 +261,7 @@ fn appendCanonicalMismatchDiagnostic(
         .kind = .canonical_z3_mismatch,
         .source = query.source,
         .message = message,
-        .blocks_artifacts = query.canonical_smt_crosscheck_required,
+        .blocks_artifacts = obligation_to_z3.queryCanonicalRequiredModePromoted(set, query),
     });
 }
 
@@ -734,6 +736,74 @@ test "canonical SMT hash crosscheck accepts storage old query when hash matches"
     try std.testing.expectEqual(canonical.smtlib_hash, overlay.set.queries[0].smtlib_hash.?);
 }
 
+test "canonical SMT hash crosscheck accepts formula combination row when hash matches" {
+    var z3_ctx = try z3_verification.Z3Context.init(std.testing.allocator);
+    defer z3_ctx.deinit();
+
+    const terms = [_]obligation.Term{
+        .{ .place_read = .{ .root = "balance", .region = .storage } },
+        .{ .old = 0 },
+        .result,
+        .{ .int_lit = .{ .value = "1", .ty = .{ .spelling = "u256" } } },
+        .{ .binary = .{ .op = .add, .lhs = 1, .rhs = 3, .ty = .{ .spelling = "u256" } } },
+        .{ .binary = .{ .op = .ge, .lhs = 2, .rhs = 4 } },
+        .{ .binary = .{ .op = .eq, .lhs = 0, .rhs = 1 } },
+        .{ .binary = .{ .op = .and_, .lhs = 5, .rhs = 6 } },
+    };
+    const obligations = [_]obligation.Obligation{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "combined" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+        .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = 7 } } },
+    }};
+    const obligation_ids = [_]obligation.Id{1};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "combined" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .obligation,
+        .obligation_ids = &obligation_ids,
+        .canonical_smt_crosscheck_required = true,
+    }};
+    const set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &terms,
+    };
+    try std.testing.expectEqual(
+        obligation_to_z3.CanonicalPromotionShape.formula_combination,
+        obligation_to_z3.queryCanonicalPromotionShape(set, queries[0]).?,
+    );
+    try std.testing.expect(obligation_to_z3.queryCanonicalRequiredModePromoted(set, queries[0]));
+
+    var adapter = obligation_to_z3.Adapter.init(&z3_ctx, std.testing.allocator, set);
+    const canonical = try adapter.queryHash(2);
+    const rows = [_]z3_verification.PreparedQueryManifestRow{.{
+        .kind = .Obligation,
+        .function_name = "combined",
+        .file = "",
+        .line = 0,
+        .column = 0,
+        .constraint_count = canonical.constraint_count,
+        .smtlib_hash = canonical.smtlib_hash,
+        .result_status = .unknown,
+        .formal_query_id = 2,
+        .formal_obligation_ids = &obligation_ids,
+        .formal_match_status = .matched,
+    }};
+
+    var overlay = try overlayPreparedQueryResults(std.testing.allocator, set, &rows);
+    defer overlay.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), overlay.set.diagnostics.len);
+    try std.testing.expectEqual(canonical.constraint_count, overlay.set.queries[0].constraint_count);
+    try std.testing.expectEqual(canonical.smtlib_hash, overlay.set.queries[0].smtlib_hash.?);
+}
+
 test "canonical SMT hash mismatch blocks only when crosscheck is required" {
     var z3_ctx = try z3_verification.Z3Context.init(std.testing.allocator);
     defer z3_ctx.deinit();
@@ -766,6 +836,11 @@ test "canonical SMT hash mismatch blocks only when crosscheck is required" {
         .queries = &optional_queries,
         .terms = &terms,
     };
+    try std.testing.expectEqual(
+        obligation_to_z3.CanonicalPromotionShape.core_formula,
+        obligation_to_z3.queryCanonicalPromotionShape(optional_set, optional_queries[0]).?,
+    );
+    try std.testing.expect(!obligation_to_z3.queryCanonicalRequiredModePromoted(optional_set, optional_queries[0]));
 
     var adapter = obligation_to_z3.Adapter.init(&z3_ctx, std.testing.allocator, optional_set);
     const canonical = try adapter.queryHash(2);
@@ -806,10 +881,191 @@ test "canonical SMT hash mismatch blocks only when crosscheck is required" {
         .queries = &required_queries,
         .terms = &terms,
     };
+    try std.testing.expect(obligation_to_z3.queryCanonicalRequiredModePromoted(required_set, required_queries[0]));
     var required_overlay = try overlayPreparedQueryResults(std.testing.allocator, required_set, &rows);
     defer required_overlay.deinit();
     try std.testing.expectEqual(@as(usize, 1), required_overlay.set.diagnostics.len);
     try std.testing.expectEqual(obligation.DiagnosticKind.canonical_z3_mismatch, required_overlay.set.diagnostics[0].kind);
     try std.testing.expect(required_overlay.set.diagnostics[0].blocks_artifacts);
     try std.testing.expectEqual(obligation.ArtifactDecision{ .blocked = .blocking_diagnostic }, required_overlay.set.artifactDecision());
+}
+
+test "canonical SMT required mode blocks promoted rows when type support regresses" {
+    const unsupported_type_terms = [_]obligation.Term{
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 1, .pattern_id = 2 }, .name = "amount", .ty = .{ .spelling = "felt" } } } },
+        .{ .int_lit = .{ .value = "0", .ty = .{ .spelling = "u256" } } },
+        .{ .binary = .{ .op = .ge, .lhs = 0, .rhs = 1 } },
+    };
+    const missing_type_terms = [_]obligation.Term{
+        .{ .int_lit = .{ .value = "0", .ty = null } },
+        .{ .int_lit = .{ .value = "1", .ty = .{ .spelling = "u256" } } },
+        .{ .binary = .{ .op = .le, .lhs = 0, .rhs = 1 } },
+    };
+    const obligations = [_]obligation.Obligation{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "typed" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+        .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = 2 } } },
+    }};
+    const obligation_ids = [_]obligation.Id{1};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "typed" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .obligation,
+        .obligation_ids = &obligation_ids,
+        .canonical_smt_crosscheck_required = true,
+    }};
+    const rows = [_]z3_verification.PreparedQueryManifestRow{.{
+        .kind = .Obligation,
+        .function_name = "typed",
+        .file = "",
+        .line = 0,
+        .column = 0,
+        .constraint_count = 1,
+        .smtlib_hash = 0x9999,
+        .result_status = .unsat,
+        .formal_query_id = 2,
+        .formal_obligation_ids = &obligation_ids,
+        .formal_match_status = .matched,
+    }};
+
+    const unsupported_type_set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &unsupported_type_terms,
+    };
+    try std.testing.expectEqual(
+        obligation_to_z3.CanonicalPromotionShape.core_formula,
+        obligation_to_z3.queryCanonicalPromotionShape(unsupported_type_set, queries[0]).?,
+    );
+    try std.testing.expect(obligation_to_z3.queryCanonicalRequiredModePromoted(unsupported_type_set, queries[0]));
+    var unsupported_overlay = try overlayPreparedQueryResults(std.testing.allocator, unsupported_type_set, &rows);
+    defer unsupported_overlay.deinit();
+    try std.testing.expectEqual(@as(usize, 1), unsupported_overlay.set.diagnostics.len);
+    try std.testing.expectEqual(obligation.DiagnosticKind.canonical_z3_unavailable, unsupported_overlay.set.diagnostics[0].kind);
+    try std.testing.expect(unsupported_overlay.set.diagnostics[0].blocks_artifacts);
+    try std.testing.expectEqual(obligation.ArtifactDecision{ .blocked = .blocking_diagnostic }, unsupported_overlay.set.artifactDecision());
+
+    const missing_type_set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &missing_type_terms,
+    };
+    try std.testing.expectEqual(
+        obligation_to_z3.CanonicalPromotionShape.core_formula,
+        obligation_to_z3.queryCanonicalPromotionShape(missing_type_set, queries[0]).?,
+    );
+    try std.testing.expect(obligation_to_z3.queryCanonicalRequiredModePromoted(missing_type_set, queries[0]));
+    var missing_overlay = try overlayPreparedQueryResults(std.testing.allocator, missing_type_set, &rows);
+    defer missing_overlay.deinit();
+    try std.testing.expectEqual(@as(usize, 1), missing_overlay.set.diagnostics.len);
+    try std.testing.expectEqual(obligation.DiagnosticKind.canonical_z3_unavailable, missing_overlay.set.diagnostics[0].kind);
+    try std.testing.expect(missing_overlay.set.diagnostics[0].blocks_artifacts);
+    try std.testing.expectEqual(obligation.ArtifactDecision{ .blocked = .blocking_diagnostic }, missing_overlay.set.artifactDecision());
+}
+
+test "canonical SMT required mode is capped by promotion table exclusions" {
+    const amount_terms = [_]obligation.Term{
+        .{ .int_lit = .{ .value = "1", .ty = .{ .spelling = "u256" } } },
+    };
+    const resource_obligations = [_]obligation.Obligation{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "resource_lane" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "resource", .ordinal = 0 } },
+        .kind = .{ .resource = .{
+            .op = .move,
+            .domain = "Token",
+            .amount = .{ .term = 0 },
+            .property = .amount_non_negative,
+        } },
+    }};
+    const resource_obligation_ids = [_]obligation.Id{1};
+    const resource_queries = [_]obligation.VerificationQuery{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "resource_lane" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .obligation,
+        .obligation_ids = &resource_obligation_ids,
+        .canonical_smt_crosscheck_required = true,
+    }};
+    const resource_set: obligation.ObligationSet = .{
+        .obligations = &resource_obligations,
+        .queries = &resource_queries,
+        .terms = &amount_terms,
+    };
+    try std.testing.expectEqual(@as(?obligation_to_z3.CanonicalPromotionShape, null), obligation_to_z3.queryCanonicalPromotionShape(resource_set, resource_queries[0]));
+    try std.testing.expect(!obligation_to_z3.queryCanonicalRequiredModePromoted(resource_set, resource_queries[0]));
+    const resource_rows = [_]z3_verification.PreparedQueryManifestRow{.{
+        .kind = .Obligation,
+        .function_name = "resource_lane",
+        .file = "",
+        .line = 0,
+        .column = 0,
+        .constraint_count = 1,
+        .smtlib_hash = 0x1234,
+        .result_status = .unsat,
+        .formal_query_id = 2,
+        .formal_obligation_ids = &resource_obligation_ids,
+        .formal_match_status = .matched,
+    }};
+    var resource_overlay = try overlayPreparedQueryResults(std.testing.allocator, resource_set, &resource_rows);
+    defer resource_overlay.deinit();
+    try std.testing.expectEqual(@as(usize, 1), resource_overlay.set.diagnostics.len);
+    try std.testing.expectEqual(obligation.DiagnosticKind.canonical_z3_unavailable, resource_overlay.set.diagnostics[0].kind);
+    try std.testing.expect(!resource_overlay.set.diagnostics[0].blocks_artifacts);
+    try std.testing.expect(resource_overlay.set.artifactDecision().isAllowed());
+
+    const effect_obligations = [_]obligation.Obligation{.{
+        .id = 3,
+        .owner = .{ .function = .{ .name = "effect_lane" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "effect_frame", .ordinal = 0 } },
+        .kind = .{ .effect_frame = .{ .relation = .write_covered_by_modifies } },
+    }};
+    const effect_obligation_ids = [_]obligation.Id{3};
+    const effect_queries = [_]obligation.VerificationQuery{.{
+        .id = 4,
+        .owner = .{ .function = .{ .name = "effect_lane" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .obligation,
+        .obligation_ids = &effect_obligation_ids,
+        .canonical_smt_crosscheck_required = true,
+    }};
+    const effect_set: obligation.ObligationSet = .{
+        .obligations = &effect_obligations,
+        .queries = &effect_queries,
+    };
+    try std.testing.expectEqual(@as(?obligation_to_z3.CanonicalPromotionShape, null), obligation_to_z3.queryCanonicalPromotionShape(effect_set, effect_queries[0]));
+    try std.testing.expect(!obligation_to_z3.queryCanonicalRequiredModePromoted(effect_set, effect_queries[0]));
+    const effect_rows = [_]z3_verification.PreparedQueryManifestRow{.{
+        .kind = .Obligation,
+        .function_name = "effect_lane",
+        .file = "",
+        .line = 0,
+        .column = 0,
+        .constraint_count = 1,
+        .smtlib_hash = 0x5678,
+        .result_status = .unsat,
+        .formal_query_id = 4,
+        .formal_obligation_ids = &effect_obligation_ids,
+        .formal_match_status = .matched,
+    }};
+    var effect_overlay = try overlayPreparedQueryResults(std.testing.allocator, effect_set, &effect_rows);
+    defer effect_overlay.deinit();
+    try std.testing.expectEqual(@as(usize, 1), effect_overlay.set.diagnostics.len);
+    try std.testing.expectEqual(obligation.DiagnosticKind.canonical_z3_unavailable, effect_overlay.set.diagnostics[0].kind);
+    try std.testing.expect(!effect_overlay.set.diagnostics[0].blocks_artifacts);
+    try std.testing.expect(effect_overlay.set.artifactDecision().isAllowed());
 }

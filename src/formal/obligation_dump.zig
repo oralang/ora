@@ -210,7 +210,7 @@ const CanonicalZ3Coverage = struct {
         if (lean_supported) self.lean_supported +|= 1;
         if (canonical_supported) self.canonical_supported_total +|= 1;
         if (lean_supported and canonical_supported) self.canonical_supported_for_lean +|= 1;
-        if (query.canonical_smt_crosscheck_required) self.required +|= 1;
+        if (obligation_to_z3.queryCanonicalRequiredModePromoted(set, query)) self.required +|= 1;
     }
 
     fn ratioBasisPoints(self: CanonicalZ3Coverage) u32 {

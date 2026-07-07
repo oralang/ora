@@ -67,6 +67,31 @@ pub const CanonicalUnsupportedReason = enum(u8) {
     unsupported_compiler_type_id,
 };
 
+pub const CanonicalPromotionShape = enum(u8) {
+    core_formula,
+    result_term,
+    scalar_place_read,
+    old_scalar_place_read,
+    formula_combination,
+};
+
+pub const CanonicalPromotionPolicy = struct {
+    shape: CanonicalPromotionShape,
+    required_mode: bool,
+};
+
+// Required mode is currently two-key: the query row must explicitly request
+// canonical SMT crosscheck and its syntax must be present in this table. The
+// table is the audit surface for which shapes may block; the row flag is the
+// rollout switch for when production starts arming those shapes.
+pub const canonical_promotion_table = [_]CanonicalPromotionPolicy{
+    .{ .shape = .core_formula, .required_mode = true },
+    .{ .shape = .result_term, .required_mode = true },
+    .{ .shape = .scalar_place_read, .required_mode = true },
+    .{ .shape = .old_scalar_place_read, .required_mode = true },
+    .{ .shape = .formula_combination, .required_mode = true },
+};
+
 pub const EncodeError = std.mem.Allocator.Error || error{
     AmbiguousQuery,
     ExpectedBitVector,
@@ -139,6 +164,213 @@ pub fn queryCanonicalSupport(set: obligation.ObligationSet, query: obligation.Ve
 
     const target = findObligation(set, query.obligation_ids[0]) orelse return .{ .unsupported = .unknown_obligation };
     return kindCanonicalSupport(set, target.kind, set.terms.len + 1);
+}
+
+pub fn queryCanonicalPromotionShape(
+    set: obligation.ObligationSet,
+    query: obligation.VerificationQuery,
+) ?CanonicalPromotionShape {
+    if (query.kind != .obligation or query.obligation_ids.len != 1) return null;
+
+    var features: PromotionFeatures = .{};
+    for (query.assumption_ids) |assumption_id| {
+        const assumption = findAssumption(set, assumption_id) orelse return null;
+        const formula = assumption.formula orelse return null;
+        if (!collectFormulaPromotionFeatures(set, formula, set.terms.len + 1, &features)) return null;
+    }
+
+    const target = findObligation(set, query.obligation_ids[0]) orelse return null;
+    if (!collectKindPromotionFeatures(set, target.kind, set.terms.len + 1, &features)) return null;
+    return features.shape();
+}
+
+pub fn queryCanonicalRequiredModePromoted(
+    set: obligation.ObligationSet,
+    query: obligation.VerificationQuery,
+) bool {
+    if (!query.canonical_smt_crosscheck_required) return false;
+    const shape = queryCanonicalPromotionShape(set, query) orelse return false;
+    return canonicalPromotionShapeRequired(shape);
+}
+
+fn canonicalPromotionShapeRequired(shape: CanonicalPromotionShape) bool {
+    for (canonical_promotion_table) |row| {
+        if (row.shape == shape) return row.required_mode;
+    }
+    return false;
+}
+
+const PromotionFeatures = struct {
+    formula_count: u32 = 0,
+    result_terms: u32 = 0,
+    scalar_place_reads: u32 = 0,
+    old_scalar_place_reads: u32 = 0,
+    arithmetic_ops: u32 = 0,
+    connective_ops: u32 = 0,
+    refinement_ops: u32 = 0,
+
+    fn markFormula(self: *PromotionFeatures) void {
+        self.formula_count +|= 1;
+    }
+
+    fn shape(self: PromotionFeatures) ?CanonicalPromotionShape {
+        if (self.formula_count == 0) return null;
+
+        var atom_classes: u32 = 0;
+        if (self.result_terms > 0) atom_classes += 1;
+        if (self.scalar_place_reads > 0) atom_classes += 1;
+        if (self.old_scalar_place_reads > 0) atom_classes += 1;
+
+        if (self.formula_count > 1 or
+            self.arithmetic_ops > 0 or
+            self.connective_ops > 0 or
+            self.refinement_ops > 0 or
+            atom_classes > 1)
+        {
+            return .formula_combination;
+        }
+        if (self.old_scalar_place_reads > 0) return .old_scalar_place_read;
+        if (self.scalar_place_reads > 0) return .scalar_place_read;
+        if (self.result_terms > 0) return .result_term;
+        return .core_formula;
+    }
+};
+
+const PromotionValueContext = enum(u8) {
+    none,
+    value,
+};
+
+fn collectKindPromotionFeatures(
+    set: obligation.ObligationSet,
+    kind: obligation.Kind,
+    fuel: usize,
+    features: *PromotionFeatures,
+) bool {
+    return switch (kind) {
+        .logical => |logical| collectFormulaPromotionFeatures(set, logical.formula, fuel, features),
+        .runtime_guard => |guard| collectFormulaPromotionFeatures(set, guard.formula, fuel, features),
+        .resource,
+        .quantifier,
+        .type_wf,
+        .type_relation,
+        .region_relation,
+        .effect_frame,
+        .filtered_input,
+        .backend_fact,
+        => false,
+    };
+}
+
+fn collectFormulaPromotionFeatures(
+    set: obligation.ObligationSet,
+    formula: obligation.FormulaRef,
+    fuel: usize,
+    features: *PromotionFeatures,
+) bool {
+    features.markFormula();
+    return switch (formula) {
+        .term => |term_id| collectTermPromotionFeatures(set, term_id, fuel, .none, features),
+        .origin_value => false,
+    };
+}
+
+fn collectTermPromotionFeatures(
+    set: obligation.ObligationSet,
+    id: obligation.TermId,
+    fuel: usize,
+    value_context: PromotionValueContext,
+    features: *PromotionFeatures,
+) bool {
+    if (fuel == 0 or id >= set.terms.len) return false;
+    switch (set.terms[id]) {
+        .bool_lit => return true,
+        .int_lit => return true,
+        .variable => |variable| return switch (variable) {
+            .free => true,
+            .bound => false,
+        },
+        .old => |operand| {
+            if (operand >= set.terms.len) return false;
+            const place = switch (set.terms[operand]) {
+                .place_read => |place| place,
+                else => return false,
+            };
+            switch (placeReadCanonicalSupport(place)) {
+                .supported => {
+                    features.old_scalar_place_reads +|= 1;
+                    return true;
+                },
+                .unsupported => return false,
+            }
+        },
+        .result => {
+            if (value_context != .value) return false;
+            features.result_terms +|= 1;
+            return true;
+        },
+        .place_read => |place| switch (placeReadCanonicalSupport(place)) {
+            .supported => {
+                features.scalar_place_reads +|= 1;
+                return true;
+            },
+            .unsupported => return false,
+        },
+        .unary => |unary| {
+            const child_context: PromotionValueContext = switch (unary.op) {
+                .not => blk: {
+                    features.connective_ops +|= 1;
+                    break :blk .none;
+                },
+                .neg => .value,
+            };
+            return collectTermPromotionFeatures(set, unary.operand, fuel - 1, child_context, features);
+        },
+        .binary => |binary| {
+            const child_context: PromotionValueContext = switch (binary.op) {
+                .and_,
+                .or_,
+                .implies,
+                => .none,
+                else => .value,
+            };
+            switch (binary.op) {
+                .add,
+                .sub,
+                .mul,
+                .div,
+                .mod,
+                => features.arithmetic_ops +|= 1,
+                .and_,
+                .or_,
+                .implies,
+                => features.connective_ops +|= 1,
+                .eq,
+                .ne,
+                .lt,
+                .le,
+                .gt,
+                .ge,
+                .slt,
+                .sle,
+                .sgt,
+                .sge,
+                => {},
+            }
+            return collectTermPromotionFeatures(set, binary.lhs, fuel - 1, child_context, features) and
+                collectTermPromotionFeatures(set, binary.rhs, fuel - 1, child_context, features);
+        },
+        .refinement_predicate => |predicate| {
+            if (refinement_builtin_map.get(predicate.name) == null) return false;
+            features.refinement_ops +|= 1;
+            if (!collectTermPromotionFeatures(set, predicate.value, fuel - 1, .value, features)) return false;
+            for (predicate.args) |arg| {
+                if (!collectTermPromotionFeatures(set, arg, fuel - 1, .value, features)) return false;
+            }
+            return true;
+        },
+        .quantified => return false,
+    }
 }
 
 fn findAssumption(set: obligation.ObligationSet, id: obligation.Id) ?obligation.Assumption {
@@ -1239,6 +1471,7 @@ fn expectCanonicalHashSucceeds(
     };
 
     try expectCanonicalSupported(set, queries[0]);
+    _ = queryCanonicalPromotionShape(set, queries[0]) orelse return error.MissingCanonicalPromotionShape;
     var adapter = Adapter.init(context, std.testing.allocator, set);
     const hash = try adapter.queryHash(2);
     try std.testing.expect(hash.constraint_count > 0);
@@ -1274,6 +1507,19 @@ fn expectCanonicalHashUnsupported(
     };
 
     try expectCanonicalUnsupported(set, queries[0], expected);
+}
+
+test "canonical Z3 required promotion table covers every shape exactly once" {
+    const shape_count = std.meta.fields(CanonicalPromotionShape).len;
+    var seen: [shape_count]bool = .{false} ** shape_count;
+
+    for (canonical_promotion_table) |row| {
+        const index: usize = @intFromEnum(row.shape);
+        try std.testing.expect(index < shape_count);
+        try std.testing.expect(!seen[index]);
+        seen[index] = true;
+    }
+    for (seen) |item| try std.testing.expect(item);
 }
 
 test "canonical Z3 classifier matrix hashes every supported core formula shape" {
@@ -1357,6 +1603,18 @@ test "canonical Z3 classifier matrix hashes every supported core formula shape" 
         .{ .refinement_predicate = .{ .name = "InRange", .value = 0, .args = &refinement_args } },
     };
     try expectCanonicalHashSucceeds(&z3_ctx, &refinement_terms, 3);
+
+    const formula_combination_terms = [_]obligation.Term{
+        .{ .place_read = .{ .root = "balance", .region = .storage } },
+        .{ .old = 0 },
+        .result,
+        .{ .int_lit = .{ .value = "1", .ty = .{ .spelling = "u256" } } },
+        .{ .binary = .{ .op = .add, .lhs = 1, .rhs = 3, .ty = .{ .spelling = "u256" } } },
+        .{ .binary = .{ .op = .ge, .lhs = 2, .rhs = 4 } },
+        .{ .binary = .{ .op = .eq, .lhs = 0, .rhs = 1 } },
+        .{ .binary = .{ .op = .and_, .lhs = 5, .rhs = 6 } },
+    };
+    try expectCanonicalHashSucceeds(&z3_ctx, &formula_combination_terms, 7);
 }
 
 test "canonical Z3 classifier matrix names unsupported core formula shapes" {
