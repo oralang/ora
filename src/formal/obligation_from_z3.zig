@@ -51,6 +51,7 @@ pub fn collectPreparedQueries(
             .solver_logic = querySolverLogic(row.solver_logic),
             .constraint_count = row.constraint_count,
             .smtlib_hash = row.smtlib_hash,
+            .canonical_smt_annotation_pure = row.annotation_pure,
             .result = queryResult(row),
         });
     }
@@ -127,12 +128,13 @@ pub fn overlayPreparedQueryResults(
             merged_query.solver_logic = querySolverLogic(row.solver_logic);
             merged_query.constraint_count = row.constraint_count;
             merged_query.smtlib_hash = row.smtlib_hash;
+            merged_query.canonical_smt_annotation_pure = row.annotation_pure;
             merged_query.result = queryResult(row);
             try appendCanonicalSmtCrosscheckDiagnostic(
                 arena_allocator,
                 &diagnostics,
                 base,
-                query,
+                merged_query,
                 row,
                 &canonical_context,
             );
@@ -196,6 +198,7 @@ fn appendCanonicalSmtCrosscheckDiagnostic(
     canonical_context: *?z3_verification.Z3Context,
 ) !void {
     if (!queryEligibleForCanonicalSmtCrosscheck(query)) return;
+    if (!row.annotation_pure) return;
     switch (obligation_to_z3.queryCanonicalSupport(set, query)) {
         .supported => {},
         .unsupported => |reason| {
@@ -664,6 +667,7 @@ test "canonical SMT hash crosscheck accepts matching supported formula row" {
         .column = 0,
         .constraint_count = canonical.constraint_count,
         .smtlib_hash = canonical.smtlib_hash,
+        .annotation_pure = true,
         .result_status = .unknown,
         .formal_query_id = 3,
         .formal_assumption_ids = &assumption_ids,
@@ -722,6 +726,7 @@ test "canonical SMT hash crosscheck accepts storage old query when hash matches"
         .column = 0,
         .constraint_count = canonical.constraint_count,
         .smtlib_hash = canonical.smtlib_hash,
+        .annotation_pure = true,
         .result_status = .unknown,
         .formal_query_id = 2,
         .formal_obligation_ids = &obligation_ids,
@@ -790,6 +795,7 @@ test "canonical SMT hash crosscheck keeps formula combinations diagnostic-only" 
         .column = 0,
         .constraint_count = canonical.constraint_count,
         .smtlib_hash = canonical.smtlib_hash,
+        .annotation_pure = true,
         .result_status = .unknown,
         .formal_query_id = 2,
         .formal_obligation_ids = &obligation_ids,
@@ -811,6 +817,7 @@ test "canonical SMT hash crosscheck keeps formula combinations diagnostic-only" 
         .column = 0,
         .constraint_count = canonical.constraint_count,
         .smtlib_hash = canonical.smtlib_hash +% 1,
+        .annotation_pure = true,
         .result_status = .unsat,
         .formal_query_id = 2,
         .formal_obligation_ids = &obligation_ids,
@@ -875,6 +882,7 @@ test "canonical SMT hash mismatch blocks only when crosscheck is required" {
         .column = 0,
         .constraint_count = canonical.constraint_count,
         .smtlib_hash = wrong_hash,
+        .annotation_pure = true,
         .result_status = .unsat,
         .formal_query_id = 2,
         .formal_obligation_ids = &obligation_ids,
@@ -903,13 +911,75 @@ test "canonical SMT hash mismatch blocks only when crosscheck is required" {
         .queries = &required_queries,
         .terms = &terms,
     };
-    try std.testing.expect(obligation_to_z3.queryCanonicalRequiredModePromoted(required_set, required_queries[0]));
+    try std.testing.expect(!obligation_to_z3.queryCanonicalRequiredModePromoted(required_set, required_queries[0]));
     var required_overlay = try overlayPreparedQueryResults(std.testing.allocator, required_set, &rows);
     defer required_overlay.deinit();
+    try std.testing.expect(obligation_to_z3.queryCanonicalRequiredModePromoted(required_overlay.set, required_overlay.set.queries[0]));
     try std.testing.expectEqual(@as(usize, 1), required_overlay.set.diagnostics.len);
     try std.testing.expectEqual(obligation.DiagnosticKind.canonical_z3_mismatch, required_overlay.set.diagnostics[0].kind);
     try std.testing.expect(required_overlay.set.diagnostics[0].blocks_artifacts);
     try std.testing.expectEqual(obligation.ArtifactDecision{ .blocked = .blocking_diagnostic }, required_overlay.set.artifactDecision());
+}
+
+test "canonical SMT hash crosscheck skips non annotation pure rows" {
+    var z3_ctx = try z3_verification.Z3Context.init(std.testing.allocator);
+    defer z3_ctx.deinit();
+
+    const terms = [_]obligation.Term{
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 1, .pattern_id = 2 }, .name = "amount", .ty = .{ .spelling = "u256" } } } },
+        .{ .int_lit = .{ .value = "0", .ty = .{ .spelling = "u256" } } },
+        .{ .binary = .{ .op = .ge, .lhs = 0, .rhs = 1 } },
+    };
+    const obligations = [_]obligation.Obligation{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "checked" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+        .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = 2 } } },
+    }};
+    const obligation_ids = [_]obligation.Id{1};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "checked" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .obligation,
+        .obligation_ids = &obligation_ids,
+        .canonical_smt_crosscheck_required = true,
+    }};
+    const set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &terms,
+    };
+    try std.testing.expect(!obligation_to_z3.queryCanonicalRequiredModePromoted(set, queries[0]));
+
+    var adapter = obligation_to_z3.Adapter.init(&z3_ctx, std.testing.allocator, set);
+    const canonical = try adapter.queryHash(2);
+    const rows = [_]z3_verification.PreparedQueryManifestRow{.{
+        .kind = .Obligation,
+        .function_name = "checked",
+        .file = "",
+        .line = 0,
+        .column = 0,
+        .constraint_count = canonical.constraint_count,
+        .smtlib_hash = canonical.smtlib_hash +% 1,
+        .annotation_pure = false,
+        .result_status = .unsat,
+        .formal_query_id = 2,
+        .formal_obligation_ids = &obligation_ids,
+        .formal_match_status = .matched,
+    }};
+
+    var overlay = try overlayPreparedQueryResults(std.testing.allocator, set, &rows);
+    defer overlay.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), overlay.set.diagnostics.len);
+    try std.testing.expect(!overlay.set.queries[0].canonical_smt_annotation_pure);
+    try std.testing.expect(!obligation_to_z3.queryCanonicalRequiredModePromoted(overlay.set, overlay.set.queries[0]));
+    try std.testing.expect(overlay.set.artifactDecision().isAllowed());
 }
 
 test "canonical SMT required mode blocks promoted rows when type support regresses" {
@@ -950,6 +1020,7 @@ test "canonical SMT required mode blocks promoted rows when type support regress
         .column = 0,
         .constraint_count = 1,
         .smtlib_hash = 0x9999,
+        .annotation_pure = true,
         .result_status = .unsat,
         .formal_query_id = 2,
         .formal_obligation_ids = &obligation_ids,
@@ -965,9 +1036,10 @@ test "canonical SMT required mode blocks promoted rows when type support regress
         obligation_to_z3.CanonicalPromotionShape.core_formula,
         obligation_to_z3.queryCanonicalPromotionShape(unsupported_type_set, queries[0]).?,
     );
-    try std.testing.expect(obligation_to_z3.queryCanonicalRequiredModePromoted(unsupported_type_set, queries[0]));
+    try std.testing.expect(!obligation_to_z3.queryCanonicalRequiredModePromoted(unsupported_type_set, queries[0]));
     var unsupported_overlay = try overlayPreparedQueryResults(std.testing.allocator, unsupported_type_set, &rows);
     defer unsupported_overlay.deinit();
+    try std.testing.expect(obligation_to_z3.queryCanonicalRequiredModePromoted(unsupported_overlay.set, unsupported_overlay.set.queries[0]));
     try std.testing.expectEqual(@as(usize, 1), unsupported_overlay.set.diagnostics.len);
     try std.testing.expectEqual(obligation.DiagnosticKind.canonical_z3_unavailable, unsupported_overlay.set.diagnostics[0].kind);
     try std.testing.expect(unsupported_overlay.set.diagnostics[0].blocks_artifacts);
@@ -982,9 +1054,10 @@ test "canonical SMT required mode blocks promoted rows when type support regress
         obligation_to_z3.CanonicalPromotionShape.core_formula,
         obligation_to_z3.queryCanonicalPromotionShape(missing_type_set, queries[0]).?,
     );
-    try std.testing.expect(obligation_to_z3.queryCanonicalRequiredModePromoted(missing_type_set, queries[0]));
+    try std.testing.expect(!obligation_to_z3.queryCanonicalRequiredModePromoted(missing_type_set, queries[0]));
     var missing_overlay = try overlayPreparedQueryResults(std.testing.allocator, missing_type_set, &rows);
     defer missing_overlay.deinit();
+    try std.testing.expect(obligation_to_z3.queryCanonicalRequiredModePromoted(missing_overlay.set, missing_overlay.set.queries[0]));
     try std.testing.expectEqual(@as(usize, 1), missing_overlay.set.diagnostics.len);
     try std.testing.expectEqual(obligation.DiagnosticKind.canonical_z3_unavailable, missing_overlay.set.diagnostics[0].kind);
     try std.testing.expect(missing_overlay.set.diagnostics[0].blocks_artifacts);
@@ -1018,6 +1091,7 @@ test "canonical SMT required mode is capped by promotion table exclusions" {
         .kind = .obligation,
         .obligation_ids = &resource_obligation_ids,
         .canonical_smt_crosscheck_required = true,
+        .canonical_smt_annotation_pure = true,
     }};
     const resource_set: obligation.ObligationSet = .{
         .obligations = &resource_obligations,
@@ -1034,6 +1108,7 @@ test "canonical SMT required mode is capped by promotion table exclusions" {
         .column = 0,
         .constraint_count = 1,
         .smtlib_hash = 0x1234,
+        .annotation_pure = true,
         .result_status = .unsat,
         .formal_query_id = 2,
         .formal_obligation_ids = &resource_obligation_ids,
@@ -1064,6 +1139,7 @@ test "canonical SMT required mode is capped by promotion table exclusions" {
         .kind = .obligation,
         .obligation_ids = &effect_obligation_ids,
         .canonical_smt_crosscheck_required = true,
+        .canonical_smt_annotation_pure = true,
     }};
     const effect_set: obligation.ObligationSet = .{
         .obligations = &effect_obligations,
@@ -1079,6 +1155,7 @@ test "canonical SMT required mode is capped by promotion table exclusions" {
         .column = 0,
         .constraint_count = 1,
         .smtlib_hash = 0x5678,
+        .annotation_pure = true,
         .result_status = .unsat,
         .formal_query_id = 4,
         .formal_obligation_ids = &effect_obligation_ids,

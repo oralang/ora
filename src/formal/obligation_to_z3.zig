@@ -80,10 +80,11 @@ pub const CanonicalPromotionPolicy = struct {
     required_mode: bool,
 };
 
-// Required mode is currently two-key: the query row must explicitly request
-// canonical SMT crosscheck and its syntax must be present in this table. The
-// table is the audit surface for which shapes may block; the row flag is the
-// rollout switch for when production starts arming those shapes.
+// Required mode is currently three-key: the query row must explicitly request
+// canonical SMT crosscheck, the live prepared row must attest that it is
+// annotation-pure, and its syntax must be present in this table. The table is
+// the audit surface for which shapes may block; the row flag is the rollout
+// switch for when production starts arming those shapes.
 pub const canonical_promotion_table = [_]CanonicalPromotionPolicy{
     .{ .shape = .core_formula, .required_mode = true },
     .{ .shape = .result_term, .required_mode = true },
@@ -191,6 +192,7 @@ pub fn queryCanonicalRequiredModePromoted(
     query: obligation.VerificationQuery,
 ) bool {
     if (!query.canonical_smt_crosscheck_required) return false;
+    if (!query.canonical_smt_annotation_pure) return false;
     const shape = queryCanonicalPromotionShape(set, query) orelse return false;
     return canonicalPromotionShapeRequired(shape);
 }

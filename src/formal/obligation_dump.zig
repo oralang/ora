@@ -1040,6 +1040,7 @@ test "coverage summary reports canonical Z3 parity coverage" {
         .logical_role = .ensures,
         .obligation_ids = &ids,
         .canonical_smt_crosscheck_required = true,
+        .canonical_smt_annotation_pure = true,
     };
     const set: obligation.ObligationSet = .{
         .obligations = &.{item},

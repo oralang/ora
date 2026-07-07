@@ -3256,6 +3256,7 @@ pub const VerificationPass = struct {
                 .column = query.column,
                 .constraint_count = std.math.cast(u32, query.constraint_count) orelse std.math.maxInt(u32),
                 .smtlib_hash = query.smtlib_hash,
+                .annotation_pure = query.annotation_pure,
                 .references_loop_post_state = query.references_loop_post_state,
                 .formal_query_id = query.formal_query_id,
                 .formal_assumption_ids = try cloneU32SliceArena(arena_allocator, query.formal_assumption_ids),
@@ -4782,6 +4783,8 @@ pub const VerificationPass = struct {
             try writer.print(",\"smtlib_bytes\":{d}", .{query.smtlib_bytes});
             try writer.writeAll(",\"smtlib_hash\":");
             try writer.print("\"0x{x}\"", .{query.smtlib_hash});
+            try writer.writeAll(",\"annotation_pure\":");
+            try writer.writeAll(if (query.annotation_pure) "true" else "false");
             try writer.writeAll(",\"guard_id\":");
             if (query.guard_id) |guard_id| {
                 try writeJsonStringEscaped(writer, guard_id);
@@ -5093,6 +5096,12 @@ pub const VerificationPass = struct {
                     .{ fn_name, obligationKindLabel(ann.kind), obligation_log_suffix, obligation_tag },
                 );
                 const formal_identity = try formalIdentityForAnnotation(self, ann, .Obligation);
+                const annotation_pure = preparedObligationAnnotationPure(
+                    ann,
+                    assumption_annotations.items,
+                    obligation_constraints.items.len,
+                    global_contract_invariants.items.len,
+                );
                 try appendPreparedQueryUnique(&queries, self.allocator, .{
                     .kind = .Obligation,
                     .fragment = obligation_fragment,
@@ -5110,6 +5119,7 @@ pub const VerificationPass = struct {
                     .constraint_count = obligation_constraints.items.len,
                     .smtlib_bytes = obligation_smtlib.len,
                     .smtlib_hash = obligation_hash,
+                    .annotation_pure = annotation_pure,
                     .log_prefix = obligation_log_prefix,
                     .formal_query_id = formal_identity.formal_query_id,
                     .formal_assumption_ids = formal_identity.formal_assumption_ids,
@@ -6347,6 +6357,41 @@ fn formalIdentityForAnnotation(
     };
 }
 
+fn preparedObligationAnnotationPure(
+    ann: EncodedAnnotation,
+    assumption_annotations: []const EncodedAnnotation,
+    constraint_count: usize,
+    global_contract_invariant_count: usize,
+) bool {
+    if (ann.source_op == null) return false;
+    if (ann.imported_obligation_source != null) return false;
+    if (global_contract_invariant_count != 0) return false;
+    if (ann.extra_constraints.len != 0) return false;
+    if (ann.loop_owner != null) return false;
+    if (ann.path_constraints.len != 0) return false;
+    if (ann.loop_entry_extra_constraints.len != 0) return false;
+    if (ann.loop_step_condition != null) return false;
+    if (ann.loop_step_extra_constraints.len != 0) return false;
+    if (ann.loop_step_head_condition != null) return false;
+    if (ann.loop_step_head_extra_constraints.len != 0) return false;
+    if (ann.loop_step_body_condition != null) return false;
+    if (ann.loop_step_body_extra_constraints.len != 0) return false;
+    if (ann.loop_step_backedge_condition != null) return false;
+    if (ann.loop_step_backedge_extra_constraints.len != 0) return false;
+    if (ann.loop_step_body_obligations.len != 0) return false;
+    if (ann.loop_post_condition != null) return false;
+    if (ann.loop_post_extra_constraints.len != 0) return false;
+    if (ann.loop_exit_condition != null) return false;
+    if (ann.loop_exit_extra_constraints.len != 0) return false;
+    if (ann.loop_snapshot_value_bindings.len != 0) return false;
+    for (assumption_annotations) |assumption_ann| {
+        if (assumption_ann.extra_constraints.len != 0) return false;
+    }
+
+    const direct_surface_count = assumption_annotations.len + 1;
+    return constraint_count == direct_surface_count;
+}
+
 fn buildQueryMetadata(self: *VerificationPass, constraints: []const z3.Z3_ast) !struct { constraint_count: usize, smtlib_hash: u64 } {
     const built = try buildSmtlibForConstraints(
         self.allocator,
@@ -6955,6 +7000,7 @@ pub const PreparedQueryManifestRow = struct {
     column: u32,
     constraint_count: u32 = 0,
     smtlib_hash: u64 = 0,
+    annotation_pure: bool = false,
     references_loop_post_state: bool = false,
     result_status: ?QueryResultStatus = null,
     vacuous: bool = false,
@@ -7666,6 +7712,7 @@ const PreparedQuery = struct {
     constraint_count: usize = 0,
     smtlib_bytes: usize = 0,
     smtlib_hash: u64 = 0,
+    annotation_pure: bool = false,
     log_prefix: []const u8,
     formal_query_id: ?u32 = null,
     formal_assumption_ids: []const u32 = &.{},
@@ -7698,6 +7745,7 @@ fn preparedQueryEquivalent(lhs: PreparedQuery, rhs: PreparedQuery) bool {
     if (!std.mem.eql(u8, lhs.file, rhs.file)) return false;
     if (lhs.line != rhs.line or lhs.column != rhs.column) return false;
     if (lhs.smtlib_hash != rhs.smtlib_hash) return false;
+    if (lhs.annotation_pure != rhs.annotation_pure) return false;
     if (lhs.formal_query_id != rhs.formal_query_id) return false;
     if (lhs.formal_match_status != rhs.formal_match_status) return false;
     if (!std.mem.eql(u32, lhs.formal_assumption_ids, rhs.formal_assumption_ids)) return false;
@@ -13943,6 +13991,7 @@ test "prepared query manifest from report runs includes result metadata" {
         .column = 3,
         .constraint_count = 7,
         .smtlib_hash = 99,
+        .annotation_pure = true,
         .references_loop_post_state = true,
         .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
         .log_prefix = try testing.allocator.dupe(u8, "f [ensures]"),
@@ -13967,6 +14016,7 @@ test "prepared query manifest from report runs includes result metadata" {
     try testing.expect(manifest.rows[0].references_loop_post_state);
     try testing.expectEqual(@as(u32, 7), manifest.rows[0].constraint_count);
     try testing.expectEqual(@as(u64, 99), manifest.rows[0].smtlib_hash);
+    try testing.expect(manifest.rows[0].annotation_pure);
 }
 
 test "rendered SMT report json includes vacuous explain tags" {

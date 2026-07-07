@@ -14,7 +14,15 @@ import sys
 from collections import Counter, defaultdict
 
 
-COUNT_FIELDS = ("total", "live_rows", "matched", "mismatched", "unavailable", "no_live_row")
+COUNT_FIELDS = (
+    "total",
+    "live_rows",
+    "matched",
+    "mismatched",
+    "not_annotation_pure",
+    "unavailable",
+    "no_live_row",
+)
 
 
 def find_sources(root: Path) -> list[Path]:
@@ -106,7 +114,7 @@ def print_summary(aggregate: dict) -> None:
     print()
 
     print("per-shape counts")
-    print("  shape                       total  live  match  mismatch  unavailable  no_live")
+    print("  shape                       total  live  match  mismatch  nonpure  unavailable  no_live")
     for shape in sorted(aggregate["shapes"]):
         counts = aggregate["shapes"][shape]
         if not any(counts.values()):
@@ -114,6 +122,7 @@ def print_summary(aggregate: dict) -> None:
         print(
             f"  {shape:<27} {counts['total']:>5} {counts['live_rows']:>5} "
             f"{counts['matched']:>6} {counts['mismatched']:>9} "
+            f"{counts['not_annotation_pure']:>8} "
             f"{counts['unavailable']:>11} {counts['no_live_row']:>8}"
         )
 

@@ -266,6 +266,7 @@ pub const VerificationQuery = struct {
     constraint_count: u32 = 0,
     smtlib_hash: ?u64 = null,
     canonical_smt_crosscheck_required: bool = false,
+    canonical_smt_annotation_pure: bool = false,
     proof_artifact_id: ?Id = null,
     discharges_query_id: ?Id = null,
     result: ?VerificationQueryResult = null,

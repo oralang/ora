@@ -17,6 +17,7 @@ const Bucket = struct {
     live_rows: u32 = 0,
     matched: u32 = 0,
     mismatched: u32 = 0,
+    not_annotation_pure: u32 = 0,
     unavailable: u32 = 0,
     no_live_row: u32 = 0,
 };
@@ -27,6 +28,7 @@ const Summary = struct {
     live_rows: u32 = 0,
     matched: u32 = 0,
     mismatched: u32 = 0,
+    not_annotation_pure: u32 = 0,
     unavailable: u32 = 0,
     no_live_row: u32 = 0,
     required: u32 = 0,
@@ -100,20 +102,21 @@ fn writeJsonString(writer: anytype, value: []const u8) !void {
 
 fn writeBucket(writer: anytype, bucket: Bucket) !void {
     try writer.print(
-        "{{\"total\":{d},\"live_rows\":{d},\"matched\":{d},\"mismatched\":{d},\"unavailable\":{d},\"no_live_row\":{d}}}",
-        .{ bucket.total, bucket.live_rows, bucket.matched, bucket.mismatched, bucket.unavailable, bucket.no_live_row },
+        "{{\"total\":{d},\"live_rows\":{d},\"matched\":{d},\"mismatched\":{d},\"not_annotation_pure\":{d},\"unavailable\":{d},\"no_live_row\":{d}}}",
+        .{ bucket.total, bucket.live_rows, bucket.matched, bucket.mismatched, bucket.not_annotation_pure, bucket.unavailable, bucket.no_live_row },
     );
 }
 
 fn writeSummary(writer: anytype, summary: Summary) !void {
     try writer.print(
-        "{{\"queries\":{d},\"promoted\":{d},\"live_rows\":{d},\"matched\":{d},\"mismatched\":{d},\"unavailable\":{d},\"no_live_row\":{d},\"required\":{d}}}",
+        "{{\"queries\":{d},\"promoted\":{d},\"live_rows\":{d},\"matched\":{d},\"mismatched\":{d},\"not_annotation_pure\":{d},\"unavailable\":{d},\"no_live_row\":{d},\"required\":{d}}}",
         .{
             summary.queries,
             summary.promoted,
             summary.live_rows,
             summary.matched,
             summary.mismatched,
+            summary.not_annotation_pure,
             summary.unavailable,
             summary.no_live_row,
             summary.required,
@@ -137,6 +140,15 @@ fn bumpNoLiveRow(
 ) void {
     summary.no_live_row +|= 1;
     buckets[bucketIndex(shape)].no_live_row +|= 1;
+}
+
+fn bumpNotAnnotationPure(
+    summary: *Summary,
+    buckets: *[shape_count + 1]Bucket,
+    shape: ?obligation_to_z3.CanonicalPromotionShape,
+) void {
+    summary.not_annotation_pure +|= 1;
+    buckets[bucketIndex(shape)].not_annotation_pure +|= 1;
 }
 
 pub fn writeJson(
@@ -186,6 +198,10 @@ pub fn writeJson(
                     outcome = "no_live_row";
                     reason = "missing_live_prepared_row";
                     bumpNoLiveRow(&summary, &buckets, shape);
+                } else if (!query.canonical_smt_annotation_pure) {
+                    outcome = "not_annotation_pure";
+                    reason = "live_row_has_ambient_context";
+                    bumpNotAnnotationPure(&summary, &buckets, shape);
                 } else {
                     if (canonical_context == null) {
                         canonical_context = try z3_verification.Z3Context.init(allocator);
@@ -295,6 +311,8 @@ fn writeQueryRecord(
     try writeJsonString(writer, shapeName(shape));
     try writer.print(",\"required\":{},\"outcome\":", .{required});
     try writeJsonString(writer, outcome);
+    try writer.writeAll(",\"annotation_pure\":");
+    try writer.writeAll(if (query.canonical_smt_annotation_pure) "true" else "false");
     try writer.writeAll(",\"reason\":");
     if (reason) |value| {
         try writeJsonString(writer, value);
@@ -333,4 +351,47 @@ test "canonical Z3 measurement writes empty report" {
     try std.testing.expect(std.mem.indexOf(u8, actual, "\"schema\":\"ora.canonical_z3.measure.v1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, actual, "\"queries\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, actual, "\"unpromoted\"") != null);
+}
+
+test "canonical Z3 measurement reports non annotation pure live rows" {
+    const terms = [_]obligation.Term{
+        .{ .bool_lit = true },
+    };
+    const obligations = [_]obligation.Obligation{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "checked" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+        .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = 0 } } },
+    }};
+    const obligation_ids = [_]obligation.Id{1};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "checked" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .obligation,
+        .obligation_ids = &obligation_ids,
+        .constraint_count = 1,
+        .smtlib_hash = 0x1234,
+        .canonical_smt_annotation_pure = false,
+    }};
+    const set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &terms,
+    };
+
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+
+    try writeJson(&out.writer, std.testing.allocator, "checked.ora", set);
+    const actual = try out.toOwnedSlice();
+    defer std.testing.allocator.free(actual);
+
+    try std.testing.expect(std.mem.indexOf(u8, actual, "\"outcome\":\"not_annotation_pure\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, actual, "\"reason\":\"live_row_has_ambient_context\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, actual, "\"not_annotation_pure\":1") != null);
 }
