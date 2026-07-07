@@ -328,6 +328,84 @@ def decodeResource : RawResource → Option ResourceGoal
           }
       | _, _, _, _ => none
 
+/-! ## Decoder tag pins
+
+Each string-enum decoder above is a hand-written mirror of the Zig emitter's
+name tables (`emit_obligation_totality_snapshot.zig`). A tag swap in a decoder
+(e.g. decoding "sle" as `.slt`) keeps every fixture denotable, so the totality
+theorem alone cannot catch it. These theorems pin the FULL decode tables by
+kernel `decide`; the Zig emit side is pinned by exhaustive switches over the
+enums. A rename on either side must update both, or the sync gate goes red. -/
+
+theorem unary_op_decode_pins :
+    ["not", "neg"].map decodeUnaryOp = [some .not_, some .neg] := by decide
+
+theorem binary_op_decode_pins :
+    ["eq", "ne", "lt", "le", "gt", "ge", "slt", "sle", "sgt", "sge",
+     "add", "sub", "mul", "div", "mod", "and", "or", "implies"].map decodeBinaryOp =
+      [some .eq, some .ne, some .lt, some .le, some .gt, some .ge,
+       some .slt, some .sle, some .sgt, some .sge,
+       some .add, some .sub, some .mul, some .div, some .mod_,
+       some .and_, some .or_, some .implies] := by decide
+
+theorem quantifier_decode_pins :
+    ["forall", "exists"].map decodeQuantifier = [some .forall_, some .exists_] := by decide
+
+theorem region_decode_pins :
+    ["none", "storage", "memory", "transient", "calldata"].map decodeRegion =
+      [some .none, some .storage, some .memory, some .transient, some .calldata] := by decide
+
+theorem assumption_kind_decode_pins :
+    ["requires", "assume", "path_assume", "env_assume", "binding",
+     "two_state_linkage", "frame", "loop_invariant", "callee_obligation",
+     "callee_ensures", "ghost_axiom", "goal"].map decodeAssumptionKind =
+      [some .requires, some .assume, some .pathAssume, some .envAssume, some .binding,
+       some .twoStateLinkage, some .frame, some .loopInvariant, some .calleeObligation,
+       some .calleeEnsures, some .ghostAxiom, some .goal] := by decide
+
+theorem effect_relation_decode_pins :
+    ["write_covered_by_modifies", "read_preserved_by_frame",
+     "read_preserved_by_key_evidence", "lock_covers_write",
+     "external_call_frame"].map decodeEffectRelation =
+      [some .writeCoveredByModifies, some .readPreservedByFrame,
+       some .readPreservedByKeyEvidence, some .lockCoversWrite,
+       some .externalCallFrame] := by decide
+
+theorem evidence_kind_decode_pins :
+    ["free_var_disequality"].map decodeEvidenceKind = [some .freeVarDisequality] := by decide
+
+theorem resource_operation_decode_pins :
+    ["move", "create", "destroy"].map decodeResourceOperation =
+      [some .move, some .create, some .destroy] := by decide
+
+theorem resource_property_decode_pins :
+    ["amount_non_negative", "source_sufficient", "destination_no_overflow",
+     "same_place_identity", "conservation"].map decodeResourceProperty =
+      [some .amountNonNegative, some .sourceSufficient, some .destinationNoOverflow,
+       some .samePlaceIdentity, some .conservation] := by decide
+
+theorem place_key_tag_decode_pins :
+    [decodeKey ("parameter", "file:1:pattern:2"),
+     decodeKey ("comptime_parameter", "3"),
+     decodeKey ("comptime_range_parameter", "4"),
+     decodeKey ("constant", "42"),
+     decodeKey ("msg_sender", ""),
+     decodeKey ("tx_origin", ""),
+     decodeKey ("unknown", "")] =
+      [some (.parameter { file_id := 1, pattern_id := 2 }),
+       some (.comptimeParameter 3),
+       some (.comptimeRangeParameter 4),
+       some (.constant "42"),
+       some .msgSender,
+       some .txOrigin,
+       some .unknown] := by decide
+
+theorem ty_spelling_decode_pins :
+    ["bool", "i1", "u256", "uint256", "i256", "int256", "compiler:12", ""].map decodeTy? =
+      [some (.spelling "bool"), some (.spelling "i1"), some (.spelling "u256"),
+       some (.spelling "uint256"), some (.spelling "i256"), some (.spelling "int256"),
+       some (.compilerTypeId 12), none] := by decide
+
 def valueForTy? : Option TyRef → Value
   | some ty => if ty.isBool then .bool true else .u256 (BitVec.ofNat 256 0)
   | none => .u256 (BitVec.ofNat 256 0)

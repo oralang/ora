@@ -36,6 +36,21 @@ def bindFreeVarsFromTerm (env : Env) : Term → Env
   | .variable (.free free) => env.setFree free.id (valueForTy? free.ty)
   | _ => env
 
+/--
+Witness environment for denotability checks.
+
+Correctness invariant: `denoteFormula?`/`obligationDenotesInEnv?` return `none`
+only for structural reasons (unknown ids, unsupported shapes, type mismatches,
+unbound free variables) — never because of the *values* an environment assigns.
+So "denotes in one total environment" is equivalent to "denotes in every
+environment", PROVIDED the environment binds every free variable that can
+appear. The fold below provides exactly that totality: the manifest's terms are
+a flat arena, so any free variable referenced anywhere appears as a term row
+and gets bound. The concrete values (true / zero) are arbitrary witnesses;
+within the supported u256/bool fragment they are also well-typed. This env must
+never be used to prove value-level facts — query semantics remain quantified
+over all environments.
+-/
 def canonicalEnv (manifest : Manifest) : Env :=
   { manifest.terms.foldl bindFreeVarsFromTerm Env.empty with
     result := some (.u256 (BitVec.ofNat 256 0)) }

@@ -331,7 +331,22 @@ fn queryResult(row: z3_verification.PreparedQueryManifestRow) ?obligation.Verifi
 fn logicalRole(kind: ?z3_verification.AnnotationKind) ?obligation.LogicalRole {
     const annotation = kind orelse return null;
     const label = z3_verification.formalLogicalRoleLabel(annotation) orelse return null;
-    return std.meta.stringToEnum(obligation.LogicalRole, label) orelse unreachable;
+    // An unknown label degrades to role-absent, which every caller treats as
+    // fail-closed (row unmatched). The vocabulary lockstep is enforced loudly
+    // by the pin test below, not by UB here.
+    return std.meta.stringToEnum(obligation.LogicalRole, label);
+}
+
+test "formal logical role labels stay in lockstep with the obligation vocabulary" {
+    inline for (std.meta.fields(z3_verification.AnnotationKind)) |field| {
+        const kind: z3_verification.AnnotationKind = @enumFromInt(field.value);
+        if (z3_verification.formalLogicalRoleLabel(kind)) |label| {
+            if (std.meta.stringToEnum(obligation.LogicalRole, label) == null) {
+                std.debug.print("annotation kind {s} produces label '{s}' with no obligation.LogicalRole member\n", .{ field.name, label });
+                return error.LogicalRoleVocabularyDrift;
+            }
+        }
+    }
 }
 
 fn queryMatchesPreparedRow(query: obligation.VerificationQuery, row: z3_verification.PreparedQueryManifestRow) bool {
