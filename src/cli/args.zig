@@ -34,6 +34,7 @@ pub const CliOptions = struct {
     minimize_cores: bool = false,
     keep_proved_checks: bool = false,
     lean_proofs_path: ?[]const u8 = null,
+    measure_canonical_z3: bool = false,
     emit_smt_report: bool = false,
     mlir_pass_pipeline: ?[]const u8 = null,
     mlir_verify_each_pass: bool = false,
@@ -181,6 +182,7 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
     var seen_minimize_cores = false;
     var seen_keep_proved_checks = false;
     var seen_lean_proofs = false;
+    var seen_measure_canonical_z3 = false;
     var seen_mlir_debug = false;
     var seen_mlir_pass_pipeline = false;
     var seen_mlir_run_sir_framework_canonicalizer = false;
@@ -284,6 +286,10 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             try claim(&seen_lean_proofs);
             opts.lean_proofs_path = arg["--lean-proofs=".len..];
             if (opts.lean_proofs_path.?.len == 0) return error.MissingArgument;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--measure-canonical-z3")) {
+            try claim(&seen_measure_canonical_z3);
+            opts.measure_canonical_z3 = true;
             i += 1;
         } else if (std.mem.eql(u8, arg, "--mlir-debug")) {
             try claim(&seen_mlir_debug);
@@ -429,6 +435,13 @@ test "parse lean proofs path" {
     const args_eq = [_][]const u8{ "--lean-proofs=proofs.json", "input.ora" };
     const parsed_eq = try parseArgs(args_eq[0..]);
     try std.testing.expectEqualStrings("proofs.json", parsed_eq.lean_proofs_path.?);
+}
+
+test "parse canonical Z3 measurement flag" {
+    const args = [_][]const u8{ "--measure-canonical-z3", "input.ora" };
+    const parsed = try parseArgs(args[0..]);
+    try std.testing.expect(parsed.measure_canonical_z3);
+    try std.testing.expectEqualStrings("input.ora", parsed.input_file.?);
 }
 
 test "parse lean proofs rejects missing and duplicate paths" {

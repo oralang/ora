@@ -89,7 +89,9 @@ pub const canonical_promotion_table = [_]CanonicalPromotionPolicy{
     .{ .shape = .result_term, .required_mode = true },
     .{ .shape = .scalar_place_read, .required_mode = true },
     .{ .shape = .old_scalar_place_read, .required_mode = true },
-    .{ .shape = .formula_combination, .required_mode = true },
+    // Full-corpus measurement showed formula combinations often lack live rows;
+    // promoted mismatches still need diagnosis before this shape can block.
+    .{ .shape = .formula_combination, .required_mode = false },
 };
 
 pub const EncodeError = std.mem.Allocator.Error || error{

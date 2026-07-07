@@ -26,6 +26,7 @@ const formal_obligation = @import("formal/obligation.zig");
 const formal_obligation_from_mlir = @import("formal/obligation_from_mlir.zig");
 const formal_obligation_from_z3 = @import("formal/obligation_from_z3.zig");
 const formal_obligation_to_lean = @import("formal/obligation_to_lean.zig");
+const formal_canonical_z3_measure = @import("formal/canonical_z3_measure.zig");
 const Metrics = lib.metrics.Metrics;
 const allocation_stats = lib.lsp.allocation_stats;
 const ManagedArrayList = std.array_list.Managed;
@@ -57,6 +58,7 @@ const MlirOptions = struct {
     minimize_cores: bool = false,
     keep_proved_checks: bool = false,
     lean_proofs_path: ?[]const u8 = null,
+    measure_canonical_z3: bool = false,
     emit_smt_report: bool = false,
     mlir_pass_pipeline: ?[]const u8 = null,
     mlir_verify_each_pass: bool = false,
@@ -688,6 +690,7 @@ pub fn main(init: std.process.Init) !void {
     const minimize_cores: bool = parsed.minimize_cores;
     const keep_proved_checks: bool = parsed.keep_proved_checks;
     const lean_proofs_path: ?[]const u8 = parsed.lean_proofs_path;
+    const measure_canonical_z3: bool = parsed.measure_canonical_z3;
     const emit_smt_report: bool = parsed.emit_smt_report;
     const mlir_pass_pipeline: ?[]const u8 = parsed.mlir_pass_pipeline;
     const mlir_verify_each_pass: bool = parsed.mlir_verify_each_pass;
@@ -794,6 +797,11 @@ pub fn main(init: std.process.Init) !void {
         exitCli(2);
     }
 
+    if (measure_canonical_z3 and !verify_z3) {
+        std.debug.print("error: --measure-canonical-z3 requires SMT verification; remove --no-verify.\n", .{});
+        exitCli(2);
+    }
+
     if (command_kind == .Debug and parsed.input_file == null) {
         std.debug.print("error: debug requires an input file.\n", .{});
         exitCli(2);
@@ -846,6 +854,7 @@ pub fn main(init: std.process.Init) !void {
         .minimize_cores = minimize_cores,
         .keep_proved_checks = keep_proved_checks,
         .lean_proofs_path = lean_proofs_path,
+        .measure_canonical_z3 = measure_canonical_z3,
         .emit_smt_report = emit_smt_report,
         .mlir_pass_pipeline = mlir_pass_pipeline,
         .mlir_verify_each_pass = mlir_verify_each_pass,
@@ -1330,7 +1339,7 @@ fn invalidateBuildArtifactOutputs(
     try deleteStemArtifactFilesWithSuffixesIfExists(allocator, bin_dir, stem, &bin_suffixes);
     const sir_suffixes = [_][]const u8{".sir"};
     try deleteStemArtifactFilesWithSuffixesIfExists(allocator, sir_dir, stem, &sir_suffixes);
-    const verify_suffixes = [_][]const u8{ ".smt.report.md", ".smt.report.json", ".proof.json", ".lean.proof.json" };
+    const verify_suffixes = [_][]const u8{ ".smt.report.md", ".smt.report.json", ".proof.json", ".lean.proof.json", ".canonical-z3.measure.json" };
     try deleteStemArtifactFilesWithSuffixesIfExists(allocator, verify_dir, stem, &verify_suffixes);
     const mlir_suffixes = [_][]const u8{ ".ora.mlir", ".sir.mlir" };
     try deleteStemArtifactFilesWithSuffixesIfExists(allocator, mlir_dir, stem, &mlir_suffixes);
@@ -1496,6 +1505,10 @@ fn runBuildArtifacts(
     const lean_obligations_file = try std.fmt.allocPrint(allocator, "{s}.lean.obligations.lean", .{stem});
     defer allocator.free(lean_obligations_file);
     try moveArtifactFileIfExists(allocator, staging_root, lean_obligations_file, verify_dir);
+
+    const canonical_z3_measure_file = try std.fmt.allocPrint(allocator, "{s}.canonical-z3.measure.json", .{stem});
+    defer allocator.free(canonical_z3_measure_file);
+    try moveArtifactFileIfExists(allocator, staging_root, canonical_z3_measure_file, verify_dir);
 
     if (verification_failed) {
         return error.VerificationFailed;
@@ -2491,6 +2504,7 @@ fn printUsage(io: std.Io) !void {
     try stdout.print("  --z3-proofs            - Emit raw Z3 proof objects in SMT reports/debug output (slower)\n", .{});
     try stdout.print("  --keep-proved-checks   - Keep SMT-proved guards/requires/ensures/invariants as runtime checks (falsification harness)\n", .{});
     try stdout.print("  --lean-proofs <file>   - Check userland Lean proof rows for Z3-unknown obligations; unblocks artifacts only\n", .{});
+    try stdout.print("  --measure-canonical-z3 - Emit canonical-vs-live SMT hash measurement JSON\n", .{});
     try stdout.print("  --minimize-cores       - Greedily minimize explain-mode unsat cores; implies --explain\n", .{});
     try stdout.print("  --debug                - Enable compiler debug output\n", .{});
     try stdout.print("  --debug-info           - Preserve source-stable lowering for debugger artifacts\n", .{});
@@ -4960,13 +4974,14 @@ fn runMlirEmitAdvanced(
         }
 
         const needs_lean_proof_gate = mlir_options.lean_proofs_path != null;
+        const needs_formal_smt_context = needs_lean_proof_gate or mlir_options.measure_canonical_z3;
         const needs_unknown_recipe = !verification_result.success and hasUnknownVerificationError(&verification_result);
-        if (needs_lean_proof_gate) {
+        if (needs_formal_smt_context) {
             formal_result_for_smt_report = try formal_obligation_from_mlir.collect(allocator, final_module, .{});
             z3_formal_query_bindings = try z3FormalQueryBindingsFromFormal(allocator, formal_result_for_smt_report.?.query_bindings);
             verifier.setFormalQueryBindings(z3_formal_query_bindings);
         }
-        if (mlir_options.emit_smt_report or needs_lean_proof_gate or needs_unknown_recipe) {
+        if (mlir_options.emit_smt_report or needs_formal_smt_context or needs_unknown_recipe) {
             pending_smt_report = try verifier.buildSmtReport(final_module, file_path, &verification_result);
             pending_smt_report_write_artifacts = mlir_options.emit_smt_report or needs_lean_proof_gate;
             if (pending_smt_report) |report| {
@@ -5046,6 +5061,19 @@ fn runMlirEmitAdvanced(
 
     if (verification_failed) {
         if (pending_smt_report) |*report| {
+            if (mlir_options.measure_canonical_z3) {
+                if (formal_result_for_smt_report) |*formal_result| {
+                    try writeCanonicalZ3MeasurementArtifact(
+                        allocator,
+                        file_path,
+                        mlir_options.output_dir,
+                        formal_result,
+                        report.*,
+                        stdout,
+                        mlir_options.suppress_artifact_logs,
+                    );
+                }
+            }
             if (pending_smt_report_write_artifacts) {
                 try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
             }
@@ -5351,6 +5379,19 @@ fn runMlirEmitAdvanced(
     }
 
     if (pending_smt_report) |*report| {
+        if (mlir_options.measure_canonical_z3) {
+            if (formal_result_for_smt_report) |*formal_result| {
+                try writeCanonicalZ3MeasurementArtifact(
+                    allocator,
+                    file_path,
+                    mlir_options.output_dir,
+                    formal_result,
+                    report.*,
+                    stdout,
+                    mlir_options.suppress_artifact_logs,
+                );
+            }
+        }
         if (pending_smt_report_write_artifacts) {
             try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
         }
@@ -5759,6 +5800,53 @@ fn writeSmtReportArtifacts(
     if (!suppress_log) {
         try stdout.print("SMT report saved to {s}\n", .{md_path});
         try stdout.print("SMT report JSON saved to {s}\n", .{json_path});
+    }
+}
+
+fn writeCanonicalZ3MeasurementArtifact(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    output_dir: ?[]const u8,
+    formal_result: *const formal_obligation_from_mlir.CollectResult,
+    report: z3_verification.SmtReportArtifacts,
+    stdout: anytype,
+    suppress_log: bool,
+) !void {
+    const query_manifest = report.query_manifest orelse return error.MissingPreparedQueryManifest;
+
+    var overlay = try formal_obligation_from_z3.overlayPreparedQueryResults(
+        allocator,
+        formal_result.set,
+        query_manifest.rows,
+    );
+    defer overlay.deinit();
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+    try formal_canonical_z3_measure.writeJson(&out.writer, allocator, file_path, overlay.set);
+    const json = try out.toOwnedSlice();
+    defer allocator.free(json);
+
+    const base_name = std.fs.path.stem(file_path);
+    const filename = try std.fmt.allocPrint(allocator, "{s}.canonical-z3.measure.json", .{base_name});
+    defer allocator.free(filename);
+
+    var path_buf: ?[]u8 = null;
+    defer if (path_buf) |buf| allocator.free(buf);
+
+    const path = if (output_dir) |dir| blk: {
+        try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), dir);
+        path_buf = try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
+        break :blk path_buf.?;
+    } else filename;
+
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = path,
+        .data = json,
+    });
+
+    if (!suppress_log) {
+        try stdout.print("Canonical Z3 measurement saved to {s}\n", .{path});
     }
 }
 

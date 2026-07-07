@@ -736,7 +736,7 @@ test "canonical SMT hash crosscheck accepts storage old query when hash matches"
     try std.testing.expectEqual(canonical.smtlib_hash, overlay.set.queries[0].smtlib_hash.?);
 }
 
-test "canonical SMT hash crosscheck accepts formula combination row when hash matches" {
+test "canonical SMT hash crosscheck keeps formula combinations diagnostic-only" {
     var z3_ctx = try z3_verification.Z3Context.init(std.testing.allocator);
     defer z3_ctx.deinit();
 
@@ -778,7 +778,7 @@ test "canonical SMT hash crosscheck accepts formula combination row when hash ma
         obligation_to_z3.CanonicalPromotionShape.formula_combination,
         obligation_to_z3.queryCanonicalPromotionShape(set, queries[0]).?,
     );
-    try std.testing.expect(obligation_to_z3.queryCanonicalRequiredModePromoted(set, queries[0]));
+    try std.testing.expect(!obligation_to_z3.queryCanonicalRequiredModePromoted(set, queries[0]));
 
     var adapter = obligation_to_z3.Adapter.init(&z3_ctx, std.testing.allocator, set);
     const canonical = try adapter.queryHash(2);
@@ -802,6 +802,28 @@ test "canonical SMT hash crosscheck accepts formula combination row when hash ma
     try std.testing.expectEqual(@as(usize, 0), overlay.set.diagnostics.len);
     try std.testing.expectEqual(canonical.constraint_count, overlay.set.queries[0].constraint_count);
     try std.testing.expectEqual(canonical.smtlib_hash, overlay.set.queries[0].smtlib_hash.?);
+
+    const mismatch_rows = [_]z3_verification.PreparedQueryManifestRow{.{
+        .kind = .Obligation,
+        .function_name = "combined",
+        .file = "",
+        .line = 0,
+        .column = 0,
+        .constraint_count = canonical.constraint_count,
+        .smtlib_hash = canonical.smtlib_hash +% 1,
+        .result_status = .unsat,
+        .formal_query_id = 2,
+        .formal_obligation_ids = &obligation_ids,
+        .formal_match_status = .matched,
+    }};
+
+    var mismatch_overlay = try overlayPreparedQueryResults(std.testing.allocator, set, &mismatch_rows);
+    defer mismatch_overlay.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), mismatch_overlay.set.diagnostics.len);
+    try std.testing.expectEqual(obligation.DiagnosticKind.canonical_z3_mismatch, mismatch_overlay.set.diagnostics[0].kind);
+    try std.testing.expect(!mismatch_overlay.set.diagnostics[0].blocks_artifacts);
+    try std.testing.expect(mismatch_overlay.set.artifactDecision().isAllowed());
 }
 
 test "canonical SMT hash mismatch blocks only when crosscheck is required" {
