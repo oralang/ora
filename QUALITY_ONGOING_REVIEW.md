@@ -61,14 +61,14 @@ blocked on submodules).
 
 ## Structural — schedule as its own slice, design note first
 
-- [ ] **Q5 (the strategic one)** `obligation_to_z3.zig`: five hand-synchronized
+- [x] **Q5 (FIXED 715c32b8)** `obligation_to_z3.zig`: five hand-synchronized
   term-tree walkers (`termCanonicalSupport` ~490, `collectTermPromotionFeatures`
   ~342, `termContainsResult` ~587, `staticTermTypeInfo` ~664,
   `Adapter.encodeTerm` ~1070) — same ten-variant switch, same fuel guard, five
   coordinated edits per new `Term` variant. Centralize guard + variant dispatch
-  behind one visitor seam. **No new walker-growing slice starts in this file
-  until this lands.** Mini design note first (visitor shape, per-walker leaf
-  logic stays).
+  behind one visitor seam. Fixed by a single exhaustive dispatcher with
+  `@hasDecl`/`visitDefault` visitor defaults and shared fuel-bounded recursion;
+  the `obligation_to_z3.zig` walker-growth freeze is lifted.
 - [ ] **Q6** After Q5: split the file (2631 lines, four responsibilities) into
   canonical_support / canonical_encode / canonical_types, tests following each.
 
