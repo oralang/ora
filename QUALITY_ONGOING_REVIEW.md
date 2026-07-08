@@ -77,32 +77,32 @@ blocked on submodules).
 
 ## Cleanup batch — one commit, no design needed
 
-- [ ] **Q7** Generic `findById(slice, id)` in `obligation.zig` — six duplicated
+- [x] **Q7 (FIXED e2f41b72)** Generic `findById(slice, id)` in `obligation.zig` — six duplicated
   linear scans (`obligation_to_z3.zig:448,455,965,972,979`;
   `obligation_from_z3.zig:189`; `proof_check.zig:956`). Also the quadratic seam
   (find-per-id inside per-id loops; overlay is O(queries×rows) with nested
   scans) — fine at per-function manifest sizes, watch on growth.
-- [ ] **Q8** Shared `formal_test_fixture.zig`: the single-obligation
+- [x] **Q8 (FIXED e2f41b72)** Shared `formal_test_fixture.zig`: the single-obligation
   set-builder boilerplate is repeated across `obligation_to_z3.zig:1714-1875`,
   `obligation_from_z3.zig`, `proof_check.zig` tests — hundreds of lines.
-- [ ] **Q9** One `kindFormula(kind) ?FormulaRef` helper replacing the
+- [x] **Q9 (FIXED e2f41b72)** One `kindFormula(kind) ?FormulaRef` helper replacing the
   8-kind unsupported arm-list repeated at `obligation_to_z3.zig` ~317, ~466,
   ~990, ~1006.
-- [ ] **Q10** `encodeVariable`/`encodeStorageSymbol` call `namedConst` for the
+- [x] **Q10 (FIXED e2f41b72)** `encodeVariable`/`encodeStorageSymbol` call `namedConst` for the
   dupeZ→symbol→const→check tail (idiom triplicated ~1166, ~1185, ~1294).
-- [ ] **Q11** `requireSupportedScalarPlace(place)` helper for the
+- [x] **Q11 (FIXED e2f41b72)** `requireSupportedScalarPlace(place)` helper for the
   support→error mapping inlined 5× (~520, ~701, ~1097, ~1117, ~377).
-- [ ] **Q12** `emit_obligation_totality_snapshot.zig:247` `writeRawTerm`:
+- [x] **Q12 (FIXED e2f41b72)** `emit_obligation_totality_snapshot.zig:247` `writeRawTerm`:
   10 positional args → params-struct with defaults. (The `else => default`
   column-filler at ~452-471 is intentional, not fail-open — leave it.)
-- [ ] **Q13** `proof_check.zig:1491` test re-inlines `leanTestProcessEnviron`
+- [x] **Q13 (FIXED e2f41b72)** `proof_check.zig:1491` test re-inlines `leanTestProcessEnviron`
   (helper exists at 1344) — call it.
-- [ ] **Q14** Consolidate id-list writers (`proof_check.zig:370,622`;
+- [x] **Q14 (FIXED e2f41b72)** Consolidate id-list writers (`proof_check.zig:370,622`;
   `emit_obligation_totality_snapshot.zig:96`) and id-equality
   (`proof_check.zig:975` vs `obligation.equalIdSlices`) into `obligation.zig`.
-- [ ] **Q15** Drop single-variant `LeanNatListMode` enum + param
+- [x] **Q15 (FIXED e2f41b72)** Drop single-variant `LeanNatListMode` enum + param
   (`proof_check.zig:564`).
-- [ ] **Q16** Extract `applyRowMetadata(*query, row)` from
+- [x] **Q16 (FIXED e2f41b72)** Extract `applyRowMetadata(*query, row)` from
   `overlayPreparedQueryResults` (~100-line body; metadata copy duplicated with
   `collectPreparedQueries`).
 
