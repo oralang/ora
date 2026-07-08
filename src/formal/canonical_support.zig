@@ -25,7 +25,7 @@ pub fn queryCanonicalSupport(set: obligation.ObligationSet, query: obligation.Ve
     if (query.obligation_ids.len != 1) return .{ .unsupported = .query_not_single_obligation };
 
     for (query.assumption_ids) |assumption_id| {
-        const assumption = findAssumption(set, assumption_id) orelse return .{ .unsupported = .unknown_assumption };
+        const assumption = obligation.findById(set.assumptions, assumption_id) orelse return .{ .unsupported = .unknown_assumption };
         const formula = assumption.formula orelse return .{ .unsupported = .null_assumption_formula };
         switch (formulaCanonicalSupport(set, formula, set.terms.len + 1, .{})) {
             .supported => {},
@@ -33,7 +33,7 @@ pub fn queryCanonicalSupport(set: obligation.ObligationSet, query: obligation.Ve
         }
     }
 
-    const target = findObligation(set, query.obligation_ids[0]) orelse return .{ .unsupported = .unknown_obligation };
+    const target = obligation.findById(set.obligations, query.obligation_ids[0]) orelse return .{ .unsupported = .unknown_obligation };
     return kindCanonicalSupport(set, target.kind, set.terms.len + 1);
 }
 
@@ -45,12 +45,12 @@ pub fn queryCanonicalPromotionShape(
 
     var features: PromotionFeatures = .{};
     for (query.assumption_ids) |assumption_id| {
-        const assumption = findAssumption(set, assumption_id) orelse return null;
+        const assumption = obligation.findById(set.assumptions, assumption_id) orelse return null;
         const formula = assumption.formula orelse return null;
         if (!collectFormulaPromotionFeatures(set, formula, set.terms.len + 1, &features)) return null;
     }
 
-    const target = findObligation(set, query.obligation_ids[0]) orelse return null;
+    const target = obligation.findById(set.obligations, query.obligation_ids[0]) orelse return null;
     if (!collectKindPromotionFeatures(set, target.kind, set.terms.len + 1, &features)) return null;
     return features.shape();
 }
@@ -318,19 +318,8 @@ fn collectKindPromotionFeatures(
     fuel: usize,
     features: *PromotionFeatures,
 ) bool {
-    return switch (kind) {
-        .logical => |logical| collectFormulaPromotionFeatures(set, logical.formula, fuel, features),
-        .runtime_guard => |guard| collectFormulaPromotionFeatures(set, guard.formula, fuel, features),
-        .resource,
-        .quantifier,
-        .type_wf,
-        .type_relation,
-        .region_relation,
-        .effect_frame,
-        .filtered_input,
-        .backend_fact,
-        => false,
-    };
+    const formula = obligation.kindFormula(kind) orelse return false;
+    return collectFormulaPromotionFeatures(set, formula, fuel, features);
 }
 
 fn collectFormulaPromotionFeatures(
@@ -361,34 +350,9 @@ fn collectTermPromotionFeatures(
     });
 }
 
-fn findAssumption(set: obligation.ObligationSet, id: obligation.Id) ?obligation.Assumption {
-    for (set.assumptions) |item| {
-        if (item.id == id) return item;
-    }
-    return null;
-}
-
-fn findObligation(set: obligation.ObligationSet, id: obligation.Id) ?obligation.Obligation {
-    for (set.obligations) |item| {
-        if (item.id == id) return item;
-    }
-    return null;
-}
-
 fn kindCanonicalSupport(set: obligation.ObligationSet, kind: obligation.Kind, fuel: usize) CanonicalSupport {
-    return switch (kind) {
-        .logical => |logical| formulaCanonicalSupport(set, logical.formula, fuel, .{}),
-        .runtime_guard => |guard| formulaCanonicalSupport(set, guard.formula, fuel, .{}),
-        .resource,
-        .quantifier,
-        .type_wf,
-        .type_relation,
-        .region_relation,
-        .effect_frame,
-        .filtered_input,
-        .backend_fact,
-        => .{ .unsupported = .unsupported_obligation_kind },
-    };
+    const formula = obligation.kindFormula(kind) orelse return .{ .unsupported = .unsupported_obligation_kind };
+    return formulaCanonicalSupport(set, formula, fuel, .{});
 }
 
 fn formulaCanonicalSupport(
@@ -493,6 +457,13 @@ pub fn placeReadCanonicalSupport(place: obligation.PlaceRef) CanonicalSupport {
     if (place.region != .storage) return .{ .unsupported = .unsupported_place_read_term };
     if (place.fields.len != 0 or place.keys.len != 0) return .{ .unsupported = .unsupported_place_read_term };
     return .supported;
+}
+
+pub fn requireSupportedScalarPlace(place: obligation.PlaceRef) EncodeError!void {
+    switch (placeReadCanonicalSupport(place)) {
+        .supported => {},
+        .unsupported => return error.UnsupportedPlaceReadTerm,
+    }
 }
 
 fn oldCanonicalSupport(set: obligation.ObligationSet, operand: obligation.TermId, fuel: usize) CanonicalSupport {
@@ -684,9 +655,9 @@ const StaticTypeVisitor = struct {
             .int_lit => |literal| typeInfo(literal.ty orelse return error.MissingType),
             .variable => |variable| typeInfo(variableTypeRef(variable) orelse return error.MissingType),
             .result => error.MissingType,
-            .place_read => |place| switch (placeReadCanonicalSupport(place)) {
-                .supported => u256TypeInfo(),
-                .unsupported => error.UnsupportedPlaceReadTerm,
+            .place_read => |place| blk: {
+                try requireSupportedScalarPlace(place);
+                break :blk u256TypeInfo();
             },
             else => error.InvalidTermReference,
         };

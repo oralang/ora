@@ -93,16 +93,6 @@ fn writeOptionalTermId(out: anytype, value: ?obligation.TermId) !void {
     }
 }
 
-fn writeNatList(out: anytype, values: []const obligation.TermId) !void {
-    if (values.len == 0) return out.writeAll("[]");
-    try out.writeByte('[');
-    for (values, 0..) |value, index| {
-        if (index != 0) try out.writeAll(", ");
-        try out.print("{d}", .{value});
-    }
-    try out.writeByte(']');
-}
-
 fn writeTypeName(out: anytype, ty: ?obligation.TypeRef) !void {
     const value = ty orelse return writeLeanString(out, "");
     switch (value) {
@@ -244,53 +234,57 @@ fn quantifierName(quantifier: obligation.Quantifier) []const u8 {
     };
 }
 
+const RawTermFields = struct {
+    tag: []const u8,
+    bool_value: bool = false,
+    text: []const u8 = "",
+    ty: ?obligation.TypeRef = null,
+    name: []const u8 = "",
+    lhs: usize = 0,
+    rhs: usize = 0,
+    condition: ?obligation.TermId = null,
+    args: []const obligation.TermId = &.{},
+    place: obligation.PlaceRef = empty_place,
+};
+
 fn writeRawTerm(
     out: anytype,
-    tag: []const u8,
-    bool_value: bool,
-    text: []const u8,
-    ty: ?obligation.TypeRef,
-    name: []const u8,
-    lhs: usize,
-    rhs: usize,
-    condition: ?obligation.TermId,
-    args: []const obligation.TermId,
-    place: obligation.PlaceRef,
+    fields: RawTermFields,
 ) !void {
     try out.writeByte('(');
-    try writeLeanString(out, tag);
+    try writeLeanString(out, fields.tag);
     try out.writeAll(", ");
-    try out.writeAll(boolText(bool_value));
+    try out.writeAll(boolText(fields.bool_value));
     try out.writeAll(", ");
-    try writeLeanString(out, text);
+    try writeLeanString(out, fields.text);
     try out.writeAll(", ");
-    try writeTypeName(out, ty);
+    try writeTypeName(out, fields.ty);
     try out.writeAll(", ");
-    try writeLeanString(out, name);
-    try out.print(", {d}, {d}, ", .{ lhs, rhs });
-    try writeOptionalTermId(out, condition);
+    try writeLeanString(out, fields.name);
+    try out.print(", {d}, {d}, ", .{ fields.lhs, fields.rhs });
+    try writeOptionalTermId(out, fields.condition);
     try out.writeAll(", ");
-    try writeNatList(out, args);
+    try obligation.writeNatList(out, fields.args);
     try out.writeAll(", ");
-    try writePlace(out, place);
+    try writePlace(out, fields.place);
     try out.writeByte(')');
 }
 
 fn writeTerm(out: anytype, term: obligation.Term) !void {
     switch (term) {
-        .bool_lit => |value| try writeRawTerm(out, "bool_lit", value, "", null, "", 0, 0, null, &.{}, empty_place),
-        .int_lit => |literal| try writeRawTerm(out, "int_lit", false, literal.value, literal.ty, "", 0, 0, null, &.{}, empty_place),
+        .bool_lit => |value| try writeRawTerm(out, .{ .tag = "bool_lit", .bool_value = value }),
+        .int_lit => |literal| try writeRawTerm(out, .{ .tag = "int_lit", .text = literal.value, .ty = literal.ty }),
         .variable => |variable| switch (variable) {
-            .free => |free| try writeRawTerm(out, "free_var", false, "", free.ty, free.name, free.id.file_id, free.id.pattern_id, null, &.{}, empty_place),
-            .bound => |bound| try writeRawTerm(out, "bound_var", false, "", bound.ty, bound.name, bound.index, 0, null, &.{}, empty_place),
+            .free => |free| try writeRawTerm(out, .{ .tag = "free_var", .ty = free.ty, .name = free.name, .lhs = free.id.file_id, .rhs = free.id.pattern_id }),
+            .bound => |bound| try writeRawTerm(out, .{ .tag = "bound_var", .ty = bound.ty, .name = bound.name, .lhs = bound.index }),
         },
-        .old => |operand| try writeRawTerm(out, "old", false, "", null, "", operand, 0, null, &.{}, empty_place),
-        .result => try writeRawTerm(out, "result", false, "", null, "", 0, 0, null, &.{}, empty_place),
-        .place_read => |place| try writeRawTerm(out, "place_read", false, "", null, "", 0, 0, null, &.{}, place),
-        .unary => |unary| try writeRawTerm(out, "unary", false, unaryName(unary.op), null, "", unary.operand, 0, null, &.{}, empty_place),
-        .binary => |binary| try writeRawTerm(out, "binary", false, binaryName(binary.op), binary.ty, "", binary.lhs, binary.rhs, null, &.{}, empty_place),
-        .refinement_predicate => |predicate| try writeRawTerm(out, "refinement", false, predicate.name, null, "", predicate.value, 0, null, predicate.args, empty_place),
-        .quantified => |quantified| try writeRawTerm(out, "quantified", false, quantifierName(quantified.quantifier), quantified.binder.ty, quantified.binder.name, quantified.body, 0, quantified.condition, &.{}, empty_place),
+        .old => |operand| try writeRawTerm(out, .{ .tag = "old", .lhs = operand }),
+        .result => try writeRawTerm(out, .{ .tag = "result" }),
+        .place_read => |place| try writeRawTerm(out, .{ .tag = "place_read", .place = place }),
+        .unary => |unary| try writeRawTerm(out, .{ .tag = "unary", .text = unaryName(unary.op), .lhs = unary.operand }),
+        .binary => |binary| try writeRawTerm(out, .{ .tag = "binary", .text = binaryName(binary.op), .ty = binary.ty, .lhs = binary.lhs, .rhs = binary.rhs }),
+        .refinement_predicate => |predicate| try writeRawTerm(out, .{ .tag = "refinement", .text = predicate.name, .lhs = predicate.value, .args = predicate.args }),
+        .quantified => |quantified| try writeRawTerm(out, .{ .tag = "quantified", .text = quantifierName(quantified.quantifier), .ty = quantified.binder.ty, .name = quantified.binder.name, .lhs = quantified.body, .condition = quantified.condition }),
     }
 }
 

@@ -65,10 +65,10 @@ fn applyRows(
 
     for (rows, 0..) |row, index| {
         try validateProofRowSyntax(row);
-        const target_query = findQueryById(set, row.query_id) orelse return error.UnknownProofQuery;
+        const target_query = obligation.findById(set.queries, row.query_id) orelse return error.UnknownProofQuery;
         try validateProofTarget(target_query);
-        if (!equalIds(target_query.obligation_ids, row.obligation_ids)) return error.ProofRowObligationMismatch;
-        if (!equalIds(target_query.assumption_ids, row.assumption_ids)) return error.ProofRowAssumptionMismatch;
+        if (!obligation.equalIdSlices(target_query.obligation_ids, row.obligation_ids)) return error.ProofRowObligationMismatch;
+        if (!obligation.equalIdSlices(target_query.assumption_ids, row.assumption_ids)) return error.ProofRowAssumptionMismatch;
 
         const content_sha256 = try readAndCheckProofContentSha256(
             arena_allocator,
@@ -302,9 +302,9 @@ fn buildCertificateJsonWithLeanVersion(
         try writer.writeAll(",\n      \"lean_query_id\": ");
         try writer.print("{d}", .{row.lean_query_id});
         try writer.writeAll(",\n      \"obligation_ids\": ");
-        try writeJsonIdArray(writer, row.obligation_ids);
+        try obligation.writeNatList(writer, row.obligation_ids);
         try writer.writeAll(",\n      \"assumption_ids\": ");
-        try writeJsonIdArray(writer, row.assumption_ids);
+        try obligation.writeNatList(writer, row.assumption_ids);
         try writer.writeAll(",\n      \"target_smtlib_hash\": ");
         if (row.target_smtlib_hash) |hash| {
             try writer.print("{d}", .{hash});
@@ -365,15 +365,6 @@ fn queryLeanVersion(allocator: std.mem.Allocator, process_environ: std.process.E
         else => {},
     }
     return error.LeanVersionCheckFailed;
-}
-
-fn writeJsonIdArray(writer: anytype, ids: []const obligation.Id) !void {
-    try writer.writeByte('[');
-    for (ids, 0..) |id, index| {
-        if (index != 0) try writer.writeAll(", ");
-        try writer.print("{d}", .{id});
-    }
-    try writer.writeByte(']');
 }
 
 fn writeJsonStringArray(writer: anytype, values: []const []const u8) !void {
@@ -530,7 +521,7 @@ fn buildLeanAgreementSource(
     );
 
     try writer.writeAll("def acceptedProofTargetIds : List Nat := ");
-    try writeLeanNatListForAgreement(writer, rows, .accepted_targets);
+    try writeLeanAcceptedProofTargetIds(writer, rows);
     try writer.writeAll("\n\n");
 
     try writer.writeAll("def agreementRows : List Ora.Obligation.Agreement.Row := ");
@@ -561,16 +552,11 @@ fn hasAgreementTargets(rows: []const CheckedProofRow) bool {
     return false;
 }
 
-const LeanNatListMode = enum { accepted_targets };
-
-fn writeLeanNatListForAgreement(writer: anytype, rows: []const CheckedProofRow, mode: LeanNatListMode) !void {
+fn writeLeanAcceptedProofTargetIds(writer: anytype, rows: []const CheckedProofRow) !void {
     try writer.writeByte('[');
     var emitted_any = false;
     for (rows) |row| {
-        const include = switch (mode) {
-            .accepted_targets => row.requires_agreement,
-        };
-        if (!include) continue;
+        if (!row.requires_agreement) continue;
         if (emitted_any) try writer.writeAll(", ");
         emitted_any = true;
         try writer.print("{d}", .{row.query_id});
@@ -597,9 +583,9 @@ fn writeAgreementRow(writer: anytype, row: CheckedProofRow) !void {
     try writer.writeAll("{ queryId := ");
     try writer.print("{d}", .{row.query_id});
     try writer.writeAll(", assumptionIds := ");
-    try writeLeanIdList(writer, row.assumption_ids);
+    try obligation.writeNatList(writer, row.assumption_ids);
     try writer.writeAll(", obligationIds := ");
-    try writeLeanIdList(writer, row.obligation_ids);
+    try obligation.writeNatList(writer, row.obligation_ids);
     try writer.writeAll(", z3RowMatched := ");
     try writer.writeAll(if (row.z3_row_matched) "true" else "false");
     try writer.writeAll(", z3PlainUnknown := ");
@@ -617,15 +603,6 @@ fn writeAgreementRow(writer: anytype, row: CheckedProofRow) !void {
     try writer.writeAll(", zigSemanticSupported := ");
     try writer.writeAll(if (row.zig_semantic_supported) "true" else "false");
     try writer.writeAll(" }");
-}
-
-fn writeLeanIdList(writer: anytype, ids: []const obligation.Id) !void {
-    try writer.writeByte('[');
-    for (ids, 0..) |id, index| {
-        if (index != 0) try writer.writeAll(", ");
-        try writer.print("{d}", .{id});
-    }
-    try writer.writeByte(']');
 }
 
 fn buildLeanCheckerSource(
@@ -953,13 +930,6 @@ fn isLeanKeyword(identifier: []const u8) bool {
     return false;
 }
 
-fn findQueryById(set: obligation.ObligationSet, id: obligation.Id) ?obligation.VerificationQuery {
-    for (set.queries) |query| {
-        if (query.id == id) return query;
-    }
-    return null;
-}
-
 fn nextQueryId(set: obligation.ObligationSet) obligation.Id {
     var max: obligation.Id = 0;
     for (set.queries) |query| max = @max(max, query.id);
@@ -970,14 +940,6 @@ fn nextProofArtifactId(set: obligation.ObligationSet) obligation.Id {
     var max: obligation.Id = 0;
     for (set.proof_artifacts) |artifact| max = @max(max, artifact.id);
     return max + 1;
-}
-
-fn equalIds(lhs: []const obligation.Id, rhs: []const obligation.Id) bool {
-    if (lhs.len != rhs.len) return false;
-    for (lhs, rhs) |a, b| {
-        if (a != b) return false;
-    }
-    return true;
 }
 
 fn concat(comptime T: type, allocator: std.mem.Allocator, lhs: []const T, rhs: []const T) ![]const T {
@@ -1488,16 +1450,7 @@ test "Lean proof checker rejects sorry and user axioms" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
-    var env_map = std.process.Environ.Map.init(allocator);
-    defer env_map.deinit();
-    const home = std.c.getenv("HOME") orelse return error.SkipZigTest;
-    const home_slice = std.mem.span(home);
-    try env_map.put("HOME", home_slice);
-    const inherited_path = if (std.c.getenv("PATH")) |path| std.mem.span(path) else "/usr/bin:/bin:/opt/homebrew/bin";
-    const path = try std.fmt.allocPrint(allocator, "{s}/.elan/bin:{s}", .{ home_slice, inherited_path });
-    defer allocator.free(path);
-    try env_map.put("PATH", path);
-    const process_environ: std.process.Environ = .{ .block = try env_map.createPosixBlock(allocator, .{}) };
+    const process_environ = try leanTestProcessEnviron(allocator);
     defer process_environ.block.deinit(allocator);
 
     const suffix = "RunB2AxiomFixture";

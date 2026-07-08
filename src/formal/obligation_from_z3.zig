@@ -33,7 +33,7 @@ pub fn collectPreparedQueries(
 
     for (rows, 0..) |row, index| {
         const id = std.math.cast(obligation.Id, index + 1) orelse return error.TooManyQueries;
-        try queries.append(arena_allocator, .{
+        var query: obligation.VerificationQuery = .{
             .id = id,
             .owner = .{ .function = .{ .name = try arena_allocator.dupe(u8, row.function_name) } },
             .source = .{
@@ -43,17 +43,12 @@ pub fn collectPreparedQueries(
             },
             .phase = .report,
             .origin = .source,
-            .backend = .z3,
             .kind = queryKind(row.kind),
             .logical_role = logicalRole(row.obligation_kind),
             .guard_id = if (row.guard_id) |guard_id| try arena_allocator.dupe(u8, guard_id) else null,
-            .fragment = queryFragment(row.fragment),
-            .solver_logic = querySolverLogic(row.solver_logic),
-            .constraint_count = row.constraint_count,
-            .smtlib_hash = row.smtlib_hash,
-            .canonical_smt_annotation_pure = row.annotation_pure,
-            .result = queryResult(row),
-        });
+        };
+        applyRowMetadata(&query, row);
+        try queries.append(arena_allocator, query);
     }
 
     const set: obligation.ObligationSet = .{
@@ -123,17 +118,11 @@ pub fn overlayPreparedQueryResults(
             if (!queryCanSharePreparedRow(query, row)) {
                 row_matched[index] = true;
             }
-            merged_query.backend = .z3;
-            merged_query.fragment = queryFragment(row.fragment);
-            merged_query.solver_logic = querySolverLogic(row.solver_logic);
-            merged_query.constraint_count = row.constraint_count;
-            merged_query.smtlib_hash = row.smtlib_hash;
-            merged_query.canonical_smt_annotation_pure = row.annotation_pure;
+            applyRowMetadata(&merged_query, row);
             if (row.annotation_pure and !merged_query.canonical_smt_crosscheck_required) {
                 merged_query.canonical_smt_crosscheck_required =
                     obligation_to_z3.queryCanonicalCrosscheckRequiredByPolicy(base, merged_query);
             }
-            merged_query.result = queryResult(row);
             try appendCanonicalSmtCrosscheckDiagnostic(
                 arena_allocator,
                 &diagnostics,
@@ -180,17 +169,10 @@ fn queryRequiresPreparedRow(set: obligation.ObligationSet, query: obligation.Ver
     if (query.obligation_ids.len == 0) return true;
 
     for (query.obligation_ids) |id| {
-        const item = findObligation(set, id) orelse return true;
+        const item = obligation.findById(set.obligations, id) orelse return true;
         if (item.kind != .effect_frame) return true;
     }
     return false;
-}
-
-fn findObligation(set: obligation.ObligationSet, id: obligation.Id) ?obligation.Obligation {
-    for (set.obligations) |item| {
-        if (item.id == id) return item;
-    }
-    return null;
 }
 
 fn appendCanonicalSmtCrosscheckDiagnostic(
@@ -275,6 +257,16 @@ fn appendCanonicalMismatchDiagnostic(
 fn optionalFile(allocator: std.mem.Allocator, file: []const u8) !?[]const u8 {
     if (file.len == 0) return null;
     return try allocator.dupe(u8, file);
+}
+
+fn applyRowMetadata(query: *obligation.VerificationQuery, row: z3_verification.PreparedQueryManifestRow) void {
+    query.backend = .z3;
+    query.fragment = queryFragment(row.fragment);
+    query.solver_logic = querySolverLogic(row.solver_logic);
+    query.constraint_count = row.constraint_count;
+    query.smtlib_hash = row.smtlib_hash;
+    query.canonical_smt_annotation_pure = row.annotation_pure;
+    query.result = queryResult(row);
 }
 
 fn queryKind(kind: z3_verification.QueryKind) obligation.VerificationQueryKind {

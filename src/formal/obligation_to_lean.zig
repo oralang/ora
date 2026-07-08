@@ -241,7 +241,7 @@ fn writeSemanticDefinitions(writer: anytype, set: obligation.ObligationSet, proo
         try writer.print("{d}", .{query.id});
         try writer.writeAll(" : Prop :=\n");
         for (query.obligation_ids, 0..) |obligation_id, index| {
-            const row = findObligation(set, obligation_id) orelse return error.InvalidDependency;
+            const row = obligation.findById(set.obligations, obligation_id) orelse return error.InvalidDependency;
             if (index != 0) try writer.writeAll(" /\\\n");
             try writer.writeAll("  obligationFollowsFromAssumptions emittedManifest\n    ");
             try writeAssumptionRowsByIds(writer, set, query.assumption_ids);
@@ -277,31 +277,17 @@ fn writeAssumptionRowsByIds(writer: anytype, set: obligation.ObligationSet, ids:
     try writer.writeByte('[');
     for (ids, 0..) |id, index| {
         if (index != 0) try writer.writeAll(", ");
-        const row = findAssumption(set, id) orelse return error.InvalidDependency;
+        const row = obligation.findById(set.assumptions, id) orelse return error.InvalidDependency;
         try writeAssumptionRow(writer, row);
     }
     try writer.writeByte(']');
-}
-
-fn findObligation(set: obligation.ObligationSet, id: obligation.Id) ?obligation.Obligation {
-    for (set.obligations) |row| {
-        if (row.id == id) return row;
-    }
-    return null;
-}
-
-fn findAssumption(set: obligation.ObligationSet, id: obligation.Id) ?obligation.Assumption {
-    for (set.assumptions) |row| {
-        if (row.id == id) return row;
-    }
-    return null;
 }
 
 pub fn querySemanticSupport(set: obligation.ObligationSet, query: obligation.VerificationQuery) SemanticSupport {
     if (query.obligation_ids.len == 0) return .{ .unsupported = .empty_query };
 
     for (query.assumption_ids) |assumption_id| {
-        const row = findAssumption(set, assumption_id) orelse return .{ .unsupported = .invalid_dependency };
+        const row = obligation.findById(set.assumptions, assumption_id) orelse return .{ .unsupported = .invalid_dependency };
         if (row.formula) |formula| {
             switch (formulaSemanticSupport(set, formula)) {
                 .supported => {},
@@ -313,7 +299,7 @@ pub fn querySemanticSupport(set: obligation.ObligationSet, query: obligation.Ver
     }
 
     for (query.obligation_ids) |obligation_id| {
-        const row = findObligation(set, obligation_id) orelse return .{ .unsupported = .invalid_dependency };
+        const row = obligation.findById(set.obligations, obligation_id) orelse return .{ .unsupported = .invalid_dependency };
         switch (kindSemanticSupport(set, query.owner, row.kind)) {
             .supported => {},
             .unsupported => |reason| return .{ .unsupported = reason },
@@ -434,7 +420,7 @@ fn keyDisjointEvidenceSemanticSupport(
     if (!keyEvidencePathMatches(evidence.read, evidence.write, evidence.key_index, evidence.lhs, evidence.rhs)) {
         return .{ .unsupported = .key_disjoint_evidence_path_mismatch };
     }
-    const assumption = findAssumption(set, evidence.assumption_id) orelse
+    const assumption = obligation.findById(set.assumptions, evidence.assumption_id) orelse
         return .{ .unsupported = .unsupported_key_disjoint_evidence_formula };
     if (!ownerEqual(assumption.owner, owner)) {
         return .{ .unsupported = .key_disjoint_evidence_owner_mismatch };

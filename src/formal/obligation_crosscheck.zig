@@ -34,7 +34,7 @@ pub fn crossCheckRuntimeGuard(
     set: obligation.ObligationSet,
     id: obligation.Id,
 ) !Result {
-    const target = findObligation(set, id) orelse return error.UnknownObligation;
+    const target = obligation.findById(set.obligations, id) orelse return error.UnknownObligation;
     const guard = switch (target.kind) {
         .runtime_guard => |guard| guard,
         else => return error.ExpectedRuntimeGuard,
@@ -77,11 +77,4 @@ fn runtimeErasureDecision(
         else
             .keep_runtime_check,
     };
-}
-
-fn findObligation(set: obligation.ObligationSet, id: obligation.Id) ?obligation.Obligation {
-    for (set.obligations) |item| {
-        if (item.id == id) return item;
-    }
-    return null;
 }

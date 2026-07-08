@@ -446,12 +446,52 @@ fn containsId(ids: []const Id, needle: Id) bool {
     return false;
 }
 
+fn SliceElement(comptime Slice: type) type {
+    const info = @typeInfo(Slice);
+    if (info != .pointer or info.pointer.size != .slice) {
+        @compileError("findById expects a slice");
+    }
+    return info.pointer.child;
+}
+
+pub fn findById(rows: anytype, id: Id) ?SliceElement(@TypeOf(rows)) {
+    for (rows) |row| {
+        if (row.id == id) return row;
+    }
+    return null;
+}
+
 pub fn equalIdSlices(lhs: []const Id, rhs: []const Id) bool {
     if (lhs.len != rhs.len) return false;
     for (lhs, rhs) |left, right| {
         if (left != right) return false;
     }
     return true;
+}
+
+pub fn writeNatList(writer: anytype, values: anytype) !void {
+    try writer.writeByte('[');
+    for (values, 0..) |value, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writer.print("{d}", .{value});
+    }
+    try writer.writeByte(']');
+}
+
+pub fn kindFormula(kind: Kind) ?FormulaRef {
+    return switch (kind) {
+        .logical => |logical| logical.formula,
+        .runtime_guard => |guard| guard.formula,
+        .resource,
+        .quantifier,
+        .type_wf,
+        .type_relation,
+        .region_relation,
+        .effect_frame,
+        .filtered_input,
+        .backend_fact,
+        => null,
+    };
 }
 
 fn querySucceeded(query: VerificationQuery, result: VerificationQueryResult) bool {

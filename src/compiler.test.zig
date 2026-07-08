@@ -34,5 +34,6 @@ comptime {
     _ = @import("formal/canonical_encode.zig");
     _ = @import("formal/canonical_z3_measure.zig");
     _ = @import("formal/emit_obligation_totality_snapshot.zig");
+    _ = @import("formal/formal_test_fixture.zig");
     _ = @import("formal/proof_manifest.zig");
 }

@@ -6,6 +6,7 @@ const z3 = z3_verification.z3_c;
 const Context = z3_verification.Z3Context;
 const Solver = z3_verification.Z3Solver;
 const obligation = @import("obligation.zig");
+const fixture = @import("formal_test_fixture.zig");
 const ct = @import("canonical_types.zig");
 const support = @import("canonical_support.zig");
 
@@ -24,9 +25,8 @@ const quantifierBinderTypeInfo = ct.quantifierBinderTypeInfo;
 const typeInfo = ct.typeInfo;
 const typeInfoIsU256 = ct.typeInfoIsU256;
 const u256TypeInfo = ct.u256TypeInfo;
-const variableTypeRef = ct.variableTypeRef;
 const expectedInfoForBinaryOperands = support.expectedInfoForBinaryOperands;
-const placeReadCanonicalSupport = support.placeReadCanonicalSupport;
+const requireSupportedScalarPlace = support.requireSupportedScalarPlace;
 const staticTermTypeInfo = support.staticTermTypeInfo;
 const termContainsResult = support.termContainsResult;
 const typeInfoEql = support.typeInfoEql;
@@ -69,12 +69,12 @@ pub const Adapter = struct {
     }
 
     pub fn checkQuery(self: *Adapter, id: obligation.Id) EncodeError!CheckStatus {
-        const query = self.findQuery(id) orelse return error.UnknownQuery;
+        const query = obligation.findById(self.set.queries, id) orelse return error.UnknownQuery;
         return self.checkQueryRow(query);
     }
 
     pub fn queryHash(self: *Adapter, id: obligation.Id) EncodeError!QueryHash {
-        const query = self.findQuery(id) orelse return error.UnknownQuery;
+        const query = obligation.findById(self.set.queries, id) orelse return error.UnknownQuery;
         return self.queryHashForRow(query);
     }
 
@@ -122,7 +122,7 @@ pub const Adapter = struct {
         defer self.query_state = null;
 
         if (query.obligation_ids.len != 1) return error.UnsupportedObligationKind;
-        const target = self.findObligation(query.obligation_ids[0]) orelse return error.UnknownObligation;
+        const target = obligation.findById(self.set.obligations, query.obligation_ids[0]) orelse return error.UnknownObligation;
 
         // The canonical byte-parity contract is order-sensitive over formal
         // ids, independent of the query builder's stored slice order.
@@ -135,7 +135,7 @@ pub const Adapter = struct {
         };
 
         for (assumption_ids) |assumption_id| {
-            const assumption = self.findAssumption(assumption_id) orelse return error.UnknownAssumption;
+            const assumption = obligation.findById(self.set.assumptions, assumption_id) orelse return error.UnknownAssumption;
             if (assumption.formula) |formula| {
                 const assumption_ast = try self.encodeFormula(formula);
                 try self.appendSideConstraints(constraints);
@@ -188,57 +188,14 @@ pub const Adapter = struct {
         return found;
     }
 
-    fn findQuery(self: *const Adapter, id: obligation.Id) ?obligation.VerificationQuery {
-        for (self.set.queries) |item| {
-            if (item.id == id) return item;
-        }
-        return null;
-    }
-
-    fn findObligation(self: *const Adapter, id: obligation.Id) ?obligation.Obligation {
-        for (self.set.obligations) |item| {
-            if (item.id == id) return item;
-        }
-        return null;
-    }
-
-    fn findAssumption(self: *const Adapter, id: obligation.Id) ?obligation.Assumption {
-        for (self.set.assumptions) |item| {
-            if (item.id == id) return item;
-        }
-        return null;
-    }
-
     fn formulaForObligation(self: *Adapter, kind: obligation.Kind) EncodeError!z3.Z3_ast {
-        return switch (kind) {
-            .logical => |logical| self.encodeFormula(logical.formula),
-            .runtime_guard => |guard| self.encodeFormula(guard.formula),
-            .resource,
-            .quantifier,
-            .type_wf,
-            .type_relation,
-            .region_relation,
-            .effect_frame,
-            .filtered_input,
-            .backend_fact,
-            => error.UnsupportedObligationKind,
-        };
+        const formula = obligation.kindFormula(kind) orelse return error.UnsupportedObligationKind;
+        return self.encodeFormula(formula);
     }
 
     fn goalCounterexampleFormula(self: *Adapter, kind: obligation.Kind) EncodeError!z3.Z3_ast {
-        return switch (kind) {
-            .logical => |logical| self.encodeGoalFormula(logical.formula),
-            .runtime_guard => |guard| self.encodeGoalFormula(guard.formula),
-            .resource,
-            .quantifier,
-            .type_wf,
-            .type_relation,
-            .region_relation,
-            .effect_frame,
-            .filtered_input,
-            .backend_fact,
-            => error.UnsupportedObligationKind,
-        };
+        const formula = obligation.kindFormula(kind) orelse return error.UnsupportedObligationKind;
+        return self.encodeGoalFormula(formula);
     }
 
     pub fn encodeFormula(self: *Adapter, formula: obligation.FormulaRef) EncodeError!z3.Z3_ast {
@@ -397,10 +354,7 @@ pub const Adapter = struct {
     }
 
     fn encodePlaceRead(self: *Adapter, place: obligation.PlaceRef) EncodeError!z3.Z3_ast {
-        switch (placeReadCanonicalSupport(place)) {
-            .supported => {},
-            .unsupported => return error.UnsupportedPlaceReadTerm,
-        }
+        try requireSupportedScalarPlace(place);
         const state = try self.canonicalQueryState();
         const root_state = try state.getOrPutPlaceRoot(self.allocator, place.root);
         const current = root_state.current orelse blk: {
@@ -418,10 +372,7 @@ pub const Adapter = struct {
             .place_read => |place| place,
             else => return error.UnsupportedOldTerm,
         };
-        switch (placeReadCanonicalSupport(place)) {
-            .supported => {},
-            .unsupported => return error.UnsupportedOldTerm,
-        }
+        requireSupportedScalarPlace(place) catch return error.UnsupportedOldTerm;
 
         const state = try self.canonicalQueryState();
         const root_state = try state.getOrPutPlaceRoot(self.allocator, place.root);
@@ -471,13 +422,7 @@ pub const Adapter = struct {
     fn encodeStorageSymbol(self: *Adapter, name_text: []const u8) EncodeError!z3.Z3_ast {
         defer self.allocator.free(name_text);
         const sort = try self.sortForType(u256TypeInfo());
-        const name = try self.allocator.dupeZ(u8, name_text);
-        defer self.allocator.free(name);
-
-        const symbol = z3.Z3_mk_string_symbol(self.context.ctx, name.ptr);
-        const ast = z3.Z3_mk_const(self.context.ctx, symbol, sort);
-        try self.context.checkNoError();
-        return ast;
+        return self.namedConst(name_text, sort);
     }
 
     fn encodeIntegerLiteral(self: *Adapter, literal: obligation.IntegerLiteralTerm) EncodeError!z3.Z3_ast {
@@ -497,13 +442,7 @@ pub const Adapter = struct {
         // Canonical SMT is byte-parity with the live encoder, which names free
         // variables from the source surface. Semantic identity remains FreeVarId
         // in the manifest and Lean denotation.
-        const name = try self.allocator.dupeZ(u8, free.name);
-        defer self.allocator.free(name);
-
-        const symbol = z3.Z3_mk_string_symbol(self.context.ctx, name.ptr);
-        const ast = z3.Z3_mk_const(self.context.ctx, symbol, sort);
-        try self.context.checkNoError();
-        return ast;
+        return self.namedConst(free.name, sort);
     }
 
     fn encodeBoundVariable(self: *Adapter, bound: obligation.BoundVarRef) EncodeError!z3.Z3_ast {
@@ -971,24 +910,9 @@ fn expectCanonicalHashSucceeds(
     terms: []const obligation.Term,
     target_term: obligation.TermId,
 ) !void {
-    const obligations = [_]obligation.Obligation{.{
-        .id = 1,
-        .owner = .{ .function = .{ .name = "matrix" } },
-        .source = .generated(),
-        .phase = .sema,
-        .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
-        .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = target_term } } },
-    }};
+    const obligations = [_]obligation.Obligation{fixture.logicalEnsuresObligation(1, "matrix", target_term)};
     const obligation_ids = [_]obligation.Id{1};
-    const queries = [_]obligation.VerificationQuery{.{
-        .id = 2,
-        .owner = .{ .function = .{ .name = "matrix" } },
-        .source = .generated(),
-        .phase = .report,
-        .origin = .source,
-        .kind = .obligation,
-        .obligation_ids = &obligation_ids,
-    }};
+    const queries = [_]obligation.VerificationQuery{fixture.obligationQuery(2, "matrix", &obligation_ids, &.{})};
     const set: obligation.ObligationSet = .{
         .obligations = &obligations,
         .queries = &queries,
@@ -1008,24 +932,9 @@ fn expectCanonicalHashSucceedsWithShape(
     target_term: obligation.TermId,
     expected_shape: CanonicalPromotionShape,
 ) !void {
-    const obligations = [_]obligation.Obligation{.{
-        .id = 1,
-        .owner = .{ .function = .{ .name = "matrix" } },
-        .source = .generated(),
-        .phase = .sema,
-        .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
-        .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = target_term } } },
-    }};
+    const obligations = [_]obligation.Obligation{fixture.logicalEnsuresObligation(1, "matrix", target_term)};
     const obligation_ids = [_]obligation.Id{1};
-    const queries = [_]obligation.VerificationQuery{.{
-        .id = 2,
-        .owner = .{ .function = .{ .name = "matrix" } },
-        .source = .generated(),
-        .phase = .report,
-        .origin = .source,
-        .kind = .obligation,
-        .obligation_ids = &obligation_ids,
-    }};
+    const queries = [_]obligation.VerificationQuery{fixture.obligationQuery(2, "matrix", &obligation_ids, &.{})};
     const set: obligation.ObligationSet = .{
         .obligations = &obligations,
         .queries = &queries,
@@ -1045,36 +954,11 @@ fn expectCanonicalHashSucceedsWithAssumption(
     assumption_term: obligation.TermId,
     target_term: obligation.TermId,
 ) !void {
-    const assumptions = [_]obligation.Assumption{.{
-        .id = 1,
-        .owner = .{ .function = .{ .name = "matrix" } },
-        .source = .generated(),
-        .phase = .sema,
-        .origin = .{ .sema_fact = .{ .kind = "assume", .ordinal = 0 } },
-        .kind = .assume,
-        .formula = .{ .term = assumption_term },
-    }};
-    const obligations = [_]obligation.Obligation{.{
-        .id = 2,
-        .owner = .{ .function = .{ .name = "matrix" } },
-        .source = .generated(),
-        .phase = .sema,
-        .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
-        .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = target_term } } },
-    }};
+    const assumptions = [_]obligation.Assumption{fixture.assumeAssumption(1, "matrix", assumption_term)};
+    const obligations = [_]obligation.Obligation{fixture.logicalEnsuresObligation(2, "matrix", target_term)};
     const assumption_ids = [_]obligation.Id{1};
     const obligation_ids = [_]obligation.Id{2};
-    const queries = [_]obligation.VerificationQuery{.{
-        .id = 3,
-        .owner = .{ .function = .{ .name = "matrix" } },
-        .source = .generated(),
-        .phase = .report,
-        .origin = .source,
-        .kind = .obligation,
-        .assumption_ids = &assumption_ids,
-        .obligation_ids = &obligation_ids,
-        .solver_logic = .all,
-    }};
+    const queries = [_]obligation.VerificationQuery{fixture.obligationQuery(3, "matrix", &obligation_ids, &assumption_ids)};
     const set: obligation.ObligationSet = .{
         .assumptions = &assumptions,
         .obligations = &obligations,
@@ -1094,24 +978,9 @@ fn expectCanonicalHashUnsupported(
     target_term: obligation.TermId,
     expected: CanonicalUnsupportedReason,
 ) !void {
-    const obligations = [_]obligation.Obligation{.{
-        .id = 1,
-        .owner = .{ .function = .{ .name = "matrix" } },
-        .source = .generated(),
-        .phase = .sema,
-        .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
-        .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = target_term } } },
-    }};
+    const obligations = [_]obligation.Obligation{fixture.logicalEnsuresObligation(1, "matrix", target_term)};
     const obligation_ids = [_]obligation.Id{1};
-    const queries = [_]obligation.VerificationQuery{.{
-        .id = 2,
-        .owner = .{ .function = .{ .name = "matrix" } },
-        .source = .generated(),
-        .phase = .report,
-        .origin = .source,
-        .kind = .obligation,
-        .obligation_ids = &obligation_ids,
-    }};
+    const queries = [_]obligation.VerificationQuery{fixture.obligationQuery(2, "matrix", &obligation_ids, &.{})};
     const set: obligation.ObligationSet = .{
         .obligations = &obligations,
         .queries = &queries,
@@ -1127,35 +996,11 @@ fn expectCanonicalHashUnsupportedWithAssumption(
     target_term: obligation.TermId,
     expected: CanonicalUnsupportedReason,
 ) !void {
-    const assumptions = [_]obligation.Assumption{.{
-        .id = 1,
-        .owner = .{ .function = .{ .name = "matrix" } },
-        .source = .generated(),
-        .phase = .sema,
-        .origin = .{ .sema_fact = .{ .kind = "assume", .ordinal = 0 } },
-        .kind = .assume,
-        .formula = .{ .term = assumption_term },
-    }};
-    const obligations = [_]obligation.Obligation{.{
-        .id = 2,
-        .owner = .{ .function = .{ .name = "matrix" } },
-        .source = .generated(),
-        .phase = .sema,
-        .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
-        .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = target_term } } },
-    }};
+    const assumptions = [_]obligation.Assumption{fixture.assumeAssumption(1, "matrix", assumption_term)};
+    const obligations = [_]obligation.Obligation{fixture.logicalEnsuresObligation(2, "matrix", target_term)};
     const assumption_ids = [_]obligation.Id{1};
     const obligation_ids = [_]obligation.Id{2};
-    const queries = [_]obligation.VerificationQuery{.{
-        .id = 3,
-        .owner = .{ .function = .{ .name = "matrix" } },
-        .source = .generated(),
-        .phase = .report,
-        .origin = .source,
-        .kind = .obligation,
-        .assumption_ids = &assumption_ids,
-        .obligation_ids = &obligation_ids,
-    }};
+    const queries = [_]obligation.VerificationQuery{fixture.obligationQuery(3, "matrix", &obligation_ids, &assumption_ids)};
     const set: obligation.ObligationSet = .{
         .assumptions = &assumptions,
         .obligations = &obligations,

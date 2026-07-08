@@ -903,15 +903,6 @@ fn writeJsonStringForTest(writer: anytype, value: []const u8) !void {
     try writer.writeByte('"');
 }
 
-fn writeIdArrayForTest(writer: anytype, ids: []const obligation.Id) !void {
-    try writer.writeByte('[');
-    for (ids, 0..) |id, index| {
-        if (index != 0) try writer.writeAll(", ");
-        try writer.print("{d}", .{id});
-    }
-    try writer.writeByte(']');
-}
-
 fn writeProofManifestForTest(
     allocator: std.mem.Allocator,
     path: []const u8,
@@ -949,9 +940,9 @@ fn writeProofManifestIdsForTest(
     try writer.writeAll("{\n  \"schema_version\": 1,\n  \"proofs\": [\n    {\n      \"query_id\": ");
     try writer.print("{d}", .{query_id});
     try writer.writeAll(",\n      \"obligation_ids\": ");
-    try writeIdArrayForTest(writer, obligation_ids);
+    try obligation.writeNatList(writer, obligation_ids);
     try writer.writeAll(",\n      \"assumption_ids\": ");
-    try writeIdArrayForTest(writer, assumption_ids);
+    try obligation.writeNatList(writer, assumption_ids);
     try writer.writeAll(",\n      \"module_name\": ");
     try writeJsonStringForTest(writer, module_name);
     try writer.writeAll(",\n      \"theorem_name\": ");
@@ -984,9 +975,9 @@ fn writeTwoProofManifestForTest(
         try writer.writeAll("    {\n      \"query_id\": ");
         try writer.print("{d}", .{row[2].id});
         try writer.writeAll(",\n      \"obligation_ids\": ");
-        try writeIdArrayForTest(writer, row[2].obligation_ids);
+        try obligation.writeNatList(writer, row[2].obligation_ids);
         try writer.writeAll(",\n      \"assumption_ids\": ");
-        try writeIdArrayForTest(writer, row[2].assumption_ids);
+        try obligation.writeNatList(writer, row[2].assumption_ids);
         try writer.writeAll(",\n      \"module_name\": ");
         try writeJsonStringForTest(writer, module_name);
         try writer.writeAll(",\n      \"theorem_name\": ");
