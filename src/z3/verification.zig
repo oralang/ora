@@ -4007,6 +4007,19 @@ pub const VerificationPass = struct {
         summary.precision_notes = self.encoder.precisionNotes();
         summary.precision_note_events = self.encoder.precisionNoteEvents();
         var kind_counts = ReportKindCounts{};
+        var guard_id_counts = std.StringHashMap(u32).init(self.allocator);
+        defer guard_id_counts.deinit();
+
+        for (queries.items) |query| {
+            if (query.kind != .GuardViolate) continue;
+            const guard_id = query.guard_id orelse continue;
+            const entry = try guard_id_counts.getOrPut(guard_id);
+            if (entry.found_existing) {
+                entry.value_ptr.* += 1;
+            } else {
+                entry.value_ptr.* = 1;
+            }
+        }
 
         var proven_guard_ids = std.StringHashMap(void).init(self.allocator);
         defer {
@@ -4039,6 +4052,10 @@ pub const VerificationPass = struct {
                 summary.vacuity_unknown += 1;
             }
             summary.fragment_counts.add(query.fragment);
+            summary.guard_erasure_agreement.add(query, run, if (query.guard_id) |guard_id|
+                (guard_id_counts.get(guard_id) orelse 0) > 1
+            else
+                false);
 
             switch (query.kind) {
                 .Base => {
@@ -4290,6 +4307,12 @@ pub const VerificationPass = struct {
         try writer.print("- Inconsistent assumption bases: `{d}`\n", .{summary.inconsistent_bases});
         try writer.print("- Proven guards: `{d}`\n", .{summary.proven_guards});
         try writer.print("- Violatable guards: `{d}`\n", .{summary.violatable_guards});
+        try writer.print("- Guard-erasure agreement rows: `{d}`\n", .{summary.guard_erasure_agreement.rows});
+        try writer.print("- Guard-erasure agreement matched: `{d}`\n", .{summary.guard_erasure_agreement.matched});
+        try writer.print("- Guard-erasure agreement missing: `{d}`\n", .{summary.guard_erasure_agreement.missing});
+        try writer.print("- Guard-erasure agreement ambiguous: `{d}`\n", .{summary.guard_erasure_agreement.ambiguous});
+        try writer.print("- Guard-erasure duplicate guard-id rows: `{d}`\n", .{summary.guard_erasure_agreement.duplicate_guard_id_rows});
+        try writer.print("- Guard-erasure clean UNSAT not authorized: `{d}`\n", .{summary.guard_erasure_agreement.clean_unsat_not_authorized});
         try writer.print("- Verification success: `{any}`\n", .{summary.verification_success});
         try writer.print("- Verification errors: `{d}`\n", .{summary.verification_errors});
         try writer.print("- Verification diagnostics: `{d}`\n", .{summary.verification_diagnostics});
@@ -4531,6 +4554,14 @@ pub const VerificationPass = struct {
         try writer.print(",\"inconsistent_bases\":{d}", .{summary.inconsistent_bases});
         try writer.print(",\"proven_guards\":{d}", .{summary.proven_guards});
         try writer.print(",\"violatable_guards\":{d}", .{summary.violatable_guards});
+        try writer.writeAll(",\"guard_erasure_agreement\":{");
+        try writer.print("\"rows\":{d}", .{summary.guard_erasure_agreement.rows});
+        try writer.print(",\"matched\":{d}", .{summary.guard_erasure_agreement.matched});
+        try writer.print(",\"missing\":{d}", .{summary.guard_erasure_agreement.missing});
+        try writer.print(",\"ambiguous\":{d}", .{summary.guard_erasure_agreement.ambiguous});
+        try writer.print(",\"duplicate_guard_id_rows\":{d}", .{summary.guard_erasure_agreement.duplicate_guard_id_rows});
+        try writer.print(",\"clean_unsat_not_authorized\":{d}", .{summary.guard_erasure_agreement.clean_unsat_not_authorized});
+        try writer.writeByte('}');
         try writer.writeAll(if (summary.encoding_degraded) ",\"encoding_degraded\":true" else ",\"encoding_degraded\":false");
         try writer.writeAll(",\"degradation_reason\":");
         if (summary.degradation_reason) |reason| {
@@ -5520,6 +5551,7 @@ pub const VerificationPass = struct {
                     "{s} guard {s} [violate]{s}",
                     .{ fn_name, ann.guard_id.?, violate_tag },
                 );
+                const violate_formal_identity = try formalIdentityForAnnotation(self, ann, .GuardViolate);
                 try appendPreparedQueryUnique(&queries, self.allocator, .{
                     .kind = .GuardViolate,
                     .fragment = violate_fragment,
@@ -5535,6 +5567,11 @@ pub const VerificationPass = struct {
                     .smtlib_bytes = violate_smtlib.len,
                     .smtlib_hash = violate_hash,
                     .log_prefix = violate_log_prefix,
+                    .formal_query_id = violate_formal_identity.formal_query_id,
+                    .formal_assumption_ids = violate_formal_identity.formal_assumption_ids,
+                    .formal_obligation_ids = violate_formal_identity.formal_obligation_ids,
+                    .formal_match_status = violate_formal_identity.formal_match_status,
+                    .formal_match_key = violate_formal_identity.formal_match_key,
                 });
 
                 try previous_guards.append(ann);
@@ -6260,12 +6297,12 @@ fn formalLogicalRoleForAnnotation(kind: AnnotationKind) ?[]const u8 {
 fn formalQueryKindForPrepared(kind: QueryKind) ?[]const u8 {
     return switch (kind) {
         .Obligation => "obligation",
+        .GuardViolate => "guard_violate",
         .Base,
         .LoopInvariantStep,
         .LoopBodySafety,
         .LoopInvariantPost,
         .GuardSatisfy,
-        .GuardViolate,
         => null,
     };
 }
@@ -6311,20 +6348,26 @@ fn formalIdentityForAnnotation(
     prepared_kind: QueryKind,
 ) !FormalPreparedQueryIdentity {
     const formal_kind = formalQueryKindForPrepared(prepared_kind) orelse return .{};
-    switch (ann.kind) {
-        .Ensures, .ContractInvariant => {},
-        .Requires,
-        .CalleePrecondition,
-        .Guard,
-        .LoopInvariant,
-        .RefinementGuard,
-        .Assume,
-        .PathAssume,
-        => return .{},
-    }
+    const role: ?[]const u8 = switch (prepared_kind) {
+        .Obligation => switch (ann.kind) {
+            .Ensures, .ContractInvariant => formalLogicalRoleForAnnotation(ann.kind),
+            .Requires,
+            .CalleePrecondition,
+            .Guard,
+            .LoopInvariant,
+            .RefinementGuard,
+            .Assume,
+            .PathAssume,
+            => return .{},
+        },
+        .GuardViolate => switch (ann.kind) {
+            .RefinementGuard => null,
+            else => return .{},
+        },
+        else => return .{},
+    };
     if (self.formal_query_bindings.len == 0) return .{};
     const source_op_id = sourceOpId(ann.source_op) orelse return .{};
-    const role = formalLogicalRoleForAnnotation(ann.kind);
     const key_text = try formatFormalMatchKey(self.allocator, source_op_id, formal_kind, role, ann.guard_id);
 
     var match: ?FormalQueryBinding = null;
@@ -7122,7 +7165,46 @@ const ReportSummary = struct {
     precision_notes: []const Encoder.PrecisionNoteKind = &.{},
     precision_note_events: []const Encoder.PrecisionNoteEvent = &.{},
     fragment_counts: ReportFragmentCounts = .{},
+    guard_erasure_agreement: GuardErasureAgreementSummary = .{},
 };
+
+const GuardErasureAgreementSummary = struct {
+    rows: u64 = 0,
+    matched: u64 = 0,
+    missing: u64 = 0,
+    ambiguous: u64 = 0,
+    duplicate_guard_id_rows: u64 = 0,
+    clean_unsat_not_authorized: u64 = 0,
+
+    fn add(
+        self: *GuardErasureAgreementSummary,
+        query: PreparedQuery,
+        run: ReportQueryRun,
+        duplicate_guard_id: bool,
+    ) void {
+        if (query.kind != .GuardViolate) return;
+        self.rows += 1;
+        switch (query.formal_match_status) {
+            .matched => self.matched += 1,
+            .missing => self.missing += 1,
+            .ambiguous => self.ambiguous += 1,
+            .not_applicable => {},
+        }
+        if (duplicate_guard_id) self.duplicate_guard_id_rows += 1;
+        if (guardErasureCleanUnsat(run) and
+            (query.formal_match_status != .matched or duplicate_guard_id))
+        {
+            self.clean_unsat_not_authorized += 1;
+        }
+    }
+};
+
+fn guardErasureCleanUnsat(run: ReportQueryRun) bool {
+    return run.status == z3.Z3_L_FALSE and
+        !run.vacuous and
+        !run.vacuity_unknown and
+        !run.verified_with_caveats;
+}
 
 const ReportKindCounts = struct {
     base: u64 = 0,
@@ -12277,6 +12359,214 @@ test "guard violate query includes scoped path assumptions" {
     try testing.expect(found_violate);
 }
 
+test "guard violate prepared row carries formal erasure identity" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildLinearPathAssumeGuardModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+
+    var guard_ann: ?EncodedAnnotation = null;
+    for (pass.encoded_annotations.items) |ann| {
+        if (ann.kind == .RefinementGuard) {
+            guard_ann = ann;
+            break;
+        }
+    }
+    const ann = guard_ann orelse return error.TestUnexpectedResult;
+    const source_op_id = sourceOpId(ann.source_op) orelse return error.TestUnexpectedResult;
+    const assumption_ids = [_]u32{ 10, 11 };
+    const obligation_ids = [_]u32{12};
+    const bindings = [_]FormalQueryBinding{.{
+        .source_op_id = source_op_id,
+        .kind = "guard_violate",
+        .guard_id = "guard:test:linear",
+        .query_id = 99,
+        .assumption_ids = assumption_ids[0..],
+        .obligation_ids = obligation_ids[0..],
+    }};
+    pass.setFormalQueryBindings(bindings[0..]);
+
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| {
+            q.deinit(testing.allocator);
+        }
+        queries.deinit();
+    }
+
+    var saw_violate = false;
+    var saw_satisfy = false;
+    for (queries.items) |q| {
+        if (!std.mem.eql(u8, q.guard_id orelse "", "guard:test:linear")) continue;
+        switch (q.kind) {
+            .GuardViolate => {
+                saw_violate = true;
+                try testing.expectEqual(FormalMatchStatus.matched, q.formal_match_status);
+                try testing.expectEqual(@as(?u32, 99), q.formal_query_id);
+                try testing.expectEqualSlices(u32, assumption_ids[0..], q.formal_assumption_ids);
+                try testing.expectEqualSlices(u32, obligation_ids[0..], q.formal_obligation_ids);
+                try testing.expect(q.formal_match_key == null);
+            },
+            .GuardSatisfy => {
+                saw_satisfy = true;
+                try testing.expectEqual(FormalMatchStatus.not_applicable, q.formal_match_status);
+                try testing.expect(q.formal_query_id == null);
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_violate);
+    try testing.expect(saw_satisfy);
+}
+
+test "guard violate formal erasure identity reports missing and ambiguous rows" {
+    const Case = enum { missing, ambiguous };
+    inline for (.{ Case.missing, Case.ambiguous }) |case| {
+        var pass = try VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+
+        const mlir_ctx = mlir.oraContextCreate();
+        defer mlir.oraContextDestroy(mlir_ctx);
+        testLoadAllDialects(mlir_ctx);
+        _ = mlir.oraDialectRegister(mlir_ctx);
+
+        const module = buildLinearPathAssumeGuardModule(mlir_ctx);
+        defer mlir.oraModuleDestroy(module);
+
+        try pass.extractAnnotationsFromMLIR(module);
+
+        var guard_ann: ?EncodedAnnotation = null;
+        for (pass.encoded_annotations.items) |ann| {
+            if (ann.kind == .RefinementGuard) {
+                guard_ann = ann;
+                break;
+            }
+        }
+        const ann = guard_ann orelse return error.TestUnexpectedResult;
+        const source_op_id = sourceOpId(ann.source_op) orelse return error.TestUnexpectedResult;
+        var bindings: [2]FormalQueryBinding = undefined;
+        const binding_count: usize = switch (case) {
+            .missing => blk: {
+                bindings[0] = .{
+                    .source_op_id = source_op_id,
+                    .kind = "guard_violate",
+                    .guard_id = "guard:test:other",
+                    .query_id = 1,
+                };
+                break :blk 1;
+            },
+            .ambiguous => blk: {
+                bindings[0] = .{
+                    .source_op_id = source_op_id,
+                    .kind = "guard_violate",
+                    .guard_id = "guard:test:linear",
+                    .query_id = 1,
+                };
+                bindings[1] = .{
+                    .source_op_id = source_op_id,
+                    .kind = "guard_violate",
+                    .guard_id = "guard:test:linear",
+                    .query_id = 2,
+                };
+                break :blk 2;
+            },
+        };
+        pass.setFormalQueryBindings(bindings[0..binding_count]);
+
+        var queries = try pass.buildPreparedQueries();
+        defer {
+            for (queries.items) |*q| {
+                q.deinit(testing.allocator);
+            }
+            queries.deinit();
+        }
+
+        var saw_violate = false;
+        for (queries.items) |q| {
+            if (q.kind != .GuardViolate) continue;
+            saw_violate = true;
+            const expected_status: FormalMatchStatus = switch (case) {
+                .missing => .missing,
+                .ambiguous => .ambiguous,
+            };
+            try testing.expectEqual(expected_status, q.formal_match_status);
+            try testing.expect(q.formal_query_id == null);
+            try testing.expect(q.formal_match_key != null);
+            try testing.expect(std.mem.indexOf(u8, q.formal_match_key.?, "kind=guard_violate") != null);
+            try testing.expect(std.mem.indexOf(u8, q.formal_match_key.?, "guard=guard:test:linear") != null);
+        }
+        try testing.expect(saw_violate);
+    }
+}
+
+test "guard-tagged obligations do not carry erasure authority identity" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setVerifyMode(.Full);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildGuardOraAssertModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+
+    var guard_ann: ?EncodedAnnotation = null;
+    for (pass.encoded_annotations.items) |ann| {
+        if (ann.kind == .Guard) {
+            guard_ann = ann;
+            break;
+        }
+    }
+    const ann = guard_ann orelse return error.TestUnexpectedResult;
+    const source_op_id = sourceOpId(ann.source_op) orelse return error.TestUnexpectedResult;
+    const bindings = [_]FormalQueryBinding{
+        .{
+            .source_op_id = source_op_id,
+            .kind = "obligation",
+            .logical_role = "guard",
+            .guard_id = "guard:test:clause",
+            .query_id = 7,
+        },
+        .{
+            .source_op_id = source_op_id,
+            .kind = "guard_violate",
+            .guard_id = "guard:test:clause",
+            .query_id = 8,
+        },
+    };
+    pass.setFormalQueryBindings(bindings[0..]);
+
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| {
+            q.deinit(testing.allocator);
+        }
+        queries.deinit();
+    }
+
+    var saw_guard_obligation = false;
+    for (queries.items) |q| {
+        if (q.kind != .Obligation or q.obligation_kind != .Guard) continue;
+        saw_guard_obligation = true;
+        try testing.expectEqual(FormalMatchStatus.not_applicable, q.formal_match_status);
+        try testing.expect(q.formal_query_id == null);
+        try testing.expect(q.formal_match_key == null);
+    }
+    try testing.expect(saw_guard_obligation);
+}
+
 test "guard satisfy queries ignore incompatible sibling branch paths" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
@@ -12310,7 +12600,6 @@ test "guard satisfy queries ignore incompatible sibling branch paths" {
 
     try testing.expectEqual(@as(usize, 2), satisfy_count);
 }
-
 test "sequential guard verification ignores sibling branch guards" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
@@ -13525,6 +13814,62 @@ test "report loop-post discharge matches verifier result collection" {
 
     try testing.expect(loopPostDischargesObligation(queries[0], queries[0..], verification_results[0..]));
     try testing.expect(loopPostDischargesReportObligation(queries[0], queries[0..], report_runs[0..]));
+}
+
+test "guard erasure agreement summary counts only clean unauthorized UNSAT rows" {
+    var matched_query = PreparedQuery{
+        .kind = .GuardViolate,
+        .function_name = "guarded",
+        .guard_id = "guard:matched",
+        .file = "/tmp/guard.ora",
+        .line = 1,
+        .column = 1,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "guarded guard guard:matched [violate]"),
+        .formal_match_status = .matched,
+    };
+    defer matched_query.deinit(testing.allocator);
+    var missing_query = PreparedQuery{
+        .kind = .GuardViolate,
+        .function_name = "guarded",
+        .guard_id = "guard:missing",
+        .file = "/tmp/guard.ora",
+        .line = 2,
+        .column = 1,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "guarded guard guard:missing [violate]"),
+        .formal_match_status = .missing,
+    };
+    defer missing_query.deinit(testing.allocator);
+    var ambiguous_query = PreparedQuery{
+        .kind = .GuardViolate,
+        .function_name = "guarded",
+        .guard_id = "guard:ambiguous",
+        .file = "/tmp/guard.ora",
+        .line = 3,
+        .column = 1,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "guarded guard guard:ambiguous [violate]"),
+        .formal_match_status = .ambiguous,
+    };
+    defer ambiguous_query.deinit(testing.allocator);
+
+    var summary = GuardErasureAgreementSummary{};
+    summary.add(matched_query, .{ .status = z3.Z3_L_FALSE }, false);
+    summary.add(missing_query, .{ .status = z3.Z3_L_FALSE }, false);
+    summary.add(ambiguous_query, .{ .status = z3.Z3_L_FALSE }, true);
+    summary.add(missing_query, .{
+        .status = z3.Z3_L_FALSE,
+        .vacuity_unknown = true,
+        .verified_with_caveats = true,
+    }, false);
+
+    try testing.expectEqual(@as(u64, 4), summary.rows);
+    try testing.expectEqual(@as(u64, 1), summary.matched);
+    try testing.expectEqual(@as(u64, 2), summary.missing);
+    try testing.expectEqual(@as(u64, 1), summary.ambiguous);
+    try testing.expectEqual(@as(u64, 1), summary.duplicate_guard_id_rows);
+    try testing.expectEqual(@as(u64, 2), summary.clean_unsat_not_authorized);
 }
 
 test "report success is false when encoder degraded" {
