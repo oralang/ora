@@ -345,6 +345,201 @@ const PromotionValueContext = enum(u8) {
     value,
 };
 
+fn walkTerm(
+    comptime Visitor: type,
+    visitor: *Visitor,
+    set: obligation.ObligationSet,
+    id: obligation.TermId,
+    fuel: usize,
+    state: Visitor.State,
+) Visitor.Result {
+    if (fuel == 0 or id >= set.terms.len) return visitor.visitInvalidTerm();
+    return switch (set.terms[id]) {
+        .bool_lit => |value| if (@hasDecl(Visitor, "visitBoolLit"))
+            visitor.visitBoolLit(set, value, fuel, state)
+        else
+            visitor.visitDefault(set, set.terms[id], fuel, state),
+        .int_lit => |literal| if (@hasDecl(Visitor, "visitIntLit"))
+            visitor.visitIntLit(set, literal, fuel, state)
+        else
+            visitor.visitDefault(set, set.terms[id], fuel, state),
+        .variable => |variable| if (@hasDecl(Visitor, "visitVariable"))
+            visitor.visitVariable(set, variable, fuel, state)
+        else
+            visitor.visitDefault(set, set.terms[id], fuel, state),
+        .old => |operand| if (@hasDecl(Visitor, "visitOld"))
+            visitor.visitOld(set, operand, fuel, state)
+        else
+            visitor.visitDefault(set, set.terms[id], fuel, state),
+        .result => if (@hasDecl(Visitor, "visitResult"))
+            visitor.visitResult(set, fuel, state)
+        else
+            visitor.visitDefault(set, set.terms[id], fuel, state),
+        .place_read => |place| if (@hasDecl(Visitor, "visitPlaceRead"))
+            visitor.visitPlaceRead(set, place, fuel, state)
+        else
+            visitor.visitDefault(set, set.terms[id], fuel, state),
+        .unary => |unary| if (@hasDecl(Visitor, "visitUnary"))
+            visitor.visitUnary(set, unary, fuel, state)
+        else
+            visitor.visitDefault(set, set.terms[id], fuel, state),
+        .binary => |binary| if (@hasDecl(Visitor, "visitBinary"))
+            visitor.visitBinary(set, binary, fuel, state)
+        else
+            visitor.visitDefault(set, set.terms[id], fuel, state),
+        .refinement_predicate => |predicate| if (@hasDecl(Visitor, "visitRefinementPredicate"))
+            visitor.visitRefinementPredicate(set, predicate, fuel, state)
+        else
+            visitor.visitDefault(set, set.terms[id], fuel, state),
+        .quantified => |quantified| if (@hasDecl(Visitor, "visitQuantified"))
+            visitor.visitQuantified(set, quantified, fuel, state)
+        else
+            visitor.visitDefault(set, set.terms[id], fuel, state),
+    };
+}
+
+const PromotionWalkState = struct {
+    value_context: PromotionValueContext = .none,
+    scope: CanonicalSupportScope = .{},
+};
+
+const PromotionVisitor = struct {
+    features: *PromotionFeatures,
+
+    const State = PromotionWalkState;
+    const Result = bool;
+
+    fn visitInvalidTerm(self: *PromotionVisitor) bool {
+        _ = self;
+        return false;
+    }
+
+    fn visitDefault(self: *PromotionVisitor, set: obligation.ObligationSet, term: obligation.Term, fuel: usize, state: State) bool {
+        _ = fuel;
+        return switch (term) {
+            .bool_lit,
+            .int_lit,
+            => true,
+            .variable => |variable| switch (variable) {
+                .free => true,
+                .bound => |bound| state.scope.containsBound(bound.index),
+            },
+            .old => |operand| {
+                if (operand >= set.terms.len) return false;
+                const place = switch (set.terms[operand]) {
+                    .place_read => |place| place,
+                    else => return false,
+                };
+                switch (placeReadCanonicalSupport(place)) {
+                    .supported => {
+                        self.features.old_scalar_place_reads +|= 1;
+                        return true;
+                    },
+                    .unsupported => return false,
+                }
+            },
+            .result => {
+                if (state.value_context != .value) return false;
+                self.features.result_terms +|= 1;
+                return true;
+            },
+            .place_read => |place| switch (placeReadCanonicalSupport(place)) {
+                .supported => {
+                    self.features.scalar_place_reads +|= 1;
+                    return true;
+                },
+                .unsupported => return false,
+            },
+            else => false,
+        };
+    }
+
+    fn visitUnary(self: *PromotionVisitor, set: obligation.ObligationSet, unary: obligation.UnaryTerm, fuel: usize, state: State) bool {
+        const child_context: PromotionValueContext = switch (unary.op) {
+            .not => blk: {
+                self.features.connective_ops +|= 1;
+                break :blk .none;
+            },
+            .neg => .value,
+        };
+        return walkTerm(PromotionVisitor, self, set, unary.operand, fuel - 1, .{
+            .value_context = child_context,
+            .scope = state.scope,
+        });
+    }
+
+    fn visitBinary(self: *PromotionVisitor, set: obligation.ObligationSet, binary: obligation.BinaryTerm, fuel: usize, state: State) bool {
+        const child_context: PromotionValueContext = switch (binary.op) {
+            .and_,
+            .or_,
+            .implies,
+            => .none,
+            else => .value,
+        };
+        switch (binary.op) {
+            .add,
+            .sub,
+            .mul,
+            .div,
+            .mod,
+            => self.features.arithmetic_ops +|= 1,
+            .and_,
+            .or_,
+            .implies,
+            => self.features.connective_ops +|= 1,
+            .eq,
+            .ne,
+            .lt,
+            .le,
+            .gt,
+            .ge,
+            .slt,
+            .sle,
+            .sgt,
+            .sge,
+            => {},
+        }
+        const child_state: State = .{
+            .value_context = child_context,
+            .scope = state.scope,
+        };
+        return walkTerm(PromotionVisitor, self, set, binary.lhs, fuel - 1, child_state) and
+            walkTerm(PromotionVisitor, self, set, binary.rhs, fuel - 1, child_state);
+    }
+
+    fn visitRefinementPredicate(self: *PromotionVisitor, set: obligation.ObligationSet, predicate: obligation.RefinementPredicateTerm, fuel: usize, state: State) bool {
+        if (refinement_builtin_map.get(predicate.name) == null) return false;
+        self.features.refinement_ops +|= 1;
+        const child_state: State = .{
+            .value_context = .value,
+            .scope = state.scope,
+        };
+        if (!walkTerm(PromotionVisitor, self, set, predicate.value, fuel - 1, child_state)) return false;
+        for (predicate.args) |arg| {
+            if (!walkTerm(PromotionVisitor, self, set, arg, fuel - 1, child_state)) return false;
+        }
+        return true;
+    }
+
+    fn visitQuantified(self: *PromotionVisitor, set: obligation.ObligationSet, quantified: obligation.QuantifiedTerm, fuel: usize, state: State) bool {
+        if (quantified.binder.origin == .function_param and quantified.condition != null) return false;
+        if (quantified.binder.origin != .function_param) {
+            self.features.quantifier_terms +|= 1;
+        }
+        const child_scope = state.scope.push(quantified.binder.origin);
+        const child_state: State = .{
+            .value_context = .none,
+            .scope = child_scope,
+        };
+        if (quantified.binder.origin != .function_param) {
+            if (quantified.condition) |condition| {
+                if (!walkTerm(PromotionVisitor, self, set, condition, fuel - 1, child_state)) return false;
+            }
+        }
+        return walkTerm(PromotionVisitor, self, set, quantified.body, fuel - 1, child_state);
+    }
+};
+
 fn collectKindPromotionFeatures(
     set: obligation.ObligationSet,
     kind: obligation.Kind,
@@ -387,107 +582,11 @@ fn collectTermPromotionFeatures(
     scope: CanonicalSupportScope,
     features: *PromotionFeatures,
 ) bool {
-    if (fuel == 0 or id >= set.terms.len) return false;
-    switch (set.terms[id]) {
-        .bool_lit => return true,
-        .int_lit => return true,
-        .variable => |variable| return switch (variable) {
-            .free => true,
-            .bound => |bound| scope.containsBound(bound.index),
-        },
-        .old => |operand| {
-            if (operand >= set.terms.len) return false;
-            const place = switch (set.terms[operand]) {
-                .place_read => |place| place,
-                else => return false,
-            };
-            switch (placeReadCanonicalSupport(place)) {
-                .supported => {
-                    features.old_scalar_place_reads +|= 1;
-                    return true;
-                },
-                .unsupported => return false,
-            }
-        },
-        .result => {
-            if (value_context != .value) return false;
-            features.result_terms +|= 1;
-            return true;
-        },
-        .place_read => |place| switch (placeReadCanonicalSupport(place)) {
-            .supported => {
-                features.scalar_place_reads +|= 1;
-                return true;
-            },
-            .unsupported => return false,
-        },
-        .unary => |unary| {
-            const child_context: PromotionValueContext = switch (unary.op) {
-                .not => blk: {
-                    features.connective_ops +|= 1;
-                    break :blk .none;
-                },
-                .neg => .value,
-            };
-            return collectTermPromotionFeatures(set, unary.operand, fuel - 1, child_context, scope, features);
-        },
-        .binary => |binary| {
-            const child_context: PromotionValueContext = switch (binary.op) {
-                .and_,
-                .or_,
-                .implies,
-                => .none,
-                else => .value,
-            };
-            switch (binary.op) {
-                .add,
-                .sub,
-                .mul,
-                .div,
-                .mod,
-                => features.arithmetic_ops +|= 1,
-                .and_,
-                .or_,
-                .implies,
-                => features.connective_ops +|= 1,
-                .eq,
-                .ne,
-                .lt,
-                .le,
-                .gt,
-                .ge,
-                .slt,
-                .sle,
-                .sgt,
-                .sge,
-                => {},
-            }
-            return collectTermPromotionFeatures(set, binary.lhs, fuel - 1, child_context, scope, features) and
-                collectTermPromotionFeatures(set, binary.rhs, fuel - 1, child_context, scope, features);
-        },
-        .refinement_predicate => |predicate| {
-            if (refinement_builtin_map.get(predicate.name) == null) return false;
-            features.refinement_ops +|= 1;
-            if (!collectTermPromotionFeatures(set, predicate.value, fuel - 1, .value, scope, features)) return false;
-            for (predicate.args) |arg| {
-                if (!collectTermPromotionFeatures(set, arg, fuel - 1, .value, scope, features)) return false;
-            }
-            return true;
-        },
-        .quantified => |quantified| {
-            if (quantified.binder.origin == .function_param and quantified.condition != null) return false;
-            if (quantified.binder.origin != .function_param) {
-                features.quantifier_terms +|= 1;
-            }
-            const child_scope = scope.push(quantified.binder.origin);
-            if (quantified.binder.origin != .function_param) {
-                if (quantified.condition) |condition| {
-                    if (!collectTermPromotionFeatures(set, condition, fuel - 1, .none, child_scope, features)) return false;
-                }
-            }
-            return collectTermPromotionFeatures(set, quantified.body, fuel - 1, .none, child_scope, features);
-        },
-    }
+    var visitor: PromotionVisitor = .{ .features = features };
+    return walkTerm(PromotionVisitor, &visitor, set, id, fuel, .{
+        .value_context = value_context,
+        .scope = scope,
+    });
 }
 
 fn findAssumption(set: obligation.ObligationSet, id: obligation.Id) ?obligation.Assumption {
@@ -532,25 +631,90 @@ fn formulaCanonicalSupport(
     };
 }
 
+const SupportWalkState = struct {
+    scope: CanonicalSupportScope = .{},
+    expected: ?TypeInfo = null,
+};
+
+const SupportVisitor = struct {
+    const State = SupportWalkState;
+    const Result = CanonicalSupport;
+
+    fn visitInvalidTerm(self: *SupportVisitor) CanonicalSupport {
+        _ = self;
+        return .{ .unsupported = .unsupported_obligation_kind };
+    }
+
+    fn visitDefault(self: *SupportVisitor, set: obligation.ObligationSet, term: obligation.Term, fuel: usize, state: State) CanonicalSupport {
+        _ = self;
+        return switch (term) {
+            .bool_lit => .supported,
+            .int_lit => |literal| typeRefCanonicalSupport(literal.ty),
+            .variable => |variable| varRefCanonicalSupport(variable, state.scope),
+            .old => |operand| oldCanonicalSupport(set, operand, fuel - 1),
+            .result => blk: {
+                const info = state.expected orelse break :blk .{ .unsupported = .unsupported_result_term };
+                if (info.kind != .bitvector) break :blk .{ .unsupported = .unsupported_result_term };
+                break :blk .supported;
+            },
+            .place_read => |place| placeReadCanonicalSupport(place),
+            else => .{ .unsupported = .unsupported_obligation_kind },
+        };
+    }
+
+    fn visitUnary(
+        self: *SupportVisitor,
+        set: obligation.ObligationSet,
+        unary: obligation.UnaryTerm,
+        fuel: usize,
+        state: State,
+    ) CanonicalSupport {
+        _ = self;
+        return termCanonicalSupport(set, unary.operand, fuel - 1, state.scope);
+    }
+
+    fn visitBinary(
+        self: *SupportVisitor,
+        set: obligation.ObligationSet,
+        binary: obligation.BinaryTerm,
+        fuel: usize,
+        state: State,
+    ) CanonicalSupport {
+        _ = self;
+        return binaryCanonicalSupport(set, binary, fuel - 1, state.scope);
+    }
+
+    fn visitRefinementPredicate(
+        self: *SupportVisitor,
+        set: obligation.ObligationSet,
+        predicate: obligation.RefinementPredicateTerm,
+        fuel: usize,
+        state: State,
+    ) CanonicalSupport {
+        _ = self;
+        return refinementPredicateCanonicalSupport(set, predicate, fuel - 1, state.scope);
+    }
+
+    fn visitQuantified(
+        self: *SupportVisitor,
+        set: obligation.ObligationSet,
+        quantified: obligation.QuantifiedTerm,
+        fuel: usize,
+        state: State,
+    ) CanonicalSupport {
+        _ = self;
+        return quantifiedCanonicalSupport(set, quantified, fuel - 1, state.scope);
+    }
+};
+
 fn termCanonicalSupport(
     set: obligation.ObligationSet,
     id: obligation.TermId,
     fuel: usize,
     scope: CanonicalSupportScope,
 ) CanonicalSupport {
-    if (fuel == 0 or id >= set.terms.len) return .{ .unsupported = .unsupported_obligation_kind };
-    return switch (set.terms[id]) {
-        .bool_lit => .supported,
-        .int_lit => |literal| typeRefCanonicalSupport(literal.ty),
-        .variable => |variable| varRefCanonicalSupport(variable, scope),
-        .old => |operand| oldCanonicalSupport(set, operand, fuel - 1),
-        .result => .{ .unsupported = .unsupported_result_term },
-        .place_read => |place| placeReadCanonicalSupport(place),
-        .unary => |unary| termCanonicalSupport(set, unary.operand, fuel - 1, scope),
-        .binary => |binary| binaryCanonicalSupport(set, binary, fuel - 1, scope),
-        .refinement_predicate => |predicate| refinementPredicateCanonicalSupport(set, predicate, fuel - 1, scope),
-        .quantified => |quantified| quantifiedCanonicalSupport(set, quantified, fuel - 1, scope),
-    };
+    var visitor: SupportVisitor = .{};
+    return walkTerm(SupportVisitor, &visitor, set, id, fuel, .{ .scope = scope });
 }
 
 fn placeReadCanonicalSupport(place: obligation.PlaceRef) CanonicalSupport {
@@ -595,14 +759,12 @@ fn termCanonicalSupportWithExpected(
     expected: ?TypeInfo,
     scope: CanonicalSupportScope,
 ) CanonicalSupport {
-    if (fuel == 0 or id >= set.terms.len) return .{ .unsupported = .unsupported_obligation_kind };
+    var visitor: SupportVisitor = .{};
     // `result` carries no TypeRef of its own; only a typed parent may pick its sort.
-    if (set.terms[id] == .result) {
-        const info = expected orelse return .{ .unsupported = .unsupported_result_term };
-        if (info.kind != .bitvector) return .{ .unsupported = .unsupported_result_term };
-        return .supported;
-    }
-    return termCanonicalSupport(set, id, fuel, scope);
+    return walkTerm(SupportVisitor, &visitor, set, id, fuel, .{
+        .scope = scope,
+        .expected = expected,
+    });
 }
 
 fn binaryResultOperandTypesMatchExpected(
@@ -629,33 +791,55 @@ fn termTypeMatchesExpected(set: obligation.ObligationSet, id: obligation.TermId,
     return .supported;
 }
 
+const ContainsResultVisitor = struct {
+    const State = void;
+    const Result = bool;
+
+    fn visitInvalidTerm(self: *ContainsResultVisitor) bool {
+        _ = self;
+        return false;
+    }
+
+    fn visitDefault(self: *ContainsResultVisitor, set: obligation.ObligationSet, term: obligation.Term, fuel: usize, state: State) bool {
+        _ = self;
+        _ = set;
+        _ = fuel;
+        _ = state;
+        return term == .result;
+    }
+
+    fn visitOld(self: *ContainsResultVisitor, set: obligation.ObligationSet, operand: obligation.TermId, fuel: usize, state: State) bool {
+        return walkTerm(ContainsResultVisitor, self, set, operand, fuel - 1, state);
+    }
+
+    fn visitUnary(self: *ContainsResultVisitor, set: obligation.ObligationSet, unary: obligation.UnaryTerm, fuel: usize, state: State) bool {
+        return walkTerm(ContainsResultVisitor, self, set, unary.operand, fuel - 1, state);
+    }
+
+    fn visitBinary(self: *ContainsResultVisitor, set: obligation.ObligationSet, binary: obligation.BinaryTerm, fuel: usize, state: State) bool {
+        return walkTerm(ContainsResultVisitor, self, set, binary.lhs, fuel - 1, state) or
+            walkTerm(ContainsResultVisitor, self, set, binary.rhs, fuel - 1, state);
+    }
+
+    fn visitRefinementPredicate(self: *ContainsResultVisitor, set: obligation.ObligationSet, predicate: obligation.RefinementPredicateTerm, fuel: usize, state: State) bool {
+        if (walkTerm(ContainsResultVisitor, self, set, predicate.value, fuel - 1, state)) return true;
+        for (predicate.args) |arg| {
+            if (walkTerm(ContainsResultVisitor, self, set, arg, fuel - 1, state)) return true;
+        }
+        return false;
+    }
+
+    fn visitQuantified(self: *ContainsResultVisitor, set: obligation.ObligationSet, quantified: obligation.QuantifiedTerm, fuel: usize, state: State) bool {
+        if (quantified.condition) |condition| {
+            if (walkTerm(ContainsResultVisitor, self, set, condition, fuel - 1, state)) return true;
+        }
+        return walkTerm(ContainsResultVisitor, self, set, quantified.body, fuel - 1, state);
+    }
+};
+
 fn termContainsResult(set: obligation.ObligationSet, id: obligation.TermId, fuel: usize) bool {
-    if (fuel == 0 or id >= set.terms.len) return false;
-    return switch (set.terms[id]) {
-        .result => true,
-        .old => |operand| termContainsResult(set, operand, fuel - 1),
-        .unary => |unary| termContainsResult(set, unary.operand, fuel - 1),
-        .binary => |binary| termContainsResult(set, binary.lhs, fuel - 1) or
-            termContainsResult(set, binary.rhs, fuel - 1),
-        .refinement_predicate => |predicate| blk: {
-            if (termContainsResult(set, predicate.value, fuel - 1)) break :blk true;
-            for (predicate.args) |arg| {
-                if (termContainsResult(set, arg, fuel - 1)) break :blk true;
-            }
-            break :blk false;
-        },
-        .quantified => |quantified| blk: {
-            if (quantified.condition) |condition| {
-                if (termContainsResult(set, condition, fuel - 1)) break :blk true;
-            }
-            break :blk termContainsResult(set, quantified.body, fuel - 1);
-        },
-        .bool_lit,
-        .int_lit,
-        .variable,
-        .place_read,
-        => false,
-    };
+    var visitor: ContainsResultVisitor = .{};
+    return walkTerm(ContainsResultVisitor, &visitor, set, id, fuel, {});
 }
 
 fn expectedInfoFromBinaryType(ty: ?obligation.TypeRef) EncodeError!?TypeInfo {
@@ -706,18 +890,49 @@ fn termIsResult(set: obligation.ObligationSet, id: obligation.TermId) bool {
     return id < set.terms.len and set.terms[id] == .result;
 }
 
-fn staticTermTypeInfo(set: obligation.ObligationSet, id: obligation.TermId) EncodeError!TypeInfo {
-    if (id >= set.terms.len) return error.InvalidTermReference;
-    return switch (set.terms[id]) {
-        .bool_lit => .{ .kind = .bool },
-        .int_lit => |literal| typeInfo(literal.ty orelse return error.MissingType),
-        .variable => |variable| typeInfo(variableTypeRef(variable) orelse return error.MissingType),
-        .old => |operand| staticTermTypeInfo(set, operand),
-        .unary => |unary| switch (unary.op) {
+const StaticTypeVisitor = struct {
+    const State = void;
+    const Result = EncodeError!TypeInfo;
+
+    fn visitInvalidTerm(self: *StaticTypeVisitor) EncodeError!TypeInfo {
+        _ = self;
+        return error.InvalidTermReference;
+    }
+
+    fn visitDefault(self: *StaticTypeVisitor, set: obligation.ObligationSet, term: obligation.Term, fuel: usize, state: State) EncodeError!TypeInfo {
+        _ = self;
+        _ = set;
+        _ = fuel;
+        _ = state;
+        return switch (term) {
+            .bool_lit,
+            .refinement_predicate,
+            .quantified,
+            => .{ .kind = .bool },
+            .int_lit => |literal| typeInfo(literal.ty orelse return error.MissingType),
+            .variable => |variable| typeInfo(variableTypeRef(variable) orelse return error.MissingType),
+            .result => error.MissingType,
+            .place_read => |place| switch (placeReadCanonicalSupport(place)) {
+                .supported => u256TypeInfo(),
+                .unsupported => error.UnsupportedPlaceReadTerm,
+            },
+            else => error.InvalidTermReference,
+        };
+    }
+
+    fn visitOld(self: *StaticTypeVisitor, set: obligation.ObligationSet, operand: obligation.TermId, fuel: usize, state: State) EncodeError!TypeInfo {
+        return walkTerm(StaticTypeVisitor, self, set, operand, fuel - 1, state);
+    }
+
+    fn visitUnary(self: *StaticTypeVisitor, set: obligation.ObligationSet, unary: obligation.UnaryTerm, fuel: usize, state: State) EncodeError!TypeInfo {
+        return switch (unary.op) {
             .not => .{ .kind = .bool },
-            .neg => staticTermTypeInfo(set, unary.operand),
-        },
-        .binary => |nested| switch (nested.op) {
+            .neg => walkTerm(StaticTypeVisitor, self, set, unary.operand, fuel - 1, state),
+        };
+    }
+
+    fn visitBinary(self: *StaticTypeVisitor, set: obligation.ObligationSet, nested: obligation.BinaryTerm, fuel: usize, state: State) EncodeError!TypeInfo {
+        return switch (nested.op) {
             .eq,
             .ne,
             .lt,
@@ -737,17 +952,14 @@ fn staticTermTypeInfo(set: obligation.ObligationSet, id: obligation.TermId) Enco
             .mul,
             .div,
             .mod,
-            => if (try expectedInfoFromBinaryType(nested.ty)) |info| info else try staticTermTypeInfo(set, nested.lhs),
-        },
-        .refinement_predicate,
-        .quantified,
-        => .{ .kind = .bool },
-        .result => error.MissingType,
-        .place_read => |place| switch (placeReadCanonicalSupport(place)) {
-            .supported => u256TypeInfo(),
-            .unsupported => error.UnsupportedPlaceReadTerm,
-        },
-    };
+            => if (try expectedInfoFromBinaryType(nested.ty)) |info| info else try walkTerm(StaticTypeVisitor, self, set, nested.lhs, fuel - 1, state),
+        };
+    }
+};
+
+fn staticTermTypeInfo(set: obligation.ObligationSet, id: obligation.TermId) EncodeError!TypeInfo {
+    var visitor: StaticTypeVisitor = .{};
+    return walkTerm(StaticTypeVisitor, &visitor, set, id, set.terms.len + 1, {});
 }
 
 fn canonicalReasonForTypeError(err: EncodeError) CanonicalSupport {
@@ -882,6 +1094,13 @@ pub const Adapter = struct {
     allocator: std.mem.Allocator,
     set: obligation.ObligationSet,
     query_state: ?*CanonicalQueryState,
+
+    const EncodeTermState = struct {
+        expected: ?TypeInfo = null,
+        enforce_expected_type: bool = false,
+    };
+    const State = EncodeTermState;
+    const Result = EncodeError!z3.Z3_ast;
 
     pub fn init(
         context: *Context,
@@ -1085,28 +1304,44 @@ pub const Adapter = struct {
 
     fn encodeGoalFormula(self: *Adapter, formula: obligation.FormulaRef) EncodeError!z3.Z3_ast {
         const ast = switch (formula) {
-            .term => |term_id| try self.encodeLeadingGoalForalls(term_id, 0),
+            .term => |term_id| try self.encodeLeadingGoalForalls(term_id, 0, self.set.terms.len + 1),
             .origin_value => return error.UnsupportedOriginValue,
         };
         try self.requireBool(ast);
         return ast;
     }
 
-    fn encodeLeadingGoalForalls(self: *Adapter, id: obligation.TermId, depth: u32) EncodeError!z3.Z3_ast {
-        if (id >= self.set.terms.len) return error.InvalidTermReference;
+    fn encodeLeadingGoalForalls(self: *Adapter, id: obligation.TermId, depth: u32, fuel: usize) EncodeError!z3.Z3_ast {
+        if (fuel == 0 or id >= self.set.terms.len) return error.InvalidTermReference;
         const term = self.set.terms[id];
         if (term != .quantified or term.quantified.quantifier != .forall) {
-            return self.encodeTerm(term);
+            return self.encodeTermIdWithState(id, fuel, .{});
         }
         if (term.quantified.binder.origin == .function_param) {
-            return self.encodeFunctionParamForallWrapper(term.quantified, depth);
+            return self.encodeFunctionParamForallWrapper(term.quantified, depth, fuel);
         }
-        return self.encodeLeadingGoalForall(term.quantified, depth);
+        return self.encodeLeadingGoalForall(term.quantified, depth, fuel);
     }
 
     fn encodeTermId(self: *Adapter, id: obligation.TermId) EncodeError!z3.Z3_ast {
-        if (id >= self.set.terms.len) return error.InvalidTermReference;
-        return self.encodeTerm(self.set.terms[id]);
+        return self.encodeTermIdWithState(id, self.set.terms.len + 1, .{});
+    }
+
+    fn encodeTermIdWithState(
+        self: *Adapter,
+        id: obligation.TermId,
+        fuel: usize,
+        state: EncodeTermState,
+    ) EncodeError!z3.Z3_ast {
+        if (state.enforce_expected_type) {
+            const expected_info = state.expected orelse return error.UnsupportedResultTerm;
+            if (id >= self.set.terms.len) return error.InvalidTermReference;
+            if (self.set.terms[id] != .result) {
+                const actual = try staticTermTypeInfo(self.set, id);
+                if (!typeInfoEql(expected_info, actual)) return error.TypeMismatch;
+            }
+        }
+        return walkTerm(Adapter, self, self.set, id, fuel, state);
     }
 
     fn encodeTermIdWithExpected(
@@ -1115,21 +1350,30 @@ pub const Adapter = struct {
         expected: ?TypeInfo,
         enforce_expected_type: bool,
     ) EncodeError!z3.Z3_ast {
-        if (id >= self.set.terms.len) return error.InvalidTermReference;
-        if (self.set.terms[id] == .result) {
-            const info = expected orelse return error.UnsupportedResultTerm;
-            if (info.kind != .bitvector) return error.UnsupportedResultTerm;
-            return self.encodeResult(info);
-        }
-        if (enforce_expected_type) {
-            const expected_info = expected orelse return error.UnsupportedResultTerm;
-            const actual = try staticTermTypeInfo(self.set, id);
-            if (!typeInfoEql(expected_info, actual)) return error.TypeMismatch;
-        }
-        return self.encodeTerm(self.set.terms[id]);
+        return self.encodeTermIdWithExpectedFuel(id, self.set.terms.len + 1, expected, enforce_expected_type);
     }
 
-    fn encodeTerm(self: *Adapter, term: obligation.Term) EncodeError!z3.Z3_ast {
+    fn encodeTermIdWithExpectedFuel(
+        self: *Adapter,
+        id: obligation.TermId,
+        fuel: usize,
+        expected: ?TypeInfo,
+        enforce_expected_type: bool,
+    ) EncodeError!z3.Z3_ast {
+        return self.encodeTermIdWithState(id, fuel, .{
+            .expected = expected,
+            .enforce_expected_type = enforce_expected_type,
+        });
+    }
+
+    fn visitInvalidTerm(self: *Adapter) EncodeError!z3.Z3_ast {
+        _ = self;
+        return error.InvalidTermReference;
+    }
+
+    fn visitDefault(self: *Adapter, set: obligation.ObligationSet, term: obligation.Term, fuel: usize, state: EncodeTermState) EncodeError!z3.Z3_ast {
+        _ = set;
+        _ = fuel;
         return switch (term) {
             .bool_lit => |value| if (value)
                 z3.Z3_mk_true(self.context.ctx)
@@ -1138,13 +1382,62 @@ pub const Adapter = struct {
             .int_lit => |literal| self.encodeIntegerLiteral(literal),
             .variable => |variable| self.encodeVariable(variable),
             .old => |operand| self.encodeOld(operand),
-            .result => error.UnsupportedResultTerm,
+            .result => blk: {
+                const info = state.expected orelse return error.UnsupportedResultTerm;
+                if (info.kind != .bitvector) return error.UnsupportedResultTerm;
+                break :blk self.encodeResult(info);
+            },
             .place_read => |place| self.encodePlaceRead(place),
-            .unary => |unary| self.encodeUnary(unary),
-            .binary => |binary| self.encodeBinary(binary),
-            .refinement_predicate => |predicate| self.encodeRefinementPredicate(predicate),
-            .quantified => |quantified| self.encodeQuantified(quantified),
+            else => error.UnsupportedType,
         };
+    }
+
+    fn visitUnary(
+        self: *Adapter,
+        set: obligation.ObligationSet,
+        unary: obligation.UnaryTerm,
+        fuel: usize,
+        state: EncodeTermState,
+    ) EncodeError!z3.Z3_ast {
+        _ = set;
+        _ = state;
+        return self.encodeUnary(unary, fuel);
+    }
+
+    fn visitBinary(
+        self: *Adapter,
+        set: obligation.ObligationSet,
+        binary: obligation.BinaryTerm,
+        fuel: usize,
+        state: EncodeTermState,
+    ) EncodeError!z3.Z3_ast {
+        _ = set;
+        _ = state;
+        return self.encodeBinary(binary, fuel);
+    }
+
+    fn visitRefinementPredicate(
+        self: *Adapter,
+        set: obligation.ObligationSet,
+        predicate: obligation.RefinementPredicateTerm,
+        fuel: usize,
+        state: EncodeTermState,
+    ) EncodeError!z3.Z3_ast {
+        _ = set;
+        _ = state;
+        return self.encodeRefinementPredicate(predicate, fuel);
+    }
+
+    fn visitQuantified(
+        self: *Adapter,
+        set: obligation.ObligationSet,
+        quantified: obligation.QuantifiedTerm,
+        fuel: usize,
+        state: EncodeTermState,
+    ) EncodeError!z3.Z3_ast {
+        _ = set;
+        _ = state;
+        return self.encodeQuantified(quantified, fuel);
     }
 
     fn encodeResult(self: *Adapter, info: TypeInfo) EncodeError!z3.Z3_ast {
@@ -1279,7 +1572,7 @@ pub const Adapter = struct {
         return binding.ast;
     }
 
-    fn encodeQuantified(self: *Adapter, quantified: obligation.QuantifiedTerm) EncodeError!z3.Z3_ast {
+    fn encodeQuantified(self: *Adapter, quantified: obligation.QuantifiedTerm, fuel: usize) EncodeError!z3.Z3_ast {
         const info = try quantifierBinderTypeInfo(quantified.binder.ty);
         const sort = try self.sortForType(info);
         const bound_ast = try self.namedConst(quantified.binder.name, sort);
@@ -1293,11 +1586,11 @@ pub const Adapter = struct {
         });
         defer state.popBound();
 
-        var quantified_body = try self.encodeTermId(quantified.body);
+        var quantified_body = try self.encodeTermIdWithState(quantified.body, fuel - 1, .{});
         try self.requireBool(quantified_body);
 
         if (quantified.condition) |condition_id| {
-            const condition = try self.encodeTermId(condition_id);
+            const condition = try self.encodeTermIdWithState(condition_id, fuel - 1, .{});
             try self.requireBool(condition);
             quantified_body = switch (quantified.quantifier) {
                 .exists => z3.Z3_mk_and(self.context.ctx, 2, &[_]z3.Z3_ast{ condition, quantified_body }),
@@ -1331,8 +1624,8 @@ pub const Adapter = struct {
         return ast;
     }
 
-    fn encodeLeadingGoalForall(self: *Adapter, quantified: obligation.QuantifiedTerm, depth: u32) EncodeError!z3.Z3_ast {
-        try self.predeclareLeadingGoalForallSurface(quantified);
+    fn encodeLeadingGoalForall(self: *Adapter, quantified: obligation.QuantifiedTerm, depth: u32, fuel: usize) EncodeError!z3.Z3_ast {
+        try self.predeclareLeadingGoalForallSurface(quantified, fuel);
 
         const info = try quantifierBinderTypeInfo(quantified.binder.ty);
         const sort = try self.sortForType(info);
@@ -1351,19 +1644,19 @@ pub const Adapter = struct {
         defer state.popBound();
 
         if (quantified.condition) |condition_id| {
-            const condition = try self.encodeTermId(condition_id);
+            const condition = try self.encodeTermIdWithState(condition_id, fuel - 1, .{});
             try self.requireBool(condition);
-            const body = try self.encodeTermId(quantified.body);
+            const body = try self.encodeTermIdWithState(quantified.body, fuel - 1, .{});
             try self.requireBool(body);
             const ast = z3.Z3_mk_implies(self.context.ctx, condition, body);
             try self.context.checkNoError();
             return ast;
         }
 
-        return self.encodeLeadingGoalForalls(quantified.body, depth + 1);
+        return self.encodeLeadingGoalForalls(quantified.body, depth + 1, fuel - 1);
     }
 
-    fn encodeFunctionParamForallWrapper(self: *Adapter, quantified: obligation.QuantifiedTerm, depth: u32) EncodeError!z3.Z3_ast {
+    fn encodeFunctionParamForallWrapper(self: *Adapter, quantified: obligation.QuantifiedTerm, depth: u32, fuel: usize) EncodeError!z3.Z3_ast {
         if (quantified.condition != null) return error.UnsupportedFunctionParamWrapperCondition;
 
         const info = try typeInfo(quantified.binder.ty orelse return error.MissingType);
@@ -1383,10 +1676,10 @@ pub const Adapter = struct {
         // SMT row treats params as free constants and asserts requires/assumes
         // as separate query constraints, so canonical byte parity unwraps the
         // binder and leaves user quantifiers to the goal-skolem path.
-        return self.encodeLeadingGoalForalls(quantified.body, depth);
+        return self.encodeLeadingGoalForalls(quantified.body, depth, fuel - 1);
     }
 
-    fn predeclareLeadingGoalForallSurface(self: *Adapter, quantified: obligation.QuantifiedTerm) EncodeError!void {
+    fn predeclareLeadingGoalForallSurface(self: *Adapter, quantified: obligation.QuantifiedTerm, fuel: usize) EncodeError!void {
         const state = try self.canonicalQueryState();
         const snapshot_value = state.snapshot();
         defer state.restore(snapshot_value);
@@ -1406,11 +1699,11 @@ pub const Adapter = struct {
         // then goal-position skolemization replaces the binder afterward. This
         // prepass preserves that symbol-interning order while discarding the raw
         // quantified term and any canonical side constraints it created.
-        const body = try self.encodeTermId(quantified.body);
+        const body = try self.encodeTermIdWithState(quantified.body, fuel - 1, .{});
         try self.requireBool(body);
 
         if (quantified.condition) |condition_id| {
-            const condition = try self.encodeTermId(condition_id);
+            const condition = try self.encodeTermIdWithState(condition_id, fuel - 1, .{});
             try self.requireBool(condition);
         }
     }
@@ -1424,8 +1717,8 @@ pub const Adapter = struct {
         return ast;
     }
 
-    fn encodeUnary(self: *Adapter, unary: obligation.UnaryTerm) EncodeError!z3.Z3_ast {
-        const operand = try self.encodeTermId(unary.operand);
+    fn encodeUnary(self: *Adapter, unary: obligation.UnaryTerm, fuel: usize) EncodeError!z3.Z3_ast {
+        const operand = try self.encodeTermIdWithState(unary.operand, fuel - 1, .{});
         const ast = switch (unary.op) {
             .not => blk: {
                 try self.requireBool(operand);
@@ -1442,13 +1735,13 @@ pub const Adapter = struct {
         return ast;
     }
 
-    fn encodeBinary(self: *Adapter, binary: obligation.BinaryTerm) EncodeError!z3.Z3_ast {
+    fn encodeBinary(self: *Adapter, binary: obligation.BinaryTerm, fuel: usize) EncodeError!z3.Z3_ast {
         const expected = try expectedInfoForBinaryOperands(self.set, binary);
         const enforce_expected_type = expected != null and
             (termContainsResult(self.set, binary.lhs, self.set.terms.len + 1) or
                 termContainsResult(self.set, binary.rhs, self.set.terms.len + 1));
-        const lhs = try self.encodeTermIdWithExpected(binary.lhs, expected, enforce_expected_type);
-        const rhs = try self.encodeTermIdWithExpected(binary.rhs, expected, enforce_expected_type);
+        const lhs = try self.encodeTermIdWithExpectedFuel(binary.lhs, fuel - 1, expected, enforce_expected_type);
+        const rhs = try self.encodeTermIdWithExpectedFuel(binary.rhs, fuel - 1, expected, enforce_expected_type);
 
         const ast = switch (binary.op) {
             .eq => z3.Z3_mk_eq(self.context.ctx, lhs, rhs),
@@ -1584,8 +1877,9 @@ pub const Adapter = struct {
     fn encodeRefinementPredicate(
         self: *Adapter,
         predicate: obligation.RefinementPredicateTerm,
+        fuel: usize,
     ) EncodeError!z3.Z3_ast {
-        const value = try self.encodeTermId(predicate.value);
+        const value = try self.encodeTermIdWithState(predicate.value, fuel - 1, .{});
         try self.requireBitVector(value);
         const value_info = try self.termTypeInfo(predicate.value);
 
@@ -1598,18 +1892,18 @@ pub const Adapter = struct {
             },
             .min_value => blk: {
                 try expectArgCount(predicate, 1);
-                const bound = try self.encodeTermId(predicate.args[0]);
+                const bound = try self.encodeTermIdWithState(predicate.args[0], fuel - 1, .{});
                 break :blk self.compareWithSignedness(.ge, value, bound, value_info.signed);
             },
             .max_value => blk: {
                 try expectArgCount(predicate, 1);
-                const bound = try self.encodeTermId(predicate.args[0]);
+                const bound = try self.encodeTermIdWithState(predicate.args[0], fuel - 1, .{});
                 break :blk self.compareWithSignedness(.le, value, bound, value_info.signed);
             },
             .in_range => blk: {
                 try expectArgCount(predicate, 2);
-                const lower = try self.encodeTermId(predicate.args[0]);
-                const upper = try self.encodeTermId(predicate.args[1]);
+                const lower = try self.encodeTermIdWithState(predicate.args[0], fuel - 1, .{});
+                const upper = try self.encodeTermIdWithState(predicate.args[1], fuel - 1, .{});
                 const lower_ok = try self.compareWithSignedness(.ge, value, lower, value_info.signed);
                 const upper_ok = try self.compareWithSignedness(.le, value, upper, value_info.signed);
                 const result = z3.Z3_mk_and(self.context.ctx, 2, &[_]z3.Z3_ast{ lower_ok, upper_ok });
