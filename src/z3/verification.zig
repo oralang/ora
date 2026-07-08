@@ -3463,6 +3463,9 @@ pub const VerificationPass = struct {
             }
             unknown_base_functions.deinit();
         }
+        var guard_id_counts = std.StringHashMap(u32).init(self.allocator);
+        defer guard_id_counts.deinit();
+        try populateGuardViolateIdCounts(&guard_id_counts, queries);
 
         for (results, 0..) |entry, idx| {
             if (entry.err) |err| {
@@ -3711,7 +3714,12 @@ pub const VerificationPass = struct {
                 },
                 .GuardViolate => {
                     if (entry.status == z3.Z3_L_FALSE) {
-                        if (try self.maybeAuthorizeGuardErasure(&combined, query, guardErasureProofStatusFromPreparedEntry(self, entry))) {
+                        if (try self.maybeAuthorizeGuardErasure(
+                            &combined,
+                            query,
+                            guardErasureProofStatusFromPreparedEntry(self, entry),
+                            guardViolateIdIsDuplicated(&guard_id_counts, query.guard_id),
+                        )) {
                             try combined.proven_guard_positions.append(combined.allocator, .{
                                 .file = try combined.allocator.dupe(u8, query.file),
                                 .line = query.line,
@@ -3795,11 +3803,13 @@ pub const VerificationPass = struct {
         self: *const VerificationPass,
         query: PreparedQuery,
         status: GuardErasureProofStatus,
+        duplicate_guard_id: bool,
     ) bool {
         if (!self.guardErasureEnclosingResultHealthy()) return false;
         if (!guardErasureCleanProof(status)) return false;
         if (query.kind != .GuardViolate) return false;
         if (query.guard_id == null) return false;
+        if (duplicate_guard_id) return false;
         if (query.formal_match_status != .matched) return false;
         return true;
     }
@@ -3809,8 +3819,9 @@ pub const VerificationPass = struct {
         result: *errors.VerificationResult,
         query: PreparedQuery,
         status: GuardErasureProofStatus,
+        duplicate_guard_id: bool,
     ) !bool {
-        if (!self.guardErasureQueryAuthorized(query, status)) return false;
+        if (!self.guardErasureQueryAuthorized(query, status, duplicate_guard_id)) return false;
         const guard_id = query.guard_id.?;
         if (result.proven_guard_ids.contains(guard_id)) return false;
         const key = try self.allocator.dupe(u8, guard_id);
@@ -4060,17 +4071,7 @@ pub const VerificationPass = struct {
         var kind_counts = ReportKindCounts{};
         var guard_id_counts = std.StringHashMap(u32).init(self.allocator);
         defer guard_id_counts.deinit();
-
-        for (queries.items) |query| {
-            if (query.kind != .GuardViolate) continue;
-            const guard_id = query.guard_id orelse continue;
-            const entry = try guard_id_counts.getOrPut(guard_id);
-            if (entry.found_existing) {
-                entry.value_ptr.* += 1;
-            } else {
-                entry.value_ptr.* = 1;
-            }
-        }
+        try populateGuardViolateIdCounts(&guard_id_counts, queries.items);
 
         var proven_guard_ids = std.StringHashMap(void).init(self.allocator);
         defer {
@@ -4153,7 +4154,11 @@ pub const VerificationPass = struct {
                             .vacuity_unknown = run.vacuity_unknown,
                             .verified_with_caveats = run.verified_with_caveats,
                         };
-                        if (self.guardErasureQueryAuthorized(query, proof_status) and !proven_guard_ids.contains(guard_id)) {
+                        if (self.guardErasureQueryAuthorized(
+                            query,
+                            proof_status,
+                            guardViolateIdIsDuplicated(&guard_id_counts, query.guard_id),
+                        ) and !proven_guard_ids.contains(guard_id)) {
                             try proven_guard_ids.put(try self.allocator.dupe(u8, guard_id), {});
                         } else if (run.status == z3.Z3_L_TRUE and !violatable_guard_ids.contains(guard_id)) {
                             try violatable_guard_ids.put(try self.allocator.dupe(u8, guard_id), {});
@@ -7262,6 +7267,24 @@ fn guardErasureCleanUnsat(run: ReportQueryRun) bool {
         !run.vacuous and
         !run.vacuity_unknown and
         !run.verified_with_caveats;
+}
+
+fn populateGuardViolateIdCounts(counts: *std.StringHashMap(u32), queries: []const PreparedQuery) !void {
+    for (queries) |query| {
+        if (query.kind != .GuardViolate) continue;
+        const guard_id = query.guard_id orelse continue;
+        const entry = try counts.getOrPut(guard_id);
+        if (entry.found_existing) {
+            entry.value_ptr.* += 1;
+        } else {
+            entry.value_ptr.* = 1;
+        }
+    }
+}
+
+fn guardViolateIdIsDuplicated(counts: *const std.StringHashMap(u32), guard_id: ?[]const u8) bool {
+    const id = guard_id orelse return false;
+    return (counts.get(id) orelse 0) > 1;
 }
 
 const ReportKindCounts = struct {
@@ -12784,6 +12807,95 @@ test "guard erasure authorization refuses enclosing soundness loss" {
     try testing.expect(result.success);
     try testing.expect(!result.proven_guard_ids.contains("guard:test:degraded"));
     try testing.expectEqual(@as(usize, 0), result.proven_guard_positions.items.len);
+}
+
+test "duplicate guard violate rows do not authorize guard erasure" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    var queries = [_]PreparedQuery{
+        .{
+            .kind = .GuardViolate,
+            .function_name = "f",
+            .guard_id = "guard:test:duplicate",
+            .file = "/tmp/test.ora",
+            .line = 4,
+            .column = 8,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try testing.allocator.dupe(u8, "f guard guard:test:duplicate [violate]"),
+            .formal_match_status = .matched,
+        },
+        .{
+            .kind = .GuardViolate,
+            .function_name = "f",
+            .guard_id = "guard:test:duplicate",
+            .file = "/tmp/test.ora",
+            .line = 5,
+            .column = 8,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try testing.allocator.dupe(u8, "f guard guard:test:duplicate [violate]"),
+            .formal_match_status = .matched,
+        },
+    };
+    defer {
+        for (&queries) |*query| query.deinit(testing.allocator);
+    }
+
+    const result_entries = [_]PreparedQueryResult{
+        .{ .status = z3.Z3_L_FALSE },
+        .{ .status = z3.Z3_L_FALSE },
+    };
+    var result = try pass.collectPreparedQueryResults(queries[0..], result_entries[0..]);
+    defer result.deinit();
+
+    try testing.expect(result.success);
+    try testing.expect(!result.proven_guard_ids.contains("guard:test:duplicate"));
+    try testing.expectEqual(@as(usize, 0), result.proven_guard_positions.items.len);
+}
+
+test "distinct guard violate rows authorize only the proven guard" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    var queries = [_]PreparedQuery{
+        .{
+            .kind = .GuardViolate,
+            .function_name = "f",
+            .guard_id = "guard:test:proved",
+            .file = "/tmp/test.ora",
+            .line = 4,
+            .column = 8,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try testing.allocator.dupe(u8, "f guard guard:test:proved [violate]"),
+            .formal_match_status = .matched,
+        },
+        .{
+            .kind = .GuardViolate,
+            .function_name = "f",
+            .guard_id = "guard:test:runtime",
+            .file = "/tmp/test.ora",
+            .line = 5,
+            .column = 8,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try testing.allocator.dupe(u8, "f guard guard:test:runtime [violate]"),
+            .formal_match_status = .matched,
+        },
+    };
+    defer {
+        for (&queries) |*query| query.deinit(testing.allocator);
+    }
+
+    const result_entries = [_]PreparedQueryResult{
+        .{ .status = z3.Z3_L_FALSE },
+        .{ .status = z3.Z3_L_TRUE },
+    };
+    var result = try pass.collectPreparedQueryResults(queries[0..], result_entries[0..]);
+    defer result.deinit();
+
+    try testing.expect(result.success);
+    try testing.expect(result.proven_guard_ids.contains("guard:test:proved"));
+    try testing.expect(!result.proven_guard_ids.contains("guard:test:runtime"));
+    try testing.expectEqual(@as(usize, 1), result.proven_guard_positions.items.len);
 }
 
 test "path constraint normalization flattens boolean ite ladders" {

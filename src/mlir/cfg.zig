@@ -9,6 +9,7 @@
 const std = @import("std");
 const mlir_c_api = @import("mlir_c_api");
 const c = mlir_c_api.c;
+const refinement_guards = @import("ora_lib").compiler.refinement_guards;
 
 pub const Mode = enum {
     ora,
@@ -85,6 +86,7 @@ pub fn generateCFG(
     if (options.proven_guard_ids) |ids| {
         var iter = ids.iterator();
         while (iter.next()) |entry| {
+            if (refinement_guards.guardIdIsDuplicated(module, entry.key_ptr.*)) continue;
             try guard_refs.append(allocator, c.oraStringRefCreate(entry.key_ptr.*.ptr, entry.key_ptr.*.len));
         }
     }

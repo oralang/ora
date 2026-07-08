@@ -5503,10 +5503,60 @@ test "refinement cleanup keeps dominated requires checks without proven guard id
 }
 
 fn firstGuardIdFromModuleText(text: []const u8) ![]const u8 {
+    return nthGuardIdFromModuleText(text, 0);
+}
+
+fn nthGuardIdFromModuleText(text: []const u8, expected_index: usize) ![]const u8 {
     const marker = "ora.guard_id = \"";
-    const start = (std.mem.indexOf(u8, text, marker) orelse return error.TestUnexpectedResult) + marker.len;
-    const end = start + (std.mem.indexOfScalar(u8, text[start..], '"') orelse return error.TestUnexpectedResult);
-    return text[start..end];
+    var offset: usize = 0;
+    var index: usize = 0;
+    while (std.mem.indexOf(u8, text[offset..], marker)) |relative_marker| {
+        const start = offset + relative_marker + marker.len;
+        const end = start + (std.mem.indexOfScalar(u8, text[start..], '"') orelse return error.TestUnexpectedResult);
+        if (index == expected_index) return text[start..end];
+        index += 1;
+        offset = end + 1;
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn setAllRefinementGuardIds(ctx: mlir.MlirContext, module: mlir.MlirModule, guard_id: []const u8) usize {
+    var count: usize = 0;
+    setAllRefinementGuardIdsInOp(ctx, mlir.oraModuleGetOperation(module), guard_id, &count);
+    return count;
+}
+
+fn setAllRefinementGuardIdsInOp(
+    ctx: mlir.MlirContext,
+    op: mlir.MlirOperation,
+    guard_id: []const u8,
+    count: *usize,
+) void {
+    if (mlir.oraOperationIsNull(op)) return;
+
+    const name_ref = mlir.oraOperationGetName(op);
+    if (name_ref.data != null and std.mem.eql(u8, name_ref.data[0..name_ref.length], "ora.refinement_guard")) {
+        mlir.oraOperationSetAttributeByName(
+            op,
+            mlir.oraStringRefCreate("ora.guard_id".ptr, "ora.guard_id".len),
+            mlir.oraStringAttrCreate(ctx, mlir.oraStringRefCreate(guard_id.ptr, guard_id.len)),
+        );
+        count.* += 1;
+    }
+
+    const num_regions = mlir.oraOperationGetNumRegions(op);
+    var region_index: usize = 0;
+    while (region_index < num_regions) : (region_index += 1) {
+        const region = mlir.oraOperationGetRegion(op, region_index);
+        if (mlir.oraRegionIsNull(region)) continue;
+        var block = mlir.oraRegionGetFirstBlock(region);
+        while (!mlir.oraBlockIsNull(block)) : (block = mlir.oraBlockGetNextInRegion(block)) {
+            var child = mlir.oraBlockGetFirstOperation(block);
+            while (!mlir.oraOperationIsNull(child)) : (child = mlir.oraOperationGetNextInBlock(child)) {
+                setAllRefinementGuardIdsInOp(ctx, child, guard_id, count);
+            }
+        }
+    }
 }
 
 test "refinement cleanup erases only proven guard while keeping dominated requires checks" {
@@ -5548,6 +5598,117 @@ test "refinement cleanup erases only proven guard while keeping dominated requir
     try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "ora.refinement_guard"));
     try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "ora.requires"));
     try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "ora.assert"));
+}
+
+test "refinement cleanup refuses duplicate guard ids even when proven" {
+    const source_text =
+        \\contract Check {
+        \\    pub fn run(a: MinValue<u256, 1>, b: MinValue<u256, 1>) {
+        \\        let _: u256 = a;
+        \\        let _: u256 = b;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 2), setAllRefinementGuardIds(hir_result.context, hir_result.module.raw_module, "guard:duplicate"));
+
+    var proven_guard_ids = std.StringHashMap(void).init(testing.allocator);
+    defer {
+        var it = proven_guard_ids.iterator();
+        while (it.next()) |entry| testing.allocator.free(entry.key_ptr.*);
+        proven_guard_ids.deinit();
+    }
+    try proven_guard_ids.put(try testing.allocator.dupe(u8, "guard:duplicate"), {});
+
+    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
+
+    const after_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
+    const after = after_ref.data[0..after_ref.length];
+
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, after, "cf.assert"));
+    try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "ora.refinement_guard"));
+}
+
+test "refinement cleanup erases only matching distinct guard id" {
+    const source_text =
+        \\contract Check {
+        \\    pub fn run(a: MinValue<u256, 1>, b: MinValue<u256, 1>) {
+        \\        let _: u256 = a;
+        \\        let _: u256 = b;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const before_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (before_ref.data != null) mlir.oraStringRefFree(before_ref);
+    const before = before_ref.data[0..before_ref.length];
+    const first_guard_id = try nthGuardIdFromModuleText(before, 0);
+    _ = try nthGuardIdFromModuleText(before, 1);
+
+    var proven_guard_ids = std.StringHashMap(void).init(testing.allocator);
+    defer {
+        var it = proven_guard_ids.iterator();
+        while (it.next()) |entry| testing.allocator.free(entry.key_ptr.*);
+        proven_guard_ids.deinit();
+    }
+    try proven_guard_ids.put(try testing.allocator.dupe(u8, first_guard_id), {});
+
+    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
+
+    const after_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
+    const after = after_ref.data[0..after_ref.length];
+
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, after, "cf.assert"));
+    try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "ora.refinement_guard"));
+}
+
+test "Ora CFG overlay does not mark duplicate guard ids proven-erased" {
+    const source_text =
+        \\contract Check {
+        \\    pub fn run(a: MinValue<u256, 1>, b: MinValue<u256, 1>) {
+        \\        let _: u256 = a;
+        \\        let _: u256 = b;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 2), setAllRefinementGuardIds(hir_result.context, hir_result.module.raw_module, "guard:duplicate"));
+
+    var proven_guard_ids = std.StringHashMap(void).init(testing.allocator);
+    defer {
+        var it = proven_guard_ids.iterator();
+        while (it.next()) |entry| testing.allocator.free(entry.key_ptr.*);
+        proven_guard_ids.deinit();
+    }
+    try proven_guard_ids.put(try testing.allocator.dupe(u8, "guard:duplicate"), {});
+
+    const dot = try mlir_cfg.generateCFG(hir_result.context, hir_result.module.raw_module, testing.allocator, .{
+        .mode = .ora,
+        .proven_guard_ids = &proven_guard_ids,
+    });
+    defer testing.allocator.free(dot);
+
+    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "ora.refinement_guard"));
+    try testing.expect(!std.mem.containsAtLeast(u8, dot, 1, "proof=\"proven-erased\""));
+}
+
+test "refinement duplicate helper treats null module as duplicated" {
+    const null_module = mlir.MlirModule{ .ptr = null };
+    try testing.expect(compiler.refinement_guards.guardIdIsDuplicated(null_module, "guard:null"));
 }
 
 test "refinement cleanup keeps dominated zero-address requires checks without proven guard id" {
