@@ -33,11 +33,12 @@ blocked on submodules).
   `LogicalRole`), UB-on-drift tomorrow. Fix: error return + a lockstep pin test
   (inline-for over `formalLogicalRoleLabel` outputs; assert each parses into
   `obligation.LogicalRole`).
-- [ ] **Q2 (banned pattern, latent)** `obligation_to_z3.zig:1146`
+- [x] **Q2 (FIXED 87a90c70)** `obligation_to_z3.zig:1146`
   `canonicalQueryState()`: `query_state orelse unreachable` reachable through
   `pub` `encodeFormula`/`encodeTerm` if any external caller skips
-  `appendQueryConstraints`. Fix: `error.CanonicalQueryStateUnset` or de-`pub`
-  the entry points.
+  `appendQueryConstraints`. Fixed by returning a typed
+  `MissingCanonicalQueryState` error and pinning direct `encodeFormula` misuse
+  with a regression test.
 - [x] **Q3 (FIXED this commit)** `formal/Ora/Obligation/Agreement.lean`:
   state the `canonicalEnv` invariant in a comment — denotability is
   environment-independent *given* an env total over the term arena's free
@@ -48,6 +49,15 @@ blocked on submodules).
   expected constructor). Closes the tag-swap channel where the gate stays green
   while pinning the wrong term. Bounded risk (real proof fixtures exercise true
   semantics) but closeable for pennies.
+- [x] **Q18 (FIXED 87a90c70)** `goal_skolem.zig`: goal-skolem name buffers must
+  be structural, not caller-discipline. Fixed by exporting comptime-sized
+  buffer constants, requiring pointer-to-sized-array callers, and proving the
+  maximum generated name fits at comptime.
+- [x] **Q19 (FIXED 87a90c70)** `obligation_to_z3.zig`:
+  `encodeFunctionParamForallWrapper` must not silently erase a hypothetical
+  wrapper condition. Fixed by rejecting conditioned function-param wrappers
+  with the named `UnsupportedFunctionParamWrapperCondition` path and classifier
+  reason.
 
 ## Structural — schedule as its own slice, design note first
 
