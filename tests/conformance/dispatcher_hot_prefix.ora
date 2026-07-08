@@ -1,7 +1,7 @@
 // Hot-prefix dispatcher target: two mutating functions ride a tiny hot
 // switch (1-2 exact checks) while fourteen views and unknown selectors fall
 // through to the cold jump table. The SIR shape is pinned in
-// src/compiler.test.oratosir.zig; this spec proves both layers route
+// src/compiler.test.oratosir.dispatcher.zig; this spec proves both layers route
 // correctly and state transitions hold across them.
 contract DispatcherHotPrefix {
     storage var counter: u256;

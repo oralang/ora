@@ -18,7 +18,7 @@
       "conversion": "Public entry dispatcher construction, selector extraction/switch routing, calldata size/canonicality checks, public function icall, and return/revert routing",
       "high_churn": true,
       "executing_tests": [
-        "src/compiler.test.oratosir.zig#compiler abiDecode N3b4 validates public calldata bool and address params before call",
+        "src/compiler.test.oratosir.abi.zig#compiler abiDecode N3b4 validates public calldata bool and address params before call",
         "tests/conformance/counter.spec.toml",
         "tests/conformance/external_return_decode.spec.toml"
       ],
@@ -59,7 +59,7 @@
       "conversion": "Public dispatcher fixed-bytes argument decode: left-aligned bytesN word mask, canonicality check, invalid-fixed-bytes revert, and payload passed to the user function",
       "high_churn": true,
       "executing_tests": [
-        "src/compiler.test.oratosir.zig#compiler abiDecode N3b4 validates public calldata bool and address params before call",
+        "src/compiler.test.oratosir.abi.zig#compiler abiDecode N3b4 validates public calldata bool and address params before call",
         "tests/sir_text/dispatcher_fixed_bytes_arg_decode.check#shr v4 a_take"
       ],
       "sir_goldens": [
@@ -124,7 +124,7 @@
       "conversion": "Public dispatcher mixed dynamic tuple argument decode: outer tuple offset validation, nested dynamic string bounds/padding checks, pointer-backed tuple carrier materialization, and user call",
       "high_churn": true,
       "executing_tests": [
-        "src/compiler.test.oratosir.zig#compiler abiDecode N3b4 validates public calldata dynamic tuple params before call",
+        "src/compiler.test.oratosir.abi.zig#compiler abiDecode N3b4 validates public calldata dynamic tuple params before call",
         "tests/conformance/dispatcher_dynamic_tuple_arg.spec.toml",
         "tests/sir_text/dispatcher_dynamic_tuple_arg_decode.check#icall @value"
       ],
@@ -253,7 +253,7 @@
       "executing_tests": [
         "tests/conformance/result_memref_scalar.spec.toml",
         "tests/conformance/result_memref_opaque.spec.toml",
-        "src/compiler.test.oratosir.zig#compiler stores opaque Result values into local Result memrefs through OraToSIR"
+        "src/compiler.test.oratosir.adt_error.zig#compiler stores opaque Result values into local Result memrefs through OraToSIR"
       ],
       "sir_goldens": [
         "tests/sir_text/result_memref_scalar.check#fn run:",

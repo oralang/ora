@@ -2,7 +2,7 @@
 // functions, but the dispatcher promotes state-mutating functions to the
 // front of the selector chain (views are normally eth_call'd, where dispatch
 // gas is free). The SIR-level case order is pinned in
-// src/compiler.test.oratosir.zig; this spec proves the reordered dispatcher
+// src/compiler.test.oratosir.dispatcher.zig; this spec proves the reordered dispatcher
 // still routes every function correctly on lib/evm.
 contract DispatcherCaseOrdering {
     storage var counter: u256;

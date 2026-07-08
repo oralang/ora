@@ -1,7 +1,7 @@
 // @callHint execution target: three cold-hinted setters demote out of the
 // hot set, so transfer/transferFrom/approve ride the hot switch while the
 // cold table carries the demoted setters and twelve views. Order is pinned
-// at SIR level in src/compiler.test.oratosir.zig; this spec proves the
+// at SIR level in src/compiler.test.oratosir.dispatcher.zig; this spec proves the
 // hinted dispatcher routes every layer correctly with state transitions.
 contract HintedToken {
     storage var total: u256;

@@ -831,7 +831,7 @@
     {
       "id": "dispatcher.case_ordering",
       "area": "dispatcher",
-      "behavior": "The dispatcher promotes state-mutating functions ahead of read-only functions in the selector chain (SIR-level order pinned in compiler.test.oratosir.zig); the reordered dispatcher routes every function correctly and unknown selectors revert",
+      "behavior": "The dispatcher promotes state-mutating functions ahead of read-only functions in the selector chain (SIR-level order pinned in compiler.test.oratosir.dispatcher.zig); the reordered dispatcher routes every function correctly and unknown selectors revert",
       "specs": [
         "tests/conformance/dispatcher_case_ordering.spec.toml"
       ]
