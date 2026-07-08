@@ -1889,6 +1889,7 @@ const Collector = struct {
                 .binder = .{
                     .name = self.function_param_names[index],
                     .ty = param_ty,
+                    .origin = .function_param,
                 },
                 .condition = condition_available,
                 .body = current,

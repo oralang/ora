@@ -916,6 +916,12 @@ pub const BinderRef = struct {
     name: []const u8,
     ty: ?TypeRef = null,
     region: ?RegionRef = null,
+    origin: BinderOrigin = .user,
+};
+
+pub const BinderOrigin = enum(u8) {
+    user,
+    function_param,
 };
 
 pub const UnaryTerm = struct {

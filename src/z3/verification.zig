@@ -17,6 +17,7 @@ pub const z3_c = @import("c.zig");
 pub const Z3Context = @import("context.zig").Context;
 pub const Z3Solver = @import("solver.zig").Solver;
 pub const state_symbols = @import("state_symbols.zig");
+pub const goal_skolem = @import("goal_skolem.zig");
 
 const z3 = z3_c;
 const mlir = @import("mlir_c_api").c;
@@ -5101,6 +5102,7 @@ pub const VerificationPass = struct {
                     assumption_annotations.items,
                     obligation_constraints.items.len,
                     global_contract_invariants.items.len,
+                    formal_identity,
                 );
                 try appendPreparedQueryUnique(&queries, self.allocator, .{
                     .kind = .Obligation,
@@ -6362,9 +6364,12 @@ fn preparedObligationAnnotationPure(
     assumption_annotations: []const EncodedAnnotation,
     constraint_count: usize,
     global_contract_invariant_count: usize,
+    formal_identity: FormalPreparedQueryIdentity,
 ) bool {
     if (ann.source_op == null) return false;
     if (ann.imported_obligation_source != null) return false;
+    if (formal_identity.formal_match_status != .matched) return false;
+    if (formal_identity.formal_assumption_ids.len != assumption_annotations.len) return false;
     if (global_contract_invariant_count != 0) return false;
     if (ann.extra_constraints.len != 0) return false;
     if (ann.loop_owner != null) return false;
@@ -8396,15 +8401,11 @@ fn instantiateLeadingForallGoal(self: *VerificationPass, goal: z3.Z3_ast) z3.Z3_
         if (bound_count != 1) return current;
 
         const bound_sort = z3.Z3_get_quantifier_bound_sort(self.context.ctx, current, 0);
-        const quantifier_id = z3.Z3_get_ast_id(self.context.ctx, current);
         var binder_name_buf: [48]u8 = undefined;
         const binder_name = quantifierBoundNameForSkolem(self.context.ctx, current, 0, binder_name_buf[0..]);
-        var name_buf: [96]u8 = undefined;
-        const witness_name = std.fmt.bufPrintZ(
-            &name_buf,
-            "$ora.goal.skolem.{s}.{d}.{d}",
-            .{ binder_name, quantifier_id, depth },
-        ) catch "$ora.goal.skolem.overflow";
+        var name_buf: [goal_skolem.name_buffer_len]u8 = undefined;
+        var sanitized_buf: [goal_skolem.binder_buffer_len]u8 = undefined;
+        const witness_name = goal_skolem.nameZ(&name_buf, &sanitized_buf, binder_name, depth);
         const witness = z3.Z3_mk_const(
             self.context.ctx,
             z3.Z3_mk_string_symbol(self.context.ctx, witness_name.ptr),
@@ -8426,23 +8427,11 @@ fn quantifierBoundNameForSkolem(ctx: z3.Z3_context, quantifier: z3.Z3_ast, index
     return switch (z3.Z3_get_symbol_kind(ctx, symbol)) {
         z3.Z3_STRING_SYMBOL => blk: {
             const raw = z3.Z3_get_symbol_string(ctx, symbol) orelse break :blk "q";
-            break :blk sanitizeSkolemName(buffer, std.mem.span(raw));
+            break :blk std.mem.span(raw);
         },
         z3.Z3_INT_SYMBOL => std.fmt.bufPrint(buffer, "q{d}", .{z3.Z3_get_symbol_int(ctx, symbol)}) catch "q",
         else => "q",
     };
-}
-
-fn sanitizeSkolemName(buffer: []u8, raw: []const u8) []const u8 {
-    if (buffer.len == 0) return "q";
-    var len: usize = 0;
-    for (raw) |ch| {
-        if (len == buffer.len) break;
-        buffer[len] = if (std.ascii.isAlphanumeric(ch) or ch == '_') ch else '_';
-        len += 1;
-    }
-    if (len == 0) return "q";
-    return buffer[0..len];
 }
 
 fn assertPreparedQueryConstraints(solver: *Solver, constraints: []const z3.Z3_ast) !void {

@@ -324,6 +324,53 @@ fn expectQuantifiedTerm(
     return quantified;
 }
 
+fn termHasNestedQuantifier(
+    set: obligation.ObligationSet,
+    term_id: obligation.TermId,
+    depth: usize,
+) bool {
+    if (term_id >= set.terms.len) return false;
+    return switch (set.terms[term_id]) {
+        .quantified => |quantified| depth > 0 or
+            termHasNestedQuantifier(set, quantified.body, depth + 1) or
+            if (quantified.condition) |condition|
+                termHasNestedQuantifier(set, condition, depth + 1)
+            else
+                false,
+        .unary => |unary| termHasNestedQuantifier(set, unary.operand, depth),
+        .binary => |binary| termHasNestedQuantifier(set, binary.lhs, depth) or
+            termHasNestedQuantifier(set, binary.rhs, depth),
+        .old => |operand| termHasNestedQuantifier(set, operand, depth),
+        .refinement_predicate => |predicate| blk: {
+            if (termHasNestedQuantifier(set, predicate.value, depth)) break :blk true;
+            for (predicate.args) |arg| {
+                if (termHasNestedQuantifier(set, arg, depth)) break :blk true;
+            }
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
+fn z3FormalQueryBindingsFromFormalForTest(
+    allocator: std.mem.Allocator,
+    bindings: []const obligation.FormalQueryBinding,
+) ![]z3_verification.FormalQueryBinding {
+    const converted = try allocator.alloc(z3_verification.FormalQueryBinding, bindings.len);
+    for (bindings, converted) |binding, *out| {
+        out.* = .{
+            .source_op_id = binding.source_op_id,
+            .kind = @tagName(binding.kind),
+            .logical_role = if (binding.logical_role) |role| @tagName(role) else null,
+            .guard_id = binding.guard_id,
+            .query_id = binding.query_id,
+            .assumption_ids = binding.assumption_ids,
+            .obligation_ids = binding.obligation_ids,
+        };
+    }
+    return converted;
+}
+
 fn expectBinaryTerm(
     set: obligation.ObligationSet,
     term_id: obligation.TermId,
@@ -3332,6 +3379,212 @@ test "formal Z3 overlay ignores only clean unmatched proved rows" {
     try testing.expect(vacuous_overlay.set.hasBlockingDiagnostic());
 }
 
+test "formal canonical Z3 quantifier row matches live prepared hash" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const source =
+        \\contract CanonicalQuantifierParity {
+        \\    pub fn bounded() -> bool
+        \\        ensures true
+        \\    {
+        \\        assume(forall i: u256 => (forall j: u256 => i <= j));
+        \\        return true;
+        \\    }
+        \\}
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "canonical_quantifier_parity.ora", .data = source });
+    const source_path = try pathFromTmpAlloc(testing.allocator, tmp, "canonical_quantifier_parity.ora");
+    defer testing.allocator.free(source_path);
+
+    var compilation = try compilePackage(source_path);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+
+    var formal_result = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+    defer formal_result.deinit();
+
+    var pass = try z3_verification.VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    const z3_bindings = try z3FormalQueryBindingsFromFormalForTest(testing.allocator, formal_result.query_bindings);
+    defer testing.allocator.free(z3_bindings);
+    pass.setFormalQueryBindings(z3_bindings);
+    var z3_manifest = try pass.collectPreparedQueryManifest(hir_result.module.raw_module);
+    defer z3_manifest.deinit();
+
+    var overlay = try obligation_from_z3.overlayPreparedQueryResults(testing.allocator, formal_result.set, z3_manifest.rows);
+    defer overlay.deinit();
+
+    var z3_ctx = try z3_verification.Z3Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+    var adapter = obligation_to_z3.Adapter.init(&z3_ctx, testing.allocator, overlay.set);
+
+    var saw_quantified_row = false;
+    for (overlay.set.queries) |query| {
+        if (query.kind != .obligation or query.obligation_ids.len != 1) continue;
+        const target_id = query.obligation_ids[0];
+        var target: ?obligation.Obligation = null;
+        for (overlay.set.obligations) |item| {
+            if (item.id == target_id) {
+                target = item;
+                break;
+            }
+        }
+        _ = target orelse continue;
+        if (obligation_to_z3.queryCanonicalPromotionShape(overlay.set, query) != .quantified_formula) continue;
+
+        var has_nested_quantified_assumption = false;
+        for (query.assumption_ids) |assumption_id| {
+            for (overlay.set.assumptions) |assumption| {
+                if (assumption.id != assumption_id) continue;
+                const term_id = switch (assumption.formula orelse continue) {
+                    .term => |id| id,
+                    .origin_value => continue,
+                };
+                if (termHasNestedQuantifier(overlay.set, term_id, 0)) {
+                    has_nested_quantified_assumption = true;
+                }
+            }
+        }
+        if (!has_nested_quantified_assumption) continue;
+
+        saw_quantified_row = true;
+        try testing.expect(query.canonical_smt_annotation_pure);
+        try testing.expect(query.smtlib_hash != null);
+        try testing.expectEqual(
+            obligation_to_z3.CanonicalPromotionShape.quantified_formula,
+            obligation_to_z3.queryCanonicalPromotionShape(overlay.set, query).?,
+        );
+        try testing.expect(!obligation_to_z3.queryCanonicalRequiredModePromoted(overlay.set, query));
+
+        const canonical = try adapter.queryHashForRow(query);
+        try testing.expectEqual(query.constraint_count, canonical.constraint_count);
+        try testing.expectEqual(query.smtlib_hash.?, canonical.smtlib_hash);
+    }
+    try testing.expect(saw_quantified_row);
+}
+
+test "formal canonical Z3 goal forall row matches live skolemized hash" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const source =
+        \\contract CanonicalGoalQuantifierParity {
+        \\    pub fn bounded() -> bool
+        \\        ensures (forall i: u256 => (forall j: u256 => i <= j))
+        \\    {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "canonical_goal_quantifier_parity.ora", .data = source });
+    const source_path = try pathFromTmpAlloc(testing.allocator, tmp, "canonical_goal_quantifier_parity.ora");
+    defer testing.allocator.free(source_path);
+
+    var compilation = try compilePackage(source_path);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+
+    var formal_result = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+    defer formal_result.deinit();
+
+    var pass = try z3_verification.VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    const z3_bindings = try z3FormalQueryBindingsFromFormalForTest(testing.allocator, formal_result.query_bindings);
+    defer testing.allocator.free(z3_bindings);
+    pass.setFormalQueryBindings(z3_bindings);
+    var z3_manifest = try pass.collectPreparedQueryManifest(hir_result.module.raw_module);
+    defer z3_manifest.deinit();
+
+    var overlay = try obligation_from_z3.overlayPreparedQueryResults(testing.allocator, formal_result.set, z3_manifest.rows);
+    defer overlay.deinit();
+
+    var z3_ctx = try z3_verification.Z3Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+    var adapter = obligation_to_z3.Adapter.init(&z3_ctx, testing.allocator, overlay.set);
+
+    var saw_goal_forall_row = false;
+    for (overlay.set.queries) |query| {
+        if (query.kind != .obligation or query.obligation_ids.len != 1) continue;
+        const target_id = query.obligation_ids[0];
+        var target: ?obligation.Obligation = null;
+        for (overlay.set.obligations) |item| {
+            if (item.id == target_id) {
+                target = item;
+                break;
+            }
+        }
+        const obligation_row = target orelse continue;
+        if (obligation_row.kind != .logical) continue;
+        const term_id = switch (obligation_row.kind.logical.formula) {
+            .term => |id| id,
+            .origin_value => continue,
+        };
+        if (!termHasNestedQuantifier(overlay.set, term_id, 0)) continue;
+
+        saw_goal_forall_row = true;
+        try testing.expect(query.canonical_smt_annotation_pure);
+        try testing.expect(query.smtlib_hash != null);
+        try testing.expectEqual(
+            obligation_to_z3.CanonicalPromotionShape.quantified_formula,
+            obligation_to_z3.queryCanonicalPromotionShape(overlay.set, query).?,
+        );
+        try testing.expect(!obligation_to_z3.queryCanonicalRequiredModePromoted(overlay.set, query));
+
+        const canonical = try adapter.queryHashForRow(query);
+        try testing.expectEqual(query.constraint_count, canonical.constraint_count);
+        try testing.expectEqual(query.smtlib_hash.?, canonical.smtlib_hash);
+    }
+    try testing.expect(saw_goal_forall_row);
+}
+
+test "formal canonical Z3 treats requires runtime mirror as non-pure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const source =
+        \\contract CanonicalRequiresMirrorBoundary {
+        \\    pub fn checked_sub(x: u256, y: u256) -> u256
+        \\        requires x >= y
+        \\        ensures result == x - y
+        \\    {
+        \\        return x - y;
+        \\    }
+        \\}
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "canonical_requires_mirror_boundary.ora", .data = source });
+    const source_path = try pathFromTmpAlloc(testing.allocator, tmp, "canonical_requires_mirror_boundary.ora");
+    defer testing.allocator.free(source_path);
+
+    var compilation = try compilePackage(source_path);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+
+    var formal_result = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+    defer formal_result.deinit();
+
+    var pass = try z3_verification.VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    const z3_bindings = try z3FormalQueryBindingsFromFormalForTest(testing.allocator, formal_result.query_bindings);
+    defer testing.allocator.free(z3_bindings);
+    pass.setFormalQueryBindings(z3_bindings);
+    var z3_manifest = try pass.collectPreparedQueryManifest(hir_result.module.raw_module);
+    defer z3_manifest.deinit();
+
+    var overlay = try obligation_from_z3.overlayPreparedQueryResults(testing.allocator, formal_result.set, z3_manifest.rows);
+    defer overlay.deinit();
+
+    const ensures_query = try findEnsuresQuery(overlay.set);
+    try testing.expect(ensures_query.smtlib_hash != null);
+    try testing.expect(!ensures_query.canonical_smt_annotation_pure);
+}
+
 test "formal Z3 overlay does not require prepared rows for structural effect frames" {
     const obligation_ids = [_]obligation.Id{1};
     const obligations = [_]obligation.Obligation{.{
@@ -4261,8 +4514,10 @@ test "formal obligation MLIR adapter binds function params by compiler id not di
 
     const outer = try expectQuantifiedTerm(result.set, try expectLogicalTerm(result.set, .ensures), .forall, "same");
     try expectTypeRefBuiltin(outer.binder.ty, .u256);
+    try testing.expectEqual(obligation.BinderOrigin.function_param, outer.binder.origin);
     const inner = try expectQuantifiedTerm(result.set, outer.body, .forall, "same");
     try expectTypeRefBuiltin(inner.binder.ty, .u256);
+    try testing.expectEqual(obligation.BinderOrigin.function_param, inner.binder.origin);
     const body = try expectBinaryTerm(result.set, inner.body, .le);
     try expectBoundVarTerm(result.set, body.lhs, 1, "same");
     try expectBoundVarTerm(result.set, body.rhs, 0, "same");

@@ -60,11 +60,15 @@ pub const CanonicalUnsupportedReason = enum(u8) {
     unsupported_result_term,
     unsupported_place_read_term,
     unsupported_quantified_term,
+    unsupported_quantifier_binder_type,
+    unsupported_function_param_wrapper_condition,
     unsupported_refinement,
     invalid_refinement_arity,
     missing_type,
     unsupported_type,
     unsupported_compiler_type_id,
+    bound_variable_out_of_scope,
+    unsupported_bound_variable_type,
 };
 
 pub const CanonicalPromotionShape = enum(u8) {
@@ -73,6 +77,7 @@ pub const CanonicalPromotionShape = enum(u8) {
     scalar_place_read,
     old_scalar_place_read,
     formula_combination,
+    quantified_formula,
 };
 
 pub const CanonicalPromotionPolicy = struct {
@@ -94,6 +99,9 @@ pub const canonical_promotion_table = [_]CanonicalPromotionPolicy{
     // Full-corpus measurement showed formula combinations often lack live rows;
     // promoted mismatches still need diagnosis before this shape can block.
     .{ .shape = .formula_combination, .required_mode = false, .rollout_enabled = false },
+    // Quantifiers are solver-option and trigger sensitive. They stay
+    // diagnostic-only until corpus measurement justifies arming them.
+    .{ .shape = .quantified_formula, .required_mode = false, .rollout_enabled = false },
 };
 
 pub const EncodeError = std.mem.Allocator.Error || error{
@@ -118,9 +126,14 @@ pub const EncodeError = std.mem.Allocator.Error || error{
     UnsupportedOriginValue,
     UnsupportedPlaceReadTerm,
     UnsupportedQuantifiedTerm,
+    UnsupportedQuantifierBinderType,
+    UnsupportedFunctionParamWrapperCondition,
     UnsupportedRefinement,
     UnsupportedResultTerm,
     UnsupportedType,
+    BoundVariableOutOfScope,
+    MissingCanonicalQueryState,
+    UnsupportedBoundVariableType,
     Z3ApiError,
 };
 
@@ -135,13 +148,28 @@ const CanonicalPlaceRootState = struct {
     entry: ?CanonicalPlaceSymbolKind = null,
 };
 
+const CanonicalBoundBinding = struct {
+    name: []const u8,
+    info: TypeInfo,
+    ast: z3.Z3_ast,
+    origin: obligation.BinderOrigin,
+};
+
+const CanonicalQuerySnapshot = struct {
+    place_roots_len: usize,
+    side_constraints_len: usize,
+    bound_stack_len: usize,
+};
+
 const CanonicalQueryState = struct {
     place_roots: std.ArrayList(CanonicalPlaceRootState) = .empty,
     side_constraints: std.ArrayList(z3.Z3_ast) = .empty,
+    bound_stack: std.ArrayList(CanonicalBoundBinding) = .empty,
 
     fn deinit(self: *CanonicalQueryState, allocator: std.mem.Allocator) void {
         self.place_roots.deinit(allocator);
         self.side_constraints.deinit(allocator);
+        self.bound_stack.deinit(allocator);
     }
 
     fn getOrPutPlaceRoot(self: *CanonicalQueryState, allocator: std.mem.Allocator, root: []const u8) !*CanonicalPlaceRootState {
@@ -150,6 +178,61 @@ const CanonicalQueryState = struct {
         }
         try self.place_roots.append(allocator, .{ .root = root });
         return &self.place_roots.items[self.place_roots.items.len - 1];
+    }
+
+    fn pushBound(self: *CanonicalQueryState, allocator: std.mem.Allocator, binding: CanonicalBoundBinding) !void {
+        try self.bound_stack.append(allocator, binding);
+    }
+
+    fn popBound(self: *CanonicalQueryState) void {
+        _ = self.bound_stack.pop();
+    }
+
+    fn lookupBound(self: *const CanonicalQueryState, index: usize) ?CanonicalBoundBinding {
+        if (index >= self.bound_stack.items.len) return null;
+        return self.bound_stack.items[self.bound_stack.items.len - 1 - index];
+    }
+
+    fn snapshot(self: *const CanonicalQueryState) CanonicalQuerySnapshot {
+        return .{
+            .place_roots_len = self.place_roots.items.len,
+            .side_constraints_len = self.side_constraints.items.len,
+            .bound_stack_len = self.bound_stack.items.len,
+        };
+    }
+
+    fn restore(self: *CanonicalQueryState, snapshot_value: CanonicalQuerySnapshot) void {
+        self.place_roots.shrinkRetainingCapacity(snapshot_value.place_roots_len);
+        self.side_constraints.shrinkRetainingCapacity(snapshot_value.side_constraints_len);
+        self.bound_stack.shrinkRetainingCapacity(snapshot_value.bound_stack_len);
+    }
+};
+
+const CanonicalSupportScope = struct {
+    bound_depth: usize = 0,
+    function_param_mask: u64 = 0,
+
+    fn push(self: CanonicalSupportScope, origin: obligation.BinderOrigin) CanonicalSupportScope {
+        var next = self;
+        if (origin == .function_param and self.bound_depth < 64) {
+            next.function_param_mask |= (@as(u64, 1) << @intCast(self.bound_depth));
+        }
+        next.bound_depth += 1;
+        return next;
+    }
+
+    fn containsBound(self: CanonicalSupportScope, index: usize) bool {
+        return index < self.bound_depth;
+    }
+
+    fn boundOrigin(self: CanonicalSupportScope, index: usize) ?obligation.BinderOrigin {
+        if (!self.containsBound(index)) return null;
+        const absolute_index = self.bound_depth - 1 - index;
+        if (absolute_index >= 64) return .user;
+        return if ((self.function_param_mask & (@as(u64, 1) << @intCast(absolute_index))) != 0)
+            .function_param
+        else
+            .user;
     }
 };
 
@@ -160,7 +243,7 @@ pub fn queryCanonicalSupport(set: obligation.ObligationSet, query: obligation.Ve
     for (query.assumption_ids) |assumption_id| {
         const assumption = findAssumption(set, assumption_id) orelse return .{ .unsupported = .unknown_assumption };
         const formula = assumption.formula orelse return .{ .unsupported = .null_assumption_formula };
-        switch (formulaCanonicalSupport(set, formula, set.terms.len + 1)) {
+        switch (formulaCanonicalSupport(set, formula, set.terms.len + 1, .{})) {
             .supported => {},
             .unsupported => |reason| return .{ .unsupported = reason },
         }
@@ -227,6 +310,7 @@ const PromotionFeatures = struct {
     arithmetic_ops: u32 = 0,
     connective_ops: u32 = 0,
     refinement_ops: u32 = 0,
+    quantifier_terms: u32 = 0,
 
     fn markFormula(self: *PromotionFeatures) void {
         self.formula_count +|= 1;
@@ -234,6 +318,7 @@ const PromotionFeatures = struct {
 
     fn shape(self: PromotionFeatures) ?CanonicalPromotionShape {
         if (self.formula_count == 0) return null;
+        if (self.quantifier_terms > 0) return .quantified_formula;
 
         var atom_classes: u32 = 0;
         if (self.result_terms > 0) atom_classes += 1;
@@ -289,7 +374,7 @@ fn collectFormulaPromotionFeatures(
 ) bool {
     features.markFormula();
     return switch (formula) {
-        .term => |term_id| collectTermPromotionFeatures(set, term_id, fuel, .none, features),
+        .term => |term_id| collectTermPromotionFeatures(set, term_id, fuel, .none, .{}, features),
         .origin_value => false,
     };
 }
@@ -299,6 +384,7 @@ fn collectTermPromotionFeatures(
     id: obligation.TermId,
     fuel: usize,
     value_context: PromotionValueContext,
+    scope: CanonicalSupportScope,
     features: *PromotionFeatures,
 ) bool {
     if (fuel == 0 or id >= set.terms.len) return false;
@@ -307,7 +393,7 @@ fn collectTermPromotionFeatures(
         .int_lit => return true,
         .variable => |variable| return switch (variable) {
             .free => true,
-            .bound => false,
+            .bound => |bound| scope.containsBound(bound.index),
         },
         .old => |operand| {
             if (operand >= set.terms.len) return false;
@@ -343,7 +429,7 @@ fn collectTermPromotionFeatures(
                 },
                 .neg => .value,
             };
-            return collectTermPromotionFeatures(set, unary.operand, fuel - 1, child_context, features);
+            return collectTermPromotionFeatures(set, unary.operand, fuel - 1, child_context, scope, features);
         },
         .binary => |binary| {
             const child_context: PromotionValueContext = switch (binary.op) {
@@ -376,19 +462,31 @@ fn collectTermPromotionFeatures(
                 .sge,
                 => {},
             }
-            return collectTermPromotionFeatures(set, binary.lhs, fuel - 1, child_context, features) and
-                collectTermPromotionFeatures(set, binary.rhs, fuel - 1, child_context, features);
+            return collectTermPromotionFeatures(set, binary.lhs, fuel - 1, child_context, scope, features) and
+                collectTermPromotionFeatures(set, binary.rhs, fuel - 1, child_context, scope, features);
         },
         .refinement_predicate => |predicate| {
             if (refinement_builtin_map.get(predicate.name) == null) return false;
             features.refinement_ops +|= 1;
-            if (!collectTermPromotionFeatures(set, predicate.value, fuel - 1, .value, features)) return false;
+            if (!collectTermPromotionFeatures(set, predicate.value, fuel - 1, .value, scope, features)) return false;
             for (predicate.args) |arg| {
-                if (!collectTermPromotionFeatures(set, arg, fuel - 1, .value, features)) return false;
+                if (!collectTermPromotionFeatures(set, arg, fuel - 1, .value, scope, features)) return false;
             }
             return true;
         },
-        .quantified => return false,
+        .quantified => |quantified| {
+            if (quantified.binder.origin == .function_param and quantified.condition != null) return false;
+            if (quantified.binder.origin != .function_param) {
+                features.quantifier_terms +|= 1;
+            }
+            const child_scope = scope.push(quantified.binder.origin);
+            if (quantified.binder.origin != .function_param) {
+                if (quantified.condition) |condition| {
+                    if (!collectTermPromotionFeatures(set, condition, fuel - 1, .none, child_scope, features)) return false;
+                }
+            }
+            return collectTermPromotionFeatures(set, quantified.body, fuel - 1, .none, child_scope, features);
+        },
     }
 }
 
@@ -408,8 +506,8 @@ fn findObligation(set: obligation.ObligationSet, id: obligation.Id) ?obligation.
 
 fn kindCanonicalSupport(set: obligation.ObligationSet, kind: obligation.Kind, fuel: usize) CanonicalSupport {
     return switch (kind) {
-        .logical => |logical| formulaCanonicalSupport(set, logical.formula, fuel),
-        .runtime_guard => |guard| formulaCanonicalSupport(set, guard.formula, fuel),
+        .logical => |logical| formulaCanonicalSupport(set, logical.formula, fuel, .{}),
+        .runtime_guard => |guard| formulaCanonicalSupport(set, guard.formula, fuel, .{}),
         .resource,
         .quantifier,
         .type_wf,
@@ -422,26 +520,36 @@ fn kindCanonicalSupport(set: obligation.ObligationSet, kind: obligation.Kind, fu
     };
 }
 
-fn formulaCanonicalSupport(set: obligation.ObligationSet, formula: obligation.FormulaRef, fuel: usize) CanonicalSupport {
+fn formulaCanonicalSupport(
+    set: obligation.ObligationSet,
+    formula: obligation.FormulaRef,
+    fuel: usize,
+    scope: CanonicalSupportScope,
+) CanonicalSupport {
     return switch (formula) {
-        .term => |term_id| termCanonicalSupport(set, term_id, fuel),
+        .term => |term_id| termCanonicalSupport(set, term_id, fuel, scope),
         .origin_value => .{ .unsupported = .unsupported_origin_value },
     };
 }
 
-fn termCanonicalSupport(set: obligation.ObligationSet, id: obligation.TermId, fuel: usize) CanonicalSupport {
+fn termCanonicalSupport(
+    set: obligation.ObligationSet,
+    id: obligation.TermId,
+    fuel: usize,
+    scope: CanonicalSupportScope,
+) CanonicalSupport {
     if (fuel == 0 or id >= set.terms.len) return .{ .unsupported = .unsupported_obligation_kind };
     return switch (set.terms[id]) {
         .bool_lit => .supported,
         .int_lit => |literal| typeRefCanonicalSupport(literal.ty),
-        .variable => |variable| varRefCanonicalSupport(variable),
+        .variable => |variable| varRefCanonicalSupport(variable, scope),
         .old => |operand| oldCanonicalSupport(set, operand, fuel - 1),
         .result => .{ .unsupported = .unsupported_result_term },
         .place_read => |place| placeReadCanonicalSupport(place),
-        .unary => |unary| termCanonicalSupport(set, unary.operand, fuel - 1),
-        .binary => |binary| binaryCanonicalSupport(set, binary, fuel - 1),
-        .refinement_predicate => |predicate| refinementPredicateCanonicalSupport(set, predicate, fuel - 1),
-        .quantified => .{ .unsupported = .unsupported_quantified_term },
+        .unary => |unary| termCanonicalSupport(set, unary.operand, fuel - 1, scope),
+        .binary => |binary| binaryCanonicalSupport(set, binary, fuel - 1, scope),
+        .refinement_predicate => |predicate| refinementPredicateCanonicalSupport(set, predicate, fuel - 1, scope),
+        .quantified => |quantified| quantifiedCanonicalSupport(set, quantified, fuel - 1, scope),
     };
 }
 
@@ -466,11 +574,12 @@ fn binaryCanonicalSupport(
     set: obligation.ObligationSet,
     binary: obligation.BinaryTerm,
     fuel: usize,
+    scope: CanonicalSupportScope,
 ) CanonicalSupport {
     const expected = expectedInfoForBinaryOperands(set, binary) catch |err| return canonicalReasonForTypeError(err);
     const support = firstUnsupported(.{
-        termCanonicalSupportWithExpected(set, binary.lhs, fuel, expected),
-        termCanonicalSupportWithExpected(set, binary.rhs, fuel, expected),
+        termCanonicalSupportWithExpected(set, binary.lhs, fuel, expected, scope),
+        termCanonicalSupportWithExpected(set, binary.rhs, fuel, expected, scope),
     });
     switch (support) {
         .supported => {},
@@ -484,6 +593,7 @@ fn termCanonicalSupportWithExpected(
     id: obligation.TermId,
     fuel: usize,
     expected: ?TypeInfo,
+    scope: CanonicalSupportScope,
 ) CanonicalSupport {
     if (fuel == 0 or id >= set.terms.len) return .{ .unsupported = .unsupported_obligation_kind };
     // `result` carries no TypeRef of its own; only a typed parent may pick its sort.
@@ -492,7 +602,7 @@ fn termCanonicalSupportWithExpected(
         if (info.kind != .bitvector) return .{ .unsupported = .unsupported_result_term };
         return .supported;
     }
-    return termCanonicalSupport(set, id, fuel);
+    return termCanonicalSupport(set, id, fuel, scope);
 }
 
 fn binaryResultOperandTypesMatchExpected(
@@ -653,10 +763,14 @@ fn typeInfoEql(lhs: TypeInfo, rhs: TypeInfo) bool {
     return lhs.kind == rhs.kind and lhs.width == rhs.width and lhs.signed == rhs.signed;
 }
 
-fn varRefCanonicalSupport(variable: obligation.VarRef) CanonicalSupport {
+fn typeInfoSameZ3Sort(lhs: TypeInfo, rhs: TypeInfo) bool {
+    return lhs.kind == rhs.kind and lhs.width == rhs.width;
+}
+
+fn varRefCanonicalSupport(variable: obligation.VarRef, scope: CanonicalSupportScope) CanonicalSupport {
     return switch (variable) {
         .free => |free| typeRefCanonicalSupport(free.ty),
-        .bound => .{ .unsupported = .unsupported_bound_variable_term },
+        .bound => |bound| boundVarCanonicalSupport(bound, scope),
     };
 }
 
@@ -664,14 +778,15 @@ fn refinementPredicateCanonicalSupport(
     set: obligation.ObligationSet,
     predicate: obligation.RefinementPredicateTerm,
     fuel: usize,
+    scope: CanonicalSupportScope,
 ) CanonicalSupport {
     if (refinement_builtin_map.get(predicate.name) == null) return .{ .unsupported = .unsupported_refinement };
-    switch (termCanonicalSupport(set, predicate.value, fuel)) {
+    switch (termCanonicalSupport(set, predicate.value, fuel, scope)) {
         .supported => {},
         .unsupported => |reason| return .{ .unsupported = reason },
     }
     for (predicate.args) |arg| {
-        switch (termCanonicalSupport(set, arg, fuel)) {
+        switch (termCanonicalSupport(set, arg, fuel, scope)) {
             .supported => {},
             .unsupported => |reason| return .{ .unsupported = reason },
         }
@@ -686,6 +801,60 @@ fn refinementPredicateCanonicalSupport(
         => if (predicate.args.len == 1) .supported else .{ .unsupported = .invalid_refinement_arity },
         .in_range => if (predicate.args.len == 2) .supported else .{ .unsupported = .invalid_refinement_arity },
     };
+}
+
+fn quantifiedCanonicalSupport(
+    set: obligation.ObligationSet,
+    quantified: obligation.QuantifiedTerm,
+    fuel: usize,
+    scope: CanonicalSupportScope,
+) CanonicalSupport {
+    if (quantified.binder.origin == .function_param) {
+        if (quantified.condition != null) return .{ .unsupported = .unsupported_function_param_wrapper_condition };
+        switch (typeRefCanonicalSupport(quantified.binder.ty)) {
+            .supported => {},
+            .unsupported => |reason| return .{ .unsupported = reason },
+        }
+        return termCanonicalSupport(set, quantified.body, fuel, scope.push(.function_param));
+    }
+
+    switch (quantifierBinderCanonicalSupport(quantified.binder.ty)) {
+        .supported => {},
+        .unsupported => |reason| return .{ .unsupported = reason },
+    }
+    const child_scope = scope.push(quantified.binder.origin);
+    if (quantified.condition) |condition| {
+        switch (termCanonicalSupport(set, condition, fuel, child_scope)) {
+            .supported => {},
+            .unsupported => |reason| return .{ .unsupported = reason },
+        }
+    }
+    return termCanonicalSupport(set, quantified.body, fuel, child_scope);
+}
+
+fn quantifierBinderCanonicalSupport(maybe_ty: ?obligation.TypeRef) CanonicalSupport {
+    _ = quantifierBinderTypeInfo(maybe_ty) catch |err| {
+        return .{ .unsupported = switch (err) {
+            error.MissingType => .missing_type,
+            error.UnsupportedCompilerTypeId => .unsupported_compiler_type_id,
+            error.UnsupportedQuantifierBinderType => .unsupported_quantifier_binder_type,
+            else => .unsupported_quantifier_binder_type,
+        } };
+    };
+    return .supported;
+}
+
+fn boundVarCanonicalSupport(bound: obligation.BoundVarRef, scope: CanonicalSupportScope) CanonicalSupport {
+    const origin = scope.boundOrigin(bound.index) orelse return .{ .unsupported = .bound_variable_out_of_scope };
+    if (origin == .function_param) return typeRefCanonicalSupport(bound.ty);
+    const info = typeInfo(bound.ty orelse return .{ .unsupported = .missing_type }) catch |err| {
+        return .{ .unsupported = switch (err) {
+            error.UnsupportedCompilerTypeId => .unsupported_compiler_type_id,
+            else => .unsupported_bound_variable_type,
+        } };
+    };
+    if (!typeInfoIsU256(info)) return .{ .unsupported = .unsupported_bound_variable_type };
+    return .supported;
 }
 
 fn typeRefCanonicalSupport(maybe_ty: ?obligation.TypeRef) CanonicalSupport {
@@ -807,7 +976,7 @@ pub const Adapter = struct {
             }
         }
 
-        const goal = try self.formulaForObligation(target.kind);
+        const goal = try self.goalCounterexampleFormula(target.kind);
         try self.appendSideConstraints(constraints);
         const negated_goal = z3.Z3_mk_not(self.context.ctx, goal);
         try self.context.checkNoError();
@@ -889,6 +1058,22 @@ pub const Adapter = struct {
         };
     }
 
+    fn goalCounterexampleFormula(self: *Adapter, kind: obligation.Kind) EncodeError!z3.Z3_ast {
+        return switch (kind) {
+            .logical => |logical| self.encodeGoalFormula(logical.formula),
+            .runtime_guard => |guard| self.encodeGoalFormula(guard.formula),
+            .resource,
+            .quantifier,
+            .type_wf,
+            .type_relation,
+            .region_relation,
+            .effect_frame,
+            .filtered_input,
+            .backend_fact,
+            => error.UnsupportedObligationKind,
+        };
+    }
+
     pub fn encodeFormula(self: *Adapter, formula: obligation.FormulaRef) EncodeError!z3.Z3_ast {
         const ast = switch (formula) {
             .term => |term_id| try self.encodeTermId(term_id),
@@ -896,6 +1081,27 @@ pub const Adapter = struct {
         };
         try self.requireBool(ast);
         return ast;
+    }
+
+    fn encodeGoalFormula(self: *Adapter, formula: obligation.FormulaRef) EncodeError!z3.Z3_ast {
+        const ast = switch (formula) {
+            .term => |term_id| try self.encodeLeadingGoalForalls(term_id, 0),
+            .origin_value => return error.UnsupportedOriginValue,
+        };
+        try self.requireBool(ast);
+        return ast;
+    }
+
+    fn encodeLeadingGoalForalls(self: *Adapter, id: obligation.TermId, depth: u32) EncodeError!z3.Z3_ast {
+        if (id >= self.set.terms.len) return error.InvalidTermReference;
+        const term = self.set.terms[id];
+        if (term != .quantified or term.quantified.quantifier != .forall) {
+            return self.encodeTerm(term);
+        }
+        if (term.quantified.binder.origin == .function_param) {
+            return self.encodeFunctionParamForallWrapper(term.quantified, depth);
+        }
+        return self.encodeLeadingGoalForall(term.quantified, depth);
     }
 
     fn encodeTermId(self: *Adapter, id: obligation.TermId) EncodeError!z3.Z3_ast {
@@ -937,7 +1143,7 @@ pub const Adapter = struct {
             .unary => |unary| self.encodeUnary(unary),
             .binary => |binary| self.encodeBinary(binary),
             .refinement_predicate => |predicate| self.encodeRefinementPredicate(predicate),
-            .quantified => error.UnsupportedQuantifiedTerm,
+            .quantified => |quantified| self.encodeQuantified(quantified),
         };
     }
 
@@ -954,7 +1160,8 @@ pub const Adapter = struct {
             .supported => {},
             .unsupported => return error.UnsupportedPlaceReadTerm,
         }
-        const root_state = try self.canonicalQueryState().getOrPutPlaceRoot(self.allocator, place.root);
+        const state = try self.canonicalQueryState();
+        const root_state = try state.getOrPutPlaceRoot(self.allocator, place.root);
         const current = root_state.current orelse blk: {
             const created = root_state.entry orelse .global;
             root_state.current = created;
@@ -975,7 +1182,8 @@ pub const Adapter = struct {
             .unsupported => return error.UnsupportedOldTerm,
         }
 
-        const root_state = try self.canonicalQueryState().getOrPutPlaceRoot(self.allocator, place.root);
+        const state = try self.canonicalQueryState();
+        const root_state = try state.getOrPutPlaceRoot(self.allocator, place.root);
         const entry = root_state.entry orelse blk: {
             const created = root_state.current orelse .entry;
             root_state.entry = created;
@@ -985,7 +1193,7 @@ pub const Adapter = struct {
         const entry_ast = try self.encodePlaceSymbol(place.root, entry);
         const linkage = z3.Z3_mk_eq(self.context.ctx, old_ast, entry_ast);
         try self.context.checkNoError();
-        try self.canonicalQueryState().side_constraints.append(self.allocator, linkage);
+        try state.side_constraints.append(self.allocator, linkage);
         return old_ast;
     }
 
@@ -993,13 +1201,13 @@ pub const Adapter = struct {
         self: *Adapter,
         constraints: *std.ArrayList(z3.Z3_ast),
     ) EncodeError!void {
-        const state = self.canonicalQueryState();
+        const state = try self.canonicalQueryState();
         try constraints.appendSlice(self.allocator, state.side_constraints.items);
         state.side_constraints.clearRetainingCapacity();
     }
 
-    fn canonicalQueryState(self: *Adapter) *CanonicalQueryState {
-        return self.query_state orelse unreachable;
+    fn canonicalQueryState(self: *Adapter) EncodeError!*CanonicalQueryState {
+        return self.query_state orelse error.MissingCanonicalQueryState;
     }
 
     fn encodePlaceSymbol(
@@ -1041,19 +1249,175 @@ pub const Adapter = struct {
     fn encodeVariable(self: *Adapter, variable: obligation.VarRef) EncodeError!z3.Z3_ast {
         const free = switch (variable) {
             .free => |value| value,
-            .bound => return error.UnsupportedBoundVariableTerm,
+            .bound => |bound| return self.encodeBoundVariable(bound),
         };
         const ty = free.ty orelse return error.MissingType;
         const sort = try self.sortForType(try typeInfo(ty));
-        const name_text = try std.fmt.allocPrint(self.allocator, "file{d}::{s}#pattern{d}", .{
-            free.id.file_id,
-            free.name,
-            free.id.pattern_id,
-        });
-        defer self.allocator.free(name_text);
-        const name = try self.allocator.dupeZ(u8, name_text);
+        // Canonical SMT is byte-parity with the live encoder, which names free
+        // variables from the source surface. Semantic identity remains FreeVarId
+        // in the manifest and Lean denotation.
+        const name = try self.allocator.dupeZ(u8, free.name);
         defer self.allocator.free(name);
 
+        const symbol = z3.Z3_mk_string_symbol(self.context.ctx, name.ptr);
+        const ast = z3.Z3_mk_const(self.context.ctx, symbol, sort);
+        try self.context.checkNoError();
+        return ast;
+    }
+
+    fn encodeBoundVariable(self: *Adapter, bound: obligation.BoundVarRef) EncodeError!z3.Z3_ast {
+        const state = try self.canonicalQueryState();
+        const binding = state.lookupBound(bound.index) orelse return error.BoundVariableOutOfScope;
+        const ty = bound.ty orelse return error.MissingType;
+        const info = try typeInfo(ty);
+        if (binding.origin == .function_param) {
+            if (!typeInfoSameZ3Sort(info, binding.info)) return error.TypeMismatch;
+            return binding.ast;
+        }
+        if (!typeInfoEql(info, binding.info)) return error.TypeMismatch;
+        if (!typeInfoIsU256(info)) return error.UnsupportedBoundVariableType;
+        return binding.ast;
+    }
+
+    fn encodeQuantified(self: *Adapter, quantified: obligation.QuantifiedTerm) EncodeError!z3.Z3_ast {
+        const info = try quantifierBinderTypeInfo(quantified.binder.ty);
+        const sort = try self.sortForType(info);
+        const bound_ast = try self.namedConst(quantified.binder.name, sort);
+
+        const state = try self.canonicalQueryState();
+        try state.pushBound(self.allocator, .{
+            .name = quantified.binder.name,
+            .info = info,
+            .ast = bound_ast,
+            .origin = quantified.binder.origin,
+        });
+        defer state.popBound();
+
+        var quantified_body = try self.encodeTermId(quantified.body);
+        try self.requireBool(quantified_body);
+
+        if (quantified.condition) |condition_id| {
+            const condition = try self.encodeTermId(condition_id);
+            try self.requireBool(condition);
+            quantified_body = switch (quantified.quantifier) {
+                .exists => z3.Z3_mk_and(self.context.ctx, 2, &[_]z3.Z3_ast{ condition, quantified_body }),
+                .forall => z3.Z3_mk_implies(self.context.ctx, condition, quantified_body),
+            };
+            try self.context.checkNoError();
+        }
+
+        var bounds = [_]z3.Z3_app{z3.Z3_to_app(self.context.ctx, bound_ast)};
+        const ast = switch (quantified.quantifier) {
+            .exists => z3.Z3_mk_exists_const(
+                self.context.ctx,
+                0,
+                @intCast(bounds.len),
+                bounds[0..].ptr,
+                0,
+                null,
+                quantified_body,
+            ),
+            .forall => z3.Z3_mk_forall_const(
+                self.context.ctx,
+                0,
+                @intCast(bounds.len),
+                bounds[0..].ptr,
+                0,
+                null,
+                quantified_body,
+            ),
+        };
+        try self.context.checkNoError();
+        return ast;
+    }
+
+    fn encodeLeadingGoalForall(self: *Adapter, quantified: obligation.QuantifiedTerm, depth: u32) EncodeError!z3.Z3_ast {
+        try self.predeclareLeadingGoalForallSurface(quantified);
+
+        const info = try quantifierBinderTypeInfo(quantified.binder.ty);
+        const sort = try self.sortForType(info);
+        var name_buf: [z3_verification.goal_skolem.name_buffer_len]u8 = undefined;
+        var binder_buf: [z3_verification.goal_skolem.binder_buffer_len]u8 = undefined;
+        const witness_name = z3_verification.goal_skolem.nameZ(&name_buf, &binder_buf, quantified.binder.name, depth);
+        const witness = try self.namedConst(witness_name, sort);
+
+        const state = try self.canonicalQueryState();
+        try state.pushBound(self.allocator, .{
+            .name = quantified.binder.name,
+            .info = info,
+            .ast = witness,
+            .origin = .user,
+        });
+        defer state.popBound();
+
+        if (quantified.condition) |condition_id| {
+            const condition = try self.encodeTermId(condition_id);
+            try self.requireBool(condition);
+            const body = try self.encodeTermId(quantified.body);
+            try self.requireBool(body);
+            const ast = z3.Z3_mk_implies(self.context.ctx, condition, body);
+            try self.context.checkNoError();
+            return ast;
+        }
+
+        return self.encodeLeadingGoalForalls(quantified.body, depth + 1);
+    }
+
+    fn encodeFunctionParamForallWrapper(self: *Adapter, quantified: obligation.QuantifiedTerm, depth: u32) EncodeError!z3.Z3_ast {
+        if (quantified.condition != null) return error.UnsupportedFunctionParamWrapperCondition;
+
+        const info = try typeInfo(quantified.binder.ty orelse return error.MissingType);
+        const sort = try self.sortForType(info);
+        const param_ast = try self.namedConst(quantified.binder.name, sort);
+
+        const state = try self.canonicalQueryState();
+        try state.pushBound(self.allocator, .{
+            .name = quantified.binder.name,
+            .info = info,
+            .ast = param_ast,
+            .origin = .function_param,
+        });
+        defer state.popBound();
+
+        // Function-param wrappers are a Lean/formal-manifest device. The live
+        // SMT row treats params as free constants and asserts requires/assumes
+        // as separate query constraints, so canonical byte parity unwraps the
+        // binder and leaves user quantifiers to the goal-skolem path.
+        return self.encodeLeadingGoalForalls(quantified.body, depth);
+    }
+
+    fn predeclareLeadingGoalForallSurface(self: *Adapter, quantified: obligation.QuantifiedTerm) EncodeError!void {
+        const state = try self.canonicalQueryState();
+        const snapshot_value = state.snapshot();
+        defer state.restore(snapshot_value);
+
+        const info = try quantifierBinderTypeInfo(quantified.binder.ty);
+        const sort = try self.sortForType(info);
+        const bound_ast = try self.namedConst(quantified.binder.name, sort);
+
+        try state.pushBound(self.allocator, .{
+            .name = quantified.binder.name,
+            .info = info,
+            .ast = bound_ast,
+            .origin = quantified.binder.origin,
+        });
+
+        // Live quantifier encoding visits the body before the `where` condition,
+        // then goal-position skolemization replaces the binder afterward. This
+        // prepass preserves that symbol-interning order while discarding the raw
+        // quantified term and any canonical side constraints it created.
+        const body = try self.encodeTermId(quantified.body);
+        try self.requireBool(body);
+
+        if (quantified.condition) |condition_id| {
+            const condition = try self.encodeTermId(condition_id);
+            try self.requireBool(condition);
+        }
+    }
+
+    fn namedConst(self: *Adapter, raw_name: []const u8, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
+        const name = try self.allocator.dupeZ(u8, raw_name);
+        defer self.allocator.free(name);
         const symbol = z3.Z3_mk_string_symbol(self.context.ctx, name.ptr);
         const ast = z3.Z3_mk_const(self.context.ctx, symbol, sort);
         try self.context.checkNoError();
@@ -1365,6 +1729,17 @@ fn u256TypeInfo() TypeInfo {
     return .{ .kind = .bitvector, .width = 256, .signed = false };
 }
 
+fn typeInfoIsU256(info: TypeInfo) bool {
+    return info.kind == .bitvector and info.width == 256 and !info.signed;
+}
+
+fn quantifierBinderTypeInfo(maybe_ty: ?obligation.TypeRef) EncodeError!TypeInfo {
+    const ty = maybe_ty orelse return error.MissingType;
+    const info = try typeInfo(ty);
+    if (!typeInfoIsU256(info)) return error.UnsupportedQuantifierBinderType;
+    return info;
+}
+
 fn typeInfo(ty: obligation.TypeRef) EncodeError!TypeInfo {
     return switch (ty) {
         .spelling => |spelling| typeInfoFromSpelling(spelling),
@@ -1496,6 +1871,93 @@ fn expectCanonicalHashSucceeds(
     try std.testing.expect(hash.constraint_count > 0);
 }
 
+fn expectCanonicalHashSucceedsWithShape(
+    context: *Context,
+    terms: []const obligation.Term,
+    target_term: obligation.TermId,
+    expected_shape: CanonicalPromotionShape,
+) !void {
+    const obligations = [_]obligation.Obligation{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "matrix" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+        .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = target_term } } },
+    }};
+    const obligation_ids = [_]obligation.Id{1};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "matrix" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .obligation,
+        .obligation_ids = &obligation_ids,
+    }};
+    const set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = terms,
+    };
+
+    try expectCanonicalSupported(set, queries[0]);
+    try std.testing.expectEqual(expected_shape, queryCanonicalPromotionShape(set, queries[0]).?);
+    var adapter = Adapter.init(context, std.testing.allocator, set);
+    const hash = try adapter.queryHash(2);
+    try std.testing.expect(hash.constraint_count > 0);
+}
+
+fn expectCanonicalHashSucceedsWithAssumption(
+    context: *Context,
+    terms: []const obligation.Term,
+    assumption_term: obligation.TermId,
+    target_term: obligation.TermId,
+) !void {
+    const assumptions = [_]obligation.Assumption{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "matrix" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "assume", .ordinal = 0 } },
+        .kind = .assume,
+        .formula = .{ .term = assumption_term },
+    }};
+    const obligations = [_]obligation.Obligation{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "matrix" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+        .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = target_term } } },
+    }};
+    const assumption_ids = [_]obligation.Id{1};
+    const obligation_ids = [_]obligation.Id{2};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 3,
+        .owner = .{ .function = .{ .name = "matrix" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .obligation,
+        .assumption_ids = &assumption_ids,
+        .obligation_ids = &obligation_ids,
+        .solver_logic = .all,
+    }};
+    const set: obligation.ObligationSet = .{
+        .assumptions = &assumptions,
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = terms,
+    };
+
+    try expectCanonicalSupported(set, queries[0]);
+    _ = queryCanonicalPromotionShape(set, queries[0]) orelse return error.MissingCanonicalPromotionShape;
+    var adapter = Adapter.init(context, std.testing.allocator, set);
+    const hash = try adapter.queryHash(3);
+    try std.testing.expect(hash.constraint_count > 0);
+}
+
 fn expectCanonicalHashUnsupported(
     terms: []const obligation.Term,
     target_term: obligation.TermId,
@@ -1520,6 +1982,51 @@ fn expectCanonicalHashUnsupported(
         .obligation_ids = &obligation_ids,
     }};
     const set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = terms,
+    };
+
+    try expectCanonicalUnsupported(set, queries[0], expected);
+}
+
+fn expectCanonicalHashUnsupportedWithAssumption(
+    terms: []const obligation.Term,
+    assumption_term: obligation.TermId,
+    target_term: obligation.TermId,
+    expected: CanonicalUnsupportedReason,
+) !void {
+    const assumptions = [_]obligation.Assumption{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "matrix" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "assume", .ordinal = 0 } },
+        .kind = .assume,
+        .formula = .{ .term = assumption_term },
+    }};
+    const obligations = [_]obligation.Obligation{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "matrix" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+        .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = target_term } } },
+    }};
+    const assumption_ids = [_]obligation.Id{1};
+    const obligation_ids = [_]obligation.Id{2};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 3,
+        .owner = .{ .function = .{ .name = "matrix" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .obligation,
+        .assumption_ids = &assumption_ids,
+        .obligation_ids = &obligation_ids,
+    }};
+    const set: obligation.ObligationSet = .{
+        .assumptions = &assumptions,
         .obligations = &obligations,
         .queries = &queries,
         .terms = terms,
@@ -1640,6 +2147,59 @@ test "canonical Z3 classifier matrix hashes every supported core formula shape" 
         .{ .binary = .{ .op = .and_, .lhs = 5, .rhs = 6 } },
     };
     try expectCanonicalHashSucceeds(&z3_ctx, &formula_combination_terms, 7);
+
+    const forall_terms = [_]obligation.Term{
+        .{ .variable = .{ .bound = .{ .index = 0, .name = "i", .ty = .{ .spelling = "u256" } } } },
+        .{ .int_lit = .{ .value = "0", .ty = .{ .spelling = "u256" } } },
+        .{ .binary = .{ .op = .ge, .lhs = 0, .rhs = 1 } },
+        .{ .quantified = .{
+            .quantifier = .forall,
+            .binder = .{ .name = "i", .ty = .{ .spelling = "u256" } },
+            .body = 2,
+        } },
+        .{ .bool_lit = true },
+    };
+    try expectCanonicalHashSucceedsWithAssumption(&z3_ctx, &forall_terms, 3, 4);
+
+    const goal_forall_terms = [_]obligation.Term{
+        .{ .variable = .{ .bound = .{ .index = 0, .name = "i", .ty = .{ .spelling = "u256" } } } },
+        .{ .binary = .{ .op = .le, .lhs = 0, .rhs = 0 } },
+        .{ .quantified = .{
+            .quantifier = .forall,
+            .binder = .{ .name = "i", .ty = .{ .spelling = "u256" } },
+            .body = 1,
+        } },
+    };
+    try expectCanonicalHashSucceeds(&z3_ctx, &goal_forall_terms, 2);
+
+    const signed_function_param_wrapper_terms = [_]obligation.Term{
+        .{ .variable = .{ .bound = .{ .index = 0, .name = "x", .ty = .{ .spelling = "i256" } } } },
+        .{ .binary = .{ .op = .sle, .lhs = 0, .rhs = 0, .ty = .{ .spelling = "i256" } } },
+        .{ .quantified = .{
+            .quantifier = .forall,
+            .binder = .{ .name = "x", .ty = .{ .spelling = "i256" }, .origin = .function_param },
+            .body = 1,
+        } },
+    };
+    try expectCanonicalHashSucceedsWithShape(&z3_ctx, &signed_function_param_wrapper_terms, 2, .core_formula);
+
+    const conditioned_function_param_wrapper_terms = [_]obligation.Term{
+        .{ .variable = .{ .bound = .{ .index = 0, .name = "x", .ty = .{ .spelling = "u256" } } } },
+        .{ .int_lit = .{ .value = "0", .ty = .{ .spelling = "u256" } } },
+        .{ .binary = .{ .op = .ge, .lhs = 0, .rhs = 1 } },
+        .{ .binary = .{ .op = .eq, .lhs = 0, .rhs = 0 } },
+        .{ .quantified = .{
+            .quantifier = .forall,
+            .binder = .{ .name = "x", .ty = .{ .spelling = "u256" }, .origin = .function_param },
+            .condition = 2,
+            .body = 3,
+        } },
+    };
+    try expectCanonicalHashUnsupported(
+        &conditioned_function_param_wrapper_terms,
+        4,
+        .unsupported_function_param_wrapper_condition,
+    );
 }
 
 test "canonical Z3 classifier matrix names unsupported core formula shapes" {
@@ -1685,16 +2245,36 @@ test "canonical Z3 classifier matrix names unsupported core formula shapes" {
     };
     try expectCanonicalHashUnsupported(&transient_place_terms, 2, .unsupported_place_read_term);
 
-    const quantified_terms = [_]obligation.Term{
+    const out_of_scope_bound_terms = [_]obligation.Term{
         .{ .variable = .{ .bound = .{ .index = 0, .name = "i", .ty = .{ .spelling = "u256" } } } },
+    };
+    try expectCanonicalHashUnsupported(&out_of_scope_bound_terms, 0, .bound_variable_out_of_scope);
+
+    const non_u256_binder_terms = [_]obligation.Term{
+        .{ .variable = .{ .bound = .{ .index = 0, .name = "i", .ty = .{ .spelling = "i256" } } } },
+        .{ .int_lit = .{ .value = "0", .ty = .{ .spelling = "i256" } } },
+        .{ .binary = .{ .op = .sge, .lhs = 0, .rhs = 1 } },
+        .{ .quantified = .{
+            .quantifier = .forall,
+            .binder = .{ .name = "i", .ty = .{ .spelling = "i256" } },
+            .body = 2,
+        } },
         .{ .bool_lit = true },
+    };
+    try expectCanonicalHashUnsupportedWithAssumption(&non_u256_binder_terms, 3, 4, .unsupported_quantifier_binder_type);
+
+    const mismatched_bound_type_terms = [_]obligation.Term{
+        .{ .variable = .{ .bound = .{ .index = 0, .name = "i", .ty = .{ .spelling = "i256" } } } },
+        .{ .int_lit = .{ .value = "0", .ty = .{ .spelling = "i256" } } },
+        .{ .binary = .{ .op = .sge, .lhs = 0, .rhs = 1 } },
         .{ .quantified = .{
             .quantifier = .forall,
             .binder = .{ .name = "i", .ty = .{ .spelling = "u256" } },
-            .body = 1,
+            .body = 2,
         } },
+        .{ .bool_lit = true },
     };
-    try expectCanonicalHashUnsupported(&quantified_terms, 2, .unsupported_quantified_term);
+    try expectCanonicalHashUnsupportedWithAssumption(&mismatched_bound_type_terms, 3, 4, .unsupported_bound_variable_type);
 }
 
 test "canonical Z3 adapter gives repeated scalar place reads one storage symbol" {
@@ -1792,6 +2372,283 @@ test "canonical Z3 adapter links old scalar place reads to entry storage" {
     const current_first_hash = try current_first_adapter.queryHash(2);
     try std.testing.expectEqual(@as(u32, 2), current_first_hash.constraint_count);
     try std.testing.expectEqual(CheckStatus.proved, try current_first_adapter.checkObligation(1));
+}
+
+test "canonical Z3 query state absence fails closed" {
+    var z3_ctx = try z3_verification.Z3Context.init(std.testing.allocator);
+    defer z3_ctx.deinit();
+
+    const terms = [_]obligation.Term{
+        .{ .place_read = .{ .root = "balance", .region = .storage } },
+        .{ .int_lit = .{ .value = "0", .ty = .{ .spelling = "u256" } } },
+        .{ .binary = .{ .op = .eq, .lhs = 0, .rhs = 1 } },
+    };
+    const set: obligation.ObligationSet = .{
+        .terms = &terms,
+    };
+
+    var adapter = Adapter.init(&z3_ctx, std.testing.allocator, set);
+    try std.testing.expectError(error.MissingCanonicalQueryState, adapter.encodeFormula(.{ .term = 2 }));
+}
+
+test "canonical Z3 quantifier conditions use live connective shapes" {
+    var z3_ctx = try z3_verification.Z3Context.init(std.testing.allocator);
+    defer z3_ctx.deinit();
+
+    const forall_terms = [_]obligation.Term{
+        .{ .variable = .{ .bound = .{ .index = 0, .name = "i", .ty = .{ .spelling = "u256" } } } },
+        .{ .int_lit = .{ .value = "0", .ty = .{ .spelling = "u256" } } },
+        .{ .binary = .{ .op = .lt, .lhs = 0, .rhs = 1 } },
+        .{ .bool_lit = false },
+        .{ .quantified = .{
+            .quantifier = .forall,
+            .binder = .{ .name = "i", .ty = .{ .spelling = "u256" } },
+            .condition = 2,
+            .body = 3,
+        } },
+        .{ .bool_lit = false },
+    };
+    const exists_terms = [_]obligation.Term{
+        .{ .variable = .{ .bound = .{ .index = 0, .name = "i", .ty = .{ .spelling = "u256" } } } },
+        .{ .int_lit = .{ .value = "0", .ty = .{ .spelling = "u256" } } },
+        .{ .binary = .{ .op = .lt, .lhs = 0, .rhs = 1 } },
+        .{ .bool_lit = true },
+        .{ .quantified = .{
+            .quantifier = .exists,
+            .binder = .{ .name = "i", .ty = .{ .spelling = "u256" } },
+            .condition = 2,
+            .body = 3,
+        } },
+        .{ .bool_lit = false },
+    };
+    const assumptions = [_]obligation.Assumption{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "quantified" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "assume", .ordinal = 0 } },
+        .kind = .assume,
+        .formula = .{ .term = 4 },
+    }};
+    const obligations = [_]obligation.Obligation{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "quantified" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+        .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = 5 } } },
+    }};
+    const assumption_ids = [_]obligation.Id{1};
+    const obligation_ids = [_]obligation.Id{2};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 3,
+        .owner = .{ .function = .{ .name = "quantified" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .obligation,
+        .assumption_ids = &assumption_ids,
+        .obligation_ids = &obligation_ids,
+        .solver_logic = .all,
+    }};
+
+    const forall_set: obligation.ObligationSet = .{
+        .assumptions = &assumptions,
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &forall_terms,
+    };
+    try expectCanonicalSupported(forall_set, queries[0]);
+    var forall_adapter = Adapter.init(&z3_ctx, std.testing.allocator, forall_set);
+    try std.testing.expectEqual(CheckStatus.disproved, try forall_adapter.checkObligation(2));
+
+    const exists_set: obligation.ObligationSet = .{
+        .assumptions = &assumptions,
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &exists_terms,
+    };
+    try expectCanonicalSupported(exists_set, queries[0]);
+    var exists_adapter = Adapter.init(&z3_ctx, std.testing.allocator, exists_set);
+    try std.testing.expectEqual(CheckStatus.proved, try exists_adapter.checkObligation(2));
+}
+
+test "canonical Z3 quantifier alpha rename preserves support surface only" {
+    var z3_ctx = try z3_verification.Z3Context.init(std.testing.allocator);
+    defer z3_ctx.deinit();
+
+    const original_terms = [_]obligation.Term{
+        .{ .variable = .{ .bound = .{ .index = 0, .name = "i", .ty = .{ .spelling = "u256" } } } },
+        .{ .binary = .{ .op = .le, .lhs = 0, .rhs = 0 } },
+        .{ .quantified = .{
+            .quantifier = .forall,
+            .binder = .{ .name = "i", .ty = .{ .spelling = "u256" } },
+            .body = 1,
+        } },
+        .{ .bool_lit = true },
+    };
+    const renamed_terms = [_]obligation.Term{
+        .{ .variable = .{ .bound = .{ .index = 0, .name = "z", .ty = .{ .spelling = "u256" } } } },
+        .{ .binary = .{ .op = .le, .lhs = 0, .rhs = 0 } },
+        .{ .quantified = .{
+            .quantifier = .forall,
+            .binder = .{ .name = "z", .ty = .{ .spelling = "u256" } },
+            .body = 1,
+        } },
+        .{ .bool_lit = true },
+    };
+
+    // This pins semantic support and promotion shape only. Byte hashes remain
+    // name-sensitive because live Z3 prints user binder names.
+    try expectCanonicalHashSucceedsWithAssumption(&z3_ctx, &original_terms, 2, 3);
+    try expectCanonicalHashSucceedsWithAssumption(&z3_ctx, &renamed_terms, 2, 3);
+}
+
+test "canonical Z3 quantifier stack handles nesting and shadowing" {
+    var z3_ctx = try z3_verification.Z3Context.init(std.testing.allocator);
+    defer z3_ctx.deinit();
+
+    const nested_terms = [_]obligation.Term{
+        .{ .variable = .{ .bound = .{ .index = 1, .name = "i", .ty = .{ .spelling = "u256" } } } },
+        .{ .variable = .{ .bound = .{ .index = 0, .name = "j", .ty = .{ .spelling = "u256" } } } },
+        .{ .binary = .{ .op = .le, .lhs = 0, .rhs = 1 } },
+        .{ .quantified = .{
+            .quantifier = .forall,
+            .binder = .{ .name = "j", .ty = .{ .spelling = "u256" } },
+            .body = 2,
+        } },
+        .{ .quantified = .{
+            .quantifier = .forall,
+            .binder = .{ .name = "i", .ty = .{ .spelling = "u256" } },
+            .body = 3,
+        } },
+        .{ .bool_lit = false },
+    };
+    const shadow_terms = [_]obligation.Term{
+        .{ .variable = .{ .bound = .{ .index = 0, .name = "i", .ty = .{ .spelling = "u256" } } } },
+        .{ .variable = .{ .bound = .{ .index = 0, .name = "i", .ty = .{ .spelling = "u256" } } } },
+        .{ .binary = .{ .op = .le, .lhs = 0, .rhs = 1 } },
+        .{ .quantified = .{
+            .quantifier = .forall,
+            .binder = .{ .name = "i", .ty = .{ .spelling = "u256" } },
+            .body = 2,
+        } },
+        .{ .quantified = .{
+            .quantifier = .forall,
+            .binder = .{ .name = "i", .ty = .{ .spelling = "u256" } },
+            .body = 3,
+        } },
+        .{ .bool_lit = false },
+    };
+    const assumptions = [_]obligation.Assumption{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "nested" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "assume", .ordinal = 0 } },
+        .kind = .assume,
+        .formula = .{ .term = 4 },
+    }};
+    const obligations = [_]obligation.Obligation{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "nested" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+        .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = 5 } } },
+    }};
+    const assumption_ids = [_]obligation.Id{1};
+    const obligation_ids = [_]obligation.Id{2};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 3,
+        .owner = .{ .function = .{ .name = "nested" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .obligation,
+        .assumption_ids = &assumption_ids,
+        .obligation_ids = &obligation_ids,
+        .solver_logic = .all,
+    }};
+
+    const nested_set: obligation.ObligationSet = .{
+        .assumptions = &assumptions,
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &nested_terms,
+    };
+    try expectCanonicalSupported(nested_set, queries[0]);
+    try std.testing.expectEqual(CanonicalPromotionShape.quantified_formula, queryCanonicalPromotionShape(nested_set, queries[0]).?);
+    var nested_adapter = Adapter.init(&z3_ctx, std.testing.allocator, nested_set);
+    const nested_hash = try nested_adapter.queryHash(3);
+    try std.testing.expect(nested_hash.constraint_count > 0);
+    try std.testing.expectEqual(CheckStatus.proved, try nested_adapter.checkObligation(2));
+
+    const shadow_set: obligation.ObligationSet = .{
+        .assumptions = &assumptions,
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &shadow_terms,
+    };
+    try expectCanonicalSupported(shadow_set, queries[0]);
+    var shadow_adapter = Adapter.init(&z3_ctx, std.testing.allocator, shadow_set);
+    try std.testing.expectEqual(CheckStatus.disproved, try shadow_adapter.checkObligation(2));
+}
+
+test "canonical Z3 quantifier shape remains diagnostic only when flagged" {
+    const terms = [_]obligation.Term{
+        .{ .variable = .{ .bound = .{ .index = 0, .name = "i", .ty = .{ .spelling = "u256" } } } },
+        .{ .binary = .{ .op = .le, .lhs = 0, .rhs = 0 } },
+        .{ .quantified = .{
+            .quantifier = .forall,
+            .binder = .{ .name = "i", .ty = .{ .spelling = "u256" } },
+            .body = 1,
+        } },
+        .{ .bool_lit = false },
+    };
+    const assumptions = [_]obligation.Assumption{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "quantified" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "assume", .ordinal = 0 } },
+        .kind = .assume,
+        .formula = .{ .term = 2 },
+    }};
+    const obligations = [_]obligation.Obligation{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "quantified" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .{ .sema_fact = .{ .kind = "ensures", .ordinal = 0 } },
+        .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = 3 } } },
+    }};
+    const assumption_ids = [_]obligation.Id{1};
+    const obligation_ids = [_]obligation.Id{2};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 3,
+        .owner = .{ .function = .{ .name = "quantified" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .obligation,
+        .assumption_ids = &assumption_ids,
+        .obligation_ids = &obligation_ids,
+        .canonical_smt_crosscheck_required = true,
+        .canonical_smt_annotation_pure = true,
+        .solver_logic = .all,
+    }};
+    const set: obligation.ObligationSet = .{
+        .assumptions = &assumptions,
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &terms,
+    };
+
+    try expectCanonicalSupported(set, queries[0]);
+    try std.testing.expectEqual(CanonicalPromotionShape.quantified_formula, queryCanonicalPromotionShape(set, queries[0]).?);
+    try std.testing.expect(!queryCanonicalCrosscheckRequiredByPolicy(set, queries[0]));
+    try std.testing.expect(!queryCanonicalRequiredModePromoted(set, queries[0]));
 }
 
 test "canonical Z3 classifier agrees with hash adapter on supported and unsupported rows" {
