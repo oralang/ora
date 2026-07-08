@@ -69,8 +69,11 @@ blocked on submodules).
   behind one visitor seam. Fixed by a single exhaustive dispatcher with
   `@hasDecl`/`visitDefault` visitor defaults and shared fuel-bounded recursion;
   the `obligation_to_z3.zig` walker-growth freeze is lifted.
-- [ ] **Q6** After Q5: split the file (2631 lines, four responsibilities) into
-  canonical_support / canonical_encode / canonical_types, tests following each.
+- [x] **Q6 (FIXED fec429d3)** After Q5: split the file (2631 lines, four
+  responsibilities) into canonical_support / canonical_encode /
+  canonical_types, tests following each. Fixed with a stable
+  `obligation_to_z3.zig` façade, a types/support/encode DAG, and explicit test
+  collection for each new module.
 
 ## Cleanup batch — one commit, no design needed
 
