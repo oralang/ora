@@ -4961,6 +4961,14 @@ fn runMlirEmitAdvanced(
         verifier.setExplainCores(mlir_options.explain_cores);
         verifier.setMinimizeCores(mlir_options.minimize_cores);
 
+        const needs_lean_proof_gate = mlir_options.lean_proofs_path != null;
+        // Guard erasure now requires first-class formal identity at the SMT
+        // verdict site. Collect the manifest once before verification so
+        // prepared GuardViolate rows can authorize erasure fail-closed.
+        formal_result_for_smt_report = try formal_obligation_from_mlir.collect(allocator, final_module, .{});
+        z3_formal_query_bindings = try z3FormalQueryBindingsFromFormal(allocator, formal_result_for_smt_report.?.query_bindings);
+        verifier.setFormalQueryBindings(z3_formal_query_bindings);
+
         const verification_result = try verifier.runVerificationPass(final_module);
 
         if (verification_result.diagnostics.items.len > 0) {
@@ -4973,15 +4981,9 @@ fn runMlirEmitAdvanced(
             }
         }
 
-        const needs_lean_proof_gate = mlir_options.lean_proofs_path != null;
-        const needs_formal_smt_context = needs_lean_proof_gate or mlir_options.measure_canonical_z3;
+        const needs_formal_smt_report_context = needs_lean_proof_gate or mlir_options.measure_canonical_z3;
         const needs_unknown_recipe = !verification_result.success and hasUnknownVerificationError(&verification_result);
-        if (needs_formal_smt_context) {
-            formal_result_for_smt_report = try formal_obligation_from_mlir.collect(allocator, final_module, .{});
-            z3_formal_query_bindings = try z3FormalQueryBindingsFromFormal(allocator, formal_result_for_smt_report.?.query_bindings);
-            verifier.setFormalQueryBindings(z3_formal_query_bindings);
-        }
-        if (mlir_options.emit_smt_report or needs_formal_smt_context or needs_unknown_recipe) {
+        if (mlir_options.emit_smt_report or needs_formal_smt_report_context or needs_unknown_recipe) {
             pending_smt_report = try verifier.buildSmtReport(final_module, file_path, &verification_result);
             pending_smt_report_write_artifacts = mlir_options.emit_smt_report or needs_lean_proof_gate;
             if (pending_smt_report) |report| {

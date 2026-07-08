@@ -1264,7 +1264,7 @@ test "compiler keeps guard lowering even when function already starts with same 
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, hir_text, "\"guard_clause\""));
 }
 
-test "compiler keeps proven guard clauses after verification cleanup" {
+test "compiler does not erase guard-clause obligations after verification cleanup" {
     const source_text =
         \\pub fn safe_add(amount: u256) -> bool
         \\    requires amount < 10;
@@ -1281,12 +1281,18 @@ test "compiler keeps proven guard clauses after verification cleanup" {
 
     var verifier = try z3_verification.VerificationPass.init(testing.allocator);
     defer verifier.deinit();
+    var formal_bindings = try h.collectFormalQueryBindingsForVerifier(testing.allocator, hir_result.module.raw_module);
+    defer {
+        formal_bindings.formal_result.deinit();
+        testing.allocator.free(formal_bindings.z3_bindings);
+    }
+    verifier.setFormalQueryBindings(formal_bindings.z3_bindings);
 
     var vr = try verifier.runVerificationPass(hir_result.module.raw_module);
     defer vr.deinit();
 
     try testing.expect(vr.success);
-    try testing.expect(vr.proven_guard_ids.count() > 0);
+    try testing.expectEqual(@as(usize, 0), vr.proven_guard_ids.count());
 
     const mutable_hir_result = @constCast(hir_result);
     mutable_hir_result.cleanupRefinementGuards(&vr.proven_guard_ids);

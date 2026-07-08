@@ -4,6 +4,8 @@ const ora_root = @import("ora_root");
 const compiler = ora_root.compiler;
 const mlir = @import("mlir_c_api").c;
 const z3_verification = @import("ora_z3_verification");
+const formal_obligation = @import("formal/obligation.zig");
+const formal_obligation_from_mlir = @import("formal/obligation_from_mlir.zig");
 
 pub fn compileText(source_text: []const u8) !compiler.driver.Compilation {
     return compiler.compileSource(testing.allocator, "test.ora", source_text);
@@ -36,6 +38,44 @@ pub fn renderSirTextForModule(context: mlir.MlirContext, module: mlir.MlirModule
     defer if (sir_text_ref.data != null) mlir.oraStringRefFree(sir_text_ref);
     if (sir_text_ref.data == null) return error.TestUnexpectedResult;
     return try testing.allocator.dupe(u8, sir_text_ref.data[0..sir_text_ref.length]);
+}
+
+pub fn collectFormalQueryBindingsForVerifier(
+    allocator: std.mem.Allocator,
+    module: mlir.MlirModule,
+) !struct {
+    formal_result: formal_obligation_from_mlir.CollectResult,
+    z3_bindings: []z3_verification.FormalQueryBinding,
+} {
+    var formal_result = try formal_obligation_from_mlir.collect(allocator, module, .{});
+    errdefer formal_result.deinit();
+
+    const z3_bindings = try z3FormalQueryBindingsFromFormalForTest(allocator, formal_result.query_bindings);
+    errdefer allocator.free(z3_bindings);
+
+    return .{
+        .formal_result = formal_result,
+        .z3_bindings = z3_bindings,
+    };
+}
+
+pub fn z3FormalQueryBindingsFromFormalForTest(
+    allocator: std.mem.Allocator,
+    bindings: []const formal_obligation.FormalQueryBinding,
+) ![]z3_verification.FormalQueryBinding {
+    const converted = try allocator.alloc(z3_verification.FormalQueryBinding, bindings.len);
+    for (bindings, converted) |binding, *out| {
+        out.* = .{
+            .source_op_id = binding.source_op_id,
+            .kind = @tagName(binding.kind),
+            .logical_role = if (binding.logical_role) |role| @tagName(role) else null,
+            .guard_id = binding.guard_id,
+            .query_id = binding.query_id,
+            .assumption_ids = binding.assumption_ids,
+            .obligation_ids = binding.obligation_ids,
+        };
+    }
+    return converted;
 }
 
 pub fn compilePackage(root_path: []const u8) !compiler.driver.Compilation {

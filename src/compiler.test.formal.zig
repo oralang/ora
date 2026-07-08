@@ -352,25 +352,6 @@ fn termHasNestedQuantifier(
     };
 }
 
-fn z3FormalQueryBindingsFromFormalForTest(
-    allocator: std.mem.Allocator,
-    bindings: []const obligation.FormalQueryBinding,
-) ![]z3_verification.FormalQueryBinding {
-    const converted = try allocator.alloc(z3_verification.FormalQueryBinding, bindings.len);
-    for (bindings, converted) |binding, *out| {
-        out.* = .{
-            .source_op_id = binding.source_op_id,
-            .kind = @tagName(binding.kind),
-            .logical_role = if (binding.logical_role) |role| @tagName(role) else null,
-            .guard_id = binding.guard_id,
-            .query_id = binding.query_id,
-            .assumption_ids = binding.assumption_ids,
-            .obligation_ids = binding.obligation_ids,
-        };
-    }
-    return converted;
-}
-
 fn expectBinaryTerm(
     set: obligation.ObligationSet,
     term_id: obligation.TermId,
@@ -3399,7 +3380,7 @@ test "formal canonical Z3 quantifier row matches live prepared hash" {
 
     var pass = try z3_verification.VerificationPass.init(testing.allocator);
     defer pass.deinit();
-    const z3_bindings = try z3FormalQueryBindingsFromFormalForTest(testing.allocator, formal_result.query_bindings);
+    const z3_bindings = try test_helpers.z3FormalQueryBindingsFromFormalForTest(testing.allocator, formal_result.query_bindings);
     defer testing.allocator.free(z3_bindings);
     pass.setFormalQueryBindings(z3_bindings);
     var z3_manifest = try pass.collectPreparedQueryManifest(hir_result.module.raw_module);
@@ -3485,7 +3466,7 @@ test "formal canonical Z3 goal forall row matches live skolemized hash" {
 
     var pass = try z3_verification.VerificationPass.init(testing.allocator);
     defer pass.deinit();
-    const z3_bindings = try z3FormalQueryBindingsFromFormalForTest(testing.allocator, formal_result.query_bindings);
+    const z3_bindings = try test_helpers.z3FormalQueryBindingsFromFormalForTest(testing.allocator, formal_result.query_bindings);
     defer testing.allocator.free(z3_bindings);
     pass.setFormalQueryBindings(z3_bindings);
     var z3_manifest = try pass.collectPreparedQueryManifest(hir_result.module.raw_module);
@@ -3562,7 +3543,7 @@ test "formal canonical Z3 treats requires runtime mirror as non-pure" {
 
     var pass = try z3_verification.VerificationPass.init(testing.allocator);
     defer pass.deinit();
-    const z3_bindings = try z3FormalQueryBindingsFromFormalForTest(testing.allocator, formal_result.query_bindings);
+    const z3_bindings = try test_helpers.z3FormalQueryBindingsFromFormalForTest(testing.allocator, formal_result.query_bindings);
     defer testing.allocator.free(z3_bindings);
     pass.setFormalQueryBindings(z3_bindings);
     var z3_manifest = try pass.collectPreparedQueryManifest(hir_result.module.raw_module);

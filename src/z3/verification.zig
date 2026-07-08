@@ -3586,17 +3586,10 @@ pub const VerificationPass = struct {
                     } else if (entry.status == z3.Z3_L_FALSE) {
                         // Any obligation the verifier proves unsat
                         // (the bad case is impossible / the property
-                        // holds). Record its position for the
-                        // FV-dead-branch overlay. For Guard-kind
-                        // obligations also dedupe via the guard_id
-                        // set so the same guard isn't recorded
-                        // twice across checked sites.
-                        if (query.obligation_kind == .Guard and query.guard_id != null) {
-                            const guard_id = query.guard_id.?;
-                            if (combined.proven_guard_ids.contains(guard_id)) continue;
-                            const key = try self.allocator.dupe(u8, guard_id);
-                            try combined.proven_guard_ids.put(key, {});
-                        }
+                        // holds). Record its position for reports and
+                        // FV-dead-branch overlays. Runtime guard erasure is
+                        // deliberately not authorized here; only matched
+                        // GuardViolate rows may write proven_guard_ids.
                         try combined.proven_guard_positions.append(combined.allocator, .{
                             .file = try combined.allocator.dupe(u8, query.file),
                             .line = query.line,
@@ -3718,12 +3711,7 @@ pub const VerificationPass = struct {
                 },
                 .GuardViolate => {
                     if (entry.status == z3.Z3_L_FALSE) {
-                        const guard_id = query.guard_id.?;
-                        if (!combined.proven_guard_ids.contains(guard_id)) {
-                            const key = try self.allocator.dupe(u8, guard_id);
-                            try combined.proven_guard_ids.put(key, {});
-                            // Same as the obligation site above —
-                            // also record the source position.
+                        if (try self.maybeAuthorizeGuardErasure(&combined, query, guardErasureProofStatusFromPreparedEntry(self, entry))) {
                             try combined.proven_guard_positions.append(combined.allocator, .{
                                 .file = try combined.allocator.dupe(u8, query.file),
                                 .line = query.line,
@@ -3766,6 +3754,69 @@ pub const VerificationPass = struct {
         }
 
         return combined;
+    }
+
+    fn guardErasureEnclosingResultHealthy(self: *const VerificationPass) bool {
+        return self.verify_mode == .Full and
+            self.verify_calls and
+            self.verify_state and
+            !self.encoder.isDegraded() and
+            self.encoder.soundnessLosses().len == 0;
+    }
+
+    const GuardErasureProofStatus = struct {
+        status: z3.Z3_lbool = z3.Z3_L_UNDEF,
+        vacuous: bool = false,
+        vacuity_unknown: bool = false,
+        verified_with_caveats: bool = false,
+    };
+
+    fn guardErasureProofStatusFromPreparedEntry(
+        self: *const VerificationPass,
+        entry: PreparedQueryResult,
+    ) GuardErasureProofStatus {
+        return .{
+            .status = entry.status,
+            .vacuous = entry.vacuous,
+            .vacuity_unknown = entry.vacuity_unknown,
+            .verified_with_caveats = entry.status == z3.Z3_L_FALSE and
+                (entry.vacuity_unknown or self.encoder.isDegraded() or self.encoder.soundnessLosses().len != 0),
+        };
+    }
+
+    fn guardErasureCleanProof(status: GuardErasureProofStatus) bool {
+        return status.status == z3.Z3_L_FALSE and
+            !status.vacuous and
+            !status.vacuity_unknown and
+            !status.verified_with_caveats;
+    }
+
+    fn guardErasureQueryAuthorized(
+        self: *const VerificationPass,
+        query: PreparedQuery,
+        status: GuardErasureProofStatus,
+    ) bool {
+        if (!self.guardErasureEnclosingResultHealthy()) return false;
+        if (!guardErasureCleanProof(status)) return false;
+        if (query.kind != .GuardViolate) return false;
+        if (query.guard_id == null) return false;
+        if (query.formal_match_status != .matched) return false;
+        return true;
+    }
+
+    fn maybeAuthorizeGuardErasure(
+        self: *VerificationPass,
+        result: *errors.VerificationResult,
+        query: PreparedQuery,
+        status: GuardErasureProofStatus,
+    ) !bool {
+        if (!self.guardErasureQueryAuthorized(query, status)) return false;
+        const guard_id = query.guard_id.?;
+        if (result.proven_guard_ids.contains(guard_id)) return false;
+        const key = try self.allocator.dupe(u8, guard_id);
+        errdefer self.allocator.free(key);
+        try result.proven_guard_ids.put(key, {});
+        return true;
     }
 
     fn collectResourceEffectEvents(self: *VerificationPass, mlir_module: mlir.MlirModule) !void {
@@ -4055,7 +4106,7 @@ pub const VerificationPass = struct {
             summary.guard_erasure_agreement.add(query, run, if (query.guard_id) |guard_id|
                 (guard_id_counts.get(guard_id) orelse 0) > 1
             else
-                false);
+                false, self.guardErasureEnclosingResultHealthy());
 
             switch (query.kind) {
                 .Base => {
@@ -4096,7 +4147,13 @@ pub const VerificationPass = struct {
                 .GuardViolate => {
                     kind_counts.guard_violate += 1;
                     if (query.guard_id) |guard_id| {
-                        if (run.status == z3.Z3_L_FALSE and !proven_guard_ids.contains(guard_id)) {
+                        const proof_status = GuardErasureProofStatus{
+                            .status = run.status,
+                            .vacuous = run.vacuous,
+                            .vacuity_unknown = run.vacuity_unknown,
+                            .verified_with_caveats = run.verified_with_caveats,
+                        };
+                        if (self.guardErasureQueryAuthorized(query, proof_status) and !proven_guard_ids.contains(guard_id)) {
                             try proven_guard_ids.put(try self.allocator.dupe(u8, guard_id), {});
                         } else if (run.status == z3.Z3_L_TRUE and !violatable_guard_ids.contains(guard_id)) {
                             try violatable_guard_ids.put(try self.allocator.dupe(u8, guard_id), {});
@@ -7181,6 +7238,7 @@ const GuardErasureAgreementSummary = struct {
         query: PreparedQuery,
         run: ReportQueryRun,
         duplicate_guard_id: bool,
+        enclosing_healthy: bool,
     ) void {
         if (query.kind != .GuardViolate) return;
         self.rows += 1;
@@ -7191,7 +7249,7 @@ const GuardErasureAgreementSummary = struct {
             .not_applicable => {},
         }
         if (duplicate_guard_id) self.duplicate_guard_id_rows += 1;
-        if (guardErasureCleanUnsat(run) and
+        if (guardErasureCleanUnsat(run) and enclosing_healthy and
             (query.formal_match_status != .matched or duplicate_guard_id))
         {
             self.clean_unsat_not_authorized += 1;
@@ -11353,7 +11411,7 @@ test "full verify mode classifies guard-tagged ora.assert as guard obligation" {
     try testing.expect(saw_guard_obligation);
 }
 
-test "verified guard obligations populate proven guard ids" {
+test "verified guard obligations do not authorize guard erasure" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
     pass.setVerifyMode(.Full);
@@ -11370,7 +11428,8 @@ test "verified guard obligations populate proven guard ids" {
     defer result.deinit();
 
     try testing.expect(result.success);
-    try testing.expect(result.proven_guard_ids.contains("guard:test:clause"));
+    try testing.expect(!result.proven_guard_ids.contains("guard:test:clause"));
+    try testing.expectEqual(@as(usize, 1), result.proven_guard_positions.items.len);
 }
 
 test "full verify mode simplifies checked multiply assert obligations before SMT-LIB emission" {
@@ -12631,11 +12690,100 @@ test "sequential guard verification uses linear path assumptions to prove guards
     const module = buildLinearPathAssumeGuardModule(mlir_ctx);
     defer mlir.oraModuleDestroy(module);
 
-    var result = try pass.runVerificationPass(module);
+    try pass.extractAnnotationsFromMLIR(module);
+    var guard_ann: ?EncodedAnnotation = null;
+    for (pass.encoded_annotations.items) |ann| {
+        if (ann.kind == .RefinementGuard) {
+            guard_ann = ann;
+            break;
+        }
+    }
+    const ann = guard_ann orelse return error.TestUnexpectedResult;
+    const source_op_id = sourceOpId(ann.source_op) orelse return error.TestUnexpectedResult;
+    const bindings = [_]FormalQueryBinding{.{
+        .source_op_id = source_op_id,
+        .kind = "guard_violate",
+        .guard_id = "guard:test:linear",
+        .query_id = 1,
+    }};
+    pass.setFormalQueryBindings(bindings[0..]);
+
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| {
+            q.deinit(testing.allocator);
+        }
+        queries.deinit();
+    }
+
+    var result = try pass.executePreparedQueriesSequential(queries.items);
     defer result.deinit();
 
     try testing.expect(result.success);
     try testing.expect(result.proven_guard_ids.contains("guard:test:linear"));
+}
+
+test "clean guard violate proof without formal identity keeps runtime guard" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const query = PreparedQuery{
+        .kind = .GuardViolate,
+        .function_name = "f",
+        .guard_id = "guard:test:missing-formal",
+        .file = "/tmp/test.ora",
+        .line = 4,
+        .column = 8,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "f guard guard:test:missing-formal [violate]"),
+        .formal_match_status = .missing,
+    };
+    defer {
+        var mutable_query = query;
+        mutable_query.deinit(testing.allocator);
+    }
+
+    const result_entry = PreparedQueryResult{
+        .status = z3.Z3_L_FALSE,
+    };
+    var result = try pass.collectPreparedQueryResults((&[_]PreparedQuery{query})[0..], (&[_]PreparedQueryResult{result_entry})[0..]);
+    defer result.deinit();
+
+    try testing.expect(result.success);
+    try testing.expect(!result.proven_guard_ids.contains("guard:test:missing-formal"));
+    try testing.expectEqual(@as(usize, 0), result.proven_guard_positions.items.len);
+}
+
+test "guard erasure authorization refuses enclosing soundness loss" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.encoder.noteSoundnessLoss(.internal_encoding_failure, "test soundness loss");
+
+    const query = PreparedQuery{
+        .kind = .GuardViolate,
+        .function_name = "f",
+        .guard_id = "guard:test:degraded",
+        .file = "/tmp/test.ora",
+        .line = 4,
+        .column = 8,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "f guard guard:test:degraded [violate]"),
+        .formal_match_status = .matched,
+    };
+    defer {
+        var mutable_query = query;
+        mutable_query.deinit(testing.allocator);
+    }
+
+    const result_entry = PreparedQueryResult{
+        .status = z3.Z3_L_FALSE,
+    };
+    var result = try pass.collectPreparedQueryResults((&[_]PreparedQuery{query})[0..], (&[_]PreparedQueryResult{result_entry})[0..]);
+    defer result.deinit();
+
+    try testing.expect(result.success);
+    try testing.expect(!result.proven_guard_ids.contains("guard:test:degraded"));
+    try testing.expectEqual(@as(usize, 0), result.proven_guard_positions.items.len);
 }
 
 test "path constraint normalization flattens boolean ite ladders" {
@@ -13633,6 +13781,7 @@ test "pure path-assume contradiction still proves dead guard path" {
         .tracked_assumptions = tracked_assumptions,
         .smtlib_z = try testing.allocator.dupeZ(u8, "(assert false)\n(check-sat)"),
         .log_prefix = try testing.allocator.dupe(u8, "verification: f guard guard:test:path-vacuity [violate]"),
+        .formal_match_status = .matched,
     }};
     defer queries[0].deinit(testing.allocator);
 
@@ -13855,18 +14004,19 @@ test "guard erasure agreement summary counts only clean unauthorized UNSAT rows"
     defer ambiguous_query.deinit(testing.allocator);
 
     var summary = GuardErasureAgreementSummary{};
-    summary.add(matched_query, .{ .status = z3.Z3_L_FALSE }, false);
-    summary.add(missing_query, .{ .status = z3.Z3_L_FALSE }, false);
-    summary.add(ambiguous_query, .{ .status = z3.Z3_L_FALSE }, true);
+    summary.add(matched_query, .{ .status = z3.Z3_L_FALSE }, false, true);
+    summary.add(missing_query, .{ .status = z3.Z3_L_FALSE }, false, true);
+    summary.add(ambiguous_query, .{ .status = z3.Z3_L_FALSE }, true, true);
     summary.add(missing_query, .{
         .status = z3.Z3_L_FALSE,
         .vacuity_unknown = true,
         .verified_with_caveats = true,
-    }, false);
+    }, false, true);
+    summary.add(missing_query, .{ .status = z3.Z3_L_FALSE }, false, false);
 
-    try testing.expectEqual(@as(u64, 4), summary.rows);
+    try testing.expectEqual(@as(u64, 5), summary.rows);
     try testing.expectEqual(@as(u64, 1), summary.matched);
-    try testing.expectEqual(@as(u64, 2), summary.missing);
+    try testing.expectEqual(@as(u64, 3), summary.missing);
     try testing.expectEqual(@as(u64, 1), summary.ambiguous);
     try testing.expectEqual(@as(u64, 1), summary.duplicate_guard_id_rows);
     try testing.expectEqual(@as(u64, 2), summary.clean_unsat_not_authorized);

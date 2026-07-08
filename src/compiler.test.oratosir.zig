@@ -1127,7 +1127,7 @@ test "compiler generates SIR CFG optimization diff without mutating module" {
     try after_graph.expectAllEdgesReferToKnownNodes();
 }
 
-test "compiler marks proven refinement guards in Ora CFG overlay" {
+test "compiler does not mark guard-clause obligations as erased in Ora CFG overlay" {
     const source_text =
         \\pub fn safe_add(amount: u256) -> bool
         \\    requires amount < 10;
@@ -1145,11 +1145,17 @@ test "compiler marks proven refinement guards in Ora CFG overlay" {
 
     var verifier = try z3_verification.VerificationPass.init(testing.allocator);
     defer verifier.deinit();
+    var formal_bindings = try h.collectFormalQueryBindingsForVerifier(testing.allocator, hir_result.module.raw_module);
+    defer {
+        formal_bindings.formal_result.deinit();
+        testing.allocator.free(formal_bindings.z3_bindings);
+    }
+    verifier.setFormalQueryBindings(formal_bindings.z3_bindings);
     var vr = try verifier.runVerificationPass(hir_result.module.raw_module);
     defer vr.deinit();
 
     try testing.expect(vr.success);
-    try testing.expect(vr.proven_guard_ids.count() > 0);
+    try testing.expectEqual(@as(usize, 0), vr.proven_guard_ids.count());
     const module_before = try printModuleTextForTest(hir_result.module.raw_module);
     defer testing.allocator.free(module_before);
 
@@ -1165,8 +1171,7 @@ test "compiler marks proven refinement guards in Ora CFG overlay" {
     try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "digraph \"ora_structured_cfg\""));
     try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "proven_guard_count="));
     try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "ora.assert"));
-    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "proof=\"proven-erased\""));
-    try testing.expectEqual(vr.proven_guard_ids.count(), std.mem.count(u8, dot, "proof=\"proven-erased\""));
+    try testing.expect(!std.mem.containsAtLeast(u8, dot, 1, "proof=\"proven-erased\""));
 }
 
 test "compiler Ora CFG overlay distinguishes runtime refinement guards" {
