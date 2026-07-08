@@ -24,10 +24,6 @@ structure Row where
   zigSemanticSupported : Bool := false
   deriving Repr
 
-def optionIsSome {α : Type} : Option α → Bool
-  | some _ => true
-  | none => false
-
 def valueForTy? : Option TyRef → Value
   | some ty => if ty.isBool then .bool true else .u256 (BitVec.ofNat 256 0)
   | none => .u256 (BitVec.ofNat 256 0)
@@ -76,10 +72,10 @@ def collectObligationsByIds (manifest : Manifest) : List Nat → Option (List Ob
       | _, _ => none
 
 def assumptionsFullyDenotable? (manifest : Manifest) (rows : List AssumptionRow) : Bool :=
-  optionIsSome (assumptionsDenoteInEnv? manifest (canonicalEnv manifest) rows)
+  (assumptionsDenoteInEnv? manifest (canonicalEnv manifest) rows).isSome
 
 def obligationFullyDenotable? (manifest : Manifest) (row : ObligationRow) : Bool :=
-  optionIsSome (obligationDenotesInEnv? manifest (canonicalEnv manifest) row)
+  (obligationDenotesInEnv? manifest (canonicalEnv manifest) row).isSome
 
 def obligationsFullyDenotable? (manifest : Manifest) (rows : List ObligationRow) : Bool :=
   rows.all (obligationFullyDenotable? manifest)

@@ -56,6 +56,7 @@ import Ora.Resource.Model
 import Ora.Resource.Theorems
 import Ora.Resource.Sync
 import Ora.Generated.StorageDisjointnessSnapshot
+import Ora.SyncDecode
 import Ora.StorageDisjointnessSync
 import Ora.Generated.ObligationTotalitySnapshot
 import Ora.ObligationTotalitySync

@@ -13,12 +13,12 @@ is to keep the current supported grammar honest while the fragment grows.
 
 import Ora.Obligation.Semantics
 import Ora.Generated.ObligationTotalitySnapshot
+import Ora.SyncDecode
 
 namespace Ora.ObligationTotalitySync
 
-open Ora.Obligation Ora.Generated
+open Ora.Obligation Ora.Generated Ora.SyncDecode
 
-abbrev RawPlace := String × String × List String × List (String × String)
 abbrev RawTerm :=
   String × Bool × String × String × String × Nat × Nat × Option Nat × List Nat × RawPlace
 abbrev RawAssumption := Nat × String × Option Nat
@@ -30,44 +30,6 @@ abbrev RawResource :=
 abbrev RawRow :=
   String × List RawTerm × List RawAssumption × Bool × Bool × String × Nat ×
     RawEffect × RawResource
-
-def optionIsSome : Option α → Bool
-  | some _ => true
-  | none => false
-
-def decodeRegion : String → Option RegionRef
-  | "none" => some .none
-  | "storage" => some .storage
-  | "memory" => some .memory
-  | "transient" => some .transient
-  | "calldata" => some .calldata
-  | _ => none
-
-def parseDecimalPrefixUntilColon : List Char → Nat → Bool → Option (Nat × List Char)
-  | [], _, _ => none
-  | ':' :: rest, acc, seen => if seen then some (acc, rest) else none
-  | c :: rest, acc, _ =>
-      match decimalDigit? c with
-      | some digit => parseDecimalPrefixUntilColon rest (acc * 10 + digit) true
-      | none => none
-
-def stripPatternPrefix : List Char → Option (List Char)
-  | 'p' :: 'a' :: 't' :: 't' :: 'e' :: 'r' :: 'n' :: ':' :: rest => some rest
-  | _ => none
-
-def decodeFreeVarIdString (value : String) : Option FreeVarId :=
-  match value.toList with
-  | 'f' :: 'i' :: 'l' :: 'e' :: ':' :: rest =>
-      match parseDecimalPrefixUntilColon rest 0 false with
-      | some (file_id, suffix) =>
-          match stripPatternPrefix suffix with
-          | some patternChars =>
-              match parseDecimalNatAux patternChars 0 false with
-              | some pattern_id => some { file_id := file_id, pattern_id := pattern_id }
-              | none => none
-          | none => none
-      | none => none
-  | _ => none
 
 def parseCompilerTypeId? (value : String) : Option Nat :=
   match value.toList with
@@ -88,29 +50,6 @@ def decodeTy? (value : String) : Option TyRef :=
       match parseCompilerTypeId? value with
       | some id => some (.compilerTypeId id)
       | none => none
-
-def decodeKey : String × String → Option PlaceKey
-  | ("parameter", value) => (decodeFreeVarIdString value).map .parameter
-  | ("comptime_parameter", value) => (parseDecimalNat? value).map .comptimeParameter
-  | ("comptime_range_parameter", value) => (parseDecimalNat? value).map .comptimeRangeParameter
-  | ("constant", value) => some (.constant value)
-  | ("msg_sender", _) => some .msgSender
-  | ("tx_origin", _) => some .txOrigin
-  | ("unknown", _) => some .unknown
-  | _ => none
-
-def decodeKeys : List (String × String) → Option (List PlaceKey)
-  | [] => some []
-  | raw :: rest =>
-      match decodeKey raw, decodeKeys rest with
-      | some key, some keys => some (key :: keys)
-      | _, _ => none
-
-def decodePlace : RawPlace → Option PlaceRef
-  | (root, regionName, fields, rawKeys) =>
-      match decodeRegion regionName, decodeKeys rawKeys with
-      | some region, some keys => some { root := root, region := region, fields := fields, keys := keys }
-      | _, _ => none
 
 def decodeUnaryOp : String → Option UnaryOp
   | "not" => some .not_
@@ -419,7 +358,7 @@ def canonicalEnv (manifest : Manifest) : Env :=
     result := some (.u256 (BitVec.ofNat 256 0)) }
 
 def valueDenotes? (manifest : Manifest) (env : Env) (fuel : Nat) (id : TermId) : Bool :=
-  optionIsSome (denoteValue? manifest env fuel id)
+  (denoteValue? manifest env fuel id).isSome
 
 def valueDenotesU256? (manifest : Manifest) (env : Env) (fuel : Nat) (id : TermId) : Bool :=
   match denoteValue? manifest env fuel id with
@@ -437,7 +376,7 @@ def valueEqDenotable?
     (fuel : Nat)
     (lhs rhs : TermId) : Bool :=
   match denoteValue? manifest env fuel lhs, denoteValue? manifest env fuel rhs with
-  | some lhsValue, some rhsValue => optionIsSome (Value.eqProp? lhsValue rhsValue)
+  | some lhsValue, some rhsValue => (Value.eqProp? lhsValue rhsValue).isSome
   | _, _ => false
 
 def refinementPredicateFullyDenotable?
@@ -568,12 +507,12 @@ def resourceAmountFullyDenotable? (manifest : Manifest) (env : Env) (goal : Reso
 
 def resourceSourceKnown? (env : Env) (goal : ResourceGoal) : Bool :=
   match goal.source with
-  | some source => optionIsSome (env.resourcePlaceKnown? source)
+  | some source => (env.resourcePlaceKnown? source).isSome
   | none => false
 
 def resourceDestinationKnown? (env : Env) (goal : ResourceGoal) : Bool :=
   match goal.destination with
-  | some destination => optionIsSome (env.resourcePlaceKnown? destination)
+  | some destination => (env.resourcePlaceKnown? destination).isSome
   | none => false
 
 def resourceGoalFullyDenotable? (manifest : Manifest) (env : Env) (goal : ResourceGoal) : Bool :=
@@ -612,7 +551,7 @@ def assumptionsFullyDenotable?
     (manifest : Manifest)
     (env : Env)
     (assumptions : List AssumptionRow) : Bool :=
-  optionIsSome (assumptionsDenoteInEnv? manifest env assumptions)
+  (assumptionsDenoteInEnv? manifest env assumptions).isSome
 
 def rowMatches : RawRow → Bool
   | (_, rawTerms, rawAssumptions, mustSupport, zigSupported, targetKind, targetTerm,
