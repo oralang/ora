@@ -29,6 +29,9 @@ comptime {
     _ = @import("formal/obligation_from_z3.zig");
     _ = @import("formal/obligation_to_lean.zig");
     _ = @import("formal/obligation_to_z3.zig");
+    _ = @import("formal/canonical_types.zig");
+    _ = @import("formal/canonical_support.zig");
+    _ = @import("formal/canonical_encode.zig");
     _ = @import("formal/canonical_z3_measure.zig");
     _ = @import("formal/emit_obligation_totality_snapshot.zig");
     _ = @import("formal/proof_manifest.zig");
