@@ -275,6 +275,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("ora_types", ora_types_mod);
     exe_mod.addImport("ora_refinements", ora_refinements_mod);
     exe_mod.addImport("ora_z3_verification", z3_verification_mod);
+    exe_mod.addImport("ora_root", lib_mod);
     lib_mod.addImport("mlir_c_api", mlir_c_mod);
     lib_mod.addImport("mlir_helpers", mlir_helpers_mod);
     lib_mod.addImport("log", log_mod);
@@ -537,6 +538,11 @@ pub fn build(b: *std.Build) void {
     // Sinora: Ora's owned Zig SIR->EVM backend. Build it by default so Ora can
     // emit bytecode with no external SIR backend.
     const sinora_root = "sinora";
+    const sinora_mod = b.createModule(.{
+        .root_source_file = b.path("sinora/src/sinora.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     var sinora_build_dependency: ?*std.Build.Step = null;
     if (std.Io.Dir.cwd().access(b.graph.io, b.fmt("{s}/build.zig", .{sinora_root}), .{}) catch null) |_| {
         const sinora_build_cmd = b.addSystemCommand(&[_][]const u8{ "zig", "build" });
@@ -547,6 +553,27 @@ pub fn build(b: *std.Build) void {
         sinora_build_step.dependOn(&sinora_build_cmd.step);
     }
     if (sinora_build_dependency) |dep| b.getInstallStep().dependOn(dep);
+    exe_mod.addImport("sinora", sinora_mod);
+
+    const dispatcher_table_snapshot_mod = b.createModule(.{
+        .root_source_file = b.path("src/formal/emit_dispatcher_table_snapshot.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    dispatcher_table_snapshot_mod.addImport("ora_root", lib_mod);
+    dispatcher_table_snapshot_mod.addImport("mlir_c_api", mlir_c_mod);
+    dispatcher_table_snapshot_mod.addImport("sinora", sinora_mod);
+    const dispatcher_table_snapshot_exe = b.addExecutable(.{
+        .name = "ora-dispatcher-table-snapshot",
+        .root_module = dispatcher_table_snapshot_mod,
+    });
+    linkMlirLibraries(b, dispatcher_table_snapshot_exe, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
+    const dispatcher_table_snapshot_run = b.addRunArtifact(dispatcher_table_snapshot_exe);
+    if (b.args) |args| {
+        dispatcher_table_snapshot_run.addArgs(args);
+    }
+    const dispatcher_table_snapshot_step = b.step("emit-dispatcher-table-snapshot", "Emit formal dispatcher table snapshot");
+    dispatcher_table_snapshot_step.dependOn(&dispatcher_table_snapshot_run.step);
 
     // create optimization demo executable
     const optimization_demo_mod = b.createModule(.{
@@ -1373,6 +1400,7 @@ pub fn build(b: *std.Build) void {
     compiler_test_mod.addImport("mlir_c_api", mlir_c_mod);
     compiler_test_mod.addImport("ora_z3_verification", z3_verification_mod);
     compiler_test_mod.addImport("ora_types", ora_types_mod);
+    compiler_test_mod.addImport("sinora", sinora_mod);
     const compiler_tests = b.addTest(.{
         .root_module = compiler_test_mod,
         .filters = compilerTestFilters(

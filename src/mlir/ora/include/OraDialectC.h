@@ -1949,6 +1949,34 @@ MLIR_CAPI_EXPORTED MlirOperation oraBreakOpCreate(
         MlirContext ctx,
         MlirModule module);
 
+    /// Test hook: remove `sir.block_name` from the first selector switch's
+    /// default destination so dispatcher fact extraction can exercise the
+    /// `guarded=false` path. Returns true when a selector switch was mutated.
+    MLIR_CAPI_EXPORTED bool oraTestStripFirstSIRSelectorSwitchDefaultBlockName(
+        MlirModule module);
+
+    /// Extract selector-switch facts from a SIR module after dispatcher build.
+    /// Returns schema-v1 JSON:
+    /// {"schema_version":1,"switches":[{"ordinal":0,"block":"<block>",
+    /// "default_label":"<block>","cases":[{"selector":<u32>,
+    /// "label":"<block>","guarded":<bool>}]}]} for every `sir.switch`
+    /// marked with `sir.selector_switch`.
+    /// `guarded` records whether the selector switch has a named default
+    /// destination. Case destination names are required separately.
+    /// Returns an empty `switches` array when no selector switch exists and a
+    /// null string ref on failure.
+    /// The caller must free the returned string using oraStringRefFree.
+    MLIR_CAPI_EXPORTED MlirStringRef oraExtractSIRDispatcherSwitchFacts(
+        MlirContext ctx,
+        MlirModule module);
+
+    /// Extract the public ABI selector-to-function intent before dispatcher
+    /// construction. The returned JSON is owned by the caller and must be
+    /// released with oraStringRefFree.
+    MLIR_CAPI_EXPORTED MlirStringRef oraExtractSIRDispatcherIntentFacts(
+        MlirContext ctx,
+        MlirModule module);
+
     /// Emit Plank SIR text from a SIR MLIR module
     /// Returns null string ref on failure
     /// The caller must free the returned string using oraStringRefFree

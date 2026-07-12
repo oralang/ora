@@ -33,6 +33,8 @@ pub const CliOptions = struct {
     z3_proofs: bool = false,
     minimize_cores: bool = false,
     keep_proved_checks: bool = false,
+    lean_proofs_requested: bool = false,
+    lean_proofs_mode: LeanProofMode = .none,
     lean_proofs_path: ?[]const u8 = null,
     measure_canonical_z3: bool = false,
     emit_smt_report: bool = false,
@@ -62,6 +64,21 @@ pub const CliOptions = struct {
     // levels, which control MLIR pass effort.
     optimize: ?[]const u8 = null,
     chain_id: ?u64 = null,
+};
+
+pub const LeanProofMode = enum {
+    none,
+    userland,
+    kernel,
+    both,
+
+    pub fn includesUserland(self: LeanProofMode) bool {
+        return self == .userland or self == .both;
+    }
+
+    pub fn includesKernel(self: LeanProofMode) bool {
+        return self == .kernel or self == .both;
+    }
 };
 
 pub const ParseError = error{
@@ -167,6 +184,13 @@ fn parseMlirDebugList(opts: *CliOptions, spec: []const u8) ParseError!void {
             return error.UnknownArgument;
         }
     }
+}
+
+fn parseLeanProofMode(value: []const u8) ?LeanProofMode {
+    if (std.mem.eql(u8, value, "userland")) return .userland;
+    if (std.mem.eql(u8, value, "kernel")) return .kernel;
+    if (std.mem.eql(u8, value, "both")) return .both;
+    return null;
 }
 
 pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
@@ -279,13 +303,29 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             i += 1;
         } else if (std.mem.eql(u8, arg, "--lean-proofs")) {
             try claim(&seen_lean_proofs);
-            if (i + 1 >= args.len) return error.MissingArgument;
-            opts.lean_proofs_path = args[i + 1];
-            i += 2;
+            opts.lean_proofs_requested = true;
+            opts.lean_proofs_mode = .userland;
+            if (i + 1 < args.len and !std.mem.startsWith(u8, args[i + 1], "-") and !looksLikeOraSourcePath(args[i + 1])) {
+                if (parseLeanProofMode(args[i + 1])) |mode| {
+                    opts.lean_proofs_mode = mode;
+                } else {
+                    opts.lean_proofs_path = args[i + 1];
+                }
+                i += 2;
+            } else {
+                i += 1;
+            }
         } else if (std.mem.startsWith(u8, arg, "--lean-proofs=")) {
             try claim(&seen_lean_proofs);
-            opts.lean_proofs_path = arg["--lean-proofs=".len..];
-            if (opts.lean_proofs_path.?.len == 0) return error.MissingArgument;
+            opts.lean_proofs_requested = true;
+            const value = arg["--lean-proofs=".len..];
+            if (value.len == 0) return error.MissingArgument;
+            if (parseLeanProofMode(value)) |mode| {
+                opts.lean_proofs_mode = mode;
+            } else {
+                opts.lean_proofs_mode = .userland;
+                opts.lean_proofs_path = value;
+            }
             i += 1;
         } else if (std.mem.eql(u8, arg, "--measure-canonical-z3")) {
             try claim(&seen_measure_canonical_z3);
@@ -405,6 +445,10 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
     return opts;
 }
 
+fn looksLikeOraSourcePath(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".ora");
+}
+
 test "parse verify mode and toggles" {
     const args = [_][]const u8{
         "--verify=full",
@@ -429,12 +473,48 @@ test "parse verify mode and toggles" {
 test "parse lean proofs path" {
     const args = [_][]const u8{ "--lean-proofs", "proofs.json", "input.ora" };
     const parsed = try parseArgs(args[0..]);
+    try std.testing.expect(parsed.lean_proofs_requested);
+    try std.testing.expectEqual(LeanProofMode.userland, parsed.lean_proofs_mode);
     try std.testing.expectEqualStrings("proofs.json", parsed.lean_proofs_path.?);
     try std.testing.expectEqualStrings("input.ora", parsed.input_file.?);
 
     const args_eq = [_][]const u8{ "--lean-proofs=proofs.json", "input.ora" };
     const parsed_eq = try parseArgs(args_eq[0..]);
+    try std.testing.expect(parsed_eq.lean_proofs_requested);
+    try std.testing.expectEqual(LeanProofMode.userland, parsed_eq.lean_proofs_mode);
     try std.testing.expectEqualStrings("proofs.json", parsed_eq.lean_proofs_path.?);
+}
+
+test "parse lean proofs as gate flag before source path" {
+    const args = [_][]const u8{ "--lean-proofs", "input.ora" };
+    const parsed = try parseArgs(args[0..]);
+    try std.testing.expect(parsed.lean_proofs_requested);
+    try std.testing.expectEqual(LeanProofMode.userland, parsed.lean_proofs_mode);
+    try std.testing.expect(parsed.lean_proofs_path == null);
+    try std.testing.expectEqualStrings("input.ora", parsed.input_file.?);
+}
+
+test "parse lean proof modes" {
+    const userland = try parseArgs(&.{ "--lean-proofs=userland", "input.ora" });
+    try std.testing.expect(userland.lean_proofs_requested);
+    try std.testing.expectEqual(LeanProofMode.userland, userland.lean_proofs_mode);
+    try std.testing.expect(userland.lean_proofs_mode.includesUserland());
+    try std.testing.expect(!userland.lean_proofs_mode.includesKernel());
+    try std.testing.expect(userland.lean_proofs_path == null);
+
+    const kernel = try parseArgs(&.{ "--lean-proofs", "kernel", "input.ora" });
+    try std.testing.expect(kernel.lean_proofs_requested);
+    try std.testing.expectEqual(LeanProofMode.kernel, kernel.lean_proofs_mode);
+    try std.testing.expect(!kernel.lean_proofs_mode.includesUserland());
+    try std.testing.expect(kernel.lean_proofs_mode.includesKernel());
+    try std.testing.expect(kernel.lean_proofs_path == null);
+
+    const both = try parseArgs(&.{ "--lean-proofs=both", "input.ora" });
+    try std.testing.expect(both.lean_proofs_requested);
+    try std.testing.expectEqual(LeanProofMode.both, both.lean_proofs_mode);
+    try std.testing.expect(both.lean_proofs_mode.includesUserland());
+    try std.testing.expect(both.lean_proofs_mode.includesKernel());
+    try std.testing.expect(both.lean_proofs_path == null);
 }
 
 test "parse canonical Z3 measurement flag" {
@@ -444,10 +524,7 @@ test "parse canonical Z3 measurement flag" {
     try std.testing.expectEqualStrings("input.ora", parsed.input_file.?);
 }
 
-test "parse lean proofs rejects missing and duplicate paths" {
-    const missing = [_][]const u8{"--lean-proofs"};
-    try std.testing.expectError(error.MissingArgument, parseArgs(missing[0..]));
-
+test "parse lean proofs rejects empty and duplicate paths" {
     const empty = [_][]const u8{"--lean-proofs="};
     try std.testing.expectError(error.MissingArgument, parseArgs(empty[0..]));
 

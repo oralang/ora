@@ -46,6 +46,7 @@ docs/
 
 tmp/
 artifacts/
+*.dispatcher.proof.json
 outside-pr/
 zig-out/
 .*/

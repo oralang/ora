@@ -62,7 +62,14 @@ pub fn main(init: std.process.Init) !void {
                     return err;
                 };
                 if (emit_options.optimize) |policy| sinora.switch_routing.dispatch_policy = policy;
-                try emitReleaseBytecode(allocator, io, emit_options.path, emit_options.source_map_path, emit_options.metrics_path);
+                try emitReleaseBytecode(
+                    allocator,
+                    io,
+                    emit_options.path,
+                    emit_options.source_map_path,
+                    emit_options.metrics_path,
+                    emit_options.dispatcher_report_path,
+                );
             },
             .emit_release_generic => {
                 const emit_options = parseEmitReleaseOptions(args[2..]) catch |err| {
@@ -70,7 +77,14 @@ pub fn main(init: std.process.Init) !void {
                     return err;
                 };
                 if (emit_options.optimize) |policy| sinora.switch_routing.dispatch_policy = policy;
-                try emitGenericReleaseBytecode(allocator, io, emit_options.path, emit_options.source_map_path, emit_options.metrics_path);
+                try emitGenericReleaseBytecode(
+                    allocator,
+                    io,
+                    emit_options.path,
+                    emit_options.source_map_path,
+                    emit_options.metrics_path,
+                    emit_options.dispatcher_report_path,
+                );
             },
             .trace_release => {
                 if (args.len != 3) {
@@ -238,8 +252,16 @@ fn emitReleaseBytecode(
     path: []const u8,
     source_map_path: ?[]const u8,
     metrics_path: ?[]const u8,
+    dispatcher_report_path: ?[]const u8,
 ) !void {
-    try emitReleaseBackendBytecode(allocator, io, path, source_map_path, metrics_path);
+    try emitReleaseBackendBytecode(
+        allocator,
+        io,
+        path,
+        source_map_path,
+        metrics_path,
+        dispatcher_report_path,
+    );
 }
 
 fn traceGenericRelease(
@@ -273,8 +295,16 @@ fn emitGenericReleaseBytecode(
     path: []const u8,
     source_map_path: ?[]const u8,
     metrics_path: ?[]const u8,
+    dispatcher_report_path: ?[]const u8,
 ) !void {
-    try emitReleaseBackendBytecode(allocator, io, path, source_map_path, metrics_path);
+    try emitReleaseBackendBytecode(
+        allocator,
+        io,
+        path,
+        source_map_path,
+        metrics_path,
+        dispatcher_report_path,
+    );
 }
 
 fn emitReleaseBackendBytecode(
@@ -283,6 +313,7 @@ fn emitReleaseBackendBytecode(
     path: []const u8,
     source_map_path: ?[]const u8,
     metrics_path: ?[]const u8,
+    dispatcher_report_path: ?[]const u8,
 ) !void {
     var bag = sinora.DiagnosticBag.init(allocator);
     defer bag.deinit();
@@ -290,13 +321,18 @@ fn emitReleaseBackendBytecode(
     var program = try loadValidatedProgram(allocator, io, path, &bag);
     defer program.deinit();
 
-    if (source_map_path) |map_path| {
+    if (source_map_path != null or dispatcher_report_path != null) {
         var result = sinora.release_generic_backend.emitReleaseWithSourceMap(allocator, program) catch |err| {
             try writeDiagnostics(io, &bag);
             return err;
         };
         defer result.deinit();
-        try writeSourceMap(io, map_path, result.source_map, result.runtime_start_pc);
+        if (source_map_path) |map_path| {
+            try writeSourceMap(io, map_path, result.source_map, result.runtime_start_pc);
+        }
+        if (dispatcher_report_path) |report_path| {
+            try writeDispatcherProofReport(io, report_path, result);
+        }
         if (metrics_path) |out_path| {
             const release_metrics = try sinora.release_generic_backend.collectReleaseMetrics(
                 allocator,
@@ -336,6 +372,7 @@ const EmitReleaseOptions = struct {
     path: []const u8,
     source_map_path: ?[]const u8 = null,
     metrics_path: ?[]const u8 = null,
+    dispatcher_report_path: ?[]const u8 = null,
     optimize: ?sinora.switch_routing.DispatchPolicy = null,
 };
 
@@ -356,6 +393,13 @@ fn parseEmitReleaseOptions(args: []const []const u8) !EmitReleaseOptions {
             if (index >= args.len) return error.InvalidArguments;
             if (result.metrics_path != null) return error.InvalidArguments;
             result.metrics_path = args[index];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--dispatcher-proof-report")) {
+            index += 1;
+            if (index >= args.len) return error.InvalidArguments;
+            if (result.dispatcher_report_path != null) return error.InvalidArguments;
+            result.dispatcher_report_path = args[index];
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--optimize=")) {
@@ -391,6 +435,71 @@ fn writeSourceMap(
         .sub_path = path,
         .data = output.written(),
     });
+}
+
+fn writeDispatcherProofReport(
+    io: std.Io,
+    path: []const u8,
+    result: sinora.release_code_to_asm.EmitResult,
+) !void {
+    for (result.dispatcher_facts) |fact| {
+        if (!fact.templates_valid) return error.DispatcherBytecodeValidationFailed;
+    }
+
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(result.bytes, &digest, .{});
+    const digest_hex = std.fmt.bytesToHex(digest, .lower);
+
+    var output = std.Io.Writer.Allocating.init(std.heap.page_allocator);
+    defer output.deinit();
+    const writer = &output.writer;
+    try writer.writeAll("{\n  \"schema_version\": 1,\n  \"bytecode_sha256\": \"");
+    try writer.writeAll(&digest_hex);
+    try writer.print("\",\n  \"runtime_start_pc\": {d},\n  \"switches\": [", .{
+        result.runtime_start_pc,
+    });
+    for (result.dispatcher_facts, 0..) |fact, fact_index| {
+        if (fact_index != 0) try writer.writeByte(',');
+        try writer.writeAll("\n    {\"function\":");
+        try writeJsonString(writer, fact.function_name);
+        try writer.writeAll(",\"block\":");
+        try writeJsonString(writer, fact.block_name);
+        try writer.writeAll(",\"strategy\":");
+        try writeJsonString(writer, fact.strategy);
+        try writer.writeAll(",\"default_label\":");
+        try writeJsonString(writer, fact.default_target);
+        try writer.print(",\"default_pc\":{d},\"templates_valid\":true,\"cases\":[", .{
+            fact.default_pc,
+        });
+        for (fact.cases, 0..) |case, case_index| {
+            if (case_index != 0) try writer.writeByte(',');
+            try writer.print("{{\"selector\":{d},\"target\":", .{case.selector});
+            try writeJsonString(writer, case.target);
+            try writer.print(",\"route_index\":{d},\"guard_pc\":{d},\"target_pc\":{d}}}", .{
+                case.route_index,
+                case.guard_pc,
+                case.target_pc,
+            });
+        }
+        try writer.writeAll("]}");
+    }
+    try writer.writeAll("\n  ]\n}\n");
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = output.written() });
+}
+
+fn writeJsonString(writer: anytype, value: []const u8) !void {
+    try writer.writeByte('"');
+    for (value) |byte| {
+        switch (byte) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            else => try writer.writeByte(byte),
+        }
+    }
+    try writer.writeByte('"');
 }
 
 fn writeReleaseMetrics(

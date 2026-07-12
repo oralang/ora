@@ -19,6 +19,7 @@ pub const dense_max_table_slots: usize = 256;
 // only a small model-error margin remains. Lean-pinned in
 // Ora/Spec/DispatcherFacts.lean.
 pub const min_selector_check_saving_x1000: usize = 1000;
+pub const exact_selector_check_x1000: usize = 1000;
 
 /// Dispatch-overhead costs in check-equivalents. One "check" is the exact
 /// case guard as release codegen emits it (selector reload + PUSH4 + EQ +
@@ -53,6 +54,10 @@ pub const DispatchPolicy = enum {
             .size => 50,
         };
     }
+
+    pub fn jsonName(self: DispatchPolicy) []const u8 {
+        return @tagName(self);
+    }
 };
 
 /// Active policy for this compilation. Sinora is a batch binary: main.zig
@@ -70,6 +75,13 @@ pub fn parsePolicyName(name: []const u8) ?DispatchPolicy {
 }
 
 pub const jump_table_entry_bytes: usize = 2;
+pub const linear_case_code_bytes: usize = 13;
+pub const dense_bit_window_preamble_code_bytes: usize = 30;
+pub const dense_multiplicative_preamble_code_bytes: usize = 36;
+pub const dense_used_slot_code_bytes: usize = 18;
+pub const sparse_preamble_code_bytes: usize = 30;
+pub const sparse_used_bucket_code_bytes: usize = 5;
+pub const sparse_case_code_bytes: usize = 17;
 
 fn planScoreX1000(runtime_avg_checks_x1000: usize, code_bytes: usize) usize {
     return runtime_avg_checks_x1000 + dispatch_policy.lambdaX1000PerByte() * code_bytes;
@@ -80,23 +92,28 @@ fn planScoreX1000(runtime_avg_checks_x1000: usize, code_bytes: usize) usize {
 // committed bytecode-size baseline.
 fn linearCodeBytes(cases: usize) usize {
     // One exact check (selector reload + PUSH4 + EQ + PUSH2 + JUMPI) per case.
-    return 13 * cases;
+    return linear_case_code_bytes * cases;
 }
 
 fn densePlanCodeBytes(plan: DensePlan) usize {
     const preamble: usize = switch (plan.kind) {
-        .bit_window => 30,
-        .multiplicative => 36, // + PUSH4 constant + MUL
+        .bit_window => dense_bit_window_preamble_code_bytes,
+        .multiplicative => dense_multiplicative_preamble_code_bytes,
     };
     // Table entries plus one landing block (JUMPDEST + exact check +
     // default jump) per used slot.
-    return preamble + jump_table_entry_bytes * plan.table_slots + 18 * plan.used_slots;
+    return preamble +
+        jump_table_entry_bytes * plan.table_slots +
+        dense_used_slot_code_bytes * plan.used_slots;
 }
 
 fn sparsePlanCodeBytes(plan: SparsePlan) usize {
     // Dispatch preamble, table entries, per-bucket block overhead, and the
     // in-bucket exact chains (one check per case plus the default jump).
-    return 30 + jump_table_entry_bytes * plan.bucket_count + 5 * plan.used_buckets + 17 * plan.cases;
+    return sparse_preamble_code_bytes +
+        jump_table_entry_bytes * plan.bucket_count +
+        sparse_used_bucket_code_bytes * plan.used_buckets +
+        sparse_case_code_bytes * plan.cases;
 }
 
 pub const StrategyKind = enum {
@@ -139,6 +156,97 @@ pub const Plan = union(enum) {
     dense: DensePlan,
 };
 
+pub const PlanTrace = struct {
+    chosen: Plan,
+    accepted_dense: ?DensePlan = null,
+    accepted_sparse: ?SparsePlan = null,
+};
+
+/// One proof-relevant candidate from the planner's bounded search.
+pub const ScoredPlan = struct {
+    plan: Plan,
+    score_x1000: usize,
+};
+
+pub const MultiplicativeCollisionWitness = struct {
+    constant: u32,
+    first_case: usize,
+    second_case: usize,
+};
+
+pub const MultiplicativeSearchTrace = struct {
+    table_slots: usize,
+    selected_candidate_index: ?u32,
+    rejected: []MultiplicativeCollisionWitness,
+};
+
+/// Complete per-switch planner evidence consumed by the Lean userland gate.
+/// The runtime planner remains allocation-free; this trace is built only when
+/// formal dispatcher facts are requested.
+pub const DetailedPlanTrace = struct {
+    policy: DispatchPolicy,
+    preconditions_met: bool,
+    linear_score_x1000: usize,
+    dense_candidates: []ScoredPlan,
+    multiplicative_searches: []MultiplicativeSearchTrace,
+    best_dense: ?ScoredPlan,
+    sparse_candidates: []ScoredPlan,
+    best_sparse: ?ScoredPlan,
+    chosen: Plan,
+
+    pub fn deinit(self: *DetailedPlanTrace, allocator: std.mem.Allocator) void {
+        for (self.multiplicative_searches) |search| allocator.free(search.rejected);
+        allocator.free(self.multiplicative_searches);
+        allocator.free(self.dense_candidates);
+        allocator.free(self.sparse_candidates);
+        self.* = undefined;
+    }
+};
+
+fn traceMultiplicativeSearch(
+    allocator: std.mem.Allocator,
+    cases: []const ir.SwitchCase,
+    table_slots: usize,
+) !MultiplicativeSearchTrace {
+    const bits: u8 = @intCast(std.math.log2_int(usize, table_slots));
+    var rejected: std.ArrayList(MultiplicativeCollisionWitness) = .empty;
+    defer rejected.deinit(allocator);
+
+    var candidate_index: u32 = 0;
+    while (candidate_index < multiplicative_search_budget) : (candidate_index += 1) {
+        const constant = multiplicativeCandidate(candidate_index);
+        var occupied = [_]?usize{null} ** dense_max_table_slots;
+        var collision: ?MultiplicativeCollisionWitness = null;
+        for (cases, 0..) |case, case_index| {
+            const selector = parseU32Selector(case.value).?;
+            const slot = multiplicativeIndex(selector, constant, bits);
+            if (occupied[slot]) |first_case| {
+                collision = .{
+                    .constant = constant,
+                    .first_case = first_case,
+                    .second_case = case_index,
+                };
+                break;
+            }
+            occupied[slot] = case_index;
+        }
+        if (collision) |witness| {
+            try rejected.append(allocator, witness);
+            continue;
+        }
+        return .{
+            .table_slots = table_slots,
+            .selected_candidate_index = candidate_index,
+            .rejected = try rejected.toOwnedSlice(allocator),
+        };
+    }
+    return .{
+        .table_slots = table_slots,
+        .selected_candidate_index = null,
+        .rejected = try rejected.toOwnedSlice(allocator),
+    };
+}
+
 pub const Stats = struct {
     switches: usize = 0,
     cases: usize = 0,
@@ -176,7 +284,10 @@ pub const Stats = struct {
             const n = switch_term.cases.len;
             self.linear_worst_checks = @max(self.linear_worst_checks, n);
             self.linear_known_selector_checks += n * (n + 1) / 2;
-            self.linear_known_selector_avg_checks_x1000 = divRound(self.linear_known_selector_checks * 1000, self.cases);
+            self.linear_known_selector_avg_checks_x1000 = divRound(
+                self.linear_known_selector_checks * exact_selector_check_x1000,
+                self.cases,
+            );
         }
 
         switch (choosePlan(switch_term)) {
@@ -263,9 +374,9 @@ const DensePlanResult = struct {
     best: ?DensePlan = null,
 };
 
-pub fn choosePlan(switch_term: ir.SwitchTerminator) Plan {
+pub fn choosePlanTrace(switch_term: ir.SwitchTerminator) PlanTrace {
     if (switch_term.default_target.len == 0 or switch_term.cases.len < 4 or !allCasesAreU32Selectors(switch_term.cases)) {
-        return .linear;
+        return .{ .chosen = .linear };
     }
 
     const linear_score = planScoreX1000(
@@ -280,17 +391,152 @@ pub fn choosePlan(switch_term: ir.SwitchTerminator) Plan {
     const dense_result = bestDensePlan(switch_term.cases);
     if (dense_result.best) |dense| {
         const score = planScoreX1000(dense.dense_total_avg_checks_x1000, densePlanCodeBytes(dense));
-        if (savesSelectorChecks(linear_score, score)) return .{ .dense = dense };
+        if (savesSelectorChecks(linear_score, score)) {
+            return .{
+                .chosen = .{ .dense = dense },
+                .accepted_dense = dense,
+            };
+        }
     }
 
     if (bestSparsePlan(switch_term.cases)) |sparse| {
         const score = planScoreX1000(sparse.sparse_total_avg_checks_x1000, sparsePlanCodeBytes(sparse));
         if (savesSelectorChecks(linear_score, score)) {
-            return .{ .sparse = sparse };
+            return .{
+                .chosen = .{ .sparse = sparse },
+                .accepted_sparse = sparse,
+            };
         }
     }
 
-    return .linear;
+    return .{ .chosen = .linear };
+}
+
+pub fn choosePlan(switch_term: ir.SwitchTerminator) Plan {
+    return choosePlanTrace(switch_term).chosen;
+}
+
+/// Enumerate the complete finite search used by `choosePlan`, including the
+/// multiplicative perfect-hash search. The formal emitter projects candidate
+/// counts, best scores, and collision witnesses from this trace. Lean
+/// regenerates the candidate lists from selectors and policy before checking
+/// those projections and the chosen plan independently.
+pub fn detailedPlanTrace(
+    allocator: std.mem.Allocator,
+    switch_term: ir.SwitchTerminator,
+) !DetailedPlanTrace {
+    const preconditions_met = switch_term.default_target.len != 0 and
+        switch_term.cases.len >= 4 and allCasesAreU32Selectors(switch_term.cases);
+    const linear_score = if (switch_term.cases.len == 0)
+        0
+    else
+        planScoreX1000(
+            linearAverageChecksX1000(switch_term.cases.len),
+            linearCodeBytes(switch_term.cases.len),
+        );
+
+    var dense_candidates: std.ArrayList(ScoredPlan) = .empty;
+    defer dense_candidates.deinit(allocator);
+    var multiplicative_searches: std.ArrayList(MultiplicativeSearchTrace) = .empty;
+    defer {
+        for (multiplicative_searches.items) |search| allocator.free(search.rejected);
+        multiplicative_searches.deinit(allocator);
+    }
+    var sparse_candidates: std.ArrayList(ScoredPlan) = .empty;
+    defer sparse_candidates.deinit(allocator);
+
+    if (preconditions_met) {
+        for (sparse_bucket_bits) |bits| {
+            for (sparse_bucket_shifts) |shift| {
+                if (denseBitWindowPlan(switch_term.cases, bits, shift)) |candidate| {
+                    try dense_candidates.append(allocator, .{
+                        .plan = .{ .dense = candidate },
+                        .score_x1000 = planScoreX1000(
+                            candidate.dense_total_avg_checks_x1000,
+                            densePlanCodeBytes(candidate),
+                        ),
+                    });
+                }
+            }
+        }
+
+        var table_slots = try std.math.ceilPowerOfTwo(usize, @max(switch_term.cases.len, 2));
+        while (table_slots <= dense_max_table_slots) : (table_slots *= 2) {
+            const search = try traceMultiplicativeSearch(allocator, switch_term.cases, table_slots);
+            multiplicative_searches.append(allocator, search) catch |err| {
+                allocator.free(search.rejected);
+                return err;
+            };
+            if (search.selected_candidate_index) |candidate_index| {
+                const bits: u8 = @intCast(std.math.log2_int(usize, table_slots));
+                const candidate = makeDensePlan(.{
+                    .kind = .multiplicative,
+                    .cases = switch_term.cases.len,
+                    .table_slots = table_slots,
+                    .index_bits = bits,
+                    .index_shift = 32 - bits,
+                    .mul_constant = multiplicativeCandidate(candidate_index),
+                });
+                try dense_candidates.append(allocator, .{
+                    .plan = .{ .dense = candidate },
+                    .score_x1000 = planScoreX1000(
+                        candidate.dense_total_avg_checks_x1000,
+                        densePlanCodeBytes(candidate),
+                    ),
+                });
+            }
+        }
+
+        for (sparse_bucket_bits) |bits| {
+            for (sparse_bucket_shifts) |shift| {
+                const candidate = analyzeSparsePlan(switch_term.cases, bits, shift);
+                if (candidate.max_bucket_size >= switch_term.cases.len) continue;
+                try sparse_candidates.append(allocator, .{
+                    .plan = .{ .sparse = candidate },
+                    .score_x1000 = planScoreX1000(
+                        candidate.sparse_total_avg_checks_x1000,
+                        sparsePlanCodeBytes(candidate),
+                    ),
+                });
+            }
+        }
+    }
+
+    const dense_owned = try dense_candidates.toOwnedSlice(allocator);
+    errdefer allocator.free(dense_owned);
+    const multiplicative_owned = try multiplicative_searches.toOwnedSlice(allocator);
+    errdefer {
+        for (multiplicative_owned) |search| allocator.free(search.rejected);
+        allocator.free(multiplicative_owned);
+    }
+    const sparse_owned = try sparse_candidates.toOwnedSlice(allocator);
+    errdefer allocator.free(sparse_owned);
+
+    const dense_result: DensePlanResult = if (preconditions_met) bestDensePlan(switch_term.cases) else .{};
+    const best_dense: ?ScoredPlan = if (dense_result.best) |dense| .{
+        .plan = .{ .dense = dense },
+        .score_x1000 = planScoreX1000(dense.dense_total_avg_checks_x1000, densePlanCodeBytes(dense)),
+    } else null;
+    const sparse = if (preconditions_met) bestSparsePlan(switch_term.cases) else null;
+    const best_sparse: ?ScoredPlan = if (sparse) |candidate| .{
+        .plan = .{ .sparse = candidate },
+        .score_x1000 = planScoreX1000(
+            candidate.sparse_total_avg_checks_x1000,
+            sparsePlanCodeBytes(candidate),
+        ),
+    } else null;
+
+    return .{
+        .policy = dispatch_policy,
+        .preconditions_met = preconditions_met,
+        .linear_score_x1000 = linear_score,
+        .dense_candidates = dense_owned,
+        .multiplicative_searches = multiplicative_owned,
+        .best_dense = best_dense,
+        .sparse_candidates = sparse_owned,
+        .best_sparse = best_sparse,
+        .chosen = choosePlan(switch_term),
+    };
 }
 
 pub fn bucketIndex(selector: u32, bucket_bits: u8, bucket_shift: u8) usize {
@@ -430,7 +676,10 @@ fn analyzeSparsePlan(cases: []const ir.SwitchCase, bucket_bits: u8, bucket_shift
     }
 
     const n = cases.len;
-    const sparse_exact_avg = divRound(successful_scan_checks * 1000, n);
+    const sparse_exact_avg = divRound(
+        successful_scan_checks * exact_selector_check_x1000,
+        n,
+    );
     return .{
         .cases = n,
         .bucket_bits = bucket_bits,
@@ -498,7 +747,7 @@ fn makeDensePlan(args: struct {
         .dense_dispatch_avg_checks_x1000 = dispatch_overhead_x1000,
         // O(1) table route plus exactly one exact-selector guard in the
         // landing block; independent of case count.
-        .dense_total_avg_checks_x1000 = dispatch_overhead_x1000 + 1000,
+        .dense_total_avg_checks_x1000 = dispatch_overhead_x1000 + exact_selector_check_x1000,
         .linear_worst_checks = args.cases,
         .linear_known_selector_avg_checks_x1000 = linearAverageChecksX1000(args.cases),
     };
@@ -554,7 +803,10 @@ fn divRound(numerator: usize, denominator: usize) usize {
 
 fn linearAverageChecksX1000(cases: usize) usize {
     std.debug.assert(cases != 0);
-    return divRound((cases * (cases + 1) / 2) * 1000, cases);
+    return divRound(
+        (cases * (cases + 1) / 2) * exact_selector_check_x1000,
+        cases,
+    );
 }
 
 // Switching hysteresis: a table shape must beat the linear score by at

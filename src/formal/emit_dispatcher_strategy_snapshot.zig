@@ -69,6 +69,25 @@ pub fn main(init: std.process.Init) !void {
     try emitNatList(out, "compilerSparseBucketShifts", switch_routing.sparse_bucket_shifts);
     try out.print("def compilerDenseMaxTableSlots : Nat := {d}\n", .{switch_routing.dense_max_table_slots});
     try out.print("def compilerMinSelectorCheckSavingX1000 : Nat := {d}\n\n", .{switch_routing.min_selector_check_saving_x1000});
+    try out.print("def compilerExactSelectorCheckX1000 : Nat := {d}\n", .{switch_routing.exact_selector_check_x1000});
+    try out.print("def compilerTableDispatchOverheadChecksX1000 : Nat := {d}\n", .{switch_routing.table_dispatch_overhead_checks_x1000});
+    try out.print("def compilerDenseMultiplicativeExtraChecksX1000 : Nat := {d}\n", .{switch_routing.dense_multiplicative_extra_checks_x1000});
+    try out.print("def compilerMultiplicativeSearchBudget : Nat := {d}\n", .{switch_routing.multiplicative_search_budget});
+    try out.writeAll("def compilerDispatchPolicyLambdasX1000 : List (String × Nat) :=\n  [");
+    inline for (@typeInfo(switch_routing.DispatchPolicy).@"enum".fields, 0..) |field, i| {
+        if (i != 0) try out.writeAll(", ");
+        const policy = @field(switch_routing.DispatchPolicy, field.name);
+        try out.print("(\"{s}\", {d})", .{ field.name, policy.lambdaX1000PerByte() });
+    }
+    try out.writeAll("]\n");
+    try out.print("def compilerJumpTableEntryBytes : Nat := {d}\n", .{switch_routing.jump_table_entry_bytes});
+    try out.print("def compilerLinearCaseCodeBytes : Nat := {d}\n", .{switch_routing.linear_case_code_bytes});
+    try out.print("def compilerDenseBitWindowPreambleCodeBytes : Nat := {d}\n", .{switch_routing.dense_bit_window_preamble_code_bytes});
+    try out.print("def compilerDenseMultiplicativePreambleCodeBytes : Nat := {d}\n", .{switch_routing.dense_multiplicative_preamble_code_bytes});
+    try out.print("def compilerDenseUsedSlotCodeBytes : Nat := {d}\n", .{switch_routing.dense_used_slot_code_bytes});
+    try out.print("def compilerSparsePreambleCodeBytes : Nat := {d}\n", .{switch_routing.sparse_preamble_code_bytes});
+    try out.print("def compilerSparseUsedBucketCodeBytes : Nat := {d}\n", .{switch_routing.sparse_used_bucket_code_bytes});
+    try out.print("def compilerSparseCaseCodeBytes : Nat := {d}\n\n", .{switch_routing.sparse_case_code_bytes});
     try out.writeAll("end Ora.Generated\n");
 
     try out.flush();

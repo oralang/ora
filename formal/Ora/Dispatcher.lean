@@ -1,17 +1,25 @@
 /-
-Ora dispatcher: soundness and necessity of the runtime selector-equality check
+Ora dispatcher abstract model.
 
-A checked indexed dispatcher guards each jump with `record.selector == sel`. The guard
-is sound (`run_sound`), known selectors resolve (`run_complete`), and it is necessary:
-an unknown selector aliasing a known one is mis-dispatched without it
-(`alias_misdispatched_without_check`). The collision classes are `KnownCollision`
-(compile-time; forbidden by dense dispatch — `noKnownCollision_iff_injOn`) and
-`UnknownAlias` (runtime; handled by the guard).
+This file proves generic facts about selector dispatch models. A checked indexed
+dispatcher guards each jump with `record.selector == sel`; that guard is sound
+(`run_sound`), known selectors resolve when stored at their own index
+(`run_complete`), and an unknown selector aliasing a known one is mis-dispatched
+without the guard (`alias_misdispatched_without_check`). Linear and sparse
+models are likewise proved sound because they scan by exact selector equality.
 
-Scope: the existence claim — that compression (`|Idx| < |Sel|`) forces an alias — is a
-pigeonhole result, not proved here. Lean can express it (`Fin`/finite types); this
-project's mathlib-free layer just doesn't yet include the finite-cardinality machinery,
-so it's deferred to a later layer rather than stubbed. Axiom-light (`propext`).
+This file does NOT, by itself, prove that every Ora source-level dispatcher
+lowering emits a table satisfying those premises. Representative compiled Ora
+fixtures are checked separately in `Ora/DispatcherTableSync.lean`, where rows
+extracted after `oraBuildSIRDispatcher` are decoded and proved to have
+known-selector coverage, dense route injectivity, sparse exact-scan behavior,
+and exact-selector guard presence.
+
+Scope: the existence claim — that compression (`|Idx| < |Sel|`) forces an alias
+— is a pigeonhole result, not proved here. Lean can express it (`Fin`/finite
+types); this project's mathlib-free layer just doesn't yet include the
+finite-cardinality machinery, so it is deferred rather than stubbed.
+Axiom-light (`propext`).
 -/
 
 namespace Ora.Dispatcher
@@ -193,5 +201,220 @@ theorem SparseDispatcher.runNoCheck_unsound :
     ∃ (d : SparseDispatcher Bool Unit Nat) (s sf : Bool),
       s ≠ sf ∧ d.runNoCheck s = some 7 ∧ d.run s = none :=
   ⟨⟨fun _ => (), fun _ => [(true, 7)]⟩, false, true, by decide, rfl, rfl⟩
+
+/-! ## Dispatcher builder correctness
+
+These theorems separate construction correctness from planning optimality.  A
+planner may choose linear, sparse, or dense routing; the builder theorem says
+that, once a plan is chosen, the emitted abstract dispatcher satisfies the
+corresponding model premise.  Dense routing is intentionally guarded by an
+admissibility premise: a caller must prove the dense index is injective over the
+known selector set.  Without that premise, the statement is false.
+-/
+
+/-- Function selector: 4-byte keccak256 hash, modeled as Nat. -/
+abbrev Selector := Nat
+
+/-- The strategy shape selected by the planner. Dense and sparse plans carry only the
+    routing index here; cost fields belong to the planner/optimality layer, not the
+    builder-correctness theorem. -/
+inductive BuilderPlan (Idx : Type) where
+  | linear
+  | dense (index : Selector → Idx)
+  | sparse (index : Selector → Idx)
+
+/-- Linear builder postcondition: any returned label came from the exact selector row. -/
+def LinearWF (cases : List (Selector × Label)) : Prop :=
+  ∀ {s : Selector} {l : Label}, linearRun cases s = some l → (s, l) ∈ cases
+
+/-- The selector set represented by a concrete case list. -/
+def casesKnown (cases : List (Selector × Label)) (selector : Selector) : Prop :=
+  ∃ label, (selector, label) ∈ cases
+
+/-- Dense table construction: the first case routed to an index owns that slot. -/
+def buildDenseTable [DecidableEq Idx]
+    (cases : List (Selector × Label)) (index : Selector → Idx) :
+    Idx → Option (Selector × Label) :=
+  fun idx => cases.find? (fun r => decide (index r.1 = idx))
+
+/-- Dense builder: one abstract slot per route index.  The concrete compiler table is
+    checked against this model from emitted rows; this construction theorem proves the
+    model itself is well-formed when the chosen dense index is admissible. -/
+def buildDenseDispatcher [DecidableEq Idx]
+    (cases : List (Selector × Label)) (index : Selector → Idx) :
+    Dispatcher Selector Idx Label :=
+  { index := index,
+    table := buildDenseTable cases index }
+
+/-- The label assignment induced by the dense builder. It is only used under `casesKnown`,
+    where `buildDenseDispatcher_wf` proves the table contains the selector's slot. -/
+def denseBuiltLabelOf [DecidableEq Idx] [Inhabited Label]
+    (cases : List (Selector × Label)) (index : Selector → Idx) : Selector → Label :=
+  fun selector =>
+    match buildDenseTable cases index (index selector) with
+    | some (_, label) => label
+    | none => default
+
+/-- Sparse builder: route to a bucket, then scan that bucket by exact selector equality. -/
+def buildSparseDispatcher [DecidableEq Idx]
+    (cases : List (Selector × Label)) (index : Selector → Idx) :
+    SparseDispatcher Selector Idx Label :=
+  { index := index,
+    buckets := fun idx => cases.filter (fun r => index r.1 = idx) }
+
+/-- Sparse builder postcondition: a result must be present in the selected bucket. -/
+def SparseWF [DecidableEq Idx]
+    (cases : List (Selector × Label)) (index : Selector → Idx) : Prop :=
+  let d := buildSparseDispatcher cases index
+  ∀ {s : Selector} {l : Label}, d.run s = some l → (s, l) ∈ d.buckets (d.index s)
+
+/-- The admissibility condition a planner must establish before handing a plan to the
+    builder. Linear and sparse dispatch scan by exact equality; dense dispatch needs
+    collision freedom over the known selector set. Returns Bool so it can be used
+    with `List.find?`. -/
+def PlanAdmissible [DecidableEq Idx] (cases : List (Selector × Label)) : BuilderPlan Idx → Bool
+  | .linear => true
+  | .dense index =>
+      cases.all (fun (s₁, _) =>
+        cases.all (fun (s₂, _) =>
+          decide (index s₁ = index s₂ → s₁ = s₂)))
+  | .sparse _ => true
+
+/-- Extract the injectivity condition from a dense `PlanAdmissible` result.
+    Since `PlanAdmissible` checks all pairs in `cases`, we can convert it to
+    a `∀` statement over known selectors. -/
+theorem PlanAdmissible_dense_inj [DecidableEq Idx]
+    (cases : List (Selector × Label)) (index : Selector → Idx)
+    (h : PlanAdmissible cases (.dense index) = true) :
+    ∀ s₁ s₂,
+      casesKnown cases s₁ → casesKnown cases s₂ →
+        index s₁ = index s₂ → s₁ = s₂ := by
+  simp [PlanAdmissible] at h
+  intro s₁ s₂ h1 h2 heq
+  rcases h1 with ⟨l₁, hmem₁⟩
+  rcases h2 with ⟨l₂, hmem₂⟩
+  have hcheck := h s₁ l₁ hmem₁ s₂ l₂ hmem₂
+  rcases hcheck with (hne | heq')
+  · exact (hne heq).elim
+  · exact heq'
+
+/-- Preconditions for dispatcher planning: at least 4 cases and a default target. -/
+def preconditionsMet (cases : List (Selector × Label)) (hasDefault : Bool) : Bool :=
+  cases.length ≥ 4 && hasDefault
+
+/-- The planner's decision procedure. Checks preconditions first; then searches
+    dense candidates (first admissible one wins), then sparse candidates,
+    falling back to linear. This mirrors the Zig `choosePlan` in
+    `sinora/src/switch_routing.zig`. -/
+def choosePlan [DecidableEq Idx] (cases : List (Selector × Label)) (hasDefault : Bool)
+    (denseCandidates : List (Selector → Idx)) (sparseCandidates : List (Selector → Idx)) :
+    BuilderPlan Idx :=
+  if preconditionsMet cases hasDefault then
+    match denseCandidates.find? (fun index => PlanAdmissible cases (.dense index)) with
+    | some index => .dense index
+    | none =>
+        match sparseCandidates.find? (fun index => PlanAdmissible cases (.sparse index)) with
+        | some index => .sparse index
+        | none => .linear
+  else
+    .linear
+
+/-- The planner returns an admissible plan.  `find?` only selects elements
+    that satisfy the predicate, so the returned plan is admissible by construction. -/
+theorem choosePlan_admissible [DecidableEq Idx]
+    (cases : List (Selector × Label)) (hasDefault : Bool)
+    (denseCandidates : List (Selector → Idx)) (sparseCandidates : List (Selector → Idx)) :
+    PlanAdmissible cases (choosePlan cases hasDefault denseCandidates sparseCandidates) = true := by
+  unfold choosePlan
+  split
+  · cases hd : denseCandidates.find? (fun index => PlanAdmissible cases (.dense index)) with
+    | none =>
+        cases hs : sparseCandidates.find? (fun index => PlanAdmissible cases (.sparse index)) with
+        | none => rfl
+        | some _ => simp [hd, hs, PlanAdmissible]
+    | some di =>
+        have hadm := List.find?_some hd
+        simp [hd, hadm]
+  · rfl
+
+/-- Strategy-specific builder postcondition. -/
+def StrategyWF [DecidableEq Idx] [Inhabited Label]
+    (cases : List (Selector × Label)) :
+    BuilderPlan Idx → Prop
+  | .linear => LinearWF cases
+  | .dense index =>
+      DenseWF (buildDenseDispatcher cases index) (casesKnown cases) (denseBuiltLabelOf cases index)
+  | .sparse index => SparseWF cases index
+
+/-- Dense builder correctness: injecting known selectors into route slots is exactly the
+    `DenseWF` premise consumed by the dispatcher theorems above. -/
+theorem buildDenseDispatcher_wf [DecidableEq Idx] [Inhabited Label]
+    (cases : List (Selector × Label)) (index : Selector → Idx)
+    (hinj : ∀ s₁ s₂, casesKnown cases s₁ → casesKnown cases s₂ →
+      index s₁ = index s₂ → s₁ = s₂) :
+    DenseWF
+      (buildDenseDispatcher cases index) (casesKnown cases) (denseBuiltLabelOf cases index) := by
+  constructor
+  · intro s hs
+    rcases hs with ⟨label, hmem⟩
+    unfold buildDenseDispatcher buildDenseTable denseBuiltLabelOf
+    rcases hfind : cases.find? (fun r => decide (index r.1 = index s)) with _ | rec
+    · have hnone := (List.find?_eq_none).mp hfind (s, label) hmem
+      have hpred :
+          (fun r : Selector × Label => decide (index r.1 = index s)) (s, label) = true := by
+        simp
+      exact False.elim (hnone hpred)
+    · have hmem_rec := List.mem_of_find?_eq_some hfind
+      have hpred_rec := List.find?_some hfind
+      have hindex : index rec.1 = index s := of_decide_eq_true hpred_rec
+      have hknown_rec : casesKnown cases rec.1 := by
+        cases rec with
+        | mk selector rec_label =>
+            exact ⟨rec_label, hmem_rec⟩
+      have hsel : rec.1 = s := hinj rec.1 s hknown_rec ⟨label, hmem⟩ hindex
+      cases rec with
+      | mk selector rec_label =>
+          have hsel' : selector = s := by simpa using hsel
+          simp [buildDenseTable, hfind, hsel']
+  · exact hinj
+
+/-- Builder correctness for every strategy shape. This is intentionally not an
+    optimality theorem: it proves that an admissible chosen plan is built into the
+    right dispatcher model, not that the planner chose the cheapest admissible plan. -/
+theorem builder_correct [DecidableEq Idx] [Inhabited Label]
+    (cases : List (Selector × Label)) (plan : BuilderPlan Idx)
+    (hadm : PlanAdmissible cases plan = true) :
+    StrategyWF cases plan := by
+  cases plan with
+  | linear =>
+      intro s l h
+      exact linearRun_sound cases h
+  | dense index =>
+      have hinj := PlanAdmissible_dense_inj cases index hadm
+      exact buildDenseDispatcher_wf cases index hinj
+  | sparse index =>
+      intro s l h
+      exact SparseDispatcher.run_sound (buildSparseDispatcher cases index) h
+
+/-- Planner + builder correctness for all selector sets.  Given any list of
+    known selectors, any default flag, and any lists of dense/sparse candidate
+    index functions, the planner's chosen plan is admissible and the builder
+    produces a dispatcher that satisfies the strategy postcondition.
+
+    This is the universal correctness theorem: for every possible input selector
+    set the planner could receive, the planner never returns an inadmissible plan,
+    and the builder never corrupts that admissibility into an incorrect dispatcher.
+
+    This does NOT prove that the Zig planner's candidate generation is exhaustive
+    or that the emitted SIR table matches the model — those are translation-level
+    checks handled by the per-contract sync gate.  What this removes is the
+    per-contract assumption that `DenseWF` (or `LinearWF` / `SparseWF`) holds
+    as a hypothesis rather than a derived fact. -/
+theorem planner_builder_correct [DecidableEq Idx] [Inhabited Label]
+    (cases : List (Selector × Label)) (hasDefault : Bool)
+    (denseCandidates : List (Selector → Idx)) (sparseCandidates : List (Selector → Idx)) :
+    StrategyWF cases (choosePlan cases hasDefault denseCandidates sparseCandidates) :=
+  builder_correct cases (choosePlan cases hasDefault denseCandidates sparseCandidates)
+    (choosePlan_admissible cases hasDefault denseCandidates sparseCandidates)
 
 end Ora.Dispatcher

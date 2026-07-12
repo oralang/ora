@@ -8214,6 +8214,180 @@ bool oraBuildSIRDispatcher(MlirContext ctx, MlirModule module)
     }
 }
 
+bool oraTestStripFirstSIRSelectorSwitchDefaultBlockName(MlirModule module)
+{
+    try
+    {
+        ModuleOp moduleOp = unwrap(module);
+        bool stripped = false;
+
+        moduleOp.walk([&](sir::SwitchOp sw) {
+            if (stripped || !sw->hasAttr("sir.selector_switch"))
+                return;
+
+            Block *defaultDest = sw.getDefaultDest();
+            if (!defaultDest || defaultDest->empty())
+                return;
+
+            defaultDest->back().removeAttr("sir.block_name");
+            stripped = true;
+        });
+
+        return stripped;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+MlirStringRef oraExtractSIRDispatcherSwitchFacts(MlirContext ctx, MlirModule module)
+{
+    try
+    {
+        (void)ctx;
+        ModuleOp moduleOp = unwrap(module);
+
+        std::string out;
+        llvm::raw_string_ostream os(out);
+        os << "{\"schema_version\":1,\"switches\":[";
+        bool firstSwitch = true;
+        bool malformed = false;
+        size_t ordinal = 0;
+
+        auto blockName = [](Block *block) -> StringRef {
+            if (!block || block->empty())
+                return StringRef();
+            auto attr = block->back().getAttrOfType<StringAttr>("sir.block_name");
+            if (!attr)
+                return StringRef();
+            return attr.getValue();
+        };
+
+        moduleOp.walk([&](sir::SwitchOp sw) {
+            if (!sw->hasAttr("sir.selector_switch"))
+                return;
+
+            StringRef switchBlock = blockName(sw->getBlock());
+            StringRef defaultLabel = blockName(sw.getDefaultDest());
+            const bool selectorSwitchGuarded = !defaultLabel.empty();
+            if (switchBlock.empty())
+            {
+                malformed = true;
+                return;
+            }
+
+            if (!firstSwitch)
+                os << ",";
+            firstSwitch = false;
+            os << "{\"ordinal\":" << ordinal++ << ",\"block\":\"";
+            os.write_escaped(switchBlock);
+            os << "\",\"default_label\":\"";
+            os.write_escaped(defaultLabel);
+            os << "\",\"cases\":[";
+
+            auto caseVals = sw.getCaseValues();
+            auto caseDests = sw.getCaseDests();
+            for (size_t i = 0; i < caseVals.size(); ++i)
+            {
+                if (i != 0)
+                    os << ",";
+                auto intAttr = dyn_cast<IntegerAttr>(caseVals[i]);
+                StringRef label = blockName(caseDests[i]);
+                if (!intAttr || label.empty())
+                {
+                    malformed = true;
+                    return;
+                }
+
+                os << "{\"selector\":" << intAttr.getValue().getZExtValue()
+                   << ",\"label\":\"";
+                os.write_escaped(label);
+                os << "\",\"guarded\":" << (selectorSwitchGuarded ? "true" : "false") << "}";
+            }
+
+            os << "]}";
+        });
+
+        os << "]}";
+        os.flush();
+
+        if (malformed || out.empty())
+            return oraStringRefCreate(nullptr, 0);
+        char *buf = static_cast<char *>(std::malloc(out.size()));
+        if (!buf)
+            return oraStringRefCreate(nullptr, 0);
+        std::memcpy(buf, out.data(), out.size());
+        return oraStringRefCreate(buf, out.size());
+    }
+    catch (...)
+    {
+        return oraStringRefCreate(nullptr, 0);
+    }
+}
+
+MlirStringRef oraExtractSIRDispatcherIntentFacts(MlirContext ctx, MlirModule module)
+{
+    try
+    {
+        (void)ctx;
+        ModuleOp moduleOp = unwrap(module);
+
+        std::string out;
+        llvm::raw_string_ostream os(out);
+        os << "{\"schema_version\":1,\"intents\":[";
+        bool first = true;
+        bool malformed = false;
+
+        for (func::FuncOp func : moduleOp.getOps<func::FuncOp>())
+        {
+            auto visibility = func->getAttrOfType<StringAttr>("ora.visibility");
+            if (!visibility || visibility.getValue() != "pub")
+                continue;
+            auto selector = func->getAttrOfType<StringAttr>("ora.selector");
+            if (!selector)
+            {
+                malformed = true;
+                break;
+            }
+            StringRef selectorText = selector.getValue();
+            if (!selectorText.consume_front("0x"))
+            {
+                malformed = true;
+                break;
+            }
+            uint32_t parsed = 0;
+            if (selectorText.getAsInteger(16, parsed))
+            {
+                malformed = true;
+                break;
+            }
+            if (!first)
+                os << ",";
+            first = false;
+            os << "{\"selector\":" << parsed << ",\"function\":\"";
+            os.write_escaped(func.getName());
+            os << "\",\"label\":\"";
+            os.write_escaped((func.getName() + "_").str());
+            os << "\"}";
+        }
+
+        os << "]}";
+        os.flush();
+        if (malformed || out.empty())
+            return oraStringRefCreate(nullptr, 0);
+        char *buf = static_cast<char *>(std::malloc(out.size()));
+        if (!buf)
+            return oraStringRefCreate(nullptr, 0);
+        std::memcpy(buf, out.data(), out.size());
+        return oraStringRefCreate(buf, out.size());
+    }
+    catch (...)
+    {
+        return oraStringRefCreate(nullptr, 0);
+    }
+}
+
 MlirStringRef oraEmitSIRText(MlirContext ctx, MlirModule module)
 {
     try

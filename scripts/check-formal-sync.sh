@@ -60,6 +60,15 @@ run_sinora_emitter() {
     > "$snapshot"
 }
 
+run_build_emitter() {
+  local label="$1"
+  local step="$2"
+  local snapshot="$3"
+
+  echo "  - $label -> $snapshot"
+  zig build "$step" --summary none -- "$snapshot"
+}
+
 lint_snapshot() {
   local snapshot="$1"
 
@@ -90,6 +99,7 @@ SNAPSHOTS=(
   "formal/Ora/Generated/DeclEnvSnapshot.lean"
   "formal/Ora/Generated/CompilerTypeRelations.lean"
   "formal/Ora/Generated/DispatcherStrategySnapshot.lean"
+  "formal/Ora/Generated/DispatcherTableSnapshot.lean"
   "formal/Ora/Generated/SinoraBackendSnapshot.lean"
   "formal/Ora/Generated/StorageDisjointnessSnapshot.lean"
   "formal/Ora/Generated/ObligationTotalitySnapshot.lean"
@@ -100,9 +110,10 @@ run_emitter "compiler universe" "src/formal/emit_compiler_snapshot.zig" "${SNAPS
 run_emitter "declaration environment" "src/formal/emit_declenv_snapshot.zig" "${SNAPSHOTS[1]}"
 run_emitter "type relations" "src/formal/emit_type_relations_snapshot.zig" "${SNAPSHOTS[2]}"
 run_sinora_emitter "dispatcher strategies" "src/formal/emit_dispatcher_strategy_snapshot.zig" "${SNAPSHOTS[3]}"
-run_sinora_emitter "sinora backend" "src/formal/emit_sinora_backend_snapshot.zig" "${SNAPSHOTS[4]}"
-run_emitter "storage disjointness" "src/formal/emit_storage_disjointness_snapshot.zig" "${SNAPSHOTS[5]}"
-run_emitter "obligation totality" "src/formal/emit_obligation_totality_snapshot.zig" "${SNAPSHOTS[6]}"
+run_build_emitter "dispatcher tables" "emit-dispatcher-table-snapshot" "${SNAPSHOTS[4]}"
+run_sinora_emitter "sinora backend" "src/formal/emit_sinora_backend_snapshot.zig" "${SNAPSHOTS[5]}"
+run_emitter "storage disjointness" "src/formal/emit_storage_disjointness_snapshot.zig" "${SNAPSHOTS[6]}"
+run_emitter "obligation totality" "src/formal/emit_obligation_totality_snapshot.zig" "${SNAPSHOTS[7]}"
 
 echo "==> [2/4] data-only lint"
 for snapshot in "${SNAPSHOTS[@]}"; do

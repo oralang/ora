@@ -14,6 +14,7 @@ const type_builtin = @import("ora_types").builtin;
 
 const test_helpers = @import("compiler.test.helpers.zig");
 const compilePackage = test_helpers.compilePackage;
+const compileText = test_helpers.compileText;
 const renderOraMlirForSource = test_helpers.renderOraMlirForSource;
 
 const ORA_BINARY_REL = "zig-out/bin/ora";
@@ -591,8 +592,8 @@ fn runProcess(allocator: std.mem.Allocator, argv: []const []const u8) !std.proce
 
     return std.process.run(allocator, io_thread.io(), .{
         .argv = argv,
-        .stdout_limit = std.Io.Limit.limited(1024 * 1024),
-        .stderr_limit = std.Io.Limit.limited(1024 * 1024),
+        .stdout_limit = std.Io.Limit.limited(8 * 1024 * 1024),
+        .stderr_limit = std.Io.Limit.limited(8 * 1024 * 1024),
     });
 }
 
@@ -668,7 +669,10 @@ fn expectExited(result: std.process.RunResult, expected: u8) !void {
             }
             try testing.expectEqual(expected, code);
         },
-        else => return error.TestUnexpectedResult,
+        else => {
+            std.debug.print("process term: {any}\nprocess stdout:\n{s}\nprocess stderr:\n{s}\n", .{ result.term, result.stdout, result.stderr });
+            return error.TestUnexpectedResult;
+        },
     }
 }
 
@@ -3024,6 +3028,507 @@ test "B6 div rem Lean proof does not discharge missing divisor guard" {
             std.mem.containsAtLeast(u8, result.stderr, 1, "failed to prove contract invariant"));
     }
     try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "blocked/b6_div_rem_guard_boundary.hex", .{}));
+}
+
+test "lean proofs run dispatcher table proof before bytecode emission" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const source =
+        \\contract DispatcherLeanGate {
+        \\    pub fn den0_() -> u256 {
+        \\        return 1;
+        \\    }
+        \\
+        \\    pub fn den1_() -> u256 {
+        \\        return 2;
+        \\    }
+        \\
+        \\    pub fn den2_() -> u256 { return 3; }
+        \\    pub fn den3_() -> u256 { return 4; }
+        \\    pub fn den4_() -> u256 { return 5; }
+        \\    pub fn den5_() -> u256 { return 6; }
+        \\    pub fn den6_() -> u256 { return 7; }
+        \\    pub fn den7_() -> u256 { return 8; }
+        \\    pub fn den8_() -> u256 { return 9; }
+        \\    pub fn den9_() -> u256 { return 10; }
+        \\    pub fn den10_() -> u256 { return 11; }
+        \\    pub fn den11_() -> u256 { return 12; }
+        \\}
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dispatcher_lean_gate.ora", .data = source });
+    const source_path = try pathFromTmpAlloc(allocator, tmp, "dispatcher_lean_gate.ora");
+    defer allocator.free(source_path);
+    const out_dir = try pathFromTmpAlloc(allocator, tmp, "out");
+    defer allocator.free(out_dir);
+
+    const result = try runProcessWithLeanPath(allocator, &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=bytecode",
+        "--out-dir",
+        out_dir,
+        "--lean-proofs",
+        source_path,
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try expectExited(result, 0);
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean dispatcher userland proof accepted") or
+        std.mem.containsAtLeast(u8, result.stderr, 1, "Lean dispatcher userland proof accepted"));
+    try tmp.dir.access(std.testing.io, "out/dispatcher_lean_gate.hex", .{});
+    const dispatcher_cert_path = try pathFromTmpAlloc(allocator, tmp, "out/dispatcher_lean_gate.lean.dispatcher.proof.json");
+    defer allocator.free(dispatcher_cert_path);
+    const dispatcher_cert = try readFileAllocForTest(allocator, dispatcher_cert_path);
+    defer allocator.free(dispatcher_cert);
+    try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "\"schema_version\": 1"));
+    try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "\"proof_surface\": \"dispatcher_userland\""));
+    try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "\"dispatcher_manifest_schema\": \"dispatcher_v1\""));
+    try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "\"switch_count\": 1"));
+    try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "\"case_count\": 12"));
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        dispatcher_cert,
+        1,
+        "current_dispatcher_table_rows_have_named_default",
+    ));
+    try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "current_dispatcher_table_rows_covered"));
+    try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "current_dispatcher_table_rows_match_model"));
+    try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "current_dispatcher_plan_shapes_valid"));
+    try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "current_dispatcher_planner_searches_valid"));
+    try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "current_dispatcher_planner_core_matches"));
+    try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "current_dispatcher_planner_matches"));
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        dispatcher_cert,
+        1,
+        "current_dispatcher_manifest_base_rows_match",
+    ));
+    try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "current_dispatcher_manifest_rows_match"));
+    try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "current_dispatcher_builder_correct"));
+    try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "current_dispatcher_network_matches"));
+    try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "current_dispatcher_unknown_selectors_revert"));
+    try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "\"bytecode_sha256\""));
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        dispatcher_cert,
+        1,
+        "\"dispatcher_bytecode_report_sha256\"",
+    ));
+    try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "\"bytecode_templates_valid\": true"));
+    try testing.expect(!std.mem.containsAtLeast(u8, dispatcher_cert, 1, "current_dispatcher_table_rows_guarded"));
+}
+
+test "lean proofs verify a two-switch dispatcher network through bytecode" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var source = std.Io.Writer.Allocating.init(allocator);
+    defer source.deinit();
+    try source.writer.writeAll(
+        \\contract DispatcherNetworkGate {
+        \\    storage var counter: u256;
+        \\
+        \\    pub fn bump() {
+        \\        counter = counter + 1;
+        \\    }
+        \\
+        \\    pub fn reset() {
+        \\        counter = 0;
+        \\    }
+        \\
+    );
+    for (0..14) |index| {
+        try source.writer.print(
+            \\    pub fn v{d}() -> u256 {{
+            \\        return {d};
+            \\    }}
+            \\
+        , .{ index, 200 + index });
+    }
+    try source.writer.writeAll("}\n");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "dispatcher_network_gate.ora",
+        .data = source.written(),
+    });
+    const source_path = try pathFromTmpAlloc(
+        allocator,
+        tmp,
+        "dispatcher_network_gate.ora",
+    );
+    defer allocator.free(source_path);
+    const out_dir = try pathFromTmpAlloc(allocator, tmp, "out");
+    defer allocator.free(out_dir);
+
+    const result = try runProcessWithLeanPath(allocator, &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=bytecode",
+        "--out-dir",
+        out_dir,
+        "--lean-proofs",
+        source_path,
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try expectExited(result, 0);
+
+    const certificate_path = try pathFromTmpAlloc(
+        allocator,
+        tmp,
+        "out/dispatcher_network_gate.lean.dispatcher.proof.json",
+    );
+    defer allocator.free(certificate_path);
+    const certificate = try readFileAllocForTest(allocator, certificate_path);
+    defer allocator.free(certificate);
+    try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"switch_count\": 2"));
+    try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "current_dispatcher_network_matches"));
+    try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "current_dispatcher_unknown_selectors_revert"));
+    try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"bytecode_templates_valid\": true"));
+}
+
+test "lean proofs discharge multiplicative dispatcher planner trace end to end" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const out_dir = try pathFromTmpAlloc(allocator, tmp, "out");
+    defer allocator.free(out_dir);
+
+    const result = try runProcessWithLeanPath(allocator, &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=bytecode",
+        "--out-dir",
+        out_dir,
+        "--lean-proofs",
+        "tests/conformance/dispatcher_dense_routing.ora",
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try expectExited(result, 0);
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean dispatcher userland proof accepted") or
+        std.mem.containsAtLeast(u8, result.stderr, 1, "Lean dispatcher userland proof accepted"));
+
+    const certificate_path = try pathFromTmpAlloc(
+        allocator,
+        tmp,
+        "out/dispatcher_dense_routing.lean.dispatcher.proof.json",
+    );
+    defer allocator.free(certificate_path);
+    const certificate = try readFileAllocForTest(allocator, certificate_path);
+    defer allocator.free(certificate);
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        certificate,
+        1,
+        "current_dispatcher_planner_searches_valid",
+    ));
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        certificate,
+        1,
+        "current_dispatcher_planner_core_matches",
+    ));
+}
+
+test "dispatcher switch fact extraction reports missing named default" {
+    const source =
+        \\contract DispatcherMissingNamedDefault {
+        \\    pub fn a0() -> u256 { return 0; }
+        \\    pub fn a1() -> u256 { return 1; }
+        \\    pub fn a2() -> u256 { return 2; }
+        \\    pub fn a3() -> u256 { return 3; }
+        \\}
+    ;
+
+    var compilation = try compileText(source);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraTestStripFirstSIRSelectorSwitchDefaultBlockName(hir_result.module.raw_module));
+
+    const facts_ref = mlir.oraExtractSIRDispatcherSwitchFacts(hir_result.context, hir_result.module.raw_module);
+    defer if (facts_ref.data != null) mlir.oraStringRefFree(facts_ref);
+    try testing.expect(facts_ref.data != null);
+
+    const facts = facts_ref.data[0..facts_ref.length];
+    try testing.expect(std.mem.containsAtLeast(u8, facts, 1, "\"guarded\":false"));
+}
+
+test "dispatcher table Lean checker rejects false generated row" {
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const module_suffix = try moduleSuffixFromTmp(allocator, tmp);
+    defer allocator.free(module_suffix);
+    const fixture_dir = try std.fmt.allocPrint(allocator, "formal/Ora/DispatcherFailureFixture/{s}", .{module_suffix});
+    defer allocator.free(fixture_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, fixture_dir);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, fixture_dir) catch {};
+    defer std.Io.Dir.cwd().deleteDir(std.testing.io, "formal/Ora/DispatcherFailureFixture") catch {};
+
+    const bad_path = try std.fmt.allocPrint(allocator, "{s}/Bad.lean", .{fixture_dir});
+    defer allocator.free(bad_path);
+    var source = std.Io.Writer.Allocating.init(allocator);
+    defer source.deinit();
+    try source.writer.writeAll(
+        \\import Ora.DispatcherTableSync
+        \\
+        \\namespace Ora.DispatcherFailureFixture
+        \\
+        \\def currentDispatcherTableRows :
+        \\    List Ora.DispatcherTableSync.RawRow :=
+        \\  [
+        \\  ("bad_dense", ("dense", "bit_window", 1, 0, 0, 0),
+        \\    ("balanced", false, 0, [], 0, none, 0, none),
+        \\    [(1, "entry", 0, false)])
+        \\  ]
+        \\
+        \\def currentDispatcherRowsHaveNamedDefault : Bool :=
+        \\  Ora.DispatcherTableSync.Gate.rowsHaveNamedDefault currentDispatcherTableRows
+        \\
+        \\theorem current_dispatcher_table_rows_have_named_default :
+        \\    currentDispatcherRowsHaveNamedDefault = true := by decide
+        \\
+        \\end Ora.DispatcherFailureFixture
+        \\
+    );
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = bad_path, .data = source.written() });
+
+    const result = try runLeanFileForTest(allocator, bad_path);
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try expectExited(result, 1);
+    try testing.expect(std.mem.containsAtLeast(u8, result.stderr, 1, "decide") or
+        std.mem.containsAtLeast(u8, result.stdout, 1, "decide"));
+    try testing.expect(!std.mem.containsAtLeast(u8, result.stderr, 1, "unknown identifier"));
+    try testing.expect(!std.mem.containsAtLeast(u8, result.stderr, 1, "Unknown constant"));
+
+    const bad_coverage_path = try std.fmt.allocPrint(allocator, "{s}/BadCoverage.lean", .{fixture_dir});
+    defer allocator.free(bad_coverage_path);
+    var bad_coverage = std.Io.Writer.Allocating.init(allocator);
+    defer bad_coverage.deinit();
+    try bad_coverage.writer.writeAll(
+        \\import Ora.DispatcherTableSync
+        \\
+        \\namespace Ora.DispatcherFailureFixture.BadCoverage
+        \\
+        \\def currentDispatcherTableRows :
+        \\    List Ora.DispatcherTableSync.RawRow :=
+        \\  [
+        \\  ("bad_coverage", ("dense", "bit_window", 2, 1, 0, 0),
+        \\    ("balanced", true, 0, [], 0, none, 0, none),
+        \\    [(1, "first", 0, true), (2, "second", 0, true)])
+        \\  ]
+        \\
+        \\def currentDispatcherRowsCovered : Bool :=
+        \\  Ora.DispatcherTableSync.Gate.rowsCovered currentDispatcherTableRows
+        \\
+        \\theorem current_dispatcher_table_rows_covered :
+        \\    currentDispatcherRowsCovered = true := by decide
+        \\
+        \\end Ora.DispatcherFailureFixture.BadCoverage
+        \\
+    );
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = bad_coverage_path, .data = bad_coverage.written() });
+
+    const bad_coverage_result = try runLeanFileForTest(allocator, bad_coverage_path);
+    defer allocator.free(bad_coverage_result.stdout);
+    defer allocator.free(bad_coverage_result.stderr);
+    try expectExited(bad_coverage_result, 1);
+    try testing.expect(std.mem.containsAtLeast(u8, bad_coverage_result.stderr, 1, "decide") or
+        std.mem.containsAtLeast(u8, bad_coverage_result.stdout, 1, "decide"));
+    try testing.expect(!std.mem.containsAtLeast(u8, bad_coverage_result.stderr, 1, "unknown identifier"));
+    try testing.expect(!std.mem.containsAtLeast(u8, bad_coverage_result.stderr, 1, "Unknown constant"));
+}
+
+test "dispatcher userland Lean checker rejects invalid plan facts" {
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const module_suffix = try moduleSuffixFromTmp(allocator, tmp);
+    defer allocator.free(module_suffix);
+    const fixture_dir = try std.fmt.allocPrint(allocator, "formal/Ora/DispatcherUserlandFailureFixture/{s}", .{module_suffix});
+    defer allocator.free(fixture_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, fixture_dir);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, fixture_dir) catch {};
+    defer std.Io.Dir.cwd().deleteDir(std.testing.io, "formal/Ora/DispatcherUserlandFailureFixture") catch {};
+
+    const bad_kind_path = try std.fmt.allocPrint(allocator, "{s}/BadKind.lean", .{fixture_dir});
+    defer allocator.free(bad_kind_path);
+    var bad_kind = std.Io.Writer.Allocating.init(allocator);
+    defer bad_kind.deinit();
+    try bad_kind.writer.writeAll(
+        \\import Ora.DispatcherTableSync
+        \\
+        \\namespace Ora.DispatcherUserlandFailureFixture.BadKind
+        \\
+        \\def currentDispatcherTableRows :
+        \\    List Ora.DispatcherTableSync.RawRow :=
+        \\  [
+        \\  ("bad_kind", ("dense", "xor", 32, 5, 0, 0),
+        \\    ("balanced", false, 0, [], 0, none, 0, none),
+        \\    [(1, "entry", 1, true)])
+        \\  ]
+        \\
+        \\def currentDispatcherPlansAdmissible : Bool :=
+        \\  Ora.DispatcherTableSync.Gate.plansAdmissible currentDispatcherTableRows
+        \\
+        \\theorem current_dispatcher_plans_admissible :
+        \\    currentDispatcherPlansAdmissible = true := by decide
+        \\
+        \\end Ora.DispatcherUserlandFailureFixture.BadKind
+        \\
+    );
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = bad_kind_path, .data = bad_kind.written() });
+
+    const bad_kind_result = try runLeanFileForTest(allocator, bad_kind_path);
+    defer allocator.free(bad_kind_result.stdout);
+    defer allocator.free(bad_kind_result.stderr);
+    try expectExited(bad_kind_result, 1);
+    try testing.expect(std.mem.containsAtLeast(u8, bad_kind_result.stderr, 1, "decide") or
+        std.mem.containsAtLeast(u8, bad_kind_result.stdout, 1, "decide"));
+
+    const bad_shape_path = try std.fmt.allocPrint(allocator, "{s}/BadShape.lean", .{fixture_dir});
+    defer allocator.free(bad_shape_path);
+    var bad_shape = std.Io.Writer.Allocating.init(allocator);
+    defer bad_shape.deinit();
+    try bad_shape.writer.writeAll(
+        \\import Ora.DispatcherTableSync
+        \\
+        \\namespace Ora.DispatcherUserlandFailureFixture.BadShape
+        \\
+        \\def currentDispatcherTableRows :
+        \\    List Ora.DispatcherTableSync.RawRow :=
+        \\  [
+        \\  ("bad_shape", ("dense", "bit_window", 64, 5, 0, 0),
+        \\    ("balanced", false, 0, [], 0, none, 0, none),
+        \\    [(1, "entry", 1, true), (2, "other", 2, true)])
+        \\  ]
+        \\
+        \\def currentDispatcherPlanShapesValid : Bool :=
+        \\  Ora.DispatcherTableSync.Gate.planShapesValid currentDispatcherTableRows
+        \\
+        \\theorem current_dispatcher_plan_shapes_valid :
+        \\    currentDispatcherPlanShapesValid = true := by decide
+        \\
+        \\end Ora.DispatcherUserlandFailureFixture.BadShape
+        \\
+    );
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = bad_shape_path, .data = bad_shape.written() });
+
+    const bad_shape_result = try runLeanFileForTest(allocator, bad_shape_path);
+    defer allocator.free(bad_shape_result.stdout);
+    defer allocator.free(bad_shape_result.stderr);
+    try expectExited(bad_shape_result, 1);
+    try testing.expect(std.mem.containsAtLeast(u8, bad_shape_result.stderr, 1, "decide") or
+        std.mem.containsAtLeast(u8, bad_shape_result.stdout, 1, "decide"));
+
+    const bad_planner_path = try std.fmt.allocPrint(allocator, "{s}/BadPlanner.lean", .{fixture_dir});
+    defer allocator.free(bad_planner_path);
+    var bad_planner = std.Io.Writer.Allocating.init(allocator);
+    defer bad_planner.deinit();
+    try bad_planner.writer.writeAll(
+        \\import Ora.DispatcherTableSync
+        \\
+        \\namespace Ora.DispatcherUserlandFailureFixture.BadPlanner
+        \\
+        \\def currentDispatcherTableRows :
+        \\    List Ora.DispatcherTableSync.RawRow :=
+        \\  [
+        \\  ("bad_planner", ("dense", "bit_window", 4, 2, 0, 0),
+        \\    ("balanced", false, 2760, [], 0, none, 0, none),
+        \\    [(0, "a", 0, false), (1, "b", 1, false),
+        \\     (2, "c", 2, false), (3, "d", 3, false)])
+        \\  ]
+        \\
+        \\def currentDispatcherPlannerMatches : Bool :=
+        \\  Ora.DispatcherTableSync.Gate.plannerMatches currentDispatcherTableRows
+        \\
+        \\theorem current_dispatcher_planner_matches :
+        \\    currentDispatcherPlannerMatches = true := by decide
+        \\
+        \\end Ora.DispatcherUserlandFailureFixture.BadPlanner
+        \\
+    );
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = bad_planner_path, .data = bad_planner.written() });
+
+    const bad_planner_result = try runLeanFileForTest(allocator, bad_planner_path);
+    defer allocator.free(bad_planner_result.stdout);
+    defer allocator.free(bad_planner_result.stderr);
+    try expectExited(bad_planner_result, 1);
+    try testing.expect(std.mem.containsAtLeast(u8, bad_planner_result.stderr, 1, "decide") or
+        std.mem.containsAtLeast(u8, bad_planner_result.stdout, 1, "decide"));
+
+    const bad_search_path = try std.fmt.allocPrint(allocator, "{s}/BadSearch.lean", .{fixture_dir});
+    defer allocator.free(bad_search_path);
+    var bad_search = std.Io.Writer.Allocating.init(allocator);
+    defer bad_search.deinit();
+    try bad_search.writer.writeAll(
+        \\import Ora.DispatcherTableSync
+        \\
+        \\namespace Ora.DispatcherUserlandFailureFixture.BadSearch
+        \\
+        \\def currentDispatcherTableRows :
+        \\    List Ora.DispatcherTableSync.RawRow :=
+        \\  [
+        \\  ("bad_search", ("linear", "", 4, 0, 0, 0),
+        \\    ("balanced", true, 2760,
+        \\      [(4, some 1, [(2462723855, 0, 1)]),
+        \\       (8, some 1, [(2462723855, 0, 2)]),
+        \\       (16, some 0, []), (32, some 0, []), (64, some 0, []),
+        \\       (128, some 0, []), (256, some 0, [])],
+        \\      44, some (("dense", "bit_window", 4, 2, 8, 0), 4350),
+        \\      56, some (("sparse", "", 4, 2, 8, 0), 4430)),
+        \\    [(1447852734, "lin0_", 0, true),
+        \\     (832491607, "lin1_", 1, true),
+        \\     (3309386683, "lin2_", 2, true),
+        \\     (2561671559, "lin3_", 3, true)])
+        \\  ]
+        \\
+        \\def currentDispatcherPlannerSearchesValid : Bool :=
+        \\  Ora.DispatcherTableSync.Gate.plannerSearchesValid currentDispatcherTableRows
+        \\
+        \\theorem current_dispatcher_planner_searches_valid :
+        \\    currentDispatcherPlannerSearchesValid = true := by decide
+        \\
+        \\end Ora.DispatcherUserlandFailureFixture.BadSearch
+        \\
+    );
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = bad_search_path,
+        .data = bad_search.written(),
+    });
+
+    const bad_search_result = try runLeanFileForTest(allocator, bad_search_path);
+    defer allocator.free(bad_search_result.stdout);
+    defer allocator.free(bad_search_result.stderr);
+    try expectExited(bad_search_result, 1);
+    try testing.expect(std.mem.containsAtLeast(u8, bad_search_result.stderr, 1, "decide") or
+        std.mem.containsAtLeast(u8, bad_search_result.stdout, 1, "decide"));
+    try testing.expect(!std.mem.containsAtLeast(u8, bad_search_result.stderr, 1, "unknown identifier"));
+    try testing.expect(!std.mem.containsAtLeast(u8, bad_search_result.stderr, 1, "Unknown constant"));
 }
 
 test "B4 unknown diagnostic rejects Lean recipe for unsupported semantic type" {

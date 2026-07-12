@@ -27,6 +27,7 @@ const formal_obligation_from_mlir = @import("formal/obligation_from_mlir.zig");
 const formal_obligation_from_z3 = @import("formal/obligation_from_z3.zig");
 const formal_obligation_to_lean = @import("formal/obligation_to_lean.zig");
 const formal_canonical_z3_measure = @import("formal/canonical_z3_measure.zig");
+const formal_dispatcher_table_gate = @import("formal/dispatcher_table_gate.zig");
 const Metrics = lib.metrics.Metrics;
 const allocation_stats = lib.lsp.allocation_stats;
 const ManagedArrayList = std.array_list.Managed;
@@ -57,6 +58,8 @@ const MlirOptions = struct {
     z3_proofs: bool = false,
     minimize_cores: bool = false,
     keep_proved_checks: bool = false,
+    lean_proofs_requested: bool = false,
+    lean_proofs_mode: cli_args.LeanProofMode = .none,
     lean_proofs_path: ?[]const u8 = null,
     measure_canonical_z3: bool = false,
     emit_smt_report: bool = false,
@@ -689,6 +692,8 @@ pub fn main(init: std.process.Init) !void {
     const z3_proofs: bool = parsed.z3_proofs;
     const minimize_cores: bool = parsed.minimize_cores;
     const keep_proved_checks: bool = parsed.keep_proved_checks;
+    const lean_proofs_requested: bool = parsed.lean_proofs_requested;
+    const lean_proofs_mode: cli_args.LeanProofMode = parsed.lean_proofs_mode;
     const lean_proofs_path: ?[]const u8 = parsed.lean_proofs_path;
     const measure_canonical_z3: bool = parsed.measure_canonical_z3;
     const emit_smt_report: bool = parsed.emit_smt_report;
@@ -853,6 +858,8 @@ pub fn main(init: std.process.Init) !void {
         .z3_proofs = z3_proofs,
         .minimize_cores = minimize_cores,
         .keep_proved_checks = keep_proved_checks,
+        .lean_proofs_requested = lean_proofs_requested,
+        .lean_proofs_mode = lean_proofs_mode,
         .lean_proofs_path = lean_proofs_path,
         .measure_canonical_z3 = measure_canonical_z3,
         .emit_smt_report = emit_smt_report,
@@ -1339,7 +1346,7 @@ fn invalidateBuildArtifactOutputs(
     try deleteStemArtifactFilesWithSuffixesIfExists(allocator, bin_dir, stem, &bin_suffixes);
     const sir_suffixes = [_][]const u8{".sir"};
     try deleteStemArtifactFilesWithSuffixesIfExists(allocator, sir_dir, stem, &sir_suffixes);
-    const verify_suffixes = [_][]const u8{ ".smt.report.md", ".smt.report.json", ".proof.json", ".lean.proof.json", ".canonical-z3.measure.json" };
+    const verify_suffixes = [_][]const u8{ ".smt.report.md", ".smt.report.json", ".proof.json", ".lean.proof.json", ".lean.dispatcher.proof.json", ".canonical-z3.measure.json" };
     try deleteStemArtifactFilesWithSuffixesIfExists(allocator, verify_dir, stem, &verify_suffixes);
     const mlir_suffixes = [_][]const u8{ ".ora.mlir", ".sir.mlir" };
     try deleteStemArtifactFilesWithSuffixesIfExists(allocator, mlir_dir, stem, &mlir_suffixes);
@@ -1359,6 +1366,7 @@ fn invalidateDirectEmitOutputs(
         ".debug.json",
         ".proof.json",
         ".lean.proof.json",
+        ".lean.dispatcher.proof.json",
         ".sir",
         ".smt.report.md",
         ".smt.report.json",
@@ -1502,6 +1510,10 @@ fn runBuildArtifacts(
     defer allocator.free(lean_proof_file);
     try moveArtifactFileIfExists(allocator, staging_root, lean_proof_file, verify_dir);
 
+    const lean_dispatcher_proof_file = try std.fmt.allocPrint(allocator, "{s}.lean.dispatcher.proof.json", .{stem});
+    defer allocator.free(lean_dispatcher_proof_file);
+    try moveArtifactFileIfExists(allocator, staging_root, lean_dispatcher_proof_file, verify_dir);
+
     const lean_obligations_file = try std.fmt.allocPrint(allocator, "{s}.lean.obligations.lean", .{stem});
     defer allocator.free(lean_obligations_file);
     try moveArtifactFileIfExists(allocator, staging_root, lean_obligations_file, verify_dir);
@@ -1625,6 +1637,7 @@ fn runDebugArtifacts(
         ".debug.json",
         ".proof.json",
         ".lean.proof.json",
+        ".lean.dispatcher.proof.json",
         ".smt.report.md",
         ".smt.report.json",
         ".sir.dot",
@@ -2503,7 +2516,9 @@ fn printUsage(io: std.Io) !void {
     try stdout.print("  --explain              - Enable unsat-core explain mode for SMT verification\n", .{});
     try stdout.print("  --z3-proofs            - Emit raw Z3 proof objects in SMT reports/debug output (slower)\n", .{});
     try stdout.print("  --keep-proved-checks   - Keep SMT-proved guards/requires/ensures/invariants as runtime checks (falsification harness)\n", .{});
-    try stdout.print("  --lean-proofs <file>   - Check userland Lean proof rows for Z3-unknown obligations; unblocks artifacts only\n", .{});
+    try stdout.print("  --lean-proofs[=mode]   - Run Lean gates; userland is the contract-level mode (default)\n", .{});
+    try stdout.print("                           kernel/both are reserved for compiler-kernel checks; use zig build check-formal-sync today\n", .{});
+    try stdout.print("                           Legacy: --lean-proofs <proofs.json> supplies external proof rows\n", .{});
     try stdout.print("  --measure-canonical-z3 - Emit canonical-vs-live SMT hash measurement JSON\n", .{});
     try stdout.print("  --minimize-cores       - Greedily minimize explain-mode unsat cores; implies --explain\n", .{});
     try stdout.print("  --debug                - Enable compiler debug output\n", .{});
@@ -4914,10 +4929,18 @@ fn runMlirEmitAdvanced(
     const cfg_mode_is_ora = if (mlir_options.emit_cfg_mode) |mode| std.ascii.eqlIgnoreCase(mode, "ora") else false;
     const cfg_mode_is_sir = if (mlir_options.emit_cfg_mode) |mode| std.ascii.eqlIgnoreCase(mode, "sir") else false;
     const cfg_mode_is_sir_diff = if (mlir_options.emit_cfg_mode) |mode| std.ascii.eqlIgnoreCase(mode, "sir-diff") else false;
+    const needs_userland_lean_gate = mlir_options.lean_proofs_mode.includesUserland();
+    if (mlir_options.lean_proofs_mode.includesKernel()) {
+        try stdout.print("error: --lean-proofs=kernel/both is not wired into contract compilation yet; run `zig build check-formal-sync` for compiler-kernel Lean checks.\n", .{});
+        try stdout.flush();
+        return error.VerificationFailed;
+    }
+    const needs_lean_dispatcher_gate = needs_userland_lean_gate;
     const needs_sir_conversion = mlir_options.emit_mlir_sir or
         mlir_options.emit_sir_text or
         mlir_options.emit_bytecode or
-        cfg_mode_is_sir;
+        cfg_mode_is_sir or
+        needs_lean_dispatcher_gate;
     const needs_refinement_cleanup = needs_sir_conversion or cfg_mode_is_sir_diff;
 
     if (mlir_options.validate_mlir) {
@@ -4938,7 +4961,7 @@ fn runMlirEmitAdvanced(
         if (formal_result_for_smt_report) |*result| result.deinit();
     }
 
-    if (mlir_options.lean_proofs_path != null and !mlir_options.verify_z3) {
+    if (mlir_options.lean_proofs_requested and !mlir_options.verify_z3) {
         try stdout.print("error: --lean-proofs requires SMT verification; remove --no-verify.\n", .{});
         try stdout.flush();
         return error.VerificationFailed;
@@ -4961,7 +4984,9 @@ fn runMlirEmitAdvanced(
         verifier.setExplainCores(mlir_options.explain_cores);
         verifier.setMinimizeCores(mlir_options.minimize_cores);
 
-        const needs_lean_proof_gate = mlir_options.lean_proofs_path != null;
+        const needs_external_lean_proof_gate = mlir_options.lean_proofs_path != null;
+        const needs_automatic_lean_proof_gate = needs_userland_lean_gate and mlir_options.lean_proofs_path == null;
+        const needs_lean_proof_gate = needs_external_lean_proof_gate or needs_automatic_lean_proof_gate;
         // Guard erasure now requires first-class formal identity at the SMT
         // verdict site. Collect the manifest once before verification so
         // prepared GuardViolate rows can authorize erasure fail-closed.
@@ -4993,7 +5018,7 @@ fn runMlirEmitAdvanced(
 
         var lean_artifact_gate_allowed = false;
         var lean_artifact_gate_failed = false;
-        if (needs_lean_proof_gate) {
+        if (needs_external_lean_proof_gate) {
             lean_artifact_gate_allowed = applyLeanProofArtifactGate(
                 allocator,
                 file_path,
@@ -5007,6 +5032,19 @@ fn runMlirEmitAdvanced(
                 lean_artifact_gate_failed = true;
                 break :blk false;
             };
+        } else if (needs_automatic_lean_proof_gate) {
+            lean_artifact_gate_allowed = applyAutomaticLeanProofArtifactGate(
+                allocator,
+                file_path,
+                &formal_result_for_smt_report.?,
+                pending_smt_report.?,
+                mlir_options,
+                stdout,
+            ) catch |err| blk: {
+                try stdout.print("Automatic Lean proof gate failed: {s}\n", .{@errorName(err)});
+                lean_artifact_gate_failed = true;
+                break :blk false;
+            };
         }
 
         if (lean_artifact_gate_failed) {
@@ -5017,7 +5055,7 @@ fn runMlirEmitAdvanced(
         }
         if (!verification_result.success and !lean_artifact_gate_allowed) {
             try printVerificationErrors(stdout, verification_result.errors.items);
-            if (needs_unknown_recipe) {
+            if (needs_unknown_recipe and !needs_userland_lean_gate) {
                 if (pending_smt_report) |*report| {
                     maybeEmitLeanUnknownRecipe(
                         allocator,
@@ -5276,12 +5314,33 @@ fn runMlirEmitAdvanced(
         );
     }
 
-    if (mlir_options.emit_sir_text or mlir_options.emit_bytecode) {
+    var dispatcher_intent_json: ?[]u8 = null;
+    defer if (dispatcher_intent_json) |json| allocator.free(json);
+    if (needs_lean_dispatcher_gate) {
+        const intent_ref = c.oraExtractSIRDispatcherIntentFacts(ctx, final_module);
+        defer if (intent_ref.data != null) {
+            const mlir_c = @import("mlir_c_api");
+            mlir_c.freeStringRef(intent_ref);
+        };
+        if (intent_ref.data == null or intent_ref.length == 0) {
+            try stdout.print("Error: dispatcher intent extraction failed\n", .{});
+            return error.VerificationFailed;
+        }
+        dispatcher_intent_json = try allocator.dupe(u8, intent_ref.data[0..intent_ref.length]);
+    }
+
+    var dispatcher_check: ?formal_dispatcher_table_gate.CheckResult = null;
+    defer if (dispatcher_check) |*check| check.deinit();
+
+    if (mlir_options.emit_sir_text or mlir_options.emit_bytecode or needs_lean_dispatcher_gate) {
         if (!c.oraBuildSIRDispatcher(ctx, final_module)) {
             try stdout.print("Error: SIR dispatcher build failed\n", .{});
             try stdout.flush();
             return error.SirDispatcherBuildFailed;
         }
+    }
+
+    if (mlir_options.emit_sir_text or mlir_options.emit_bytecode or needs_lean_dispatcher_gate) {
         if (!c.oraLegalizeSIRText(ctx, final_module)) {
             try stdout.print("Error: SIR text legalizer failed\n", .{});
             try stdout.flush();
@@ -5333,6 +5392,23 @@ fn runMlirEmitAdvanced(
             null;
 
         const sir_text = sir_text_ref.data[0..sir_text_ref.length];
+        if (needs_lean_dispatcher_gate) {
+            dispatcher_check = formal_dispatcher_table_gate.checkCurrentModule(
+                allocator,
+                ctx,
+                final_module,
+                dispatcher_intent_json orelse return error.VerificationFailed,
+                sir_text,
+                file_path,
+                mlir_options.process_environ,
+                stdout,
+                mlir_options.suppress_artifact_logs,
+            ) catch |err| {
+                try stdout.print("Lean dispatcher userland proof failed: {s}\n", .{@errorName(err)});
+                try stdout.flush();
+                return error.VerificationFailed;
+            };
+        }
         const sir_global_slots_ref: c.MlirStringRef = if (mlir_options.debug_info)
             c.oraExtractSIRGlobalSlots(ctx, final_module)
         else
@@ -5376,7 +5452,17 @@ fn runMlirEmitAdvanced(
         }
         if (mlir_options.emit_bytecode) {
             if (mlir_options.emit_sir_text and mlir_options.output_dir == null) try stdout.print("\n", .{});
-            try emitBytecodeFromSirText(allocator, &compilation.db, compilation.root_module_id, &compilation.db.sources, sir_text, file_path, mlir_options.output_dir, mlir_options.output_file, sir_locations, sir_line_map, sir_debug_info, source_scopes, stdout, mlir_options.suppress_artifact_logs, mlir_options.optimize);
+            try emitBytecodeFromSirText(allocator, &compilation.db, compilation.root_module_id, &compilation.db.sources, sir_text, file_path, mlir_options.output_dir, mlir_options.output_file, sir_locations, sir_line_map, sir_debug_info, source_scopes, stdout, mlir_options.suppress_artifact_logs, mlir_options.optimize, if (dispatcher_check) |*check| check else null);
+        } else if (dispatcher_check) |*check| {
+            try writeLeanDispatcherProofCertificate(
+                allocator,
+                file_path,
+                mlir_options.output_dir,
+                check.certificate_json,
+                stdout,
+                mlir_options.suppress_artifact_logs,
+            );
+            try stdout.print("Lean dispatcher userland SIR proof accepted\n", .{});
         }
     }
 
@@ -6074,6 +6160,194 @@ fn plainUnknownPreparedRows(report: z3_verification.SmtReportArtifacts) usize {
     return count;
 }
 
+fn plainUnknownPreparedRowCountForLeanSet(set: formal_obligation.ObligationSet) usize {
+    var count: usize = 0;
+    for (set.queries) |query| {
+        if (isLeanUnknownRecipeTarget(query)) count += 1;
+    }
+    return count;
+}
+
+fn freeVarIdsEqual(lhs: formal_obligation.FreeVarId, rhs: formal_obligation.FreeVarId) bool {
+    return lhs.file_id == rhs.file_id and lhs.pattern_id == rhs.pattern_id;
+}
+
+fn appendUniqueFreeVarId(
+    allocator: std.mem.Allocator,
+    ids: *std.ArrayList(formal_obligation.FreeVarId),
+    id: formal_obligation.FreeVarId,
+) !void {
+    for (ids.items) |existing| {
+        if (freeVarIdsEqual(existing, id)) return;
+    }
+    try ids.append(allocator, id);
+}
+
+fn collectFreeVarsFromTerm(
+    allocator: std.mem.Allocator,
+    set: formal_obligation.ObligationSet,
+    term_id: formal_obligation.TermId,
+    ids: *std.ArrayList(formal_obligation.FreeVarId),
+    fuel: u32,
+) !void {
+    if (fuel == 0) return error.LeanAutoProofTermCycle;
+    if (term_id >= set.terms.len) return error.InvalidTermReference;
+    switch (set.terms[term_id]) {
+        .variable => |variable| switch (variable) {
+            .free => |free| try appendUniqueFreeVarId(allocator, ids, free.id),
+            .bound => {},
+        },
+        .old => |operand| try collectFreeVarsFromTerm(allocator, set, operand, ids, fuel - 1),
+        .unary => |unary| try collectFreeVarsFromTerm(allocator, set, unary.operand, ids, fuel - 1),
+        .binary => |binary| {
+            try collectFreeVarsFromTerm(allocator, set, binary.lhs, ids, fuel - 1);
+            try collectFreeVarsFromTerm(allocator, set, binary.rhs, ids, fuel - 1);
+        },
+        .refinement_predicate => |predicate| {
+            try collectFreeVarsFromTerm(allocator, set, predicate.value, ids, fuel - 1);
+            for (predicate.args) |arg| try collectFreeVarsFromTerm(allocator, set, arg, ids, fuel - 1);
+        },
+        .quantified => |quantified| {
+            if (quantified.condition) |condition| try collectFreeVarsFromTerm(allocator, set, condition, ids, fuel - 1);
+            try collectFreeVarsFromTerm(allocator, set, quantified.body, ids, fuel - 1);
+        },
+        .bool_lit,
+        .int_lit,
+        .result,
+        .place_read,
+        => {},
+    }
+}
+
+fn collectFreeVarsFromFormula(
+    allocator: std.mem.Allocator,
+    set: formal_obligation.ObligationSet,
+    formula: formal_obligation.FormulaRef,
+    ids: *std.ArrayList(formal_obligation.FreeVarId),
+) !void {
+    switch (formula) {
+        .term => |term_id| try collectFreeVarsFromTerm(allocator, set, term_id, ids, 256),
+        .origin_value => {},
+    }
+}
+
+fn collectFreeVarsFromQuery(
+    allocator: std.mem.Allocator,
+    set: formal_obligation.ObligationSet,
+    query: formal_obligation.VerificationQuery,
+) ![]formal_obligation.FreeVarId {
+    var ids: std.ArrayList(formal_obligation.FreeVarId) = .empty;
+    errdefer ids.deinit(allocator);
+    for (query.assumption_ids) |id| {
+        const assumption = findLeanAssumptionById(set, id) orelse return error.InvalidDependency;
+        if (assumption.formula) |formula| try collectFreeVarsFromFormula(allocator, set, formula, &ids);
+    }
+    for (query.obligation_ids) |id| {
+        const item = findLeanObligationById(set, id) orelse return error.InvalidDependency;
+        if (formal_obligation.kindFormula(item.kind)) |formula| {
+            try collectFreeVarsFromFormula(allocator, set, formula, &ids);
+        }
+    }
+    return try ids.toOwnedSlice(allocator);
+}
+
+fn writeLeanFreeVarId(writer: anytype, id: formal_obligation.FreeVarId) !void {
+    try writer.print("{{ file_id := {d}, pattern_id := {d} }}", .{ id.file_id, id.pattern_id });
+}
+
+fn writeLeanAutoWitnessEnv(
+    writer: anytype,
+    free_vars: []const formal_obligation.FreeVarId,
+) !void {
+    if (free_vars.len == 0) {
+        try writer.writeAll("Env.empty");
+        return;
+    }
+    for (free_vars, 0..) |_, index| {
+        try writer.writeByte('(');
+        if (index == 0) {
+            try writer.writeAll("Env.empty");
+        }
+    }
+    for (free_vars, 0..) |free_var, index| {
+        try writer.writeAll(".setFree ");
+        try writeLeanFreeVarId(writer, free_var);
+        try writer.print(" (.u256 (BitVec.ofNat 256 {d})))", .{index});
+    }
+}
+
+fn writeLeanAutoFreeVarEqFacts(
+    writer: anytype,
+    free_vars: []const formal_obligation.FreeVarId,
+) !void {
+    for (free_vars, 0..) |lhs, lhs_index| {
+        for (free_vars, 0..) |rhs, rhs_index| {
+            try writer.print("  have h_auto_free_{d}_{d} : ((", .{ lhs_index, rhs_index });
+            try writeLeanFreeVarId(writer, lhs);
+            try writer.writeAll(" : FreeVarId) == ");
+            try writeLeanFreeVarId(writer, rhs);
+            try writer.print(") = {s} := by rfl\n", .{if (freeVarIdsEqual(lhs, rhs)) "true" else "false"});
+        }
+    }
+}
+
+fn writeLeanAutoSimpSet(writer: anytype, free_var_count: usize) !void {
+    try writer.writeAll(
+        \\[
+        \\      assumptionsDenoteInEnv,
+        \\      assumptionsDenoteInEnv?,
+        \\      assumptionAnd?,
+        \\      assumptionDenotesInEnv?,
+        \\      obligationDenotesInEnv,
+        \\      obligationDenotesInEnv?,
+        \\      formulaDenotes?,
+        \\      denoteFormula?,
+        \\      denoteValue?,
+        \\      effectFrameGoalDenotes?,
+        \\      resourceGoalDenotes?,
+        \\      resourceGoalAmount?,
+        \\      resourceGoalSource?,
+        \\      resourceGoalDestination?,
+        \\      emittedManifest,
+        \\      emittedTerms,
+        \\      emittedAssumptions,
+        \\      emittedObligations,
+        \\      Env.setFree,
+        \\      Env.lookupVar,
+        \\      Env.lookupFree,
+        \\      lookupFreeBinding,
+        \\      Env.lookupBound,
+        \\      Env.lookupPlace,
+        \\      Env.lookupEntryPlace,
+        \\      Env.pushBound,
+        \\      Value.eqProp?,
+        \\      BinderRef.isU256,
+        \\      BoundVarRef.isU256,
+        \\      TyRef.isU256,
+        \\      TyRef.isI256,
+        \\      TyRef.isU256Carrier,
+        \\      compilerTypeIdU256,
+        \\      compilerTypeIdI256,
+        \\      compilerTypeIdBool,
+        \\      Ora.Spec.expectedCompilerTypeIdU256,
+        \\      Ora.Spec.expectedCompilerTypeIdI256,
+        \\      Ora.Spec.expectedCompilerTypeIdBool,
+        \\      U256.sle,
+        \\      U256.slt,
+        \\      U256.sge,
+        \\      U256.sgt
+    );
+    for (0..free_var_count) |lhs_index| {
+        for (0..free_var_count) |rhs_index| {
+            try writer.print(",\n      h_auto_free_{d}_{d}", .{ lhs_index, rhs_index });
+        }
+    }
+    try writer.writeAll(
+        \\
+        \\    ]
+    );
+}
+
 fn printLeanFormulaProjectionSummary(stdout: anytype, summary: LeanFormulaProjectionSummary) !void {
     try stdout.print(
         "formula projection: term={d}, origin_value={d}, total={d}, term_ratio_basis_points={d}",
@@ -6382,6 +6656,210 @@ fn applyLeanProofArtifactGate(
     }
 }
 
+fn leanAutoProofScratchSegment(allocator: std.mem.Allocator, file_path: []const u8) ![]const u8 {
+    const stem = std.fs.path.stem(file_path);
+    var component = std.Io.Writer.Allocating.init(allocator);
+    defer component.deinit();
+    try component.writer.writeAll("AutoProof_");
+    for (stem) |byte| {
+        if (std.ascii.isAlphanumeric(byte) or byte == '_') {
+            try component.writer.writeByte(byte);
+        } else {
+            try component.writer.writeByte('_');
+        }
+    }
+    const hash = std.hash.Wyhash.hash(0, file_path);
+    const pid = std.posix.system.getpid();
+    return try std.fmt.allocPrint(allocator, "{s}_{x}_{d}", .{ component.written(), hash, pid });
+}
+
+fn buildAutomaticLeanProofModuleSource(
+    allocator: std.mem.Allocator,
+    obligations_source: []const u8,
+    module_namespace: []const u8,
+    set: formal_obligation.ObligationSet,
+    queries: []const formal_obligation.VerificationQuery,
+) ![]const u8 {
+    const namespace_start = std.mem.indexOf(u8, obligations_source, "namespace ") orelse return error.LeanObligationsMissingNamespace;
+    const body_start = (std.mem.indexOfPos(u8, obligations_source, namespace_start, "\n") orelse return error.LeanObligationsMissingNamespace) + 1;
+    const end_start = std.mem.lastIndexOf(u8, obligations_source, "\nend ") orelse return error.LeanObligationsMissingNamespace;
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    errdefer out.deinit();
+    const writer = &out.writer;
+
+    try writer.writeAll(obligations_source[0..namespace_start]);
+    try writer.writeAll("namespace ");
+    try writer.writeAll(module_namespace);
+    try writer.writeByte('\n');
+    try writer.writeAll(obligations_source[body_start..end_start]);
+    try writer.writeByte('\n');
+
+    for (queries) |query| {
+        const free_vars = try collectFreeVarsFromQuery(allocator, set, query);
+        defer allocator.free(free_vars);
+
+        try writer.print("theorem discharge_q{d} : emittedQuery_{d} := by\n", .{ query.id, query.id });
+        try writeLeanAutoFreeVarEqFacts(writer, free_vars);
+        try writer.writeAll("  unfold ");
+        try writer.print("emittedQuery_{d}", .{query.id});
+        try writer.writeAll(" obligationFollowsFromAssumptions\n");
+        try writer.writeAll("  constructor\n");
+        try writer.writeAll("  · refine ⟨");
+        try writeLeanAutoWitnessEnv(writer, free_vars);
+        try writer.writeAll(", ?_⟩\n");
+        try writer.writeAll("    simp ");
+        try writeLeanAutoSimpSet(writer, free_vars.len);
+        try writer.writeAll(" <;> try decide\n");
+        try writer.writeAll("  · intro env hAssumptions\n");
+        try writer.writeAll("    simp ");
+        try writeLeanAutoSimpSet(writer, free_vars.len);
+        try writer.writeAll(" at hAssumptions ⊢\n");
+        try writer.writeAll("    repeat intro\n");
+        try writer.writeAll("    first\n");
+        try writer.writeAll("    | assumption\n");
+        try writer.writeAll("    | exact U256.ult_implies_ule _ _ (by assumption)\n");
+        try writer.writeAll("    | exact stable_place_read_self_eq_denotes env _\n");
+        try writer.writeAll("    | simp_all ");
+        try writeLeanAutoSimpSet(writer, free_vars.len);
+        try writer.writeAll("\n\n");
+    }
+
+    try writer.writeAll("end ");
+    try writer.writeAll(module_namespace);
+    try writer.writeByte('\n');
+    return try out.toOwnedSlice();
+}
+
+fn applyAutomaticLeanProofArtifactGate(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    formal_result: *const formal_obligation_from_mlir.CollectResult,
+    smt_report: z3_verification.SmtReportArtifacts,
+    mlir_options: MlirOptions,
+    stdout: anytype,
+) !bool {
+    const proof_check = @import("formal/proof_check.zig");
+
+    var context = try collectLeanObligationContextFromFormalResult(allocator, file_path, formal_result, smt_report);
+    defer context.deinit();
+
+    var target_queries: std.ArrayList(formal_obligation.VerificationQuery) = .empty;
+    defer target_queries.deinit(allocator);
+    var unavailable_count: usize = 0;
+    for (context.merged_result.set.queries) |query| {
+        if (!isLeanUnknownRecipeTarget(query)) continue;
+        const projection = projectionSummaryForLeanQuery(context.merged_result.set, query);
+        const semantic_support = formal_obligation_to_lean.querySemanticSupport(context.merged_result.set, query);
+        if (projection.hasOpaqueFormula() or !leanSemanticSupportAvailable(semantic_support)) {
+            unavailable_count += 1;
+            continue;
+        }
+        try target_queries.append(allocator, query);
+    }
+
+    const unknown_rows = plainUnknownPreparedRows(smt_report);
+    const classified_targets = plainUnknownPreparedRowCountForLeanSet(context.merged_result.set);
+    const unmatched_unknown_rows = if (unknown_rows > classified_targets) unknown_rows - classified_targets else 0;
+    if (unavailable_count != 0 or unmatched_unknown_rows != 0) {
+        try stdout.writeAll("Automatic Lean proof gate cannot cover all Z3 UNKNOWN userland obligations.\n");
+        if (unavailable_count != 0) {
+            try stdout.print("  unsupported Lean-fragment UNKNOWN queries: {d}\n", .{unavailable_count});
+        }
+        if (unmatched_unknown_rows != 0) {
+            try stdout.print("  unmatched UNKNOWN prepared rows: {d}\n", .{unmatched_unknown_rows});
+        }
+        return false;
+    }
+
+    if (target_queries.items.len == 0) {
+        return true;
+    }
+
+    context.obligations_source = try renderLeanObligationsSource(
+        allocator,
+        context.merged_result.set,
+        context.generated_namespace,
+    );
+
+    const scratch_segment = try leanAutoProofScratchSegment(allocator, file_path);
+    defer allocator.free(scratch_segment);
+    const scratch_rel = try std.fmt.allocPrint(allocator, "formal/Ora/AutoProofScratch/{s}", .{scratch_segment});
+    defer allocator.free(scratch_rel);
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try std.Io.Dir.cwd().createDirPath(io, scratch_rel);
+    defer std.Io.Dir.cwd().deleteTree(io, scratch_rel) catch {};
+    defer std.Io.Dir.cwd().deleteDir(io, "formal/Ora/AutoProofScratch") catch {};
+
+    const module_name = try std.fmt.allocPrint(allocator, "Ora.AutoProofScratch.{s}.Proofs", .{scratch_segment});
+    defer allocator.free(module_name);
+    const proof_path = try std.fmt.allocPrint(allocator, "{s}/Proofs.lean", .{scratch_rel});
+    defer allocator.free(proof_path);
+    const proof_source = try buildAutomaticLeanProofModuleSource(
+        allocator,
+        context.obligations_source.?,
+        module_name,
+        context.merged_result.set,
+        target_queries.items,
+    );
+    defer allocator.free(proof_source);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = proof_path, .data = proof_source });
+
+    const rows = try allocator.alloc(proof_check.ProofRow, target_queries.items.len);
+    defer allocator.free(rows);
+    var theorem_names: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (theorem_names.items) |name| allocator.free(name);
+        theorem_names.deinit(allocator);
+    }
+    for (target_queries.items, rows) |query, *row| {
+        const theorem_name = try std.fmt.allocPrint(allocator, "{s}.discharge_q{d}", .{ module_name, query.id });
+        try theorem_names.append(allocator, theorem_name);
+        row.* = .{
+            .query_id = query.id,
+            .obligation_ids = query.obligation_ids,
+            .assumption_ids = query.assumption_ids,
+            .module_name = module_name,
+            .theorem_name = theorem_name,
+            .path = proof_path,
+            .content_sha256 = null,
+        };
+    }
+
+    var applied = try proof_check.applyProofRows(
+        allocator,
+        context.merged_result.set,
+        rows,
+        context.generated_namespace,
+        context.obligations_source.?,
+        mlir_options.process_environ,
+        stdout,
+    );
+    defer if (applied) |*result| result.deinit();
+    if (applied == null) return false;
+
+    const decided_set = applied.?.set;
+    const decision = decided_set.artifactDecision();
+    try writeLeanProofCertificate(
+        allocator,
+        file_path,
+        mlir_options.output_dir,
+        applied.?.certificate_json,
+        stdout,
+        mlir_options.suppress_artifact_logs,
+    );
+    switch (decision) {
+        .allowed => return true,
+        .blocked => |reason| {
+            if (reason == .blocking_diagnostic) {
+                try printLeanProofGateDiagnostics(stdout, decided_set);
+            }
+            try stdout.print("Automatic Lean proof gate did not authorize artifact emission: {s}\n", .{@tagName(reason)});
+            return false;
+        },
+    }
+}
+
 fn printLeanProofGateDiagnostics(stdout: anytype, set: @import("formal/obligation.zig").ObligationSet) !void {
     var printed_header = false;
     for (set.diagnostics) |diagnostic| {
@@ -6440,6 +6918,37 @@ fn writeLeanProofCertificate(
     }
 }
 
+fn writeLeanDispatcherProofCertificate(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    output_dir: ?[]const u8,
+    certificate_json: []const u8,
+    stdout: anytype,
+    suppress_log: bool,
+) !void {
+    const base_name = std.fs.path.stem(file_path);
+    const filename = try std.fmt.allocPrint(allocator, "{s}.lean.dispatcher.proof.json", .{base_name});
+    defer allocator.free(filename);
+
+    var path_buf: ?[]u8 = null;
+    defer if (path_buf) |buf| allocator.free(buf);
+
+    const path = if (output_dir) |dir| blk: {
+        try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), dir);
+        path_buf = try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
+        break :blk path_buf.?;
+    } else filename;
+
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = path,
+        .data = certificate_json,
+    });
+
+    if (!suppress_log) {
+        try stdout.print("Lean dispatcher proof certificate saved to {s}\n", .{path});
+    }
+}
+
 fn leanProofGeneratedNamespace(allocator: std.mem.Allocator, file_path: []const u8) ![]const u8 {
     const stem = std.fs.path.stem(file_path);
     var component_out = std.Io.Writer.Allocating.init(allocator);
@@ -6490,10 +6999,11 @@ fn runSinoraBytecode(
     sinora_path: []const u8,
     sir_file_path: []const u8,
     source_map_path: ?[]const u8,
+    dispatcher_report_path: ?[]const u8,
     optimize_arg: []const u8,
     stdout: anytype,
 ) ![]const u8 {
-    var argv_buf: [6][]const u8 = undefined;
+    var argv_buf: [8][]const u8 = undefined;
     var argc: usize = 0;
     argv_buf[argc] = sinora_path;
     argc += 1;
@@ -6503,6 +7013,12 @@ fn runSinoraBytecode(
     argc += 1;
     if (source_map_path) |path| {
         argv_buf[argc] = "--source-map";
+        argc += 1;
+        argv_buf[argc] = path;
+        argc += 1;
+    }
+    if (dispatcher_report_path) |path| {
+        argv_buf[argc] = "--dispatcher-proof-report";
         argc += 1;
         argv_buf[argc] = path;
         argc += 1;
@@ -6561,6 +7077,7 @@ fn emitBytecodeFromSirText(
     stdout: anytype,
     suppress_log: bool,
     optimize: ?project_config.OptimizeProfile,
+    dispatcher_check: ?*formal_dispatcher_table_gate.CheckResult,
 ) !void {
     const basename = std.fs.path.stem(file_path);
     const sir_extension = ".sir";
@@ -6586,6 +7103,11 @@ fn emitBytecodeFromSirText(
     else
         null;
     defer if (sinora_srcmap_path) |p| allocator.free(p);
+    const dispatcher_report_path = if (dispatcher_check != null)
+        try std.fs.path.join(allocator, &[_][]const u8{ temp_dir, "dispatcher_bytecode_report.json" })
+    else
+        null;
+    defer if (dispatcher_report_path) |p| allocator.free(p);
 
     const sinora_path = resolveSinoraPath(allocator) catch |err| {
         if (err == error.SinoraNotFound) {
@@ -6606,6 +7128,7 @@ fn emitBytecodeFromSirText(
         sinora_path,
         sir_file_path,
         sinora_srcmap_path,
+        dispatcher_report_path,
         optimize_arg,
         stdout,
     );
@@ -6616,6 +7139,26 @@ fn emitBytecodeFromSirText(
         try stdout.print("SIR input saved to: {s}\n", .{sir_file_path});
         try stdout.flush();
         return error.SinoraEmptyBytecode;
+    }
+    if (dispatcher_check) |check| {
+        const report_path = dispatcher_report_path orelse return error.DispatcherBytecodeReportMissing;
+        const report_json = try std.Io.Dir.cwd().readFileAlloc(
+            std.Io.Threaded.global_single_threaded.io(),
+            report_path,
+            allocator,
+            std.Io.Limit.limited(16 * 1024 * 1024),
+        );
+        defer allocator.free(report_json);
+        try check.validateAndBindBytecode(allocator, report_json, sinora_bytecode);
+        try writeLeanDispatcherProofCertificate(
+            allocator,
+            file_path,
+            output_dir,
+            check.certificate_json,
+            stdout,
+            suppress_log,
+        );
+        try stdout.print("Lean dispatcher userland proof accepted (SIR + bytecode)\n", .{});
     }
     if (!suppress_log) {
         try stdout.print("Sinora bytecode emitted ({d} bytes)\n", .{hexByteLength(sinora_bytecode)});

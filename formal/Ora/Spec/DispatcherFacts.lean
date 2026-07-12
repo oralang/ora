@@ -76,6 +76,24 @@ explicit runtime + code-byte costs, leaving a one-check model-error margin.
 -/
 def expectedMinSelectorCheckSavingX1000 : Nat := 1000
 
+/- Independent specification of the planner cost model. The compiler emits
+   its own values into `DispatcherStrategySnapshot`; kernel-checked sync
+   theorems reject any change made on only one side. -/
+def expectedTableDispatchOverheadChecksX1000 : Nat := 2800
+def expectedExactSelectorCheckX1000 : Nat := 1000
+def expectedDenseMultiplicativeExtraChecksX1000 : Nat := 300
+def expectedMultiplicativeSearchBudget : Nat := 512
+def expectedDispatchPolicyLambdasX1000 : List (String × Nat) :=
+  [("gas", 0), ("balanced", 5), ("size", 50)]
+def expectedJumpTableEntryBytes : Nat := 2
+def expectedLinearCaseCodeBytes : Nat := 13
+def expectedDenseBitWindowPreambleCodeBytes : Nat := 30
+def expectedDenseMultiplicativePreambleCodeBytes : Nat := 36
+def expectedDenseUsedSlotCodeBytes : Nat := 18
+def expectedSparsePreambleCodeBytes : Nat := 30
+def expectedSparseUsedBucketCodeBytes : Nat := 5
+def expectedSparseCaseCodeBytes : Nat := 17
+
 def HasExactSelectorValidation (strategy : DispatcherStrategy) : Prop :=
   strategy.info.requiresExactSelectorValidation = true
 

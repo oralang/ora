@@ -131,12 +131,40 @@ pub const EmitResult = struct {
     bytes: []const u8,
     source_map: []const SourceMapEntry,
     runtime_start_pc: u32,
+    dispatcher_facts: []const DispatcherBytecodeFact,
 
     pub fn deinit(self: *EmitResult) void {
+        for (self.dispatcher_facts) |fact| {
+            for (fact.cases) |case| self.allocator.free(case.target);
+            self.allocator.free(fact.cases);
+            self.allocator.free(fact.default_target);
+            self.allocator.free(fact.strategy);
+            self.allocator.free(fact.block_name);
+            self.allocator.free(fact.function_name);
+        }
+        self.allocator.free(self.dispatcher_facts);
         self.allocator.free(self.source_map);
         self.allocator.free(self.bytes);
         self.* = undefined;
     }
+};
+
+pub const DispatcherBytecodeCase = struct {
+    selector: u32,
+    target: []const u8,
+    route_index: usize,
+    guard_pc: u32,
+    target_pc: u32,
+};
+
+pub const DispatcherBytecodeFact = struct {
+    function_name: []const u8,
+    block_name: []const u8,
+    strategy: []const u8,
+    default_target: []const u8,
+    default_pc: u32,
+    templates_valid: bool,
+    cases: []const DispatcherBytecodeCase,
 };
 
 const SourceIndexBuilder = struct {
@@ -262,6 +290,209 @@ const PendingJumpTable = struct {
     targets: []evm_asm.Label,
     entry_width: u8,
 };
+
+const DispatcherMark = struct {
+    function_name: []const u8,
+    block_name: []const u8,
+    strategy: []const u8,
+    default_target: []const u8,
+    default_label: evm_asm.Label,
+    route_start: evm_asm.Label,
+    reference_mode: ReferenceMode,
+    plan: switch_routing.Plan,
+    switch_store: u32,
+    table_store: ?u32 = null,
+    table_label: ?evm_asm.Label = null,
+    table_targets: []const evm_asm.Label = &.{},
+    case_start: usize,
+    case_count: usize = 0,
+    default_start: usize,
+    default_count: usize = 0,
+};
+
+const DispatcherCaseMark = struct {
+    selector: u32,
+    target: []const u8,
+    route_index: usize,
+    guard_label: evm_asm.Label,
+    target_label: evm_asm.Label,
+    switch_store: u32,
+    reference_mode: ReferenceMode,
+};
+
+const DispatcherDefaultMark = struct {
+    jump_label: evm_asm.Label,
+    target_label: evm_asm.Label,
+    reference_mode: ReferenceMode,
+};
+
+fn dispatcherPcValue(absolute: u32, mode: ReferenceMode, runtime_start_pc: u32) !u32 {
+    return switch (mode) {
+        .direct => absolute,
+        .runcode_delta => if (absolute >= runtime_start_pc)
+            absolute - runtime_start_pc
+        else
+            CodeToAsmError.UnsupportedSir,
+    };
+}
+
+fn dispatcherReferenceValue(
+    finalized: evm_asm.LabelBytecode.Finalized,
+    label: evm_asm.Label,
+    mode: ReferenceMode,
+    runtime_start_pc: u32,
+) !u32 {
+    const absolute = evm_asm.LabelBytecode.labelOffset(finalized, label) orelse
+        return CodeToAsmError.MissingLabel;
+    return dispatcherPcValue(absolute, mode, runtime_start_pc);
+}
+
+fn readPushValue(bytes: []const u8, cursor: *usize) ?u256 {
+    if (cursor.* >= bytes.len) return null;
+    const opcode = bytes[cursor.*];
+    cursor.* += 1;
+    if (opcode == evm_asm.op.PUSH0) return 0;
+    if (opcode < evm_asm.op.PUSH1 or opcode > evm_asm.op.PUSH1 + 31) return null;
+    const width: usize = opcode - evm_asm.op.PUSH1 + 1;
+    if (cursor.* + width > bytes.len) return null;
+    var value: u256 = 0;
+    for (bytes[cursor.*..][0..width]) |byte| value = (value << 8) | byte;
+    cursor.* += width;
+    return value;
+}
+
+fn readOpcode(bytes: []const u8, cursor: *usize, expected: u8) bool {
+    if (cursor.* >= bytes.len or bytes[cursor.*] != expected) return false;
+    cursor.* += 1;
+    return true;
+}
+
+fn validateExactGuardBytes(
+    bytes: []const u8,
+    absolute_pc: u32,
+    switch_store: u32,
+    selector: u32,
+    target_pc: u32,
+) bool {
+    var cursor: usize = absolute_pc;
+    return readPushValue(bytes, &cursor) == @as(u256, switch_store) and
+        readOpcode(bytes, &cursor, evm_asm.op.MLOAD) and
+        readPushValue(bytes, &cursor) == @as(u256, selector) and
+        readOpcode(bytes, &cursor, evm_asm.op.EQ) and
+        readPushValue(bytes, &cursor) == @as(u256, target_pc) and
+        readOpcode(bytes, &cursor, evm_asm.op.JUMPI);
+}
+
+fn validateDefaultJumpBytes(bytes: []const u8, absolute_pc: u32, target_pc: u32) bool {
+    var cursor: usize = absolute_pc;
+    return readPushValue(bytes, &cursor) == @as(u256, target_pc) and
+        readOpcode(bytes, &cursor, evm_asm.op.JUMP);
+}
+
+fn validateIndexedRouteBytes(
+    bytes: []const u8,
+    absolute_pc: u32,
+    switch_store: u32,
+    table_store: u32,
+    table_pc: u32,
+    plan: switch_routing.Plan,
+) bool {
+    var cursor: usize = absolute_pc;
+    if (readPushValue(bytes, &cursor) != @as(u256, switch_store) or
+        !readOpcode(bytes, &cursor, evm_asm.op.MLOAD)) return false;
+
+    var bits: u8 = 0;
+    var shift: u8 = 0;
+    switch (plan) {
+        .sparse => |sparse| {
+            bits = sparse.bucket_bits;
+            shift = sparse.bucket_shift;
+        },
+        .dense => |dense| {
+            if (dense.kind == .multiplicative) {
+                if (readPushValue(bytes, &cursor) != @as(u256, dense.mul_constant.?) or
+                    !readOpcode(bytes, &cursor, evm_asm.op.MUL)) return false;
+            }
+            bits = dense.index_bits.?;
+            shift = dense.index_shift.?;
+        },
+        .linear => return false,
+    }
+    if (shift != 0 and
+        (readPushValue(bytes, &cursor) != @as(u256, shift) or
+            !readOpcode(bytes, &cursor, evm_asm.op.SHR))) return false;
+    const mask = (@as(u32, 1) << @as(u5, @intCast(bits))) - 1;
+    if (readPushValue(bytes, &cursor) != @as(u256, mask) or
+        !readOpcode(bytes, &cursor, evm_asm.op.AND)) return false;
+
+    return readPushValue(bytes, &cursor) == 0 and
+        readPushValue(bytes, &cursor) == @as(u256, table_store) and
+        readOpcode(bytes, &cursor, evm_asm.op.MSTORE) and
+        readPushValue(bytes, &cursor) == @as(u256, jump_table_entry_width) and
+        readOpcode(bytes, &cursor, evm_asm.op.MUL) and
+        readPushValue(bytes, &cursor) == @as(u256, table_pc) and
+        readOpcode(bytes, &cursor, evm_asm.op.ADD) and
+        readPushValue(bytes, &cursor) == @as(u256, jump_table_entry_width) and
+        readOpcode(bytes, &cursor, evm_asm.op.SWAP1) and
+        readPushValue(bytes, &cursor) == @as(u256, table_store + 32 - jump_table_entry_width) and
+        readOpcode(bytes, &cursor, evm_asm.op.CODECOPY) and
+        readPushValue(bytes, &cursor) == @as(u256, table_store) and
+        readOpcode(bytes, &cursor, evm_asm.op.MLOAD) and
+        readOpcode(bytes, &cursor, evm_asm.op.JUMP);
+}
+
+fn validateJumpTableBytes(
+    finalized: evm_asm.LabelBytecode.Finalized,
+    absolute_pc: u32,
+    targets: []const evm_asm.Label,
+    mode: ReferenceMode,
+    runtime_start_pc: u32,
+) bool {
+    var cursor: usize = absolute_pc;
+    for (targets) |target| {
+        if (cursor + jump_table_entry_width > finalized.bytes.len) return false;
+        const actual = (@as(u32, finalized.bytes[cursor]) << 8) |
+            finalized.bytes[cursor + 1];
+        const expected = dispatcherReferenceValue(
+            finalized,
+            target,
+            mode,
+            runtime_start_pc,
+        ) catch return false;
+        if (actual != expected) return false;
+        cursor += jump_table_entry_width;
+    }
+    return true;
+}
+
+fn validateJumpTableRouting(
+    finalized: evm_asm.LabelBytecode.Finalized,
+    targets: []const evm_asm.Label,
+    cases: []const DispatcherCaseMark,
+    default_label: evm_asm.Label,
+) bool {
+    for (targets, 0..) |target, route_index| {
+        var first_case: ?DispatcherCaseMark = null;
+        for (cases) |case| {
+            if (case.route_index == route_index) {
+                first_case = case;
+                break;
+            }
+        }
+        if (first_case) |case| {
+            const target_pc = evm_asm.LabelBytecode.labelOffset(finalized, target) orelse
+                return false;
+            const guard_pc = evm_asm.LabelBytecode.labelOffset(finalized, case.guard_label) orelse
+                return false;
+            if (guard_pc == 0 or target_pc + 1 != guard_pc) return false;
+            if (target_pc >= finalized.bytes.len or
+                finalized.bytes[target_pc] != evm_asm.op.JUMPDEST) return false;
+        } else if (target.id != default_label.id) {
+            return false;
+        }
+    }
+    return true;
+}
 
 const VisitedBlock = struct {
     function_name: []const u8,
@@ -467,6 +698,9 @@ const GenericEmitter = struct {
     icall_return_marks: std.ArrayList(IcallReturnMark) = .empty,
     source_indices: ?*const SourceIndexMap = null,
     source_map_marks: std.ArrayList(SourceMapMark) = .empty,
+    dispatcher_marks: std.ArrayList(DispatcherMark) = .empty,
+    dispatcher_case_marks: std.ArrayList(DispatcherCaseMark) = .empty,
+    dispatcher_default_marks: std.ArrayList(DispatcherDefaultMark) = .empty,
     runcode_start: ?evm_asm.Label = null,
     initcode_end: ?evm_asm.Label = null,
 
@@ -488,6 +722,12 @@ const GenericEmitter = struct {
     }
 
     fn deinit(self: *GenericEmitter) void {
+        for (self.dispatcher_marks.items) |mark| {
+            if (mark.table_targets.len != 0) self.allocator.free(mark.table_targets);
+        }
+        self.dispatcher_default_marks.deinit(self.allocator);
+        self.dispatcher_case_marks.deinit(self.allocator);
+        self.dispatcher_marks.deinit(self.allocator);
         self.clearPendingJumpTables();
         self.pending_jump_tables.deinit(self.allocator);
         self.source_map_marks.deinit(self.allocator);
@@ -514,6 +754,12 @@ const GenericEmitter = struct {
         try self.used_data.ensureTotalCapacity(self.allocator, stats.data_segments);
         try self.operations.ensureTotalCapacity(self.allocator, stats.instructions);
         try self.source_map_marks.ensureTotalCapacity(self.allocator, stats.instructions + stats.terminators);
+        try self.dispatcher_marks.ensureTotalCapacity(self.allocator, stats.switches);
+        try self.dispatcher_case_marks.ensureTotalCapacity(self.allocator, stats.switch_cases);
+        try self.dispatcher_default_marks.ensureTotalCapacity(
+            self.allocator,
+            stats.switch_cases + stats.switches,
+        );
         try self.pending_blocks.ensureTotalCapacity(self.allocator, @max(stats.blocks, 1));
         try self.visited_blocks.ensureTotalCapacity(self.allocator, @max(stats.blocks, 1));
         try self.pending_jump_tables.ensureTotalCapacity(self.allocator, @max(stats.terminators, 1));
@@ -557,6 +803,11 @@ const GenericEmitter = struct {
         var finalized = try self.bytecode.toOwnedFinalized();
         errdefer finalized.deinit();
 
+        const runtime_start_pc = evm_asm.LabelBytecode.labelOffset(
+            finalized,
+            self.runcode_start orelse return CodeToAsmError.MissingLabel,
+        ) orelse return CodeToAsmError.MissingLabel;
+
         const entries = try self.allocator.alloc(SourceMapEntry, self.source_map_marks.items.len);
         errdefer self.allocator.free(entries);
         for (self.source_map_marks.items, entries) |mark, *entry| {
@@ -566,10 +817,11 @@ const GenericEmitter = struct {
             };
         }
 
-        const runtime_start_pc = evm_asm.LabelBytecode.labelOffset(
-            finalized,
-            self.runcode_start orelse return CodeToAsmError.MissingLabel,
-        ) orelse return CodeToAsmError.MissingLabel;
+        const dispatcher_facts = try self.buildDispatcherFacts(finalized, runtime_start_pc);
+        errdefer {
+            for (dispatcher_facts) |fact| self.allocator.free(fact.cases);
+            self.allocator.free(dispatcher_facts);
+        }
         const bytes = finalized.bytes;
         self.allocator.free(finalized.label_offsets);
         finalized.bytes = &.{};
@@ -579,7 +831,148 @@ const GenericEmitter = struct {
             .bytes = bytes,
             .source_map = entries,
             .runtime_start_pc = runtime_start_pc,
+            .dispatcher_facts = dispatcher_facts,
         };
+    }
+
+    fn buildDispatcherFacts(
+        self: *GenericEmitter,
+        finalized: evm_asm.LabelBytecode.Finalized,
+        runtime_start_pc: u32,
+    ) ![]DispatcherBytecodeFact {
+        const facts = try self.allocator.alloc(DispatcherBytecodeFact, self.dispatcher_marks.items.len);
+        errdefer self.allocator.free(facts);
+        var initialized: usize = 0;
+        errdefer for (facts[0..initialized]) |fact| self.allocator.free(fact.cases);
+
+        for (self.dispatcher_marks.items, facts) |mark, *fact| {
+            const cases = try self.allocator.alloc(DispatcherBytecodeCase, mark.case_count);
+            errdefer self.allocator.free(cases);
+            var templates_valid = true;
+            const route_absolute = evm_asm.LabelBytecode.labelOffset(
+                finalized,
+                mark.route_start,
+            ) orelse return CodeToAsmError.MissingLabel;
+            switch (mark.plan) {
+                .linear => {},
+                .sparse, .dense => {
+                    const table_label = mark.table_label orelse
+                        return CodeToAsmError.MissingLabel;
+                    const table_store = mark.table_store orelse
+                        return CodeToAsmError.UnsupportedSir;
+                    const table_value = try dispatcherReferenceValue(
+                        finalized,
+                        table_label,
+                        mark.reference_mode,
+                        runtime_start_pc,
+                    );
+                    templates_valid = templates_valid and validateIndexedRouteBytes(
+                        finalized.bytes,
+                        route_absolute,
+                        mark.switch_store,
+                        table_store,
+                        table_value,
+                        mark.plan,
+                    );
+                    const table_absolute = evm_asm.LabelBytecode.labelOffset(
+                        finalized,
+                        table_label,
+                    ) orelse return CodeToAsmError.MissingLabel;
+                    templates_valid = templates_valid and validateJumpTableBytes(
+                        finalized,
+                        table_absolute,
+                        mark.table_targets,
+                        mark.reference_mode,
+                        runtime_start_pc,
+                    );
+                },
+            }
+            const case_marks = self.dispatcher_case_marks.items[mark.case_start..][0..mark.case_count];
+            for (case_marks, cases) |case_mark, *case_fact| {
+                const guard_absolute = evm_asm.LabelBytecode.labelOffset(
+                    finalized,
+                    case_mark.guard_label,
+                ) orelse return CodeToAsmError.MissingLabel;
+                const target_value = try dispatcherReferenceValue(
+                    finalized,
+                    case_mark.target_label,
+                    case_mark.reference_mode,
+                    runtime_start_pc,
+                );
+                templates_valid = templates_valid and validateExactGuardBytes(
+                    finalized.bytes,
+                    guard_absolute,
+                    case_mark.switch_store,
+                    case_mark.selector,
+                    target_value,
+                );
+                case_fact.* = .{
+                    .selector = case_mark.selector,
+                    .target = try self.allocator.dupe(u8, case_mark.target),
+                    .route_index = case_mark.route_index,
+                    .guard_pc = try dispatcherPcValue(
+                        guard_absolute,
+                        case_mark.reference_mode,
+                        runtime_start_pc,
+                    ),
+                    .target_pc = target_value,
+                };
+            }
+            if (mark.table_targets.len != 0) {
+                templates_valid = templates_valid and validateJumpTableRouting(
+                    finalized,
+                    mark.table_targets,
+                    case_marks,
+                    mark.default_label,
+                );
+            }
+            const default_marks = self.dispatcher_default_marks.items[mark.default_start..][0..mark.default_count];
+            for (default_marks) |default_mark| {
+                const jump_absolute = evm_asm.LabelBytecode.labelOffset(
+                    finalized,
+                    default_mark.jump_label,
+                ) orelse return CodeToAsmError.MissingLabel;
+                const target_value = try dispatcherReferenceValue(
+                    finalized,
+                    default_mark.target_label,
+                    default_mark.reference_mode,
+                    runtime_start_pc,
+                );
+                templates_valid = templates_valid and validateDefaultJumpBytes(
+                    finalized.bytes,
+                    jump_absolute,
+                    target_value,
+                );
+            }
+            const semantic_default = resolveForwardingTarget(
+                self.program,
+                mark.function_name,
+                mark.default_target,
+            );
+            const semantic_default_label = self.blockLabel(
+                mark.function_name,
+                semantic_default,
+            ) orelse return CodeToAsmError.MissingLabel;
+            const semantic_default_absolute = evm_asm.LabelBytecode.labelOffset(
+                finalized,
+                semantic_default_label,
+            ) orelse return CodeToAsmError.MissingLabel;
+            fact.* = .{
+                .function_name = try self.allocator.dupe(u8, mark.function_name),
+                .block_name = try self.allocator.dupe(u8, mark.block_name),
+                .strategy = try self.allocator.dupe(u8, mark.strategy),
+                .default_target = try self.allocator.dupe(u8, semantic_default),
+                .default_pc = try dispatcherPcValue(
+                    semantic_default_absolute,
+                    mark.reference_mode,
+                    runtime_start_pc,
+                ),
+                .templates_valid = templates_valid and mark.default_count > 0,
+                .cases = cases,
+            };
+            initialized += 1;
+        }
+        return facts;
     }
 
     fn pushSourceMapMark(self: *GenericEmitter, idx: u32) !void {
@@ -865,7 +1258,13 @@ const GenericEmitter = struct {
                 const switch_store = self.layout.switch_store orelse return CodeToAsmError.UnsupportedSir;
                 try self.bytecode.pushU32(switch_store);
                 try self.bytecode.pushOp(evm_asm.op.MSTORE);
-                try self.emitSwitchRoute(function.name, switch_store, switch_term, context);
+                try self.emitSwitchRoute(
+                    function.name,
+                    block.name,
+                    switch_store,
+                    switch_term,
+                    context,
+                );
             },
             .iret => try self.bytecode.pushOp(evm_asm.op.JUMP),
             .return_ => try self.bytecode.pushOp(evm_asm.op.RETURN),
@@ -879,32 +1278,85 @@ const GenericEmitter = struct {
     fn emitSwitchRoute(
         self: *GenericEmitter,
         function_name: []const u8,
+        block_name: []const u8,
         switch_store: u32,
         switch_term: ir.SwitchTerminator,
         context: EmitContext,
     ) !void {
-        switch (switch_routing.choosePlan(switch_term)) {
-            .linear => try self.emitLinearSwitch(function_name, switch_store, switch_term, context),
-            .sparse => |plan| try self.emitSparseSwitch(function_name, switch_store, switch_term, plan, context),
-            .dense => |plan| try self.emitDenseSwitch(function_name, switch_store, switch_term, plan, context),
+        const plan = switch_routing.choosePlan(switch_term);
+        const route_start = try self.bytecode.newLabel();
+        try self.bytecode.mark(route_start);
+        const default_label = self.blockLabel(function_name, switch_term.default_target) orelse
+            return CodeToAsmError.MissingLabel;
+        const mark_index = self.dispatcher_marks.items.len;
+        try self.dispatcher_marks.append(self.allocator, .{
+            .function_name = function_name,
+            .block_name = block_name,
+            .strategy = switch (plan) {
+                .linear => "linear",
+                .sparse => "sparse",
+                .dense => "dense",
+            },
+            .default_target = switch_term.default_target,
+            .default_label = default_label,
+            .route_start = route_start,
+            .reference_mode = context.reference_mode,
+            .plan = plan,
+            .switch_store = switch_store,
+            .case_start = self.dispatcher_case_marks.items.len,
+            .default_start = self.dispatcher_default_marks.items.len,
+        });
+        switch (plan) {
+            .linear => try self.emitLinearSwitch(
+                mark_index,
+                function_name,
+                switch_store,
+                switch_term,
+                context,
+            ),
+            .sparse => |sparse| try self.emitSparseSwitch(
+                mark_index,
+                function_name,
+                switch_store,
+                switch_term,
+                sparse,
+                context,
+            ),
+            .dense => |dense| try self.emitDenseSwitch(
+                mark_index,
+                function_name,
+                switch_store,
+                switch_term,
+                dense,
+                context,
+            ),
         }
     }
 
     fn emitLinearSwitch(
         self: *GenericEmitter,
+        mark_index: usize,
         function_name: []const u8,
         switch_store: u32,
         switch_term: ir.SwitchTerminator,
         context: EmitContext,
     ) !void {
-        for (switch_term.cases) |case| {
-            try self.emitExactCaseJump(function_name, switch_store, case, context);
+        for (switch_term.cases, 0..) |case, route_index| {
+            try self.emitExactCaseJump(
+                mark_index,
+                function_name,
+                switch_store,
+                case,
+                route_index,
+                context,
+            );
         }
-        try self.emitDefaultSwitchJump(function_name, switch_term, context);
+        try self.emitDefaultSwitchJump(mark_index, function_name, switch_term, context);
     }
 
     fn emitSparseSwitch(
         self: *GenericEmitter,
+        mark_index: usize,
         function_name: []const u8,
         switch_store: u32,
         switch_term: ir.SwitchTerminator,
@@ -932,6 +1384,10 @@ const GenericEmitter = struct {
         for (bucket_labels, table_targets) |maybe_label, *target| {
             target.* = maybe_label orelse default_label;
         }
+        self.dispatcher_marks.items[mark_index].table_store = table_store;
+        self.dispatcher_marks.items[mark_index].table_label = table_label;
+        self.dispatcher_marks.items[mark_index].table_targets =
+            try self.allocator.dupe(evm_asm.Label, table_targets);
         try self.queueJumpTable(table_label, table_targets, jump_table_entry_width);
 
         for (bucket_labels, 0..) |maybe_label, bucket| {
@@ -940,14 +1396,15 @@ const GenericEmitter = struct {
             for (switch_term.cases) |case| {
                 const selector = switch_routing.parseU32Selector(case.value) orelse return CodeToAsmError.UnsupportedSir;
                 if (switch_routing.bucketIndex(selector, plan.bucket_bits, plan.bucket_shift) != bucket) continue;
-                try self.emitExactCaseJump(function_name, switch_store, case, context);
+                try self.emitExactCaseJump(mark_index, function_name, switch_store, case, bucket, context);
             }
-            try self.emitDefaultSwitchJump(function_name, switch_term, context);
+            try self.emitDefaultSwitchJump(mark_index, function_name, switch_term, context);
         }
     }
 
     fn emitDenseSwitch(
         self: *GenericEmitter,
+        mark_index: usize,
         function_name: []const u8,
         switch_store: u32,
         switch_term: ir.SwitchTerminator,
@@ -980,6 +1437,10 @@ const GenericEmitter = struct {
         for (slot_labels, table_targets) |maybe_label, *target| {
             target.* = maybe_label orelse default_label;
         }
+        self.dispatcher_marks.items[mark_index].table_store = table_store;
+        self.dispatcher_marks.items[mark_index].table_label = table_label;
+        self.dispatcher_marks.items[mark_index].table_targets =
+            try self.allocator.dupe(evm_asm.Label, table_targets);
         try self.queueJumpTable(table_label, table_targets, jump_table_entry_width);
 
         for (slot_labels, 0..) |maybe_label, slot| {
@@ -988,19 +1449,37 @@ const GenericEmitter = struct {
             for (switch_term.cases) |case| {
                 const selector = switch_routing.parseU32Selector(case.value) orelse return CodeToAsmError.UnsupportedSir;
                 if (switch_routing.denseIndex(selector, plan) != slot) continue;
-                try self.emitExactCaseJump(function_name, switch_store, case, context);
+                try self.emitExactCaseJump(mark_index, function_name, switch_store, case, slot, context);
             }
-            try self.emitDefaultSwitchJump(function_name, switch_term, context);
+            try self.emitDefaultSwitchJump(mark_index, function_name, switch_term, context);
         }
     }
 
     fn emitExactCaseJump(
         self: *GenericEmitter,
+        mark_index: usize,
         function_name: []const u8,
         switch_store: u32,
         case: ir.SwitchCase,
+        route_index: usize,
         context: EmitContext,
     ) !void {
+        const guard_label = try self.bytecode.newLabel();
+        try self.bytecode.mark(guard_label);
+        const target_label = self.blockLabel(function_name, case.target) orelse
+            return CodeToAsmError.MissingLabel;
+        const selector = switch_routing.parseU32Selector(case.value) orelse
+            return CodeToAsmError.UnsupportedSir;
+        try self.dispatcher_case_marks.append(self.allocator, .{
+            .selector = selector,
+            .target = case.target,
+            .route_index = route_index,
+            .guard_label = guard_label,
+            .target_label = target_label,
+            .switch_store = switch_store,
+            .reference_mode = context.reference_mode,
+        });
+        self.dispatcher_marks.items[mark_index].case_count += 1;
         try self.emitStoredSelector(switch_store);
         try self.bytecode.pushU256(parseU256(case.value) orelse return CodeToAsmError.UnsupportedSir);
         try self.bytecode.pushOp(evm_asm.op.EQ);
@@ -1010,11 +1489,22 @@ const GenericEmitter = struct {
 
     fn emitDefaultSwitchJump(
         self: *GenericEmitter,
+        mark_index: usize,
         function_name: []const u8,
         switch_term: ir.SwitchTerminator,
         context: EmitContext,
     ) !void {
         if (switch_term.default_target.len == 0) return;
+        const jump_label = try self.bytecode.newLabel();
+        try self.bytecode.mark(jump_label);
+        const target_label = self.blockLabel(function_name, switch_term.default_target) orelse
+            return CodeToAsmError.MissingLabel;
+        try self.dispatcher_default_marks.append(self.allocator, .{
+            .jump_label = jump_label,
+            .target_label = target_label,
+            .reference_mode = context.reference_mode,
+        });
+        self.dispatcher_marks.items[mark_index].default_count += 1;
         try self.pushBlockLabel(function_name, switch_term.default_target, context);
         try self.bytecode.pushOp(evm_asm.op.JUMP);
     }
@@ -1258,6 +1748,25 @@ fn findBlock(function: ir.Function, name: []const u8) ?ir.Block {
         if (std.mem.eql(u8, block.name, name)) return block;
     }
     return null;
+}
+
+fn resolveForwardingTarget(
+    program: ir.Program,
+    function_name: []const u8,
+    initial: []const u8,
+) []const u8 {
+    const function = findFunction(program, function_name) orelse return initial;
+    var current = initial;
+    var fuel: usize = function.blocks.len + 1;
+    while (fuel > 0) : (fuel -= 1) {
+        const block = findBlock(function, current) orelse return current;
+        if (block.instructions.len != 0) return current;
+        switch (block.terminator) {
+            .jump => |target| current = target,
+            else => return current,
+        }
+    }
+    return current;
 }
 
 fn findDataSegment(program: ir.Program, name: []const u8) ?usize {
@@ -1597,4 +2106,61 @@ test "generic code-to-asm emits internal call return label pattern" {
     try std.testing.expectEqual(@as(usize, 3), countByte(bytes, evm_asm.op.JUMPDEST));
     try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.JUMP) != null);
     try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.STOP) != null);
+}
+
+test "dispatcher byte validator rejects corrupted exact guards and defaults" {
+    var guard = [_]u8{
+        evm_asm.op.PUSH1, 0x40,
+        evm_asm.op.MLOAD, evm_asm.op.PUSH1,
+        0x2a,             evm_asm.op.EQ,
+        evm_asm.op.PUSH1, 0x10,
+        evm_asm.op.JUMPI,
+    };
+    try std.testing.expect(validateExactGuardBytes(&guard, 0, 0x40, 0x2a, 0x10));
+    guard[5] = evm_asm.op.LT;
+    try std.testing.expect(!validateExactGuardBytes(&guard, 0, 0x40, 0x2a, 0x10));
+
+    var fallback = [_]u8{ evm_asm.op.PUSH1, 0x10, evm_asm.op.JUMP };
+    try std.testing.expect(validateDefaultJumpBytes(&fallback, 0, 0x10));
+    fallback[2] = evm_asm.op.JUMPI;
+    try std.testing.expect(!validateDefaultJumpBytes(&fallback, 0, 0x10));
+}
+
+test "dispatcher byte validator rejects corrupted indexed routing" {
+    var route = [_]u8{
+        evm_asm.op.PUSH1, 0x40,
+        evm_asm.op.MLOAD, evm_asm.op.PUSH1,
+        0x03,             evm_asm.op.AND,
+        evm_asm.op.PUSH0, evm_asm.op.PUSH1,
+        0x80,             evm_asm.op.MSTORE,
+        evm_asm.op.PUSH1, jump_table_entry_width,
+        evm_asm.op.MUL,   evm_asm.op.PUSH1,
+        0x20,             evm_asm.op.ADD,
+        evm_asm.op.PUSH1, jump_table_entry_width,
+        evm_asm.op.SWAP1, evm_asm.op.PUSH1,
+        0x9e,             evm_asm.op.CODECOPY,
+        evm_asm.op.PUSH1, 0x80,
+        evm_asm.op.MLOAD, evm_asm.op.JUMP,
+    };
+    const plan: switch_routing.Plan = .{ .sparse = .{
+        .bucket_bits = 2,
+        .bucket_shift = 0,
+    } };
+    try std.testing.expect(validateIndexedRouteBytes(
+        &route,
+        0,
+        0x40,
+        0x80,
+        0x20,
+        plan,
+    ));
+    route[5] = evm_asm.op.OR;
+    try std.testing.expect(!validateIndexedRouteBytes(
+        &route,
+        0,
+        0x40,
+        0x80,
+        0x20,
+        plan,
+    ));
 }

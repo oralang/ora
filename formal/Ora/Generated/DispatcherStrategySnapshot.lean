@@ -27,4 +27,19 @@ def compilerSparseBucketShifts : List Nat := [0, 4, 8, 12, 16, 20, 24]
 def compilerDenseMaxTableSlots : Nat := 256
 def compilerMinSelectorCheckSavingX1000 : Nat := 1000
 
+def compilerExactSelectorCheckX1000 : Nat := 1000
+def compilerTableDispatchOverheadChecksX1000 : Nat := 2800
+def compilerDenseMultiplicativeExtraChecksX1000 : Nat := 300
+def compilerMultiplicativeSearchBudget : Nat := 512
+def compilerDispatchPolicyLambdasX1000 : List (String × Nat) :=
+  [("gas", 0), ("balanced", 5), ("size", 50)]
+def compilerJumpTableEntryBytes : Nat := 2
+def compilerLinearCaseCodeBytes : Nat := 13
+def compilerDenseBitWindowPreambleCodeBytes : Nat := 30
+def compilerDenseMultiplicativePreambleCodeBytes : Nat := 36
+def compilerDenseUsedSlotCodeBytes : Nat := 18
+def compilerSparsePreambleCodeBytes : Nat := 30
+def compilerSparseUsedBucketCodeBytes : Nat := 5
+def compilerSparseCaseCodeBytes : Nat := 17
+
 end Ora.Generated
