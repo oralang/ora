@@ -3,7 +3,8 @@ Ora refinement bridge — registry ⇄ semantics.
 
 `Refinement.lean` (registry) says which refinements exist and how the compiler
 classifies them (`hasRuntimeGuard` / `compileTimeOnly`); `RefinementValue.lean`
-(semantics) says what each MEANS as a runtime predicate. This file connects them:
+(semantics) says what each means as a runtime predicate. This file connects a
+resolved registry name to a typed runtime predicate:
 
   * `RefinementName.runtimeDenotation` — the predicate a registry name imposes on
     a value, given its typed bounds; and
@@ -12,9 +13,14 @@ classifies them (`hasRuntimeGuard` / `compileTimeOnly`); `RefinementValue.lean`
     `Ora.Refine` predicate; `Exact` / `Scaled` (compile-time-only) denote to
     nothing — and nothing the registry marks compile-time-only can ever denote.
 
-Bounds are TYPED (`α`) here. Interpreting the type-level `RefinementArg` string
-literals (`integer "1"`) into concrete `α` values is a separate value-
-representation step (deferred, like `Scaled`); this file links names to meanings.
+Bounds are typed (`α`) here. The type-level string-name and string-bound bridge
+is handled by `RefinementTie.lean`, where `Ty.runtimeDenotation?` resolves a
+`Ty.refinement` name through the registry and interprets integer bounds through
+an explicit carrier function `Nat -> α`.
+
+Remaining boundary: `Exact` and `Scaled` are compile-time-only in this runtime
+denotation layer and intentionally denote to `none`; carrier-specific numeric
+validity beyond the explicit `Nat -> α` interpretation is not proven here.
 -/
 
 import Ora.Types.Refinement

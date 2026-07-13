@@ -4,8 +4,13 @@ Canonical verification-obligation manifest model.
 This is the Lean-side consumer for compiler-emitted obligation rows. It is not
 the contract semantics layer yet; it checks that the generated manifest is
 structurally well-formed and that every formula/term reference points at a real
-row. Later slices attach semantic meaning to this same syntax for Z3/Lean
-cross-checking.
+row.
+The `*.wf` checks in this file are Boolean structural
+validators, not Prop-valued invariants. They are suitable for `decide`-style
+sync checks and fail-closed data validation, but they do not by themselves
+provide hypotheses that compose in later logical proofs. Semantic meaning is
+defined in `Semantics.lean`, and proof-target agreement is checked in
+`Agreement.lean`.
 -/
 
 namespace Ora.Obligation
