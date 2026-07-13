@@ -31,6 +31,9 @@ theorem dense_max_table_slots_match :
 theorem min_selector_check_saving_match :
     compilerMinSelectorCheckSavingX1000 = expectedMinSelectorCheckSavingX1000 := by decide
 
+theorem check_scale_match :
+    compilerCheckScaleX1000 = expectedCheckScaleX1000 := by decide
+
 theorem table_dispatch_overhead_checks_match :
     compilerTableDispatchOverheadChecksX1000 =
       expectedTableDispatchOverheadChecksX1000 := by decide

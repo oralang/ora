@@ -224,7 +224,7 @@ fn emitCompiledFixtureRows(
 
     if (!first_row.*) try out.writeAll(",\n");
     first_row.* = false;
-    try dispatcher_rows.emitLeanRow(out, allocator, spec.name, switches[0].cases);
+    try dispatcher_rows.emitLeanRow(out, allocator, spec.name, switches[0].cases, .tuple);
 }
 
 fn emitRows(out: anytype, allocator: std.mem.Allocator) !void {

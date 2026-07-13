@@ -649,7 +649,14 @@ pub fn main(init: std.process.Init) !void {
     }
 
     var parsed = cli_args.parseArgs(parse_args.items) catch |err| {
-        std.debug.print("error: invalid arguments: {s}\n", .{@errorName(err)});
+        if (err == error.UnsupportedLeanProofMode) {
+            std.debug.print(
+                "error: --lean-proofs=kernel/both is a repository check, not a contract compilation mode; run `zig build check-formal-sync`\n",
+                .{},
+            );
+        } else {
+            std.debug.print("error: invalid arguments: {s}\n", .{@errorName(err)});
+        }
         try printUsage(io);
         exitCli(2);
     };
@@ -1523,6 +1530,11 @@ fn runBuildArtifacts(
     try moveArtifactFileIfExists(allocator, staging_root, canonical_z3_measure_file, verify_dir);
 
     if (verification_failed) {
+        try stdout.print(
+            "error: build blocked because formal verification did not authorize artifact emission\n",
+            .{},
+        );
+        try stdout.flush();
         return error.VerificationFailed;
     }
 
@@ -2517,7 +2529,7 @@ fn printUsage(io: std.Io) !void {
     try stdout.print("  --z3-proofs            - Emit raw Z3 proof objects in SMT reports/debug output (slower)\n", .{});
     try stdout.print("  --keep-proved-checks   - Keep SMT-proved guards/requires/ensures/invariants as runtime checks (falsification harness)\n", .{});
     try stdout.print("  --lean-proofs[=mode]   - Run Lean gates; userland is the contract-level mode (default)\n", .{});
-    try stdout.print("                           kernel/both are reserved for compiler-kernel checks; use zig build check-formal-sync today\n", .{});
+    try stdout.print("                           kernel/both are rejected by the contract CLI; use zig build check-formal-sync\n", .{});
     try stdout.print("                           Legacy: --lean-proofs <proofs.json> supplies external proof rows\n", .{});
     try stdout.print("  --measure-canonical-z3 - Emit canonical-vs-live SMT hash measurement JSON\n", .{});
     try stdout.print("  --minimize-cores       - Greedily minimize explain-mode unsat cores; implies --explain\n", .{});
@@ -5051,6 +5063,9 @@ fn runMlirEmitAdvanced(
             verification_failed = true;
         }
         if (needs_lean_proof_gate and !lean_artifact_gate_allowed) {
+            try stdout.writeAll(
+                "error: Lean userland obligation proof gate rejected the contract\n",
+            );
             verification_failed = true;
         }
         if (!verification_result.success and !lean_artifact_gate_allowed) {
@@ -5100,6 +5115,18 @@ fn runMlirEmitAdvanced(
     }
 
     if (verification_failed) {
+        const z3_status: []const u8 = if (verification_result_opt) |*result|
+            if (result.success) "accepted" else "rejected"
+        else
+            "not-run";
+        const lean_status: []const u8 = if (needs_userland_lean_gate)
+            "rejected"
+        else
+            "not-requested";
+        try stdout.print(
+            "error: userland verification failed (Z3: {s}, Lean obligation gate: {s})\n",
+            .{ z3_status, lean_status },
+        );
         if (pending_smt_report) |*report| {
             if (mlir_options.measure_canonical_z3) {
                 if (formal_result_for_smt_report) |*formal_result| {
@@ -5323,7 +5350,11 @@ fn runMlirEmitAdvanced(
             mlir_c.freeStringRef(intent_ref);
         };
         if (intent_ref.data == null or intent_ref.length == 0) {
-            try stdout.print("Error: dispatcher intent extraction failed\n", .{});
+            try stdout.print(
+                "error: Lean dispatcher userland proof failed: dispatcher intent extraction returned no facts for '{s}'\n",
+                .{file_path},
+            );
+            try stdout.flush();
             return error.VerificationFailed;
         }
         dispatcher_intent_json = try allocator.dupe(u8, intent_ref.data[0..intent_ref.length]);
@@ -5393,11 +5424,16 @@ fn runMlirEmitAdvanced(
 
         const sir_text = sir_text_ref.data[0..sir_text_ref.length];
         if (needs_lean_dispatcher_gate) {
+            const dispatcher_intent = dispatcher_intent_json orelse {
+                try stdout.writeAll("Lean dispatcher userland proof failed: dispatcher intent facts are unavailable\n");
+                try stdout.flush();
+                return error.VerificationFailed;
+            };
             dispatcher_check = formal_dispatcher_table_gate.checkCurrentModule(
                 allocator,
                 ctx,
                 final_module,
-                dispatcher_intent_json orelse return error.VerificationFailed,
+                dispatcher_intent,
                 sir_text,
                 file_path,
                 mlir_options.process_environ,
@@ -5488,7 +5524,11 @@ fn runMlirEmitAdvanced(
     }
 
     try stdout.flush();
-    if (verification_failed) return error.VerificationFailed;
+    if (verification_failed) {
+        try stdout.writeAll("error: formal verification failed after SIR lowering\n");
+        try stdout.flush();
+        return error.VerificationFailed;
+    }
 }
 
 fn printVersion() !void {
@@ -6836,7 +6876,12 @@ fn applyAutomaticLeanProofArtifactGate(
         stdout,
     );
     defer if (applied) |*result| result.deinit();
-    if (applied == null) return false;
+    if (applied == null) {
+        try stdout.writeAll(
+            "Automatic Lean proof gate failed: the generated proof checker did not accept every targeted Z3 UNKNOWN obligation.\n",
+        );
+        return false;
+    }
 
     const decided_set = applied.?.set;
     const decision = decided_set.artifactDecision();
@@ -7149,7 +7194,14 @@ fn emitBytecodeFromSirText(
             std.Io.Limit.limited(16 * 1024 * 1024),
         );
         defer allocator.free(report_json);
-        try check.validateAndBindBytecode(allocator, report_json, sinora_bytecode);
+        check.validateAndBindBytecode(allocator, report_json, sinora_bytecode) catch |err| {
+            try stdout.print(
+                "Lean dispatcher userland bytecode proof failed: {s}\n",
+                .{@errorName(err)},
+            );
+            try stdout.flush();
+            return error.VerificationFailed;
+        };
         try writeLeanDispatcherProofCertificate(
             allocator,
             file_path,

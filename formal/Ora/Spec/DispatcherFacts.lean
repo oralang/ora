@@ -79,6 +79,7 @@ def expectedMinSelectorCheckSavingX1000 : Nat := 1000
 /- Independent specification of the planner cost model. The compiler emits
    its own values into `DispatcherStrategySnapshot`; kernel-checked sync
    theorems reject any change made on only one side. -/
+def expectedCheckScaleX1000 : Nat := 1000
 def expectedTableDispatchOverheadChecksX1000 : Nat := 2800
 def expectedExactSelectorCheckX1000 : Nat := 1000
 def expectedDenseMultiplicativeExtraChecksX1000 : Nat := 300

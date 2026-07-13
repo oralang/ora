@@ -302,10 +302,9 @@ theorem PlanAdmissible_dense_inj [DecidableEq Idx]
 def preconditionsMet (cases : List (Selector × Label)) (hasDefault : Bool) : Bool :=
   cases.length ≥ 4 && hasDefault
 
-/-- The planner's decision procedure. Checks preconditions first; then searches
-    dense candidates (first admissible one wins), then sparse candidates,
-    falling back to linear. This mirrors the Zig `choosePlan` in
-    `sinora/src/switch_routing.zig`. -/
+/-- A small strategy-agnostic planner used to prove the generic composition
+    pattern. The production scoring planner is specified separately in
+    `Ora.DispatcherPlannerSpec` and implemented by `Ora.SinoraPlanner`. -/
 def choosePlan [DecidableEq Idx] (cases : List (Selector × Label)) (hasDefault : Bool)
     (denseCandidates : List (Selector → Idx)) (sparseCandidates : List (Selector → Idx)) :
     BuilderPlan Idx :=

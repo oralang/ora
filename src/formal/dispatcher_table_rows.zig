@@ -11,6 +11,11 @@ const abi = @import("ora_root").compiler.hir.abi;
 const ir = sinora.ir;
 const switch_routing = sinora.switch_routing;
 
+pub const LeanRowSyntax = enum {
+    tuple,
+    named,
+};
+
 pub const DispatcherIntentManifest = struct {
     schema_version: u32,
     intents: []const DispatcherIntent,
@@ -244,26 +249,44 @@ fn emitLeanPlan(
     out: anytype,
     plan: switch_routing.Plan,
     cases_len: usize,
+    syntax: LeanRowSyntax,
 ) !void {
-    try out.writeAll("(");
-    try writeLeanString(out, planStrategyName(plan));
-    try out.writeAll(", ");
-    try writeLeanString(out, denseKindName(plan));
-    try out.print(", {d}, {d}, {d}, {d})", .{
-        tableSlots(plan, cases_len),
-        indexBits(plan),
-        indexShift(plan),
-        mulConstant(plan),
-    });
+    switch (syntax) {
+        .tuple => {
+            try out.writeByte('(');
+            try writeLeanString(out, planStrategyName(plan));
+            try out.writeAll(", ");
+            try writeLeanString(out, denseKindName(plan));
+            try out.print(", {d}, {d}, {d}, {d})", .{
+                tableSlots(plan, cases_len),
+                indexBits(plan),
+                indexShift(plan),
+                mulConstant(plan),
+            });
+        },
+        .named => {
+            try out.writeAll("{ strategy := ");
+            try writeLeanString(out, planStrategyName(plan));
+            try out.writeAll(", denseKind := ");
+            try writeLeanString(out, denseKindName(plan));
+            try out.print(", tableSlots := {d}, indexBits := {d}, indexShift := {d}, mulConstant := {d} }}", .{
+                tableSlots(plan, cases_len),
+                indexBits(plan),
+                indexShift(plan),
+                mulConstant(plan),
+            });
+        },
+    }
 }
 
 fn emitLeanScoredPlan(
     out: anytype,
     scored: switch_routing.ScoredPlan,
     cases_len: usize,
+    syntax: LeanRowSyntax,
 ) !void {
     try out.writeByte('(');
-    try emitLeanPlan(out, scored.plan, cases_len);
+    try emitLeanPlan(out, scored.plan, cases_len, syntax);
     try out.print(", {d})", .{scored.score_x1000});
 }
 
@@ -271,10 +294,11 @@ fn emitLeanOptionalScoredPlan(
     out: anytype,
     plan: ?switch_routing.ScoredPlan,
     cases_len: usize,
+    syntax: LeanRowSyntax,
 ) !void {
     if (plan) |scored| {
         try out.writeAll("some ");
-        try emitLeanScoredPlan(out, scored, cases_len);
+        try emitLeanScoredPlan(out, scored, cases_len, syntax);
     } else {
         try out.writeAll("none");
     }
@@ -469,6 +493,7 @@ pub fn emitLeanRow(
     allocator: std.mem.Allocator,
     name: []const u8,
     extracted: []const ExtractedCase,
+    syntax: LeanRowSyntax,
 ) !void {
     const cases = try extractedToSwitchCases(allocator, extracted);
     defer freeExtractedSwitchCases(allocator, cases);
@@ -482,22 +507,44 @@ pub fn emitLeanRow(
     defer trace.deinit(allocator);
     const plan = trace.chosen;
 
-    try out.writeAll("  (");
-    try writeLeanString(out, name);
-    try out.writeAll(", ");
-    try emitLeanPlan(out, plan, cases.len);
-    try out.writeAll(", (");
-    try writeLeanString(out, trace.policy.jsonName());
-    try out.print(", {s}, {d}, ", .{
-        if (trace.preconditions_met) "true" else "false",
-        trace.linear_score_x1000,
-    });
-    try emitLeanMultiplicativeSearches(out, trace.multiplicative_searches);
-    try out.print(", {d}, ", .{trace.dense_candidates.len});
-    try emitLeanOptionalScoredPlan(out, trace.best_dense, cases.len);
-    try out.print(", {d}, ", .{trace.sparse_candidates.len});
-    try emitLeanOptionalScoredPlan(out, trace.best_sparse, cases.len);
-    try out.writeAll("),\n    [");
+    switch (syntax) {
+        .tuple => {
+            try out.writeAll("  (");
+            try writeLeanString(out, name);
+            try out.writeAll(", ");
+            try emitLeanPlan(out, plan, cases.len, syntax);
+            try out.writeAll(", (");
+            try writeLeanString(out, trace.policy.jsonName());
+            try out.print(", {s}, {d}, ", .{
+                if (trace.preconditions_met) "true" else "false",
+                trace.linear_score_x1000,
+            });
+            try emitLeanMultiplicativeSearches(out, trace.multiplicative_searches);
+            try out.print(", {d}, ", .{trace.dense_candidates.len});
+            try emitLeanOptionalScoredPlan(out, trace.best_dense, cases.len, syntax);
+            try out.print(", {d}, ", .{trace.sparse_candidates.len});
+            try emitLeanOptionalScoredPlan(out, trace.best_sparse, cases.len, syntax);
+            try out.writeAll("),\n    [");
+        },
+        .named => {
+            try out.writeAll("  { name := ");
+            try writeLeanString(out, name);
+            try out.writeAll(", plan := ");
+            try emitLeanPlan(out, plan, cases.len, syntax);
+            try out.writeAll(", trace := { policy := ");
+            try writeLeanString(out, trace.policy.jsonName());
+            try out.print(", preconditionsMet := {s}, linearScore := {d}, multiplicativeSearches := ", .{
+                if (trace.preconditions_met) "true" else "false",
+                trace.linear_score_x1000,
+            });
+            try emitLeanMultiplicativeSearches(out, trace.multiplicative_searches);
+            try out.print(", denseCandidateCount := {d}, bestDense := ", .{trace.dense_candidates.len});
+            try emitLeanOptionalScoredPlan(out, trace.best_dense, cases.len, syntax);
+            try out.print(", sparseCandidateCount := {d}, bestSparse := ", .{trace.sparse_candidates.len});
+            try emitLeanOptionalScoredPlan(out, trace.best_sparse, cases.len, syntax);
+            try out.writeAll(" },\n    cases := [");
+        },
+    }
 
     for (extracted, 0..) |case, i| {
         if (i != 0) try out.writeAll(",\n     ");
@@ -508,5 +555,8 @@ pub fn emitLeanRow(
             if (case.guarded) "true" else "false",
         });
     }
-    try out.writeAll("])");
+    try out.writeAll(switch (syntax) {
+        .tuple => "])",
+        .named => "] }",
+    });
 }

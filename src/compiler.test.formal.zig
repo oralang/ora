@@ -3042,6 +3042,8 @@ test "lean proofs run dispatcher table proof before bytecode emission" {
 
     const source =
         \\contract DispatcherLeanGate {
+        \\    pub fn init() {}
+        \\
         \\    pub fn den0_() -> u256 {
         \\        return 1;
         \\    }
@@ -3096,19 +3098,7 @@ test "lean proofs run dispatcher table proof before bytecode emission" {
         u8,
         dispatcher_cert,
         1,
-        "current_dispatcher_table_rows_have_named_default",
-    ));
-    try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "current_dispatcher_table_rows_covered"));
-    try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "current_dispatcher_table_rows_match_model"));
-    try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "current_dispatcher_plan_shapes_valid"));
-    try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "current_dispatcher_planner_searches_valid"));
-    try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "current_dispatcher_planner_core_matches"));
-    try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "current_dispatcher_planner_matches"));
-    try testing.expect(std.mem.containsAtLeast(
-        u8,
-        dispatcher_cert,
-        1,
-        "current_dispatcher_manifest_base_rows_match",
+        "current_dispatcher_planner_reference_matches",
     ));
     try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "current_dispatcher_manifest_rows_match"));
     try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "current_dispatcher_builder_correct"));
@@ -3123,6 +3113,9 @@ test "lean proofs run dispatcher table proof before bytecode emission" {
     ));
     try testing.expect(std.mem.containsAtLeast(u8, dispatcher_cert, 1, "\"bytecode_templates_valid\": true"));
     try testing.expect(!std.mem.containsAtLeast(u8, dispatcher_cert, 1, "current_dispatcher_table_rows_guarded"));
+    try testing.expect(!std.mem.containsAtLeast(u8, dispatcher_cert, 1, "current_dispatcher_table_rows_covered"));
+    try testing.expect(!std.mem.containsAtLeast(u8, dispatcher_cert, 1, "current_dispatcher_planner_searches_valid"));
+    try testing.expect(!std.mem.containsAtLeast(u8, dispatcher_cert, 1, "current_dispatcher_manifest_base_rows_match"));
 }
 
 test "lean proofs verify a two-switch dispatcher network through bytecode" {
@@ -3237,9 +3230,27 @@ test "lean proofs discharge multiplicative dispatcher planner trace end to end" 
         u8,
         certificate,
         1,
-        "current_dispatcher_planner_searches_valid",
+        "current_dispatcher_planner_reference_matches",
     ));
     try testing.expect(std.mem.containsAtLeast(
+        u8,
+        certificate,
+        1,
+        "current_dispatcher_manifest_rows_match",
+    ));
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        certificate,
+        1,
+        "current_dispatcher_builder_correct",
+    ));
+    try testing.expect(!std.mem.containsAtLeast(
+        u8,
+        certificate,
+        1,
+        "current_dispatcher_planner_searches_valid",
+    ));
+    try testing.expect(!std.mem.containsAtLeast(
         u8,
         certificate,
         1,
@@ -3299,9 +3310,13 @@ test "dispatcher table Lean checker rejects false generated row" {
         \\def currentDispatcherTableRows :
         \\    List Ora.DispatcherTableSync.RawRow :=
         \\  [
-        \\  ("bad_dense", ("dense", "bit_window", 1, 0, 0, 0),
-        \\    ("balanced", false, 0, [], 0, none, 0, none),
-        \\    [(1, "entry", 0, false)])
+        \\  { name := "bad_dense",
+        \\    plan := { strategy := "dense", denseKind := "bit_window", tableSlots := 1,
+        \\      indexBits := 0, indexShift := 0, mulConstant := 0 },
+        \\    trace := { policy := "balanced", preconditionsMet := false, linearScore := 0,
+        \\      multiplicativeSearches := [], denseCandidateCount := 0, bestDense := none,
+        \\      sparseCandidateCount := 0, bestSparse := none },
+        \\    cases := [(1, "entry", 0, false)] }
         \\  ]
         \\
         \\def currentDispatcherRowsHaveNamedDefault : Bool :=
@@ -3336,9 +3351,13 @@ test "dispatcher table Lean checker rejects false generated row" {
         \\def currentDispatcherTableRows :
         \\    List Ora.DispatcherTableSync.RawRow :=
         \\  [
-        \\  ("bad_coverage", ("dense", "bit_window", 2, 1, 0, 0),
-        \\    ("balanced", true, 0, [], 0, none, 0, none),
-        \\    [(1, "first", 0, true), (2, "second", 0, true)])
+        \\  { name := "bad_coverage",
+        \\    plan := { strategy := "dense", denseKind := "bit_window", tableSlots := 2,
+        \\      indexBits := 1, indexShift := 0, mulConstant := 0 },
+        \\    trace := { policy := "balanced", preconditionsMet := true, linearScore := 0,
+        \\      multiplicativeSearches := [], denseCandidateCount := 0, bestDense := none,
+        \\      sparseCandidateCount := 0, bestSparse := none },
+        \\    cases := [(1, "first", 0, true), (2, "second", 0, true)] }
         \\  ]
         \\
         \\def currentDispatcherRowsCovered : Bool :=
@@ -3387,9 +3406,13 @@ test "dispatcher userland Lean checker rejects invalid plan facts" {
         \\def currentDispatcherTableRows :
         \\    List Ora.DispatcherTableSync.RawRow :=
         \\  [
-        \\  ("bad_kind", ("dense", "xor", 32, 5, 0, 0),
-        \\    ("balanced", false, 0, [], 0, none, 0, none),
-        \\    [(1, "entry", 1, true)])
+        \\  { name := "bad_kind",
+        \\    plan := { strategy := "dense", denseKind := "xor", tableSlots := 32,
+        \\      indexBits := 5, indexShift := 0, mulConstant := 0 },
+        \\    trace := { policy := "balanced", preconditionsMet := false, linearScore := 0,
+        \\      multiplicativeSearches := [], denseCandidateCount := 0, bestDense := none,
+        \\      sparseCandidateCount := 0, bestSparse := none },
+        \\    cases := [(1, "entry", 1, true)] }
         \\  ]
         \\
         \\def currentDispatcherPlansAdmissible : Bool :=
@@ -3422,9 +3445,13 @@ test "dispatcher userland Lean checker rejects invalid plan facts" {
         \\def currentDispatcherTableRows :
         \\    List Ora.DispatcherTableSync.RawRow :=
         \\  [
-        \\  ("bad_shape", ("dense", "bit_window", 64, 5, 0, 0),
-        \\    ("balanced", false, 0, [], 0, none, 0, none),
-        \\    [(1, "entry", 1, true), (2, "other", 2, true)])
+        \\  { name := "bad_shape",
+        \\    plan := { strategy := "dense", denseKind := "bit_window", tableSlots := 64,
+        \\      indexBits := 5, indexShift := 0, mulConstant := 0 },
+        \\    trace := { policy := "balanced", preconditionsMet := false, linearScore := 0,
+        \\      multiplicativeSearches := [], denseCandidateCount := 0, bestDense := none,
+        \\      sparseCandidateCount := 0, bestSparse := none },
+        \\    cases := [(1, "entry", 1, true), (2, "other", 2, true)] }
         \\  ]
         \\
         \\def currentDispatcherPlanShapesValid : Bool :=
@@ -3457,10 +3484,14 @@ test "dispatcher userland Lean checker rejects invalid plan facts" {
         \\def currentDispatcherTableRows :
         \\    List Ora.DispatcherTableSync.RawRow :=
         \\  [
-        \\  ("bad_planner", ("dense", "bit_window", 4, 2, 0, 0),
-        \\    ("balanced", false, 2760, [], 0, none, 0, none),
-        \\    [(0, "a", 0, false), (1, "b", 1, false),
-        \\     (2, "c", 2, false), (3, "d", 3, false)])
+        \\  { name := "bad_planner",
+        \\    plan := { strategy := "dense", denseKind := "bit_window", tableSlots := 4,
+        \\      indexBits := 2, indexShift := 0, mulConstant := 0 },
+        \\    trace := { policy := "balanced", preconditionsMet := false, linearScore := 2760,
+        \\      multiplicativeSearches := [], denseCandidateCount := 0, bestDense := none,
+        \\      sparseCandidateCount := 0, bestSparse := none },
+        \\    cases := [(0, "a", 0, false), (1, "b", 1, false),
+        \\      (2, "c", 2, false), (3, "d", 3, false)] }
         \\  ]
         \\
         \\def currentDispatcherPlannerMatches : Bool :=
@@ -3481,6 +3512,54 @@ test "dispatcher userland Lean checker rejects invalid plan facts" {
     try testing.expect(std.mem.containsAtLeast(u8, bad_planner_result.stderr, 1, "decide") or
         std.mem.containsAtLeast(u8, bad_planner_result.stdout, 1, "decide"));
 
+    const bad_reference_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/BadReference.lean",
+        .{fixture_dir},
+    );
+    defer allocator.free(bad_reference_path);
+    var bad_reference = std.Io.Writer.Allocating.init(allocator);
+    defer bad_reference.deinit();
+    try bad_reference.writer.writeAll(
+        \\import Ora.DispatcherTableSync
+        \\
+        \\namespace Ora.DispatcherUserlandFailureFixture.BadReference
+        \\
+        \\def currentDispatcherTableRows :
+        \\    List Ora.DispatcherTableSync.RawRow :=
+        \\  [
+        \\  { name := "bad_reference",
+        \\    plan := { strategy := "dense", denseKind := "bit_window", tableSlots := 4,
+        \\      indexBits := 2, indexShift := 0, mulConstant := 0 },
+        \\    trace := { policy := "balanced", preconditionsMet := true, linearScore := 0,
+        \\      multiplicativeSearches := [], denseCandidateCount := 0, bestDense := none,
+        \\      sparseCandidateCount := 0, bestSparse := none },
+        \\    cases := [(1447852734, "a", 0, true), (832491607, "b", 1, true),
+        \\      (3309386683, "c", 2, true), (2561671559, "d", 3, true)] }
+        \\  ]
+        \\
+        \\def currentDispatcherPlannerReferenceMatches : Bool :=
+        \\  Ora.DispatcherTableSync.Gate.plannerReferenceMatches currentDispatcherTableRows
+        \\
+        \\theorem current_dispatcher_planner_reference_matches :
+        \\    currentDispatcherPlannerReferenceMatches = true := by decide
+        \\
+        \\end Ora.DispatcherUserlandFailureFixture.BadReference
+        \\
+    );
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = bad_reference_path,
+        .data = bad_reference.written(),
+    });
+
+    const bad_reference_result = try runLeanFileForTest(allocator, bad_reference_path);
+    defer allocator.free(bad_reference_result.stdout);
+    defer allocator.free(bad_reference_result.stderr);
+    try expectExited(bad_reference_result, 1);
+    try testing.expect(std.mem.containsAtLeast(u8, bad_reference_result.stderr, 1, "decide") or
+        std.mem.containsAtLeast(u8, bad_reference_result.stdout, 1, "decide"));
+    try testing.expect(!std.mem.containsAtLeast(u8, bad_reference_result.stderr, 1, "unknown identifier"));
+
     const bad_search_path = try std.fmt.allocPrint(allocator, "{s}/BadSearch.lean", .{fixture_dir});
     defer allocator.free(bad_search_path);
     var bad_search = std.Io.Writer.Allocating.init(allocator);
@@ -3493,18 +3572,25 @@ test "dispatcher userland Lean checker rejects invalid plan facts" {
         \\def currentDispatcherTableRows :
         \\    List Ora.DispatcherTableSync.RawRow :=
         \\  [
-        \\  ("bad_search", ("linear", "", 4, 0, 0, 0),
-        \\    ("balanced", true, 2760,
-        \\      [(4, some 1, [(2462723855, 0, 1)]),
-        \\       (8, some 1, [(2462723855, 0, 2)]),
-        \\       (16, some 0, []), (32, some 0, []), (64, some 0, []),
-        \\       (128, some 0, []), (256, some 0, [])],
-        \\      44, some (("dense", "bit_window", 4, 2, 8, 0), 4350),
-        \\      56, some (("sparse", "", 4, 2, 8, 0), 4430)),
-        \\    [(1447852734, "lin0_", 0, true),
-        \\     (832491607, "lin1_", 1, true),
-        \\     (3309386683, "lin2_", 2, true),
-        \\     (2561671559, "lin3_", 3, true)])
+        \\  { name := "bad_search",
+        \\    plan := { strategy := "linear", denseKind := "", tableSlots := 4,
+        \\      indexBits := 0, indexShift := 0, mulConstant := 0 },
+        \\    trace := { policy := "balanced", preconditionsMet := true, linearScore := 2760,
+        \\      multiplicativeSearches :=
+        \\        [(4, some 1, [(2462723855, 0, 1)]),
+        \\         (8, some 1, [(2462723855, 0, 2)]),
+        \\         (16, some 0, []), (32, some 0, []), (64, some 0, []),
+        \\         (128, some 0, []), (256, some 0, [])],
+        \\      denseCandidateCount := 44,
+        \\      bestDense := some ({ strategy := "dense", denseKind := "bit_window",
+        \\        tableSlots := 4, indexBits := 2, indexShift := 8, mulConstant := 0 }, 4350),
+        \\      sparseCandidateCount := 56,
+        \\      bestSparse := some ({ strategy := "sparse", denseKind := "",
+        \\        tableSlots := 4, indexBits := 2, indexShift := 8, mulConstant := 0 }, 4430) },
+        \\    cases := [(1447852734, "lin0_", 0, true),
+        \\      (832491607, "lin1_", 1, true),
+        \\      (3309386683, "lin2_", 2, true),
+        \\      (2561671559, "lin3_", 3, true)] }
         \\  ]
         \\
         \\def currentDispatcherPlannerSearchesValid : Bool :=

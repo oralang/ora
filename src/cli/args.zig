@@ -85,6 +85,7 @@ pub const ParseError = error{
     MissingArgument,
     UnknownArgument,
     DuplicateArgument,
+    UnsupportedLeanProofMode,
 };
 
 fn claim(seen: *bool) ParseError!void {
@@ -307,6 +308,7 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             opts.lean_proofs_mode = .userland;
             if (i + 1 < args.len and !std.mem.startsWith(u8, args[i + 1], "-") and !looksLikeOraSourcePath(args[i + 1])) {
                 if (parseLeanProofMode(args[i + 1])) |mode| {
+                    if (mode.includesKernel()) return error.UnsupportedLeanProofMode;
                     opts.lean_proofs_mode = mode;
                 } else {
                     opts.lean_proofs_path = args[i + 1];
@@ -321,6 +323,7 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             const value = arg["--lean-proofs=".len..];
             if (value.len == 0) return error.MissingArgument;
             if (parseLeanProofMode(value)) |mode| {
+                if (mode.includesKernel()) return error.UnsupportedLeanProofMode;
                 opts.lean_proofs_mode = mode;
             } else {
                 opts.lean_proofs_mode = .userland;
@@ -502,19 +505,14 @@ test "parse lean proof modes" {
     try std.testing.expect(!userland.lean_proofs_mode.includesKernel());
     try std.testing.expect(userland.lean_proofs_path == null);
 
-    const kernel = try parseArgs(&.{ "--lean-proofs", "kernel", "input.ora" });
-    try std.testing.expect(kernel.lean_proofs_requested);
-    try std.testing.expectEqual(LeanProofMode.kernel, kernel.lean_proofs_mode);
-    try std.testing.expect(!kernel.lean_proofs_mode.includesUserland());
-    try std.testing.expect(kernel.lean_proofs_mode.includesKernel());
-    try std.testing.expect(kernel.lean_proofs_path == null);
-
-    const both = try parseArgs(&.{ "--lean-proofs=both", "input.ora" });
-    try std.testing.expect(both.lean_proofs_requested);
-    try std.testing.expectEqual(LeanProofMode.both, both.lean_proofs_mode);
-    try std.testing.expect(both.lean_proofs_mode.includesUserland());
-    try std.testing.expect(both.lean_proofs_mode.includesKernel());
-    try std.testing.expect(both.lean_proofs_path == null);
+    try std.testing.expectError(
+        error.UnsupportedLeanProofMode,
+        parseArgs(&.{ "--lean-proofs", "kernel", "input.ora" }),
+    );
+    try std.testing.expectError(
+        error.UnsupportedLeanProofMode,
+        parseArgs(&.{ "--lean-proofs=both", "input.ora" }),
+    );
 }
 
 test "parse canonical Z3 measurement flag" {

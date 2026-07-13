@@ -69,6 +69,7 @@ pub fn main(init: std.process.Init) !void {
     try emitNatList(out, "compilerSparseBucketShifts", switch_routing.sparse_bucket_shifts);
     try out.print("def compilerDenseMaxTableSlots : Nat := {d}\n", .{switch_routing.dense_max_table_slots});
     try out.print("def compilerMinSelectorCheckSavingX1000 : Nat := {d}\n\n", .{switch_routing.min_selector_check_saving_x1000});
+    try out.print("def compilerCheckScaleX1000 : Nat := {d}\n", .{switch_routing.check_scale_x1000});
     try out.print("def compilerExactSelectorCheckX1000 : Nat := {d}\n", .{switch_routing.exact_selector_check_x1000});
     try out.print("def compilerTableDispatchOverheadChecksX1000 : Nat := {d}\n", .{switch_routing.table_dispatch_overhead_checks_x1000});
     try out.print("def compilerDenseMultiplicativeExtraChecksX1000 : Nat := {d}\n", .{switch_routing.dense_multiplicative_extra_checks_x1000});

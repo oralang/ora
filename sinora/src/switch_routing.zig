@@ -19,6 +19,7 @@ pub const dense_max_table_slots: usize = 256;
 // only a small model-error margin remains. Lean-pinned in
 // Ora/Spec/DispatcherFacts.lean.
 pub const min_selector_check_saving_x1000: usize = 1000;
+pub const check_scale_x1000: usize = 1000;
 pub const exact_selector_check_x1000: usize = 1000;
 
 /// Dispatch-overhead costs in check-equivalents. One "check" is the exact
@@ -689,7 +690,7 @@ fn analyzeSparsePlan(cases: []const ir.SwitchCase, bucket_bits: u8, bucket_shift
         .empty_buckets = bucket_count - used_buckets,
         .singleton_buckets = singleton_buckets,
         .max_bucket_size = max_bucket_size,
-        .avg_bucket_size_x1000 = divRound(n * 1000, used_buckets),
+        .avg_bucket_size_x1000 = divRound(n * check_scale_x1000, used_buckets),
         .linear_worst_checks = n,
         .linear_known_selector_avg_checks_x1000 = linearAverageChecksX1000(n),
         .sparse_worst_bucket_checks = max_bucket_size,
@@ -740,7 +741,7 @@ fn makeDensePlan(args: struct {
         .table_slots = args.table_slots,
         .used_slots = args.cases,
         .hole_slots = args.table_slots - args.cases,
-        .load_factor_x1000 = divRound(args.cases * 1000, args.table_slots),
+        .load_factor_x1000 = divRound(args.cases * check_scale_x1000, args.table_slots),
         .index_bits = args.index_bits,
         .index_shift = args.index_shift,
         .mul_constant = args.mul_constant,

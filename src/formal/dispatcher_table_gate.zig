@@ -252,6 +252,7 @@ fn buildCheckerSource(
         \\    List Ora.DispatcherTableSync.RawRow :=
         \\  [
     );
+    try writer.writeByte('\n');
 
     var first = true;
     for (switches) |sw| {
@@ -259,7 +260,7 @@ fn buildCheckerSource(
         first = false;
         var name_buf: [64]u8 = undefined;
         const name = try std.fmt.bufPrint(&name_buf, "user_dispatcher_switch_{d}", .{sw.ordinal});
-        try dispatcher_rows.emitLeanRow(writer, allocator, name, sw.cases);
+        try dispatcher_rows.emitLeanRow(writer, allocator, name, sw.cases, .named);
     }
 
     try writer.writeAll(
@@ -315,9 +316,6 @@ fn buildCheckerSource(
         \\def currentDispatcherPlanShapesValid : Bool :=
         \\  Ora.DispatcherTableSync.Gate.planShapesValid currentDispatcherTableRows
         \\
-        \\def currentDispatcherPlansAdmissible : Bool :=
-        \\  Ora.DispatcherTableSync.Gate.plansAdmissible currentDispatcherTableRows
-        \\
         \\def currentDispatcherPlannerMatches : Bool :=
         \\  Ora.DispatcherTableSync.Gate.plannerMatches currentDispatcherTableRows
         \\
@@ -326,6 +324,9 @@ fn buildCheckerSource(
         \\
         \\def currentDispatcherPlannerCoreMatches : Bool :=
         \\  Ora.DispatcherTableSync.Gate.plannerCoreMatches currentDispatcherTableRows
+        \\
+        \\def currentDispatcherPlannerReferenceMatches : Bool :=
+        \\  Ora.DispatcherTableSync.Gate.plannerReferenceMatches currentDispatcherTableRows
         \\
         \\def currentDispatcherPlanIndicesMatch : Bool :=
         \\  Ora.DispatcherTableSync.Gate.planIndicesMatch currentDispatcherTableRows
@@ -351,9 +352,6 @@ fn buildCheckerSource(
         \\theorem current_dispatcher_plan_shapes_valid :
         \\    currentDispatcherPlanShapesValid = true := by decide
         \\
-        \\theorem current_dispatcher_plans_admissible :
-        \\    currentDispatcherPlansAdmissible = true := by decide
-        \\
         \\set_option maxRecDepth 1000000 in
         \\set_option maxHeartbeats 2000000 in
         \\theorem current_dispatcher_planner_searches_valid :
@@ -363,6 +361,11 @@ fn buildCheckerSource(
         \\set_option maxHeartbeats 2000000 in
         \\theorem current_dispatcher_planner_core_matches :
         \\    currentDispatcherPlannerCoreMatches = true := by decide
+        \\
+        \\set_option maxRecDepth 1000000 in
+        \\set_option maxHeartbeats 2000000 in
+        \\theorem current_dispatcher_planner_reference_matches :
+        \\    currentDispatcherPlannerReferenceMatches = true := by decide
         \\
         \\theorem current_dispatcher_planner_matches :
         \\    currentDispatcherPlannerMatches = true := by
@@ -384,10 +387,12 @@ fn buildCheckerSource(
         \\    current_dispatcher_manifest_base_rows_match
         \\    current_dispatcher_planner_matches
         \\
+        \\set_option maxRecDepth 1000000 in
+        \\set_option maxHeartbeats 2000000 in
         \\theorem current_dispatcher_builder_correct :
         \\    ∀ row, row ∈ currentDispatcherTableRows → Ora.DispatcherTableSync.Gate.rowStrategyWF row :=
         \\  Ora.DispatcherTableSync.Gate.builderCorrect
-        \\    currentDispatcherTableRows current_dispatcher_planner_matches
+        \\    currentDispatcherTableRows current_dispatcher_planner_reference_matches
         \\
         \\end Ora.DispatcherRuntimeCheck
         \\
@@ -494,17 +499,7 @@ fn buildCertificateJson(
         \\  "theorems": [
         \\    "current_dispatcher_network_matches",
         \\    "current_dispatcher_unknown_selectors_revert",
-        \\    "current_dispatcher_table_rows_have_named_default",
-        \\    "current_dispatcher_table_rows_covered",
-        \\    "current_dense_rows_injective",
-        \\    "current_dispatcher_table_rows_match_model",
-        \\    "current_dispatcher_plan_shapes_valid",
-        \\    "current_dispatcher_plans_admissible",
-        \\    "current_dispatcher_planner_searches_valid",
-        \\    "current_dispatcher_planner_core_matches",
-        \\    "current_dispatcher_planner_matches",
-        \\    "current_dispatcher_plan_indices_match",
-        \\    "current_dispatcher_manifest_base_rows_match",
+        \\    "current_dispatcher_planner_reference_matches",
         \\    "current_dispatcher_manifest_rows_match",
         \\    "current_dispatcher_builder_correct"
         \\  ]

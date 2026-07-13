@@ -27,6 +27,7 @@ def compilerSparseBucketShifts : List Nat := [0, 4, 8, 12, 16, 20, 24]
 def compilerDenseMaxTableSlots : Nat := 256
 def compilerMinSelectorCheckSavingX1000 : Nat := 1000
 
+def compilerCheckScaleX1000 : Nat := 1000
 def compilerExactSelectorCheckX1000 : Nat := 1000
 def compilerTableDispatchOverheadChecksX1000 : Nat := 2800
 def compilerDenseMultiplicativeExtraChecksX1000 : Nat := 300

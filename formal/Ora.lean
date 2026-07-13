@@ -46,6 +46,8 @@ import Ora.Spec.TypeRelations
 import Ora.Generated.CompilerTypeRelations
 import Ora.TypeRelationsSync
 import Ora.Dispatcher
+import Ora.DispatcherPlannerSpec
+import Ora.SinoraPlanner
 import Ora.Spec.DispatcherFacts
 import Ora.Generated.DispatcherStrategySnapshot
 import Ora.DispatcherStrategySync

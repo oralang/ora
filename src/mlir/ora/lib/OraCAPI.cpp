@@ -8344,6 +8344,8 @@ MlirStringRef oraExtractSIRDispatcherIntentFacts(MlirContext ctx, MlirModule mod
             auto visibility = func->getAttrOfType<StringAttr>("ora.visibility");
             if (!visibility || visibility.getValue() != "pub")
                 continue;
+            if (auto init = func->getAttrOfType<BoolAttr>("ora.init"); init && init.getValue())
+                continue;
             auto selector = func->getAttrOfType<StringAttr>("ora.selector");
             if (!selector)
             {
