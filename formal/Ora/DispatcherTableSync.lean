@@ -31,13 +31,12 @@ namespace Ora.DispatcherTableSync
 
 open Ora.Generated Ora.Spec.DispatcherFacts
 
-abbrev RawCase := Nat × String × Nat × Bool
-abbrev GeneratedRawPlan := String × String × Nat × Nat × Nat × Nat
-abbrev GeneratedRawScoredPlan := GeneratedRawPlan × Nat
-abbrev GeneratedRawPlannerTrace :=
-  String × Bool × Nat × List (Nat × Option Nat × List (Nat × Nat × Nat)) ×
-    Nat × Option GeneratedRawScoredPlan × Nat × Option GeneratedRawScoredPlan
-abbrev GeneratedRawRow := String × GeneratedRawPlan × GeneratedRawPlannerTrace × List RawCase
+structure RawCase where
+  selector : Nat
+  label : String
+  index : Nat
+  hasNamedDefault : Bool
+  deriving Repr, DecidableEq
 
 structure RawPlan where
   strategy : String
@@ -49,8 +48,33 @@ structure RawPlan where
   deriving Repr, DecidableEq
 
 abbrev RawScoredPlan := RawPlan × Nat
-abbrev RawCollisionWitness := Nat × Nat × Nat
-abbrev RawMultiplicativeSearch := Nat × Option Nat × List RawCollisionWitness
+
+structure RawCollisionWitness where
+  constant : Nat
+  firstCase : Nat
+  secondCase : Nat
+  deriving Repr, DecidableEq
+
+structure RawMultiplicativeSearch where
+  tableSlots : Nat
+  selected : Option Nat
+  rejected : List RawCollisionWitness
+  deriving Repr, DecidableEq
+
+/- The generated snapshot stays on positional tuples as its wire format; the
+   decode layer below is the single place that binds tuple positions to named
+   fields, so a transposed emitter column shows up here and nowhere else. -/
+abbrev GeneratedRawCase := Nat × String × Nat × Bool
+abbrev GeneratedRawPlan := String × String × Nat × Nat × Nat × Nat
+abbrev GeneratedRawScoredPlan := GeneratedRawPlan × Nat
+abbrev GeneratedRawCollisionWitness := Nat × Nat × Nat
+abbrev GeneratedRawMultiplicativeSearch :=
+  Nat × Option Nat × List GeneratedRawCollisionWitness
+abbrev GeneratedRawPlannerTrace :=
+  String × Bool × Nat × List GeneratedRawMultiplicativeSearch ×
+    Nat × Option GeneratedRawScoredPlan × Nat × Option GeneratedRawScoredPlan
+abbrev GeneratedRawRow :=
+  String × GeneratedRawPlan × GeneratedRawPlannerTrace × List GeneratedRawCase
 
 structure RawPlannerTrace where
   policy : String
@@ -70,6 +94,10 @@ structure RawRow where
   cases : List RawCase
   deriving Repr, DecidableEq
 
+def decodeGeneratedCase : GeneratedRawCase → RawCase
+  | (selector, label, index, hasNamedDefault) =>
+      { selector, label, index, hasNamedDefault }
+
 def decodeGeneratedPlan : GeneratedRawPlan → RawPlan
   | (strategy, denseKind, tableSlots, indexBits, indexShift, mulConstant) =>
       { strategy, denseKind, tableSlots, indexBits, indexShift, mulConstant }
@@ -77,45 +105,55 @@ def decodeGeneratedPlan : GeneratedRawPlan → RawPlan
 def decodeGeneratedScoredPlan : GeneratedRawScoredPlan → RawScoredPlan
   | (plan, score) => (decodeGeneratedPlan plan, score)
 
+def decodeGeneratedCollisionWitness : GeneratedRawCollisionWitness → RawCollisionWitness
+  | (constant, firstCase, secondCase) => { constant, firstCase, secondCase }
+
+def decodeGeneratedMultiplicativeSearch :
+    GeneratedRawMultiplicativeSearch → RawMultiplicativeSearch
+  | (tableSlots, selected, rejected) =>
+      { tableSlots, selected,
+        rejected := rejected.map decodeGeneratedCollisionWitness }
+
 def decodeGeneratedPlannerTrace : GeneratedRawPlannerTrace → RawPlannerTrace
   | (policy, preconditionsMet, linearScore, multiplicativeSearches,
       denseCandidateCount, bestDense, sparseCandidateCount, bestSparse) =>
-      { policy, preconditionsMet, linearScore, multiplicativeSearches,
+      { policy, preconditionsMet, linearScore,
+        multiplicativeSearches :=
+          multiplicativeSearches.map decodeGeneratedMultiplicativeSearch,
         denseCandidateCount, bestDense := bestDense.map decodeGeneratedScoredPlan,
         sparseCandidateCount, bestSparse := bestSparse.map decodeGeneratedScoredPlan }
 
 def decodeGeneratedRow : GeneratedRawRow → RawRow
   | (name, plan, trace, cases) =>
       { name, plan := decodeGeneratedPlan plan,
-        trace := decodeGeneratedPlannerTrace trace, cases }
+        trace := decodeGeneratedPlannerTrace trace,
+        cases := cases.map decodeGeneratedCase }
 
 def compilerDispatcherTableRows : List RawRow :=
   Ora.Generated.compilerDispatcherTableRows.map decodeGeneratedRow
 
+/- An intent stays a plain pair so it is definitionally the same type as a
+   network switch case entry (`networkCasesAuthorized` compares them directly). -/
 abbrev RawIntent := Nat × String
-abbrev RawNetworkSwitch := String × String × List (Nat × String)
+
+structure RawNetworkSwitch where
+  block : String
+  defaultTarget : String
+  cases : List (Nat × String)
+  deriving Repr, DecidableEq
 
 def intentSelector : RawIntent → Nat := Prod.fst
 def intentLabel : RawIntent → String := Prod.snd
 
-def networkSwitchBlock : RawNetworkSwitch → String
-  | (block, _, _) => block
-
-def networkSwitchDefault : RawNetworkSwitch → String
-  | (_, fallback, _) => fallback
-
-def networkSwitchCases : RawNetworkSwitch → List (Nat × String)
-  | (_, _, cases) => cases
-
 def dispatchNetwork : Nat → List RawNetworkSwitch → String → Nat → String
   | 0, _, block, _ => block
   | fuel + 1, switches, block, selector =>
-      match switches.find? (fun sw => networkSwitchBlock sw == block) with
+      match switches.find? (fun sw => sw.block == block) with
       | none => block
       | some sw =>
-          match (networkSwitchCases sw).find? (fun c => c.1 == selector) with
+          match sw.cases.find? (fun c => c.1 == selector) with
           | some c => c.2
-          | none => dispatchNetwork fuel switches (networkSwitchDefault sw) selector
+          | none => dispatchNetwork fuel switches sw.defaultTarget selector
 
 def networkNoDuplicateNat : List Nat → Bool
   | [] => true
@@ -129,24 +167,23 @@ def networkNoDuplicateString : List String → Bool
   | value :: rest => !(rest.contains value) && networkNoDuplicateString rest
 
 def networkBlocksDistinct (switches : List RawNetworkSwitch) : Bool :=
-  networkNoDuplicateString (switches.map networkSwitchBlock)
+  networkNoDuplicateString (switches.map (·.block))
 
 def networkCasesAuthorized
     (intents : List RawIntent) (switches : List RawNetworkSwitch) : Bool :=
   switches.all fun sw =>
-    (networkSwitchCases sw).all fun c => intents.contains c
+    sw.cases.all fun c => intents.contains c
 
 def networkIntentsPresentExactlyOnce
     (intents : List RawIntent) (switches : List RawNetworkSwitch) : Bool :=
   intents.all fun intent =>
     decide ((switches.foldl (fun count sw =>
-      count + (networkSwitchCases sw).count intent) 0) = 1)
+      count + sw.cases.count intent) 0) = 1)
 
 def networkDefaultsKnown (switches : List RawNetworkSwitch) : Bool :=
   switches.all fun sw =>
-    networkSwitchDefault sw == "revert_error" ||
-      switches.any (fun target =>
-        networkSwitchBlock target == networkSwitchDefault sw)
+    sw.defaultTarget == "revert_error" ||
+      switches.any (fun target => target.block == sw.defaultTarget)
 
 def networkKnownSelectorsReachIntent
     (intents : List RawIntent)
@@ -173,116 +210,41 @@ def dispatcherNetworkMatches
     networkKnownSelectorsReachIntent intents switches entry &&
     networkDefaultReachesRevert switches entry
 
-def caseSelector : RawCase → Nat
-  | (selector, _, _, _) => selector
-
-def caseLabel : RawCase → String
-  | (_, label, _, _) => label
-
-def caseIndex : RawCase → Nat
-  | (_, _, index, _) => index
-
-def caseHasNamedDefault : RawCase → Bool
-  | (_, _, _, hasNamedDefault) => hasNamedDefault
-
-def rowName (row : RawRow) : String := row.name
-
-def planStrategy (plan : RawPlan) : String := plan.strategy
-
-def planDenseKind (plan : RawPlan) : String := plan.denseKind
-
-def planTableSlots (plan : RawPlan) : Nat := plan.tableSlots
-
-def planIndexBits (plan : RawPlan) : Nat := plan.indexBits
-
-def planIndexShift (plan : RawPlan) : Nat := plan.indexShift
-
-def planMulConstant (plan : RawPlan) : Nat := plan.mulConstant
-
-def rowPlan (row : RawRow) : RawPlan := row.plan
-
-def rowStrategy : RawRow → String
-  | row => planStrategy (rowPlan row)
-
-def rowDenseKind : RawRow → String
-  | row => planDenseKind (rowPlan row)
-
-def rowTableSlots : RawRow → Nat
-  | row => planTableSlots (rowPlan row)
-
-def rowIndexBits : RawRow → Nat
-  | row => planIndexBits (rowPlan row)
-
-def rowIndexShift : RawRow → Nat
-  | row => planIndexShift (rowPlan row)
-
-def rowMulConstant : RawRow → Nat
-  | row => planMulConstant (rowPlan row)
-
-def rowTrace (row : RawRow) : RawPlannerTrace := row.trace
-
-def tracePolicy (trace : RawPlannerTrace) : String := trace.policy
-
-def tracePreconditionsMet (trace : RawPlannerTrace) : Bool := trace.preconditionsMet
-
-def traceLinearScore (trace : RawPlannerTrace) : Nat := trace.linearScore
-
-def traceMultiplicativeSearches (trace : RawPlannerTrace) : List RawMultiplicativeSearch :=
-  trace.multiplicativeSearches
-
-def traceDenseCandidateCount (trace : RawPlannerTrace) : Nat := trace.denseCandidateCount
-
-def traceBestDense (trace : RawPlannerTrace) : Option RawScoredPlan := trace.bestDense
-
-def traceSparseCandidateCount (trace : RawPlannerTrace) : Nat := trace.sparseCandidateCount
-
-def traceBestSparse (trace : RawPlannerTrace) : Option RawScoredPlan := trace.bestSparse
-
-def rowCases (row : RawRow) : List RawCase := row.cases
-
 def casePair (c : RawCase) : Nat × String :=
-  (caseSelector c, caseLabel c)
+  (c.selector, c.label)
 
 def rowCasePairs (row : RawRow) : List (Nat × String) :=
-  (rowCases row).map casePair
+  row.cases.map casePair
 
 def noDuplicateBy (key : RawCase → Nat) : List RawCase → Bool
   | [] => true
   | c :: rest => !(rest.any (fun d => key d == key c)) && noDuplicateBy key rest
 
 def allHasNamedDefault (row : RawRow) : Bool :=
-  (rowCases row).all caseHasNamedDefault
+  row.cases.all (·.hasNamedDefault)
 
 def routeIndicesInRange (row : RawRow) : Bool :=
-  decide (0 < rowTableSlots row) &&
-    (rowCases row).all (fun c => decide (caseIndex c < rowTableSlots row))
+  decide (0 < row.plan.tableSlots) &&
+    row.cases.all (fun c => decide (c.index < row.plan.tableSlots))
 
 def pow2 (bits : Nat) : Nat :=
   2 ^ bits
 
-def indexedShapeValid (row : RawRow) : Bool :=
-  decide (0 < rowIndexBits row) &&
-    decide (rowIndexBits row <= 8) &&
-    decide (rowTableSlots row = pow2 (rowIndexBits row))
-
 def linearRouteIndicesSequentialFrom : Nat → List RawCase → Bool
   | _, [] => true
   | index, c :: rest =>
-      (caseIndex c == index) && linearRouteIndicesSequentialFrom (index + 1) rest
+      (c.index == index) && linearRouteIndicesSequentialFrom (index + 1) rest
 
 def linearRouteIndicesSequential (row : RawRow) : Bool :=
-  linearRouteIndicesSequentialFrom 0 (rowCases row)
-
-def selectorKnown (cases : List RawCase) (selector : Nat) : Bool :=
-  cases.any (fun c => caseSelector c == selector)
+  linearRouteIndicesSequentialFrom 0 row.cases
 
 def indexForSelector (cases : List RawCase) (selector : Nat) : Nat :=
-  match cases.find? (fun c => caseSelector c == selector) with
-  | some c => caseIndex c
+  match cases.find? (fun c => c.selector == selector) with
+  | some c => c.index
   | none => 0
 
 def tableAtIndex (cases : List RawCase) (index : Nat) : Option (Nat × String) :=
-  match cases.find? (fun c => caseIndex c == index) with
+  match cases.find? (fun c => c.index == index) with
   | some c => some (casePair c)
   | none => none
 
@@ -293,139 +255,138 @@ def multiplicativeIndex (selector constant bits : Nat) : Nat :=
   (selector * constant / pow2 (32 - bits)) % pow2 bits
 
 def planShapeValid (plan : RawPlan) (casesLen : Nat) : Bool :=
-  match planStrategy plan, planDenseKind plan with
+  match plan.strategy, plan.denseKind with
   | "linear", "" =>
-      decide (planTableSlots plan = casesLen) &&
-        decide (planIndexBits plan = 0) &&
-        decide (planIndexShift plan = 0) &&
-        decide (planMulConstant plan = 0)
+      decide (plan.tableSlots = casesLen) &&
+        decide (plan.indexBits = 0) &&
+        decide (plan.indexShift = 0) &&
+        decide (plan.mulConstant = 0)
   | "sparse", "" =>
-      decide (0 < planIndexBits plan) &&
-        decide (planIndexBits plan <= 8) &&
-        decide (planTableSlots plan = pow2 (planIndexBits plan)) &&
-        decide (planIndexShift plan <= 24) &&
-        decide (planMulConstant plan = 0)
+      decide (0 < plan.indexBits) &&
+        decide (plan.indexBits <= 8) &&
+        decide (plan.tableSlots = pow2 plan.indexBits) &&
+        decide (plan.indexShift <= 24) &&
+        decide (plan.mulConstant = 0)
   | "dense", "bit_window" =>
-      decide (0 < planIndexBits plan) &&
-        decide (planIndexBits plan <= 8) &&
-        decide (planTableSlots plan = pow2 (planIndexBits plan)) &&
-        decide (planIndexShift plan <= 24) &&
-        decide (planMulConstant plan = 0)
+      decide (0 < plan.indexBits) &&
+        decide (plan.indexBits <= 8) &&
+        decide (plan.tableSlots = pow2 plan.indexBits) &&
+        decide (plan.indexShift <= 24) &&
+        decide (plan.mulConstant = 0)
   | "dense", "multiplicative" =>
-      decide (0 < planIndexBits plan) &&
-        decide (planIndexBits plan <= 8) &&
-        decide (planTableSlots plan = pow2 (planIndexBits plan)) &&
-        decide (planIndexShift plan = 32 - planIndexBits plan) &&
-        decide (0 < planMulConstant plan) &&
-        decide (planMulConstant plan % 2 = 1)
+      decide (0 < plan.indexBits) &&
+        decide (plan.indexBits <= 8) &&
+        decide (plan.tableSlots = pow2 plan.indexBits) &&
+        decide (plan.indexShift = 32 - plan.indexBits) &&
+        decide (0 < plan.mulConstant) &&
+        decide (plan.mulConstant % 2 = 1)
   | _, _ => false
 
 def rowPlanShapeValid (row : RawRow) : Bool :=
-  planShapeValid (rowPlan row) (rowCases row).length
+  planShapeValid row.plan row.cases.length
 
 def planIndex (plan : RawPlan) (selector : Nat) : Nat :=
-  match planStrategy plan, planDenseKind plan with
+  match plan.strategy, plan.denseKind with
   | "dense", "multiplicative" =>
-      multiplicativeIndex selector (planMulConstant plan) (planIndexBits plan)
+      multiplicativeIndex selector plan.mulConstant plan.indexBits
   | "dense", "bit_window" =>
-      bitWindowIndex selector (planIndexBits plan) (planIndexShift plan)
+      bitWindowIndex selector plan.indexBits plan.indexShift
   | "sparse", _ =>
-      bitWindowIndex selector (planIndexBits plan) (planIndexShift plan)
+      bitWindowIndex selector plan.indexBits plan.indexShift
   | _, _ => 0
 
 def rowPlanIndex (row : RawRow) (selector : Nat) : Nat :=
-  planIndex (rowPlan row) selector
+  planIndex row.plan selector
 
 def planBuilder? (plan : RawPlan) (casesLen : Nat) : Option (Ora.Dispatcher.BuilderPlan Nat) :=
   if planShapeValid plan casesLen then
-    match planStrategy plan, planDenseKind plan with
+    match plan.strategy, plan.denseKind with
     | "linear", "" => some .linear
     | "dense", "multiplicative" =>
         some (.dense (fun selector =>
-          multiplicativeIndex selector (planMulConstant plan) (planIndexBits plan)))
+          multiplicativeIndex selector plan.mulConstant plan.indexBits))
     | "dense", "bit_window" =>
         some (.dense (fun selector =>
-          bitWindowIndex selector (planIndexBits plan) (planIndexShift plan)))
+          bitWindowIndex selector plan.indexBits plan.indexShift))
     | "sparse", "" =>
         some (.sparse (fun selector =>
-          bitWindowIndex selector (planIndexBits plan) (planIndexShift plan)))
+          bitWindowIndex selector plan.indexBits plan.indexShift))
     | _, _ => none
   else
     none
 
 def rowBuilderPlan? (row : RawRow) : Option (Ora.Dispatcher.BuilderPlan Nat) :=
-  planBuilder? (rowPlan row) (rowCases row).length
+  planBuilder? row.plan row.cases.length
 
 def indexedDispatcher (row : RawRow) : Ora.Dispatcher.Dispatcher Nat Nat String :=
-  let cases := rowCases row
-  { index := fun selector => indexForSelector cases selector,
-    table := fun index => tableAtIndex cases index }
+  { index := fun selector => indexForSelector row.cases selector,
+    table := fun index => tableAtIndex row.cases index }
 
 def indexedRunKnownOk (row : RawRow) : Bool :=
-  (rowCases row).all fun c =>
-    (indexedDispatcher row).run (caseSelector c) == some (caseLabel c)
+  row.cases.all fun c =>
+    (indexedDispatcher row).run c.selector == some c.label
 
 def indexedRunSoundOk (row : RawRow) : Bool :=
   let d := indexedDispatcher row
-  (rowCases row).all fun c =>
-    match d.run (caseSelector c) with
-    | some label => d.table (d.index (caseSelector c)) == some (caseSelector c, label)
+  row.cases.all fun c =>
+    match d.run c.selector with
+    | some label => d.table (d.index c.selector) == some (c.selector, label)
     | none => false
 
 def linearRunKnownOk (row : RawRow) : Bool :=
-  let table := (rowCases row).map casePair
-  (rowCases row).all fun c =>
-    Ora.Dispatcher.linearRun table (caseSelector c) == some (caseLabel c)
+  let table := row.cases.map casePair
+  row.cases.all fun c =>
+    Ora.Dispatcher.linearRun table c.selector == some c.label
 
 def linearRunSoundOk (row : RawRow) : Bool :=
-  let table := (rowCases row).map casePair
-  (rowCases row).all fun c =>
-    match Ora.Dispatcher.linearRun table (caseSelector c) with
-    | some label => table.any (fun entry => entry == (caseSelector c, label))
+  let table := row.cases.map casePair
+  row.cases.all fun c =>
+    match Ora.Dispatcher.linearRun table c.selector with
+    | some label => table.any (fun entry => entry == (c.selector, label))
     | none => false
 
 def bucketEntries (cases : List RawCase) (index : Nat) : List (Nat × String) :=
-  (cases.filter (fun c => caseIndex c == index)).map casePair
+  (cases.filter (fun c => c.index == index)).map casePair
 
 def sparseDispatcher (row : RawRow) : Ora.Dispatcher.SparseDispatcher Nat Nat String :=
-  let cases := rowCases row
-  { index := fun selector => indexForSelector cases selector,
-    buckets := fun index => bucketEntries cases index }
+  { index := fun selector => indexForSelector row.cases selector,
+    buckets := fun index => bucketEntries row.cases index }
 
 def sparseRunKnownOk (row : RawRow) : Bool :=
-  (rowCases row).all fun c =>
-    (sparseDispatcher row).run (caseSelector c) == some (caseLabel c)
+  row.cases.all fun c =>
+    (sparseDispatcher row).run c.selector == some c.label
 
 def sparseRunSoundOk (row : RawRow) : Bool :=
   let d := sparseDispatcher row
-  (rowCases row).all fun c =>
-    match d.run (caseSelector c) with
-    | some label => (d.buckets (d.index (caseSelector c))).any
-        (fun entry => entry == (caseSelector c, label))
+  row.cases.all fun c =>
+    match d.run c.selector with
+    | some label => (d.buckets (d.index c.selector)).any
+        (fun entry => entry == (c.selector, label))
     | none => false
 
 def strategyKnown (row : RawRow) : Bool :=
-  match rowStrategy row with
-  | "linear" => rowDenseKind row == ""
-  | "sparse" => rowDenseKind row == ""
-  | "dense" => rowDenseKind row == "bit_window" || rowDenseKind row == "multiplicative"
+  match row.plan.strategy with
+  | "linear" => row.plan.denseKind == ""
+  | "sparse" => row.plan.denseKind == ""
+  | "dense" =>
+      row.plan.denseKind == "bit_window" || row.plan.denseKind == "multiplicative"
   | _ => false
 
 def denseInjectiveIfDense (row : RawRow) : Bool :=
-  if rowStrategy row == "dense" then noDuplicateBy caseIndex (rowCases row) else true
+  if row.plan.strategy == "dense" then noDuplicateBy (·.index) row.cases else true
 
 def selectorsDistinct (row : RawRow) : Bool :=
-  noDuplicateBy caseSelector (rowCases row)
+  noDuplicateBy (·.selector) row.cases
 
 def modelRunKnownOk (row : RawRow) : Bool :=
-  match rowStrategy row with
+  match row.plan.strategy with
   | "linear" => linearRunKnownOk row
   | "sparse" => sparseRunKnownOk row
   | "dense" => indexedRunKnownOk row
   | _ => false
 
 def modelRunSoundOk (row : RawRow) : Bool :=
-  match rowStrategy row with
+  match row.plan.strategy with
   | "linear" => linearRunSoundOk row
   | "sparse" => sparseRunSoundOk row
   | "dense" => indexedRunSoundOk row
@@ -476,7 +437,7 @@ def encodePlannerPlan (casesLen : Nat) : Ora.DispatcherPlannerSpec.Plan → RawP
    below independently validates scores, search order, and collision witnesses.
    Both paths are intentionally permanent defense in depth. -/
 def rowPlannerReferenceMatches (row : RawRow) : Bool :=
-  match plannerPolicy? (tracePolicy (rowTrace row)) with
+  match plannerPolicy? row.trace.policy with
   | none => false
   | some policy =>
       let input : Ora.DispatcherPlannerSpec.Input String :=
@@ -484,39 +445,34 @@ def rowPlannerReferenceMatches (row : RawRow) : Bool :=
           hasDefault := allHasNamedDefault row,
           policy := policy }
       encodePlannerPlan input.cases.length (Ora.SinoraPlanner.choosePlanReference input) ==
-        rowPlan row
+        row.plan
+
+section EncodeBridge
+
+/- One shared simp set for all three strategy branches of the encode bridge. -/
+attribute [local simp]
+  encodePlannerPlan planBuilder? planShapeValid
+  Ora.DispatcherPlannerSpec.Plan.toBuilderPlan
+  Ora.DispatcherPlannerSpec.Plan.wellShaped
+  Ora.DispatcherPlannerSpec.DensePlan.wellShaped
+  Ora.DispatcherPlannerSpec.SparsePlan.wellShaped
+  Ora.DispatcherPlannerSpec.DensePlan.index
+  Ora.DispatcherPlannerSpec.SparsePlan.index
+  bitWindowIndex multiplicativeIndex pow2
+  Ora.DispatcherPlannerSpec.bitWindowIndex
+  Ora.DispatcherPlannerSpec.multiplicativeIndex
+  Ora.DispatcherPlannerSpec.pow2
 
 theorem planBuilder_encodePlannerPlan
     (casesLen : Nat) (plan : Ora.DispatcherPlannerSpec.Plan)
     (hshape : Ora.DispatcherPlannerSpec.Plan.wellShaped plan = true) :
     planBuilder? (encodePlannerPlan casesLen plan) casesLen = some plan.toBuilderPlan := by
   cases plan with
-  | linear =>
-      simp [encodePlannerPlan, planBuilder?, planShapeValid, planStrategy, planDenseKind,
-        planTableSlots, planIndexBits, planIndexShift, planMulConstant,
-        Ora.DispatcherPlannerSpec.Plan.toBuilderPlan]
-  | dense dense =>
-      cases dense <;>
-        simp_all [encodePlannerPlan, planBuilder?, planShapeValid, planStrategy, planDenseKind,
-          planTableSlots, planIndexBits, planIndexShift, planMulConstant,
-          Ora.DispatcherPlannerSpec.Plan.toBuilderPlan,
-          Ora.DispatcherPlannerSpec.Plan.wellShaped,
-          Ora.DispatcherPlannerSpec.DensePlan.wellShaped,
-          Ora.DispatcherPlannerSpec.DensePlan.index, bitWindowIndex, multiplicativeIndex,
-          Ora.DispatcherPlannerSpec.bitWindowIndex,
-          Ora.DispatcherPlannerSpec.multiplicativeIndex, pow2,
-          Ora.DispatcherPlannerSpec.pow2]
-  | sparse sparse =>
-      cases sparse
-      simp_all [encodePlannerPlan, planBuilder?, planShapeValid, planStrategy, planDenseKind,
-        planTableSlots, planIndexBits, planIndexShift, planMulConstant,
-        Ora.DispatcherPlannerSpec.Plan.toBuilderPlan,
-        Ora.DispatcherPlannerSpec.Plan.wellShaped,
-        Ora.DispatcherPlannerSpec.SparsePlan.wellShaped,
-        Ora.DispatcherPlannerSpec.SparsePlan.index, bitWindowIndex,
-        Ora.DispatcherPlannerSpec.bitWindowIndex, pow2,
-        Ora.DispatcherPlannerSpec.pow2]
-      rfl
+  | linear => simp
+  | dense dense => cases dense <;> simp_all
+  | sparse sparse => cases sparse; simp_all; rfl
+
+end EncodeBridge
 
 def linearRawPlan (casesLen : Nat) : RawPlan :=
   { strategy := "linear", denseKind := "", tableSlots := casesLen,
@@ -584,32 +540,13 @@ def indexBitsForSlots? : Nat → Option Nat
   | 256 => some 8
   | _ => none
 
-def multiplicativeSearchTableSlots : RawMultiplicativeSearch → Nat
-  | (tableSlots, _, _) => tableSlots
-
-def multiplicativeSearchSelected : RawMultiplicativeSearch → Option Nat
-  | (_, selected, _) => selected
-
-def multiplicativeSearchRejected : RawMultiplicativeSearch → List RawCollisionWitness
-  | (_, _, rejected) => rejected
-
-def collisionWitnessConstant : RawCollisionWitness → Nat
-  | (constant, _, _) => constant
-
-def collisionWitnessFirstCase : RawCollisionWitness → Nat
-  | (_, firstCase, _) => firstCase
-
-def collisionWitnessSecondCase : RawCollisionWitness → Nat
-  | (_, _, secondCase) => secondCase
-
 def collisionWitnessValid (selectors : List Nat) (bits : Nat)
     (witness : RawCollisionWitness) : Bool :=
-  match selectors.get? (collisionWitnessFirstCase witness),
-      selectors.get? (collisionWitnessSecondCase witness) with
+  match selectors.get? witness.firstCase, selectors.get? witness.secondCase with
   | some first, some second =>
-      decide (collisionWitnessFirstCase witness < collisionWitnessSecondCase witness) &&
-        decide (multiplicativeIndex first (collisionWitnessConstant witness) bits =
-          multiplicativeIndex second (collisionWitnessConstant witness) bits)
+      decide (witness.firstCase < witness.secondCase) &&
+        decide (multiplicativeIndex first witness.constant bits =
+          multiplicativeIndex second witness.constant bits)
   | _, _ => false
 
 def rejectedWitnessesValid (selectors : List Nat) (bits : Nat) : List RawCollisionWitness → Bool
@@ -618,27 +555,26 @@ def rejectedWitnessesValid (selectors : List Nat) (bits : Nat) : List RawCollisi
       collisionWitnessValid selectors bits witness && rejectedWitnessesValid selectors bits rest
 
 def rejectedConstantsValid (rejected : List RawCollisionWitness) : Bool :=
-  rejected.map collisionWitnessConstant ==
+  rejected.map (·.constant) ==
     compilerDispatcherMultiplicativeCandidates.take rejected.length
 
 def multiplicativeSearchValid (selectors : List Nat) (search : RawMultiplicativeSearch) : Bool :=
-  match indexBitsForSlots? (multiplicativeSearchTableSlots search) with
+  match indexBitsForSlots? search.tableSlots with
   | none => false
   | some bits =>
-      let rejected := multiplicativeSearchRejected search
-      let selected := multiplicativeSearchSelected search
-      rejectedConstantsValid rejected && rejectedWitnessesValid selectors bits rejected &&
-        match selected with
+      rejectedConstantsValid search.rejected &&
+        rejectedWitnessesValid selectors bits search.rejected &&
+        match search.selected with
         | some candidateIndex =>
             decide (candidateIndex < expectedMultiplicativeSearchBudget) &&
-              decide (rejected.length = candidateIndex) &&
+              decide (search.rejected.length = candidateIndex) &&
               collisionFree selectors (fun selector =>
                 multiplicativeIndex selector (multiplicativeCandidate candidateIndex) bits)
-        | none => decide (rejected.length = expectedMultiplicativeSearchBudget)
+        | none => decide (search.rejected.length = expectedMultiplicativeSearchBudget)
 
 def multiplicativeSearchesValid (selectors : List Nat)
     (searches : List RawMultiplicativeSearch) : Bool :=
-  searches.map multiplicativeSearchTableSlots == multiplicativeTableSlots selectors.length &&
+  searches.map (·.tableSlots) == multiplicativeTableSlots selectors.length &&
     searches.all (multiplicativeSearchValid selectors)
 
 def incrementBucket : Nat → List (Nat × Nat) → List (Nat × Nat)
@@ -685,16 +621,16 @@ def linearScore (casesLen policyLambda : Nat) : Nat :=
 
 def denseRuntimeChecks (plan : RawPlan) : Nat :=
   expectedTableDispatchOverheadChecksX1000 + expectedExactSelectorCheckX1000 +
-    if planDenseKind plan == "multiplicative" then
+    if plan.denseKind == "multiplicative" then
       expectedDenseMultiplicativeExtraChecksX1000
     else 0
 
 def denseCodeBytes (plan : RawPlan) (casesLen : Nat) : Nat :=
   let preamble :=
-    if planDenseKind plan == "multiplicative" then
+    if plan.denseKind == "multiplicative" then
       expectedDenseMultiplicativePreambleCodeBytes
     else expectedDenseBitWindowPreambleCodeBytes
-  preamble + expectedJumpTableEntryBytes * planTableSlots plan +
+  preamble + expectedJumpTableEntryBytes * plan.tableSlots +
     expectedDenseUsedSlotCodeBytes * casesLen
 
 def denseScore (plan : RawPlan) (casesLen policyLambda : Nat) : Nat :=
@@ -703,17 +639,17 @@ def denseScore (plan : RawPlan) (casesLen policyLambda : Nat) : Nat :=
 def multiplicativePlans (selectors : List Nat) (policyLambda : Nat)
     (searches : List RawMultiplicativeSearch) : List RawScoredPlan :=
   searches.filterMap fun search =>
-    (multiplicativeSearchSelected search).map fun candidateIndex =>
-      let tableSlots := multiplicativeSearchTableSlots search
-      let bits := (indexBitsForSlots? tableSlots).getD 0
+    search.selected.map fun candidateIndex =>
+      let bits := (indexBitsForSlots? search.tableSlots).getD 0
       let plan : RawPlan :=
-        { strategy := "dense", denseKind := "multiplicative", tableSlots := tableSlots,
+        { strategy := "dense", denseKind := "multiplicative",
+          tableSlots := search.tableSlots,
           indexBits := bits, indexShift := 32 - bits,
           mulConstant := multiplicativeCandidate candidateIndex }
       (plan, denseScore plan selectors.length policyLambda)
 
 def sparseScore (selectors : List Nat) (plan : RawPlan) (policyLambda : Nat) : Nat :=
-  let counts := bucketCounts selectors (planIndexBits plan) (planIndexShift plan)
+  let counts := bucketCounts selectors plan.indexBits plan.indexShift
   let usedBuckets := usedBucketCount counts
   let exactAverage :=
     divRound
@@ -721,7 +657,7 @@ def sparseScore (selectors : List Nat) (plan : RawPlan) (policyLambda : Nat) : N
       selectors.length
   let runtimeAverage := exactAverage + expectedTableDispatchOverheadChecksX1000
   let codeBytes := expectedSparsePreambleCodeBytes +
-    expectedJumpTableEntryBytes * planTableSlots plan +
+    expectedJumpTableEntryBytes * plan.tableSlots +
     expectedSparseUsedBucketCodeBytes * usedBuckets +
     expectedSparseCaseCodeBytes * selectors.length
   planScore runtimeAverage codeBytes policyLambda
@@ -748,36 +684,36 @@ def sparseCandidates (selectors : List Nat) (policyLambda : Nat) : List RawScore
 
 def denseCandidateBetter (casesLen : Nat) (candidate best : RawScoredPlan) : Bool :=
   if candidate.2 != best.2 then decide (candidate.2 < best.2)
-  else if planTableSlots candidate.1 != planTableSlots best.1 then
-    decide (planTableSlots candidate.1 < planTableSlots best.1)
+  else if candidate.1.tableSlots != best.1.tableSlots then
+    decide (candidate.1.tableSlots < best.1.tableSlots)
   else
     let candidateLoad :=
-      divRound (casesLen * expectedCheckScaleX1000) (planTableSlots candidate.1)
+      divRound (casesLen * expectedCheckScaleX1000) candidate.1.tableSlots
     let bestLoad :=
-      divRound (casesLen * expectedCheckScaleX1000) (planTableSlots best.1)
+      divRound (casesLen * expectedCheckScaleX1000) best.1.tableSlots
     if candidateLoad != bestLoad then decide (candidateLoad > bestLoad)
-    else if planDenseKind candidate.1 != planDenseKind best.1 then
-      planDenseKind candidate.1 == "bit_window"
-    else if planIndexShift candidate.1 != planIndexShift best.1 then
-      decide (planIndexShift candidate.1 < planIndexShift best.1)
-    else if planIndexBits candidate.1 != planIndexBits best.1 then
-      decide (planIndexBits candidate.1 < planIndexBits best.1)
+    else if candidate.1.denseKind != best.1.denseKind then
+      candidate.1.denseKind == "bit_window"
+    else if candidate.1.indexShift != best.1.indexShift then
+      decide (candidate.1.indexShift < best.1.indexShift)
+    else if candidate.1.indexBits != best.1.indexBits then
+      decide (candidate.1.indexBits < best.1.indexBits)
     else false
 
 def sparseCandidateBetter (selectors : List Nat) (candidate best : RawScoredPlan) : Bool :=
   let candidateCounts :=
-    bucketCounts selectors (planIndexBits candidate.1) (planIndexShift candidate.1)
-  let bestCounts := bucketCounts selectors (planIndexBits best.1) (planIndexShift best.1)
+    bucketCounts selectors candidate.1.indexBits candidate.1.indexShift
+  let bestCounts := bucketCounts selectors best.1.indexBits best.1.indexShift
   if candidate.2 != best.2 then decide (candidate.2 < best.2)
   else if maxBucketSize candidateCounts != maxBucketSize bestCounts then
     decide (maxBucketSize candidateCounts < maxBucketSize bestCounts)
   else if usedBucketCount candidateCounts != usedBucketCount bestCounts then
     decide (usedBucketCount candidateCounts < usedBucketCount bestCounts)
-  else if planTableSlots candidate.1 != planTableSlots best.1 then
-    decide (planTableSlots candidate.1 < planTableSlots best.1)
-  else if planIndexShift candidate.1 != planIndexShift best.1 then
-    decide (planIndexShift candidate.1 < planIndexShift best.1)
-  else decide (planIndexBits candidate.1 < planIndexBits best.1)
+  else if candidate.1.tableSlots != best.1.tableSlots then
+    decide (candidate.1.tableSlots < best.1.tableSlots)
+  else if candidate.1.indexShift != best.1.indexShift then
+    decide (candidate.1.indexShift < best.1.indexShift)
+  else decide (candidate.1.indexBits < best.1.indexBits)
 
 def bestDenseCandidate (casesLen : Nat) (candidates : List RawScoredPlan) : Option RawScoredPlan :=
   candidates.foldl (fun best candidate =>
@@ -821,15 +757,15 @@ def plannerPreconditionsMet (selectors : List Nat) (hasDefault : Bool) : Bool :=
     selectors.all (fun selector => decide (selector < u32Modulus))
 
 def recomputePlannerCore? (row : RawRow) : Option (RawPlannerTrace × RawPlan) :=
-  let selectors := (rowCases row).map caseSelector
+  let selectors := row.cases.map (·.selector)
   let casesLen := selectors.length
-  let policy := tracePolicy (rowTrace row)
+  let policy := row.trace.policy
   match policyLambda? policy with
   | none => none
   | some policyLambda =>
       let preconditions := plannerPreconditionsMet selectors (allHasNamedDefault row)
       let linear := linearScore casesLen policyLambda
-      let searches := traceMultiplicativeSearches (rowTrace row)
+      let searches := row.trace.multiplicativeSearches
       if preconditions then
         let dense := denseCandidates selectors policyLambda searches
         let bestDense := bestDenseCandidate casesLen dense
@@ -851,15 +787,15 @@ def recomputePlannerCore? (row : RawRow) : Option (RawPlannerTrace × RawPlan) :
         some (trace, linearRawPlan casesLen)
 
 def rowMultiplicativeSearchesValid (row : RawRow) : Bool :=
-  let selectors := (rowCases row).map caseSelector
+  let selectors := row.cases.map (·.selector)
   if plannerPreconditionsMet selectors (allHasNamedDefault row) then
-    multiplicativeSearchesValid selectors (traceMultiplicativeSearches (rowTrace row))
-  else (traceMultiplicativeSearches (rowTrace row)).isEmpty
+    multiplicativeSearchesValid selectors row.trace.multiplicativeSearches
+  else row.trace.multiplicativeSearches.isEmpty
 
 def rowPlannerCoreMatches (row : RawRow) : Bool :=
   match recomputePlannerCore? row with
   | some (trace, plan) =>
-      trace == rowTrace row && plan == rowPlan row
+      trace == row.trace && plan == row.plan
   | none => false
 
 def rowPlannerChosen? (row : RawRow) : Option RawPlan :=
@@ -870,12 +806,12 @@ def rowPlannerMatches (row : RawRow) : Bool :=
 
 def rowPlanIndicesMatch (row : RawRow) : Bool :=
   rowPlanShapeValid row &&
-    match rowStrategy row with
+    match row.plan.strategy with
     | "linear" => linearRouteIndicesSequential row
     | "dense" =>
-        (rowCases row).all (fun c => caseIndex c == rowPlanIndex row (caseSelector c))
+        row.cases.all (fun c => c.index == rowPlanIndex row c.selector)
     | "sparse" =>
-        (rowCases row).all (fun c => caseIndex c == rowPlanIndex row (caseSelector c))
+        row.cases.all (fun c => c.index == rowPlanIndex row c.selector)
     | _ => false
 
 def rowStrategyWF (row : RawRow) : Prop :=
@@ -912,7 +848,7 @@ theorem row_builder_correct_of_reference_match (row : RawRow)
     (h : rowPlannerReferenceMatches row = true) :
     rowStrategyWF row := by
   unfold rowPlannerReferenceMatches at h
-  cases hpolicy : plannerPolicy? (tracePolicy (rowTrace row)) with
+  cases hpolicy : plannerPolicy? row.trace.policy with
   | none => simp [hpolicy] at h
   | some policy =>
       simp only [hpolicy] at h
@@ -922,11 +858,11 @@ theorem row_builder_correct_of_reference_match (row : RawRow)
           policy := policy }
       have hplan :
           encodePlannerPlan input.cases.length
-              (Ora.SinoraPlanner.choosePlanReference input) = rowPlan row := by
+              (Ora.SinoraPlanner.choosePlanReference input) = row.plan := by
         simpa [input] using h
       have hwf := Ora.SinoraPlanner.planner_reference_builder_correct input
       have hshape := Ora.SinoraPlanner.choosePlanReference_wellShaped input
-      have hlen : (rowCasePairs row).length = (rowCases row).length := by
+      have hlen : (rowCasePairs row).length = row.cases.length := by
         simp [rowCasePairs]
       dsimp [input] at hplan hwf hshape
       unfold rowStrategyWF rowBuilderPlan?
@@ -975,7 +911,7 @@ def planShapesValid (rows : List RawRow) : Bool :=
 
 def plansAdmissible (rows : List RawRow) : Bool :=
   rows.all fun row =>
-    rawPlanAdmissible (rowCasePairs row) (rowCases row).length (rowPlan row)
+    rawPlanAdmissible (rowCasePairs row) row.cases.length row.plan
 
 def plannerMatches (rows : List RawRow) : Bool :=
   rows.all rowPlannerMatches
@@ -1057,9 +993,6 @@ def compilerDispatcherRowsHaveNamedDefault : Bool :=
 def compilerDispatcherRowsCovered : Bool :=
   Gate.rowsCovered compilerDispatcherTableRows
 
-def compilerDispatcherRowsSound : Bool :=
-  compilerDispatcherTableRows.all modelRunSoundOk
-
 def compilerDenseRowsInjective : Bool :=
   Gate.denseRowsInjective compilerDispatcherTableRows
 
@@ -1068,7 +1001,7 @@ def compilerDispatcherPlanShapesValid : Bool :=
 
 def compilerSparseRowsExactScan : Bool :=
   compilerDispatcherTableRows.all fun row =>
-    if rowStrategy row == "sparse" then
+    if row.plan.strategy == "sparse" then
       sparseRunKnownOk row && allHasNamedDefault row
     else true
 
@@ -1117,16 +1050,15 @@ theorem dispatcher_policy_lambda_discriminators :
 theorem multiplicative_search_rejects_false_collision_witness :
     multiplicativeSearchValid
       [1447852734, 832491607, 3309386683, 2561671559]
-      (4, some 1, [(2462723855, 0, 1)]) = false := by decide
+      { tableSlots := 4, selected := some 1,
+        rejected := [{ constant := 2462723855, firstCase := 0, secondCase := 1 }] } =
+      false := by decide
 
 theorem dispatcher_table_rows_have_named_default :
     compilerDispatcherRowsHaveNamedDefault = true := by decide
 
 theorem dispatcher_table_rows_covered :
     compilerDispatcherRowsCovered = true := by decide
-
-theorem dispatcher_table_rows_sound :
-    compilerDispatcherRowsSound = true := by decide
 
 theorem dense_dispatcher_rows_injective :
     compilerDenseRowsInjective = true := by decide

@@ -3336,7 +3336,7 @@ test "dispatcher table Lean checker rejects false generated row" {
         \\    trace := { policy := "balanced", preconditionsMet := false, linearScore := 0,
         \\      multiplicativeSearches := [], denseCandidateCount := 0, bestDense := none,
         \\      sparseCandidateCount := 0, bestSparse := none },
-        \\    cases := [(1, "entry", 0, false)] }
+        \\    cases := [{ selector := 1, label := "entry", index := 0, hasNamedDefault := false }] }
         \\  ]
         \\
         \\def currentDispatcherRowsHaveNamedDefault : Bool :=
@@ -3377,7 +3377,9 @@ test "dispatcher table Lean checker rejects false generated row" {
         \\    trace := { policy := "balanced", preconditionsMet := true, linearScore := 0,
         \\      multiplicativeSearches := [], denseCandidateCount := 0, bestDense := none,
         \\      sparseCandidateCount := 0, bestSparse := none },
-        \\    cases := [(1, "first", 0, true), (2, "second", 0, true)] }
+        \\    cases := [
+        \\      { selector := 1, label := "first", index := 0, hasNamedDefault := true },
+        \\      { selector := 2, label := "second", index := 0, hasNamedDefault := true }] }
         \\  ]
         \\
         \\def currentDispatcherRowsCovered : Bool :=
@@ -3432,7 +3434,7 @@ test "dispatcher userland Lean checker rejects invalid plan facts" {
         \\    trace := { policy := "balanced", preconditionsMet := false, linearScore := 0,
         \\      multiplicativeSearches := [], denseCandidateCount := 0, bestDense := none,
         \\      sparseCandidateCount := 0, bestSparse := none },
-        \\    cases := [(1, "entry", 1, true)] }
+        \\    cases := [{ selector := 1, label := "entry", index := 1, hasNamedDefault := true }] }
         \\  ]
         \\
         \\def currentDispatcherPlansAdmissible : Bool :=
@@ -3471,7 +3473,9 @@ test "dispatcher userland Lean checker rejects invalid plan facts" {
         \\    trace := { policy := "balanced", preconditionsMet := false, linearScore := 0,
         \\      multiplicativeSearches := [], denseCandidateCount := 0, bestDense := none,
         \\      sparseCandidateCount := 0, bestSparse := none },
-        \\    cases := [(1, "entry", 1, true), (2, "other", 2, true)] }
+        \\    cases := [
+        \\      { selector := 1, label := "entry", index := 1, hasNamedDefault := true },
+        \\      { selector := 2, label := "other", index := 2, hasNamedDefault := true }] }
         \\  ]
         \\
         \\def currentDispatcherPlanShapesValid : Bool :=
@@ -3510,8 +3514,11 @@ test "dispatcher userland Lean checker rejects invalid plan facts" {
         \\    trace := { policy := "balanced", preconditionsMet := false, linearScore := 2760,
         \\      multiplicativeSearches := [], denseCandidateCount := 0, bestDense := none,
         \\      sparseCandidateCount := 0, bestSparse := none },
-        \\    cases := [(0, "a", 0, false), (1, "b", 1, false),
-        \\      (2, "c", 2, false), (3, "d", 3, false)] }
+        \\    cases := [
+        \\      { selector := 0, label := "a", index := 0, hasNamedDefault := false },
+        \\      { selector := 1, label := "b", index := 1, hasNamedDefault := false },
+        \\      { selector := 2, label := "c", index := 2, hasNamedDefault := false },
+        \\      { selector := 3, label := "d", index := 3, hasNamedDefault := false }] }
         \\  ]
         \\
         \\def currentDispatcherPlannerMatches : Bool :=
@@ -3554,8 +3561,11 @@ test "dispatcher userland Lean checker rejects invalid plan facts" {
         \\    trace := { policy := "balanced", preconditionsMet := true, linearScore := 0,
         \\      multiplicativeSearches := [], denseCandidateCount := 0, bestDense := none,
         \\      sparseCandidateCount := 0, bestSparse := none },
-        \\    cases := [(1447852734, "a", 0, true), (832491607, "b", 1, true),
-        \\      (3309386683, "c", 2, true), (2561671559, "d", 3, true)] }
+        \\    cases := [
+        \\      { selector := 1447852734, label := "a", index := 0, hasNamedDefault := true },
+        \\      { selector := 832491607, label := "b", index := 1, hasNamedDefault := true },
+        \\      { selector := 3309386683, label := "c", index := 2, hasNamedDefault := true },
+        \\      { selector := 2561671559, label := "d", index := 3, hasNamedDefault := true }] }
         \\  ]
         \\
         \\def currentDispatcherPlannerReferenceMatches : Bool :=
@@ -3597,20 +3607,26 @@ test "dispatcher userland Lean checker rejects invalid plan facts" {
         \\      indexBits := 0, indexShift := 0, mulConstant := 0 },
         \\    trace := { policy := "balanced", preconditionsMet := true, linearScore := 2760,
         \\      multiplicativeSearches :=
-        \\        [(4, some 1, [(2462723855, 0, 1)]),
-        \\         (8, some 1, [(2462723855, 0, 2)]),
-        \\         (16, some 0, []), (32, some 0, []), (64, some 0, []),
-        \\         (128, some 0, []), (256, some 0, [])],
+        \\        [{ tableSlots := 4, selected := some 1,
+        \\           rejected := [{ constant := 2462723855, firstCase := 0, secondCase := 1 }] },
+        \\         { tableSlots := 8, selected := some 1,
+        \\           rejected := [{ constant := 2462723855, firstCase := 0, secondCase := 2 }] },
+        \\         { tableSlots := 16, selected := some 0, rejected := [] },
+        \\         { tableSlots := 32, selected := some 0, rejected := [] },
+        \\         { tableSlots := 64, selected := some 0, rejected := [] },
+        \\         { tableSlots := 128, selected := some 0, rejected := [] },
+        \\         { tableSlots := 256, selected := some 0, rejected := [] }],
         \\      denseCandidateCount := 44,
         \\      bestDense := some ({ strategy := "dense", denseKind := "bit_window",
         \\        tableSlots := 4, indexBits := 2, indexShift := 8, mulConstant := 0 }, 4350),
         \\      sparseCandidateCount := 56,
         \\      bestSparse := some ({ strategy := "sparse", denseKind := "",
         \\        tableSlots := 4, indexBits := 2, indexShift := 8, mulConstant := 0 }, 4430) },
-        \\    cases := [(1447852734, "lin0_", 0, true),
-        \\      (832491607, "lin1_", 1, true),
-        \\      (3309386683, "lin2_", 2, true),
-        \\      (2561671559, "lin3_", 3, true)] }
+        \\    cases := [
+        \\      { selector := 1447852734, label := "lin0_", index := 0, hasNamedDefault := true },
+        \\      { selector := 832491607, label := "lin1_", index := 1, hasNamedDefault := true },
+        \\      { selector := 3309386683, label := "lin2_", index := 2, hasNamedDefault := true },
+        \\      { selector := 2561671559, label := "lin3_", index := 3, hasNamedDefault := true }] }
         \\  ]
         \\
         \\def currentDispatcherPlannerSearchesValid : Bool :=

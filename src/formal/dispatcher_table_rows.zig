@@ -307,23 +307,40 @@ fn emitLeanOptionalScoredPlan(
 fn emitLeanMultiplicativeSearch(
     out: anytype,
     search: switch_routing.MultiplicativeSearchTrace,
+    syntax: LeanRowSyntax,
 ) !void {
-    try out.print("({d}, ", .{search.table_slots});
+    switch (syntax) {
+        .tuple => try out.print("({d}, ", .{search.table_slots}),
+        .named => try out.print("{{ tableSlots := {d}, selected := ", .{search.table_slots}),
+    }
     if (search.selected_candidate_index) |candidate_index| {
         try out.print("some {d}", .{candidate_index});
     } else {
         try out.writeAll("none");
     }
-    try out.writeAll(", [");
+    try out.writeAll(switch (syntax) {
+        .tuple => ", [",
+        .named => ", rejected := [",
+    });
     for (search.rejected, 0..) |witness, i| {
         if (i != 0) try out.writeAll(", ");
-        try out.print("({d}, {d}, {d})", .{
-            witness.constant,
-            witness.first_case,
-            witness.second_case,
-        });
+        switch (syntax) {
+            .tuple => try out.print("({d}, {d}, {d})", .{
+                witness.constant,
+                witness.first_case,
+                witness.second_case,
+            }),
+            .named => try out.print("{{ constant := {d}, firstCase := {d}, secondCase := {d} }}", .{
+                witness.constant,
+                witness.first_case,
+                witness.second_case,
+            }),
+        }
     }
-    try out.writeAll("])");
+    try out.writeAll(switch (syntax) {
+        .tuple => "])",
+        .named => "] }",
+    });
 }
 
 test "dispatcher manifest validator ties source intents to exact SIR routes" {
@@ -446,11 +463,12 @@ test "dispatcher manifest validator rejects a non-reverting terminal default" {
 fn emitLeanMultiplicativeSearches(
     out: anytype,
     searches: []const switch_routing.MultiplicativeSearchTrace,
+    syntax: LeanRowSyntax,
 ) !void {
     try out.writeByte('[');
     for (searches, 0..) |search, i| {
         if (i != 0) try out.writeAll(", ");
-        try emitLeanMultiplicativeSearch(out, search);
+        try emitLeanMultiplicativeSearch(out, search, syntax);
     }
     try out.writeByte(']');
 }
@@ -519,7 +537,7 @@ pub fn emitLeanRow(
                 if (trace.preconditions_met) "true" else "false",
                 trace.linear_score_x1000,
             });
-            try emitLeanMultiplicativeSearches(out, trace.multiplicative_searches);
+            try emitLeanMultiplicativeSearches(out, trace.multiplicative_searches, syntax);
             try out.print(", {d}, ", .{trace.dense_candidates.len});
             try emitLeanOptionalScoredPlan(out, trace.best_dense, cases.len, syntax);
             try out.print(", {d}, ", .{trace.sparse_candidates.len});
@@ -537,7 +555,7 @@ pub fn emitLeanRow(
                 if (trace.preconditions_met) "true" else "false",
                 trace.linear_score_x1000,
             });
-            try emitLeanMultiplicativeSearches(out, trace.multiplicative_searches);
+            try emitLeanMultiplicativeSearches(out, trace.multiplicative_searches, syntax);
             try out.print(", denseCandidateCount := {d}, bestDense := ", .{trace.dense_candidates.len});
             try emitLeanOptionalScoredPlan(out, trace.best_dense, cases.len, syntax);
             try out.print(", sparseCandidateCount := {d}, bestSparse := ", .{trace.sparse_candidates.len});
@@ -548,12 +566,24 @@ pub fn emitLeanRow(
 
     for (extracted, 0..) |case, i| {
         if (i != 0) try out.writeAll(",\n     ");
-        try out.print("({d}, ", .{case.selector});
-        try writeLeanString(out, case.label);
-        try out.print(", {d}, {s})", .{
-            routeIndex(plan, case.selector, i),
-            if (case.guarded) "true" else "false",
-        });
+        switch (syntax) {
+            .tuple => {
+                try out.print("({d}, ", .{case.selector});
+                try writeLeanString(out, case.label);
+                try out.print(", {d}, {s})", .{
+                    routeIndex(plan, case.selector, i),
+                    if (case.guarded) "true" else "false",
+                });
+            },
+            .named => {
+                try out.print("{{ selector := {d}, label := ", .{case.selector});
+                try writeLeanString(out, case.label);
+                try out.print(", index := {d}, hasNamedDefault := {s} }}", .{
+                    routeIndex(plan, case.selector, i),
+                    if (case.guarded) "true" else "false",
+                });
+            },
+        }
     }
     try out.writeAll(switch (syntax) {
         .tuple => "])",

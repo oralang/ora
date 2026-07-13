@@ -269,18 +269,18 @@ fn buildCheckerSource(
     );
     for (switches, 0..) |sw, switch_index| {
         if (switch_index != 0) try writer.writeAll(",\n");
-        try writer.writeAll("    (");
+        try writer.writeAll("    { block := ");
         try dispatcher_rows.writeLeanString(writer, sw.block);
-        try writer.writeAll(", ");
+        try writer.writeAll(", defaultTarget := ");
         try dispatcher_rows.writeLeanString(writer, sw.default_label);
-        try writer.writeAll(", [");
+        try writer.writeAll(", cases := [");
         for (sw.cases, 0..) |case, case_index| {
             if (case_index != 0) try writer.writeAll(", ");
             try writer.print("({d}, ", .{case.selector});
             try dispatcher_rows.writeLeanString(writer, case.label);
             try writer.writeByte(')');
         }
-        try writer.writeAll("])");
+        try writer.writeAll("] }");
     }
     try writer.writeAll(
         \\]
@@ -345,7 +345,7 @@ fn buildCheckerSource(
     }
     const final_indent = if (intents.len == 0) 2 else intents.len * 2;
     for (0..final_indent) |_| try writer.writeByte(' ');
-    try writer.writeAll("· simp [currentDispatcherNetwork, currentDispatcherEntry, Ora.DispatcherTableSync.dispatchNetwork, Ora.DispatcherTableSync.networkSwitchBlock, Ora.DispatcherTableSync.networkSwitchDefault, Ora.DispatcherTableSync.networkSwitchCases, List.find?");
+    try writer.writeAll("· simp [currentDispatcherNetwork, currentDispatcherEntry, Ora.DispatcherTableSync.dispatchNetwork, List.find?");
     for (intents, 0..) |_, index| {
         try writer.print(", beq_false_of_ne (Ne.symm h{d})", .{index});
     }
