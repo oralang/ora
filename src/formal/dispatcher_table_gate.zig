@@ -12,6 +12,35 @@ const sinora = @import("sinora");
 const dispatcher_rows = @import("dispatcher_table_rows.zig");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const proof_scratch_root = "/tmp/ora-dispatcher-proof";
+
+const ProofClaim = struct {
+    theorem_name: []const u8,
+    summary: []const u8,
+};
+
+const proof_claims = [_]ProofClaim{
+    .{
+        .theorem_name = "current_dispatcher_network_matches",
+        .summary = "the dispatcher network implements the intended selector topology",
+    },
+    .{
+        .theorem_name = "current_dispatcher_unknown_selectors_revert",
+        .summary = "every selector absent from the public intents reaches revert_error",
+    },
+    .{
+        .theorem_name = "current_dispatcher_planner_reference_matches",
+        .summary = "each emitted plan equals the universally admissible Lean reference plan",
+    },
+    .{
+        .theorem_name = "current_dispatcher_manifest_rows_match",
+        .summary = "row shape, coverage, collision, route-index, and planner-evidence checks hold",
+    },
+    .{
+        .theorem_name = "current_dispatcher_builder_correct",
+        .summary = "each emitted plan builds a strategy-well-formed dispatcher",
+    },
+};
 
 pub const CheckResult = struct {
     arena: std.heap.ArenaAllocator,
@@ -23,6 +52,28 @@ pub const CheckResult = struct {
     pub fn deinit(self: *CheckResult) void {
         self.arena.deinit();
         self.* = undefined;
+    }
+
+    pub fn writeVerificationSummary(
+        self: *const CheckResult,
+        writer: anytype,
+        bytecode_bound: bool,
+    ) !void {
+        try writer.print(
+            "Lean dispatcher verification summary:\n  proof surface: dispatcher_userland\n  input: {d} switch(es), {d} case(s)\n  kernel-checked conclusions:\n",
+            .{ self.switch_count, self.case_count },
+        );
+        for (proof_claims) |claim| {
+            try writer.print("    - {s}: {s}\n", .{ claim.theorem_name, claim.summary });
+        }
+        if (bytecode_bound) {
+            try writer.writeAll(
+                "  bytecode binding (compiler-side checks, not an additional Lean theorem):\n" ++
+                    "    - the backend report matches the proven SIR switches, strategies, labels, and route indices\n" ++
+                    "    - the backend templates_valid attestation is present\n" ++
+                    "    - the certificate binds the backend report and emitted bytecode by SHA-256\n",
+            );
+        }
     }
 
     pub fn validateAndBindBytecode(
@@ -98,7 +149,6 @@ pub fn checkCurrentModule(
     file_path: []const u8,
     process_environ: std.process.Environ,
     stdout: anytype,
-    quiet: bool,
 ) !CheckResult {
     const facts_ref = mlir.oraExtractSIRDispatcherSwitchFacts(ctx, module);
     defer if (facts_ref.data != null) mlir.oraStringRefFree(facts_ref);
@@ -132,14 +182,16 @@ pub fn checkCurrentModule(
     defer allocator.free(scratch_segment);
 
     const io = std.Io.Threaded.global_single_threaded.io();
-    const scratch_rel = try std.fmt.allocPrint(allocator, "formal/Ora/ProofCheckScratch/{s}", .{scratch_segment});
-    defer allocator.free(scratch_rel);
-    try std.Io.Dir.cwd().createDirPath(io, scratch_rel);
-    defer std.Io.Dir.cwd().deleteTree(io, scratch_rel) catch {};
+    const scratch_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/{s}",
+        .{ proof_scratch_root, scratch_segment },
+    );
+    defer allocator.free(scratch_path);
+    try std.Io.Dir.cwd().createDirPath(io, scratch_path);
+    defer std.Io.Dir.cwd().deleteTree(io, scratch_path) catch {};
 
-    const checker_rel = try std.fmt.allocPrint(allocator, "{s}/DispatcherTable.lean", .{scratch_rel});
-    defer allocator.free(checker_rel);
-    const checker_path = try std.fmt.allocPrint(allocator, "Ora/ProofCheckScratch/{s}/DispatcherTable.lean", .{scratch_segment});
+    const checker_path = try std.fmt.allocPrint(allocator, "{s}/DispatcherTable.lean", .{scratch_path});
     defer allocator.free(checker_path);
 
     const checker_source = try buildCheckerSource(
@@ -148,14 +200,13 @@ pub fn checkCurrentModule(
         switches,
     );
     defer allocator.free(checker_source);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = checker_rel, .data = checker_source });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = checker_path, .data = checker_source });
 
     const lean_output = try runLeanCommandCapture(
         allocator,
         &.{ "lake", "env", "lean", checker_path },
         process_environ,
         stdout,
-        quiet,
     );
     defer allocator.free(lean_output.stdout);
     defer allocator.free(lean_output.stderr);
@@ -494,18 +545,13 @@ fn buildCertificateJson(
     try writer.writeAll(",\n  \"dispatcher_table_check_sha256\": ");
     try writeJsonString(writer, checker_sha256);
     try writer.print(",\n  \"switch_count\": {d},\n  \"case_count\": {d}", .{ switch_count, case_count });
-    try writer.writeAll(
-        \\,
-        \\  "theorems": [
-        \\    "current_dispatcher_network_matches",
-        \\    "current_dispatcher_unknown_selectors_revert",
-        \\    "current_dispatcher_planner_reference_matches",
-        \\    "current_dispatcher_manifest_rows_match",
-        \\    "current_dispatcher_builder_correct"
-        \\  ]
-        \\}
-        \\
-    );
+    try writer.writeAll(",\n  \"theorems\": [");
+    for (proof_claims, 0..) |claim, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.writeAll("\n    ");
+        try writeJsonString(writer, claim.theorem_name);
+    }
+    try writer.writeAll("\n  ]\n}\n");
     return try allocator.dupe(u8, out.written());
 }
 
@@ -599,7 +645,6 @@ fn runLeanCommandCapture(
     argv: []const []const u8,
     process_environ: std.process.Environ,
     stdout: anytype,
-    quiet: bool,
 ) !LeanCommandOutput {
     var process_io = std.Io.Threaded.init(allocator, .{
         .async_limit = .nothing,
@@ -622,11 +667,19 @@ fn runLeanCommandCapture(
 
     switch (result.term) {
         .exited => |code| if (code == 0) {
+            const lean_stdout = std.mem.trim(u8, result.stdout, " \t\r\n");
+            const lean_stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
+            try stdout.writeAll("Lean checker output:\n  exit status: 0\n");
+            if (lean_stdout.len == 0 and lean_stderr.len == 0) {
+                try stdout.writeAll("  diagnostics: none\n");
+            } else {
+                if (lean_stdout.len != 0) try stdout.print("  stdout:\n{s}\n", .{lean_stdout});
+                if (lean_stderr.len != 0) try stdout.print("  stderr:\n{s}\n", .{lean_stderr});
+            }
             return .{ .stdout = result.stdout, .stderr = result.stderr };
         },
         else => {},
     }
-    _ = quiet;
     try stdout.writeAll("Lean dispatcher userland proof rejected.\n");
     if (result.stdout.len != 0) try stdout.print("{s}\n", .{result.stdout});
     if (result.stderr.len != 0) try stdout.print("{s}\n", .{result.stderr});
@@ -678,6 +731,11 @@ test "dispatcher backend report rejects template and route disagreement" {
         error.DispatcherBytecodeCaseMismatch,
         validateBackendReport(std.testing.allocator, &expected_switches, report),
     );
+}
+
+test "dispatcher proof scratch root stays outside the audited formal tree" {
+    try std.testing.expect(std.fs.path.isAbsolute(proof_scratch_root));
+    try std.testing.expect(!std.mem.containsAtLeast(u8, proof_scratch_root, 1, "formal"));
 }
 
 test "dispatcher certificate refuses a bytecode hash not bound by the backend report" {

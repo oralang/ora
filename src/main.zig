@@ -5438,7 +5438,6 @@ fn runMlirEmitAdvanced(
                 file_path,
                 mlir_options.process_environ,
                 stdout,
-                mlir_options.suppress_artifact_logs,
             ) catch |err| {
                 try stdout.print("Lean dispatcher userland proof failed: {s}\n", .{@errorName(err)});
                 try stdout.flush();
@@ -5498,6 +5497,7 @@ fn runMlirEmitAdvanced(
                 stdout,
                 mlir_options.suppress_artifact_logs,
             );
+            try check.writeVerificationSummary(stdout, false);
             try stdout.print("Lean dispatcher userland SIR proof accepted\n", .{});
         }
     }
@@ -7210,6 +7210,7 @@ fn emitBytecodeFromSirText(
             stdout,
             suppress_log,
         );
+        try check.writeVerificationSummary(stdout, true);
         try stdout.print("Lean dispatcher userland proof accepted (SIR + bytecode)\n", .{});
     }
     if (!suppress_log) {

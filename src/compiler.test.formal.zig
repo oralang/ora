@@ -3084,6 +3084,26 @@ test "lean proofs run dispatcher table proof before bytecode emission" {
     try expectExited(result, 0);
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean dispatcher userland proof accepted") or
         std.mem.containsAtLeast(u8, result.stderr, 1, "Lean dispatcher userland proof accepted"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean checker output:"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "exit status: 0"));
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        result.stdout,
+        1,
+        "input: 1 switch(es), 12 case(s)",
+    ));
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        result.stdout,
+        1,
+        "current_dispatcher_planner_reference_matches",
+    ));
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        result.stdout,
+        1,
+        "bytecode binding (compiler-side checks, not an additional Lean theorem)",
+    ));
     try tmp.dir.access(std.testing.io, "out/dispatcher_lean_gate.hex", .{});
     const dispatcher_cert_path = try pathFromTmpAlloc(allocator, tmp, "out/dispatcher_lean_gate.lean.dispatcher.proof.json");
     defer allocator.free(dispatcher_cert_path);
