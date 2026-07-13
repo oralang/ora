@@ -1558,7 +1558,7 @@ pub fn build(b: *std.Build) void {
     check_formal_sync_step.dependOn(&formal_sync_cmd.step);
 
     // zig build check-canonical-z3-required
-    const canonical_z3_required_out_dir = b.fmt("/tmp/ora-canonical-z3-required-gate-{d}", .{std.c.getpid()});
+    const canonical_z3_required_out_dir = b.fmt("/tmp/ora-canonical-z3-required-gate-{d}", .{std.posix.system.getpid()});
     const canonical_z3_required_json = b.fmt("{s}/report.json", .{canonical_z3_required_out_dir});
     const canonical_z3_required_cmd = b.addSystemCommand(&[_][]const u8{
         "python3",
