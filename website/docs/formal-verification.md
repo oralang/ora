@@ -73,6 +73,11 @@ EVM-bytecode equivalence proof; the verifier trusts the MLIR-to-SMT encoder and
 the lowering pipeline, and bytecode conformance tests cover representative
 runtime behavior.
 
+Ora also has two kernel-checked Lean lanes: a per-contract userland gate and a
+repository-level compiler/model gate. See [Lean Verification: Userland and
+Kernel Lanes](./lean-verification-lanes) for their commands, proof surfaces,
+certificates, failure behavior, and exact trust boundaries.
+
 ## Evidence
 
 - `docs/compiler/formal-verification.md`
