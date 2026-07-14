@@ -410,6 +410,32 @@ jobs:
           name: mlir-${{ runner.os }}-${{ runner.arch }}
           path: vendor/mlir
 
+      # The formal test suites shell out to `lake env lean` (per-contract Lean
+      # gates); without elan they fail with exit 127 instead of testing anything.
+      - name: Install Elan
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Cache Lean artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.elan
+            formal/.lake
+          key: ${{ runner.os }}-lean-${{ hashFiles('formal/lean-toolchain', 'formal/lakefile.toml', 'formal/lake-manifest.json') }}
+          restore-keys: |
+            ${{ runner.os }}-lean-
+
+      # `lake env lean` does not build imports; the Ora Lean library must be
+      # compiled before tests import Ora.DispatcherTableSync et al.
+      - name: Build formal Lean library
+        shell: bash
+        run: |
+          cd formal && lake build
+
       - name: Build project (cached MLIR)
         shell: bash
         run: |
@@ -507,6 +533,33 @@ jobs:
         with:
           name: mlir-${{ runner.os }}-${{ runner.arch }}
           path: vendor/mlir
+
+      # The gate includes check-formal-sync (run with --skip-mlir via the
+      # forwarded -Dskip-mlir flag) and the Lean-gated formal tests; both need
+      # `lake` on PATH and a built Ora Lean library.
+      - name: Install Elan
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Cache Lean artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.elan
+            formal/.lake
+          key: ${{ runner.os }}-lean-${{ hashFiles('formal/lean-toolchain', 'formal/lakefile.toml', 'formal/lake-manifest.json') }}
+          restore-keys: |
+            ${{ runner.os }}-lean-
+
+      # `lake env lean` does not build imports; the Ora Lean library must be
+      # compiled before tests import Ora.DispatcherTableSync et al.
+      - name: Build formal Lean library
+        shell: bash
+        run: |
+          cd formal && lake build
 
       - name: Build compiler (cached MLIR)
         shell: bash

@@ -1550,10 +1550,17 @@ pub fn build(b: *std.Build) void {
     check_refinement_registry_sync_step.dependOn(&refinement_registry_sync_cmd.step);
 
     // zig build check-formal-sync
-    const formal_sync_cmd = b.addSystemCommand(&[_][]const u8{
-        "bash",
-        "scripts/check-formal-sync.sh",
-    });
+    // Forward -Dskip-mlir so the script's child `zig build` emitter steps link
+    // the prebuilt vendor/mlir instead of re-running the vendored-LLVM CMake
+    // build (which fails on runners without the LLVM source tree).
+    const formal_sync_cmd = if (skip_mlir_build)
+        b.addSystemCommand(&[_][]const u8{
+            "bash", "scripts/check-formal-sync.sh", "--skip-mlir",
+        })
+    else
+        b.addSystemCommand(&[_][]const u8{
+            "bash", "scripts/check-formal-sync.sh",
+        });
     const check_formal_sync_step = b.step("check-formal-sync", "Regenerate formal snapshots and run Lean verification checks");
     check_formal_sync_step.dependOn(&formal_sync_cmd.step);
 
