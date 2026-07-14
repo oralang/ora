@@ -2,7 +2,7 @@
 // INPUT: ora-example/errors/simple_error_test.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {sir.error_ids = {TestError = 224292994 : i256}, sir.error_selectors = {TestError = "0x0d5e7082"}} {
-// CHECK-NEXT:   func.func @test() -> !sir.u256 attributes {ora.abi_return = "bool", ora.abi_return_layout = "bool", ora.abi_return_words = 1 : i256, ora.returns_error_union = true, ora.selector = "0xf8a8fd6d", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @test() -> !sir.u256 attributes {ora.abi_return = "bool", ora.abi_return_layout = "bool", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.return_error_ids = [224292994 : i256], ora.returns_error_union = true, ora.selector = "0xf8a8fd6d", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 64 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/errors/simple_error_test.ora":6:9)))
 // CHECK-NEXT:     %1 = sir.const 224292994 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/errors/simple_error_test.ora":6:9)))
 // CHECK-NEXT:     %2 = sir.const 1 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/errors/simple_error_test.ora":6:9)))

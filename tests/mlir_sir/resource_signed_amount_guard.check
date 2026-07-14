@@ -1,0 +1,18 @@
+// INPUT: tests/conformance/resource_signed_amount.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-NOT: ora.create
+//
+// CHECK-LABEL: func.func @credit
+// CHECK-SAME: ora.abi_params = ["address", "int256"]
+// CHECK: [[ARG_NON_NEG:%[0-9]+]] = sir.iszero
+// CHECK: sir.cond_br [[ARG_NON_NEG]]
+// CHECK: %hash_debts = sir.keccak256
+// CHECK: [[BEFORE:%[0-9]+]] = sir.sload %hash_debts
+// CHECK: [[NEG_AMOUNT:%[0-9]+]] = sir.slt %arg1
+// CHECK: [[NON_NEG:%[0-9]+]] = sir.iszero [[NEG_AMOUNT]]
+// CHECK: sir.cond_br [[NON_NEG]]
+// CHECK: [[AFTER:%[0-9]+]] = sir.add [[BEFORE]]
+// CHECK: [[OVERFLOW:%[0-9]+]] = sir.slt [[AFTER]]
+// CHECK: [[OK:%[0-9]+]] = sir.iszero [[OVERFLOW]]
+// CHECK: sir.cond_br [[OK]]
+// CHECK: sir.sstore %hash_debts

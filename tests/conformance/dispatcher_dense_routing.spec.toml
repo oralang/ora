@@ -1,0 +1,134 @@
+# Dense dispatcher routing: every fn routes through the jump table and its
+# landing-block exact-selector guard; unknown and bucket-adjacent selectors
+# take the default edge. Selector list pinned in sinora switch_routing tests.
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "d0()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 100 }
+
+[[call]]
+fn = "d1()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 101 }
+
+[[call]]
+fn = "d2()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 102 }
+
+[[call]]
+fn = "d3()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 103 }
+
+[[call]]
+fn = "d4()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 104 }
+
+[[call]]
+fn = "d5()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 105 }
+
+[[call]]
+fn = "d6()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 106 }
+
+[[call]]
+fn = "d7()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 107 }
+
+[[call]]
+fn = "d8()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 108 }
+
+[[call]]
+fn = "d9()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 109 }
+
+[[call]]
+fn = "d10()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 110 }
+
+[[call]]
+fn = "d11()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 111 }
+
+[[call]]
+fn = "d12()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 112 }
+
+[[call]]
+fn = "d13()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 113 }
+
+[[call]]
+fn = "d14()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 114 }
+
+[[call]]
+fn = "d15()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 115 }
+
+# Unknown selector routes to the default revert through the table's hole slots.
+[[call]]
+calldata = "0xdeadbeef"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+reverts = { any = true }
+
+# Slot alias: low 7 bits equal d0()'s table slot (0x2a) but the full selector
+# differs — the landing block's exact guard must route to default, not d0.
+[[call]]
+calldata = "0x0000002a"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+reverts = { any = true }

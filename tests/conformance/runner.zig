@@ -24,7 +24,7 @@ pub const PropertyRuntime = struct {
         const encoded_args = try abi.encodeArgs(self.allocator, function_abi.inputs, resolved_args);
         defer self.allocator.free(encoded_args);
 
-        var calldata = std.ArrayList(u8){};
+        var calldata: std.ArrayList(u8) = .empty;
         defer calldata.deinit(self.allocator);
         try calldata.appendSlice(self.allocator, &function_abi.selector);
         try calldata.appendSlice(self.allocator, encoded_args);
@@ -64,7 +64,7 @@ pub fn runOraEmitWithExtraArgs(
     output_dir: []const u8,
     extra_args: []const []const u8,
 ) !void {
-    var argv = std.ArrayList([]const u8){};
+    var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
     try argv.appendSlice(allocator, &.{
         types.ORA_BINARY_REL,
@@ -76,16 +76,22 @@ pub fn runOraEmitWithExtraArgs(
     try argv.appendSlice(allocator, extra_args);
     try argv.append(allocator, source_path);
 
-    const result = try std.process.Child.run(.{
-        .allocator = allocator,
+    var process_io = std.Io.Threaded.init(allocator, .{
+        .async_limit = .nothing,
+        .concurrent_limit = .nothing,
+    });
+    defer process_io.deinit();
+
+    const result = try std.process.run(allocator, process_io.io(), .{
         .argv = argv.items,
-        .max_output_bytes = 8 * 1024 * 1024,
+        .stdout_limit = std.Io.Limit.limited(8 * 1024 * 1024),
+        .stderr_limit = std.Io.Limit.limited(8 * 1024 * 1024),
     });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
     switch (result.term) {
-        .Exited => |code| if (code != 0) {
+        .exited => |code| if (code != 0) {
             std.debug.print("ora emit failed with code {d}\nstdout:\n{s}\nstderr:\n{s}\n", .{ code, result.stdout, result.stderr });
             return error.OraEmitFailed;
         },
@@ -119,14 +125,15 @@ const SkipList = struct {
 };
 
 pub fn checkCorpusSidecars(allocator: std.mem.Allocator, corpus_dir_path: []const u8) !void {
+    const io = std.Io.Threaded.global_single_threaded.io();
     var skip_list = try loadSkipList(allocator, corpus_dir_path);
     defer skip_list.deinit(allocator);
 
-    var dir = try std.fs.cwd().openDir(corpus_dir_path, .{ .iterate = true });
-    defer dir.close();
+    var dir = try std.Io.Dir.cwd().openDir(io, corpus_dir_path, .{ .iterate = true });
+    defer dir.close(io);
 
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".ora")) continue;
         if (skip_list.contains(entry.name)) continue;
@@ -134,7 +141,7 @@ pub fn checkCorpusSidecars(allocator: std.mem.Allocator, corpus_dir_path: []cons
         const stem = entry.name[0 .. entry.name.len - ".ora".len];
         const spec_name = try std.fmt.allocPrint(allocator, "{s}.spec.toml", .{stem});
         defer allocator.free(spec_name);
-        dir.access(spec_name, .{}) catch |err| switch (err) {
+        dir.access(io, spec_name, .{}) catch |err| switch (err) {
             error.FileNotFound => return error.MissingSidecar,
             else => return err,
         };
@@ -144,13 +151,13 @@ pub fn checkCorpusSidecars(allocator: std.mem.Allocator, corpus_dir_path: []cons
 fn loadSkipList(allocator: std.mem.Allocator, corpus_dir_path: []const u8) !SkipList {
     const skip_path = try std.fs.path.join(allocator, &.{ corpus_dir_path, "SKIP" });
     defer allocator.free(skip_path);
-    const buffer = std.fs.cwd().readFileAlloc(allocator, skip_path, 1024 * 1024) catch |err| switch (err) {
+    const buffer = std.Io.Dir.cwd().readFileAlloc(std.Io.Threaded.global_single_threaded.io(), skip_path, allocator, std.Io.Limit.limited(1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => return .{},
         else => return err,
     };
     errdefer allocator.free(buffer);
 
-    var entries = std.ArrayList([]const u8){};
+    var entries: std.ArrayList([]const u8) = .empty;
     errdefer entries.deinit(allocator);
 
     var lines = std.mem.splitScalar(u8, buffer, '\n');
@@ -193,7 +200,7 @@ fn readArtifacts(allocator: std.mem.Allocator, output_dir: []const u8, stem: []c
     const abi_name = try std.fmt.allocPrint(allocator, "{s}.abi.json", .{stem});
     const hex_path = try std.fs.path.join(allocator, &.{ output_dir, hex_name });
     const abi_path = try std.fs.path.join(allocator, &.{ output_dir, abi_name });
-    const hex = try std.fs.cwd().readFileAlloc(allocator, hex_path, 16 * 1024 * 1024);
+    const hex = try std.Io.Dir.cwd().readFileAlloc(std.Io.Threaded.global_single_threaded.io(), hex_path, allocator, std.Io.Limit.limited(16 * 1024 * 1024));
     return .{ .bytecode = try abi.parseHexBytes(allocator, hex), .abi_path = abi_path };
 }
 
@@ -219,11 +226,21 @@ pub fn runConformanceSpecDifferential(
     try runConformanceSpecWithExtraArgs(allocator, source_path, spec_path, &.{"--keep-proved-checks"});
 }
 
-/// Like runConformanceSpec but records numeric metrics (per-call gas + per-contract
-/// bytecode size) into `metrics`. Still asserts all spec outcomes, so it only
-/// measures on a green corpus.
+/// Like runConformanceSpec but records numeric metrics (deploy gas, per-call
+/// gas, and per-contract bytecode size) into `metrics`. Still asserts all spec
+/// outcomes, so it only measures on a green corpus.
 pub fn runConformanceSpecMetrics(allocator: std.mem.Allocator, source_path: []const u8, spec_path: []const u8, metrics: MetricSink) !void {
     return runConformanceSpecImpl(allocator, source_path, spec_path, metrics, &.{"--no-verify"});
+}
+
+pub fn runConformanceSpecMetricsWithExtraArgs(
+    allocator: std.mem.Allocator,
+    source_path: []const u8,
+    spec_path: []const u8,
+    metrics: MetricSink,
+    extra_args: []const []const u8,
+) !void {
+    return runConformanceSpecImpl(allocator, source_path, spec_path, metrics, extra_args);
 }
 
 fn runConformanceSpecImpl(
@@ -237,7 +254,7 @@ fn runConformanceSpecImpl(
     defer run_arena.deinit();
     const arena = run_arena.allocator();
 
-    const spec_text = try std.fs.cwd().readFileAlloc(arena, spec_path, 1024 * 1024);
+    const spec_text = try std.Io.Dir.cwd().readFileAlloc(std.Io.Threaded.global_single_threaded.io(), spec_path, arena, std.Io.Limit.limited(1024 * 1024));
     var parsed = try spec_mod.parse(arena, spec_text);
     defer parsed.deinit();
 
@@ -245,20 +262,28 @@ fn runConformanceSpecImpl(
     // ora-example app) instead of the spec's sibling .ora.
     const effective_source = parsed.value.deploy.source orelse source_path;
     if (parsed.value.deploy.source) |declared| {
-        std.fs.cwd().access(declared, .{}) catch {
+        std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), declared, .{}) catch {
             std.debug.print("declared deploy source not found: {s}\n", .{declared});
             return error.DeclaredSourceMissing;
         };
     }
 
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.makeDir("out");
-    const out_path = try pathFromTmpAlloc(arena, tmp, "out");
+    const io = std.Io.Threaded.global_single_threaded.io();
+    // Scoped per process as well as per spec: the conformance suite and the
+    // metrics harness walk the same corpus as sibling gate steps, and a
+    // shared deterministic path lets one process's entry/exit deleteTree
+    // vaporize the other's artifacts mid-read (observed as FileNotFound on
+    // abi.json and as vanished metrics rows).
+    const tmp_path = try std.fmt.allocPrint(arena, ".zig-cache/tmp/conformance-{x}-{d}", .{ std.hash.Wyhash.hash(0, spec_path), std.c.getpid() });
+    std.Io.Dir.cwd().deleteTree(io, tmp_path) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, tmp_path) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, tmp_path);
+    const out_path = try std.fmt.allocPrint(arena, "{s}/out", .{tmp_path});
+    try std.Io.Dir.cwd().createDir(io, out_path, .default_dir);
 
     // Compile the primary contract, then every [[contract]] secondary. Each
     // .ora has a distinct stem so all artifacts coexist in one out dir.
-    var compiled = std.ArrayList(CompiledContract){};
+    var compiled: std.ArrayList(CompiledContract) = .empty;
     const primary = try compileOne(arena, effective_source, out_path, extra_args);
     try testing.expectError(error.UnknownFunction, primary.doc.findFunction("missing()"));
     if (metrics) |sink| try sink.record("__bytecode_bytes", primary.bytecode.len);
@@ -272,7 +297,7 @@ fn runConformanceSpecImpl(
     });
 
     for (parsed.value.secondary) |c| {
-        std.fs.cwd().access(c.source, .{}) catch {
+        std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), c.source, .{}) catch {
             std.debug.print("secondary contract source not found: {s}\n", .{c.source});
             return error.DeclaredSourceMissing;
         };
@@ -322,17 +347,18 @@ fn sourceStem(source_path: []const u8) ?[]const u8 {
 }
 
 pub fn collectSpecNames(allocator: std.mem.Allocator, corpus_dir_path: []const u8) ![][]const u8 {
-    var dir = try std.fs.cwd().openDir(corpus_dir_path, .{ .iterate = true });
-    defer dir.close();
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var dir = try std.Io.Dir.cwd().openDir(io, corpus_dir_path, .{ .iterate = true });
+    defer dir.close(io);
 
-    var specs = std.ArrayList([]const u8){};
+    var specs: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (specs.items) |name| allocator.free(name);
         specs.deinit(allocator);
     }
 
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".spec.toml")) continue;
         try specs.append(allocator, try allocator.dupe(u8, entry.name));
@@ -430,7 +456,7 @@ fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, contracts: []cons
         const ctor_args = try abi.encodeArgs(allocator, ctor.inputs, resolved);
         defer allocator.free(ctor_args);
 
-        var init_code = std.ArrayList(u8){};
+        var init_code: std.ArrayList(u8) = .empty;
         defer init_code.deinit(allocator);
         try init_code.appendSlice(allocator, c.bytecode);
         try init_code.appendSlice(allocator, ctor_args);
@@ -441,6 +467,13 @@ fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, contracts: []cons
             std.debug.print("contract deployment failed: {s}\n", .{c.name});
         }
         try testing.expect(create_result.success);
+        if (metrics) |sink| {
+            const deploy_key = if (i == 0)
+                "__deploy_gas"
+            else
+                try std.fmt.allocPrint(allocator, "__deploy_gas:{s}", .{c.name});
+            try sink.record(deploy_key, types.DEFAULT_GAS - create_result.gas_left);
+        }
         try testing.expect(host.getCodeForAddress(create_result.address).len > 0);
         try addresses.put(c.name, create_result.address);
     }
@@ -463,7 +496,7 @@ fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, contracts: []cons
         var function_abi: ?abi_doc.FunctionAbi = null;
         defer if (function_abi) |fa| fa.deinit(allocator);
 
-        var calldata = std.ArrayList(u8){};
+        var calldata: std.ArrayList(u8) = .empty;
         defer calldata.deinit(allocator);
 
         if (call.calldata) |raw| {
@@ -674,7 +707,7 @@ pub fn compileAndRunPropertySource(
     source: []const u8,
     comptime run: fn (*PropertyRuntime) anyerror!void,
 ) !void {
-    std.fs.cwd().access(types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
+    std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -683,12 +716,13 @@ pub fn compileAndRunPropertySource(
     defer run_arena.deinit();
     const arena = run_arena.allocator();
 
+    const io = std.Io.Threaded.global_single_threaded.io();
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir("out");
+    try tmp.dir.createDir(io, "out", .default_dir);
 
     const source_name = try std.fmt.allocPrint(arena, "{s}.ora", .{stem});
-    try tmp.dir.writeFile(.{ .sub_path = source_name, .data = source });
+    try tmp.dir.writeFile(io, .{ .sub_path = source_name, .data = source });
 
     const source_path = try pathFromTmpAlloc(arena, tmp, source_name);
     const out_path = try pathFromTmpAlloc(arena, tmp, "out");
@@ -707,7 +741,7 @@ pub fn compileAndRunPropertySourceDifferential(
     rhs_args: []const []const u8,
     comptime run: fn (*PropertyRuntime, *PropertyRuntime) anyerror!void,
 ) !void {
-    std.fs.cwd().access(types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
+    std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -716,13 +750,14 @@ pub fn compileAndRunPropertySourceDifferential(
     defer run_arena.deinit();
     const arena = run_arena.allocator();
 
+    const io = std.Io.Threaded.global_single_threaded.io();
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.makeDir("lhs");
-    try tmp.dir.makeDir("rhs");
+    try tmp.dir.createDir(io, "lhs", .default_dir);
+    try tmp.dir.createDir(io, "rhs", .default_dir);
 
     const source_name = try std.fmt.allocPrint(arena, "{s}.ora", .{stem});
-    try tmp.dir.writeFile(.{ .sub_path = source_name, .data = source });
+    try tmp.dir.writeFile(io, .{ .sub_path = source_name, .data = source });
 
     const source_path = try pathFromTmpAlloc(arena, tmp, source_name);
     const lhs_out = try pathFromTmpAlloc(arena, tmp, "lhs");
@@ -770,7 +805,7 @@ fn compileAndDeployPropertySource(
     defer constructor_abi.deinit(arena);
     const deploy_args = try abi.encodeArgs(arena, constructor_abi.inputs, &.{});
 
-    var init_code = std.ArrayList(u8){};
+    var init_code: std.ArrayList(u8) = .empty;
     defer init_code.deinit(arena);
     try init_code.appendSlice(arena, artifacts.bytecode);
     try init_code.appendSlice(arena, deploy_args);

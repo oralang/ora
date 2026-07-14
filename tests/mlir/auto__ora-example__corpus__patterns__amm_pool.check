@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/patterns/amm_pool.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @addLiquidity
+// CHECK-LABEL: func.func @removeLiquidity
+// CHECK-LABEL: func.func @swapAForB
+// CHECK-LABEL: func.func @swapBForA
+// CHECK-LABEL: func.func @getReserves
+// CHECK-LABEL: func.func @getReserveB
+// CHECK-LABEL: func.func @getShares

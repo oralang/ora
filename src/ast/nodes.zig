@@ -348,6 +348,7 @@ pub const Stmt = union(enum) {
     Log: LogStmt,
     Lock: LockStmt,
     Unlock: UnlockStmt,
+    CallHint: CallHintStmt,
     Assert: AssertStmt,
     Assume: AssumeStmt,
     Havoc: HavocStmt,
@@ -465,6 +466,23 @@ pub const LogStmt = struct {
 pub const LockStmt = struct {
     range: source.TextRange,
     path: ExprId,
+};
+
+/// Expected call-frequency scale for `@callHint` (Zig's BranchHint minus
+/// `unpredictable`, which has no dispatch meaning). A pure gas-layout hint:
+/// it may only reorder the dispatcher, never change behavior.
+pub const CallHint = enum {
+    none,
+    likely,
+    unlikely,
+    cold,
+};
+
+pub const CallHintStmt = struct {
+    range: source.TextRange,
+    /// Resolved at syntax lowering; null means the argument was not a
+    /// CallHint variant name and sema must reject it.
+    hint: ?CallHint,
 };
 
 pub const UnlockStmt = struct {
@@ -603,6 +621,7 @@ pub const Item = union(enum) {
     Struct: StructItem,
     Bitfield: BitfieldItem,
     Enum: EnumItem,
+    Resource: ResourceItem,
     Trait: TraitItem,
     Impl: ImplItem,
     TypeAlias: TypeAliasItem,
@@ -635,6 +654,7 @@ pub const FunctionItem = struct {
     name: []const u8,
     is_ghost: bool = false,
     is_comptime: bool = false,
+    is_inline: bool = false,
     is_generic: bool = false,
     abi_decode_permissive: bool = false,
     visibility: Visibility,
@@ -700,6 +720,12 @@ pub const TypeAliasItem = struct {
     is_generic: bool = false,
     template_parameters: []const Parameter,
     target_type: TypeExprId,
+};
+
+pub const ResourceItem = struct {
+    range: source.TextRange,
+    name: []const u8,
+    carrier_type: TypeExprId,
 };
 
 pub const LogDeclItem = struct {

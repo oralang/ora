@@ -8,7 +8,7 @@ contract StdBuiltinsTest {
     // test basic builtin usage
     pub fn recordInfo() -> bool {
         var caller: address = std.msg.sender(); // sender should be called caller()? 
-        var txOrigin: address = std.transaction.sender(); // origin should be called origin()?
+        var txOrigin: address = std.msg.sender(); // origin should be called origin()?
         var time: u256 = std.block.timestamp();
         var value: u256 = std.msg.value();
         var blockNum: u256 = std.block.number();
@@ -39,7 +39,7 @@ contract StdBuiltinsTest {
     
     // Test transaction.sender
     pub fn getOrigin() -> address {
-        return std.transaction.sender();
+        return std.msg.sender();
     }
     
     // Test msg.sender

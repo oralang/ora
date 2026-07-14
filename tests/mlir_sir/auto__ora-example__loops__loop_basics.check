@@ -2,7 +2,7 @@
 // INPUT: ora-example/loops/loop_basics.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @sum_range(%arg0: !sir.u256 loc("{{.*}}/ora-example/loops/loop_basics.ora":2:22)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.param_names = ["n"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xb2217fcb", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @sum_range(%arg0: !sir.u256 loc("{{.*}}/ora-example/loops/loop_basics.ora":2:22)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:0"], ora.param_names = ["n"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xb2217fcb", ora.visibility = "pub"} {
 // CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/loops/loop_basics.ora":4:9)))
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/loops/loop_basics.ora":7:9)))
 // CHECK-NEXT:     %c0 = sir.const 0 : !sir.u256 loc(unknown)
@@ -20,7 +20,7 @@
 // CHECK-NEXT:     sir.store %10 : !sir.ptr<1>, %9 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/loops/loop_basics.ora":7:9)))
 // CHECK-NEXT:     sir.return %10 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/loops/loop_basics.ora":7:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/loops/loop_basics.ora":2:5)
-// CHECK-NEXT:   func.func @sum_while(%arg0: !sir.u256 loc("{{.*}}/ora-example/loops/loop_basics.ora":10:22)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.param_names = ["n"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xdafedd24", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @sum_while(%arg0: !sir.u256 loc("{{.*}}/ora-example/loops/loop_basics.ora":10:22)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:5"], ora.param_names = ["n"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xdafedd24", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/loops/loop_basics.ora":17:9)))
 // CHECK-NEXT:     %c0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc(unknown)
@@ -32,18 +32,16 @@
 // CHECK-NEXT:     %6 = sir.and %5 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/loops/loop_basics.ora":13:16)))
 // CHECK-NEXT:     %7 = sir.bitcast %6 : !sir.u256 : i1 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/loops/loop_basics.ora":13:16)))
 // CHECK-NEXT:     %8 = sir.bitcast %7 : i1 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/loops/loop_basics.ora":13:9)))
-// CHECK-NEXT:     %9 = sir.iszero %8 : !sir.u256 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/loops/loop_basics.ora":13:9)))
-// CHECK-NEXT:     %10 = sir.iszero %9 : !sir.u256 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/loops/loop_basics.ora":13:9)))
-// CHECK-NEXT:     sir.cond_br %10 : !sir.u256, ^bb2(%4, %3 : i256, i256), ^bb3(%4, %3 : i256, i256) loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/loops/loop_basics.ora":13:9)))
-// CHECK-NEXT:   ^bb2(%11: !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/loops/loop_basics.ora":13:9))), %12: !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/loops/loop_basics.ora":13:9)))):  // pred: ^bb1
-// CHECK-NEXT:     %13 = sir.add %11 : !sir.u256, %12 : !sir.u256 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/loops/loop_basics.ora":14:19)))
-// CHECK-NEXT:     %14 = sir.bitcast %13 : !sir.u256 : i256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/loops/loop_basics.ora":14:19)))
-// CHECK-NEXT:     %15 = sir.add %12 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/loops/loop_basics.ora":15:13)))
-// CHECK-NEXT:     %16 = sir.bitcast %15 : !sir.u256 : i256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/loops/loop_basics.ora":15:13)))
-// CHECK-NEXT:     sir.br ^bb1(%14, %16 : i256, i256) loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/loops/loop_basics.ora":13:9)))
-// CHECK-NEXT:   ^bb3(%17: !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/loops/loop_basics.ora":13:9))), %18: !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/loops/loop_basics.ora":13:9)))):  // pred: ^bb1
-// CHECK-NEXT:     %19 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/loops/loop_basics.ora":17:9)))
-// CHECK-NEXT:     sir.store %19 : !sir.ptr<1>, %17 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/loops/loop_basics.ora":17:9)))
-// CHECK-NEXT:     sir.return %19 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/loops/loop_basics.ora":17:9)))
+// CHECK-NEXT:     sir.cond_br %8 : !sir.u256, ^bb2(%4, %3 : i256, i256), ^bb3(%4, %3 : i256, i256) loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/loops/loop_basics.ora":13:9)))
+// CHECK-NEXT:   ^bb2(%9: !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/loops/loop_basics.ora":13:9))), %10: !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/loops/loop_basics.ora":13:9)))):  // pred: ^bb1
+// CHECK-NEXT:     %11 = sir.add %9 : !sir.u256, %10 : !sir.u256 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/loops/loop_basics.ora":14:19)))
+// CHECK-NEXT:     %12 = sir.bitcast %11 : !sir.u256 : i256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/loops/loop_basics.ora":14:19)))
+// CHECK-NEXT:     %13 = sir.add %10 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/loops/loop_basics.ora":15:13)))
+// CHECK-NEXT:     %14 = sir.bitcast %13 : !sir.u256 : i256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/loops/loop_basics.ora":15:13)))
+// CHECK-NEXT:     sir.br ^bb1(%12, %14 : i256, i256) loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/loops/loop_basics.ora":13:9)))
+// CHECK-NEXT:   ^bb3(%15: !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/loops/loop_basics.ora":13:9))), %16: !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/loops/loop_basics.ora":13:9)))):  // pred: ^bb1
+// CHECK-NEXT:     %17 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/loops/loop_basics.ora":17:9)))
+// CHECK-NEXT:     sir.store %17 : !sir.ptr<1>, %15 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/loops/loop_basics.ora":17:9)))
+// CHECK-NEXT:     sir.return %17 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/loops/loop_basics.ora":17:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/loops/loop_basics.ora":10:5)
 // CHECK-NEXT: } loc("{{.*}}/ora-example/loops/loop_basics.ora":1:1)

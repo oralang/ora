@@ -21,6 +21,8 @@ EXPECTED_PASS_EXCEPTIONS = {
 TYPE_FALLBACK_RE = re.compile(
     r"^debug: HIR type fallback: (?P<reason>[a-z_]+)(?: at (?P<file>.*):(?P<line>\d+):(?P<column>\d+))?$"
 )
+BYTECODE_BACKEND_EMIT_RE = re.compile(r"Sinora bytecode emitted \((?P<bytes>\d+) bytes\)")
+BYTECODE_SAVED_RE = re.compile(r"^Bytecode saved to (?P<path>.+)$", re.MULTILINE)
 
 
 def extract_type_fallbacks(*texts):
@@ -117,28 +119,70 @@ def expected_failure_for(file_path, emit_mode):
     return "fail" in stem_lower
 
 
-def compiler_command(compiler_path, emit_mode, file_path):
+def compiler_command(compiler_path, emit_mode, file_path, extra_args=None):
+    extra_args = extra_args or []
     if emit_mode == "build":
-        return [compiler_path, str(file_path)]
+        return [compiler_path, *extra_args, str(file_path)]
     if emit_mode in ("ora", "mlir"):
-        return [compiler_path, "--verify", "--emit=mlir:ora", str(file_path)]
+        return [compiler_path, "--verify", "--emit=mlir:ora", *extra_args, str(file_path)]
     if emit_mode == "sir":
-        return [compiler_path, "--verify", "--emit=mlir:sir", str(file_path)]
+        return [compiler_path, "--verify", "--emit=mlir:sir", *extra_args, str(file_path)]
     if emit_mode == "sir-text":
-        return [compiler_path, "--emit=sir-text", str(file_path)]
+        return [compiler_path, "--emit=sir-text", *extra_args, str(file_path)]
     if emit_mode == "bytecode":
-        return [compiler_path, "--emit=bytecode", str(file_path)]
+        return [compiler_path, "--emit=bytecode", *extra_args, str(file_path)]
     if emit_mode == "abi":
-        return [compiler_path, "--emit=abi", str(file_path)]
+        return [compiler_path, "--emit=abi", *extra_args, str(file_path)]
     if emit_mode == "abi-extras":
-        return [compiler_path, "--emit=abi:extras", str(file_path)]
+        return [compiler_path, "--emit=abi:extras", *extra_args, str(file_path)]
     raise ValueError(f"unsupported emit mode: {emit_mode}")
 
 
-def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30, report_type_fallbacks=False, emit_mode="build", max_error_lines=40):
+def bytecode_backend_validation_required(emit_mode, has_contract_decl):
+    """Build/bytecode contract runs must exercise Ora's Sinora bytecode backend."""
+    return emit_mode in ("build", "bytecode") and has_contract_decl
+
+
+def validate_bytecode_backend_outputs(stdout, stderr):
+    """Return Sinora bytecode emission details from compiler output or a .hex artifact."""
+    bytecode_validation_match = BYTECODE_BACKEND_EMIT_RE.search(stdout) or BYTECODE_BACKEND_EMIT_RE.search(stderr)
+    if bytecode_validation_match:
+        return {
+            "backend": "sinora",
+            "bytes": int(bytecode_validation_match.group("bytes")),
+            "source": "compiler-output",
+        }, None
+
+    saved_match = BYTECODE_SAVED_RE.search(stdout) or BYTECODE_SAVED_RE.search(stderr)
+    if not saved_match:
+        return None, (
+            "feature-test bytecode backend validation missing: expected compiler output "
+            "`Sinora bytecode emitted (...)` or a `Bytecode saved to ...` artifact path"
+        )
+
+    bytecode_path = Path(saved_match.group("path").strip())
+    try:
+        bytecode = bytecode_path.read_bytes()
+    except OSError as exc:
+        return None, f"feature-test bytecode backend validation failed: cannot read {bytecode_path}: {exc}"
+
+    payload = bytecode.strip()
+    if payload.startswith(b"0x"):
+        payload = payload[2:]
+    if len(payload) == 0:
+        return None, f"feature-test bytecode backend validation failed: empty bytecode artifact {bytecode_path}"
+    return {
+        "backend": "sinora",
+        "bytes": len(payload) // 2,
+        "source": "artifact",
+        "bytecode_path": str(bytecode_path),
+    }, None
+
+
+def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30, report_type_fallbacks=False, emit_mode="build", max_error_lines=40, compiler_args=None, expected_fail_by_name=True):
     """Test a single .ora file and return results."""
     normalized_path = str(Path(file_path))
-    expected_failure = expected_failure_for(normalized_path, emit_mode)
+    expected_failure = expected_fail_by_name and expected_failure_for(normalized_path, emit_mode)
     try:
         source_text = Path(file_path).read_text()
     except OSError:
@@ -157,7 +201,7 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30, report
 
     try:
         result = subprocess.run(
-            compiler_command(compiler_path, emit_mode, file_path),
+            compiler_command(compiler_path, emit_mode, file_path, compiler_args),
             capture_output=True,
             timeout=timeout_s,
             env=env,
@@ -182,6 +226,7 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30, report
         stderr = stderr_raw.decode('utf-8', errors='ignore') if stderr_raw else ""
 
     type_fallbacks = extract_type_fallbacks(stdout, stderr)
+    bytecode_validation, bytecode_validation_error = validate_bytecode_backend_outputs(stdout, stderr)
 
     if timeout_note:
         if stderr:
@@ -230,6 +275,17 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30, report
         has_critical = any(p in filtered_stderr for p in critical_patterns)
         if empty_module and not has_critical:
             has_error = False
+
+    if (
+        not has_error
+        and not timed_out
+        and not expected_failure
+        and bytecode_backend_validation_required(emit_mode, has_contract_decl)
+        and bytecode_validation is None
+    ):
+        has_error = True
+        validation_error = bytecode_validation_error or "feature-test bytecode backend validation missing"
+        stderr = f"{stderr.rstrip()}\n{validation_error}\n" if stderr else validation_error
 
     if timed_out:
         status = "✅ EXPECTED FAIL (TIMEOUT)" if expected_failure else "❌ TIMEOUT"
@@ -281,6 +337,7 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30, report
         "timed_out": timed_out,
         "expected_failure": expected_failure,
         "type_fallbacks": type_fallbacks,
+        "bytecode_validation": bytecode_validation,
     }
 
 
@@ -356,6 +413,8 @@ def generate_report(results, ops, output_file="docs/ORA_FEATURE_TEST_REPORT.md")
         f.write(f"- **✅ Successful:** {success_count} ({success_count*100//total if total > 0 else 0}%)\n")
         f.write(f"- **❌ Failed:** {failed_count} ({failed_count*100//total if total > 0 else 0}%)\n")
         f.write(f"- **Success rate:** {success_count*100//total if total > 0 else 0}%\n\n")
+        bytecode_validation_count = sum(1 for r in results if r.get("bytecode_validation"))
+        f.write(f"- **Sinora bytecode validations:** {bytecode_validation_count}\n\n")
         
         f.write("### Key Findings\n\n")
         f.write("**✅ Working Features:**\n")
@@ -392,6 +451,8 @@ def generate_report(results, ops, output_file="docs/ORA_FEATURE_TEST_REPORT.md")
             f.write(f"**Status:** {r['status']}\n\n")
             if r.get("expected_failure"):
                 f.write("**Expected failure:** yes\n\n")
+            if r.get("bytecode_validation"):
+                f.write(f"**Bytecode backend validation:** Sinora emitted bytecode ({r['bytecode_validation']['bytes']} bytes)\n\n")
             
             if r['error']:
                 f.write(f"**Error Output:**\n```\n{r['error']}\n```\n\n")
@@ -544,6 +605,9 @@ Examples:
   # Test SIR emission through the same sweeper
   python3 scripts/test_ora_features.py --emit sir --subdir corpus
 
+  # Test an experimental compiler path. Use equals syntax for dash-prefixed args.
+  python3 scripts/test_ora_features.py --emit sir --compiler-arg=--no-canonicalize --subdir corpus
+
   # Test one file and print exactly what the script captured
   python3 scripts/test_ora_features.py --file ora-example/apps/erc20_bitfield_comptime_generics.ora
 
@@ -580,6 +644,10 @@ Examples:
                        help="Max stderr/stdout lines retained per failure")
     parser.add_argument("--fallback-report",
                        help="Write a HIR type-fallback worklist and enable ORA_REPORT_TYPE_FALLBACKS for compiler runs")
+    parser.add_argument("--compiler-arg", action="append", default=[],
+                       help="Extra compiler argument appended before the input file (repeatable; use --compiler-arg=--flag for dash-prefixed values)")
+    parser.add_argument("--all-expected-pass", action="store_true",
+                       help="Treat every tested file as expected-success regardless of its filename")
     parser.add_argument("paths", nargs="*",
                        help="Optional .ora files or directories to test instead of --base-dir")
     
@@ -594,10 +662,12 @@ Examples:
         return
 
     if args.file:
-        result = test_file(args.file, args.compiler, args.timeout, args.fallback_report is not None, args.emit, args.max_error_lines)
+        result = test_file(args.file, args.compiler, args.timeout, args.fallback_report is not None, args.emit, args.max_error_lines, args.compiler_arg, not args.all_expected_pass)
         print(f"File: {result['file']}")
         print(f"Emit: {result['emit']}")
         print(f"Status: {result['status']}")
+        if result.get("bytecode_validation"):
+            print(f"Bytecode backend validation: Sinora emitted bytecode ({result['bytecode_validation']['bytes']} bytes)")
         print(f"Return code: {result['return_code']}")
         print(f"Timed out: {result['timed_out']}")
         print("\n[stdout]")
@@ -639,12 +709,15 @@ Examples:
     for i, file in enumerate(ora_files, 1):
         if not failures_only:
             print(f"[{i}/{len(ora_files)}] Testing {file}...", end=" ")
-        result = test_file(file, args.compiler, args.timeout, args.fallback_report is not None, args.emit, args.max_error_lines)
+        result = test_file(file, args.compiler, args.timeout, args.fallback_report is not None, args.emit, args.max_error_lines, args.compiler_arg, not args.all_expected_pass)
         results.append(result)
         if not failures_only or result["status"].startswith("❌"):
             if failures_only:
                 print(f"[{i}/{len(ora_files)}] Testing {file}...", end=" ")
-            print(result["status"])
+            if result.get("bytecode_validation"):
+                print(f"{result['status']} (Sinora, {result['bytecode_validation']['bytes']} bytes)")
+            else:
+                print(result["status"])
         if args.show_all_output:
             snippet = result["stderr"].strip() or result["stdout"].strip()
             if snippet:

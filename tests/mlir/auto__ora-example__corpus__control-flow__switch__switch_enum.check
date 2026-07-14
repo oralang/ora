@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/control-flow/switch/switch_enum.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @test_exhaustive
+// CHECK-LABEL: func.func @test_enum_expression
+// CHECK-LABEL: func.func @test_enum_blocks
+// CHECK-LABEL: func.func @get_priority

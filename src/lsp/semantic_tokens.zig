@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtins = @import("../builtins.zig");
 const lexer_mod = @import("ora_lexer");
 const refinements = @import("ora_refinements");
 const frontend = @import("frontend.zig");
@@ -96,12 +97,12 @@ fn tokenizeWithTokenSlice(
     tokens: anytype,
     maybe_index: ?semantic_index.SemanticIndex,
 ) ![]SemanticToken {
-    var tokens_list = std.ArrayList(SemanticToken){};
+    var tokens_list = std.ArrayList(SemanticToken).empty;
     errdefer tokens_list.deinit(allocator);
 
     try extractComments(&tokens_list, allocator, tokens, source);
 
-    for (tokens) |token| {
+    for (tokens, 0..) |token, index| {
         if (token.type == .Eof) continue;
         const len: u32 = @intCast(token.lexeme.len);
         if (len == 0) continue;
@@ -109,7 +110,7 @@ fn tokenizeWithTokenSlice(
         const tok_line = if (token.line > 0) token.line - 1 else 0;
         const tok_char = if (token.column > 0) token.column - 1 else 0;
 
-        if (classifyToken(token, maybe_index)) |classification| {
+        if (classifyToken(token, tokenContext(tokens, index), maybe_index)) |classification| {
             try tokens_list.append(allocator, .{
                 .line = tok_line,
                 .start_char = tok_char,
@@ -129,7 +130,23 @@ const Classification = struct {
     modifiers: u32,
 };
 
-fn classifyToken(token: anytype, maybe_index: ?semantic_index.SemanticIndex) ?Classification {
+const TokenContext = struct {
+    previous_type: ?TokenType = null,
+    previous_lexeme: ?[]const u8 = null,
+    previous_previous_type: ?TokenType = null,
+    previous_previous_lexeme: ?[]const u8 = null,
+};
+
+fn tokenContext(tokens: []const token_cache.Token, index: usize) TokenContext {
+    return .{
+        .previous_type = if (index >= 1) tokens[index - 1].type else null,
+        .previous_lexeme = if (index >= 1) tokens[index - 1].lexeme else null,
+        .previous_previous_type = if (index >= 2) tokens[index - 2].type else null,
+        .previous_previous_lexeme = if (index >= 2) tokens[index - 2].lexeme else null,
+    };
+}
+
+fn classifyToken(token: anytype, context: TokenContext, maybe_index: ?semantic_index.SemanticIndex) ?Classification {
     const tt = token.type;
 
     if (classifyKeywordLexeme(token)) |classification| {
@@ -177,7 +194,7 @@ fn classifyToken(token: anytype, maybe_index: ?semantic_index.SemanticIndex) ?Cl
 
     // Identifiers — enrich via semantic index
     if (tt == .Identifier) {
-        return classifyIdentifier(token, maybe_index);
+        return classifyIdentifier(token, context, maybe_index);
     }
 
     // Delimiters — skip (not typically highlighted semantically)
@@ -195,12 +212,21 @@ fn classifyKeywordLexeme(token: anytype) ?Classification {
     return .{ .kind = .keyword, .modifiers = 0 };
 }
 
-fn classifyIdentifier(token: anytype, maybe_index: ?semantic_index.SemanticIndex) Classification {
+fn classifyIdentifier(token: anytype, context: TokenContext, maybe_index: ?semantic_index.SemanticIndex) Classification {
+    if (std.mem.eql(u8, token.lexeme, "Resource")) {
+        return .{ .kind = .type, .modifiers = SemanticTokenModifier.mask(.defaultLibrary) };
+    }
     if (refinements.entryForName(token.lexeme) != null) {
         return .{ .kind = .type, .modifiers = SemanticTokenModifier.mask(.defaultLibrary) };
     }
 
-    const idx = maybe_index orelse return .{ .kind = .variable, .modifiers = 0 };
+    if (context.previous_type == .At and builtins.entryForName(token.lexeme) != null) {
+        return .{ .kind = .function, .modifiers = SemanticTokenModifier.mask(.defaultLibrary) };
+    }
+
+    if (classifyBuiltinPathMember(token.lexeme, context)) |classification| return classification;
+
+    const idx = maybe_index orelse return classifyBuiltinNamespace(token.lexeme) orelse .{ .kind = .variable, .modifiers = 0 };
     const tok_line = if (token.line > 0) token.line - 1 else 0;
     const tok_char = if (token.column > 0) token.column - 1 else 0;
     const tok_end = tok_char + @as(u32, @intCast(token.lexeme.len));
@@ -227,7 +253,73 @@ fn classifyIdentifier(token: anytype, maybe_index: ?semantic_index.SemanticIndex
         };
     }
 
+    if (classifyBuiltinNamespace(token.lexeme)) |classification| return classification;
+
     return .{ .kind = .variable, .modifiers = 0 };
+}
+
+fn classifyBuiltinPathMember(lexeme: []const u8, context: TokenContext) ?Classification {
+    if (context.previous_type != .Dot) return null;
+
+    if (context.previous_previous_lexeme) |base| {
+        if (isSyntheticEnvNamespace(base)) {
+            return .{
+                .kind = .property,
+                .modifiers = SemanticTokenModifier.mask(.defaultLibrary) | SemanticTokenModifier.mask(.readonly),
+            };
+        }
+        if (std.mem.eql(u8, base, "constants") and isUppercaseConstantName(lexeme)) {
+            return defaultLibraryConstant();
+        }
+    }
+
+    if (context.previous_previous_type) |base_type| {
+        if (isIntegerTypeKeyword(base_type) and isIntegerBoundMember(lexeme)) {
+            return defaultLibraryConstant();
+        }
+    }
+
+    return null;
+}
+
+fn classifyBuiltinNamespace(lexeme: []const u8) ?Classification {
+    if (!isSyntheticEnvNamespace(lexeme) and !std.mem.eql(u8, lexeme, "constants")) return null;
+    return .{
+        .kind = .namespace,
+        .modifiers = SemanticTokenModifier.mask(.defaultLibrary),
+    };
+}
+
+fn defaultLibraryConstant() Classification {
+    return .{
+        .kind = .variable,
+        .modifiers = SemanticTokenModifier.mask(.defaultLibrary) | SemanticTokenModifier.mask(.readonly),
+    };
+}
+
+fn isSyntheticEnvNamespace(lexeme: []const u8) bool {
+    return std.mem.eql(u8, lexeme, "msg") or
+        std.mem.eql(u8, lexeme, "transaction") or
+        std.mem.eql(u8, lexeme, "tx") or
+        std.mem.eql(u8, lexeme, "block");
+}
+
+fn isIntegerBoundMember(lexeme: []const u8) bool {
+    return std.mem.eql(u8, lexeme, "MIN") or std.mem.eql(u8, lexeme, "MAX");
+}
+
+fn isUppercaseConstantName(lexeme: []const u8) bool {
+    var saw_letter = false;
+    for (lexeme) |byte| {
+        if (byte >= 'A' and byte <= 'Z') {
+            saw_letter = true;
+            continue;
+        }
+        if (byte >= '0' and byte <= '9') continue;
+        if (byte == '_') continue;
+        return false;
+    }
+    return saw_letter;
 }
 
 fn symbolKindToTokenKind(kind: semantic_index.SymbolKind) SemanticTokenKind {
@@ -388,7 +480,7 @@ fn isControlFlowKeyword(tt: TokenType) bool {
 
 fn isDeclarationKeyword(tt: TokenType) bool {
     return switch (tt) {
-        .Contract, .Fn, .Let, .Var, .Const, .Pub, .Import, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Log, .Error, .Init, .Errors => true,
+        .Contract, .Fn, .Let, .Var, .Const, .Pub, .Import, .Struct, .Bitfield, .Enum, .Resource, .Extern, .Trait, .Impl, .Log, .Error, .Init, .Errors => true,
         else => false,
     };
 }
@@ -402,6 +494,26 @@ fn isOtherKeyword(tt: TokenType) bool {
 
 fn isTypeKeyword(tt: TokenType) bool {
     return lexer_mod.isTypeKeyword(tt);
+}
+
+fn isIntegerTypeKeyword(tt: TokenType) bool {
+    return switch (tt) {
+        .U8,
+        .U16,
+        .U32,
+        .U64,
+        .U128,
+        .U160,
+        .U256,
+        .I8,
+        .I16,
+        .I32,
+        .I64,
+        .I128,
+        .I256,
+        => true,
+        else => false,
+    };
 }
 
 fn isOperator(tt: TokenType) bool {

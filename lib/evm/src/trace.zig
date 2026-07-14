@@ -1,5 +1,5 @@
 const std = @import("std");
-const primitives = @import("voltaire");
+const primitives = @import("primitives.zig");
 const TraceConfig = primitives.TraceConfig;
 
 /// EIP-3155 compatible trace entry
@@ -48,7 +48,7 @@ pub const TraceEntry = struct {
         try obj.put("memSize", .{ .integer = @intCast(self.memSize) });
 
         // Stack as array of hex strings
-        var stack_arr = std.ArrayList(std.json.Value){};
+        var stack_arr: std.ArrayList(std.json.Value) = .empty;
         for (self.stack) |val| {
             var val_buf: [66]u8 = undefined;
             const val_str = try std.fmt.bufPrint(&val_buf, "0x{x}", .{val});
@@ -90,7 +90,7 @@ pub const Tracer = struct {
 
     pub fn init(allocator: std.mem.Allocator) Tracer {
         return .{
-            .entries = std.ArrayList(TraceEntry){},
+            .entries = .empty,
             .allocator = allocator,
             .config = TraceConfig.from(),
         };
@@ -187,7 +187,7 @@ pub const Tracer = struct {
     }
 
     pub fn toJson(self: *const Tracer) !std.json.Value {
-        var arr = std.ArrayList(std.json.Value){};
+        var arr: std.ArrayList(std.json.Value) = .empty;
 
         for (self.entries.items) |*entry| {
             const entry_json = try entry.toJson(self.allocator);
@@ -198,10 +198,10 @@ pub const Tracer = struct {
     }
 
     pub fn writeToFile(self: *const Tracer, path: []const u8) !void {
-        const file = try std.fs.cwd().createFile(path, .{});
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(std.Io.Threaded.global_single_threaded.io(), path, .{});
+        defer file.close(std.Io.Threaded.global_single_threaded.io());
 
-        var json = std.ArrayList(u8){};
+        var json: std.ArrayList(u8) = .empty;
         defer json.deinit(self.allocator);
 
         const writer = json.writer(self.allocator);
@@ -251,7 +251,7 @@ pub const Tracer = struct {
         }
 
         try writer.writeAll("\n]\n");
-        try file.writeAll(json.items);
+        try file.writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), json.items);
     }
 };
 

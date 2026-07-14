@@ -1,0 +1,21 @@
+// INPUT: ora-example/corpus/resources/dynamic_alias_transfer.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-NOT: ora.move
+//
+// CHECK-LABEL: func.func @transfer_maybe_same
+// CHECK-SAME: ora.read_slots = ["balances[param#0]", "balances[param#1]"]
+// CHECK-SAME: ora.write_slots = ["balances[param#0]", "balances[param#1]"]
+// CHECK: %hash_balances = sir.keccak256
+// CHECK: %hash_balances_{{[0-9]+}} = sir.keccak256
+// CHECK: [[SAME:%[0-9]+]] = sir.eq %hash_balances
+// CHECK: sir.cond_br [[SAME]]
+// CHECK: [[SAME_VALUE:%[0-9]+]] = sir.sload %hash_balances
+// CHECK: [[SAME_BAD:%[0-9]+]] = sir.lt [[SAME_VALUE]]
+// CHECK: [[SAME_OK:%[0-9]+]] = sir.iszero [[SAME_BAD]]
+// CHECK: sir.cond_br [[SAME_OK]]
+// CHECK: [[SRC:%[0-9]+]] = sir.sload %hash_balances
+// CHECK: [[DST:%[0-9]+]] = sir.sload %hash_balances_{{[0-9]+}}
+// CHECK: [[SRC_AFTER:%[0-9]+]] = sir.sub [[SRC]]
+// CHECK: [[DST_AFTER:%[0-9]+]] = sir.add [[DST]]
+// CHECK: sir.sstore %hash_balances
+// CHECK: sir.sstore %hash_balances_{{[0-9]+}}

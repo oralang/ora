@@ -1,0 +1,50 @@
+# Short-calldata dispatch guard: calldata < 4 bytes must never select a
+# function. ping124() has selector 0x746e2900 (trailing zero byte), so the
+# 3-byte calldata 0x746e29 zero-pads to the exact selector word — the one
+# case that routed successfully before the dispatcher-level guard existed.
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+# Baseline: the full 4-byte selector routes and executes.
+[[call]]
+fn = "ping124()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 42 }
+
+# Same call raw-encoded.
+[[call]]
+calldata = "0x746e2900"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+succeeds = {}
+
+# THE alias: 3-byte prefix zero-pads to ping124()'s selector word. Must revert.
+[[call]]
+calldata = "0x746e29"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+reverts = { any = true }
+
+# Empty calldata (selector word 0x00000000) must revert.
+[[call]]
+calldata = "0x"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+reverts = { any = true }
+
+# 1- and 2-byte calldata must revert.
+[[call]]
+calldata = "0x74"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+reverts = { any = true }
+
+[[call]]
+calldata = "0x746e"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+reverts = { any = true }

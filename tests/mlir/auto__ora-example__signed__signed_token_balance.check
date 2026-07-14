@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/signed/signed_token_balance.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @record_profit
+// CHECK-LABEL: func.func @record_loss
+// CHECK-LABEL: func.func @accumulate_unchecked
+// CHECK-LABEL: func.func @get_pnl
+// CHECK-LABEL: func.func @is_profitable

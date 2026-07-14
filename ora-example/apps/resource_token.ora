@@ -1,0 +1,64 @@
+comptime const std = @import("std");
+
+resource TokenUnit = u256;
+
+contract ResourceToken {
+    storage var balances: map<address, Resource<TokenUnit>>;
+    storage var allowances: map<address, map<address, TokenUnit>>;
+    storage var total_supply: TokenUnit;
+
+    pub fn issue(to: address, amount: TokenUnit)
+        modifies balances[to], total_supply
+        requires @amount(balances[to]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        requires total_supply <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    {
+        @create(balances[to], amount);
+        total_supply += amount;
+    }
+
+    pub fn transfer(from: address, to: address, amount: TokenUnit)
+        modifies balances[from], balances[to]
+        requires @amount(balances[from]) >= amount
+        requires @amount(balances[to]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    {
+        @move(balances[from], balances[to], amount);
+    }
+
+    pub fn approve(owner: address, spender: address, amount: TokenUnit)
+        modifies allowances[owner][spender]
+        ensures allowances[owner][spender] == amount
+    {
+        allowances[owner][spender] = amount;
+    }
+
+    pub fn transferFrom(owner: address, spender: address, to: address, amount: TokenUnit)
+        modifies allowances[owner][spender], balances[owner], balances[to]
+        requires allowances[owner][spender] >= amount
+        requires @amount(balances[owner]) >= amount
+        requires @amount(balances[to]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    {
+        allowances[owner][spender] -= amount;
+        @move(balances[owner], balances[to], amount);
+    }
+
+    pub fn retire(from: address, amount: TokenUnit)
+        modifies balances[from], total_supply
+        requires @amount(balances[from]) >= amount
+        requires total_supply >= amount
+    {
+        @destroy(balances[from], amount);
+        total_supply -= amount;
+    }
+
+    pub fn balanceOf(owner: address) -> TokenUnit {
+        return @amount(balances[owner]);
+    }
+
+    pub fn allowance(owner: address, spender: address) -> TokenUnit {
+        return allowances[owner][spender];
+    }
+
+    pub fn totalSupply() -> TokenUnit {
+        return total_supply;
+    }
+}

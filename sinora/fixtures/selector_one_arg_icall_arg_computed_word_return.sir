@@ -1,0 +1,94 @@
+fn init:
+    entry {
+        v0 = runtime_start_offset
+        v1 = runtime_length
+        v2 = malloc v1
+        codecopy v2 v0 v1
+        return v2 v1
+    }
+
+fn wrapping_pow_u256:
+    entry v0 v1 -> v4 v2 {
+        v2 = const 0x20
+        v3 = exp v0 v1
+        v4 = malloc v2
+        mstore256 v4 v3
+        iret
+    }
+
+fn wrapping_pow_square:
+    entry v0 -> v3 v1 {
+        v1 = const 0x20
+        c2 = const 0x2
+        v2 = exp v0 c2
+        v3 = malloc v1
+        mstore256 v3 v2
+        iret
+    }
+
+fn main:
+    main_entry {
+        zero = const 0x0
+        selector_offset = const 0x4
+        word_size = const 0x20
+        min_cdsize_1arg = const 0x23
+        arg1_offset = const 0x24
+        min_cdsize_2args = const 0x43
+        arg2_offset = const 0x44
+        min_cdsize_3args = const 0x63
+        selector_shift = const 0xE0
+        v0 = codesize
+        v1 = mload256 word_size
+        v2 = lt v1 v0
+        sel_zero = const 0x0
+        sel_mask = sub sel_zero v2
+        sel_t = and sel_mask v0
+        sel_inv = not sel_mask
+        sel_f = and sel_inv v1
+        v3 = or sel_t sel_f
+        mstore256 word_size v3
+        cv = callvalue
+        cv_nonzero = iszero cv
+        => cv_nonzero ? @load_selector : @revert_error
+    }
+    load_selector {
+        zero_0 = const 0x0
+        selector_shift_0 = const 0xE0
+        selector_word = calldataload zero_0
+        selector = shr selector_shift_0 selector_word
+        switch selector {
+        0x4DA152DE => @wrapping_pow_u256_
+        0xC92441A6 => @wrapping_pow_square_
+        default => @revert_error
+    }
+    }
+    revert_error {
+        zero_1 = const 0x0
+        revert zero_1 zero_1
+    }
+    wrapping_pow_u256_ {
+        cdsize_wrapping_pow_u256 = calldatasize
+        min_cdsize_2args_0 = const 0x43
+        valid_wrapping_pow_u256 = lt min_cdsize_2args_0 cdsize_wrapping_pow_u256
+        => valid_wrapping_pow_u256 ? @wrapping_pow_u256_exec : @revert_error
+    }
+    wrapping_pow_u256_exec {
+        selector_offset_0 = const 0x4
+        a_wrapping_pow_u256 = calldataload selector_offset_0
+        arg1_offset_0 = const 0x24
+        b_wrapping_pow_u256 = calldataload arg1_offset_0
+        v4 v5 = icall @wrapping_pow_u256 a_wrapping_pow_u256 b_wrapping_pow_u256
+        return v4 v5
+    }
+    wrapping_pow_square_ {
+        cdsize_wrapping_pow_square = calldatasize
+        min_cdsize_1arg_0 = const 0x23
+        valid_wrapping_pow_square = lt min_cdsize_1arg_0 cdsize_wrapping_pow_square
+        => valid_wrapping_pow_square ? @wrapping_pow_square_exec : @revert_error
+    }
+    wrapping_pow_square_exec {
+        selector_offset_1 = const 0x4
+        a_wrapping_pow_square = calldataload selector_offset_1
+        v6 v7 = icall @wrapping_pow_square a_wrapping_pow_square
+        return v6 v7
+    }

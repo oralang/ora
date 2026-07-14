@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/error-union/error_chain.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @validate_input
+// CHECK-LABEL: func.func @compute
+// CHECK-LABEL: func.func @process
+// CHECK-LABEL: func.func @safe_process

@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/summaries/private_helper_inline.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @safeAdd
+// CHECK-LABEL: func.func @safeSub
+// CHECK-LABEL: func.func @deposit
+// CHECK-LABEL: func.func @withdraw

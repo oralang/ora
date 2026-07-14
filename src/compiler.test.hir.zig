@@ -206,6 +206,224 @@ test "compiler lowers syntax into immutable AST items" {
     try testing.expect(file.item(file.root_items[0]).Contract.members.len >= 2);
 }
 
+test "compiler lowers resource declarations into AST items and indexes them" {
+    const source_text =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    resource ShareUnit = u256;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const file = try compilation.db.astFile(module.file_id);
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+
+    const root_resource_id = item_index.lookup("TokenUnit") orelse return error.TestExpectedEqual;
+    const root_resource = file.item(root_resource_id).Resource;
+    try testing.expectEqualStrings("TokenUnit", root_resource.name);
+
+    const contract_id = item_index.lookup("Vault") orelse return error.TestExpectedEqual;
+    const contract = file.item(contract_id).Contract;
+    try testing.expectEqual(@as(usize, 1), contract.members.len);
+    const member_resource = file.item(contract.members[0]).Resource;
+    try testing.expectEqualStrings("ShareUnit", member_resource.name);
+
+    const member_id = item_index.lookup("Vault.ShareUnit") orelse return error.TestExpectedEqual;
+    try testing.expectEqual(contract.members[0], member_id);
+}
+
+test "compiler lowers map-backed resource builtins to Ora resource ops" {
+    const source_text =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn exercise(from: address, to: address, amount: TokenUnit) {
+        \\        @move(balances[from], balances[to], amount);
+        \\        @create(balances[to], amount);
+        \\        @destroy(balances[from], amount);
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"ora.move\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"ora.create\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"ora.destroy\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 3, "domain = \"TokenUnit\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 3, "carrier_type = i256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.map_get"));
+}
+
+test "compiler lowers resource amount observation as a pure read" {
+    const source_text =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\    storage var reserve: Resource<TokenUnit>;
+        \\
+        \\    pub fn balanceOf(owner: address) -> TokenUnit {
+        \\        return @amount(balances[owner]);
+        \\    }
+        \\
+        \\    pub fn reserveBalance() -> TokenUnit {
+        \\        return @amount(reserve);
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.map_get"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.sload"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "\"ora.create\""));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "\"ora.destroy\""));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "\"ora.move\""));
+}
+
+test "compiler lowers direct storage resource places through OraToSIR" {
+    const source_text =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var reserve: Resource<TokenUnit>;
+        \\    storage var treasury: Resource<TokenUnit>;
+        \\
+        \\    pub fn issue(amount: TokenUnit) {
+        \\        @create(reserve, amount);
+        \\    }
+        \\
+        \\    pub fn retire(amount: TokenUnit) {
+        \\        @destroy(reserve, amount);
+        \\    }
+        \\
+        \\    pub fn sweep(amount: TokenUnit) {
+        \\        @move(reserve, treasury, amount);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.create"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.destroy"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.move"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "eq"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 4, "sload"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 4, "sstore"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 3, "revert"));
+}
+
+test "compiler lowers map-backed resource create and destroy through OraToSIR" {
+    const source_text =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn issue(to: address, amount: TokenUnit) {
+        \\        @create(balances[to], amount);
+        \\    }
+        \\
+        \\    pub fn retire(from: address, amount: TokenUnit) {
+        \\        @destroy(balances[from], amount);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.create"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.destroy"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "sstore"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, " ? @"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "revert"));
+}
+
+test "compiler lowers map-backed resource move through OraToSIR" {
+    const source_text =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn transfer(from: address, to: address, amount: TokenUnit) {
+        \\        @move(balances[from], balances[to], amount);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.move"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "eq"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "sload"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "sstore"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 3, " ? @"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "revert"));
+}
+
+test "compiler lowers resource move between distinct roots without alias branch" {
+    const source_text =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var source_balances: map<address, Resource<TokenUnit>>;
+        \\    storage var destination_balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn sweep(from: address, to: address, amount: TokenUnit) {
+        \\        @move(source_balances[from], destination_balances[to], amount);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.move"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "eq"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "sload"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "sstore"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, " ? @"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "revert"));
+}
+
 test "compiler parses and lowers structured top-level item forms" {
     const source_text =
         \\comptime const math = @import("./math.ora");
@@ -326,6 +544,38 @@ test "compiler lowers embedded std constants through imported module access" {
     const hir_text = try renderHirTextForSource(source_text);
     defer testing.allocator.free(hir_text);
     try testing.expect(std.mem.indexOf(u8, hir_text, "ora.field_access") == null);
+}
+
+test "compiler lowers refinement bounds from embedded std integer constants" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\type SignedDeltaAmount = InRange<u256, 1, std.constants.I256_MAX>;
+        \\
+        \\contract RefinementConstBounds {
+        \\    pub fn keep(amount: SignedDeltaAmount) -> u256 {
+        \\        return amount;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expectEqual(@as(u32, 0), hir_result.type_fallback_count);
+    try testing.expect(hir_result.isEmittable());
+
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "57896044618658097711785492504343953926634992332820282019728792003956564819967"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.refinement_guard"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.lowering_error"));
 }
 
 test "compiler lowers structured type expressions" {
@@ -632,6 +882,7 @@ test "compiler lowers string, bytes, and address literals through real ops" {
     const source_text =
         \\pub fn owner() -> address {
         \\    let note = "hello";
+        \\    let quoted = "a\"b";
         \\    let payload = hex"deadbeef";
         \\    let who = 0x1234567890abcdef1234567890abcdef12345678;
         \\    return who;
@@ -2212,6 +2463,66 @@ test "compiler lowers runtime keccak256 builtin" {
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.keccak256"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.return %c0_i256 : i256"));
+}
+
+test "compiler lowers computed storage derive and word operations to Ora MLIR ops" {
+    const source_text =
+        \\contract Vault {
+        \\    pub fn write(owner: address, offset: u256, value: u256) {
+        \\        let slot: StorageSlot = @storageDerive("vault.position", owner);
+        \\        @storageWordStore(slot, offset, value);
+        \\    }
+        \\
+        \\    pub fn read(owner: address, offset: u256) -> u256 {
+        \\        let slot: StorageSlot = @storageDerive("vault.position", owner);
+        \\        return @storageWordLoad(slot, offset);
+        \\    }
+        \\
+        \\    pub fn clear(owner: address) {
+        \\        let slot: StorageSlot = @storageDerive("vault.position", owner);
+        \\        let range: StorageRange = @storageRange(slot, 2);
+        \\        @storageRangeErase(range);
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.storage.derive"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"vault.position\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "namespace_hash"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.storage.word_load"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.storage.word_store"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.storage.range_erase"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "word_count = 2"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "$computed_storage[vault.position][param#0][param#1]"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "$computed_storage[vault.position][param#0][0..2]"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "memref.store"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "memref.load"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.lowering_error"));
+}
+
+test "compiler lowers imported fixed size data wrapper with concrete array lengths" {
+    const source_text =
+        \\comptime const fixed = @import("std/storage/fixed_size_data");
+        \\
+        \\contract Vault {
+        \\    pub fn read(owner: address) -> u256 {
+        \\        let slot: StorageSlot = @storageDerive("vault.fixed", owner);
+        \\        let data: [u256; 3] = fixed.load(slot, 3);
+        \\        return data[2];
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "@std.storage.fixed_size_data.load__3"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref<3xi256>"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.storage.word_load"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.lowering_error"));
 }
 
 test "compiler lowers builtin cast through real conversion ops" {

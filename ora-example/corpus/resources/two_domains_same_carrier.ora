@@ -1,0 +1,20 @@
+resource Shares = u256;
+resource Credits = u256;
+comptime const std = @import("std");
+
+contract TwoDomainsSameCarrier {
+    storage var shares: map<address, Resource<Shares>>;
+    storage var credits: map<address, Resource<Credits>>;
+
+    pub fn mint_shares(to: address, amount: Shares)
+        requires @amount(shares[to]) <= @cast(Shares, std.constants.U256_MAX) - amount
+    {
+        @create(shares[to], amount);
+    }
+
+    pub fn mint_credits(to: address, amount: Credits)
+        requires @amount(credits[to]) <= @cast(Credits, std.constants.U256_MAX) - amount
+    {
+        @create(credits[to], amount);
+    }
+}

@@ -1,0 +1,5 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/modifies/pass_internal_struct_field_frame.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @set_owner
+// CHECK-LABEL: func.func @f

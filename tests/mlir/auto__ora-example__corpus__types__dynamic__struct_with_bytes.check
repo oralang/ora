@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/dynamic/struct_with_bytes.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @setBlob
+// CHECK-LABEL: func.func @getData
+// CHECK-LABEL: func.func @getSize
+// CHECK-LABEL: func.func @updateData

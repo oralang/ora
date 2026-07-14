@@ -1,6 +1,6 @@
 //===- SIRTextLegalizer.cpp - SIR Text Legalizer Pass ----------------===//
 //
-// Validates SIR MLIR against constraints required by the Sensei text format.
+// Validates SIR MLIR against constraints required by the Plank SIR text format.
 // This pass should be run after Ora -> SIR conversion and before text emission.
 //
 //===----------------------------------------------------------------------===//
@@ -15,6 +15,7 @@
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/Casting.h"
@@ -108,63 +109,100 @@ namespace mlir
                 return NameLoc::get(StringAttr::get(ctx, syntheticTag), base);
             }
 
-            struct SIRTextLegalizerPass : public PassWrapper<SIRTextLegalizerPass, OperationPass<ModuleOp>>
+            static bool sameValues(ValueRange lhs, ValueRange rhs)
             {
-                // Insert trampoline blocks for cond_br with operands. Sensei's
-                // text form carries values through block outputs rather than
-                // edge-specific conditional branch operands. The backend stores
-                // locals in function-wide static slots, so trampoline block
-                // outputs may reference dominated values defined in predecessor
-                // blocks without executable scratch memory.
-            LogicalResult normalizeBranches(ModuleOp module)
-            {
-                SmallVector<sir::CondBrOp, 16> condBranchesToFix;
-                module.walk([&](sir::CondBrOp br) {
-                    auto trueOps = br.getTrueOperands();
-                    auto falseOps = br.getFalseOperands();
-                    if (!trueOps.empty() || !falseOps.empty())
-                        condBranchesToFix.push_back(br);
-                });
-
-                for (auto br : condBranchesToFix)
-                {
-                    OpBuilder b(br);
-                    Block *parentBlock = br.getOperation()->getBlock();
-                    Region *region = parentBlock->getParent();
-
-                    // Create trampoline blocks after the parent block.
-                    Block *trampTrue = new Block();
-                    Block *trampFalse = new Block();
-                    region->getBlocks().insertAfter(Region::iterator(parentBlock), trampTrue);
-                    region->getBlocks().insertAfter(Region::iterator(trampTrue), trampFalse);
-
-                    // trampoline_true: br ^true_dest(true_operands)
-                    {
-                        OpBuilder tb(br.getContext());
-                        tb.setInsertionPointToEnd(trampTrue);
-                        Location trampLoc = makeSyntheticOriginOnlyLoc(br.getLoc(), "branch_trampoline_true");
-                        tb.create<sir::BrOp>(trampLoc, br.getTrueOperands(), br.getTrueDest());
-                    }
-                    // trampoline_false: br ^false_dest(false_operands)
-                    {
-                        OpBuilder fb(br.getContext());
-                        fb.setInsertionPointToEnd(trampFalse);
-                        Location trampLoc = makeSyntheticOriginOnlyLoc(br.getLoc(), "branch_trampoline_false");
-                        fb.create<sir::BrOp>(trampLoc, br.getFalseOperands(), br.getFalseDest());
-                    }
-
-                    // Replace cond_br with: cond_br %c, ^trampTrue, ^trampFalse (no operands)
-                    b.setInsertionPoint(br);
-                    b.create<sir::CondBrOp>(br.getLoc(), br.getCond(),
-                                            ValueRange{}, ValueRange{},
-                                            trampTrue, trampFalse);
-                    br.erase();
-                }
-
-                return success();
+                if (lhs.size() != rhs.size())
+                    return false;
+                for (auto [a, b] : llvm::zip_equal(lhs, rhs))
+                    if (a != b)
+                        return false;
+                return true;
             }
 
-            void runOnOperation() override
+            struct SIRTextLegalizerPass : public PassWrapper<SIRTextLegalizerPass, OperationPass<ModuleOp>>
+            {
+                // Plank SIR text has one block-output span per source block,
+                // not per-edge branch operands. For differing cond_br operands,
+                // route both edges through relay blocks with a shared carrier
+                // tuple so release stack scheduling sees real block arguments
+                // rather than hidden predecessor locals.
+                LogicalResult normalizeBranches(ModuleOp module)
+                {
+                    SmallVector<sir::CondBrOp, 16> condBranchesToFix;
+                    module.walk([&](sir::CondBrOp br) {
+                        if (!sameValues(br.getTrueOperands(), br.getFalseOperands()))
+                            condBranchesToFix.push_back(br);
+                    });
+
+                    for (auto br : condBranchesToFix)
+                    {
+                        OpBuilder b(br);
+                        Block *parentBlock = br.getOperation()->getBlock();
+                        Region *region = parentBlock->getParent();
+
+                        SmallVector<Value, 8> carrier;
+                        carrier.append(br.getTrueOperands().begin(), br.getTrueOperands().end());
+                        carrier.append(br.getFalseOperands().begin(), br.getFalseOperands().end());
+
+                        SmallVector<Type, 8> carrierTypes;
+                        SmallVector<Location, 8> carrierLocs;
+                        carrierTypes.reserve(carrier.size());
+                        carrierLocs.reserve(carrier.size());
+                        for (Value value : carrier)
+                        {
+                            carrierTypes.push_back(value.getType());
+                            carrierLocs.push_back(br.getLoc());
+                        }
+
+                        // Create relay blocks after the parent block. The block
+                        // arguments are the shared carrier tuple passed by the
+                        // source cond_br.
+                        Block *relayTrue = new Block();
+                        Block *relayFalse = new Block();
+                        relayTrue->addArguments(carrierTypes, carrierLocs);
+                        relayFalse->addArguments(carrierTypes, carrierLocs);
+                        region->getBlocks().insertAfter(Region::iterator(parentBlock), relayTrue);
+                        region->getBlocks().insertAfter(Region::iterator(relayTrue), relayFalse);
+
+                        SmallVector<Value, 8> trueForward;
+                        SmallVector<Value, 8> falseForward;
+                        trueForward.reserve(br.getTrueOperands().size());
+                        falseForward.reserve(br.getFalseOperands().size());
+                        for (unsigned i = 0; i < br.getTrueOperands().size(); ++i)
+                            trueForward.push_back(relayTrue->getArgument(i));
+                        for (unsigned i = 0; i < br.getFalseOperands().size(); ++i)
+                            falseForward.push_back(relayFalse->getArgument(br.getTrueOperands().size() + i));
+
+                        // relay_true(carrier): br ^true_dest(true_slice)
+                        {
+                            OpBuilder tb(br.getContext());
+                            tb.setInsertionPointToEnd(relayTrue);
+                            Location relayLoc = makeSyntheticOriginOnlyLoc(br.getLoc(), "branch_relay_true");
+                            tb.create<sir::BrOp>(relayLoc, trueForward, br.getTrueDest());
+                        }
+
+                        // relay_false(carrier): br ^false_dest(false_slice)
+                        {
+                            OpBuilder fb(br.getContext());
+                            fb.setInsertionPointToEnd(relayFalse);
+                            Location relayLoc = makeSyntheticOriginOnlyLoc(br.getLoc(), "branch_relay_false");
+                            fb.create<sir::BrOp>(relayLoc, falseForward, br.getFalseDest());
+                        }
+
+                        // Replace with a cond_br whose two edges carry identical
+                        // operands. The text emitter turns those operands into the
+                        // source block's single output span.
+                        b.setInsertionPoint(br);
+                        b.create<sir::CondBrOp>(br.getLoc(), br.getCond(),
+                                                carrier, carrier,
+                                                relayTrue, relayFalse);
+                        br.erase();
+                    }
+
+                    return success();
+                }
+
+                void runOnOperation() override
                 {
                     ModuleOp module = getOperation();
 

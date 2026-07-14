@@ -1,0 +1,22 @@
+// INPUT: ora-example/corpus/resources/distinct_roots_transfer.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-NOT: ora.move
+//
+// CHECK-LABEL: func.func @settle
+// CHECK-SAME: ora.read_slots = ["pending[param#0]", "settled[param#1]"]
+// CHECK-SAME: ora.write_slots = ["pending[param#0]", "settled[param#1]"]
+// CHECK: %slot_pending = sir.const 0
+// CHECK: %hash_pending = sir.keccak256
+// CHECK: %hash_settled = sir.keccak256
+// CHECK: [[SRC:%[0-9]+]] = sir.sload %hash_pending
+// CHECK: [[DST:%[0-9]+]] = sir.sload %hash_settled
+// CHECK: [[SRC_AFTER:%[0-9]+]] = sir.sub [[SRC]]
+// CHECK: [[SRC_BAD:%[0-9]+]] = sir.lt [[SRC]]
+// CHECK: [[SRC_OK:%[0-9]+]] = sir.iszero [[SRC_BAD]]
+// CHECK: sir.cond_br [[SRC_OK]]
+// CHECK: [[DST_AFTER:%[0-9]+]] = sir.add [[DST]]
+// CHECK: [[DST_BAD:%[0-9]+]] = sir.lt [[DST_AFTER]]
+// CHECK: [[DST_OK:%[0-9]+]] = sir.iszero [[DST_BAD]]
+// CHECK: sir.cond_br [[DST_OK]]
+// CHECK: sir.sstore %hash_pending
+// CHECK: sir.sstore %hash_settled

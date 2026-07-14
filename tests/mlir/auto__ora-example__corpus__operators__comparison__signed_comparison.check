@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/operators/comparison/signed_comparison.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @lt_i8
+// CHECK-LABEL: func.func @le_i8
+// CHECK-LABEL: func.func @gt_i8
+// CHECK-LABEL: func.func @ge_i8
+// CHECK-LABEL: func.func @lt_i256
+// CHECK-LABEL: func.func @le_i256
+// CHECK-LABEL: func.func @gt_i256
+// CHECK-LABEL: func.func @ge_i256

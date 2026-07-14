@@ -1,0 +1,11 @@
+resource DebtUnit = i256;
+
+contract ResourceSmtFailNegativeSignedAmount {
+    storage var debt: Resource<DebtUnit>;
+
+    pub fn credit(amount: DebtUnit)
+        modifies debt
+    {
+        @create(debt, amount);
+    }
+}

@@ -1,0 +1,11 @@
+// Negative: range erase must be statically bounded; dynamic lengths would lower
+// to an unbounded storage loop.
+comptime const std_storage = @import("std/storage");
+
+contract BadComputedStorageUnboundedRange {
+    pub fn bad(owner: address, len: u256) {
+        let slot: StorageSlot = std_storage.derive("ora.test.bad.unbounded", owner);
+        let range: StorageRange = std_storage.range(slot, len);
+        std_storage.words.erase(range);
+    }
+}

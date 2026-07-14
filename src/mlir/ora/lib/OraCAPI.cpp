@@ -33,6 +33,7 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Transforms/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -50,6 +51,7 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/ADT/ArrayRef.h"
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -57,6 +59,32 @@
 
 namespace
 {
+    static bool isOraDialectRegistered(MlirContext ctx)
+    {
+        mlir::MLIRContext *context = unwrap(ctx);
+        return context->getLoadedDialect("ora") != nullptr;
+    }
+
+    static MlirOperation createSimpleOraOperation(
+        MlirContext ctx,
+        MlirLocation loc,
+        llvm::StringRef name,
+        llvm::ArrayRef<mlir::Value> operands,
+        llvm::ArrayRef<mlir::Type> resultTypes = {},
+        llvm::ArrayRef<mlir::NamedAttribute> attributes = {})
+    {
+        if (!isOraDialectRegistered(ctx))
+            return {nullptr};
+
+        mlir::MLIRContext *context = unwrap(ctx);
+        mlir::OperationState state(unwrap(loc), name);
+        state.addOperands(operands);
+        state.addTypes(resultTypes);
+        state.addAttributes(attributes);
+        mlir::OpBuilder builder(context);
+        return wrap(builder.create(state));
+    }
+
     static mlir::Operation *findStructDeclInScope(mlir::Operation *anchor, llvm::StringRef structName)
     {
         if (!anchor)
@@ -223,6 +251,11 @@ extern "C"
     void oraContextDestroy(MlirContext ctx)
     {
         delete unwrap(ctx);
+    }
+
+    void oraContextSetAllowUnregisteredDialects(MlirContext ctx, bool allow)
+    {
+        unwrap(ctx)->allowUnregisteredDialects(allow);
     }
 
     void oraSetDebugEnabled(bool enabled)
@@ -544,6 +577,16 @@ void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
         return int_attr.getValue().getSExtValue();
     }
 
+    MlirType oraTypeAttrGetValue(MlirAttribute attr)
+    {
+        auto type_attr = llvm::dyn_cast<mlir::TypeAttr>(unwrap(attr));
+        if (!type_attr)
+        {
+            return {nullptr};
+        }
+        return wrap(type_attr.getValue());
+    }
+
     size_t oraArrayAttrGetNumElements(MlirAttribute attr)
     {
         auto array_attr = llvm::dyn_cast<mlir::ArrayAttr>(unwrap(attr));
@@ -557,11 +600,31 @@ void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
     MlirAttribute oraArrayAttrGetElement(MlirAttribute attr, size_t index)
     {
         auto array_attr = llvm::dyn_cast<mlir::ArrayAttr>(unwrap(attr));
-        if (!array_attr || index >= array_attr.size())
+        if (!array_attr || index >= static_cast<size_t>(array_attr.size()))
         {
             return MlirAttribute{nullptr};
         }
         return wrap(array_attr[index]);
+    }
+
+    size_t oraDenseI32ArrayAttrGetNumElements(MlirAttribute attr)
+    {
+        auto array_attr = llvm::dyn_cast<mlir::DenseI32ArrayAttr>(unwrap(attr));
+        if (!array_attr)
+        {
+            return 0;
+        }
+        return array_attr.size();
+    }
+
+    int32_t oraDenseI32ArrayAttrGetElement(MlirAttribute attr, size_t index)
+    {
+        auto array_attr = llvm::dyn_cast<mlir::DenseI32ArrayAttr>(unwrap(attr));
+        if (!array_attr || index >= static_cast<size_t>(array_attr.size()))
+        {
+            return 0;
+        }
+        return array_attr.asArrayRef()[index];
     }
 
     MlirStringRef oraIntegerAttrGetValueString(MlirAttribute attr)
@@ -1374,6 +1437,119 @@ MlirOperation oraSStoreOpCreate(MlirContext ctx, MlirLocation loc, MlirValue val
 
 
         return wrap(sstoreOp.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraStorageDeriveOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    MlirStringRef namespaceName,
+    MlirStringRef namespaceHashDecimal,
+    const MlirValue *keys,
+    size_t numKeys,
+    MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        StringRef namespaceRef = unwrap(namespaceName);
+        StringRef hashRef = unwrap(namespaceHashDecimal);
+        Type resultTypeRef = unwrap(resultType);
+
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        llvm::APInt hashValue(256, 0);
+        if (hashRef.getAsInteger(10, hashValue))
+        {
+            return {nullptr};
+        }
+        hashValue = hashValue.zextOrTrunc(256);
+        auto hashType = ::mlir::IntegerType::get(context, 256, ::mlir::IntegerType::Unsigned);
+        auto hashAttr = IntegerAttr::get(hashType, hashValue);
+
+        SmallVector<Value, 4> operands;
+        operands.reserve(numKeys);
+        for (size_t i = 0; i < numKeys; ++i)
+        {
+            operands.push_back(unwrap(keys[i]));
+        }
+
+        OpBuilder builder(context);
+        OperationState state(location, "ora.storage.derive");
+        state.addOperands(operands);
+        state.addTypes(resultTypeRef);
+        state.addAttribute("namespace_name", StringAttr::get(context, namespaceRef));
+        state.addAttribute("namespace_hash", hashAttr);
+        Operation *op = builder.create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraStorageWordLoadOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    MlirValue slot,
+    MlirValue offset,
+    MlirType resultType)
+{
+    try
+    {
+        Type resultTypeRef = unwrap(resultType);
+        SmallVector<Value, 2> operands{unwrap(slot), unwrap(offset)};
+        SmallVector<Type, 1> results{resultTypeRef};
+        return createSimpleOraOperation(ctx, loc, "ora.storage.word_load", operands, results);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraStorageWordStoreOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    MlirValue slot,
+    MlirValue offset,
+    MlirValue value)
+{
+    try
+    {
+        SmallVector<Value, 3> operands{unwrap(slot), unwrap(offset), unwrap(value)};
+        return createSimpleOraOperation(ctx, loc, "ora.storage.word_store", operands);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraStorageRangeEraseOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    MlirValue slot,
+    uint64_t wordCount)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        auto wordCountType = mlir::IntegerType::get(context, 64);
+        SmallVector<Value, 1> operands{unwrap(slot)};
+        SmallVector<NamedAttribute, 1> attributes{
+            NamedAttribute(StringAttr::get(context, "word_count"), IntegerAttr::get(wordCountType, wordCount)),
+        };
+        return createSimpleOraOperation(ctx, loc, "ora.storage.range_erase", operands, {}, attributes);
     }
     catch (...)
     {
@@ -4503,6 +4679,17 @@ MlirAttribute oraIntegerAttrGetFromString(MlirType type, MlirStringRef valueStr)
             return {nullptr};
         }
 
+        bool isNegative = false;
+        if (cleanValue.front() == '-' || cleanValue.front() == '+')
+        {
+            isNegative = cleanValue.front() == '-';
+            cleanValue.erase(cleanValue.begin());
+            if (cleanValue.empty())
+            {
+                return {nullptr};
+            }
+        }
+
         // Parse the string digit by digit to build the APInt
         // This handles values of any size up to the bit width
         llvm::APInt apValue(bitWidth, 0);
@@ -4519,9 +4706,10 @@ MlirAttribute oraIntegerAttrGetFromString(MlirType type, MlirStringRef valueStr)
             }
         }
 
-        // If the type is signed and the value would be negative in two's complement,
-        // we need to handle sign extension. For now, we'll assume unsigned parsing.
-        // The isSigned flag in the type will handle the interpretation.
+        if (isNegative)
+        {
+            apValue = -apValue;
+        }
 
         // Verify the value fits in the bit width
         // APInt will automatically truncate, but we want to ensure it's valid
@@ -4540,10 +4728,8 @@ MlirAttribute oraIntegerAttrGetFromString(MlirType type, MlirStringRef valueStr)
         }
         return wrap(attr);
     }
-    catch (const std::exception &e)
+    catch (const std::exception &)
     {
-        // Log the exception for debugging (can be removed in production)
-        // For now, just return null
         return {nullptr};
     }
     catch (...)
@@ -5032,49 +5218,50 @@ MlirOperation oraStructInstantiateOpCreate(MlirContext ctx, MlirLocation loc, Ml
     }
 }
 
-MlirOperation oraMoveOpCreate(MlirContext ctx, MlirLocation loc, MlirValue amount, MlirValue source, MlirValue destination)
+static void addOperandSegmentSizes(OperationState &state, MLIRContext *context, ArrayRef<int32_t> sizes)
+{
+    state.addAttribute("operand_segment_sizes", DenseI32ArrayAttr::get(context, sizes));
+}
+
+static void addResourceBoundaryAttrs(OperationState &state, MLIRContext *context, MlirStringRef domain, MlirType carrierType, bool carrierSigned)
+{
+    state.addAttribute("domain", StringAttr::get(context, unwrap(domain)));
+    state.addAttribute("carrier_type", TypeAttr::get(unwrap(carrierType)));
+    state.addAttribute("carrier_signed", BoolAttr::get(context, carrierSigned));
+}
+
+MlirOperation oraMoveOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    const MlirValue *sourcePlace,
+    size_t numSourcePlace,
+    const MlirValue *destinationPlace,
+    size_t numDestinationPlace,
+    MlirValue amount,
+    MlirStringRef domain,
+    MlirType carrierType,
+    bool carrierSigned)
 {
     try
     {
         MLIRContext *context = unwrap(ctx);
         Location location = unwrap(loc);
-        Value amt = unwrap(amount);
-        Value src = unwrap(source);
-        Value dst = unwrap(destination);
-
-        OpBuilder builder(context);
-
-        // Create the move operation
-        auto op = builder.create<ora::MoveOp>(location, amt, src, dst);
-
-        return wrap(op.getOperation());
-    }
-    catch (...)
-    {
-        return {nullptr};
-    }
-}
-
-MlirOperation oraMoveOpCreateWithMapping(MlirContext ctx, MlirLocation loc, MlirValue mapping, MlirValue source, MlirValue destination, MlirValue amount, MlirType resultType)
-{
-    try
-    {
-        Location location = unwrap(loc);
-
-        Value mappingVal = unwrap(mapping);
-        Value sourceVal = unwrap(source);
-        Value destinationVal = unwrap(destination);
-        Value amountVal = unwrap(amount);
-        Type resultTy = unwrap(resultType);
 
         OperationState state(location, "ora.move");
-        SmallVector<Value, 4> operands;
-        operands.push_back(mappingVal);
-        operands.push_back(sourceVal);
-        operands.push_back(destinationVal);
-        operands.push_back(amountVal);
+        SmallVector<Value, 8> operands;
+        for (size_t i = 0; i < numSourcePlace; ++i)
+            operands.push_back(unwrap(sourcePlace[i]));
+        for (size_t i = 0; i < numDestinationPlace; ++i)
+            operands.push_back(unwrap(destinationPlace[i]));
+        operands.push_back(unwrap(amount));
         state.addOperands(operands);
-        state.addTypes(resultTy);
+        SmallVector<int32_t, 3> segments = {
+            static_cast<int32_t>(numSourcePlace),
+            static_cast<int32_t>(numDestinationPlace),
+            1,
+        };
+        addOperandSegmentSizes(state, context, segments);
+        addResourceBoundaryAttrs(state, context, domain, carrierType, carrierSigned);
 
         Operation *op = Operation::create(state);
         return wrap(op);
@@ -5083,6 +5270,66 @@ MlirOperation oraMoveOpCreateWithMapping(MlirContext ctx, MlirLocation loc, Mlir
     {
         return {nullptr};
     }
+}
+
+static MlirOperation createResourceBoundaryOp(
+    MlirContext ctx,
+    MlirLocation loc,
+    StringRef opName,
+    const MlirValue *place,
+    size_t numPlace,
+    MlirValue amount,
+    MlirStringRef domain,
+    MlirType carrierType,
+    bool carrierSigned)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+
+        OperationState state(location, opName);
+        SmallVector<Value, 4> operands;
+        for (size_t i = 0; i < numPlace; ++i)
+            operands.push_back(unwrap(place[i]));
+        Value amountVal = unwrap(amount);
+        operands.push_back(amountVal);
+        state.addOperands(operands);
+        addResourceBoundaryAttrs(state, context, domain, carrierType, carrierSigned);
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraCreateOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    const MlirValue *place,
+    size_t numPlace,
+    MlirValue amount,
+    MlirStringRef domain,
+    MlirType carrierType,
+    bool carrierSigned)
+{
+    return createResourceBoundaryOp(ctx, loc, "ora.create", place, numPlace, amount, domain, carrierType, carrierSigned);
+}
+
+MlirOperation oraDestroyOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    const MlirValue *place,
+    size_t numPlace,
+    MlirValue amount,
+    MlirStringRef domain,
+    MlirType carrierType,
+    bool carrierSigned)
+{
+    return createResourceBoundaryOp(ctx, loc, "ora.destroy", place, numPlace, amount, domain, carrierType, carrierSigned);
 }
 
 MlirOperation oraCmpOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef predicate, MlirValue lhs, MlirValue rhs, MlirType resultType)
@@ -5624,6 +5871,14 @@ MlirAttribute oraBoolAttrCreate(MlirContext ctx, bool value)
     {
         return {nullptr};
     }
+}
+
+bool oraBoolAttrGetValue(MlirAttribute attr)
+{
+    Attribute attribute = unwrap(attr);
+    if (auto boolAttr = llvm::dyn_cast_or_null<BoolAttr>(attribute))
+        return boolAttr.getValue();
+    return false;
 }
 
 MlirAttribute oraIntegerAttrCreateI64(MlirContext ctx, MlirType type, int64_t value)
@@ -7672,11 +7927,60 @@ static void oraConfigureVerifierForPassManager(PassManager &pm, const char *pipe
     }
 }
 
+static constexpr bool oraNativeMlirStatisticsEnabled()
+{
+#if LLVM_ENABLE_STATS
+    return true;
+#else
+    return false;
+#endif
+}
+
+class ScopedOraMlirPassStatistics
+{
+public:
+    explicit ScopedOraMlirPassStatistics(bool enabled) : enabled(enabled)
+    {
+        if (enabled)
+            setActiveOraMlirPassStatistics(&statistics);
+    }
+
+    ~ScopedOraMlirPassStatistics()
+    {
+        if (enabled)
+            setActiveOraMlirPassStatistics(nullptr);
+    }
+
+    const OraMlirPassStatistics &get() const { return statistics; }
+
+private:
+    bool enabled = false;
+    OraMlirPassStatistics statistics;
+};
+
+static void copyOraMlirPassStatistics(const mlir::ora::OraMlirPassStatistics &from, OraMlirPassStatisticsC *to)
+{
+    if (!to)
+        return;
+
+    to->ora_functions_canonicalized = from.oraFunctionsCanonicalized;
+    to->ora_functions_cse_processed = from.oraFunctionsCSEProcessed;
+    to->ora_storage_reads_reused = from.oraStorageReadsReused;
+    to->ora_calls_inlined = from.oraCallsInlined;
+    to->ora_source_inline_failures = from.oraSourceInlineFailures;
+    to->sir_constants_deduplicated = from.sirConstantsDeduplicated;
+    to->sir_unused_allocas_removed = from.sirUnusedAllocasRemoved;
+    to->sir_unused_loads_removed = from.sirUnusedLoadsRemoved;
+    to->sir_unused_pure_ops_removed = from.sirUnusedPureOpsRemoved;
+    to->sir_framework_functions_processed = from.sirFrameworkFunctionsProcessed;
+    to->ora_symbols_dced = from.oraSymbolsDCEd;
+}
+
 //===----------------------------------------------------------------------===//
 // Ora Canonicalization (before conversion)
 //===----------------------------------------------------------------------===//
 
-bool oraCanonicalizeOraMLIR(MlirContext ctx, MlirModule module)
+static bool oraCanonicalizeOraMLIRImpl(MlirContext ctx, MlirModule module, bool printStatistics, OraMlirPassStatisticsC *outStatistics)
 {
     try
     {
@@ -7692,6 +7996,9 @@ bool oraCanonicalizeOraMLIR(MlirContext ctx, MlirModule module)
         // Create pass manager for builtin.module operations
         PassManager pm(context, "builtin.module");
         oraConfigureVerifierForPassManager(pm, "ora-canonicalize");
+        if (printStatistics && oraNativeMlirStatisticsEnabled())
+            pm.enableStatistics(PassDisplayMode::Pipeline);
+        ScopedOraMlirPassStatistics oraStatistics(printStatistics || outStatistics != nullptr);
 
         auto addOraFunctionOptimizationPipeline = [&]()
         {
@@ -7712,7 +8019,18 @@ bool oraCanonicalizeOraMLIR(MlirContext ctx, MlirModule module)
         // Ora emission / Ora->SIR conversion.
         addOraFunctionOptimizationPipeline();
 
+        // 4. Framework symbol DCE is safe only after Ora roots are translated
+        // into MLIR symbol visibility. Public ABI/init/debug roots stay public;
+        // explicit private helpers become removable if they are not referenced
+        // by a live root.
+        pm.addPass(mlir::ora::createOraSymbolVisibilityPass());
+        pm.addPass(mlir::createSymbolDCEPass());
+        pm.addPass(mlir::ora::createOraSymbolDCECleanupPass());
+
         LogicalResult result = pm.run(moduleOp);
+        copyOraMlirPassStatistics(oraStatistics.get(), outStatistics);
+        if (printStatistics)
+            printOraMlirPassStatistics(oraStatistics.get(), llvm::errs(), "ora-canonicalize");
 
         if (failed(result))
         {
@@ -7727,19 +8045,29 @@ bool oraCanonicalizeOraMLIR(MlirContext ctx, MlirModule module)
     }
 }
 
+bool oraCanonicalizeOraMLIR(MlirContext ctx, MlirModule module)
+{
+    return oraCanonicalizeOraMLIRImpl(ctx, module, false, nullptr);
+}
+
+bool oraCanonicalizeOraMLIRWithStatisticsOut(MlirContext ctx, MlirModule module, bool printStatistics, OraMlirPassStatisticsC *outStatistics)
+{
+    return oraCanonicalizeOraMLIRImpl(ctx, module, printStatistics, outStatistics);
+}
+
 //===----------------------------------------------------------------------===//
 // Ora to SIR Conversion
 //===----------------------------------------------------------------------===//
 
-bool oraConvertToSIR(MlirContext ctx, MlirModule module, bool debugInfo)
+static bool oraConvertToSIRImpl(MlirContext ctx, MlirModule module, bool debugInfo, bool printStatistics, OraMlirPassStatisticsC *outStatistics)
 {
     try
     {
         MLIRContext *context = unwrap(ctx);
         ModuleOp moduleOp = unwrap(module);
         const bool hadDebugInfoAttr = moduleOp->hasAttr("ora.debug_info");
-        const bool enablePhase0SIRFrameworkCanonicalizer =
-            moduleOp->hasAttr("ora.phase0.run_sir_framework_canonicalizer");
+        const bool skipSIRFrameworkCanonicalizer =
+            moduleOp->hasAttr("ora.phase0.skip_sir_framework_canonicalizer");
         if (debugInfo && !hadDebugInfoAttr)
         {
             moduleOp->setAttr("ora.debug_info", UnitAttr::get(context));
@@ -7761,6 +8089,9 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module, bool debugInfo)
         // This ensures nested passes can be added and executed
         PassManager pm(context, "builtin.module");
         oraConfigureVerifierForPassManager(pm, "ora-to-sir");
+        if (printStatistics && oraNativeMlirStatisticsEnabled())
+            pm.enableStatistics(PassDisplayMode::Pipeline);
+        ScopedOraMlirPassStatistics oraStatistics(printStatistics || outStatistics != nullptr);
 
         ORA_DEBUG_PREFIX("OraCAPI", "Created PassManager for builtin.module");
 
@@ -7779,12 +8110,14 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module, bool debugInfo)
         pm.addPass(createSIROptimizationPass());
         // Cleanup removes dead pure ops after the deterministic hygiene pass.
         pm.addPass(createSIRCleanupPass());
-        if (enablePhase0SIRFrameworkCanonicalizer)
+        if (!skipSIRFrameworkCanonicalizer)
         {
-            // Phase 0 framework-first spike: let MLIR canonicalization exercise
-            // dialect folders on SIR after conversion. This is opt-in
-            // so normal builds remain byte-identical while the spike measures
-            // framework behavior against the existing manual cleanup baseline.
+            // Framework-first SIR hygiene is part of the normal pipeline.
+            // Branch, cast, and pure-value cleanup belong in MLIR
+            // canonicalizers and RemoveDeadValues instead of reviving the old
+            // broad bespoke peephole batch that was disabled after converted
+            // loop-CFG crashes. The internal skip attr exists only for debug
+            // viewers that need a before/after snapshot from cloned modules.
             pm.addPass(createSIRFrameworkCanonicalizerPass());
         }
 
@@ -7792,6 +8125,9 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module, bool debugInfo)
         ORA_DEBUG_PREFIX("OraCAPI", "Running OraToSIR pass...");
 
         LogicalResult result = pm.run(moduleOp);
+        copyOraMlirPassStatistics(oraStatistics.get(), outStatistics);
+        if (printStatistics)
+            printOraMlirPassStatistics(oraStatistics.get(), llvm::errs(), "ora-to-sir");
         if (debugInfo && !hadDebugInfoAttr)
             moduleOp->removeAttr("ora.debug_info");
 
@@ -7810,6 +8146,16 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module, bool debugInfo)
     {
         return false;
     }
+}
+
+bool oraConvertToSIR(MlirContext ctx, MlirModule module, bool debugInfo)
+{
+    return oraConvertToSIRImpl(ctx, module, debugInfo, false, nullptr);
+}
+
+bool oraConvertToSIRWithStatisticsOut(MlirContext ctx, MlirModule module, bool debugInfo, bool printStatistics, OraMlirPassStatisticsC *outStatistics)
+{
+    return oraConvertToSIRImpl(ctx, module, debugInfo, printStatistics, outStatistics);
 }
 
 //===----------------------------------------------------------------------===//
@@ -7865,6 +8211,182 @@ bool oraBuildSIRDispatcher(MlirContext ctx, MlirModule module)
     catch (...)
     {
         return false;
+    }
+}
+
+bool oraTestStripFirstSIRSelectorSwitchDefaultBlockName(MlirModule module)
+{
+    try
+    {
+        ModuleOp moduleOp = unwrap(module);
+        bool stripped = false;
+
+        moduleOp.walk([&](sir::SwitchOp sw) {
+            if (stripped || !sw->hasAttr("sir.selector_switch"))
+                return;
+
+            Block *defaultDest = sw.getDefaultDest();
+            if (!defaultDest || defaultDest->empty())
+                return;
+
+            defaultDest->back().removeAttr("sir.block_name");
+            stripped = true;
+        });
+
+        return stripped;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+MlirStringRef oraExtractSIRDispatcherSwitchFacts(MlirContext ctx, MlirModule module)
+{
+    try
+    {
+        (void)ctx;
+        ModuleOp moduleOp = unwrap(module);
+
+        std::string out;
+        llvm::raw_string_ostream os(out);
+        os << "{\"schema_version\":1,\"switches\":[";
+        bool firstSwitch = true;
+        bool malformed = false;
+        size_t ordinal = 0;
+
+        auto blockName = [](Block *block) -> StringRef {
+            if (!block || block->empty())
+                return StringRef();
+            auto attr = block->back().getAttrOfType<StringAttr>("sir.block_name");
+            if (!attr)
+                return StringRef();
+            return attr.getValue();
+        };
+
+        moduleOp.walk([&](sir::SwitchOp sw) {
+            if (!sw->hasAttr("sir.selector_switch"))
+                return;
+
+            StringRef switchBlock = blockName(sw->getBlock());
+            StringRef defaultLabel = blockName(sw.getDefaultDest());
+            const bool selectorSwitchGuarded = !defaultLabel.empty();
+            if (switchBlock.empty())
+            {
+                malformed = true;
+                return;
+            }
+
+            if (!firstSwitch)
+                os << ",";
+            firstSwitch = false;
+            os << "{\"ordinal\":" << ordinal++ << ",\"block\":\"";
+            os.write_escaped(switchBlock);
+            os << "\",\"default_label\":\"";
+            os.write_escaped(defaultLabel);
+            os << "\",\"cases\":[";
+
+            auto caseVals = sw.getCaseValues();
+            auto caseDests = sw.getCaseDests();
+            for (size_t i = 0; i < caseVals.size(); ++i)
+            {
+                if (i != 0)
+                    os << ",";
+                auto intAttr = dyn_cast<IntegerAttr>(caseVals[i]);
+                StringRef label = blockName(caseDests[i]);
+                if (!intAttr || label.empty())
+                {
+                    malformed = true;
+                    return;
+                }
+
+                os << "{\"selector\":" << intAttr.getValue().getZExtValue()
+                   << ",\"label\":\"";
+                os.write_escaped(label);
+                os << "\",\"guarded\":" << (selectorSwitchGuarded ? "true" : "false") << "}";
+            }
+
+            os << "]}";
+        });
+
+        os << "]}";
+        os.flush();
+
+        if (malformed || out.empty())
+            return oraStringRefCreate(nullptr, 0);
+        char *buf = static_cast<char *>(std::malloc(out.size()));
+        if (!buf)
+            return oraStringRefCreate(nullptr, 0);
+        std::memcpy(buf, out.data(), out.size());
+        return oraStringRefCreate(buf, out.size());
+    }
+    catch (...)
+    {
+        return oraStringRefCreate(nullptr, 0);
+    }
+}
+
+MlirStringRef oraExtractSIRDispatcherIntentFacts(MlirContext ctx, MlirModule module)
+{
+    try
+    {
+        (void)ctx;
+        ModuleOp moduleOp = unwrap(module);
+
+        std::string out;
+        llvm::raw_string_ostream os(out);
+        os << "{\"schema_version\":1,\"intents\":[";
+        bool first = true;
+        bool malformed = false;
+
+        for (func::FuncOp func : moduleOp.getOps<func::FuncOp>())
+        {
+            auto visibility = func->getAttrOfType<StringAttr>("ora.visibility");
+            if (!visibility || visibility.getValue() != "pub")
+                continue;
+            if (auto init = func->getAttrOfType<BoolAttr>("ora.init"); init && init.getValue())
+                continue;
+            auto selector = func->getAttrOfType<StringAttr>("ora.selector");
+            if (!selector)
+            {
+                malformed = true;
+                break;
+            }
+            StringRef selectorText = selector.getValue();
+            if (!selectorText.consume_front("0x"))
+            {
+                malformed = true;
+                break;
+            }
+            uint32_t parsed = 0;
+            if (selectorText.getAsInteger(16, parsed))
+            {
+                malformed = true;
+                break;
+            }
+            if (!first)
+                os << ",";
+            first = false;
+            os << "{\"selector\":" << parsed << ",\"function\":\"";
+            os.write_escaped(func.getName());
+            os << "\",\"label\":\"";
+            os.write_escaped((func.getName() + "_").str());
+            os << "\"}";
+        }
+
+        os << "]}";
+        os.flush();
+        if (malformed || out.empty())
+            return oraStringRefCreate(nullptr, 0);
+        char *buf = static_cast<char *>(std::malloc(out.size()));
+        if (!buf)
+            return oraStringRefCreate(nullptr, 0);
+        std::memcpy(buf, out.data(), out.size());
+        return oraStringRefCreate(buf, out.size());
+    }
+    catch (...)
+    {
+        return oraStringRefCreate(nullptr, 0);
     }
 }
 

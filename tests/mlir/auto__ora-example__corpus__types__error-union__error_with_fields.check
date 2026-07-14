@@ -1,0 +1,6 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/error-union/error_with_fields.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @withdraw
+// CHECK-LABEL: func.func @safe_withdraw
+// CHECK-LABEL: func.func @get_balance

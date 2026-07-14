@@ -1,0 +1,13 @@
+resource TokenUnit = u256;
+
+contract ResourceSmtMoveDynamicAlias {
+    storage var balances: map<address, Resource<TokenUnit>>;
+
+    pub fn self_transfer(owner: address, amount: TokenUnit)
+        modifies balances[owner]
+        requires @amount(balances[owner]) >= amount
+        ensures @amount(balances[owner]) == old(@amount(balances[owner]))
+    {
+        @move(balances[owner], balances[owner], amount);
+    }
+}

@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/comptime/abi_decode_static.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @scalar_value
+// CHECK-LABEL: func.func @array_sum
+// CHECK-LABEL: func.func @struct_amount
+// CHECK-LABEL: func.func @fixed_bytes_sum
+// CHECK-LABEL: func.func @enum_ok
+// CHECK-LABEL: func.func @bitfield_last_byte
+// CHECK-LABEL: func.func @refinement_ok
+// CHECK-LABEL: func.func @malformed_is_err

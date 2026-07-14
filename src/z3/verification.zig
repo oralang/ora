@@ -13,15 +13,49 @@
 //===----------------------------------------------------------------------===//
 
 const std = @import("std");
-const z3 = @import("c.zig");
+pub const z3_c = @import("c.zig");
+pub const Z3Context = @import("context.zig").Context;
+pub const Z3Solver = @import("solver.zig").Solver;
+pub const state_symbols = @import("state_symbols.zig");
+pub const goal_skolem = @import("goal_skolem.zig");
+
+const z3 = z3_c;
 const mlir = @import("mlir_c_api").c;
-const Context = @import("context.zig").Context;
-const Solver = @import("solver.zig").Solver;
+const Context = Z3Context;
+const Solver = Z3Solver;
 const Encoder = @import("encoder.zig").Encoder;
 const errors = @import("errors.zig");
 const mlir_helpers = @import("mlir_helpers.zig");
 const refinements = @import("ora_types").refinement_semantics;
 const ManagedArrayList = std.array_list.Managed;
+
+pub const VerificationResult = errors.VerificationResult;
+pub const VerificationError = errors.VerificationError;
+pub const Diagnostic = errors.Diagnostic;
+pub const Counterexample = errors.Counterexample;
+pub const ProvenGuardPosition = errors.ProvenGuardPosition;
+
+fn libcEnv(comptime name: [:0]const u8) ?[]const u8 {
+    if (!@import("builtin").link_libc) return null;
+    return if (std.c.getenv(name)) |value| std.mem.span(value) else null;
+}
+
+fn nowTimestamp() std.Io.Clock.Timestamp {
+    return std.Io.Clock.Timestamp.now(std.Io.Threaded.global_single_threaded.io(), .awake);
+}
+
+fn unixTimestampSeconds() i64 {
+    const timestamp = std.Io.Clock.Timestamp.now(std.Io.Threaded.global_single_threaded.io(), .real);
+    const seconds = @divFloor(timestamp.raw.nanoseconds, std.time.ns_per_s);
+    return std.math.cast(i64, seconds) orelse if (seconds < 0) std.math.minInt(i64) else std.math.maxInt(i64);
+}
+
+fn elapsedNs(start: std.Io.Clock.Timestamp) u64 {
+    const end = nowTimestamp();
+    const elapsed = std.Io.Clock.Timestamp.durationTo(start, end);
+    if (elapsed.raw.nanoseconds <= 0) return 0;
+    return std.math.cast(u64, elapsed.raw.nanoseconds) orelse std.math.maxInt(u64);
+}
 
 pub const AnnotationKind = enum {
     Requires, // Function precondition
@@ -67,12 +101,12 @@ const ImportedObligationSource = struct {
     kind: Encoder.PendingObligationSourceKind,
 };
 
-const QuerySolverLogic = enum {
+pub const QuerySolverLogic = enum(u8) {
     all,
     qf_aufbv,
 };
 
-const QueryFragment = enum {
+pub const QueryFragment = enum(u8) {
     unknown,
     qf_bv,
     qf_bv_array,
@@ -80,6 +114,9 @@ const QueryFragment = enum {
     aufbv_quantifiers,
     other,
 };
+
+pub const PendingObligationSourceKind = Encoder.PendingObligationSourceKind;
+pub const PendingConstraintSourceKind = Encoder.PendingConstraintSourceKind;
 
 const TrackedAssumption = struct {
     proxy: ?z3.Z3_ast = null,
@@ -97,10 +134,17 @@ fn cloneAssumptionTagSlice(
 pub const SmtReportArtifacts = struct {
     markdown: []u8,
     json: []u8,
+    trusted_artifacts_allowed: bool,
+    query_manifest: ?PreparedQueryManifest = null,
 
     pub fn deinit(self: *SmtReportArtifacts, allocator: std.mem.Allocator) void {
         allocator.free(self.markdown);
         allocator.free(self.json);
+        if (self.query_manifest) |*manifest| manifest.deinit();
+    }
+
+    pub fn blocksTrustedArtifacts(self: SmtReportArtifacts) bool {
+        return !self.trusted_artifacts_allowed;
     }
 };
 
@@ -161,6 +205,8 @@ pub const VerificationPass = struct {
     explain_cores: bool = false,
     proofs_enabled: bool = false,
     minimize_cores: bool = false,
+    force_unknown_query: ?ForcedUnknownQuery = null,
+    formal_query_bindings: []const FormalQueryBinding = &.{},
 
     /// Current function being processed (for MLIR extraction)
     current_function_name: ?[]const u8 = null,
@@ -185,6 +231,8 @@ pub const VerificationPass = struct {
     guard_id_storage: ManagedArrayList([]const u8),
     /// Storage for duplicated annotation labels/messages
     label_storage: ManagedArrayList([]const u8),
+    /// Resource operation events surfaced in SMT reports.
+    report_resource_events: ManagedArrayList(ResourceEffectEvent),
     /// Semantic constraint provenance recorded while extracting prepared queries.
     semantic_constraint_tags: std.AutoHashMap(usize, AssumptionTag),
 
@@ -211,32 +259,32 @@ pub const VerificationPass = struct {
         errdefer qf_solver.deinit();
 
         var encoder = Encoder.init(context, allocator);
-        const debug_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_DEBUG") catch null;
+        const debug_env = libcEnv("ORA_Z3_DEBUG");
         const debug_options = if (debug_env) |val| blk: {
-            defer allocator.free(val);
             break :blk try parseZ3DebugEnv(val);
         } else Z3DebugEnvOptions{};
         encoder.setDebugAssertSimplify(debug_options.assert_simplify);
 
-        const timeout_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_TIMEOUT_MS") catch null;
+        const timeout_env = libcEnv("ORA_Z3_TIMEOUT_MS");
         var timeout_ms: ?u32 = 60_000;
         if (timeout_env) |val| {
             timeout_ms = std.fmt.parseInt(u32, val, 10) catch null;
-            allocator.free(val);
         }
 
-        const seed_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_SEED") catch null;
+        const seed_env = libcEnv("ORA_Z3_SEED");
         var random_seed: u32 = 0;
         if (seed_env) |val| {
             random_seed = std.fmt.parseInt(u32, val, 10) catch random_seed;
-            allocator.free(val);
         }
+        const force_unknown_query = if (libcEnv("ORA_Z3_TEST_FORCE_UNKNOWN_QUERY")) |val|
+            try parseForcedUnknownQuery(val)
+        else
+            null;
 
-        const summary_depth_env = std.process.getEnvVarOwned(allocator, "ORA_VERIFY_MAX_SUMMARY_INLINE_DEPTH") catch null;
+        const summary_depth_env = libcEnv("ORA_VERIFY_MAX_SUMMARY_INLINE_DEPTH");
         const max_summary_inline_depth = if (options.max_summary_inline_depth) |depth|
             depth
         else if (summary_depth_env) |val| blk: {
-            defer allocator.free(val);
             break :blk try std.fmt.parseInt(u32, val, 10);
         } else encoder.max_summary_inline_depth;
 
@@ -268,6 +316,7 @@ pub const VerificationPass = struct {
             .explain_cores = false,
             .proofs_enabled = proofs_enabled,
             .minimize_cores = false,
+            .force_unknown_query = force_unknown_query,
             .runtime_reachable_function_names = std.StringHashMap(void).init(allocator),
             .encoded_annotations = ManagedArrayList(EncodedAnnotation).init(allocator),
             .active_path_assumptions = ManagedArrayList(ActivePathAssume).init(allocator),
@@ -275,6 +324,7 @@ pub const VerificationPass = struct {
             .location_storage = ManagedArrayList([]const u8).init(allocator),
             .guard_id_storage = ManagedArrayList([]const u8).init(allocator),
             .label_storage = ManagedArrayList([]const u8).init(allocator),
+            .report_resource_events = ManagedArrayList(ResourceEffectEvent).init(allocator),
             .semantic_constraint_tags = std.AutoHashMap(usize, AssumptionTag).init(allocator),
         };
         return pass;
@@ -318,6 +368,10 @@ pub const VerificationPass = struct {
         self.minimize_cores = enabled;
     }
 
+    pub fn setFormalQueryBindings(self: *VerificationPass, bindings: []const FormalQueryBinding) void {
+        self.formal_query_bindings = bindings;
+    }
+
     pub fn deinit(self: *VerificationPass) void {
         for (self.function_name_storage.items) |name| {
             self.allocator.free(name);
@@ -335,6 +389,7 @@ pub const VerificationPass = struct {
             self.allocator.free(label);
         }
         self.label_storage.deinit();
+        self.report_resource_events.deinit();
         self.semantic_constraint_tags.deinit();
         self.runtime_reachable_function_names.deinit();
         for (self.encoded_annotations.items) |ann| {
@@ -647,7 +702,7 @@ pub const VerificationPass = struct {
                 }
             }
 
-            var block_arg_bindings = std.ArrayList(SavedValueBinding){};
+            var block_arg_bindings = std.ArrayList(SavedValueBinding).empty;
             defer {
                 for (block_arg_bindings.items) |saved| {
                     if (saved.had_binding) {
@@ -660,7 +715,7 @@ pub const VerificationPass = struct {
             }
             try self.bindRegionBlockArguments(current_block, &block_arg_bindings);
 
-            var block_loop_invariant_annotations = std.ArrayList(usize){};
+            var block_loop_invariant_annotations = std.ArrayList(usize).empty;
             defer block_loop_invariant_annotations.deinit(self.allocator);
 
             // walk operations in this block
@@ -1169,7 +1224,7 @@ pub const VerificationPass = struct {
     ) !void {
         // Globals: merge per-slot as ite(condition, then, else), defaulting to base.
         self.clearEncoderGlobalMap();
-        var global_names = std.ArrayList([]const u8){};
+        var global_names = std.ArrayList([]const u8).empty;
         defer global_names.deinit(self.allocator);
 
         var base_g_it = base.global_map.iterator();
@@ -1273,7 +1328,7 @@ pub const VerificationPass = struct {
         branch_states: []const EncoderBranchState,
     ) !void {
         self.clearEncoderGlobalMap();
-        var global_names = std.ArrayList([]const u8){};
+        var global_names = std.ArrayList([]const u8).empty;
         defer global_names.deinit(self.allocator);
 
         var base_g_it = base.global_map.iterator();
@@ -2091,7 +2146,12 @@ pub const VerificationPass = struct {
             std.mem.eql(u8, op_name, "call") or
             std.mem.eql(u8, op_name, "ora.sstore") or
             std.mem.eql(u8, op_name, "ora.tstore") or
-            std.mem.eql(u8, op_name, "ora.map_store");
+            std.mem.eql(u8, op_name, "ora.map_store") or
+            std.mem.eql(u8, op_name, "ora.create") or
+            std.mem.eql(u8, op_name, "ora.destroy") or
+            std.mem.eql(u8, op_name, "ora.move") or
+            std.mem.eql(u8, op_name, "ora.storage.word_store") or
+            std.mem.eql(u8, op_name, "ora.storage.range_erase");
         if (!should_observe) return;
 
         const function_name = self.current_function_name orelse "unknown";
@@ -2774,11 +2834,13 @@ pub const VerificationPass = struct {
             else
                 term_name_ref.data[0..term_name_ref.length];
             if (!std.mem.eql(u8, term_name, "scf.yield")) continue;
-            const loop_writes_state = self.encoder.operationMayWriteTrackedState(parent_op) catch false;
+            // Soundness default: write-analysis failure must over-havoc loop state,
+            // never preserve storage across a loop that might mutate it.
+            const loop_writes_state = self.encoder.operationMayWriteTrackedState(parent_op) catch true;
 
             try self.restoreEncoderBranchState(&base_encoder_state);
-            self.clearEncoderGlobalMap();
             if (loop_writes_state) {
+                self.clearEncoderGlobalMap();
                 try self.seedFreshLoopGlobalState(parent_op, "post");
             }
             self.encoder.value_map.clearRetainingCapacity();
@@ -3138,6 +3200,86 @@ pub const VerificationPass = struct {
         return try self.executePreparedQueriesSequential(queries.items);
     }
 
+    pub fn collectPreparedQuerySummary(self: *VerificationPass, mlir_module: mlir.MlirModule) !PreparedQuerySummary {
+        self.encoder.clearDegradation();
+        try self.extractAnnotationsFromMLIR(mlir_module);
+        if (self.encoder.isDegraded()) return error.VerificationEncodingDegraded;
+
+        var queries = try self.buildPreparedQueries();
+        defer {
+            for (queries.items) |*query| {
+                query.deinit(self.allocator);
+            }
+            queries.deinit();
+        }
+        if (self.encoder.isDegraded()) return error.VerificationEncodingDegraded;
+
+        return PreparedQuerySummary.fromPreparedQueries(queries.items);
+    }
+
+    pub fn collectPreparedQueryManifest(self: *VerificationPass, mlir_module: mlir.MlirModule) !PreparedQueryManifest {
+        self.encoder.clearDegradation();
+        try self.extractAnnotationsFromMLIR(mlir_module);
+        if (self.encoder.isDegraded()) return error.VerificationEncodingDegraded;
+
+        var queries = try self.buildPreparedQueries();
+        defer {
+            for (queries.items) |*query| {
+                query.deinit(self.allocator);
+            }
+            queries.deinit();
+        }
+        if (self.encoder.isDegraded()) return error.VerificationEncodingDegraded;
+
+        return try self.preparedQueryManifestFromQueries(queries.items, null);
+    }
+
+    fn preparedQueryManifestFromQueries(
+        self: *VerificationPass,
+        queries: []const PreparedQuery,
+        runs: ?[]const ReportQueryRun,
+    ) !PreparedQueryManifest {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        errdefer arena.deinit();
+        const arena_allocator = arena.allocator();
+
+        const rows = try arena_allocator.alloc(PreparedQueryManifestRow, queries.len);
+        for (queries, rows, 0..) |query, *row, index| {
+            row.* = .{
+                .kind = query.kind,
+                .fragment = query.fragment,
+                .solver_logic = query.solver_logic,
+                .function_name = try arena_allocator.dupe(u8, query.function_name),
+                .guard_id = if (query.guard_id) |guard_id| try arena_allocator.dupe(u8, guard_id) else null,
+                .obligation_kind = query.obligation_kind,
+                .file = try arena_allocator.dupe(u8, query.file),
+                .line = query.line,
+                .column = query.column,
+                .constraint_count = std.math.cast(u32, query.constraint_count) orelse std.math.maxInt(u32),
+                .smtlib_hash = query.smtlib_hash,
+                .annotation_pure = query.annotation_pure,
+                .references_loop_post_state = query.references_loop_post_state,
+                .formal_query_id = query.formal_query_id,
+                .formal_assumption_ids = try cloneU32SliceArena(arena_allocator, query.formal_assumption_ids),
+                .formal_obligation_ids = try cloneU32SliceArena(arena_allocator, query.formal_obligation_ids),
+                .formal_match_status = query.formal_match_status,
+                .formal_match_key = if (query.formal_match_key) |key| try arena_allocator.dupe(u8, key) else null,
+            };
+            if (runs) |run_items| {
+                const run = run_items[index];
+                row.result_status = queryResultStatus(run.status);
+                row.vacuous = run.vacuous;
+                row.vacuity_unknown = run.vacuity_unknown;
+                row.verified_with_caveats = run.verified_with_caveats;
+            }
+        }
+
+        return .{
+            .arena = arena,
+            .rows = rows,
+        };
+    }
+
     fn executePreparedQueriesSequential(self: *VerificationPass, queries: []const PreparedQuery) !errors.VerificationResult {
         const results = try self.allocator.alloc(PreparedQueryResult, queries.len);
         defer self.allocator.free(results);
@@ -3173,7 +3315,7 @@ pub const VerificationPass = struct {
             }
 
             std.debug.print("{s} start\n", .{query.log_prefix});
-            var timer = try std.time.Timer.start();
+            const timer = nowTimestamp();
             var vacuity_explain_copy: ?[]u8 = null;
             var vacuity_tags_copy: []const AssumptionTag = &.{};
             errdefer if (vacuity_explain_copy) |core| self.allocator.free(core);
@@ -3181,7 +3323,7 @@ pub const VerificationPass = struct {
             var vacuous = false;
             var vacuity_unknown = false;
 
-            const status = if (self.explain_cores) blk: {
+            var status = if (self.explain_cores) blk: {
                 const explain = runExplainCheck(self, active_solver, query, query.log_prefix) catch |err| {
                     return try self.queryExecutionFailureResult(query, "explain-mode query execution", err, duplicateZ3ApiMessageOrNull(self.context, self.allocator, err));
                 };
@@ -3217,13 +3359,15 @@ pub const VerificationPass = struct {
                     return try self.queryExecutionFailureResult(query, "solver check", err, duplicateZ3ApiMessageOrNull(self.context, self.allocator, err));
                 };
             };
+            const forced_unknown = forcedUnknownApplies(self.force_unknown_query, idx, query, status, vacuous, vacuity_unknown);
+            status = maybeForceUnknownStatus(self.force_unknown_query, idx, query, status, vacuous, vacuity_unknown);
             results[idx].vacuous = vacuous;
             results[idx].vacuity_unknown = vacuity_unknown;
             results[idx].explain_str = vacuity_explain_copy;
             results[idx].explain_tags = vacuity_tags_copy;
             vacuity_explain_copy = null;
             vacuity_tags_copy = &.{};
-            const elapsed_ms = timer.read() / std.time.ns_per_ms;
+            const elapsed_ms = elapsedNs(timer) / std.time.ns_per_ms;
 
             std.debug.print("{s} -> {s} ({d}ms)\n", .{
                 query.log_prefix,
@@ -3231,7 +3375,11 @@ pub const VerificationPass = struct {
                 elapsed_ms,
             });
             if (status == z3.Z3_L_UNDEF) {
-                std.debug.print("note: Z3 returned UNKNOWN (likely timeout). Consider adding stronger constraints or increasing ORA_Z3_TIMEOUT_MS.\n", .{});
+                if (forced_unknown) {
+                    std.debug.print("note: forced UNKNOWN by ORA_Z3_TEST_FORCE_UNKNOWN_QUERY\n", .{});
+                } else {
+                    std.debug.print("note: Z3 returned UNKNOWN (likely timeout). Consider adding stronger constraints or increasing ORA_Z3_TIMEOUT_MS.\n", .{});
+                }
             }
 
             results[idx].status = status;
@@ -3315,6 +3463,9 @@ pub const VerificationPass = struct {
             }
             unknown_base_functions.deinit();
         }
+        var guard_id_counts = std.StringHashMap(u32).init(self.allocator);
+        defer guard_id_counts.deinit();
+        try populateGuardViolateIdCounts(&guard_id_counts, queries);
 
         for (results, 0..) |entry, idx| {
             if (entry.err) |err| {
@@ -3388,21 +3539,20 @@ pub const VerificationPass = struct {
             }
 
             if (entry.vacuous) {
-                if (vacuousCoreContainsRequires(entry.explain_tags)) {
-                    try combined.addError(.{
-                        .error_type = .PreconditionViolation,
-                        .message = try std.fmt.allocPrint(
-                            self.allocator,
-                            "verification assumptions are inconsistent for {s} in {s}",
-                            .{ queryKindLabel(query.kind), query.function_name },
-                        ),
-                        .file = try self.allocator.dupe(u8, query.file),
-                        .line = query.line,
-                        .column = query.column,
-                        .counterexample = null,
-                        .allocator = self.allocator,
-                    });
-                }
+                const detail = entry.explain_str orelse firstFailClosedCoreAssumptionLabel(entry.explain_tags) orelse "tracked assumptions";
+                try combined.addError(.{
+                    .error_type = .PreconditionViolation,
+                    .message = try std.fmt.allocPrint(
+                        self.allocator,
+                        "verification assumptions are inconsistent for {s} in {s} ({s})",
+                        .{ queryKindLabel(query.kind), query.function_name, detail },
+                    ),
+                    .file = try self.allocator.dupe(u8, query.file),
+                    .line = query.line,
+                    .column = query.column,
+                    .counterexample = null,
+                    .allocator = self.allocator,
+                });
                 continue;
             }
 
@@ -3439,17 +3589,10 @@ pub const VerificationPass = struct {
                     } else if (entry.status == z3.Z3_L_FALSE) {
                         // Any obligation the verifier proves unsat
                         // (the bad case is impossible / the property
-                        // holds). Record its position for the
-                        // FV-dead-branch overlay. For Guard-kind
-                        // obligations also dedupe via the guard_id
-                        // set so the same guard isn't recorded
-                        // twice across checked sites.
-                        if (query.obligation_kind == .Guard and query.guard_id != null) {
-                            const guard_id = query.guard_id.?;
-                            if (combined.proven_guard_ids.contains(guard_id)) continue;
-                            const key = try self.allocator.dupe(u8, guard_id);
-                            try combined.proven_guard_ids.put(key, {});
-                        }
+                        // holds). Record its position for reports and
+                        // FV-dead-branch overlays. Runtime guard erasure is
+                        // deliberately not authorized here; only matched
+                        // GuardViolate rows may write proven_guard_ids.
                         try combined.proven_guard_positions.append(combined.allocator, .{
                             .file = try combined.allocator.dupe(u8, query.file),
                             .line = query.line,
@@ -3571,12 +3714,12 @@ pub const VerificationPass = struct {
                 },
                 .GuardViolate => {
                     if (entry.status == z3.Z3_L_FALSE) {
-                        const guard_id = query.guard_id.?;
-                        if (!combined.proven_guard_ids.contains(guard_id)) {
-                            const key = try self.allocator.dupe(u8, guard_id);
-                            try combined.proven_guard_ids.put(key, {});
-                            // Same as the obligation site above —
-                            // also record the source position.
+                        if (try self.maybeAuthorizeGuardErasure(
+                            &combined,
+                            query,
+                            guardErasureProofStatusFromPreparedEntry(self, entry),
+                            guardViolateIdIsDuplicated(&guard_id_counts, query.guard_id),
+                        )) {
                             try combined.proven_guard_positions.append(combined.allocator, .{
                                 .file = try combined.allocator.dupe(u8, query.file),
                                 .line = query.line,
@@ -3621,12 +3764,136 @@ pub const VerificationPass = struct {
         return combined;
     }
 
+    fn guardErasureEnclosingResultHealthy(self: *const VerificationPass) bool {
+        return self.verify_mode == .Full and
+            self.verify_calls and
+            self.verify_state and
+            !self.encoder.isDegraded() and
+            self.encoder.soundnessLosses().len == 0;
+    }
+
+    const GuardErasureProofStatus = struct {
+        status: z3.Z3_lbool = z3.Z3_L_UNDEF,
+        vacuous: bool = false,
+        vacuity_unknown: bool = false,
+        verified_with_caveats: bool = false,
+    };
+
+    fn guardErasureProofStatusFromPreparedEntry(
+        self: *const VerificationPass,
+        entry: PreparedQueryResult,
+    ) GuardErasureProofStatus {
+        return .{
+            .status = entry.status,
+            .vacuous = entry.vacuous,
+            .vacuity_unknown = entry.vacuity_unknown,
+            .verified_with_caveats = entry.status == z3.Z3_L_FALSE and
+                (entry.vacuity_unknown or self.encoder.isDegraded() or self.encoder.soundnessLosses().len != 0),
+        };
+    }
+
+    fn guardErasureCleanProof(status: GuardErasureProofStatus) bool {
+        return status.status == z3.Z3_L_FALSE and
+            !status.vacuous and
+            !status.vacuity_unknown and
+            !status.verified_with_caveats;
+    }
+
+    fn guardErasureQueryAuthorized(
+        self: *const VerificationPass,
+        query: PreparedQuery,
+        status: GuardErasureProofStatus,
+        duplicate_guard_id: bool,
+    ) bool {
+        if (!self.guardErasureEnclosingResultHealthy()) return false;
+        if (!guardErasureCleanProof(status)) return false;
+        if (query.kind != .GuardViolate) return false;
+        if (query.guard_id == null) return false;
+        if (duplicate_guard_id) return false;
+        if (query.formal_match_status != .matched) return false;
+        return true;
+    }
+
+    fn maybeAuthorizeGuardErasure(
+        self: *VerificationPass,
+        result: *errors.VerificationResult,
+        query: PreparedQuery,
+        status: GuardErasureProofStatus,
+        duplicate_guard_id: bool,
+    ) !bool {
+        if (!self.guardErasureQueryAuthorized(query, status, duplicate_guard_id)) return false;
+        const guard_id = query.guard_id.?;
+        if (result.proven_guard_ids.contains(guard_id)) return false;
+        const key = try self.allocator.dupe(u8, guard_id);
+        errdefer self.allocator.free(key);
+        try result.proven_guard_ids.put(key, {});
+        return true;
+    }
+
+    fn collectResourceEffectEvents(self: *VerificationPass, mlir_module: mlir.MlirModule) !void {
+        const module_op = mlir.oraModuleGetOperation(mlir_module);
+        const num_regions = mlir.oraOperationGetNumRegions(module_op);
+        for (0..@intCast(num_regions)) |region_idx| {
+            const region = mlir.oraOperationGetRegion(module_op, @intCast(region_idx));
+            try self.collectResourceEffectEventsInRegion(region, null);
+        }
+    }
+
+    fn collectResourceEffectEventsInRegion(
+        self: *VerificationPass,
+        region: mlir.MlirRegion,
+        current_function: ?[]const u8,
+    ) !void {
+        var current_block = mlir.oraRegionGetFirstBlock(region);
+        while (!mlir.oraBlockIsNull(current_block)) {
+            var current_op = mlir.oraBlockGetFirstOperation(current_block);
+            while (!mlir.oraOperationIsNull(current_op)) {
+                const op_name_ref = mlir.oraOperationGetName(current_op);
+                defer @import("mlir_c_api").freeStringRef(op_name_ref);
+                const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
+                    ""
+                else
+                    op_name_ref.data[0..op_name_ref.length];
+
+                const nested_function = if (std.mem.eql(u8, op_name, "func.func"))
+                    (try self.getFunctionNameFromOp(current_op)) orelse current_function
+                else
+                    current_function;
+
+                if (resourceEffectKindFromOpName(op_name)) |kind| {
+                    const loc = try self.getLocationInfo(current_op);
+                    const domain = (try self.getStringAttr(current_op, "domain", &self.label_storage)) orelse "unknown";
+                    try self.report_resource_events.append(.{
+                        .kind = kind,
+                        .function_name = nested_function orelse "unknown",
+                        .domain = domain,
+                        .file = loc.file,
+                        .line = loc.line,
+                        .column = loc.column,
+                    });
+                }
+
+                const num_regions = mlir.oraOperationGetNumRegions(current_op);
+                for (0..@intCast(num_regions)) |region_idx| {
+                    const nested_region = mlir.oraOperationGetRegion(current_op, @intCast(region_idx));
+                    try self.collectResourceEffectEventsInRegion(nested_region, nested_function);
+                }
+
+                current_op = mlir.oraOperationGetNextInBlock(current_op);
+            }
+            current_block = mlir.oraBlockGetNextInRegion(current_block);
+        }
+    }
+
     pub fn buildSmtReport(
         self: *VerificationPass,
         mlir_module: mlir.MlirModule,
         source_file: []const u8,
         verification_result: ?*const errors.VerificationResult,
     ) !SmtReportArtifacts {
+        self.report_resource_events.clearRetainingCapacity();
+        try self.collectResourceEffectEvents(mlir_module);
+
         if (self.encoded_annotations.items.len == 0) {
             self.phaseLog("report extract-annotations begin", .{});
             self.extractAnnotationsFromMLIR(mlir_module) catch |err| {
@@ -3705,13 +3972,13 @@ pub const VerificationPass = struct {
             if (self.trace_smt) {
                 self.traceSmt("Q{d} report check-start", .{idx + 1});
             }
-            var timer = try std.time.Timer.start();
+            const timer = nowTimestamp();
             var explain_copy: ?[]u8 = null;
             var explain_tags_copy: []const AssumptionTag = &.{};
             var core_minimized = false;
             var vacuous = false;
             var vacuity_unknown = false;
-            const status = if (self.explain_cores) blk: {
+            var status = if (self.explain_cores) blk: {
                 const explain = try runExplainCheck(self, &self.solver, query, null);
                 core_minimized = explain.core_minimized;
                 vacuous = explain.vacuous;
@@ -3742,7 +4009,8 @@ pub const VerificationPass = struct {
                 try assertPreparedQueryConstraints(&self.solver, query.constraints);
                 break :blk try self.solver.checkChecked();
             };
-            const elapsed_ms = timer.read() / std.time.ns_per_ms;
+            status = maybeForceUnknownStatus(self.force_unknown_query, idx, query, status, vacuous, vacuity_unknown);
+            const elapsed_ms = elapsedNs(timer) / std.time.ns_per_ms;
             if (self.trace_smt) {
                 self.traceSmt(
                     "Q{d} report check-done status={s} elapsed_ms={d}",
@@ -3801,6 +4069,9 @@ pub const VerificationPass = struct {
         summary.precision_notes = self.encoder.precisionNotes();
         summary.precision_note_events = self.encoder.precisionNoteEvents();
         var kind_counts = ReportKindCounts{};
+        var guard_id_counts = std.StringHashMap(u32).init(self.allocator);
+        defer guard_id_counts.deinit();
+        try populateGuardViolateIdCounts(&guard_id_counts, queries.items);
 
         var proven_guard_ids = std.StringHashMap(void).init(self.allocator);
         defer {
@@ -3833,6 +4104,10 @@ pub const VerificationPass = struct {
                 summary.vacuity_unknown += 1;
             }
             summary.fragment_counts.add(query.fragment);
+            summary.guard_erasure_agreement.add(query, run, if (query.guard_id) |guard_id|
+                (guard_id_counts.get(guard_id) orelse 0) > 1
+            else
+                false, self.guardErasureEnclosingResultHealthy());
 
             switch (query.kind) {
                 .Base => {
@@ -3844,7 +4119,9 @@ pub const VerificationPass = struct {
                 .Obligation => {
                     kind_counts.obligation += 1;
                     if (run.status == z3.Z3_L_TRUE) {
-                        summary.failed_obligations += 1;
+                        if (!loopPostDischargesReportObligation(query, queries.items, report_runs)) {
+                            summary.failed_obligations += 1;
+                        }
                     }
                 },
                 .LoopInvariantStep => {
@@ -3871,7 +4148,17 @@ pub const VerificationPass = struct {
                 .GuardViolate => {
                     kind_counts.guard_violate += 1;
                     if (query.guard_id) |guard_id| {
-                        if (run.status == z3.Z3_L_FALSE and !proven_guard_ids.contains(guard_id)) {
+                        const proof_status = GuardErasureProofStatus{
+                            .status = run.status,
+                            .vacuous = run.vacuous,
+                            .vacuity_unknown = run.vacuity_unknown,
+                            .verified_with_caveats = run.verified_with_caveats,
+                        };
+                        if (self.guardErasureQueryAuthorized(
+                            query,
+                            proof_status,
+                            guardViolateIdIsDuplicated(&guard_id_counts, query.guard_id),
+                        ) and !proven_guard_ids.contains(guard_id)) {
                             try proven_guard_ids.put(try self.allocator.dupe(u8, guard_id), {});
                         } else if (run.status == z3.Z3_L_TRUE and !violatable_guard_ids.contains(guard_id)) {
                             try violatable_guard_ids.put(try self.allocator.dupe(u8, guard_id), {});
@@ -3911,7 +4198,7 @@ pub const VerificationPass = struct {
             summary.violatable_guards = @intCast(violatable_guard_ids.count());
         }
 
-        const generated_at_unix = std.time.timestamp();
+        const generated_at_unix = unixTimestampSeconds();
         const markdown = try self.renderSmtReportMarkdown(
             source_file,
             generated_at_unix,
@@ -3932,9 +4219,16 @@ pub const VerificationPass = struct {
             kind_counts,
             verification_result,
         );
+        errdefer self.allocator.free(json);
+
+        var query_manifest = try self.preparedQueryManifestFromQueries(queries.items, report_runs);
+        errdefer query_manifest.deinit();
+
         return .{
             .markdown = markdown,
             .json = json,
+            .trusted_artifacts_allowed = summary.verification_success,
+            .query_manifest = query_manifest,
         };
     }
 
@@ -3943,7 +4237,7 @@ pub const VerificationPass = struct {
         source_file: []const u8,
         verification_result: *const errors.VerificationResult,
     ) !SmtReportArtifacts {
-        const generated_at_unix = std.time.timestamp();
+        const generated_at_unix = unixTimestampSeconds();
         const summary = ReportSummary{
             .verification_success = false,
             .verification_errors = @intCast(verification_result.errors.items.len),
@@ -3980,6 +4274,7 @@ pub const VerificationPass = struct {
         return .{
             .markdown = markdown,
             .json = json,
+            .trusted_artifacts_allowed = false,
         };
     }
 
@@ -3988,7 +4283,7 @@ pub const VerificationPass = struct {
         source_file: []const u8,
         verification_result: ?*const errors.VerificationResult,
     ) !SmtReportArtifacts {
-        const generated_at_unix = std.time.timestamp();
+        const generated_at_unix = unixTimestampSeconds();
         const summary = ReportSummary{
             .verification_success = false,
             .verification_errors = if (verification_result) |vr| @intCast(vr.errors.items.len) else 0,
@@ -4026,6 +4321,7 @@ pub const VerificationPass = struct {
         return .{
             .markdown = markdown,
             .json = json,
+            .trusted_artifacts_allowed = false,
         };
     }
 
@@ -4039,9 +4335,9 @@ pub const VerificationPass = struct {
         kind_counts: ReportKindCounts,
         verification_result: ?*const errors.VerificationResult,
     ) ![]u8 {
-        var buffer = std.ArrayList(u8){};
-        defer buffer.deinit(self.allocator);
-        const writer = buffer.writer(self.allocator);
+        var buffer = std.Io.Writer.Allocating.init(self.allocator);
+        defer buffer.deinit();
+        const writer = &buffer.writer;
 
         try writer.writeAll("# SMT Encoding Report\n\n");
 
@@ -4073,6 +4369,12 @@ pub const VerificationPass = struct {
         try writer.print("- Inconsistent assumption bases: `{d}`\n", .{summary.inconsistent_bases});
         try writer.print("- Proven guards: `{d}`\n", .{summary.proven_guards});
         try writer.print("- Violatable guards: `{d}`\n", .{summary.violatable_guards});
+        try writer.print("- Guard-erasure agreement rows: `{d}`\n", .{summary.guard_erasure_agreement.rows});
+        try writer.print("- Guard-erasure agreement matched: `{d}`\n", .{summary.guard_erasure_agreement.matched});
+        try writer.print("- Guard-erasure agreement missing: `{d}`\n", .{summary.guard_erasure_agreement.missing});
+        try writer.print("- Guard-erasure agreement ambiguous: `{d}`\n", .{summary.guard_erasure_agreement.ambiguous});
+        try writer.print("- Guard-erasure duplicate guard-id rows: `{d}`\n", .{summary.guard_erasure_agreement.duplicate_guard_id_rows});
+        try writer.print("- Guard-erasure clean UNSAT not authorized: `{d}`\n", .{summary.guard_erasure_agreement.clean_unsat_not_authorized});
         try writer.print("- Verification success: `{any}`\n", .{summary.verification_success});
         try writer.print("- Verification errors: `{d}`\n", .{summary.verification_errors});
         try writer.print("- Verification diagnostics: `{d}`\n", .{summary.verification_diagnostics});
@@ -4120,6 +4422,34 @@ pub const VerificationPass = struct {
         try writer.print("- AUFBV: `{d}`\n", .{summary.fragment_counts.aufbv});
         try writer.print("- AUFBV+Quantifiers: `{d}`\n", .{summary.fragment_counts.aufbv_quantifiers});
         try writer.print("- other: `{d}`\n", .{summary.fragment_counts.other});
+        try writer.writeAll("\n");
+
+        const resource_summary = resourceEffectSummary(self.report_resource_events.items);
+        try writer.writeAll("## Resource Effects\n");
+        try writer.print("- Conserved moves: `{d}`\n", .{resource_summary.conserved_moves});
+        try writer.print("- Explicit creates: `{d}`\n", .{resource_summary.explicit_creates});
+        try writer.print("- Explicit destroys: `{d}`\n", .{resource_summary.explicit_destroys});
+        try writer.print("- Runtime guards: `{d}`\n", .{summary.violatable_guards});
+        try writer.print("- Proof-elided guards: `{d}`\n", .{summary.proven_guards});
+        if (self.report_resource_events.items.len == 0) {
+            try writer.writeAll("- No resource operations observed.\n");
+        } else {
+            try writer.writeAll("- Resource operation events:\n");
+            for (self.report_resource_events.items) |event| {
+                try writer.print(
+                    "  - `{s}` in `{s}` domain `{s}` at `{s}:{d}:{d}` ({s})\n",
+                    .{
+                        resourceEffectKindMarkdownLabel(event.kind),
+                        event.function_name,
+                        event.domain,
+                        event.file,
+                        event.line,
+                        event.column,
+                        resourceEffectDescription(event.kind),
+                    },
+                );
+            }
+        }
         try writer.writeAll("\n");
 
         try writer.writeAll("## 5. Findings\n");
@@ -4234,7 +4564,7 @@ pub const VerificationPass = struct {
             try writer.writeAll("\n```\n\n");
         }
 
-        return buffer.toOwnedSlice(self.allocator);
+        return buffer.toOwnedSlice();
     }
 
     fn renderSmtReportJson(
@@ -4247,9 +4577,9 @@ pub const VerificationPass = struct {
         kind_counts: ReportKindCounts,
         verification_result: ?*const errors.VerificationResult,
     ) ![]u8 {
-        var buffer = std.ArrayList(u8){};
-        defer buffer.deinit(self.allocator);
-        const writer = buffer.writer(self.allocator);
+        var buffer = std.Io.Writer.Allocating.init(self.allocator);
+        defer buffer.deinit();
+        const writer = &buffer.writer;
 
         try writer.writeByte('{');
         try writer.writeAll("\"schema\":\"ora.smt.report.v1\",");
@@ -4286,6 +4616,14 @@ pub const VerificationPass = struct {
         try writer.print(",\"inconsistent_bases\":{d}", .{summary.inconsistent_bases});
         try writer.print(",\"proven_guards\":{d}", .{summary.proven_guards});
         try writer.print(",\"violatable_guards\":{d}", .{summary.violatable_guards});
+        try writer.writeAll(",\"guard_erasure_agreement\":{");
+        try writer.print("\"rows\":{d}", .{summary.guard_erasure_agreement.rows});
+        try writer.print(",\"matched\":{d}", .{summary.guard_erasure_agreement.matched});
+        try writer.print(",\"missing\":{d}", .{summary.guard_erasure_agreement.missing});
+        try writer.print(",\"ambiguous\":{d}", .{summary.guard_erasure_agreement.ambiguous});
+        try writer.print(",\"duplicate_guard_id_rows\":{d}", .{summary.guard_erasure_agreement.duplicate_guard_id_rows});
+        try writer.print(",\"clean_unsat_not_authorized\":{d}", .{summary.guard_erasure_agreement.clean_unsat_not_authorized});
+        try writer.writeByte('}');
         try writer.writeAll(if (summary.encoding_degraded) ",\"encoding_degraded\":true" else ",\"encoding_degraded\":false");
         try writer.writeAll(",\"degradation_reason\":");
         if (summary.degradation_reason) |reason| {
@@ -4345,6 +4683,24 @@ pub const VerificationPass = struct {
         try writer.print(",\"other\":{d}", .{summary.fragment_counts.other});
         try writer.print(",\"unknown\":{d}", .{summary.fragment_counts.unknown});
         try writer.writeByte('}');
+        try writer.writeByte(',');
+
+        const resource_summary = resourceEffectSummary(self.report_resource_events.items);
+        try writer.writeAll("\"resource_effect_summary\":{");
+        try writer.print("\"conserved_moves\":{d}", .{resource_summary.conserved_moves});
+        try writer.print(",\"explicit_creates\":{d}", .{resource_summary.explicit_creates});
+        try writer.print(",\"explicit_destroys\":{d}", .{resource_summary.explicit_destroys});
+        try writer.print(",\"runtime_guards\":{d}", .{summary.violatable_guards});
+        try writer.print(",\"proof_elided_guards\":{d}", .{summary.proven_guards});
+        try writer.writeByte('}');
+        try writer.writeByte(',');
+
+        try writer.writeAll("\"resource_effects\":[");
+        for (self.report_resource_events.items, 0..) |event, idx| {
+            if (idx != 0) try writer.writeByte(',');
+            try writeResourceEffectEventJson(writer, event);
+        }
+        try writer.writeByte(']');
         try writer.writeByte(',');
 
         try writer.writeAll("\"verification\":{");
@@ -4521,6 +4877,8 @@ pub const VerificationPass = struct {
             try writer.print(",\"smtlib_bytes\":{d}", .{query.smtlib_bytes});
             try writer.writeAll(",\"smtlib_hash\":");
             try writer.print("\"0x{x}\"", .{query.smtlib_hash});
+            try writer.writeAll(",\"annotation_pure\":");
+            try writer.writeAll(if (query.annotation_pure) "true" else "false");
             try writer.writeAll(",\"guard_id\":");
             if (query.guard_id) |guard_id| {
                 try writeJsonStringEscaped(writer, guard_id);
@@ -4602,7 +4960,7 @@ pub const VerificationPass = struct {
         try writer.writeByte(']');
 
         try writer.writeByte('}');
-        return buffer.toOwnedSlice(self.allocator);
+        return buffer.toOwnedSlice();
     }
 
     fn buildPreparedQueries(self: *VerificationPass) !ManagedArrayList(PreparedQuery) {
@@ -4812,7 +5170,7 @@ pub const VerificationPass = struct {
                         try obligation_constraints.append(step_cond);
                     }
                 }
-                const negated = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ann.condition));
+                const negated = makeGoalCounterexample(self, ann.condition);
                 try obligation_constraints.append(negated);
                 try appendGoalTrackedAssumption(&tracked_obligation_assumptions, fn_name, ann, negated);
                 try materializeTrackedAssumptionProxies(self, &tracked_obligation_assumptions);
@@ -4831,6 +5189,14 @@ pub const VerificationPass = struct {
                     "{s} [{s}]{s}{s}",
                     .{ fn_name, obligationKindLabel(ann.kind), obligation_log_suffix, obligation_tag },
                 );
+                const formal_identity = try formalIdentityForAnnotation(self, ann, .Obligation);
+                const annotation_pure = preparedObligationAnnotationPure(
+                    ann,
+                    assumption_annotations.items,
+                    obligation_constraints.items.len,
+                    global_contract_invariants.items.len,
+                    formal_identity,
+                );
                 try appendPreparedQueryUnique(&queries, self.allocator, .{
                     .kind = .Obligation,
                     .fragment = obligation_fragment,
@@ -4848,7 +5214,13 @@ pub const VerificationPass = struct {
                     .constraint_count = obligation_constraints.items.len,
                     .smtlib_bytes = obligation_smtlib.len,
                     .smtlib_hash = obligation_hash,
+                    .annotation_pure = annotation_pure,
                     .log_prefix = obligation_log_prefix,
+                    .formal_query_id = formal_identity.formal_query_id,
+                    .formal_assumption_ids = formal_identity.formal_assumption_ids,
+                    .formal_obligation_ids = formal_identity.formal_obligation_ids,
+                    .formal_match_status = formal_identity.formal_match_status,
+                    .formal_match_key = formal_identity.formal_match_key,
                 });
 
                 if (isImportedCalleeObligationAnnotation(ann)) {
@@ -4940,7 +5312,7 @@ pub const VerificationPass = struct {
                                 try tracked_body_safety_assumptions.append(tracked);
                             }
 
-                            const negated_body_obligation = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(body_obligation));
+                            const negated_body_obligation = makeGoalCounterexample(self, body_obligation);
                             try body_safety_constraints.append(negated_body_obligation);
                             try appendGoalTrackedAssumption(&tracked_body_safety_assumptions, fn_name, ann, negated_body_obligation);
                             try materializeTrackedAssumptionProxies(self, &tracked_body_safety_assumptions);
@@ -4997,7 +5369,7 @@ pub const VerificationPass = struct {
                                     negated_backedge,
                                     makeTrackedAssumptionTag(.loop_invariant, ann),
                                 );
-                                const negated_exit_invariant = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(step_body_condition));
+                                const negated_exit_invariant = makeGoalCounterexample(self, step_body_condition);
                                 try exit_constraints.append(negated_exit_invariant);
                                 try appendGoalTrackedAssumption(&tracked_exit_assumptions, fn_name, ann, negated_exit_invariant);
                                 try materializeTrackedAssumptionProxies(self, &tracked_exit_assumptions);
@@ -5041,7 +5413,7 @@ pub const VerificationPass = struct {
                                 makeTrackedAssumptionTag(.loop_invariant, ann),
                             );
                         }
-                        const negated_step = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(step_body_condition));
+                        const negated_step = makeGoalCounterexample(self, step_body_condition);
                         try step_constraints.append(negated_step);
                         try appendGoalTrackedAssumption(&tracked_step_assumptions, fn_name, ann, negated_step);
                         try materializeTrackedAssumptionProxies(self, &tracked_step_assumptions);
@@ -5120,7 +5492,7 @@ pub const VerificationPass = struct {
                     }
 
                     try post_constraints.append(exit_condition);
-                    const negated_post = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(ensure_ann.condition));
+                    const negated_post = makeGoalCounterexample(self, ensure_ann.condition);
                     try post_constraints.append(negated_post);
                     try appendGoalTrackedAssumption(&tracked_post_assumptions, fn_name, ensure_ann, negated_post);
                     try materializeTrackedAssumptionProxies(self, &tracked_post_assumptions);
@@ -5241,6 +5613,7 @@ pub const VerificationPass = struct {
                     "{s} guard {s} [violate]{s}",
                     .{ fn_name, ann.guard_id.?, violate_tag },
                 );
+                const violate_formal_identity = try formalIdentityForAnnotation(self, ann, .GuardViolate);
                 try appendPreparedQueryUnique(&queries, self.allocator, .{
                     .kind = .GuardViolate,
                     .fragment = violate_fragment,
@@ -5256,6 +5629,11 @@ pub const VerificationPass = struct {
                     .smtlib_bytes = violate_smtlib.len,
                     .smtlib_hash = violate_hash,
                     .log_prefix = violate_log_prefix,
+                    .formal_query_id = violate_formal_identity.formal_query_id,
+                    .formal_assumption_ids = violate_formal_identity.formal_assumption_ids,
+                    .formal_obligation_ids = violate_formal_identity.formal_obligation_ids,
+                    .formal_match_status = violate_formal_identity.formal_match_status,
+                    .formal_match_key = violate_formal_identity.formal_match_key,
                 });
 
                 try previous_guards.append(ann);
@@ -5344,7 +5722,12 @@ pub const VerificationPass = struct {
         if (ann.kind != .ContractInvariant and ann.kind != .LoopInvariant) return null;
         if (std.mem.startsWith(u8, ann.file, "embedded://")) return null;
 
-        const source_text = std.fs.cwd().readFileAlloc(self.allocator, ann.file, 1 << 20) catch return null;
+        const source_text = std.Io.Dir.cwd().readFileAlloc(
+            std.Io.Threaded.global_single_threaded.io(),
+            ann.file,
+            self.allocator,
+            std.Io.Limit.limited(1 << 20),
+        ) catch return null;
         defer self.allocator.free(source_text);
 
         var current_line: u32 = 1;
@@ -5395,7 +5778,7 @@ pub const VerificationPass = struct {
             return try self.allocator.dupe(u8, reasons[0]);
         }
 
-        var list = std.ArrayList(u8){};
+        var list = std.ArrayList(u8).empty;
         defer list.deinit(self.allocator);
         try list.appendSlice(self.allocator, reasons[0]);
         try list.appendSlice(self.allocator, " [all reasons: ");
@@ -5931,7 +6314,7 @@ fn obligationKindLabel(kind: AnnotationKind) []const u8 {
 
 fn inferInvariantLabelFromLine(line: []const u8) ?[]const u8 {
     if (!std.mem.startsWith(u8, line, "invariant ")) return null;
-    const rest = std.mem.trimLeft(u8, line["invariant ".len..], " \t");
+    const rest = std.mem.trimStart(u8, line["invariant ".len..], " \t");
     const open_paren = std.mem.indexOfScalar(u8, rest, '(') orelse return null;
     const candidate = std.mem.trim(u8, rest[0..open_paren], " \t");
     if (candidate.len == 0) return null;
@@ -5944,6 +6327,179 @@ fn shortQueryHash(hash: u64) u32 {
 
 fn formatQueryTag(allocator: std.mem.Allocator, constraint_count: usize, smtlib_hash: u64) ![]u8 {
     return std.fmt.allocPrint(allocator, " [q={x:0>8} c={d}]", .{ shortQueryHash(smtlib_hash), constraint_count });
+}
+
+const FormalPreparedQueryIdentity = struct {
+    formal_query_id: ?u32 = null,
+    formal_assumption_ids: []const u32 = &.{},
+    formal_obligation_ids: []const u32 = &.{},
+    formal_match_status: FormalMatchStatus = .not_applicable,
+    formal_match_key: ?[]const u8 = null,
+};
+
+fn sourceOpId(op: ?mlir.MlirOperation) ?usize {
+    const value = op orelse return null;
+    if (mlir.oraOperationIsNull(value)) return null;
+    return @intFromPtr(value.ptr);
+}
+
+fn formalLogicalRoleForAnnotation(kind: AnnotationKind) ?[]const u8 {
+    return switch (kind) {
+        .Requires => "requires",
+        .CalleePrecondition => "callee_precondition",
+        .Ensures => "ensures",
+        .Guard => "guard",
+        .LoopInvariant => "invariant",
+        .ContractInvariant => "contract_invariant",
+        .RefinementGuard => "refinement",
+        .Assume, .PathAssume => null,
+    };
+}
+
+fn formalQueryKindForPrepared(kind: QueryKind) ?[]const u8 {
+    return switch (kind) {
+        .Obligation => "obligation",
+        .GuardViolate => "guard_violate",
+        .Base,
+        .LoopInvariantStep,
+        .LoopBodySafety,
+        .LoopInvariantPost,
+        .GuardSatisfy,
+        => null,
+    };
+}
+
+fn formatFormalMatchKey(
+    allocator: std.mem.Allocator,
+    source_op_id: usize,
+    kind: []const u8,
+    role: ?[]const u8,
+    guard_id: ?[]const u8,
+) ![]const u8 {
+    const role_text = role orelse "none";
+    const guard_text = guard_id orelse "none";
+    return try std.fmt.allocPrint(
+        allocator,
+        "source_op=0x{x} kind={s} role={s} guard={s}",
+        .{ source_op_id, kind, role_text, guard_text },
+    );
+}
+
+fn bindingMatchesPreparedQuery(
+    binding: FormalQueryBinding,
+    source_op_id: usize,
+    kind: []const u8,
+    role: ?[]const u8,
+    guard_id: ?[]const u8,
+) bool {
+    if (binding.source_op_id != source_op_id) return false;
+    if (!std.mem.eql(u8, binding.kind, kind)) return false;
+    if (!optionalStringEqual(binding.logical_role, role)) return false;
+    if (!optionalStringEqual(binding.guard_id, guard_id)) return false;
+    return true;
+}
+
+fn optionalStringEqual(lhs: ?[]const u8, rhs: ?[]const u8) bool {
+    if (lhs == null or rhs == null) return lhs == null and rhs == null;
+    return std.mem.eql(u8, lhs.?, rhs.?);
+}
+
+fn formalIdentityForAnnotation(
+    self: *VerificationPass,
+    ann: EncodedAnnotation,
+    prepared_kind: QueryKind,
+) !FormalPreparedQueryIdentity {
+    const formal_kind = formalQueryKindForPrepared(prepared_kind) orelse return .{};
+    const role: ?[]const u8 = switch (prepared_kind) {
+        .Obligation => switch (ann.kind) {
+            .Ensures, .ContractInvariant => formalLogicalRoleForAnnotation(ann.kind),
+            .Requires,
+            .CalleePrecondition,
+            .Guard,
+            .LoopInvariant,
+            .RefinementGuard,
+            .Assume,
+            .PathAssume,
+            => return .{},
+        },
+        .GuardViolate => switch (ann.kind) {
+            .RefinementGuard => null,
+            else => return .{},
+        },
+        else => return .{},
+    };
+    if (self.formal_query_bindings.len == 0) return .{};
+    const source_op_id = sourceOpId(ann.source_op) orelse return .{};
+    const key_text = try formatFormalMatchKey(self.allocator, source_op_id, formal_kind, role, ann.guard_id);
+
+    var match: ?FormalQueryBinding = null;
+    var duplicate = false;
+    for (self.formal_query_bindings) |binding| {
+        if (!bindingMatchesPreparedQuery(binding, source_op_id, formal_kind, role, ann.guard_id)) continue;
+        if (match != null) {
+            duplicate = true;
+            break;
+        }
+        match = binding;
+    }
+
+    if (duplicate) {
+        return .{
+            .formal_match_status = .ambiguous,
+            .formal_match_key = key_text,
+        };
+    }
+
+    const binding = match orelse return .{
+        .formal_match_status = .missing,
+        .formal_match_key = key_text,
+    };
+
+    self.allocator.free(key_text);
+    return .{
+        .formal_query_id = binding.query_id,
+        .formal_assumption_ids = try cloneU32SliceArena(self.allocator, binding.assumption_ids),
+        .formal_obligation_ids = try cloneU32SliceArena(self.allocator, binding.obligation_ids),
+        .formal_match_status = .matched,
+    };
+}
+
+fn preparedObligationAnnotationPure(
+    ann: EncodedAnnotation,
+    assumption_annotations: []const EncodedAnnotation,
+    constraint_count: usize,
+    global_contract_invariant_count: usize,
+    formal_identity: FormalPreparedQueryIdentity,
+) bool {
+    if (ann.source_op == null) return false;
+    if (ann.imported_obligation_source != null) return false;
+    if (formal_identity.formal_match_status != .matched) return false;
+    if (formal_identity.formal_assumption_ids.len != assumption_annotations.len) return false;
+    if (global_contract_invariant_count != 0) return false;
+    if (ann.extra_constraints.len != 0) return false;
+    if (ann.loop_owner != null) return false;
+    if (ann.path_constraints.len != 0) return false;
+    if (ann.loop_entry_extra_constraints.len != 0) return false;
+    if (ann.loop_step_condition != null) return false;
+    if (ann.loop_step_extra_constraints.len != 0) return false;
+    if (ann.loop_step_head_condition != null) return false;
+    if (ann.loop_step_head_extra_constraints.len != 0) return false;
+    if (ann.loop_step_body_condition != null) return false;
+    if (ann.loop_step_body_extra_constraints.len != 0) return false;
+    if (ann.loop_step_backedge_condition != null) return false;
+    if (ann.loop_step_backedge_extra_constraints.len != 0) return false;
+    if (ann.loop_step_body_obligations.len != 0) return false;
+    if (ann.loop_post_condition != null) return false;
+    if (ann.loop_post_extra_constraints.len != 0) return false;
+    if (ann.loop_exit_condition != null) return false;
+    if (ann.loop_exit_extra_constraints.len != 0) return false;
+    if (ann.loop_snapshot_value_bindings.len != 0) return false;
+    for (assumption_annotations) |assumption_ann| {
+        if (assumption_ann.extra_constraints.len != 0) return false;
+    }
+
+    const direct_surface_count = assumption_annotations.len + 1;
+    return constraint_count == direct_surface_count;
 }
 
 fn buildQueryMetadata(self: *VerificationPass, constraints: []const z3.Z3_ast) !struct { constraint_count: usize, smtlib_hash: u64 } {
@@ -6042,7 +6598,7 @@ fn collectSortedFunctionNames(
     allocator: std.mem.Allocator,
     by_function: *const std.StringHashMap(ManagedArrayList(EncodedAnnotation)),
 ) !std.ArrayList([]const u8) {
-    var names = std.ArrayList([]const u8){};
+    var names = std.ArrayList([]const u8).empty;
     errdefer names.deinit(allocator);
 
     var it = by_function.iterator();
@@ -6479,7 +7035,7 @@ fn sameLoopInvariantGroup(self: *VerificationPass, reference: EncodedAnnotation,
     return constraintSlicesEquivalent(self, reference.path_constraints, candidate.path_constraints);
 }
 
-const QueryKind = enum {
+pub const QueryKind = enum(u8) {
     Base,
     Obligation,
     LoopInvariantStep,
@@ -6487,6 +7043,154 @@ const QueryKind = enum {
     LoopInvariantPost,
     GuardSatisfy,
     GuardViolate,
+};
+
+const ForcedUnknownQuery = struct {
+    kind: QueryKind,
+    query_id: usize,
+};
+
+fn parseForcedUnknownQuery(value: []const u8) !ForcedUnknownQuery {
+    const separator = std.mem.indexOfScalar(u8, value, ':') orelse return error.InvalidForcedUnknownQuery;
+    if (separator == 0 or separator + 1 >= value.len) return error.InvalidForcedUnknownQuery;
+
+    const kind_text = value[0..separator];
+    const id_text = value[separator + 1 ..];
+    const query_id = try std.fmt.parseInt(usize, id_text, 10);
+    if (query_id == 0) return error.InvalidForcedUnknownQuery;
+
+    inline for (std.meta.fields(QueryKind)) |field| {
+        const kind: QueryKind = @enumFromInt(field.value);
+        if (std.mem.eql(u8, kind_text, formalQueryKindLabel(kind))) {
+            return .{ .kind = kind, .query_id = query_id };
+        }
+    }
+    return error.InvalidForcedUnknownQuery;
+}
+
+pub const PreparedQuerySummary = struct {
+    total: u64 = 0,
+    base: u64 = 0,
+    obligation: u64 = 0,
+    loop_invariant_step: u64 = 0,
+    loop_body_safety: u64 = 0,
+    loop_invariant_post: u64 = 0,
+    guard_satisfy: u64 = 0,
+    guard_violate: u64 = 0,
+
+    fn add(self: *PreparedQuerySummary, kind: QueryKind) void {
+        self.total += 1;
+        switch (kind) {
+            .Base => self.base += 1,
+            .Obligation => self.obligation += 1,
+            .LoopInvariantStep => self.loop_invariant_step += 1,
+            .LoopBodySafety => self.loop_body_safety += 1,
+            .LoopInvariantPost => self.loop_invariant_post += 1,
+            .GuardSatisfy => self.guard_satisfy += 1,
+            .GuardViolate => self.guard_violate += 1,
+        }
+    }
+
+    fn fromPreparedQueries(queries: []const PreparedQuery) PreparedQuerySummary {
+        var summary: PreparedQuerySummary = .{};
+        for (queries) |query| summary.add(query.kind);
+        return summary;
+    }
+};
+
+pub const PreparedQueryManifestRow = struct {
+    kind: QueryKind,
+    fragment: QueryFragment = .unknown,
+    solver_logic: QuerySolverLogic = .all,
+    function_name: []const u8,
+    guard_id: ?[]const u8 = null,
+    obligation_kind: ?AnnotationKind = null,
+    file: []const u8,
+    line: u32,
+    column: u32,
+    constraint_count: u32 = 0,
+    smtlib_hash: u64 = 0,
+    annotation_pure: bool = false,
+    references_loop_post_state: bool = false,
+    result_status: ?QueryResultStatus = null,
+    vacuous: bool = false,
+    vacuity_unknown: bool = false,
+    verified_with_caveats: bool = false,
+    formal_query_id: ?u32 = null,
+    formal_assumption_ids: []const u32 = &.{},
+    formal_obligation_ids: []const u32 = &.{},
+    formal_match_status: FormalMatchStatus = .not_applicable,
+    formal_match_key: ?[]const u8 = null,
+};
+
+pub const FormalMatchStatus = enum(u8) {
+    not_applicable,
+    matched,
+    missing,
+    ambiguous,
+};
+
+pub const FormalQueryBinding = struct {
+    source_op_id: usize,
+    kind: []const u8,
+    logical_role: ?[]const u8 = null,
+    guard_id: ?[]const u8 = null,
+    query_id: u32,
+    assumption_ids: []const u32 = &.{},
+    obligation_ids: []const u32 = &.{},
+};
+
+pub const PreparedQueryManifest = struct {
+    arena: std.heap.ArenaAllocator,
+    rows: []const PreparedQueryManifestRow,
+
+    pub fn deinit(self: *PreparedQueryManifest) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+pub const QueryResultStatus = enum(u8) {
+    sat,
+    unsat,
+    unknown,
+};
+
+fn queryResultStatus(status: z3.Z3_lbool) QueryResultStatus {
+    return switch (status) {
+        z3.Z3_L_TRUE => .sat,
+        z3.Z3_L_FALSE => .unsat,
+        else => .unknown,
+    };
+}
+
+const ResourceEffectKind = enum {
+    conserved_move,
+    explicit_create,
+    explicit_destroy,
+};
+
+const ResourceEffectEvent = struct {
+    kind: ResourceEffectKind,
+    function_name: []const u8,
+    domain: []const u8,
+    file: []const u8,
+    line: u32,
+    column: u32,
+};
+
+const ResourceEffectSummary = struct {
+    conserved_moves: u64 = 0,
+    explicit_creates: u64 = 0,
+    explicit_destroys: u64 = 0,
+
+    fn add(self: *ResourceEffectSummary, kind: ResourceEffectKind) void {
+        switch (kind) {
+            .conserved_move => self.conserved_moves += 1,
+            .explicit_create => self.explicit_creates += 1,
+            .explicit_destroy => self.explicit_destroys += 1,
+        }
+    }
 };
 
 const ReportQueryRun = struct {
@@ -6523,7 +7227,65 @@ const ReportSummary = struct {
     precision_notes: []const Encoder.PrecisionNoteKind = &.{},
     precision_note_events: []const Encoder.PrecisionNoteEvent = &.{},
     fragment_counts: ReportFragmentCounts = .{},
+    guard_erasure_agreement: GuardErasureAgreementSummary = .{},
 };
+
+const GuardErasureAgreementSummary = struct {
+    rows: u64 = 0,
+    matched: u64 = 0,
+    missing: u64 = 0,
+    ambiguous: u64 = 0,
+    duplicate_guard_id_rows: u64 = 0,
+    clean_unsat_not_authorized: u64 = 0,
+
+    fn add(
+        self: *GuardErasureAgreementSummary,
+        query: PreparedQuery,
+        run: ReportQueryRun,
+        duplicate_guard_id: bool,
+        enclosing_healthy: bool,
+    ) void {
+        if (query.kind != .GuardViolate) return;
+        self.rows += 1;
+        switch (query.formal_match_status) {
+            .matched => self.matched += 1,
+            .missing => self.missing += 1,
+            .ambiguous => self.ambiguous += 1,
+            .not_applicable => {},
+        }
+        if (duplicate_guard_id) self.duplicate_guard_id_rows += 1;
+        if (guardErasureCleanUnsat(run) and enclosing_healthy and
+            (query.formal_match_status != .matched or duplicate_guard_id))
+        {
+            self.clean_unsat_not_authorized += 1;
+        }
+    }
+};
+
+fn guardErasureCleanUnsat(run: ReportQueryRun) bool {
+    return run.status == z3.Z3_L_FALSE and
+        !run.vacuous and
+        !run.vacuity_unknown and
+        !run.verified_with_caveats;
+}
+
+fn populateGuardViolateIdCounts(counts: *std.StringHashMap(u32), queries: []const PreparedQuery) !void {
+    for (queries) |query| {
+        if (query.kind != .GuardViolate) continue;
+        const guard_id = query.guard_id orelse continue;
+        const entry = try counts.getOrPut(guard_id);
+        if (entry.found_existing) {
+            entry.value_ptr.* += 1;
+        } else {
+            entry.value_ptr.* = 1;
+        }
+    }
+}
+
+fn guardViolateIdIsDuplicated(counts: *const std.StringHashMap(u32), guard_id: ?[]const u8) bool {
+    const id = guard_id orelse return false;
+    return (counts.get(id) orelse 0) > 1;
+}
 
 const ReportKindCounts = struct {
     base: u64 = 0,
@@ -6575,6 +7337,10 @@ fn verificationTrustLabel(
 }
 
 fn queryKindLabel(kind: QueryKind) []const u8 {
+    return formalQueryKindLabel(kind);
+}
+
+pub fn formalQueryKindLabel(kind: QueryKind) []const u8 {
     return switch (kind) {
         .Base => "base",
         .Obligation => "obligation",
@@ -6583,6 +7349,73 @@ fn queryKindLabel(kind: QueryKind) []const u8 {
         .LoopInvariantPost => "loop_invariant_post",
         .GuardSatisfy => "guard_satisfy",
         .GuardViolate => "guard_violate",
+    };
+}
+
+pub fn formalQueryFragmentLabel(fragment: QueryFragment) []const u8 {
+    return switch (fragment) {
+        .unknown => "unknown",
+        .qf_bv => "qf_bv",
+        .qf_bv_array => "qf_bv_array",
+        .aufbv => "aufbv",
+        .aufbv_quantifiers => "aufbv_quantifiers",
+        .other => "other",
+    };
+}
+
+pub fn formalQuerySolverLogicLabel(logic: QuerySolverLogic) []const u8 {
+    return switch (logic) {
+        .all => "all",
+        .qf_aufbv => "qf_aufbv",
+    };
+}
+
+pub fn formalLogicalRoleLabel(kind: AnnotationKind) ?[]const u8 {
+    return switch (kind) {
+        .Requires => "requires",
+        .CalleePrecondition => "callee_precondition",
+        .Ensures => "ensures",
+        .Guard => "guard",
+        .LoopInvariant => "loop_invariant",
+        .ContractInvariant => "contract_invariant",
+        .RefinementGuard => "refinement",
+        .Assume, .PathAssume => null,
+    };
+}
+
+pub fn formalAssumptionKindLabel(kind: AnnotationKind) ?[]const u8 {
+    return switch (kind) {
+        .Requires => "requires",
+        .Assume => "assume",
+        .PathAssume => "path_assume",
+        .CalleePrecondition,
+        .Ensures,
+        .Guard,
+        .LoopInvariant,
+        .ContractInvariant,
+        .RefinementGuard,
+        => null,
+    };
+}
+
+pub fn formalPendingObligationRoleLabel(kind: PendingObligationSourceKind) ?[]const u8 {
+    return switch (kind) {
+        .local => null,
+        .callee_precondition => "callee_precondition",
+        .imported_callee_obligation => "imported_callee_obligation",
+        .imported_callee_ensures => "imported_callee_ensures",
+    };
+}
+
+pub fn formalPendingConstraintAssumptionKindLabel(kind: PendingConstraintSourceKind) ?[]const u8 {
+    return switch (kind) {
+        .generic => null,
+        .assume => "assume",
+        .path_assume => "path_assume",
+        .binding => "binding",
+        .two_state_linkage => "two_state_linkage",
+        .env_assume => "env_assume",
+        .frame => "frame",
     };
 }
 
@@ -6911,6 +7744,29 @@ fn writePrecisionNoteEventJson(writer: anytype, event: Encoder.PrecisionNoteEven
     try writer.writeByte('}');
 }
 
+fn resourceEffectSummary(events: []const ResourceEffectEvent) ResourceEffectSummary {
+    var summary = ResourceEffectSummary{};
+    for (events) |event| summary.add(event.kind);
+    return summary;
+}
+
+fn writeResourceEffectEventJson(writer: anytype, event: ResourceEffectEvent) !void {
+    try writer.writeByte('{');
+    try writer.writeAll("\"kind\":");
+    try writeJsonStringEscaped(writer, resourceEffectKindLabel(event.kind));
+    try writer.writeAll(",\"description\":");
+    try writeJsonStringEscaped(writer, resourceEffectDescription(event.kind));
+    try writer.writeAll(",\"function_name\":");
+    try writeJsonStringEscaped(writer, event.function_name);
+    try writer.writeAll(",\"domain\":");
+    try writeJsonStringEscaped(writer, event.domain);
+    try writer.writeAll(",\"file\":");
+    try writeJsonStringEscaped(writer, event.file);
+    try writer.print(",\"line\":{d}", .{event.line});
+    try writer.print(",\"column\":{d}", .{event.column});
+    try writer.writeByte('}');
+}
+
 fn writeJsonStringEscaped(writer: anytype, value: []const u8) !void {
     try writer.writeByte('"');
     for (value) |ch| {
@@ -6969,7 +7825,7 @@ fn collectSortedStringKeys(
     allocator: std.mem.Allocator,
     map: anytype,
 ) !std.ArrayList([]const u8) {
-    var keys = std.ArrayList([]const u8){};
+    var keys = std.ArrayList([]const u8).empty;
     errdefer keys.deinit(allocator);
 
     var it = map.iterator();
@@ -7024,11 +7880,20 @@ const PreparedQuery = struct {
     constraint_count: usize = 0,
     smtlib_bytes: usize = 0,
     smtlib_hash: u64 = 0,
+    annotation_pure: bool = false,
     log_prefix: []const u8,
+    formal_query_id: ?u32 = null,
+    formal_assumption_ids: []const u32 = &.{},
+    formal_obligation_ids: []const u32 = &.{},
+    formal_match_status: FormalMatchStatus = .not_applicable,
+    formal_match_key: ?[]const u8 = null,
 
     fn deinit(self: *PreparedQuery, allocator: std.mem.Allocator) void {
         if (self.constraints.len > 0) allocator.free(self.constraints);
         if (self.tracked_assumptions.len > 0) allocator.free(self.tracked_assumptions);
+        if (self.formal_assumption_ids.len > 0) allocator.free(self.formal_assumption_ids);
+        if (self.formal_obligation_ids.len > 0) allocator.free(self.formal_obligation_ids);
+        if (self.formal_match_key) |key| allocator.free(key);
         allocator.free(self.smtlib_z);
         allocator.free(self.log_prefix);
     }
@@ -7048,6 +7913,11 @@ fn preparedQueryEquivalent(lhs: PreparedQuery, rhs: PreparedQuery) bool {
     if (!std.mem.eql(u8, lhs.file, rhs.file)) return false;
     if (lhs.line != rhs.line or lhs.column != rhs.column) return false;
     if (lhs.smtlib_hash != rhs.smtlib_hash) return false;
+    if (lhs.annotation_pure != rhs.annotation_pure) return false;
+    if (lhs.formal_query_id != rhs.formal_query_id) return false;
+    if (lhs.formal_match_status != rhs.formal_match_status) return false;
+    if (!std.mem.eql(u32, lhs.formal_assumption_ids, rhs.formal_assumption_ids)) return false;
+    if (!std.mem.eql(u32, lhs.formal_obligation_ids, rhs.formal_obligation_ids)) return false;
     if (lhs.tracked_assumptions.len != rhs.tracked_assumptions.len) return false;
     return std.mem.eql(u8, lhs.smtlib_z, rhs.smtlib_z);
 }
@@ -7072,19 +7942,46 @@ fn loopPostDischargesObligation(
     queries: []const PreparedQuery,
     results: []const PreparedQueryResult,
 ) bool {
+    std.debug.assert(queries.len == results.len);
     if (obligation_query.kind != .Obligation) return false;
     if (obligation_query.obligation_kind != .Ensures) return false;
     if (!obligation_query.references_loop_post_state) return false;
 
     for (queries, results) |query, result| {
-        if (query.kind != .LoopInvariantPost) continue;
-        if (result.status != z3.Z3_L_FALSE) continue;
-        if (!std.mem.eql(u8, query.function_name, obligation_query.function_name)) continue;
-        if (!std.mem.eql(u8, query.file, obligation_query.file)) continue;
-        if (query.line != obligation_query.line or query.column != obligation_query.column) continue;
+        if (!loopPostQueryProvesObligation(obligation_query, query, result.status)) continue;
         return true;
     }
     return false;
+}
+
+fn loopPostDischargesReportObligation(
+    obligation_query: PreparedQuery,
+    queries: []const PreparedQuery,
+    runs: []const ReportQueryRun,
+) bool {
+    std.debug.assert(queries.len == runs.len);
+    if (obligation_query.kind != .Obligation) return false;
+    if (obligation_query.obligation_kind != .Ensures) return false;
+    if (!obligation_query.references_loop_post_state) return false;
+
+    for (queries, runs) |query, run| {
+        if (!loopPostQueryProvesObligation(obligation_query, query, run.status)) continue;
+        return true;
+    }
+    return false;
+}
+
+fn loopPostQueryProvesObligation(
+    obligation_query: PreparedQuery,
+    loop_post_query: PreparedQuery,
+    loop_post_status: z3.Z3_lbool,
+) bool {
+    return loop_post_query.kind == .LoopInvariantPost and
+        loop_post_status == z3.Z3_L_FALSE and
+        std.mem.eql(u8, loop_post_query.function_name, obligation_query.function_name) and
+        std.mem.eql(u8, loop_post_query.file, obligation_query.file) and
+        loop_post_query.line == obligation_query.line and
+        loop_post_query.column == obligation_query.column;
 }
 
 const PreparedQueryResult = struct {
@@ -7100,11 +7997,47 @@ const PreparedQueryResult = struct {
     vacuity_unknown: bool = false,
 };
 
-fn vacuousCoreContainsRequires(tags: []const AssumptionTag) bool {
+fn forcedUnknownApplies(
+    target: ?ForcedUnknownQuery,
+    query_index: usize,
+    query: PreparedQuery,
+    status: z3.Z3_lbool,
+    vacuous: bool,
+    vacuity_unknown: bool,
+) bool {
+    const forced = target orelse return false;
+    if (forced.query_id != query_index + 1) return false;
+    if (forced.kind != query.kind) return false;
+    if (query.kind == .Base) return false;
+    if (vacuous or vacuity_unknown) return false;
+    // Test hook invariant: this may only turn a successful proof into UNKNOWN.
+    // It never changes SAT/failing queries and therefore cannot hide a
+    // counterexample or make artifact emission easier.
+    return status == z3.Z3_L_FALSE;
+}
+
+fn maybeForceUnknownStatus(
+    target: ?ForcedUnknownQuery,
+    query_index: usize,
+    query: PreparedQuery,
+    status: z3.Z3_lbool,
+    vacuous: bool,
+    vacuity_unknown: bool,
+) z3.Z3_lbool {
+    return if (forcedUnknownApplies(target, query_index, query, status, vacuous, vacuity_unknown))
+        z3.Z3_L_UNDEF
+    else
+        status;
+}
+
+fn firstFailClosedCoreAssumptionLabel(tags: []const AssumptionTag) ?[]const u8 {
     for (tags) |tag| {
-        if (tag.kind == .requires) return true;
+        switch (tag.kind) {
+            .goal, .path_assume => continue,
+            else => return defaultTrackedAssumptionLabel(tag.kind),
+        }
     }
-    return false;
+    return null;
 }
 
 fn querySolverLogicLabel(logic: QuerySolverLogic) []const u8 {
@@ -7158,7 +8091,9 @@ fn inferReportVerificationSuccess(
     if (!verify_state) return false;
     if (summary.vacuous != 0) return false;
     if (summary.vacuity_unknown != 0) return false;
-    if (verification_result) |vr| return vr.success;
+    if (verification_result) |vr| {
+        if (!vr.success) return false;
+    }
     return summary.failed_obligations == 0 and
         summary.inconsistent_bases == 0 and
         summary.unknown == 0;
@@ -7324,6 +8259,37 @@ fn collectFunctionNamesInRegion(
     }
 }
 
+fn resourceEffectKindFromOpName(op_name: []const u8) ?ResourceEffectKind {
+    if (std.mem.eql(u8, op_name, "ora.move")) return .conserved_move;
+    if (std.mem.eql(u8, op_name, "ora.create")) return .explicit_create;
+    if (std.mem.eql(u8, op_name, "ora.destroy")) return .explicit_destroy;
+    return null;
+}
+
+fn resourceEffectKindLabel(kind: ResourceEffectKind) []const u8 {
+    return switch (kind) {
+        .conserved_move => "conserved_move",
+        .explicit_create => "explicit_create",
+        .explicit_destroy => "explicit_destroy",
+    };
+}
+
+fn resourceEffectKindMarkdownLabel(kind: ResourceEffectKind) []const u8 {
+    return switch (kind) {
+        .conserved_move => "conserved move",
+        .explicit_create => "explicit create",
+        .explicit_destroy => "explicit destroy",
+    };
+}
+
+fn resourceEffectDescription(kind: ResourceEffectKind) []const u8 {
+    return switch (kind) {
+        .conserved_move => "net domain delta is zero",
+        .explicit_create => "domain boundary delta is positive",
+        .explicit_destroy => "domain boundary delta is negative",
+    };
+}
+
 fn addConstraintSlice(list: *ManagedArrayList(z3.Z3_ast), constraints: []const z3.Z3_ast) !void {
     for (constraints) |cst| {
         try list.append(cst);
@@ -7332,6 +8298,10 @@ fn addConstraintSlice(list: *ManagedArrayList(z3.Z3_ast), constraints: []const z
 
 fn cloneConstraintAstSlice(allocator: std.mem.Allocator, constraints: []const z3.Z3_ast) ![]const z3.Z3_ast {
     return if (constraints.len == 0) &.{} else try allocator.dupe(z3.Z3_ast, constraints);
+}
+
+fn cloneU32SliceArena(allocator: std.mem.Allocator, values: []const u32) ![]const u32 {
+    return if (values.len == 0) &.{} else try allocator.dupe(u32, values);
 }
 
 const QueryFragmentFeatures = struct {
@@ -7578,6 +8548,55 @@ fn appendGoalTrackedAssumption(
     });
 }
 
+fn makeGoalCounterexample(self: *VerificationPass, goal: z3.Z3_ast) z3.Z3_ast {
+    const instantiated = instantiateLeadingForallGoal(self, goal);
+    return z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(instantiated));
+}
+
+fn instantiateLeadingForallGoal(self: *VerificationPass, goal: z3.Z3_ast) z3.Z3_ast {
+    var current = self.encoder.coerceBoolean(goal);
+    var depth: u32 = 0;
+
+    while (z3.Z3_get_ast_kind(self.context.ctx, current) == z3.Z3_QUANTIFIER_AST and
+        z3.Z3_is_quantifier_forall(self.context.ctx, current))
+    {
+        const bound_count = z3.Z3_get_quantifier_num_bound(self.context.ctx, current);
+        if (bound_count != 1) return current;
+
+        const bound_sort = z3.Z3_get_quantifier_bound_sort(self.context.ctx, current, 0);
+        var binder_name_buf: [48]u8 = undefined;
+        const binder_name = quantifierBoundNameForSkolem(self.context.ctx, current, 0, binder_name_buf[0..]);
+        var name_buf: [goal_skolem.name_buffer_len]u8 = undefined;
+        var sanitized_buf: [goal_skolem.binder_buffer_len]u8 = undefined;
+        const witness_name = goal_skolem.nameZ(&name_buf, &sanitized_buf, binder_name, depth);
+        const witness = z3.Z3_mk_const(
+            self.context.ctx,
+            z3.Z3_mk_string_symbol(self.context.ctx, witness_name.ptr),
+            bound_sort,
+        );
+        var replacement = [_]z3.Z3_ast{witness};
+        const body = z3.Z3_get_quantifier_body(self.context.ctx, current);
+        current = self.encoder.coerceBoolean(
+            z3.Z3_substitute_vars(self.context.ctx, body, 1, replacement[0..].ptr),
+        );
+        depth += 1;
+    }
+
+    return current;
+}
+
+fn quantifierBoundNameForSkolem(ctx: z3.Z3_context, quantifier: z3.Z3_ast, index: c_uint, buffer: []u8) []const u8 {
+    const symbol = z3.Z3_get_quantifier_bound_name(ctx, quantifier, index);
+    return switch (z3.Z3_get_symbol_kind(ctx, symbol)) {
+        z3.Z3_STRING_SYMBOL => blk: {
+            const raw = z3.Z3_get_symbol_string(ctx, symbol) orelse break :blk "q";
+            break :blk std.mem.span(raw);
+        },
+        z3.Z3_INT_SYMBOL => std.fmt.bufPrint(buffer, "q{d}", .{z3.Z3_get_symbol_int(ctx, symbol)}) catch "q",
+        else => "q",
+    };
+}
+
 fn assertPreparedQueryConstraints(solver: *Solver, constraints: []const z3.Z3_ast) !void {
     for (constraints) |constraint| {
         try solver.assertChecked(constraint);
@@ -7677,9 +8696,9 @@ fn formatUnsatCoreSummary(
         return .{ .explain_str = null, .explain_tags = &.{} };
     }
 
-    var buffer = ManagedArrayList(u8).init(allocator);
+    var buffer = std.Io.Writer.Allocating.init(allocator);
     errdefer buffer.deinit();
-    const writer = buffer.writer();
+    const writer = &buffer.writer;
     for (parts.items, 0..) |part, idx| {
         if (idx != 0) try writer.writeAll("; ");
         try writer.writeAll(part);
@@ -7766,7 +8785,7 @@ fn runMandatoryVacuityCheck(
 
     const vacuity = try checkPreparedQueryTrackedAssumptions(self, solver, query, false);
     if (vacuity.status == z3.Z3_L_FALSE) {
-        if (vacuousCoreContainsRequires(vacuity.explain_tags)) {
+        if (firstFailClosedCoreAssumptionLabel(vacuity.explain_tags) != null) {
             if (log_prefix) |prefix| {
                 if (vacuity.explain_str) |core| {
                     std.debug.print("{s} note: assumptions inconsistent ({s})\n", .{ prefix, core });
@@ -7817,7 +8836,7 @@ fn runExplainCheck(
     if (query.kind != .Base) {
         const vacuity = try checkPreparedQueryTrackedAssumptions(self, solver, query, false);
         if (vacuity.status == z3.Z3_L_FALSE) {
-            if (vacuousCoreContainsRequires(vacuity.explain_tags)) {
+            if (firstFailClosedCoreAssumptionLabel(vacuity.explain_tags) != null) {
                 if (log_prefix) |prefix| {
                     if (vacuity.explain_str) |core| {
                         std.debug.print("{s} note: assumptions inconsistent ({s})\n", .{ prefix, core });
@@ -8029,7 +9048,7 @@ fn buildSmtlibForConstraints(
 
     const raw = z3.Z3_solver_to_string(solver.context.ctx, temp_solver.solver);
     const text = if (raw == null) "" else std.mem.span(raw);
-    var out: std.ArrayList(u8) = .{};
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
     try out.appendSlice(allocator, text);
     if (!std.mem.endsWith(u8, text, "\n")) {
@@ -10415,7 +11434,7 @@ test "full verify mode classifies guard-tagged ora.assert as guard obligation" {
     try testing.expect(saw_guard_obligation);
 }
 
-test "verified guard obligations populate proven guard ids" {
+test "verified guard obligations do not authorize guard erasure" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
     pass.setVerifyMode(.Full);
@@ -10432,7 +11451,8 @@ test "verified guard obligations populate proven guard ids" {
     defer result.deinit();
 
     try testing.expect(result.success);
-    try testing.expect(result.proven_guard_ids.contains("guard:test:clause"));
+    try testing.expect(!result.proven_guard_ids.contains("guard:test:clause"));
+    try testing.expectEqual(@as(usize, 1), result.proven_guard_positions.items.len);
 }
 
 test "full verify mode simplifies checked multiply assert obligations before SMT-LIB emission" {
@@ -11421,6 +12441,214 @@ test "guard violate query includes scoped path assumptions" {
     try testing.expect(found_violate);
 }
 
+test "guard violate prepared row carries formal erasure identity" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildLinearPathAssumeGuardModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+
+    var guard_ann: ?EncodedAnnotation = null;
+    for (pass.encoded_annotations.items) |ann| {
+        if (ann.kind == .RefinementGuard) {
+            guard_ann = ann;
+            break;
+        }
+    }
+    const ann = guard_ann orelse return error.TestUnexpectedResult;
+    const source_op_id = sourceOpId(ann.source_op) orelse return error.TestUnexpectedResult;
+    const assumption_ids = [_]u32{ 10, 11 };
+    const obligation_ids = [_]u32{12};
+    const bindings = [_]FormalQueryBinding{.{
+        .source_op_id = source_op_id,
+        .kind = "guard_violate",
+        .guard_id = "guard:test:linear",
+        .query_id = 99,
+        .assumption_ids = assumption_ids[0..],
+        .obligation_ids = obligation_ids[0..],
+    }};
+    pass.setFormalQueryBindings(bindings[0..]);
+
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| {
+            q.deinit(testing.allocator);
+        }
+        queries.deinit();
+    }
+
+    var saw_violate = false;
+    var saw_satisfy = false;
+    for (queries.items) |q| {
+        if (!std.mem.eql(u8, q.guard_id orelse "", "guard:test:linear")) continue;
+        switch (q.kind) {
+            .GuardViolate => {
+                saw_violate = true;
+                try testing.expectEqual(FormalMatchStatus.matched, q.formal_match_status);
+                try testing.expectEqual(@as(?u32, 99), q.formal_query_id);
+                try testing.expectEqualSlices(u32, assumption_ids[0..], q.formal_assumption_ids);
+                try testing.expectEqualSlices(u32, obligation_ids[0..], q.formal_obligation_ids);
+                try testing.expect(q.formal_match_key == null);
+            },
+            .GuardSatisfy => {
+                saw_satisfy = true;
+                try testing.expectEqual(FormalMatchStatus.not_applicable, q.formal_match_status);
+                try testing.expect(q.formal_query_id == null);
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_violate);
+    try testing.expect(saw_satisfy);
+}
+
+test "guard violate formal erasure identity reports missing and ambiguous rows" {
+    const Case = enum { missing, ambiguous };
+    inline for (.{ Case.missing, Case.ambiguous }) |case| {
+        var pass = try VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+
+        const mlir_ctx = mlir.oraContextCreate();
+        defer mlir.oraContextDestroy(mlir_ctx);
+        testLoadAllDialects(mlir_ctx);
+        _ = mlir.oraDialectRegister(mlir_ctx);
+
+        const module = buildLinearPathAssumeGuardModule(mlir_ctx);
+        defer mlir.oraModuleDestroy(module);
+
+        try pass.extractAnnotationsFromMLIR(module);
+
+        var guard_ann: ?EncodedAnnotation = null;
+        for (pass.encoded_annotations.items) |ann| {
+            if (ann.kind == .RefinementGuard) {
+                guard_ann = ann;
+                break;
+            }
+        }
+        const ann = guard_ann orelse return error.TestUnexpectedResult;
+        const source_op_id = sourceOpId(ann.source_op) orelse return error.TestUnexpectedResult;
+        var bindings: [2]FormalQueryBinding = undefined;
+        const binding_count: usize = switch (case) {
+            .missing => blk: {
+                bindings[0] = .{
+                    .source_op_id = source_op_id,
+                    .kind = "guard_violate",
+                    .guard_id = "guard:test:other",
+                    .query_id = 1,
+                };
+                break :blk 1;
+            },
+            .ambiguous => blk: {
+                bindings[0] = .{
+                    .source_op_id = source_op_id,
+                    .kind = "guard_violate",
+                    .guard_id = "guard:test:linear",
+                    .query_id = 1,
+                };
+                bindings[1] = .{
+                    .source_op_id = source_op_id,
+                    .kind = "guard_violate",
+                    .guard_id = "guard:test:linear",
+                    .query_id = 2,
+                };
+                break :blk 2;
+            },
+        };
+        pass.setFormalQueryBindings(bindings[0..binding_count]);
+
+        var queries = try pass.buildPreparedQueries();
+        defer {
+            for (queries.items) |*q| {
+                q.deinit(testing.allocator);
+            }
+            queries.deinit();
+        }
+
+        var saw_violate = false;
+        for (queries.items) |q| {
+            if (q.kind != .GuardViolate) continue;
+            saw_violate = true;
+            const expected_status: FormalMatchStatus = switch (case) {
+                .missing => .missing,
+                .ambiguous => .ambiguous,
+            };
+            try testing.expectEqual(expected_status, q.formal_match_status);
+            try testing.expect(q.formal_query_id == null);
+            try testing.expect(q.formal_match_key != null);
+            try testing.expect(std.mem.indexOf(u8, q.formal_match_key.?, "kind=guard_violate") != null);
+            try testing.expect(std.mem.indexOf(u8, q.formal_match_key.?, "guard=guard:test:linear") != null);
+        }
+        try testing.expect(saw_violate);
+    }
+}
+
+test "guard-tagged obligations do not carry erasure authority identity" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setVerifyMode(.Full);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildGuardOraAssertModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+
+    var guard_ann: ?EncodedAnnotation = null;
+    for (pass.encoded_annotations.items) |ann| {
+        if (ann.kind == .Guard) {
+            guard_ann = ann;
+            break;
+        }
+    }
+    const ann = guard_ann orelse return error.TestUnexpectedResult;
+    const source_op_id = sourceOpId(ann.source_op) orelse return error.TestUnexpectedResult;
+    const bindings = [_]FormalQueryBinding{
+        .{
+            .source_op_id = source_op_id,
+            .kind = "obligation",
+            .logical_role = "guard",
+            .guard_id = "guard:test:clause",
+            .query_id = 7,
+        },
+        .{
+            .source_op_id = source_op_id,
+            .kind = "guard_violate",
+            .guard_id = "guard:test:clause",
+            .query_id = 8,
+        },
+    };
+    pass.setFormalQueryBindings(bindings[0..]);
+
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| {
+            q.deinit(testing.allocator);
+        }
+        queries.deinit();
+    }
+
+    var saw_guard_obligation = false;
+    for (queries.items) |q| {
+        if (q.kind != .Obligation or q.obligation_kind != .Guard) continue;
+        saw_guard_obligation = true;
+        try testing.expectEqual(FormalMatchStatus.not_applicable, q.formal_match_status);
+        try testing.expect(q.formal_query_id == null);
+        try testing.expect(q.formal_match_key == null);
+    }
+    try testing.expect(saw_guard_obligation);
+}
+
 test "guard satisfy queries ignore incompatible sibling branch paths" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
@@ -11454,7 +12682,6 @@ test "guard satisfy queries ignore incompatible sibling branch paths" {
 
     try testing.expectEqual(@as(usize, 2), satisfy_count);
 }
-
 test "sequential guard verification ignores sibling branch guards" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
@@ -11486,11 +12713,189 @@ test "sequential guard verification uses linear path assumptions to prove guards
     const module = buildLinearPathAssumeGuardModule(mlir_ctx);
     defer mlir.oraModuleDestroy(module);
 
-    var result = try pass.runVerificationPass(module);
+    try pass.extractAnnotationsFromMLIR(module);
+    var guard_ann: ?EncodedAnnotation = null;
+    for (pass.encoded_annotations.items) |ann| {
+        if (ann.kind == .RefinementGuard) {
+            guard_ann = ann;
+            break;
+        }
+    }
+    const ann = guard_ann orelse return error.TestUnexpectedResult;
+    const source_op_id = sourceOpId(ann.source_op) orelse return error.TestUnexpectedResult;
+    const bindings = [_]FormalQueryBinding{.{
+        .source_op_id = source_op_id,
+        .kind = "guard_violate",
+        .guard_id = "guard:test:linear",
+        .query_id = 1,
+    }};
+    pass.setFormalQueryBindings(bindings[0..]);
+
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| {
+            q.deinit(testing.allocator);
+        }
+        queries.deinit();
+    }
+
+    var result = try pass.executePreparedQueriesSequential(queries.items);
     defer result.deinit();
 
     try testing.expect(result.success);
     try testing.expect(result.proven_guard_ids.contains("guard:test:linear"));
+}
+
+test "clean guard violate proof without formal identity keeps runtime guard" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const query = PreparedQuery{
+        .kind = .GuardViolate,
+        .function_name = "f",
+        .guard_id = "guard:test:missing-formal",
+        .file = "/tmp/test.ora",
+        .line = 4,
+        .column = 8,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "f guard guard:test:missing-formal [violate]"),
+        .formal_match_status = .missing,
+    };
+    defer {
+        var mutable_query = query;
+        mutable_query.deinit(testing.allocator);
+    }
+
+    const result_entry = PreparedQueryResult{
+        .status = z3.Z3_L_FALSE,
+    };
+    var result = try pass.collectPreparedQueryResults((&[_]PreparedQuery{query})[0..], (&[_]PreparedQueryResult{result_entry})[0..]);
+    defer result.deinit();
+
+    try testing.expect(result.success);
+    try testing.expect(!result.proven_guard_ids.contains("guard:test:missing-formal"));
+    try testing.expectEqual(@as(usize, 0), result.proven_guard_positions.items.len);
+}
+
+test "guard erasure authorization refuses enclosing soundness loss" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.encoder.noteSoundnessLoss(.internal_encoding_failure, "test soundness loss");
+
+    const query = PreparedQuery{
+        .kind = .GuardViolate,
+        .function_name = "f",
+        .guard_id = "guard:test:degraded",
+        .file = "/tmp/test.ora",
+        .line = 4,
+        .column = 8,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "f guard guard:test:degraded [violate]"),
+        .formal_match_status = .matched,
+    };
+    defer {
+        var mutable_query = query;
+        mutable_query.deinit(testing.allocator);
+    }
+
+    const result_entry = PreparedQueryResult{
+        .status = z3.Z3_L_FALSE,
+    };
+    var result = try pass.collectPreparedQueryResults((&[_]PreparedQuery{query})[0..], (&[_]PreparedQueryResult{result_entry})[0..]);
+    defer result.deinit();
+
+    try testing.expect(result.success);
+    try testing.expect(!result.proven_guard_ids.contains("guard:test:degraded"));
+    try testing.expectEqual(@as(usize, 0), result.proven_guard_positions.items.len);
+}
+
+test "duplicate guard violate rows do not authorize guard erasure" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    var queries = [_]PreparedQuery{
+        .{
+            .kind = .GuardViolate,
+            .function_name = "f",
+            .guard_id = "guard:test:duplicate",
+            .file = "/tmp/test.ora",
+            .line = 4,
+            .column = 8,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try testing.allocator.dupe(u8, "f guard guard:test:duplicate [violate]"),
+            .formal_match_status = .matched,
+        },
+        .{
+            .kind = .GuardViolate,
+            .function_name = "f",
+            .guard_id = "guard:test:duplicate",
+            .file = "/tmp/test.ora",
+            .line = 5,
+            .column = 8,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try testing.allocator.dupe(u8, "f guard guard:test:duplicate [violate]"),
+            .formal_match_status = .matched,
+        },
+    };
+    defer {
+        for (&queries) |*query| query.deinit(testing.allocator);
+    }
+
+    const result_entries = [_]PreparedQueryResult{
+        .{ .status = z3.Z3_L_FALSE },
+        .{ .status = z3.Z3_L_FALSE },
+    };
+    var result = try pass.collectPreparedQueryResults(queries[0..], result_entries[0..]);
+    defer result.deinit();
+
+    try testing.expect(result.success);
+    try testing.expect(!result.proven_guard_ids.contains("guard:test:duplicate"));
+    try testing.expectEqual(@as(usize, 0), result.proven_guard_positions.items.len);
+}
+
+test "distinct guard violate rows authorize only the proven guard" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    var queries = [_]PreparedQuery{
+        .{
+            .kind = .GuardViolate,
+            .function_name = "f",
+            .guard_id = "guard:test:proved",
+            .file = "/tmp/test.ora",
+            .line = 4,
+            .column = 8,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try testing.allocator.dupe(u8, "f guard guard:test:proved [violate]"),
+            .formal_match_status = .matched,
+        },
+        .{
+            .kind = .GuardViolate,
+            .function_name = "f",
+            .guard_id = "guard:test:runtime",
+            .file = "/tmp/test.ora",
+            .line = 5,
+            .column = 8,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try testing.allocator.dupe(u8, "f guard guard:test:runtime [violate]"),
+            .formal_match_status = .matched,
+        },
+    };
+    defer {
+        for (&queries) |*query| query.deinit(testing.allocator);
+    }
+
+    const result_entries = [_]PreparedQueryResult{
+        .{ .status = z3.Z3_L_FALSE },
+        .{ .status = z3.Z3_L_TRUE },
+    };
+    var result = try pass.collectPreparedQueryResults(queries[0..], result_entries[0..]);
+    defer result.deinit();
+
+    try testing.expect(result.success);
+    try testing.expect(result.proven_guard_ids.contains("guard:test:proved"));
+    try testing.expect(!result.proven_guard_ids.contains("guard:test:runtime"));
+    try testing.expectEqual(@as(usize, 1), result.proven_guard_positions.items.len);
 }
 
 test "path constraint normalization flattens boolean ite ladders" {
@@ -11619,6 +13024,31 @@ test "query fragment inference classifies solver fragments conservatively" {
     try testing.expectEqual(QuerySolverLogic.all, inferQuerySolverLogic(context.ctx, &[_]z3.Z3_ast{quant}));
 }
 
+test "goal-position forall counterexamples are skolemized without changing validity" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const bv8_sort = z3.Z3_mk_bv_sort(pass.context.ctx, 8);
+    const x = z3.Z3_mk_const(pass.context.ctx, z3.Z3_mk_string_symbol(pass.context.ctx, "goal_forall_x"), bv8_sort);
+    const bound = [_]z3.Z3_ast{x};
+
+    const tautology_body = z3.Z3_mk_eq(pass.context.ctx, x, x);
+    const tautology_goal = z3.Z3_mk_forall_const(pass.context.ctx, 0, 1, @ptrCast(&bound), 0, null, tautology_body);
+    const tautology_counterexample = makeGoalCounterexample(&pass, tautology_goal);
+    try testing.expectEqual(QueryFragment.qf_bv, inferQueryFragment(pass.context.ctx, &[_]z3.Z3_ast{tautology_counterexample}));
+    try pass.solver.assertChecked(tautology_counterexample);
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), try pass.solver.checkChecked());
+    try pass.solver.resetChecked();
+
+    const seven = z3.Z3_mk_numeral(pass.context.ctx, "7", bv8_sort);
+    const false_body = z3.Z3_mk_eq(pass.context.ctx, x, seven);
+    const false_goal = z3.Z3_mk_forall_const(pass.context.ctx, 0, 1, @ptrCast(&bound), 0, null, false_body);
+    const false_counterexample = makeGoalCounterexample(&pass, false_goal);
+    try testing.expectEqual(QueryFragment.qf_bv, inferQueryFragment(pass.context.ctx, &[_]z3.Z3_ast{false_counterexample}));
+    try pass.solver.assertChecked(false_counterexample);
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_TRUE), try pass.solver.checkChecked());
+}
+
 test "prepared queries route quantifier-free and quantified formulas to different solvers" {
     const mlir_ctx = mlir.oraContextCreate();
     defer mlir.oraContextDestroy(mlir_ctx);
@@ -11684,6 +13114,39 @@ test "prepared queries route quantifier-free and quantified formulas to differen
     }
     try testing.expect(saw_general);
     try testing.expect(saw_quantifier_fragment);
+
+    var quantified_goal_pass = try VerificationPass.init(testing.allocator);
+    defer quantified_goal_pass.deinit();
+    const goal_bv8_sort = z3.Z3_mk_bv_sort(quantified_goal_pass.context.ctx, 8);
+    const goal_x = z3.Z3_mk_const(quantified_goal_pass.context.ctx, z3.Z3_mk_string_symbol(quantified_goal_pass.context.ctx, "prepared_goal_quant_x"), goal_bv8_sort);
+    const goal_body = z3.Z3_mk_eq(quantified_goal_pass.context.ctx, goal_x, goal_x);
+    const goal_bound = [_]z3.Z3_ast{goal_x};
+    const quantified_goal = z3.Z3_mk_forall_const(quantified_goal_pass.context.ctx, 0, 1, @ptrCast(&goal_bound), 0, null, goal_body);
+    try quantified_goal_pass.encoded_annotations.append(.{
+        .function_name = "prepared_quantified_goal_test",
+        .kind = .Ensures,
+        .condition = quantified_goal,
+        .extra_constraints = &.{},
+        .file = "test.ora",
+        .line = 3,
+        .column = 1,
+    });
+    var quantified_goal_queries = try quantified_goal_pass.buildPreparedQueries();
+    defer {
+        for (quantified_goal_queries.items) |*q| q.deinit(testing.allocator);
+        quantified_goal_queries.deinit();
+    }
+    var saw_quantifier_free_goal = false;
+    for (quantified_goal_queries.items) |query| {
+        if (query.kind != .Obligation) continue;
+        saw_quantifier_free_goal = true;
+        try testing.expectEqual(QueryFragment.qf_bv, query.fragment);
+        try testing.expectEqual(QuerySolverLogic.qf_aufbv, query.solver_logic);
+        try quantified_goal_pass.solver.resetChecked();
+        try assertPreparedQueryConstraints(&quantified_goal_pass.solver, query.constraints);
+        try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), try quantified_goal_pass.solver.checkChecked());
+    }
+    try testing.expect(saw_quantifier_free_goal);
 }
 
 test "contract invariants from loop body obligations use loop constraints" {
@@ -12134,6 +13597,7 @@ test "SMT report fails closed on real query-build degradation" {
     defer artifacts.deinit(testing.allocator);
 
     try testing.expect(pass.encoder.isDegraded());
+    try testing.expect(artifacts.blocksTrustedArtifacts());
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"encoding_degraded\":true") != null);
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"degradation_reason\":\"struct_field_extract requires exact product metadata\"") != null);
     try testing.expect(std.mem.indexOf(u8, artifacts.markdown, "Encoding degraded: `true`") != null);
@@ -12205,6 +13669,31 @@ test "prepared query result collection taints function on unknown base" {
     try testing.expectEqual(@as(usize, 1), collected.errors.items.len);
     try testing.expectEqual(errors.VerificationErrorType.Unknown, collected.errors.items[0].error_type);
     try testing.expect(std.mem.containsAtLeast(u8, collected.errors.items[0].message, 1, "verification assumptions are unknown in f"));
+}
+
+test "forced unknown test hook only downgrades successful proof results" {
+    const forced = try parseForcedUnknownQuery("obligation:1");
+    try testing.expectEqual(QueryKind.Obligation, forced.kind);
+    try testing.expectEqual(@as(usize, 1), forced.query_id);
+    try testing.expectError(error.InvalidForcedUnknownQuery, parseForcedUnknownQuery("obligation:0"));
+    try testing.expectError(error.InvalidForcedUnknownQuery, parseForcedUnknownQuery("base"));
+
+    const query = PreparedQuery{
+        .kind = .Obligation,
+        .function_name = "f",
+        .obligation_kind = .Ensures,
+        .file = "/tmp/test.ora",
+        .line = 1,
+        .column = 1,
+        .smtlib_z = "(check-sat)",
+        .log_prefix = "verification: f [ensures]",
+    };
+
+    try testing.expectEqual(z3.Z3_L_UNDEF, maybeForceUnknownStatus(forced, 0, query, z3.Z3_L_FALSE, false, false));
+    try testing.expectEqual(z3.Z3_L_TRUE, maybeForceUnknownStatus(forced, 0, query, z3.Z3_L_TRUE, false, false));
+    try testing.expectEqual(z3.Z3_L_FALSE, maybeForceUnknownStatus(forced, 0, query, z3.Z3_L_FALSE, true, false));
+    try testing.expectEqual(z3.Z3_L_FALSE, maybeForceUnknownStatus(forced, 0, query, z3.Z3_L_FALSE, false, true));
+    try testing.expectEqual(z3.Z3_L_FALSE, maybeForceUnknownStatus(forced, 1, query, z3.Z3_L_FALSE, false, false));
 }
 
 test "prepared query result collection fails closed on unknown for every query kind" {
@@ -12326,6 +13815,98 @@ test "result collection fails closed on inconclusive vacuity check" {
     try testing.expectEqual(@as(usize, 0), collected.proven_guard_positions.items.len);
 }
 
+test "non-requires inconsistent assumptions do not prove or erase guard" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const frame_proxy = try pass.solver.mkFreshBoolProxy("frame_inconsistent");
+    const tracked_assumptions = try testing.allocator.dupe(TrackedAssumption, &[_]TrackedAssumption{
+        .{
+            .proxy = frame_proxy,
+            .ast = z3.Z3_mk_false(pass.context.ctx),
+            .tag = .{
+                .kind = .frame,
+                .function_name = "f",
+                .file = "/tmp/test.ora",
+                .line = 6,
+                .column = 5,
+                .label = "injected frame contradiction",
+            },
+        },
+    });
+
+    var queries = [_]PreparedQuery{.{
+        .kind = .GuardViolate,
+        .function_name = "f",
+        .guard_id = "guard:test:frame-vacuity",
+        .file = "/tmp/test.ora",
+        .line = 7,
+        .column = 3,
+        .tracked_assumptions = tracked_assumptions,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "verification: f guard guard:test:frame-vacuity [violate]"),
+    }};
+    defer queries[0].deinit(testing.allocator);
+
+    var result = try pass.executePreparedQueriesSequential(queries[0..]);
+    defer result.deinit();
+
+    try testing.expect(!result.success);
+    try testing.expectEqual(@as(usize, 1), result.errors.items.len);
+    try testing.expectEqual(errors.VerificationErrorType.PreconditionViolation, result.errors.items[0].error_type);
+    try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "verification assumptions are inconsistent"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.errors.items[0].message, 1, "frame condition"));
+    try testing.expect(!result.proven_guard_ids.contains("guard:test:frame-vacuity"));
+    try testing.expectEqual(@as(usize, 0), result.proven_guard_positions.items.len);
+    try testing.expectEqual(@as(usize, 0), result.z3_proofs.items.len);
+}
+
+test "pure path-assume contradiction still proves dead guard path" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const path_assumption = z3.Z3_mk_false(pass.context.ctx);
+    const path_proxy = try pass.solver.mkFreshBoolProxy("path_inconsistent");
+    const tracked_assumptions = try testing.allocator.dupe(TrackedAssumption, &[_]TrackedAssumption{
+        .{
+            .proxy = path_proxy,
+            .ast = path_assumption,
+            .tag = .{
+                .kind = .path_assume,
+                .function_name = "f",
+                .file = "/tmp/test.ora",
+                .line = 6,
+                .column = 5,
+                .label = "injected dead path",
+            },
+        },
+    });
+
+    var queries = [_]PreparedQuery{.{
+        .kind = .GuardViolate,
+        .function_name = "f",
+        .guard_id = "guard:test:path-vacuity",
+        .file = "/tmp/test.ora",
+        .line = 7,
+        .column = 3,
+        .constraints = try testing.allocator.dupe(z3.Z3_ast, &[_]z3.Z3_ast{path_assumption}),
+        .tracked_assumptions = tracked_assumptions,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(assert false)\n(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "verification: f guard guard:test:path-vacuity [violate]"),
+        .formal_match_status = .matched,
+    }};
+    defer queries[0].deinit(testing.allocator);
+
+    var result = try pass.executePreparedQueriesSequential(queries[0..]);
+    defer result.deinit();
+
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors.items.len);
+    try testing.expect(result.proven_guard_ids.contains("guard:test:path-vacuity"));
+    try testing.expectEqual(@as(usize, 1), result.proven_guard_positions.items.len);
+    try testing.expectEqual(@as(usize, 0), result.z3_proofs.items.len);
+}
+
 test "prepared query result collection includes captured Z3 API message" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
@@ -12424,7 +14005,7 @@ test "report success is false without verification result when queries are unkno
     try testing.expect(!inferReportVerificationSuccess(summary, null, false, .Full, true, true));
 }
 
-test "report success follows verification result when present" {
+test "report success requires successful verification result when present" {
     var result = errors.VerificationResult.init(testing.allocator);
     defer result.deinit();
     result.success = false;
@@ -12434,6 +14015,123 @@ test "report success follows verification result when present" {
         .unknown = 0,
     };
     try testing.expect(!inferReportVerificationSuccess(summary, &result, false, .Full, true, true));
+}
+
+test "report success checks report counters even when verification result succeeded" {
+    var result = errors.VerificationResult.init(testing.allocator);
+    defer result.deinit();
+    result.success = true;
+
+    try testing.expect(!inferReportVerificationSuccess(.{
+        .total_queries = 1,
+        .unknown = 1,
+    }, &result, false, .Full, true, true));
+    try testing.expect(!inferReportVerificationSuccess(.{
+        .total_queries = 1,
+        .failed_obligations = 1,
+    }, &result, false, .Full, true, true));
+    try testing.expect(!inferReportVerificationSuccess(.{
+        .total_queries = 1,
+        .inconsistent_bases = 1,
+    }, &result, false, .Full, true, true));
+}
+
+test "report loop-post discharge matches verifier result collection" {
+    var queries = [_]PreparedQuery{
+        .{
+            .kind = .Obligation,
+            .function_name = "countTo",
+            .obligation_kind = .Ensures,
+            .file = "/tmp/loop.ora",
+            .line = 7,
+            .column = 9,
+            .references_loop_post_state = true,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try testing.allocator.dupe(u8, "countTo [ensures]"),
+        },
+        .{
+            .kind = .LoopInvariantPost,
+            .function_name = "countTo",
+            .obligation_kind = .Ensures,
+            .file = "/tmp/loop.ora",
+            .line = 7,
+            .column = 9,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try testing.allocator.dupe(u8, "countTo [invariant-post]"),
+        },
+    };
+    defer {
+        for (&queries) |*query| query.deinit(testing.allocator);
+    }
+
+    const verification_results = [_]PreparedQueryResult{
+        .{ .status = z3.Z3_L_TRUE },
+        .{ .status = z3.Z3_L_FALSE },
+    };
+    const report_runs = [_]ReportQueryRun{
+        .{ .status = z3.Z3_L_TRUE },
+        .{ .status = z3.Z3_L_FALSE },
+    };
+
+    try testing.expect(loopPostDischargesObligation(queries[0], queries[0..], verification_results[0..]));
+    try testing.expect(loopPostDischargesReportObligation(queries[0], queries[0..], report_runs[0..]));
+}
+
+test "guard erasure agreement summary counts only clean unauthorized UNSAT rows" {
+    var matched_query = PreparedQuery{
+        .kind = .GuardViolate,
+        .function_name = "guarded",
+        .guard_id = "guard:matched",
+        .file = "/tmp/guard.ora",
+        .line = 1,
+        .column = 1,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "guarded guard guard:matched [violate]"),
+        .formal_match_status = .matched,
+    };
+    defer matched_query.deinit(testing.allocator);
+    var missing_query = PreparedQuery{
+        .kind = .GuardViolate,
+        .function_name = "guarded",
+        .guard_id = "guard:missing",
+        .file = "/tmp/guard.ora",
+        .line = 2,
+        .column = 1,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "guarded guard guard:missing [violate]"),
+        .formal_match_status = .missing,
+    };
+    defer missing_query.deinit(testing.allocator);
+    var ambiguous_query = PreparedQuery{
+        .kind = .GuardViolate,
+        .function_name = "guarded",
+        .guard_id = "guard:ambiguous",
+        .file = "/tmp/guard.ora",
+        .line = 3,
+        .column = 1,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "guarded guard guard:ambiguous [violate]"),
+        .formal_match_status = .ambiguous,
+    };
+    defer ambiguous_query.deinit(testing.allocator);
+
+    var summary = GuardErasureAgreementSummary{};
+    summary.add(matched_query, .{ .status = z3.Z3_L_FALSE }, false, true);
+    summary.add(missing_query, .{ .status = z3.Z3_L_FALSE }, false, true);
+    summary.add(ambiguous_query, .{ .status = z3.Z3_L_FALSE }, true, true);
+    summary.add(missing_query, .{
+        .status = z3.Z3_L_FALSE,
+        .vacuity_unknown = true,
+        .verified_with_caveats = true,
+    }, false, true);
+    summary.add(missing_query, .{ .status = z3.Z3_L_FALSE }, false, false);
+
+    try testing.expectEqual(@as(u64, 5), summary.rows);
+    try testing.expectEqual(@as(u64, 1), summary.matched);
+    try testing.expectEqual(@as(u64, 3), summary.missing);
+    try testing.expectEqual(@as(u64, 1), summary.ambiguous);
+    try testing.expectEqual(@as(u64, 1), summary.duplicate_guard_id_rows);
+    try testing.expectEqual(@as(u64, 2), summary.clean_unsat_not_authorized);
 }
 
 test "report success is false when encoder degraded" {
@@ -12654,6 +14352,80 @@ test "rendered SMT report omits markdown precision context when there are no pre
     try testing.expect(std.mem.indexOf(u8, markdown, "- Precision context:") == null);
 }
 
+test "rendered SMT report includes resource effect summary and events" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    try pass.report_resource_events.append(.{
+        .kind = .conserved_move,
+        .function_name = "transfer",
+        .domain = "TokenUnit",
+        .file = "/tmp/resource.ora",
+        .line = 12,
+        .column = 9,
+    });
+    try pass.report_resource_events.append(.{
+        .kind = .explicit_create,
+        .function_name = "issue",
+        .domain = "TokenUnit",
+        .file = "/tmp/resource.ora",
+        .line = 18,
+        .column = 9,
+    });
+    try pass.report_resource_events.append(.{
+        .kind = .explicit_destroy,
+        .function_name = "retire",
+        .domain = "TokenUnit",
+        .file = "/tmp/resource.ora",
+        .line = 24,
+        .column = 9,
+    });
+
+    const summary = ReportSummary{
+        .proven_guards = 2,
+        .violatable_guards = 1,
+    };
+    const kind_counts = ReportKindCounts{};
+
+    const markdown = try pass.renderSmtReportMarkdown(
+        "/tmp/resource.ora",
+        0,
+        &.{},
+        &.{},
+        summary,
+        kind_counts,
+        null,
+    );
+    defer testing.allocator.free(markdown);
+
+    try testing.expect(std.mem.indexOf(u8, markdown, "## Resource Effects") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "- Conserved moves: `1`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "- Explicit creates: `1`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "- Explicit destroys: `1`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "- Runtime guards: `1`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "- Proof-elided guards: `2`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "`conserved move` in `transfer` domain `TokenUnit`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "net domain delta is zero") != null);
+
+    const json = try pass.renderSmtReportJson(
+        "/tmp/resource.ora",
+        0,
+        &.{},
+        &.{},
+        summary,
+        kind_counts,
+        null,
+    );
+    defer testing.allocator.free(json);
+
+    try testing.expect(std.mem.indexOf(u8, json, "\"resource_effect_summary\":{\"conserved_moves\":1,\"explicit_creates\":1,\"explicit_destroys\":1,\"runtime_guards\":1,\"proof_elided_guards\":2}") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"resource_effects\":[") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"kind\":\"conserved_move\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"description\":\"net domain delta is zero\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"function_name\":\"transfer\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"domain\":\"TokenUnit\"") != null);
+}
+
 test "rendered SMT report attributes precision events to matching proof errors" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
@@ -12798,6 +14570,49 @@ test "rendered SMT report json includes query fragment metadata" {
     try testing.expect(std.mem.indexOf(u8, json, "\"query_fragment_counts\":{\"qf_bv\":0,\"qf_bv_array\":0,\"aufbv\":0,\"aufbv_quantifiers\":1") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"fragment\":\"AUFBV+Quantifiers\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"solver_logic\":\"ALL\"") != null);
+}
+
+test "prepared query manifest from report runs includes result metadata" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    var queries = [_]PreparedQuery{.{
+        .kind = .Obligation,
+        .fragment = .aufbv_quantifiers,
+        .solver_logic = .all,
+        .function_name = "f",
+        .obligation_kind = .Ensures,
+        .file = "/tmp/test.ora",
+        .line = 12,
+        .column = 3,
+        .constraint_count = 7,
+        .smtlib_hash = 99,
+        .annotation_pure = true,
+        .references_loop_post_state = true,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "f [ensures]"),
+    }};
+    defer queries[0].deinit(testing.allocator);
+
+    const runs = [_]ReportQueryRun{.{
+        .status = z3.Z3_L_FALSE,
+        .vacuous = true,
+        .vacuity_unknown = true,
+        .verified_with_caveats = true,
+    }};
+
+    var manifest = try pass.preparedQueryManifestFromQueries(queries[0..], runs[0..]);
+    defer manifest.deinit();
+
+    try testing.expectEqual(@as(usize, 1), manifest.rows.len);
+    try testing.expectEqual(QueryResultStatus.unsat, manifest.rows[0].result_status.?);
+    try testing.expect(manifest.rows[0].vacuous);
+    try testing.expect(manifest.rows[0].vacuity_unknown);
+    try testing.expect(manifest.rows[0].verified_with_caveats);
+    try testing.expect(manifest.rows[0].references_loop_post_state);
+    try testing.expectEqual(@as(u32, 7), manifest.rows[0].constraint_count);
+    try testing.expectEqual(@as(u64, 99), manifest.rows[0].smtlib_hash);
+    try testing.expect(manifest.rows[0].annotation_pure);
 }
 
 test "rendered SMT report json includes vacuous explain tags" {
@@ -13257,10 +15072,10 @@ test "explain mode reports contradictory requires as vacuous" {
     try testing.expectEqual(errors.VerificationErrorType.PreconditionViolation, verification_result.errors.items[0].error_type);
     try testing.expectEqual(@as(usize, 0), verification_result.proven_guard_positions.items.len);
 
-    const artifacts = try pass.buildSmtReport(module, "/tmp/vacuous_requires_test.ora", &verification_result);
-    defer testing.allocator.free(artifacts.markdown);
-    defer testing.allocator.free(artifacts.json);
+    var artifacts = try pass.buildSmtReport(module, "/tmp/vacuous_requires_test.ora", &verification_result);
+    defer artifacts.deinit(testing.allocator);
 
+    try testing.expect(artifacts.blocksTrustedArtifacts());
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"vacuous\":true") != null);
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"vacuity_unknown\":false") != null);
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"kind\":\"requires\"") != null);
@@ -13286,10 +15101,10 @@ test "runVerificationPass explain mode remains on canonical prepared-query path"
     try testing.expect(!verification_result.success);
     try testing.expectEqual(errors.VerificationErrorType.PreconditionViolation, verification_result.errors.items[0].error_type);
 
-    const artifacts = try pass.buildSmtReport(module, "/tmp/vacuous_requires_test.ora", &verification_result);
-    defer testing.allocator.free(artifacts.markdown);
-    defer testing.allocator.free(artifacts.json);
+    var artifacts = try pass.buildSmtReport(module, "/tmp/vacuous_requires_test.ora", &verification_result);
+    defer artifacts.deinit(testing.allocator);
 
+    try testing.expect(artifacts.blocksTrustedArtifacts());
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"vacuous\":true") != null);
     try testing.expect(std.mem.indexOf(u8, artifacts.json, "\"explain_core\":\"requires requires\"") != null);
 }

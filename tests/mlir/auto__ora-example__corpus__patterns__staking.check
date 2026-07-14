@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/patterns/staking.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @init
+// CHECK-LABEL: func.func @calculateReward
+// CHECK-LABEL: func.func @stake
+// CHECK-LABEL: func.func @unstake
+// CHECK-LABEL: func.func @claimRewards
+// CHECK-LABEL: func.func @getStake
+// CHECK-LABEL: func.func @getPendingReward
+// CHECK-LABEL: func.func @getTotalStaked

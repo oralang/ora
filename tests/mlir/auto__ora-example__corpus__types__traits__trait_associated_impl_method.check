@@ -1,0 +1,6 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/traits/trait_associated_impl_method.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @PriceDefaults
+// CHECK-LABEL: func.func @default_base
+// CHECK-LABEL: func.func @TraitAssociatedImplMethod

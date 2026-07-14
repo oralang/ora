@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/control-flow/while/while_break.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @test_break_on_condition
+// CHECK-LABEL: func.func @test_break_infinite
+// CHECK-LABEL: func.func @test_break_then_compute
+// CHECK-LABEL: func.func @test_break_inner_only
+// CHECK-LABEL: func.func @test_break_preserves_state

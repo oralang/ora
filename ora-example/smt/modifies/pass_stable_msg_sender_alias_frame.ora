@@ -1,0 +1,19 @@
+contract V {
+    storage var balances: map<address, u256>;
+
+    pub fn set_with_let(value: u256)
+        modifies balances[std.msg.sender()]
+        ensures balances[std.msg.sender()] == value
+    {
+        let sender: address = std.msg.sender();
+        balances[sender] = value;
+    }
+
+    pub fn set_with_const(value: u256)
+        modifies balances[std.msg.sender()]
+        ensures balances[std.msg.sender()] == value
+    {
+        const sender: address = std.msg.sender();
+        balances[sender] = value;
+    }
+}

@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/comptime/abi_encode_static.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @scalar_tuple_len
+// CHECK-LABEL: func.func @scalar_tuple_byte_sum
+// CHECK-LABEL: func.func @signed_negative_first_byte
+// CHECK-LABEL: func.func @static_struct_len
+// CHECK-LABEL: func.func @enum_value_last_byte
+// CHECK-LABEL: func.func @bitfield_value_last_byte
+// CHECK-LABEL: func.func @empty_tuple_len

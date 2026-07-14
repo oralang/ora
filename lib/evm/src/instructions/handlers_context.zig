@@ -1,6 +1,6 @@
 /// Execution context opcode handlers for the EVM
 const std = @import("std");
-const primitives = @import("voltaire");
+const primitives = @import("../primitives.zig");
 const GasConstants = primitives.GasConstants;
 const Address = primitives.Address;
 
@@ -206,7 +206,7 @@ pub fn Handlers(FrameType: type) type {
             try frame.consumeGas(access_cost);
 
             // Get the code from the external address
-            const code = if (evm.host) |h| h.getCode(ext_addr) else evm.code.get(ext_addr) orelse &[_]u8{};
+            const code = if (evm.host) |h| h.getCode(ext_addr) else if (evm.code.get(ext_addr)) |code| code else &.{};
             try frame.pushStack(code.len);
             frame.pc += 1;
         }
@@ -252,7 +252,7 @@ pub fn Handlers(FrameType: type) type {
             if (aligned > frame.memory_size) frame.memory_size = aligned;
 
             // Get the code from the external address
-            const code = if (evm.host) |h| h.getCode(ext_addr) else evm.code.get(ext_addr) orelse &[_]u8{};
+            const code = if (evm.host) |h| h.getCode(ext_addr) else if (evm.code.get(ext_addr)) |code| code else &.{};
 
             // Copy code to memory
             var i: u32 = 0;
@@ -344,7 +344,7 @@ pub fn Handlers(FrameType: type) type {
             try frame.consumeGas(access_cost);
 
             // Get the code from the external address
-            const code = if (evm.host) |h| h.getCode(ext_addr) else evm.code.get(ext_addr) orelse &[_]u8{};
+            const code = if (evm.host) |h| h.getCode(ext_addr) else if (evm.code.get(ext_addr)) |code| code else &.{};
 
             if (code.len == 0) {
                 // Return 0 for empty accounts (no code)

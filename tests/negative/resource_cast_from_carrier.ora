@@ -1,0 +1,7 @@
+resource TokenUnit = u256;
+
+contract CastFromCarrier {
+    pub fn bad(amount: TokenUnit) {
+        @cast(Resource<TokenUnit>, amount);
+    }
+}

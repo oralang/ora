@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/compound/struct_basic.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @create
+// CHECK-LABEL: func.func @field_access
+// CHECK-LABEL: func.func @storage_write
+// CHECK-LABEL: func.func @storage_read
+// CHECK-LABEL: func.func @storage_field_write
+// CHECK-LABEL: func.func @pass_struct
+// CHECK-LABEL: func.func @return_struct
+// CHECK-LABEL: func.func @multi_field_types

@@ -2,22 +2,22 @@
 // INPUT: ora-example/type-system/fundamentals/primitive_types.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @testU256() attributes {ora.selector = "0xaf932d84", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testU256() attributes {ora.dispatch_class = "readonly", ora.selector = "0xaf932d84", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/fundamentals/primitive_types.ora":10:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/fundamentals/primitive_types.ora":10:5)
-// CHECK-NEXT:   func.func @testBool() attributes {ora.selector = "0x36aacafa", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testBool() attributes {ora.dispatch_class = "readonly", ora.selector = "0x36aacafa", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/fundamentals/primitive_types.ora":17:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/fundamentals/primitive_types.ora":17:5)
-// CHECK-NEXT:   func.func @testAddress() attributes {ora.selector = "0x262330b4", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testAddress() attributes {ora.dispatch_class = "readonly", ora.selector = "0x262330b4", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/fundamentals/primitive_types.ora":24:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/fundamentals/primitive_types.ora":24:5)
-// CHECK-NEXT:   func.func @testString() attributes {ora.selector = "0xfb8f0f59", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testString() attributes {ora.dispatch_class = "readonly", ora.selector = "0xfb8f0f59", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/fundamentals/primitive_types.ora":31:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/fundamentals/primitive_types.ora":31:5)
-// CHECK-NEXT:   func.func @testHexValues() attributes {ora.selector = "0x183b4afc", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testHexValues() attributes {ora.dispatch_class = "readonly", ora.selector = "0x183b4afc", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/fundamentals/primitive_types.ora":37:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/fundamentals/primitive_types.ora":37:5)
-// CHECK-NEXT:   func.func @testTypeAnnotations() attributes {ora.selector = "0x843409e1", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testTypeAnnotations() attributes {ora.dispatch_class = "readonly", ora.selector = "0x843409e1", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/fundamentals/primitive_types.ora":43:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/fundamentals/primitive_types.ora":43:5)
 // CHECK-NEXT: } loc("{{.*}}/ora-example/type-system/fundamentals/primitive_types.ora":8:1)

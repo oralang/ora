@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/refinement/max_value_u256.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @setCap
+// CHECK-LABEL: func.func @getCap
+// CHECK-LABEL: func.func @addWithCap
+// CHECK-LABEL: func.func @compare
+// CHECK-LABEL: func.func @isUnderCap
+// CHECK-LABEL: func.func @getCurrent

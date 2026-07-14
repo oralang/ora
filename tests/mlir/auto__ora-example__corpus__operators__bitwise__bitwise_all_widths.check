@@ -1,0 +1,21 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/operators/bitwise/bitwise_all_widths.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @and_u8
+// CHECK-LABEL: func.func @or_u8
+// CHECK-LABEL: func.func @xor_u8
+// CHECK-LABEL: func.func @and_u16
+// CHECK-LABEL: func.func @or_u16
+// CHECK-LABEL: func.func @xor_u16
+// CHECK-LABEL: func.func @and_u32
+// CHECK-LABEL: func.func @or_u32
+// CHECK-LABEL: func.func @xor_u32
+// CHECK-LABEL: func.func @and_u64
+// CHECK-LABEL: func.func @or_u64
+// CHECK-LABEL: func.func @xor_u64
+// CHECK-LABEL: func.func @and_u128
+// CHECK-LABEL: func.func @or_u128
+// CHECK-LABEL: func.func @xor_u128
+// CHECK-LABEL: func.func @and_u256
+// CHECK-LABEL: func.func @or_u256
+// CHECK-LABEL: func.func @xor_u256

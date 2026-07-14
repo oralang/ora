@@ -1,0 +1,4 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/resources/resource_lock_external_call.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @issue_then_call

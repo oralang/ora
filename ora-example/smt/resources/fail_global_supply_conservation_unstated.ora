@@ -1,0 +1,15 @@
+resource TokenUnit = u256;
+comptime const std = @import("std");
+
+contract ResourceSmtFailGlobalSupplyConservationUnstated {
+    storage var balance: Resource<TokenUnit>;
+    storage var total_supply: TokenUnit;
+
+    pub fn issue(amount: TokenUnit)
+        modifies balance
+        requires @amount(balance) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        ensures @amount(balance) == total_supply
+    {
+        @create(balance, amount);
+    }
+}

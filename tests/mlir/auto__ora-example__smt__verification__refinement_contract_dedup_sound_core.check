@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/verification/refinement_contract_dedup_sound_core.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @identityU256
+// CHECK-LABEL: func.func @plusOne
+// CHECK-LABEL: func.func @requiresCovered
+// CHECK-LABEL: func.func @requiresUncovered
+// CHECK-LABEL: func.func @requiresCallNotDedup
+// CHECK-LABEL: func.func @ensuresIdentitySelfCall
+// CHECK-LABEL: func.func @ensuresOtherCallNotDedup

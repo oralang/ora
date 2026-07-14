@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/operators/bitwise/signed_bitwise.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @and_i256
+// CHECK-LABEL: func.func @or_i256
+// CHECK-LABEL: func.func @xor_i256
+// CHECK-LABEL: func.func @shl_i256
+// CHECK-LABEL: func.func @shr_i256

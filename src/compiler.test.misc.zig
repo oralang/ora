@@ -333,7 +333,7 @@ test "compiler package loader bridges import graph into source modules" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "dep.ora",
         .data =
         \\pub fn helper() -> u256 {
@@ -341,7 +341,7 @@ test "compiler package loader bridges import graph into source modules" {
         \\}
         ,
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\comptime const dep = @import("./dep.ora");
@@ -385,7 +385,9 @@ test "compiler source loader injects embedded std modules" {
     defer compilation.deinit();
 
     const package = compilation.db.sources.package(compilation.package_id);
-    try testing.expectEqual(@as(usize, 6), package.modules.items.len);
+    // root + transitive closure of "std": std, constants, bytes, result,
+    // interfaces, erc, erc20, erc165, erc721, erc1155, erc2612.
+    try testing.expectEqual(@as(usize, 12), package.modules.items.len);
 
     const graph = try compilation.db.moduleGraph(compilation.package_id);
     const root_summary = for (graph.modules) |summary| {
@@ -581,7 +583,7 @@ test "compiler preserves typed local names in assignments" {
         \\    storage balances: map<address, u256>;
         \\
         \\    pub fn deposit(amount: u256) {
-        \\        const sender: address = std.msg.sender;
+        \\        const sender: address = std.msg.sender();
         \\        balances[sender] = amount;
         \\    }
         \\}
@@ -969,7 +971,7 @@ test "compiler resolves std environment intrinsics before HIR lowering" {
         \\
         \\    pub fn capture() -> u256 {
         \\        owner = std.msg.sender();
-        \\        let sender: address = std.msg.sender;
+        \\        let sender: address = std.msg.sender();
         \\        let origin: address = std.tx.origin();
         \\        let coinbase: address = std.block.coinbase;
         \\        let value: u256 = std.msg.value();
@@ -986,6 +988,28 @@ test "compiler resolves std environment intrinsics before HIR lowering" {
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     try testing.expectEqual(@as(usize, 0), hir_result.type_fallback_count);
+}
+
+test "compiler rejects field-form sender environment intrinsics" {
+    const source_text =
+        \\contract Env {
+        \\    pub fn capture() {
+        \\        let immediate: address = std.msg.sender;
+        \\        let transaction_sender: address = std.tx.sender();
+        \\        let legacy_sender: address = std.transaction.sender;
+        \\        let origin: address = std.tx.origin;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`std.msg.sender` must be called as `std.msg.sender()`"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`std.tx.sender` is not supported; use `std.tx.origin()`"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`std.transaction.sender` is not supported; use `std.msg.sender()`"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`std.tx.origin` must be called as `std.tx.origin()`"));
 }
 
 test "compiler resolves for-range integer bounds before HIR lowering" {
@@ -2959,7 +2983,7 @@ test "compilePackageWithOptions records frontend metrics by phase" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\contract MetricsSmoke {
@@ -3028,6 +3052,82 @@ test "compilePackageWithOptions records frontend metrics by phase" {
     }
     try testing.expect(total_alloc_calls > 0);
     try testing.expect(total_bytes_allocated > 0);
+}
+
+test "compilePackageWithOptions exposes central artifact emission decision" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "ok.ora",
+        .data =
+        \\contract OkArtifact {
+        \\    pub fn get() -> u256 {
+        \\        return 1;
+        \\    }
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "bad.ora",
+        .data =
+        \\error Failure;
+        \\
+        \\contract BadArtifact {
+        \\    pub fn run() -> u256 {
+        \\        var values: [Result<string, Failure>; 1] = [Err(Failure())];
+        \\        values[0] = Ok("abc");
+        \\        return 7;
+        \\    }
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "malformed.ora",
+        .data =
+        \\resource TokenUnit =;
+        \\
+        \\contract MissingCarrier {}
+        ,
+    });
+
+    const ok_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/ok.ora", .{tmp.sub_path});
+    defer testing.allocator.free(ok_path);
+    var ok_compilation = try compiler.compilePackage(testing.allocator, ok_path);
+    defer ok_compilation.deinit();
+    const ok_decision = try ok_compilation.artifactEmissionDecision();
+    switch (ok_decision) {
+        .allowed => {},
+        .blocked => return error.TestUnexpectedResult,
+    }
+
+    const bad_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/bad.ora", .{tmp.sub_path});
+    defer testing.allocator.free(bad_path);
+    var bad_compilation = try compiler.compilePackage(testing.allocator, bad_path);
+    defer bad_compilation.deinit();
+    try testing.expect(!bad_compilation.isArtifactEmittable());
+    const bad_decision = try bad_compilation.artifactEmissionDecision();
+    switch (bad_decision) {
+        .allowed => return error.TestUnexpectedResult,
+        .blocked => |reason| switch (reason) {
+            .package_diagnostics => {},
+            else => return error.TestUnexpectedResult,
+        },
+    }
+
+    const malformed_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/malformed.ora", .{tmp.sub_path});
+    defer testing.allocator.free(malformed_path);
+    var malformed_compilation = try compiler.compilePackage(testing.allocator, malformed_path);
+    defer malformed_compilation.deinit();
+    try testing.expect(!malformed_compilation.isArtifactEmittable());
+    const malformed_decision = try malformed_compilation.artifactEmissionDecision();
+    switch (malformed_decision) {
+        .allowed => return error.TestUnexpectedResult,
+        .blocked => |reason| switch (reason) {
+            .package_diagnostics => {},
+            else => return error.TestUnexpectedResult,
+        },
+    }
 }
 
 test "SMT degradation probes fail closed in sequential and parallel verification" {

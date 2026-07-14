@@ -58,7 +58,7 @@ pub fn lower(allocator: std.mem.Allocator, tree: *const syntax.SyntaxTree) !Lowe
 }
 
 pub fn debugDump(allocator: std.mem.Allocator, file: *const AstFile) ![]u8 {
-    var buffer: std.ArrayList(u8) = .{};
+    var buffer: std.ArrayList(u8) = .empty;
     defer buffer.deinit(allocator);
 
     const writer = buffer.writer(allocator);
@@ -183,6 +183,9 @@ const Validator = struct {
                 _ = try self.expectType(type_alias.target_type, item_range, "type alias references invalid target type id");
                 try self.validateParameters(type_alias.template_parameters, "type alias parameter");
             },
+            .Resource => |resource| {
+                _ = try self.expectType(resource.carrier_type, item_range, "resource references invalid carrier type id");
+            },
             .LogDecl => |log_decl| {
                 try self.validateLogFields(log_decl.fields);
                 for (log_decl.metadata) |metadata_id| {
@@ -270,6 +273,7 @@ const Validator = struct {
                 for (log_stmt.args) |expr_id| _ = try self.expectExpr(expr_id, stmt_range, "log statement references invalid argument expression id");
             },
             .Lock => |lock_stmt| _ = try self.expectExpr(lock_stmt.path, stmt_range, "lock statement references invalid path expression id"),
+            .CallHint => {},
             .Unlock => |unlock_stmt| _ = try self.expectExpr(unlock_stmt.path, stmt_range, "unlock statement references invalid path expression id"),
             .Assert => |assert_stmt| _ = try self.expectExpr(assert_stmt.condition, stmt_range, "assert statement references invalid condition expression id"),
             .Assume => |assume_stmt| _ = try self.expectExpr(assume_stmt.condition, stmt_range, "assume statement references invalid condition expression id"),
@@ -645,6 +649,7 @@ fn itemName(item: Item) ?[]const u8 {
         .Struct => |struct_item| struct_item.name,
         .Bitfield => |bitfield| bitfield.name,
         .Enum => |enum_item| enum_item.name,
+        .Resource => |resource| resource.name,
         .TypeAlias => |type_alias| type_alias.name,
         .LogDecl => |log_decl| log_decl.name,
         .ErrorDecl => |error_decl| error_decl.name,

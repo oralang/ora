@@ -1,0 +1,17 @@
+resource TokenUnit = u256;
+comptime const std = @import("std");
+
+contract ResourceSmtMoveWithSufficientBalance {
+    storage var balances: map<address, Resource<TokenUnit>>;
+
+    pub fn transfer(from: address, to: address, amount: TokenUnit)
+        modifies balances[from], balances[to]
+        requires from != to
+        requires @amount(balances[from]) >= amount
+        requires @amount(balances[to]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        ensures @amount(balances[from]) == old(@amount(balances[from])) - amount
+        ensures @amount(balances[to]) == old(@amount(balances[to])) + amount
+    {
+        @move(balances[from], balances[to], amount);
+    }
+}

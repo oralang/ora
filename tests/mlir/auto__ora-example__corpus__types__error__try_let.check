@@ -1,0 +1,6 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/error/try_let.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @validate
+// CHECK-LABEL: func.func @process
+// CHECK-LABEL: func.func @process_twice

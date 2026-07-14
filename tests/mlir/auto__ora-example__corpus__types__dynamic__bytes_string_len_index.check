@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/dynamic/bytes_string_len_index.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @firstByte
+// CHECK-LABEL: func.func @firstChar
+// CHECK-LABEL: func.func @byteLen
+// CHECK-LABEL: func.func @stringLen

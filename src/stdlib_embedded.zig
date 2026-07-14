@@ -1,9 +1,43 @@
 const std = @import("std");
 
+pub const EmbeddedImport = struct {
+    alias: []const u8,
+    specifier: []const u8,
+};
+
 pub const EmbeddedModule = struct {
     logical_path: []const u8,
     resolved_path: []const u8,
     source: []const u8,
+    imports: []const EmbeddedImport = &.{},
+};
+
+const std_imports = [_]EmbeddedImport{
+    .{ .alias = "constants", .specifier = "std/constants" },
+    .{ .alias = "bytes", .specifier = "std/bytes" },
+    .{ .alias = "result", .specifier = "std/result" },
+    .{ .alias = "interfaces", .specifier = "std/interfaces" },
+    .{ .alias = "erc", .specifier = "std/erc" },
+};
+
+const erc_imports = [_]EmbeddedImport{
+    .{ .alias = "erc20", .specifier = "std/erc/erc20" },
+    .{ .alias = "erc165", .specifier = "std/erc/erc165" },
+    .{ .alias = "erc721", .specifier = "std/erc/erc721" },
+    .{ .alias = "erc1155", .specifier = "std/erc/erc1155" },
+    .{ .alias = "erc2612", .specifier = "std/erc/erc2612" },
+};
+
+const erc_interfaces_imports = [_]EmbeddedImport{
+    .{ .alias = "interfaces", .specifier = "std/interfaces" },
+};
+
+const bytes_imports = [_]EmbeddedImport{
+    .{ .alias = "constants", .specifier = "std/constants" },
+};
+
+const storage_imports = [_]EmbeddedImport{
+    .{ .alias = "words", .specifier = "std/storage/words" },
 };
 
 // Embedded Ora stdlib modules compiled into the compiler binary.
@@ -12,11 +46,13 @@ const modules = [_]EmbeddedModule{
         .logical_path = "std",
         .resolved_path = "embedded://std/std.ora",
         .source = @embedFile("std/std.ora"),
+        .imports = &std_imports,
     },
     .{
         .logical_path = "std/bytes",
         .resolved_path = "embedded://std/bytes.ora",
         .source = @embedFile("std/bytes.ora"),
+        .imports = &bytes_imports,
     },
     .{
         .logical_path = "std/constants",
@@ -29,9 +65,59 @@ const modules = [_]EmbeddedModule{
         .source = @embedFile("std/result.ora"),
     },
     .{
+        .logical_path = "std/storage",
+        .resolved_path = "embedded://std/storage.ora",
+        .source = @embedFile("std/storage.ora"),
+        .imports = &storage_imports,
+    },
+    .{
+        .logical_path = "std/storage/words",
+        .resolved_path = "embedded://std/storage/words.ora",
+        .source = @embedFile("std/storage/words.ora"),
+    },
+    .{
+        .logical_path = "std/storage/fixed_size_data",
+        .resolved_path = "embedded://std/storage/fixed_size_data.ora",
+        .source = @embedFile("std/storage/fixed_size_data.ora"),
+    },
+    .{
         .logical_path = "std/interfaces",
         .resolved_path = "embedded://std/interfaces.ora",
         .source = @embedFile("std/interfaces.ora"),
+    },
+    .{
+        .logical_path = "std/erc",
+        .resolved_path = "embedded://std/erc.ora",
+        .source = @embedFile("std/erc.ora"),
+        .imports = &erc_imports,
+    },
+    .{
+        .logical_path = "std/erc/erc20",
+        .resolved_path = "embedded://std/erc/erc20.ora",
+        .source = @embedFile("std/erc/erc20.ora"),
+    },
+    .{
+        .logical_path = "std/erc/erc165",
+        .resolved_path = "embedded://std/erc/erc165.ora",
+        .source = @embedFile("std/erc/erc165.ora"),
+        .imports = &erc_interfaces_imports,
+    },
+    .{
+        .logical_path = "std/erc/erc721",
+        .resolved_path = "embedded://std/erc/erc721.ora",
+        .source = @embedFile("std/erc/erc721.ora"),
+        .imports = &erc_interfaces_imports,
+    },
+    .{
+        .logical_path = "std/erc/erc1155",
+        .resolved_path = "embedded://std/erc/erc1155.ora",
+        .source = @embedFile("std/erc/erc1155.ora"),
+        .imports = &erc_interfaces_imports,
+    },
+    .{
+        .logical_path = "std/erc/erc2612",
+        .resolved_path = "embedded://std/erc/erc2612.ora",
+        .source = @embedFile("std/erc/erc2612.ora"),
     },
 };
 

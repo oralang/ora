@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin_docs = @import("builtin_docs.zig");
 const frontend = @import("frontend.zig");
 const keyword_docs = @import("keyword_docs.zig");
 const refinement_docs = @import("refinement_docs.zig");
@@ -31,7 +32,10 @@ pub fn hoverAtIndex(
         }
     }
 
+    if (try builtinHoverAt(allocator, source, position)) |hover| return hover;
+    if (try directiveArgHoverAt(allocator, source, position)) |hover| return hover;
     if (try keywordHoverAt(allocator, source, position)) |hover| return hover;
+    if (try resourceTypeHoverAt(allocator, source, position)) |hover| return hover;
     return refinementHoverAt(allocator, source, position);
 }
 
@@ -57,10 +61,13 @@ fn appendSignature(buffer: []u8, cursor: *usize, symbol: semantic_index.Symbol) 
             appendBytes(buffer, cursor, "contract ");
             appendBytes(buffer, cursor, symbol.name);
         },
-        .function, .method => if (symbol.detail) |detail|
-            appendNameDetail(buffer, cursor, "fn ", symbol.name, detail, "")
-        else
-            appendNameDetail(buffer, cursor, "fn ", symbol.name, "", "()"),
+        .function, .method => {
+            const prefix = functionPrefix(symbol);
+            if (symbol.detail) |detail|
+                appendNameDetail(buffer, cursor, prefix, symbol.name, detail, "")
+            else
+                appendNameDetail(buffer, cursor, prefix, symbol.name, "", "()");
+        },
         .variable => if (symbol.detail) |detail|
             appendNameDetail(buffer, cursor, "var ", symbol.name, detail, ": ")
         else
@@ -128,6 +135,10 @@ fn appendBytes(buffer: []u8, cursor: *usize, value: []const u8) void {
     cursor.* += value.len;
 }
 
+fn functionPrefix(symbol: semantic_index.Symbol) []const u8 {
+    return if (symbol.is_inline) "inline fn " else "fn ";
+}
+
 fn hoverValueCapacity(symbol: semantic_index.Symbol) usize {
     var total: usize = "```ora\n".len + "\n```".len + signatureCapacity(symbol);
     if (symbol.doc_comment) |doc| total += "\n---\n".len + doc.len;
@@ -138,7 +149,7 @@ fn signatureCapacity(symbol: semantic_index.Symbol) usize {
     const detail_len = if (symbol.detail) |detail| detail.len else 0;
     return symbol.name.len + detail_len + switch (symbol.kind) {
         .contract => "contract ".len,
-        .function, .method => "fn ".len + if (symbol.detail == null) "()".len else 0,
+        .function, .method => functionPrefix(symbol).len + if (symbol.detail == null) "()".len else 0,
         .variable => "var ".len + if (symbol.detail != null) ": ".len else 0,
         .field => "field ".len + if (symbol.detail != null) ": ".len else 0,
         .constant => "const ".len + if (symbol.detail != null) ": ".len else 0,
@@ -163,6 +174,53 @@ fn keywordHoverAt(allocator: Allocator, source: []const u8, position: frontend.P
     return .{ .contents = value, .range = word.range };
 }
 
+fn builtinHoverAt(allocator: Allocator, source: []const u8, position: frontend.Position) !?Hover {
+    const word = builtinWordAtPosition(source, position) orelse return null;
+    const entry = builtin_docs.entryForName(word.text) orelse return null;
+    const markdown = try builtin_docs.markdownAlloc(allocator, entry);
+    errdefer allocator.free(markdown);
+    const value = try std.fmt.allocPrint(allocator, "```ora\n{s}\n```\n---\n{s}", .{ entry.signature, markdown });
+    allocator.free(markdown);
+    return .{ .contents = value, .range = word.range };
+}
+
+/// Hover on a keyword-like state inside a directive builtin's parens,
+/// e.g. `cold` in `@callHint(cold)`. The value set and docs come from the
+/// builtin registry, so this stays in lockstep with the language enum.
+fn directiveArgHoverAt(allocator: Allocator, source: []const u8, position: frontend.Position) !?Hover {
+    const word = wordAtPosition(source, position) orelse return null;
+    const line_start = lineStartOffset(source, position.line) orelse return null;
+    var i = line_start + @as(usize, @intCast(word.range.start.character));
+    while (i > line_start and (source[i - 1] == ' ' or source[i - 1] == '\t')) i -= 1;
+    if (i == line_start or source[i - 1] != '(') return null;
+    i -= 1;
+    while (i > line_start and (source[i - 1] == ' ' or source[i - 1] == '\t')) i -= 1;
+    const name_end = i;
+    while (i > line_start and isIdentChar(source[i - 1])) i -= 1;
+    if (i == name_end or i == line_start or source[i - 1] != '@') return null;
+    const entry = builtin_docs.entryForName(source[i..name_end]) orelse return null;
+    for (entry.arg_values) |value| {
+        if (!std.mem.eql(u8, value.name, word.text)) continue;
+        const contents = try std.fmt.allocPrint(
+            allocator,
+            "```ora\n@{s}({s})\n```\n---\n{s}",
+            .{ entry.name, value.name, value.documentation },
+        );
+        return .{ .contents = contents, .range = word.range };
+    }
+    return null;
+}
+
+fn resourceTypeHoverAt(allocator: Allocator, source: []const u8, position: frontend.Position) !?Hover {
+    const word = wordAtPosition(source, position) orelse return null;
+    if (!std.mem.eql(u8, word.text, "Resource")) return null;
+    const value = try allocator.dupe(
+        u8,
+        "```ora\nResource<T>\n```\n---\nOpaque storage or transient resource place for a declared `resource` domain. `Resource<T>` values are capabilities: they are stored in contract state, observed through `@amount`, and mutated through `@create`, `@destroy`, and `@move`; they cannot be exposed through ABI parameters, returns, or logs.",
+    );
+    return .{ .contents = value, .range = word.range };
+}
+
 fn refinementHoverAt(allocator: Allocator, source: []const u8, position: frontend.Position) !?Hover {
     const word = wordAtPosition(source, position) orelse return null;
     const entry = refinement_docs.entryForName(word.text) orelse return null;
@@ -172,15 +230,39 @@ fn refinementHoverAt(allocator: Allocator, source: []const u8, position: fronten
 
 const WordAtPosition = struct { text: []const u8, range: frontend.Range };
 
-fn wordAtPosition(source: []const u8, position: frontend.Position) ?WordAtPosition {
-    var cursor: usize = 0;
-    var line: u32 = 0;
-    while (cursor < source.len and line < position.line) : (cursor += 1) {
-        if (source[cursor] == '\n') line += 1;
-    }
-    if (line != position.line) return null;
+fn builtinWordAtPosition(source: []const u8, position: frontend.Position) ?WordAtPosition {
+    const word = wordAtPosition(source, position) orelse return wordAfterAtAtPosition(source, position);
+    if (word.range.start.character == 0) return null;
+    const line_start = lineStartOffset(source, position.line) orelse return null;
+    const at_offset = line_start + @as(usize, @intCast(word.range.start.character)) - 1;
+    if (at_offset >= source.len or source[at_offset] != '@') return null;
+    return .{
+        .text = word.text,
+        .range = .{
+            .start = .{ .line = word.range.start.line, .character = word.range.start.character - 1 },
+            .end = word.range.end,
+        },
+    };
+}
 
-    const line_start = cursor;
+fn wordAfterAtAtPosition(source: []const u8, position: frontend.Position) ?WordAtPosition {
+    const line_start = lineStartOffset(source, position.line) orelse return null;
+    const cursor = @min(line_start + @as(usize, @intCast(position.character)), source.len);
+    if (cursor >= source.len or source[cursor] != '@') return null;
+    var end = cursor + 1;
+    while (end < source.len and source[end] != '\n' and isIdentChar(source[end])) end += 1;
+    if (end == cursor + 1) return null;
+    return .{
+        .text = source[cursor + 1 .. end],
+        .range = .{
+            .start = .{ .line = position.line, .character = @intCast(cursor - line_start) },
+            .end = .{ .line = position.line, .character = @intCast(end - line_start) },
+        },
+    };
+}
+
+fn wordAtPosition(source: []const u8, position: frontend.Position) ?WordAtPosition {
+    const line_start = lineStartOffset(source, position.line) orelse return null;
     const col: usize = @intCast(position.character);
     const pos = @min(line_start + col, source.len);
 
@@ -199,6 +281,16 @@ fn wordAtPosition(source: []const u8, position: frontend.Position) ?WordAtPositi
             .end = .{ .line = position.line, .character = end_char },
         },
     };
+}
+
+fn lineStartOffset(source: []const u8, target_line: u32) ?usize {
+    var cursor: usize = 0;
+    var line: u32 = 0;
+    while (cursor < source.len and line < target_line) : (cursor += 1) {
+        if (source[cursor] == '\n') line += 1;
+    }
+    if (line != target_line) return null;
+    return cursor;
 }
 
 fn isIdentChar(ch: u8) bool {

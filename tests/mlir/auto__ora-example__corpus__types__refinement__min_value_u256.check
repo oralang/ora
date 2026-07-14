@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/refinement/min_value_u256.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @setThreshold
+// CHECK-LABEL: func.func @getThreshold
+// CHECK-LABEL: func.func @addToCounter
+// CHECK-LABEL: func.func @subtractFromCounter
+// CHECK-LABEL: func.func @multiply
+// CHECK-LABEL: func.func @compare
+// CHECK-LABEL: func.func @aboveThreshold

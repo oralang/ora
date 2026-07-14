@@ -56,7 +56,7 @@ contract ERC20Token {
         burn_rate_bps: BasisPoints<u256>,
         minimum_transfer: MinValue<u256, 1>
     )
-        requires(std.transaction.sender != std.constants.ZERO_ADDRESS)
+        requires(std.msg.sender() != std.constants.ZERO_ADDRESS)
         requires(initial_supply >= 1)
         requires(token_decimals <= 18)
         requires(fee_rate <= 10000)
@@ -70,7 +70,7 @@ contract ERC20Token {
         // - burn_rate_bps in [0, 10000] (0-100%)
         // - minimum_transfer >= 1 (prevents zero transfers)
         
-        owner = std.transaction.sender; // NonZeroAddress ensures sender != 0
+        owner = std.msg.sender(); // NonZeroAddress ensures sender != 0
         total_supply = initial_supply; // MaxValue ensures <= cap
         decimals = token_decimals;
         transfer_fee_rate = fee_rate;
@@ -88,10 +88,10 @@ contract ERC20Token {
         to: NonZeroAddress,
         amount: MinValue<u256, 1>
     ) -> !u256 | InsufficientBalance | TransferToZeroAddress | AmountBelowMinimum
-        requires(std.transaction.sender != std.constants.ZERO_ADDRESS)
+        requires(std.msg.sender() != std.constants.ZERO_ADDRESS)
         requires(to != std.constants.ZERO_ADDRESS)
         requires(amount >= 1)
-        requires(getBalance(std.transaction.sender) >= calculateTotalRequired(amount))
+        requires(getBalance(std.msg.sender()) >= calculateTotalRequired(amount))
         requires(getBalance(to) <= std.constants.U256_MAX - calculateTotalRequired(amount))
     {
         // Refined types ensure:
@@ -106,7 +106,7 @@ contract ERC20Token {
         }
         
         // Get sender balance
-        const sender_balance = getBalance(std.transaction.sender);
+        const sender_balance = getBalance(std.msg.sender());
         
         // Calculate total required (amount + fees)
         const total_required = calculateTotalRequired(amount);
@@ -127,7 +127,7 @@ contract ERC20Token {
 
         assert(recipient_balance <= std.constants.U256_MAX - total_required, "recipient overflow checked");
 
-        setBalance(std.transaction.sender, sender_balance - total_required);
+        setBalance(std.msg.sender(), sender_balance - total_required);
         setBalance(to, recipient_balance + total_required);
 
         // Return remaining balance
@@ -187,8 +187,8 @@ contract ERC20Token {
         requires(amount >= 1)
     {
         // Only owner can mint
-        if (std.transaction.sender != owner) {
-            return Unauthorized(std.transaction.sender, owner);
+        if (std.msg.sender() != owner) {
+            return Unauthorized(std.msg.sender(), owner);
         }
         
         // Check arithmetic and supply cap before computing new total
@@ -218,7 +218,7 @@ contract ERC20Token {
     pub fn burn(amount: MinValue<u256, 1>) -> !u256 | InsufficientBalance
         requires(amount >= 1)
     {
-        const sender_balance = getBalance(std.transaction.sender);
+        const sender_balance = getBalance(std.msg.sender());
         
         if (sender_balance < amount) {
             const amount_value: u256 = amount;
@@ -240,7 +240,7 @@ contract ERC20Token {
             return InsufficientBalance(total_supply, actual_burn);
         }
         
-        setBalance(std.transaction.sender, sender_balance - actual_burn);
+        setBalance(std.msg.sender(), sender_balance - actual_burn);
         total_supply = total_supply - actual_burn; // Type-safe subtraction
         
         return total_supply;
@@ -290,8 +290,8 @@ contract ERC20Token {
     pub fn setTransferFeeRate(new_rate: BasisPoints<u256>) -> !bool | Unauthorized
         requires(new_rate <= 10000)
     {
-        if (std.transaction.sender != owner) {
-            return Unauthorized(std.transaction.sender, owner);
+        if (std.msg.sender() != owner) {
+            return Unauthorized(std.msg.sender(), owner);
         }
         
         // BasisPoints type ensures new_rate is in [0, 10000]
@@ -303,8 +303,8 @@ contract ERC20Token {
     pub fn setBurnRate(new_rate: BasisPoints<u256>) -> !bool | Unauthorized
         requires(new_rate <= 10000)
     {
-        if (std.transaction.sender != owner) {
-            return Unauthorized(std.transaction.sender, owner);
+        if (std.msg.sender() != owner) {
+            return Unauthorized(std.msg.sender(), owner);
         }
         
         burn_rate = new_rate;
@@ -315,8 +315,8 @@ contract ERC20Token {
     pub fn setMinTransfer(new_min: MinValue<u256, 1>) -> !bool | Unauthorized
         requires(new_min >= 1)
     {
-        if (std.transaction.sender != owner) {
-            return Unauthorized(std.transaction.sender, owner);
+        if (std.msg.sender() != owner) {
+            return Unauthorized(std.msg.sender(), owner);
         }
         
         min_transfer = new_min;

@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/compound/struct_nested.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @create_bounds
+// CHECK-LABEL: func.func @deep_access
+// CHECK-LABEL: func.func @storage_nested_write
+// CHECK-LABEL: func.func @storage_nested_read
+// CHECK-LABEL: func.func @three_deep_write
+// CHECK-LABEL: func.func @three_deep_read

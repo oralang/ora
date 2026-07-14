@@ -1,0 +1,121 @@
+fn init:
+    entry {
+        v0 = runtime_start_offset
+        v1 = runtime_length
+        v2 = malloc v1
+        codecopy v2 v0 v1
+        return v2 v1
+    }
+
+fn make_pair:
+    entry v0 v1 -> v4 v3 {
+        v2 = const 0x20
+        v3 = const 0x40
+        v4 = malloc v3
+        mstore256 v4 v0
+        v5 = add v4 v2
+        mstore256 v5 v1
+        iret
+    }
+
+fn make_pair_u8:
+    entry v0 v1 -> v7 v3 {
+        v2 = const 0x20
+        v3 = const 0x40
+        v4 = const 0xFF
+        v5 = and v1 v4
+        v6 = and v0 v4
+        v7 = malloc v3
+        mstore256 v7 v6
+        v8 = add v7 v2
+        mstore256 v8 v5
+        iret
+    }
+
+fn main:
+    main_entry {
+        zero = const 0x0
+        selector_offset = const 0x4
+        word_size = const 0x20
+        min_cdsize_1arg = const 0x23
+        arg1_offset = const 0x24
+        min_cdsize_2args = const 0x43
+        arg2_offset = const 0x44
+        min_cdsize_3args = const 0x63
+        selector_shift = const 0xE0
+        v0 = codesize
+        v1 = mload256 word_size
+        v2 = lt v1 v0
+        sel_zero = const 0x0
+        sel_mask = sub sel_zero v2
+        sel_t = and sel_mask v0
+        sel_inv = not sel_mask
+        sel_f = and sel_inv v1
+        v3 = or sel_t sel_f
+        mstore256 word_size v3
+        cv = callvalue
+        cv_nonzero = iszero cv
+        => cv_nonzero ? @load_selector : @revert_error
+    }
+    load_selector {
+        zero_0 = const 0x0
+        selector_shift_0 = const 0xE0
+        selector_word = calldataload zero_0
+        selector = shr selector_shift_0 selector_word
+        switch selector {
+        0xEF51FF62 => @make_pair_
+        0x9DA88387 => @make_pair_u8_
+        default => @revert_error
+    }
+    }
+    revert_error {
+        zero_1 = const 0x0
+        revert zero_1 zero_1
+    }
+    make_pair_ {
+        cdsize_make_pair = calldatasize
+        min_cdsize_2args_0 = const 0x43
+        valid_make_pair = lt min_cdsize_2args_0 cdsize_make_pair
+        => valid_make_pair ? @make_pair_exec : @revert_error
+    }
+    make_pair_exec {
+        selector_offset_0 = const 0x4
+        a_make_pair = calldataload selector_offset_0
+        arg1_offset_0 = const 0x24
+        b_make_pair = calldataload arg1_offset_0
+        v4 v5 = icall @make_pair a_make_pair b_make_pair
+        return v4 v5
+    }
+    make_pair_u8_ {
+        cdsize_make_pair_u8 = calldatasize
+        min_cdsize_2args_1 = const 0x43
+        valid_make_pair_u8 = lt min_cdsize_2args_1 cdsize_make_pair_u8
+        => valid_make_pair_u8 ? @bb0 : @revert_error
+    }
+    bb0 {
+        selector_offset_1 = const 0x4
+        a_make_pair_u8 = calldataload selector_offset_1
+        v6 = const 0xFF
+        v7 = and a_make_pair_u8 v6
+        v8 = eq a_make_pair_u8 v7
+        => v8 ? @bb1 : @abi_decode_revert_3
+    }
+    make_pair_u8_exec {
+        v14 v15 = icall @make_pair_u8 v7 v10
+        return v14 v15
+    }
+    bb1 {
+        arg1_offset_1 = const 0x24
+        b_make_pair_u8 = calldataload arg1_offset_1
+        v9 = const 0xFF
+        v10 = and b_make_pair_u8 v9
+        v11 = eq b_make_pair_u8 v10
+        => v11 ? @make_pair_u8_exec : @abi_decode_revert_3
+    }
+    abi_decode_revert_3 {
+        word_size_0 = const 0x20
+        v12 = const 0x3
+        v13 = sallocany 0x20
+        mstore256 v13 v12
+        revert v13 word_size_0
+    }

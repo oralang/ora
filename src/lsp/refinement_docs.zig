@@ -28,7 +28,7 @@ pub const entries = [_]Entry{
     .{
         .name = "NonZeroAddress",
         .signature = "NonZeroAddress",
-        .documentation = "Refines `address` to exclude the zero address. Trusted environment senders such as `std.msg.sender` and `std.transaction.sender` satisfy this refinement.",
+        .documentation = "Refines `address` to exclude the zero address. Trusted caller values such as `std.msg.sender()` satisfy this refinement.",
     },
     .{
         .name = "NonZero",

@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/control-flow/declarations_let.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @test_integer_lets
+// CHECK-LABEL: func.func @test_bool_lets
+// CHECK-LABEL: func.func @test_address_let
+// CHECK-LABEL: func.func @test_string_let
+// CHECK-LABEL: func.func @test_expression_lets
+// CHECK-LABEL: func.func @helper
+// CHECK-LABEL: func.func @test_let_from_call
+// CHECK-LABEL: func.func @test_let_used_in_expression

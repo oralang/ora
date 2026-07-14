@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/error-union/error_union_void.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @init
+// CHECK-LABEL: func.func @pause
+// CHECK-LABEL: func.func @unpause
+// CHECK-LABEL: func.func @set_value
+// CHECK-LABEL: func.func @try_set_value
+// CHECK-LABEL: func.func @get_value
+// CHECK-LABEL: func.func @is_paused

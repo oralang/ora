@@ -8,6 +8,7 @@ const refinements = ora_types.refinement_semantics;
 const type_descriptors = @import("../sema/type_descriptors.zig");
 const abi_layout_context = @import("../abi/layout_context.zig");
 const abi_support = @import("abi.zig");
+const generic_call_args = @import("../generic_call_args.zig");
 const source = @import("../source/mod.zig");
 const support = @import("support.zig");
 
@@ -25,6 +26,7 @@ const descriptorFromPathName = sema.descriptorFromPathName;
 
 const no_public_result_input_error_id: i64 = 0;
 const no_abi_param_enum_count: usize = 0;
+const computed_storage_effect_root = "$computed_storage";
 
 pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSymbolKind: type) type {
     return struct {
@@ -40,6 +42,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     try self.lowerDeclPlaceholder(item_id, .bitfield, bitfield.name, bitfield.range, "ora.bitfield_decl", parent_block);
                 },
                 .Enum => |enum_item| try self.lowerEnumDecl(item_id, enum_item, parent_block),
+                .Resource => {},
                 .Trait => {},
                 .Impl => |impl_item| try @This().lowerImpl(self, impl_item, parent_block),
                 .TypeAlias => {},
@@ -106,9 +109,9 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         pub fn lowerFunction(self: *Lowerer, item_id: ast.ItemId, function: ast.FunctionItem, parent_block: mlir.MlirBlock) anyerror!void {
-            if (function.is_generic or function.is_comptime) return;
+            if (function.is_generic or function.is_comptime or function.is_inline) return;
             const parameters = try self.runtimeFunctionParameters(function);
-            try @This().lowerConcreteFunction(self, item_id, function, function.name, parameters, parent_block, &.{}, null, null);
+            try @This().lowerConcreteFunction(self, item_id, function, function.name, parameters, parent_block, &.{}, &.{}, null, null);
         }
 
         pub fn lowerImpl(self: *Lowerer, impl_item: ast.ImplItem, parent_block: mlir.MlirBlock) anyerror!void {
@@ -122,7 +125,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 if (function.is_generic or function.is_comptime) continue;
                 const symbol_name = try @This().implMethodSymbolName(self, impl_item.trait_name, impl_item.target_name, function.name);
                 if (self.monomorphized_function_names.contains(symbol_name)) continue;
-                try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, function.parameters, impl_parent_block, &.{}, null, null);
+                try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, function.parameters, impl_parent_block, &.{}, &.{}, null, null);
                 try self.monomorphized_function_names.put(symbol_name, {});
             }
         }
@@ -192,7 +195,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         pub fn lowerInstantiatedBitfieldDecl(self: *Lowerer, instantiated: sema.InstantiatedBitfield, parent_block: mlir.MlirBlock) anyerror!void {
             const template_item = self.file.item(instantiated.template_item_id).Bitfield;
-            const op = try self.createNamedPlaceholderOp("ora.bitfield_decl", instantiated.mangled_name, template_item.range, mlir.oraNoneTypeCreate(self.context));
+            const op = try @This().createNamedDeclStubOp(self, "ora.bitfield_decl", instantiated.mangled_name, template_item.range, mlir.oraNoneTypeCreate(self.context));
             if (try self.bitfieldMetadataForType(.{ .bitfield = .{ .name = instantiated.mangled_name } })) |metadata| {
                 mlir.oraOperationSetAttributeByName(op, strRef("ora.bitfield"), mlir.oraStringAttrCreate(self.context, strRef(metadata.name)));
                 if (metadata.layout.len > 0) {
@@ -200,6 +203,84 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 }
             }
             appendOp(parent_block, op);
+        }
+
+        fn inlineKnownArgValueFromExpr(self: *Lowerer, expr_id: ast.ExprId) ?Lowerer.InlineKnownArgValue {
+            return switch (self.file.expression(expr_id).*) {
+                .IntegerLiteral => |literal| .{ .integer = std.mem.trim(u8, literal.text, " \t\n\r") },
+                .BoolLiteral => |literal| .{ .boolean = literal.value },
+                .Group => |group| @This().inlineKnownArgValueFromExpr(self, group.expr),
+                else => blk: {
+                    const expr_type = self.typecheck.expr_types[expr_id.index()];
+                    if (expr_type.kind() == .refinement) break :blk .{ .refinement = expr_type };
+                    break :blk null;
+                },
+            };
+        }
+
+        fn inlineKnownRuntimeArgBindings(
+            self: *Lowerer,
+            function: ast.FunctionItem,
+            runtime_args: []const ast.ExprId,
+            runtime_parameters: []const ast.Parameter,
+        ) anyerror![]const Lowerer.InlineKnownArgBinding {
+            if (!function.is_inline) return &.{};
+
+            var bindings: std.ArrayList(Lowerer.InlineKnownArgBinding) = .empty;
+            for (runtime_parameters, 0..) |parameter, index| {
+                if (index >= runtime_args.len) break;
+                const name = self.patternName(parameter.pattern) orelse continue;
+                const value = @This().inlineKnownArgValueFromExpr(self, runtime_args[index]) orelse continue;
+                try bindings.append(self.allocator, .{ .parameter_name = name, .value = value });
+            }
+            return bindings.toOwnedSlice(self.allocator);
+        }
+
+        fn mangleInlineKnownFunctionName(
+            self: *Lowerer,
+            base_name: []const u8,
+            bindings: []const Lowerer.InlineKnownArgBinding,
+        ) anyerror![]const u8 {
+            if (bindings.len == 0) return base_name;
+
+            var name = std.ArrayList(u8).empty;
+            try name.appendSlice(self.allocator, base_name);
+            try name.appendSlice(self.allocator, "__inline");
+            for (bindings) |binding| {
+                try name.appendSlice(self.allocator, "__");
+                for (binding.parameter_name) |ch| {
+                    try name.append(self.allocator, if (std.ascii.isAlphanumeric(ch)) ch else '_');
+                }
+                try name.append(self.allocator, '_');
+                switch (binding.value) {
+                    .integer => |text| {
+                        for (text) |ch| {
+                            try name.append(self.allocator, if (std.ascii.isAlphanumeric(ch)) ch else '_');
+                        }
+                    },
+                    .boolean => |value| try name.appendSlice(self.allocator, if (value) "true" else "false"),
+                    .refinement => |ty| try @This().appendInlineRefinementMangle(self, &name, ty.refinement),
+                }
+            }
+            return name.toOwnedSlice(self.allocator);
+        }
+
+        fn appendInlineRefinementMangle(self: *Lowerer, name: *std.ArrayList(u8), refinement: sema.RefinementType) !void {
+            try name.appendSlice(self.allocator, "refined_");
+            try @This().appendMangleText(self, name, refinement.name);
+            for (refinement.args) |arg| {
+                try name.append(self.allocator, '_');
+                switch (arg) {
+                    .Type => try name.append(self.allocator, 'T'),
+                    .Integer => |integer| try @This().appendMangleText(self, name, integer.text),
+                }
+            }
+        }
+
+        fn appendMangleText(self: *Lowerer, name: *std.ArrayList(u8), text: []const u8) !void {
+            for (text) |ch| {
+                try name.append(self.allocator, if (std.ascii.isAlphanumeric(ch)) ch else '_');
+            }
         }
 
         pub fn ensureMonomorphizedFunction(
@@ -227,9 +308,19 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 self.module_body;
 
             if (!function.is_generic) {
+                if (function.is_inline) {
+                    const runtime_args = self.stripGenericCallArgs(function, call);
+                    const known_args = try @This().inlineKnownRuntimeArgBindings(self, function, runtime_args, parameters);
+                    const symbol_name = try @This().mangleInlineKnownFunctionName(self, base_symbol_name, known_args);
+                    if (!self.monomorphized_function_names.contains(symbol_name)) {
+                        try @This().lowerConcreteFunction(self, item_id, function, symbol_name, parameters, parent_block, &.{}, known_args, null, null);
+                        try self.monomorphized_function_names.put(symbol_name, {});
+                    }
+                    return symbol_name;
+                }
                 if (scoped_contract_id == null) return function.name;
                 if (!self.monomorphized_function_names.contains(base_symbol_name)) {
-                    try @This().lowerConcreteFunction(self, item_id, function, base_symbol_name, parameters, parent_block, &.{}, null, null);
+                    try @This().lowerConcreteFunction(self, item_id, function, base_symbol_name, parameters, parent_block, &.{}, &.{}, null, null);
                     try self.monomorphized_function_names.put(base_symbol_name, {});
                 }
                 return base_symbol_name;
@@ -237,9 +328,12 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
             var inline_bindings: [Lowerer.inline_generic_binding_capacity]Lowerer.GenericTypeBinding = undefined;
             const bindings = (try self.genericTypeBindingsForCall(function, call, inline_bindings[0..])) orelse return null;
-            const mangled_name = try self.mangleGenericFunctionName(base_symbol_name, bindings);
+            const generic_mangled_name = try self.mangleGenericFunctionName(base_symbol_name, bindings);
+            const runtime_args = self.stripGenericCallArgs(function, call);
+            const known_args = try @This().inlineKnownRuntimeArgBindings(self, function, runtime_args, parameters);
+            const mangled_name = try @This().mangleInlineKnownFunctionName(self, generic_mangled_name, known_args);
             if (!self.monomorphized_function_names.contains(mangled_name)) {
-                try @This().lowerConcreteFunction(self, item_id, function, mangled_name, parameters, parent_block, bindings, null, null);
+                try @This().lowerConcreteFunction(self, item_id, function, mangled_name, parameters, parent_block, bindings, known_args, null, null);
                 try self.monomorphized_function_names.put(mangled_name, {});
             }
             return mangled_name;
@@ -298,6 +392,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 .module_query = self.module_query,
                 .module_body = self.module_body,
                 .items = self.items,
+                .type_fallback_count = self.type_fallback_count,
                 .type_fallbacks = self.type_fallbacks,
                 .placeholder_count = self.placeholder_count,
                 .default_value_count = self.default_value_count,
@@ -321,13 +416,15 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
             if (function.is_generic) {
                 const runtime_parameters = try imported_lowerer.runtimeFunctionParameters(function);
-                const bindings = if (resolved_call) |resolved|
+                const sema_bindings = if (resolved_call) |resolved|
                     try @This().hirBindingsFromSema(self, resolved.generic_bindings)
+                else
+                    &.{};
+                const bindings = if (sema_bindings.len != 0)
+                    sema_bindings
                 else blk: {
-                    var binding_lowerer = imported_lowerer;
-                    binding_lowerer.typecheck = self.typecheck;
                     var inline_bindings: [Lowerer.inline_generic_binding_capacity]Lowerer.GenericTypeBinding = undefined;
-                    break :blk (try binding_lowerer.genericTypeBindingsForCall(function, call, inline_bindings[0..])) orelse return null;
+                    break :blk (try @This().explicitImportedComptimeBindings(self, target_file, function, call, inline_bindings[0..])) orelse return null;
                 };
                 const symbol_name = try imported_lowerer.mangleGenericFunctionName(base_symbol_name, bindings);
                 if (!self.monomorphized_function_names.contains(symbol_name)) {
@@ -339,12 +436,14 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                         runtime_parameters,
                         parent_block,
                         bindings,
+                        &.{},
                         if (resolved_call) |resolved| resolved.runtime_parameter_types else null,
                         if (resolved_call) |resolved| resolved.return_type else null,
                     );
                     try self.monomorphized_function_names.put(symbol_name, {});
                 }
                 self.items = imported_lowerer.items;
+                self.type_fallback_count = imported_lowerer.type_fallback_count;
                 self.type_fallbacks = imported_lowerer.type_fallbacks;
                 self.placeholder_count = imported_lowerer.placeholder_count;
                 self.default_value_count = imported_lowerer.default_value_count;
@@ -352,10 +451,11 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             }
 
             if (!self.monomorphized_function_names.contains(base_symbol_name)) {
-                try @This().lowerConcreteFunction(&imported_lowerer, item_id, function, base_symbol_name, function.parameters, parent_block, &.{}, null, null);
+                try @This().lowerConcreteFunction(&imported_lowerer, item_id, function, base_symbol_name, function.parameters, parent_block, &.{}, &.{}, null, null);
                 try self.monomorphized_function_names.put(base_symbol_name, {});
             }
             self.items = imported_lowerer.items;
+            self.type_fallback_count = imported_lowerer.type_fallback_count;
             self.type_fallbacks = imported_lowerer.type_fallbacks;
             self.placeholder_count = imported_lowerer.placeholder_count;
             self.default_value_count = imported_lowerer.default_value_count;
@@ -367,6 +467,74 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 if (handle.kind == kind and std.mem.eql(u8, handle.symbol_name, symbol_name)) return true;
             }
             return false;
+        }
+
+        fn explicitImportedComptimeBindings(
+            self: *Lowerer,
+            target_file: *const ast.AstFile,
+            function: ast.FunctionItem,
+            call: ast.CallExpr,
+            scratch: []Lowerer.GenericTypeBinding,
+        ) anyerror!?[]const Lowerer.GenericTypeBinding {
+            const comptime_count = generic_call_args.comptimeParameterCount(function);
+            if (comptime_count == 0) return &.{};
+
+            if (call.args.len != generic_call_args.explicitArgumentCount(function, .{})) return null;
+
+            const bindings = if (comptime_count <= scratch.len)
+                scratch[0..comptime_count]
+            else
+                try self.allocator.alloc(Lowerer.GenericTypeBinding, comptime_count);
+            var iter = generic_call_args.iterator(function, call, .{});
+            while ((iter.next() catch return null)) |entry| {
+                const index = entry.comptime_index orelse continue;
+                if (index >= bindings.len) return null;
+                const name = @This().patternNameInFile(target_file, entry.parameter.pattern) orelse return null;
+                bindings[index] = (try @This().explicitImportedComptimeBinding(self, target_file, entry.parameter, name, entry.arg)) orelse return null;
+            }
+            return if (iter.comptime_index == bindings.len and iter.arg_index == call.args.len) bindings else null;
+        }
+
+        fn explicitImportedComptimeBinding(
+            self: *Lowerer,
+            target_file: *const ast.AstFile,
+            parameter: ast.Parameter,
+            name: []const u8,
+            arg_expr: ast.ExprId,
+        ) anyerror!?Lowerer.GenericTypeBinding {
+            if (@This().isTypeParameterInFile(target_file, parameter)) {
+                return null;
+            }
+
+            const integer_text = @This().integerArgTextInFile(self.file, arg_expr) orelse return null;
+            return .{
+                .name = name,
+                .value = .{ .integer = integer_text },
+                .mangle_name = try self.allocator.dupe(u8, integer_text),
+            };
+        }
+
+        fn integerArgTextInFile(file: *const ast.AstFile, expr_id: ast.ExprId) ?[]const u8 {
+            return switch (file.expression(expr_id).*) {
+                .IntegerLiteral => |literal| std.mem.trim(u8, literal.text, " \t\n\r"),
+                .Group => |group| @This().integerArgTextInFile(file, group.expr),
+                else => null,
+            };
+        }
+
+        fn patternNameInFile(file: *const ast.AstFile, pattern_id: ast.PatternId) ?[]const u8 {
+            return switch (file.pattern(pattern_id).*) {
+                .Name => |name| name.name,
+                else => null,
+            };
+        }
+
+        fn isTypeParameterInFile(file: *const ast.AstFile, parameter: ast.Parameter) bool {
+            if (!parameter.is_comptime) return false;
+            return switch (file.typeExpr(parameter.type_expr).*) {
+                .Path => |path| std.mem.eql(u8, path.name, "type"),
+                else => false,
+            };
         }
 
         fn hirBindingsFromSema(self: *Lowerer, bindings: []const sema.GenericTypeBinding) anyerror![]const Lowerer.GenericTypeBinding {
@@ -421,7 +589,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     self.active_impl_self_type = descriptorFromPathName(self.file, self.item_index, target_name);
                     defer self.active_impl_contract_scope = previous_impl_contract_scope;
                     defer self.active_impl_self_type = previous_impl_self_type;
-                    try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, runtime_parameters, parent_block, bindings, null, null);
+                    try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, runtime_parameters, parent_block, bindings, &.{}, null, null);
                     try self.monomorphized_function_names.put(symbol_name, {});
                 }
                 return symbol_name;
@@ -435,7 +603,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 self.active_impl_self_type = descriptorFromPathName(self.file, self.item_index, target_name);
                 defer self.active_impl_contract_scope = previous_impl_contract_scope;
                 defer self.active_impl_self_type = previous_impl_self_type;
-                try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, function.parameters, parent_block, &.{}, null, null);
+                try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, function.parameters, parent_block, &.{}, &.{}, null, null);
                 try self.monomorphized_function_names.put(symbol_name, {});
             }
             return symbol_name;
@@ -452,7 +620,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         fn implMethodSymbolName(self: *Lowerer, trait_name: []const u8, target_name: []const u8, method_name: []const u8) anyerror![]const u8 {
-            var name = std.ArrayList(u8){};
+            var name = std.ArrayList(u8).empty;
             try name.ensureTotalCapacityPrecise(self.allocator, trait_name.len + target_name.len + method_name.len + 2);
             try name.appendSlice(self.allocator, trait_name);
             try name.appendSlice(self.allocator, ".");
@@ -470,6 +638,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             parameters: []const ast.Parameter,
             parent_block: mlir.MlirBlock,
             type_bindings: []const Lowerer.GenericTypeBinding,
+            inline_known_args: []const Lowerer.InlineKnownArgBinding,
             concrete_runtime_parameter_types: ?[]const sema.Type,
             concrete_return_type: ?sema.Type,
         ) anyerror!void {
@@ -477,7 +646,11 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             self.active_type_bindings = type_bindings;
             defer self.active_type_bindings = previous_type_bindings;
 
-            var attrs: std.ArrayList(mlir.MlirNamedAttribute) = .{};
+            const previous_inline_known_args = self.active_inline_known_args;
+            self.active_inline_known_args = inline_known_args;
+            defer self.active_inline_known_args = previous_inline_known_args;
+
+            var attrs: std.ArrayList(mlir.MlirNamedAttribute) = .empty;
             const return_type = if (function.return_type) |_| blk: {
                 if (concrete_return_type) |resolved| break :blk self.lowerSemaType(resolved, function.range);
                 break :blk self.lowerSemaType(self.typecheck.body_types[function.body.index()], function.range);
@@ -492,10 +665,14 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     .private => "private",
                 },
             ));
-            if (function.visibility == .private and std.mem.indexOfScalar(u8, symbol_name, '.') != null) {
-                // Imported private helpers are inlined before OraToSIR call conversion so
-                // generic/library code lowers through the caller's real value representation.
+            if (function.is_inline or (function.visibility == .private and std.mem.indexOfScalar(u8, symbol_name, '.') != null)) {
+                // Inline functions and imported private helpers are expanded before
+                // OraToSIR call conversion so call lowering sees the caller's value
+                // representation.
                 try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.inline", true));
+            }
+            if (function.is_inline) {
+                try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.source_inline", true));
             }
             if (std.mem.eql(u8, function.name, "init")) {
                 try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.init", true));
@@ -508,6 +685,28 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 if (function.abi_decode_permissive) {
                     try attrs.append(self.allocator, namedStringAttr(self.context, "ora.abi_decode_mode", "permissive"));
                 }
+                // Dispatcher case-ordering class. Read-only functions are
+                // normally reached via eth_call, where dispatch gas is free,
+                // so the dispatcher gives mutating functions the cheap chain
+                // positions. Only provably read-only functions may be
+                // demoted; anything unknown stays "mutating" (misordering
+                // costs gas, never correctness — order is semantics-neutral).
+                const dispatch_class: []const u8 = if (item_id.index() < self.typecheck.item_effects.len)
+                    switch (self.typecheck.item_effects[item_id.index()]) {
+                        .pure, .reads => "readonly",
+                        .writes, .reads_writes, .side_effects, .external => "mutating",
+                    }
+                else
+                    "mutating";
+                try attrs.append(self.allocator, namedStringAttr(self.context, "ora.dispatch_class", dispatch_class));
+                // Developer @callHint refinement; absent attr == .none. Sema
+                // has already validated placement, so this is a plain read.
+                if (item_id.index() < self.typecheck.item_call_hints.len) {
+                    const hint = self.typecheck.item_call_hints[item_id.index()];
+                    if (hint != .none) {
+                        try attrs.append(self.allocator, namedStringAttr(self.context, "ora.dispatch_hint", @tagName(hint)));
+                    }
+                }
             }
             if (function.visibility == .private) {
                 if (return_type) |ret_type| {
@@ -519,8 +718,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             try @This().attachEffectSummaryAttrs(self, &attrs, item_id);
             try @This().attachModifiesSummaryAttrs(self, &attrs, item_id);
 
-            var param_types: std.ArrayList(mlir.MlirType) = .{};
-            var param_locs: std.ArrayList(mlir.MlirLocation) = .{};
+            var param_types: std.ArrayList(mlir.MlirType) = .empty;
+            var param_locs: std.ArrayList(mlir.MlirLocation) = .empty;
             for (parameters, 0..) |parameter, index| {
                 const impl_self_param_type: ?mlir.MlirType = if (self.active_impl_self_type) |self_type| blk: {
                     if (std.mem.eql(u8, self.patternName(parameter.pattern) orelse "", "self")) {
@@ -582,21 +781,36 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 }
             }
 
-            // Attach ora.param_names so the SMT encoder can use readable variable names.
+            // Attach source parameter metadata for verification/proof tooling.
+            // Names are only presentation; binding ids are the compiler identity.
             if (parameters.len > 0) {
                 const param_name_attrs = try self.allocator.alloc(mlir.MlirAttribute, parameters.len);
+                const param_binding_id_attrs = try self.allocator.alloc(mlir.MlirAttribute, parameters.len);
                 defer self.allocator.free(param_name_attrs);
+                defer self.allocator.free(param_binding_id_attrs);
                 for (parameters, 0..) |parameter, index| {
                     const param_name = switch (self.file.pattern(parameter.pattern).*) {
                         .Name => |name| name.name,
                         else => "",
                     };
+                    var binding_id_buf: [64]u8 = undefined;
+                    const binding_id = try std.fmt.bufPrint(
+                        &binding_id_buf,
+                        "file:{d}:pattern:{d}",
+                        .{ self.file.file_id.index(), parameter.pattern.index() },
+                    );
                     param_name_attrs[index] = mlir.oraStringAttrCreate(self.context, strRef(param_name));
+                    param_binding_id_attrs[index] = mlir.oraStringAttrCreate(self.context, strRef(binding_id));
                 }
                 mlir.oraOperationSetAttributeByName(
                     op,
                     strRef("ora.param_names"),
                     mlir.oraArrayAttrCreate(self.context, @intCast(param_name_attrs.len), param_name_attrs.ptr),
+                );
+                mlir.oraOperationSetAttributeByName(
+                    op,
+                    strRef("ora.param_binding_ids"),
+                    mlir.oraArrayAttrCreate(self.context, @intCast(param_binding_id_attrs.len), param_binding_id_attrs.ptr),
                 );
             }
 
@@ -631,10 +845,17 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     if (try @This().appendEffectSlotAttrs(self, attrs, "ora.read_slots", read_effect.slots)) {
                         try attrs.append(self.allocator, namedStringAttr(self.context, "ora.effect", "reads"));
                     }
+                    _ = try @This().appendEffectSlotAttrs(self, attrs, "ora.write_slots", &.{});
+                    if (@This().effectWriteSlotsComplete(effect)) {
+                        try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.write_slots_complete", true));
+                    }
                 },
                 .writes => |write_effect| {
                     if (try @This().appendEffectSlotAttrs(self, attrs, "ora.write_slots", write_effect.slots)) {
                         try attrs.append(self.allocator, namedStringAttr(self.context, "ora.effect", "writes"));
+                    }
+                    if (@This().effectWriteSlotsComplete(effect)) {
+                        try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.write_slots_complete", true));
                     }
                 },
                 .reads_writes => |read_write| {
@@ -647,8 +868,38 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     } else if (has_writes) {
                         try attrs.append(self.allocator, namedStringAttr(self.context, "ora.effect", "writes"));
                     }
+                    if (@This().effectWriteSlotsComplete(effect)) {
+                        try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.write_slots_complete", true));
+                    }
                 },
             }
+        }
+
+        fn effectWriteSlotsComplete(effect: sema.Effect) bool {
+            return switch (effect) {
+                .pure => false,
+                .external, .side_effects => false,
+                .reads => |read_effect| effectFlagsAllowCompleteWriteSlots(read_effect.flags),
+                .writes => |write_effect| effectFlagsAllowCompleteWriteSlots(write_effect.flags) and
+                    writeSlotsRepresentCompleteStorage(write_effect.slots),
+                .reads_writes => |read_write| effectFlagsAllowCompleteWriteSlots(read_write.flags) and
+                    writeSlotsRepresentCompleteStorage(read_write.writes),
+            };
+        }
+
+        fn effectFlagsAllowCompleteWriteSlots(flags: anytype) bool {
+            // External calls and havoc may clobber storage outside the slot list.
+            // Log/lock/unlock effects do not write storage by themselves.
+            return !flags.has_external and !flags.has_havoc;
+        }
+
+        fn writeSlotsRepresentCompleteStorage(slots: []const sema.EffectSlot) bool {
+            for (slots) |slot| {
+                if (slot.region == .storage and std.mem.eql(u8, slot.name, computed_storage_effect_root)) {
+                    return false;
+                }
+            }
+            return true;
         }
 
         fn attachModifiesSummaryAttrs(
@@ -660,7 +911,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             if (item_id.index() >= self.typecheck.item_modifies.len) return;
             const slots = self.typecheck.item_modifies[item_id.index()] orelse return;
 
-            var slot_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+            var slot_attrs: std.ArrayList(mlir.MlirAttribute) = .empty;
             defer slot_attrs.deinit(self.allocator);
 
             for (slots) |slot| {
@@ -689,15 +940,25 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             attr_name: []const u8,
             slots: []const sema.EffectSlot,
         ) anyerror!bool {
-            var slot_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+            var slot_attrs: std.ArrayList(mlir.MlirAttribute) = .empty;
             defer slot_attrs.deinit(self.allocator);
 
             for (slots) |slot| {
                 switch (slot.region) {
-                    .storage => try slot_attrs.append(
-                        self.allocator,
-                        mlir.oraStringAttrCreate(self.context, strRef(slot.name)),
-                    ),
+                    .storage => {
+                        const needs_full_path = std.mem.eql(u8, slot.name, "$computed_storage") or
+                            slot.field_path != null or
+                            slot.key_path != null;
+                        const slot_path = if (needs_full_path)
+                            try sema.formatEffectSlotPath(self.allocator, slot)
+                        else
+                            slot.name;
+                        defer if (needs_full_path) self.allocator.free(slot_path);
+                        try slot_attrs.append(
+                            self.allocator,
+                            mlir.oraStringAttrCreate(self.context, strRef(slot_path)),
+                        );
+                    },
                     .transient => {
                         const slot_name = try std.fmt.allocPrint(self.allocator, "transient:{s}", .{slot.name});
                         defer self.allocator.free(slot_name);
@@ -710,12 +971,16 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 }
             }
 
-            if (slot_attrs.items.len == 0) return false;
+            const has_slots = slot_attrs.items.len != 0;
             try attrs.append(self.allocator, .{
                 .name = identifier(self.context, attr_name),
-                .attribute = mlir.oraArrayAttrCreate(self.context, @intCast(slot_attrs.items.len), slot_attrs.items.ptr),
+                .attribute = mlir.oraArrayAttrCreate(
+                    self.context,
+                    @intCast(slot_attrs.items.len),
+                    if (slot_attrs.items.len == 0) null else slot_attrs.items.ptr,
+                ),
             });
-            return true;
+            return has_slots;
         }
 
         const TraitMethodMatch = struct {
@@ -727,7 +992,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             const impl_item = @This().enclosingImplForMethod(self, method_item_id) orelse return &.{};
             const trait_item_id = self.item_index.lookup(impl_item.trait_name) orelse return &.{};
 
-            var clauses: std.ArrayList(FunctionLowerer.ExtraVerificationClause) = .{};
+            var clauses: std.ArrayList(FunctionLowerer.ExtraVerificationClause) = .empty;
             if (@This().matchingTraitMethodForImplMethod(self, trait_item_id, method_item_id)) |matched| {
                 const aliases = try @This().traitMethodPatternAliases(self, matched.method, self.file.item(method_item_id).Function);
                 for (self.traitMethodVerificationFactEntries(matched.owner)) |entry| {
@@ -825,20 +1090,20 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             function: ast.FunctionItem,
             parameters: []const ast.Parameter,
         ) anyerror!void {
-            var signature_parts: std.ArrayList([]const u8) = .{};
+            var signature_parts: std.ArrayList([]const u8) = .empty;
             defer {
                 for (signature_parts.items) |part| self.allocator.free(part);
                 signature_parts.deinit(self.allocator);
             }
-            var abi_param_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+            var abi_param_attrs: std.ArrayList(mlir.MlirAttribute) = .empty;
             defer abi_param_attrs.deinit(self.allocator);
-            var result_input_mode_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+            var result_input_mode_attrs: std.ArrayList(mlir.MlirAttribute) = .empty;
             defer result_input_mode_attrs.deinit(self.allocator);
-            var result_input_error_id_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+            var result_input_error_id_attrs: std.ArrayList(mlir.MlirAttribute) = .empty;
             defer result_input_error_id_attrs.deinit(self.allocator);
-            var abi_param_enum_count_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+            var abi_param_enum_count_attrs: std.ArrayList(mlir.MlirAttribute) = .empty;
             defer abi_param_enum_count_attrs.deinit(self.allocator);
-            var abi_param_refinement_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+            var abi_param_refinement_attrs: std.ArrayList(mlir.MlirAttribute) = .empty;
             defer abi_param_refinement_attrs.deinit(self.allocator);
 
             for (parameters) |parameter| {
@@ -945,12 +1210,38 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     }
                 }
 
-                if (function.return_type) |return_type_id| {
+                if (body_type.kind() == .error_union and @This().publicReturnErrorsUseCustomErrors(body_type.error_union)) {
+                    try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.returns_error_union", true));
+                    const error_union = body_type.error_union;
+                    var return_error_id_attrs: std.ArrayList(mlir.MlirAttribute) = .empty;
+                    defer return_error_id_attrs.deinit(self.allocator);
+                    for (error_union.error_types) |error_type| {
+                        return_error_id_attrs.append(
+                            self.allocator,
+                            mlir.oraIntegerAttrCreateI64FromType(
+                                reprIntegerType(self.context),
+                                @intCast(try @This().publicReturnErrorId(self, error_type)),
+                            ),
+                        ) catch return error.OutOfMemory;
+                    }
+                    try attrs.append(self.allocator, .{
+                        .name = identifier(self.context, "ora.return_error_ids"),
+                        .attribute = mlir.oraArrayAttrCreate(self.context, @intCast(return_error_id_attrs.items.len), return_error_id_attrs.items.ptr),
+                    });
+                } else if (function.return_type) |return_type_id| {
                     if (self.file.typeExpr(return_type_id).* == .ErrorUnion) {
-                        try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.returns_error_union", true));
+                        return error.UnsupportedAbiType;
                     }
                 }
             }
+        }
+
+        fn publicReturnErrorsUseCustomErrors(error_union: anytype) bool {
+            for (error_union.error_types) |error_type| {
+                const error_name = error_type.name() orelse return false;
+                if (std.mem.eql(u8, error_name, "AbiDecodeError")) return false;
+            }
+            return true;
         }
 
         pub fn lowerField(self: *Lowerer, item_id: ast.ItemId, field: ast.FieldItem, parent_block: mlir.MlirBlock) anyerror!void {
@@ -1409,7 +1700,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         pub fn lowerLogDecl(self: *Lowerer, item_id: ast.ItemId, log_decl: ast.LogDeclItem, parent_block: mlir.MlirBlock) anyerror!void {
             const loc = self.location(log_decl.range);
-            var attrs: std.ArrayList(mlir.MlirNamedAttribute) = .{};
+            var attrs: std.ArrayList(mlir.MlirNamedAttribute) = .empty;
             const event_name = abi_support.eventWireNameFromLogDecl(self.file, log_decl) orelse log_decl.name;
             try attrs.append(self.allocator, namedStringAttr(self.context, "sym_name", log_decl.name));
             try attrs.append(self.allocator, namedStringAttr(self.context, "ora.event_name", event_name));
@@ -1441,7 +1732,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         fn lowerErrorDeclNamed(self: *Lowerer, item_id: ast.ItemId, error_decl: ast.ErrorDeclItem, symbol_name: []const u8, parent_block: mlir.MlirBlock) anyerror!void {
             const loc = self.location(error_decl.range);
-            var attrs: std.ArrayList(mlir.MlirNamedAttribute) = .{};
+            var attrs: std.ArrayList(mlir.MlirNamedAttribute) = .empty;
             try attrs.append(self.allocator, namedStringAttr(self.context, "sym_name", symbol_name));
             try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.error_decl", true));
             try attrs.append(self.allocator, .{
@@ -1579,22 +1870,26 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         pub fn buildBitfieldLayout(self: *Lowerer, bitfield: ast.BitfieldItem) ![]const u8 {
-            var buffer: std.ArrayList(u8) = .{};
+            var buffer: std.ArrayList(u8) = .empty;
             for (bitfield.fields) |field| {
                 const resolved = (try self.resolveBitfieldField(bitfield.name, field.name)) orelse continue;
-                try buffer.writer(self.allocator).print("{s}:{d}:{d}:{c};", .{ field.name, resolved.offset, resolved.width, resolved.sign });
+                const fragment = try std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}:{c};", .{ field.name, resolved.offset, resolved.width, resolved.sign });
+                defer self.allocator.free(fragment);
+                try buffer.appendSlice(self.allocator, fragment);
             }
             return buffer.toOwnedSlice(self.allocator);
         }
 
         pub fn buildInstantiatedBitfieldLayout(self: *Lowerer, bitfield: sema.InstantiatedBitfield) ![]const u8 {
-            var buffer: std.ArrayList(u8) = .{};
+            var buffer: std.ArrayList(u8) = .empty;
             var next_offset: u32 = 0;
             for (bitfield.fields) |field| {
                 const width = field.width orelse self.bitfieldFieldWidthFromType(field.ty) orelse return error.InvalidBitfieldFieldType;
                 const offset = field.offset orelse next_offset;
                 const sign = self.bitfieldFieldSignFromType(field.ty);
-                try buffer.writer(self.allocator).print("{s}:{d}:{d}:{c};", .{ field.name, offset, width, sign });
+                const fragment = try std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}:{c};", .{ field.name, offset, width, sign });
+                defer self.allocator.free(fragment);
+                try buffer.appendSlice(self.allocator, fragment);
                 next_offset = offset + width;
             }
             return buffer.toOwnedSlice(self.allocator);
@@ -1654,6 +1949,21 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             return (try @This().publicResultInputErrorId(self, ty)) orelse no_public_result_input_error_id;
         }
 
+        fn publicReturnErrorId(self: *Lowerer, error_type: sema.Type) anyerror!i64 {
+            const error_name = error_type.name() orelse return error.UnsupportedAbiType;
+            if (self.item_index.lookup(error_name)) |item_id| {
+                if (self.file.item(item_id).* != .ErrorDecl) return error.UnsupportedAbiType;
+                return try @This().errorDeclRuntimeIdForItem(self, item_id);
+            }
+
+            // Preserve the existing selector-derived convention for imported
+            // payloadless errors whose declarations are not present in this
+            // file's item index.
+            var signature_buf: [256]u8 = undefined;
+            const signature = std.fmt.bufPrint(&signature_buf, "{s}()", .{error_name}) catch return error.UnsupportedAbiType;
+            return @intCast(abi_support.keccakSelectorValue(signature));
+        }
+
         fn enumVariantCountForType(self: *Lowerer, ty: sema.Type) ?usize {
             const enum_name = ty.name() orelse return null;
             for (self.typecheck.instantiated_enums) |instantiated| {
@@ -1672,7 +1982,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         fn abiParamRefinementSpec(self: *Lowerer, ty: sema.Type) ![]const u8 {
-            var parts: std.ArrayList([]const u8) = .{};
+            var parts: std.ArrayList([]const u8) = .empty;
             defer {
                 for (parts.items) |part| self.allocator.free(part);
                 parts.deinit(self.allocator);
@@ -1762,26 +2072,37 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             op_name: []const u8,
             parent_block: mlir.MlirBlock,
         ) anyerror!void {
-            const op = try self.createNamedPlaceholderOp(op_name, name, range, mlir.oraNoneTypeCreate(self.context));
+            const op = try @This().createNamedDeclStubOp(self, op_name, name, range, mlir.oraNoneTypeCreate(self.context));
             appendOp(parent_block, op);
             try self.appendItemHandle(item_id, kind, name, range, op);
         }
 
         pub fn createNamedPlaceholderOp(self: *Lowerer, op_name: []const u8, name: []const u8, range: source.TextRange, ty: mlir.MlirType) anyerror!mlir.MlirOperation {
+            return @This().createNamedOpInternal(self, op_name, name, range, ty, true);
+        }
+
+        pub fn createNamedDeclStubOp(self: *Lowerer, op_name: []const u8, name: []const u8, range: source.TextRange, ty: mlir.MlirType) anyerror!mlir.MlirOperation {
+            return @This().createNamedOpInternal(self, op_name, name, range, ty, false);
+        }
+
+        fn createNamedOpInternal(self: *Lowerer, op_name: []const u8, name: []const u8, range: source.TextRange, ty: mlir.MlirType, mark_executable_fallback: bool) anyerror!mlir.MlirOperation {
             const loc = self.location(range);
             var attrs: [2]mlir.MlirNamedAttribute = .{
                 namedStringAttr(self.context, "sym_name", name),
                 namedTypeAttr(self.context, "ora.type", ty),
             };
-            return self.createPlaceholderOp(op_name, loc, &attrs);
+            return @This().createPlaceholderOpInternal(self, op_name, loc, &attrs, mark_executable_fallback);
         }
 
         pub fn createPlaceholderOp(self: *Lowerer, op_name: []const u8, loc: mlir.MlirLocation, attrs: []const mlir.MlirNamedAttribute) anyerror!mlir.MlirOperation {
-            const mark_executable_fallback = std.mem.endsWith(u8, op_name, "_placeholder");
-            var marked_attrs: std.ArrayList(mlir.MlirNamedAttribute) = .{};
-            defer marked_attrs.deinit(self.allocator);
-            var final_attrs = attrs;
+            return @This().createPlaceholderOpInternal(self, op_name, loc, attrs, true);
+        }
 
+        fn createPlaceholderOpInternal(self: *Lowerer, op_name: []const u8, loc: mlir.MlirLocation, attrs: []const mlir.MlirNamedAttribute, mark_executable_fallback: bool) anyerror!mlir.MlirOperation {
+            var marked_attrs: std.ArrayList(mlir.MlirNamedAttribute) = .empty;
+            defer marked_attrs.deinit(self.allocator);
+
+            var final_attrs = attrs;
             if (mark_executable_fallback) {
                 self.recordPlaceholder();
                 try marked_attrs.appendSlice(self.allocator, attrs);

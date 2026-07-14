@@ -11,6 +11,7 @@ formal semantics, IR design, and proof-oriented compiler structure.
 Use this track for:
 
 - [Formal Verification](../formal-verification)
+- [Lean Verification: Userland and Kernel Lanes](../lean-verification-lanes)
 - [Research Snapshot](./research-snapshot)
 - [Compiler Architecture](./compiler-architecture)
 - [Type System](./type-system)

@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/compound/map_basic.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @write_balance
+// CHECK-LABEL: func.func @read_balance
+// CHECK-LABEL: func.func @add_balance
+// CHECK-LABEL: func.func @sub_balance
+// CHECK-LABEL: func.func @set_flag
+// CHECK-LABEL: func.func @get_flag
+// CHECK-LABEL: func.func @transfer

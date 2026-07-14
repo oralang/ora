@@ -1,0 +1,21 @@
+// INPUT: ora-example/corpus/resources/transient_resource_immediate.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+
+// CHECK-LABEL: fn issue:
+// CHECK: slot_scratch = const 0x0
+// CHECK: [[BEFORE:v[0-9]+]] = tload slot_scratch
+// CHECK: [[AFTER:v[0-9]+]] = add {{v[0-9]+}} v0
+// CHECK: [[OVERFLOW:v[0-9]+]] = lt [[AFTER]]
+// CHECK: [[OK:v[0-9]+]] = iszero [[OVERFLOW]]
+// CHECK: => [[OK]] ? @bb4 : @bb2
+// CHECK: tstore 0x0 [[AFTER]]
+// CHECK-NOT: sstore slot_scratch
+
+// CHECK-LABEL: fn retire:
+// CHECK: slot_scratch = const 0x0
+// CHECK: [[BEFORE:v[0-9]+]] = tload slot_scratch
+// CHECK: [[AFTER:v[0-9]+]] = sub {{v[0-9]+}} v0
+// CHECK: [[UNDERFLOW:v[0-9]+]] = lt {{v[0-9]+}} v0
+// CHECK: [[OK:v[0-9]+]] = iszero [[UNDERFLOW]]
+// CHECK: => [[OK]] ? @bb2 : @bb0
+// CHECK: tstore 0x0 [[AFTER]]

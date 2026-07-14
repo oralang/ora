@@ -1,0 +1,12 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/declarations/declaration_chain.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @basic_chain
+// CHECK-LABEL: func.func @long_chain
+// CHECK-LABEL: func.func @mixed_ops_chain
+// CHECK-LABEL: func.func @bool_chain
+// CHECK-LABEL: func.func @struct_chain
+// CHECK-LABEL: func.func @fibonacci_chain
+// CHECK-LABEL: func.func @multi_ref_chain
+// CHECK-LABEL: func.func @mixed_let_var_chain
+// CHECK-LABEL: func.func @power_chain

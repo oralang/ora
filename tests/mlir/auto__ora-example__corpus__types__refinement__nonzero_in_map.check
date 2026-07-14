@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/refinement/nonzero_in_map.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @deposit
+// CHECK-LABEL: func.func @withdraw
+// CHECK-LABEL: func.func @transfer
+// CHECK-LABEL: func.func @balanceOf
+// CHECK-LABEL: func.func @approve
+// CHECK-LABEL: func.func @isApproved

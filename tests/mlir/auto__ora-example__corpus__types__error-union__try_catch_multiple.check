@@ -1,0 +1,6 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/error-union/try_catch_multiple.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @get_item
+// CHECK-LABEL: func.func @safe_get_item
+// CHECK-LABEL: func.func @store_item

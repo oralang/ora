@@ -16,7 +16,7 @@ pub const Stage = enum {
     comptime_ok,
 
     /// Can only be evaluated at runtime.
-    /// Examples: storage access, external calls, chain state (msg.sender, block.*)
+    /// Examples: storage access, external calls, chain state (msg.sender, tx.origin, block.*)
     runtime_only,
 
     /// Check if this stage is valid in must_eval mode
@@ -133,6 +133,8 @@ test "Stage validity checks" {
 
 test "runtime-only intrinsic detection" {
     try std.testing.expect(isRuntimeOnlyIntrinsic("msg.sender"));
+    try std.testing.expect(isRuntimeOnlyIntrinsic("tx.origin"));
+    try std.testing.expect(!isRuntimeOnlyIntrinsic("tx.sender"));
     try std.testing.expect(isRuntimeOnlyIntrinsic("sload"));
     try std.testing.expect(!isRuntimeOnlyIntrinsic("add"));
 }

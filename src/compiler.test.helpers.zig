@@ -4,6 +4,8 @@ const ora_root = @import("ora_root");
 const compiler = ora_root.compiler;
 const mlir = @import("mlir_c_api").c;
 const z3_verification = @import("ora_z3_verification");
+const formal_obligation = @import("formal/obligation.zig");
+const formal_obligation_from_mlir = @import("formal/obligation_from_mlir.zig");
 
 pub fn compileText(source_text: []const u8) !compiler.driver.Compilation {
     return compiler.compileSource(testing.allocator, "test.ora", source_text);
@@ -38,6 +40,44 @@ pub fn renderSirTextForModule(context: mlir.MlirContext, module: mlir.MlirModule
     return try testing.allocator.dupe(u8, sir_text_ref.data[0..sir_text_ref.length]);
 }
 
+pub fn collectFormalQueryBindingsForVerifier(
+    allocator: std.mem.Allocator,
+    module: mlir.MlirModule,
+) !struct {
+    formal_result: formal_obligation_from_mlir.CollectResult,
+    z3_bindings: []z3_verification.FormalQueryBinding,
+} {
+    var formal_result = try formal_obligation_from_mlir.collect(allocator, module, .{});
+    errdefer formal_result.deinit();
+
+    const z3_bindings = try z3FormalQueryBindingsFromFormalForTest(allocator, formal_result.query_bindings);
+    errdefer allocator.free(z3_bindings);
+
+    return .{
+        .formal_result = formal_result,
+        .z3_bindings = z3_bindings,
+    };
+}
+
+pub fn z3FormalQueryBindingsFromFormalForTest(
+    allocator: std.mem.Allocator,
+    bindings: []const formal_obligation.FormalQueryBinding,
+) ![]z3_verification.FormalQueryBinding {
+    const converted = try allocator.alloc(z3_verification.FormalQueryBinding, bindings.len);
+    for (bindings, converted) |binding, *out| {
+        out.* = .{
+            .source_op_id = binding.source_op_id,
+            .kind = @tagName(binding.kind),
+            .logical_role = if (binding.logical_role) |role| @tagName(role) else null,
+            .guard_id = binding.guard_id,
+            .query_id = binding.query_id,
+            .assumption_ids = binding.assumption_ids,
+            .obligation_ids = binding.obligation_ids,
+        };
+    }
+    return converted;
+}
+
 pub fn compilePackage(root_path: []const u8) !compiler.driver.Compilation {
     const resolved_path = try resolvePackageFixturePath(root_path);
     defer testing.allocator.free(resolved_path);
@@ -66,7 +106,7 @@ fn resolvePackageFixturePath(root_path: []const u8) ![]u8 {
 }
 
 fn pathExists(path: []const u8) bool {
-    std.fs.cwd().access(path, .{}) catch return false;
+    std.Io.Dir.cwd().access(std.testing.io, path, .{}) catch return false;
     return true;
 }
 
@@ -161,7 +201,7 @@ pub fn expectVerificationProbeEquivalent(lhs: *const VerificationProbeSummary, r
 }
 
 fn appendSortedLabelsCsv(builder: *std.ArrayList(u8), labels: []const []const u8) !void {
-    var sorted = std.ArrayList([]const u8){};
+    var sorted = std.ArrayList([]const u8).empty;
     defer sorted.deinit(testing.allocator);
     for (labels) |label| {
         try sorted.append(testing.allocator, label);
@@ -179,39 +219,39 @@ fn appendSortedLabelsCsv(builder: *std.ArrayList(u8), labels: []const []const u8
 }
 
 fn collectErrorKindCsv(result: anytype) ![]u8 {
-    var labels = std.ArrayList([]const u8){};
+    var labels = std.ArrayList([]const u8).empty;
     defer labels.deinit(testing.allocator);
     for (result.errors.items) |err| {
         try labels.append(testing.allocator, @tagName(err.error_type));
     }
 
-    var builder = std.ArrayList(u8){};
+    var builder = std.ArrayList(u8).empty;
     errdefer builder.deinit(testing.allocator);
     try appendSortedLabelsCsv(&builder, labels.items);
     return try builder.toOwnedSlice(testing.allocator);
 }
 
 fn collectSoundnessLossCsv(verifier: *const z3_verification.VerificationPass) ![]u8 {
-    var labels = std.ArrayList([]const u8){};
+    var labels = std.ArrayList([]const u8).empty;
     defer labels.deinit(testing.allocator);
     for (verifier.encoder.soundnessLosses()) |loss| {
         try labels.append(testing.allocator, @tagName(loss));
     }
 
-    var builder = std.ArrayList(u8){};
+    var builder = std.ArrayList(u8).empty;
     errdefer builder.deinit(testing.allocator);
     try appendSortedLabelsCsv(&builder, labels.items);
     return try builder.toOwnedSlice(testing.allocator);
 }
 
 fn collectPrecisionNoteCsv(verifier: *const z3_verification.VerificationPass) ![]u8 {
-    var labels = std.ArrayList([]const u8){};
+    var labels = std.ArrayList([]const u8).empty;
     defer labels.deinit(testing.allocator);
     for (verifier.encoder.precisionNotes()) |note| {
         try labels.append(testing.allocator, @tagName(note));
     }
 
-    var builder = std.ArrayList(u8){};
+    var builder = std.ArrayList(u8).empty;
     errdefer builder.deinit(testing.allocator);
     try appendSortedLabelsCsv(&builder, labels.items);
     return try builder.toOwnedSlice(testing.allocator);

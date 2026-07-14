@@ -154,32 +154,37 @@ fn messageType(comptime Handler: type) type {
             }
         }
 
-        var enum_fields: [methods.len + 1]std.builtin.Type.EnumField = undefined;
-        for (enum_fields[0 .. enum_fields.len - 1], methods, 0..) |*field, method, i| {
-            field.* = .{ .name = method, .value = i };
+        const TagInt = std.math.IntFittingRange(0, methods.len);
+        var enum_field_names: [methods.len + 1][]const u8 = undefined;
+        var enum_field_values: [methods.len + 1]TagInt = undefined;
+        for (enum_field_names[0 .. enum_field_names.len - 1], enum_field_values[0 .. enum_field_values.len - 1], methods, 0..) |*name, *value, method, i| {
+            name.* = method;
+            value.* = @intCast(i);
         }
-        enum_fields[methods.len] = .{ .name = "other", .value = methods.len };
+        enum_field_names[methods.len] = "other";
+        enum_field_values[methods.len] = @intCast(methods.len);
 
-        const MethodEnum = @Type(.{ .@"enum" = .{
-            .tag_type = std.math.IntFittingRange(0, methods.len),
-            .fields = &enum_fields,
-            .decls = &.{},
-            .is_exhaustive = true,
-        } });
+        const MethodEnum = @Enum(TagInt, .exhaustive, &enum_field_names, &enum_field_values);
 
-        var union_fields: [methods.len + 1]std.builtin.Type.UnionField = undefined;
-        for (union_fields[0 .. union_fields.len - 1], methods) |*field, method| {
+        var union_field_names: [methods.len + 1][]const u8 = undefined;
+        var union_field_types: [methods.len + 1]type = undefined;
+        var union_field_attrs: [methods.len + 1]std.builtin.Type.UnionField.Attributes = undefined;
+        for (
+            union_field_names[0 .. union_field_names.len - 1],
+            union_field_types[0 .. union_field_types.len - 1],
+            union_field_attrs[0 .. union_field_attrs.len - 1],
+            methods,
+        ) |*name, *field_type_out, *attrs, method| {
             const field_type = lsp.ParamsType(method);
-            field.* = .{ .name = method, .type = field_type, .alignment = @alignOf(field_type) };
+            name.* = method;
+            field_type_out.* = field_type;
+            attrs.* = .{ .@"align" = @alignOf(field_type) };
         }
-        union_fields[methods.len] = .{ .name = "other", .type = lsp.MethodWithParams, .alignment = @alignOf(lsp.MethodWithParams) };
+        union_field_names[methods.len] = "other";
+        union_field_types[methods.len] = lsp.MethodWithParams;
+        union_field_attrs[methods.len] = .{ .@"align" = @alignOf(lsp.MethodWithParams) };
 
-        Params.* = @Type(.{ .@"union" = .{
-            .layout = .auto,
-            .tag_type = MethodEnum,
-            .fields = &union_fields,
-            .decls = &.{},
-        } });
+        Params.* = @Union(.auto, MethodEnum, &union_field_names, &union_field_types, &union_field_attrs);
     }
 
     return lsp.Message(RequestParams, NotificationParams, .{});

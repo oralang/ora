@@ -1,0 +1,6 @@
+// Negative: callers cannot provide forged storage capabilities through public ABI.
+contract BadComputedStoragePublicParam {
+    pub fn bad(slot: StorageSlot) {
+        _ = slot;
+    }
+}

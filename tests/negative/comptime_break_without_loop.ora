@@ -1,0 +1,8 @@
+contract ComptimeBreakWithoutLoop {
+    pub fn run() -> u256 {
+        comptime {
+            break;
+        }
+        return 1;
+    }
+}

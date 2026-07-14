@@ -1,0 +1,99 @@
+fn init:
+    entry {
+        v0 = runtime_start_offset
+        v1 = runtime_length
+        v2 = malloc v1
+        codecopy v2 v0 v1
+        return v2 v1
+    }
+
+fn safe_mul:
+    entry v0 v1 {
+        v2 = const 0x1
+        v3 = const 0x20
+        v4 = large_const 0x8000000000000000000000000000000000000000000000000000000000000000
+        v5 = large_const 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+        c0 = const 0x0
+        v6 = mul v0 v1
+        v7 = eq v0 v4
+        v8 = eq v1 v5
+        v9 = and v7 v8
+        v10 = eq v1 c0
+        v11 = xor v10 v2
+        v12 = sdiv v6 v1
+        v13 = eq v12 v0
+        v14 = xor v13 v2
+        v15 = and v14 v11
+        v16 = or v9 v15
+        v17 = and v16 v2
+        v18 = iszero v17
+        v19 = iszero v18
+        => v19 ? @bb0 : @bb1
+    }
+    bb0 -> v20 v3 {
+        v20 = malloc v3
+        mstore256 v20 c0
+        iret
+    }
+    bb1 {
+        => @bb2
+    }
+    bb2 -> v21 v3 {
+        v21 = malloc v3
+        mstore256 v21 v6
+        iret
+    }
+
+fn main:
+    main_entry {
+        zero = const 0x0
+        selector_offset = const 0x4
+        word_size = const 0x20
+        min_cdsize_1arg = const 0x23
+        arg1_offset = const 0x24
+        min_cdsize_2args = const 0x43
+        arg2_offset = const 0x44
+        min_cdsize_3args = const 0x63
+        selector_shift = const 0xE0
+        v0 = codesize
+        v1 = mload256 word_size
+        v2 = lt v1 v0
+        sel_zero = const 0x0
+        sel_mask = sub sel_zero v2
+        sel_t = and sel_mask v0
+        sel_inv = not sel_mask
+        sel_f = and sel_inv v1
+        v3 = or sel_t sel_f
+        mstore256 word_size v3
+        cv = callvalue
+        cv_nonzero = iszero cv
+        => cv_nonzero ? @load_selector : @revert_error
+    }
+    load_selector {
+        zero_0 = const 0x0
+        selector_shift_0 = const 0xE0
+        selector_word = calldataload zero_0
+        selector = shr selector_shift_0 selector_word
+        switch selector {
+        0xF05399E9 => @safe_mul_
+        default => @revert_error
+    }
+    }
+    revert_error {
+        zero_1 = const 0x0
+        revert zero_1 zero_1
+    }
+    safe_mul_ {
+        cdsize_safe_mul = calldatasize
+        min_cdsize_2args_0 = const 0x43
+        valid_safe_mul = lt min_cdsize_2args_0 cdsize_safe_mul
+        => valid_safe_mul ? @safe_mul_exec : @revert_error
+    }
+    safe_mul_exec {
+        selector_offset_0 = const 0x4
+        a_safe_mul = calldataload selector_offset_0
+        arg1_offset_0 = const 0x24
+        b_safe_mul = calldataload arg1_offset_0
+        v4 v5 = icall @safe_mul a_safe_mul b_safe_mul
+        return v4 v5
+    }

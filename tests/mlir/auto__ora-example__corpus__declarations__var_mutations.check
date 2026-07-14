@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/declarations/var_mutations.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @increment_decrement
+// CHECK-LABEL: func.func @reassign
+// CHECK-LABEL: func.func @compound_assign
+// CHECK-LABEL: func.func @bitwise_compound
+// CHECK-LABEL: func.func @bool_mutation
+// CHECK-LABEL: func.func @address_mutation
+// CHECK-LABEL: func.func @multi_var_mutation
+// CHECK-LABEL: func.func @var_in_loop

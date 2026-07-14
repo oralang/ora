@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/patterns/user_profiles.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @createProfile
+// CHECK-LABEL: func.func @updateUsername
+// CHECK-LABEL: func.func @addReputation
+// CHECK-LABEL: func.func @deactivate
+// CHECK-LABEL: func.func @getProfile
+// CHECK-LABEL: func.func @getUserCount

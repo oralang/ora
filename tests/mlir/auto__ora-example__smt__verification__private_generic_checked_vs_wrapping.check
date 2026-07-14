@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/verification/private_generic_checked_vs_wrapping.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @safeAdd
+// CHECK-LABEL: func.func @add__u256
+// CHECK-LABEL: func.func @safeSub
+// CHECK-LABEL: func.func @sub__u256
+// CHECK-LABEL: func.func @wrappingAdd
+// CHECK-LABEL: func.func @addWrap__u256

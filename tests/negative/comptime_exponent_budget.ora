@@ -1,0 +1,7 @@
+contract ComptimeExponentBudget {
+    pub fn run() -> u256 {
+        return comptime {
+            2 ** 1000001;
+        };
+    }
+}

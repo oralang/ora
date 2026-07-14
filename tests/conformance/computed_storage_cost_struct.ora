@@ -1,0 +1,23 @@
+struct Payload4 {
+    a: u256;
+    b: u256;
+    c: u256;
+    d: u256;
+}
+
+contract ComputedStorageCostStruct {
+    storage var payloads: map<address, Payload4>;
+
+    pub fn store_four(owner: address, a: u256, b: u256, c: u256, d: u256) {
+        payloads[owner] = Payload4 { a: a, b: b, c: c, d: d };
+    }
+
+    pub fn sum_four(owner: address) -> u256 {
+        let data: Payload4 = payloads[owner];
+        return data.a + data.b + data.c + data.d;
+    }
+
+    pub fn clear_four(owner: address) {
+        payloads[owner] = Payload4 { a: 0, b: 0, c: 0, d: 0 };
+    }
+}

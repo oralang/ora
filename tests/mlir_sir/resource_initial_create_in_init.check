@@ -1,0 +1,16 @@
+// INPUT: tests/conformance/resource_initial_create_in_init.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-NOT: ora.create
+//
+// CHECK-LABEL: func.func @init
+// CHECK-SAME: ora.init = true
+// CHECK-SAME: ora.read_slots = ["reserve", "total_supply"]
+// CHECK-SAME: ora.write_slots = ["reserve", "total_supply"]
+// CHECK: %slot_reserve = sir.const 0
+// CHECK: [[BEFORE:%[a-zA-Z0-9_]+]] = sir.sload %slot_reserve
+// CHECK: [[AFTER:%[0-9]+]] = sir.add
+// CHECK: [[OVERFLOW:%[0-9]+]] = sir.lt [[AFTER]]
+// CHECK: [[OK:%[0-9]+]] = sir.iszero [[OVERFLOW]]
+// CHECK: sir.cond_br [[OK]]
+// CHECK: sir.sstore %slot_reserve
+// CHECK: sir.sstore %c1

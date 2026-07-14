@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/control-flow/switch/switch_expression.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @test_assign
+// CHECK-LABEL: func.func @test_return_expr
+// CHECK-LABEL: func.func @test_range_expr
+// CHECK-LABEL: func.func @test_in_arithmetic
+// CHECK-LABEL: func.func @test_nested_switch_expr
+// CHECK-LABEL: func.func @test_bool_result

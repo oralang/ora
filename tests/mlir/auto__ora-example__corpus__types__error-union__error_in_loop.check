@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/error-union/error_in_loop.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @validate_entry
+// CHECK-LABEL: func.func @process_entries
+// CHECK-LABEL: func.func @process_strict
+// CHECK-LABEL: func.func @set_entry
+// CHECK-LABEL: func.func @get_valid_count
+// CHECK-LABEL: func.func @get_total_sum

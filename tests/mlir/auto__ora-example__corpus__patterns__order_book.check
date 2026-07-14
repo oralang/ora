@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/patterns/order_book.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @placeOrder
+// CHECK-LABEL: func.func @cancelOrder
+// CHECK-LABEL: func.func @fillOrder
+// CHECK-LABEL: func.func @getOrder
+// CHECK-LABEL: func.func @getOrderCount

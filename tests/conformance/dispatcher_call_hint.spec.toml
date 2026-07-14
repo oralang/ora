@@ -1,0 +1,62 @@
+# Hinted dispatcher: hot-switch fns, cold-demoted setters, and table views
+# all route correctly; state crosses every dispatch layer.
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "transfer(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", 5]
+returns = { bool = true }
+
+[[call]]
+fn = "mint(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", 7]
+returns = {}
+
+[[call]]
+fn = "totalSupply()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 12 }
+
+[[call]]
+fn = "burn(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [2]
+returns = {}
+
+[[call]]
+fn = "v0()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 300 }
+
+[[call]]
+fn = "pause()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = {}
+
+[[call]]
+fn = "totalSupply()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 0 }
+
+[[call]]
+calldata = "0xdeadbeef"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+reverts = { any = true }
+

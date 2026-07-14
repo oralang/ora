@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/compound/array_types.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @u8_array
+// CHECK-LABEL: func.func @bool_array
+// CHECK-LABEL: func.func @address_array
+// CHECK-LABEL: func.func @signed_array
+// CHECK-LABEL: func.func @nested_array
+// CHECK-LABEL: func.func @storage_write
+// CHECK-LABEL: func.func @storage_read

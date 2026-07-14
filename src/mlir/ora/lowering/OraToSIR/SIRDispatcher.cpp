@@ -1002,6 +1002,13 @@ namespace mlir
                 return AbiReturnBuffer{retPtr, size};
             }
 
+            struct ErrorInfo
+            {
+                uint64_t id = 0;
+                uint32_t selector = 0;
+                uint64_t paramCount = 0;
+            };
+
             struct PubFuncInfo
             {
                 func::FuncOp func;
@@ -1016,6 +1023,8 @@ namespace mlir
                 SmallVector<std::string, 8> abiParamRefinements;
                 SmallVector<std::string, 8> resultInputModes;
                 SmallVector<int64_t, 8> resultInputErrorIds;
+                SmallVector<ErrorInfo, 8> returnErrors;
+                bool hasReturnErrorMetadata = false;
                 bool hasAbiReturn = false;
                 int64_t abiReturnWords = -1;
                 std::string abiReturnLayout;
@@ -1026,13 +1035,6 @@ namespace mlir
                     : func(func), provenanceLoc(provenanceLoc)
                 {
                 }
-            };
-
-            struct ErrorInfo
-            {
-                uint64_t id = 0;
-                uint32_t selector = 0;
-                uint64_t paramCount = 0;
             };
 
             static Value getShiftedSelectorConst(OpBuilder &builder, Location loc, MLIRContext *, uint32_t selector)
@@ -1380,6 +1382,31 @@ namespace mlir
                                 info.resultInputErrorIds.push_back(iattr.getInt());
                             }
                         }
+                        if (auto returnErrorIdsAttr = func->getAttrOfType<ArrayAttr>("ora.return_error_ids"))
+                        {
+                            info.hasReturnErrorMetadata = true;
+                            for (Attribute a : returnErrorIdsAttr)
+                            {
+                                auto iattr = dyn_cast<IntegerAttr>(a);
+                                if (!iattr)
+                                {
+                                    func.emitError("ora.return_error_ids contains non-integer attr");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                uint64_t errorId = iattr.getValue().getZExtValue();
+                                auto found = llvm::find_if(abiErrors, [&](const ErrorInfo &errInfo) {
+                                    return errInfo.id == errorId;
+                                });
+                                if (found == abiErrors.end())
+                                {
+                                    func.emitError("ora.return_error_ids references unknown error id");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                info.returnErrors.push_back(*found);
+                            }
+                        }
 
                         if (auto abiReturnAttr = func->getAttrOfType<StringAttr>("ora.abi_return"))
                         {
@@ -1409,6 +1436,12 @@ namespace mlir
 
                         if (auto returnsErrorUnionAttr = func->getAttrOfType<BoolAttr>("ora.returns_error_union"))
                             info.returnsErrorUnion = returnsErrorUnionAttr.getValue();
+                        if (info.returnsErrorUnion && !info.hasReturnErrorMetadata)
+                        {
+                            func.emitError("public error-union function is missing ora.return_error_ids metadata");
+                            signalPassFailure();
+                            return;
+                        }
                         if (auto modeAttr = func->getAttrOfType<StringAttr>("ora.abi_decode_mode"))
                             info.permissiveAbiDecode = modeAttr.getValue() == "permissive";
                         if (!info.abiParamLayouts.empty() && info.resultInputModes.size() != info.abiParamLayouts.size())
@@ -1487,6 +1520,36 @@ namespace mlir
                         info.minHeadBytes = 4 + 32 * headSlots;
                         pubFuncs.push_back(info);
                     }
+
+                    // Frequency-ordered dispatch. Sort key: developer
+                    // @callHint rank (likely < none < unlikely < cold), then
+                    // mutability class (state-mutating before provably
+                    // read-only — views are normally reached via gas-free
+                    // eth_call), then declaration order via stable sort.
+                    // Missing attributes never demote. Order is
+                    // semantics-neutral — it only shifts linear-chain gas.
+                    auto hintRankOf = [](const PubFuncInfo &info) {
+                        auto attr = info.func->getAttrOfType<StringAttr>("ora.dispatch_hint");
+                        if (!attr)
+                            return 1; // none
+                        if (attr.getValue() == "likely")
+                            return 0;
+                        if (attr.getValue() == "unlikely")
+                            return 2;
+                        if (attr.getValue() == "cold")
+                            return 3;
+                        return 1;
+                    };
+                    auto classRankOf = [](const PubFuncInfo &info) {
+                        auto attr = info.func->getAttrOfType<StringAttr>("ora.dispatch_class");
+                        return (attr && attr.getValue() == "readonly") ? 1 : 0;
+                    };
+                    std::stable_sort(pubFuncs.begin(), pubFuncs.end(),
+                                     [&](const PubFuncInfo &a, const PubFuncInfo &b) {
+                                         if (hintRankOf(a) != hintRankOf(b))
+                                             return hintRankOf(a) < hintRankOf(b);
+                                         return classRankOf(a) < classRankOf(b);
+                                     });
 
                     // Synthesize boilerplate init/main; user-defined versions are replaced.
                     if (auto sym = SymbolTable::lookupSymbolIn(module, StringRef("init")))
@@ -2207,7 +2270,7 @@ namespace mlir
                     static_cast<void>(getConst(builder, dispatcherMainLoc, u256Type, i64Type, 99, constCache, entry, "min_cdsize_3args"));
                     static_cast<void>(getConst(builder, dispatcherMainLoc, u256Type, i64Type, 224, constCache, entry, "selector_shift"));
 
-                    // Sensei initializes memory[0x20] to its static memory high-water mark
+                    // Plank initializes memory[0x20] to its static memory high-water mark.
                     // before entering main. Raise it past compiler-owned named-memory slots
                     // placed after CODESIZE so user allocations cannot collide with them.
                     Value freePtrSlot = builder.create<sir::BitcastOp>(dispatcherMainLoc, ptrType, c32_entry);
@@ -2226,7 +2289,34 @@ namespace mlir
                     setResultName(cv.getDefiningOp(), "cv");
                     Value cv_zero = builder.create<sir::IsZeroOp>(dispatcherMainLoc, u256Type, cv);
                     setResultName(cv_zero.getDefiningOp(), "cv_nonzero");
-                    builder.create<sir::CondBrOp>(dispatcherMainLoc, cv_zero, ValueRange{}, ValueRange{}, loadSelector, revertError);
+                    // CALLDATALOAD(0) zero-pads, so calldata shorter than 4 bytes can
+                    // only alias a selector whose low byte(s) are zero — and only a
+                    // zero-argument function lacks the per-case min-calldatasize guard.
+                    // Guard the whole dispatcher iff such a function exists; every
+                    // other contract keeps its current byte-stable entry sequence.
+                    bool needsShortCalldataGuard = false;
+                    for (auto &info : pubFuncs)
+                    {
+                        int64_t caseMinSize = info.minHeadBytes > 0 ? info.minHeadBytes : (4 + 32 * static_cast<int64_t>(info.argCount));
+                        if (caseMinSize <= 4 && (info.selector & 0xFFu) == 0)
+                        {
+                            needsShortCalldataGuard = true;
+                            break;
+                        }
+                    }
+                    Value dispatchOk = cv_zero;
+                    if (needsShortCalldataGuard)
+                    {
+                        Value cds_entry = builder.create<sir::CallDataSizeOp>(dispatcherMainLoc, u256Type);
+                        setResultName(cds_entry.getDefiningOp(), "cdsize_guard");
+                        Value c4_entry = getConst(builder, dispatcherMainLoc, u256Type, i64Type, 4, constCache, entry, "selector_offset");
+                        Value shortCalldata = builder.create<sir::LtOp>(dispatcherMainLoc, u256Type, cds_entry, c4_entry);
+                        Value cdOk = builder.create<sir::IsZeroOp>(dispatcherMainLoc, u256Type, shortCalldata);
+                        setResultName(cdOk.getDefiningOp(), "cd_has_selector");
+                        dispatchOk = builder.create<sir::AndOp>(dispatcherMainLoc, u256Type, cv_zero, cdOk);
+                        setResultName(dispatchOk.getDefiningOp(), "dispatch_ok");
+                    }
+                    builder.create<sir::CondBrOp>(dispatcherMainLoc, dispatchOk, ValueRange{}, ValueRange{}, loadSelector, revertError);
                     setBlockName(entry, "main_entry");
                     setBlockOrder(entry, 0);
 
@@ -2248,9 +2338,72 @@ namespace mlir
                         caseValues.push_back(static_cast<int64_t>(info.selector));
                     }
 
-                    auto caseAttr = builder.getI64ArrayAttr(caseValues);
-                    auto sw = builder.create<sir::SwitchOp>(dispatcherMainLoc, selector, caseAttr, revertError, caseBlocks);
-                    sw->setAttr("sir.selector_switch", builder.getUnitAttr());
+                    // Hot-prefix split: a tiny leading switch (the backend
+                    // lowers < 4 cases as a linear chain) gives the hot set
+                    // 1-3 exact checks while everything else falls through to
+                    // the cold switch's jump table. The hot set is the
+                    // @callHint(likely) functions when any exist (developer
+                    // knowledge wins); otherwise the heuristic set: mutating
+                    // functions, with @callHint(cold) ones excluded so
+                    // demoting rare setters (mint/burn/pause) lets the split
+                    // fire for transfer-shaped contracts. The stable sort
+                    // above already placed the hot set first.
+                    size_t likelyCount = 0;
+                    for (auto &info : pubFuncs)
+                    {
+                        if (hintRankOf(info) != 0)
+                            break;
+                        ++likelyCount;
+                    }
+                    // Cap the hot switch at 3 checks: beyond that, chain
+                    // position costs approach table cost and the split stops
+                    // paying. Overflow likely fns keep their hint rank and
+                    // lead the cold switch instead, which matters exactly
+                    // when the cold layer routes linear and is harmless when
+                    // the uniform planner tables it.
+                    size_t hotCount = std::min<size_t>(likelyCount, 3);
+                    if (hotCount == 0)
+                    {
+                        for (auto &info : pubFuncs)
+                        {
+                            if (hintRankOf(info) >= 3 || classRankOf(info) != 0)
+                                break;
+                            ++hotCount;
+                        }
+                    }
+                    const size_t coldCount = pubFuncs.size() - hotCount;
+                    // An explicit @callHint(likely) set is developer-asserted
+                    // call frequency — the author is deliberately opting out
+                    // of the defaults, so honor it with a split whenever the
+                    // cold remainder is still worth a second switch (>= 4
+                    // cases). The mutability heuristic keeps the conservative
+                    // table-sized threshold: it is a guess, hints are not.
+                    const size_t minColdForSplit = likelyCount >= 1 ? 4 : 12;
+                    const bool splitHotPrefix = hotCount >= 1 && hotCount <= 3 && coldCount >= minColdForSplit;
+
+                    if (splitHotPrefix)
+                    {
+                        Block *coldDispatch = mainFunc.addBlock();
+                        auto hotAttr = builder.getI64ArrayAttr(ArrayRef<int64_t>(caseValues).take_front(hotCount));
+                        auto hotSw = builder.create<sir::SwitchOp>(
+                            dispatcherMainLoc, selector, hotAttr, coldDispatch,
+                            ArrayRef<Block *>(caseBlocks).take_front(hotCount));
+                        hotSw->setAttr("sir.selector_switch", builder.getUnitAttr());
+
+                        builder.setInsertionPointToEnd(coldDispatch);
+                        auto coldAttr = builder.getI64ArrayAttr(ArrayRef<int64_t>(caseValues).drop_front(hotCount));
+                        auto coldSw = builder.create<sir::SwitchOp>(
+                            dispatcherMainLoc, selector, coldAttr, revertError,
+                            ArrayRef<Block *>(caseBlocks).drop_front(hotCount));
+                        coldSw->setAttr("sir.selector_switch", builder.getUnitAttr());
+                        setBlockName(coldDispatch, "cold_dispatch");
+                    }
+                    else
+                    {
+                        auto caseAttr = builder.getI64ArrayAttr(caseValues);
+                        auto sw = builder.create<sir::SwitchOp>(dispatcherMainLoc, selector, caseAttr, revertError, caseBlocks);
+                        sw->setAttr("sir.selector_switch", builder.getUnitAttr());
+                    }
                     setBlockName(loadSelector, "load_selector");
                     setBlockOrder(loadSelector, 1);
 
@@ -4054,7 +4207,7 @@ namespace mlir
 
                             builder.setInsertionPointToEnd(errorDispatchBlock);
                             Block *nextErrorBlock = revertError;
-                            for (const ErrorInfo &errInfo : llvm::reverse(abiErrors))
+                            for (const ErrorInfo &errInfo : llvm::reverse(info.returnErrors))
                             {
                                 Block *compareBlock = mainFunc.addBlock();
                                 builder.setInsertionPointToEnd(compareBlock);

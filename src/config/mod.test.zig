@@ -6,12 +6,18 @@ fn pathFromTmpAlloc(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, rel_p
     return std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, rel_path });
 }
 
+fn realPathAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const real_z = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, path, allocator);
+    defer allocator.free(real_z);
+    return allocator.dupe(u8, real_z);
+}
+
 test "config: parse ora.toml targets and compiler output" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "ora.toml",
         .data =
         \\schema_version = "0.1"
@@ -78,12 +84,71 @@ test "config: parse ora.toml targets and compiler output" {
     try testing.expectEqualStrings("out/math", parsed.targets[1].output_dir.?);
 }
 
+test "config: parse optimize profile at compiler and target level" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "ora.toml",
+        .data =
+        \\schema_version = "0.1"
+        \\
+        \\[compiler]
+        \\optimize = "size"
+        \\
+        \\[[targets]]
+        \\name = "Router"
+        \\kind = "contract"
+        \\root = "contracts/Router.ora"
+        \\optimize = "gas"
+        \\
+        \\[[targets]]
+        \\name = "Child"
+        \\kind = "contract"
+        \\root = "contracts/Child.ora"
+        ,
+    });
+
+    const config_path = try pathFromTmpAlloc(allocator, tmp, "ora.toml");
+    defer allocator.free(config_path);
+
+    var parsed = try config.loadProjectConfigFile(allocator, config_path);
+    defer parsed.deinit(allocator);
+
+    try testing.expectEqual(@as(?config.OptimizeProfile, .size), parsed.compiler_optimize);
+    try testing.expectEqual(@as(?config.OptimizeProfile, .gas), parsed.targets[0].optimize);
+    // Child has no override; the resolver falls back to [compiler].
+    try testing.expectEqual(@as(?config.OptimizeProfile, null), parsed.targets[1].optimize);
+}
+
+test "config: invalid optimize profile errors" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "ora.toml",
+        .data =
+        \\schema_version = "0.1"
+        \\
+        \\[compiler]
+        \\optimize = "fastest"
+        ,
+    });
+
+    const config_path = try pathFromTmpAlloc(allocator, tmp, "ora.toml");
+    defer allocator.free(config_path);
+
+    try testing.expectError(config.ConfigError.InvalidToml, config.loadProjectConfigFile(allocator, config_path));
+}
+
 test "config: schema_version is required" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "ora.toml",
         .data =
         \\[[targets]]
@@ -106,8 +171,8 @@ test "config: discovery walks up parent directories" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("workspace/app/src");
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "workspace/app/src");
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "workspace/ora.toml",
         .data =
         \\schema_version = "0.1"
@@ -131,7 +196,7 @@ test "config: discovery walks up parent directories" {
     try testing.expect(loaded.config.targets.len == 1);
     try testing.expectEqualStrings("App", loaded.config.targets[0].name);
 
-    const real_dir = try std.fs.cwd().realpathAlloc(allocator, loaded.config_dir);
+    const real_dir = try realPathAlloc(allocator, loaded.config_dir);
     defer allocator.free(real_dir);
     try testing.expectEqualStrings("workspace", std.fs.path.basename(real_dir));
 }
@@ -153,16 +218,16 @@ test "config: find matching target index for entry file" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("workspace/contracts");
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "workspace/contracts");
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "workspace/contracts/Token.ora",
         .data = "contract Token { }",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "workspace/contracts/Pool.ora",
         .data = "contract Pool { }",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "workspace/ora.toml",
         .data =
         \\schema_version = "0.1"
@@ -199,7 +264,7 @@ test "config: parse multiline string arrays for init_args and include_paths" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "ora.toml",
         .data =
         \\schema_version = "0.1"
@@ -249,7 +314,7 @@ test "config: invalid init_args format errors" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "ora.toml",
         .data =
         \\schema_version = "0.1"
@@ -274,7 +339,7 @@ test "config: duplicate init_args names error" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "ora.toml",
         .data =
         \\schema_version = "0.1"
@@ -297,7 +362,7 @@ test "config: legacy defines keys are rejected" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "ora.toml",
         .data =
         \\schema_version = "0.1"

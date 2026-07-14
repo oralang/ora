@@ -1,0 +1,29 @@
+resource TokenUnit = u256;
+comptime const std = @import("std");
+
+contract ResourceSmtCreateDestroySupplyDelta {
+    storage var balance: Resource<TokenUnit>;
+    storage var total_supply: TokenUnit;
+
+    pub fn issue(amount: TokenUnit)
+        modifies balance, total_supply
+        requires @amount(balance) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        requires total_supply <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        ensures @amount(balance) == old(@amount(balance)) + amount
+        ensures total_supply == old(total_supply) + amount
+    {
+        @create(balance, amount);
+        total_supply += amount;
+    }
+
+    pub fn retire(amount: TokenUnit)
+        modifies balance, total_supply
+        requires @amount(balance) >= amount
+        requires total_supply >= amount
+        ensures @amount(balance) == old(@amount(balance)) - amount
+        ensures total_supply == old(total_supply) - amount
+    {
+        @destroy(balance, amount);
+        total_supply -= amount;
+    }
+}

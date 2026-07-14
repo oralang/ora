@@ -1,0 +1,16 @@
+// INPUT: tests/conformance/resource_dynamic_alias.ora
+// CHECK-LABEL: ora.contract @ResourceDynamicAlias
+// CHECK: ora.global "balances" : !ora.map<!ora.address, i256>
+//
+// CHECK-LABEL: func.func @transfer
+// CHECK-SAME: ora.read_slots = ["balances[param#0]", "balances[param#1]"]
+// CHECK-SAME: ora.write_slots = ["balances[param#0]", "balances[param#1]"]
+// CHECK: %balances
+// CHECK-SAME: ora.sload "balances"
+// CHECK: %balances_{{[0-9]+}}
+// CHECK-SAME: ora.sload "balances"
+// CHECK: "ora.move"
+// CHECK-SAME: carrier_signed = false
+// CHECK-SAME: carrier_type = i256
+// CHECK-SAME: domain = "TokenUnit"
+// CHECK-SAME: operandSegmentSizes = array<i32: 2, 2, 1>

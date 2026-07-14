@@ -1,0 +1,1 @@
+expect_error = "resource places can only be mutated with @move, @create, or @destroy"

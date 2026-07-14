@@ -1,0 +1,20 @@
+// INPUT: ora-example/corpus/resources/signed_resource_negative_balance.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-NOT: ora.move
+//
+// CHECK-LABEL: func.func @settle
+// CHECK-SAME: ora.read_slots = ["pending", "settled"]
+// CHECK-SAME: ora.write_slots = ["pending", "settled"]
+// CHECK: [[NEG_AMOUNT:%[0-9]+]] = sir.slt %arg0 : !sir.u256, %c0
+// CHECK: [[NON_NEG:%[0-9]+]] = sir.iszero [[NEG_AMOUNT]]
+// CHECK: sir.cond_br [[NON_NEG]]
+// CHECK: [[SRC_AFTER:%[0-9]+]] = sir.sub
+// CHECK: [[SRC_BAD:%[0-9]+]] = sir.sgt [[SRC_AFTER]]
+// CHECK: [[SRC_OK:%[0-9]+]] = sir.iszero [[SRC_BAD]]
+// CHECK: sir.cond_br [[SRC_OK]]
+// CHECK: [[DST_AFTER:%[0-9]+]] = sir.add
+// CHECK: [[DST_BAD:%[0-9]+]] = sir.slt [[DST_AFTER]]
+// CHECK: [[DST_OK:%[0-9]+]] = sir.iszero [[DST_BAD]]
+// CHECK: sir.cond_br [[DST_OK]]
+// CHECK: sir.sstore %c0
+// CHECK: sir.sstore %c1

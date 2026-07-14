@@ -1,0 +1,19 @@
+resource DebtUnit = i256;
+
+contract ResourceSignedAmount {
+    storage var debts: map<address, Resource<DebtUnit>>;
+
+    pub fn credit(owner: address, amount: DebtUnit)
+        modifies debts[owner]
+        requires amount >= 0
+        requires amount <= 100
+        requires @amount(debts[owner]) <= 100
+        ensures @amount(debts[owner]) == old(@amount(debts[owner])) + amount
+    {
+        @create(debts[owner], amount);
+    }
+
+    pub fn debtOf(owner: address) -> DebtUnit {
+        return @amount(debts[owner]);
+    }
+}

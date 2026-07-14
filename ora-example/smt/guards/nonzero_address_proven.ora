@@ -24,10 +24,10 @@ contract NonZeroAddressProven {
         let caller: NonZeroAddress = std.msg.sender();
     }
 
-    // SMT can prove NonZeroAddress from std.transaction.sender (builtin)
+    // SMT can prove NonZeroAddress from std.msg.sender() (builtin)
     pub fn provenNonZeroFromTransactionSender() {
-        // Guard should be removed - std.transaction.sender() never returns zero
-        let origin: NonZeroAddress = std.transaction.sender();
+        // Guard should be removed - std.msg.sender() never returns zero
+        let origin: NonZeroAddress = std.msg.sender();
     }
 
     // SMT can prove NonZeroAddress from function parameter refinement

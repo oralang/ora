@@ -1,0 +1,122 @@
+fn init:
+    entry {
+        v0 = runtime_start_offset
+        v1 = runtime_length
+        v2 = malloc v1
+        codecopy v2 v0 v1
+        return v2 v1
+    }
+
+fn testTStoreRead:
+    entry {
+        iret
+    }
+
+fn testMultipleTStoreReads:
+    entry {
+        iret
+    }
+
+fn testTStoreReadInConditional:
+    entry {
+        iret
+    }
+
+fn testTStoreReadInLoop:
+    entry {
+        iret
+    }
+
+fn testReentrancyPattern:
+    entry {
+        c1 = const 0x1
+        v0 = const 0x0
+        v1 = tload v0
+        v2 = eq v1 v0
+        v3 = and v2 c1
+        v4 = iszero v3
+        v5 = iszero v4
+        => v5 ? @bb0 : @bb1
+    }
+    bb0 {
+        tstore v0 c1
+        tstore v0 v0
+        => @bb2
+    }
+    bb1 {
+        => @bb2
+    }
+    bb2 {
+        iret
+    }
+
+fn main:
+    main_entry {
+        zero = const 0x0
+        selector_offset = const 0x4
+        word_size = const 0x20
+        min_cdsize_1arg = const 0x23
+        arg1_offset = const 0x24
+        min_cdsize_2args = const 0x43
+        arg2_offset = const 0x44
+        min_cdsize_3args = const 0x63
+        selector_shift = const 0xE0
+        v0 = codesize
+        v1 = const 0x40
+        v2 = add v0 v1
+        v3 = mload256 word_size
+        v4 = lt v3 v2
+        sel_zero = const 0x0
+        sel_mask = sub sel_zero v4
+        sel_t = and sel_mask v2
+        sel_inv = not sel_mask
+        sel_f = and sel_inv v3
+        v5 = or sel_t sel_f
+        mstore256 word_size v5
+        cv = callvalue
+        cv_nonzero = iszero cv
+        => cv_nonzero ? @load_selector : @revert_error
+    }
+    load_selector {
+        zero_0 = const 0x0
+        selector_shift_0 = const 0xE0
+        selector_word = calldataload zero_0
+        selector = shr selector_shift_0 selector_word
+        switch selector {
+        0x32BFCB93 => @testTStoreRead_
+        0x36E5400D => @testMultipleTStoreReads_
+        0xD2DD173B => @testTStoreReadInConditional_
+        0x9C259461 => @testTStoreReadInLoop_
+        0x5F9D70DD => @testReentrancyPattern_
+        default => @revert_error
+    }
+    }
+    revert_error {
+        zero_1 = const 0x0
+        revert zero_1 zero_1
+    }
+    testTStoreRead_ {
+        icall @testTStoreRead
+        v6 = const 0x0
+        return v6 v6
+    }
+    testMultipleTStoreReads_ {
+        icall @testMultipleTStoreReads
+        v7 = const 0x0
+        return v7 v7
+    }
+    testTStoreReadInConditional_ {
+        icall @testTStoreReadInConditional
+        v8 = const 0x0
+        return v8 v8
+    }
+    testTStoreReadInLoop_ {
+        icall @testTStoreReadInLoop
+        v9 = const 0x0
+        return v9 v9
+    }
+    testReentrancyPattern_ {
+        icall @testReentrancyPattern
+        v10 = const 0x0
+        return v10 v10
+    }

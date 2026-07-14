@@ -25,7 +25,7 @@ contract NonZeroAddressSubtyping {
     }
     
     fn testSubtypingIn() {
-        let non_zero: NonZeroAddress = std.transaction.sender(); // Assuming this works
+        let non_zero: NonZeroAddress = std.msg.sender(); // Assuming this works
         acceptAddress(non_zero); // Valid: NonZeroAddress <: address
     }
     
@@ -35,7 +35,7 @@ contract NonZeroAddressSubtyping {
     
     // Function returning address can return NonZeroAddress
     fn returnAddress() -> address {
-        let non_zero: NonZeroAddress = std.transaction.sender(); // Assuming this works
+        let non_zero: NonZeroAddress = std.msg.sender(); // Assuming this works
         return non_zero; // Valid: NonZeroAddress <: address
     }
     
@@ -44,7 +44,7 @@ contract NonZeroAddressSubtyping {
     // ============================================================================
     
     fn testVariableAssignment() {
-        let non_zero: NonZeroAddress = std.transaction.sender(); // Assuming this works
+        let non_zero: NonZeroAddress = std.msg.sender(); // Assuming this works
         let addr: address = non_zero; // Valid: NonZeroAddress <: address
     }
     
@@ -52,7 +52,7 @@ contract NonZeroAddressSubtyping {
     // Invalid: address -> NonZeroAddress (without guard)
     // ============================================================================
     // NOTE: This should require a runtime guard or come from trusted source
-    // (e.g., std.transaction.sender, std.msg.sender)
+    // (e.g., std.msg.sender(), std.msg.sender())
     
     fn testAddressToNonZeroAddress(addr: address) {
         // This should require a guard unless addr comes from trusted source

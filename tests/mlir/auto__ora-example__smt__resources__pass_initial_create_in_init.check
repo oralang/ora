@@ -1,0 +1,4 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/resources/pass_initial_create_in_init.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @init

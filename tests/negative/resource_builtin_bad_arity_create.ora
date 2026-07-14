@@ -1,0 +1,9 @@
+resource TokenUnit = u256;
+
+contract BadCreateArity {
+    storage var balances: map<address, Resource<TokenUnit>>;
+
+    pub fn bad(to: address) {
+        @create(balances[to]);
+    }
+}

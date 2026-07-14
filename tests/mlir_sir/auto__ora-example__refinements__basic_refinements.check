@@ -2,7 +2,7 @@
 // INPUT: ora-example/refinements/basic_refinements.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @testMinValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":5:21)) attributes {ora.param_names = ["amount"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testMinValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":5:21)) attributes {ora.param_binding_ids = ["file:0:pattern:0"], ora.param_names = ["amount"], ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c1000 = sir.const 1000 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":1:1)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
@@ -12,16 +12,14 @@
 // CHECK-NEXT:     %5 = sir.and %4 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":1:1)
 // CHECK-NEXT:     %6 = sir.bitcast %5 : !sir.u256 : i1 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":1:1)
 // CHECK-NEXT:     %7 = sir.bitcast %6 : i1 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":5:21)
-// CHECK-NEXT:     %8 = sir.iszero %7 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":5:21)
-// CHECK-NEXT:     %9 = sir.iszero %8 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":5:21)
-// CHECK-NEXT:     sir.cond_br %9 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":5:21)
+// CHECK-NEXT:     sir.cond_br %7 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":5:21)
 // CHECK-NEXT:   ^bb1:  // pred: ^bb0
-// CHECK-NEXT:     %10 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/refinements/basic_refinements.ora":5:21)
-// CHECK-NEXT:     sir.revert %10 : !sir.ptr<1>, %0 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":5:21)
+// CHECK-NEXT:     %8 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/refinements/basic_refinements.ora":5:21)
+// CHECK-NEXT:     sir.revert %8 : !sir.ptr<1>, %0 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":5:21)
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/basic_refinements.ora":5:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/basic_refinements.ora":5:5)
-// CHECK-NEXT:   func.func @testMaxValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":10:21)) attributes {ora.param_names = ["limit"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testMaxValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":10:21)) attributes {ora.param_binding_ids = ["file:0:pattern:1"], ora.param_names = ["limit"], ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c10000 = sir.const 10000 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":1:1)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
@@ -31,16 +29,14 @@
 // CHECK-NEXT:     %5 = sir.and %4 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":1:1)
 // CHECK-NEXT:     %6 = sir.bitcast %5 : !sir.u256 : i1 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":1:1)
 // CHECK-NEXT:     %7 = sir.bitcast %6 : i1 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":10:21)
-// CHECK-NEXT:     %8 = sir.iszero %7 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":10:21)
-// CHECK-NEXT:     %9 = sir.iszero %8 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":10:21)
-// CHECK-NEXT:     sir.cond_br %9 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":10:21)
+// CHECK-NEXT:     sir.cond_br %7 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":10:21)
 // CHECK-NEXT:   ^bb1:  // pred: ^bb0
-// CHECK-NEXT:     %10 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/refinements/basic_refinements.ora":10:21)
-// CHECK-NEXT:     sir.revert %10 : !sir.ptr<1>, %0 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":10:21)
+// CHECK-NEXT:     %8 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/refinements/basic_refinements.ora":10:21)
+// CHECK-NEXT:     sir.revert %8 : !sir.ptr<1>, %0 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":10:21)
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/basic_refinements.ora":10:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/basic_refinements.ora":10:5)
-// CHECK-NEXT:   func.func @testInRange(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":15:20)) attributes {ora.param_names = ["rate"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testInRange(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":15:20)) attributes {ora.param_binding_ids = ["file:0:pattern:2"], ora.param_names = ["rate"], ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c10000 = sir.const 10000 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":1:1)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
@@ -54,22 +50,20 @@
 // CHECK-NEXT:     %9 = sir.and %8 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":1:1)
 // CHECK-NEXT:     %10 = sir.bitcast %9 : !sir.u256 : i1 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":1:1)
 // CHECK-NEXT:     %11 = sir.bitcast %10 : i1 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":15:20)
-// CHECK-NEXT:     %12 = sir.iszero %11 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":15:20)
-// CHECK-NEXT:     %13 = sir.iszero %12 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":15:20)
-// CHECK-NEXT:     sir.cond_br %13 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":15:20)
+// CHECK-NEXT:     sir.cond_br %11 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":15:20)
 // CHECK-NEXT:   ^bb1:  // pred: ^bb0
-// CHECK-NEXT:     %14 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/refinements/basic_refinements.ora":15:20)
-// CHECK-NEXT:     sir.revert %14 : !sir.ptr<1>, %0 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":15:20)
+// CHECK-NEXT:     %12 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/refinements/basic_refinements.ora":15:20)
+// CHECK-NEXT:     sir.revert %12 : !sir.ptr<1>, %0 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":15:20)
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/basic_refinements.ora":15:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/basic_refinements.ora":15:5)
-// CHECK-NEXT:   func.func @testScaled(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":20:19)) attributes {ora.param_names = ["amount"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testScaled(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":20:19)) attributes {ora.param_binding_ids = ["file:0:pattern:3"], ora.param_names = ["amount"], ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/basic_refinements.ora":20:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/basic_refinements.ora":20:5)
-// CHECK-NEXT:   func.func @testExact(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":25:18)) attributes {ora.param_names = ["total"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testExact(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":25:18)) attributes {ora.param_binding_ids = ["file:0:pattern:4"], ora.param_names = ["total"], ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/basic_refinements.ora":25:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/basic_refinements.ora":25:5)
-// CHECK-NEXT:   func.func @testNonZero(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":30:20)) attributes {ora.param_names = ["divisor"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testNonZero(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":30:20)) attributes {ora.param_binding_ids = ["file:0:pattern:5"], ora.param_names = ["divisor"], ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.eq %arg0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":1:1)
@@ -77,16 +71,14 @@
 // CHECK-NEXT:     %4 = sir.and %3 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":1:1)
 // CHECK-NEXT:     %5 = sir.bitcast %4 : !sir.u256 : i1 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":1:1)
 // CHECK-NEXT:     %6 = sir.bitcast %5 : i1 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":30:20)
-// CHECK-NEXT:     %7 = sir.iszero %6 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":30:20)
-// CHECK-NEXT:     %8 = sir.iszero %7 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":30:20)
-// CHECK-NEXT:     sir.cond_br %8 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":30:20)
+// CHECK-NEXT:     sir.cond_br %6 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":30:20)
 // CHECK-NEXT:   ^bb1:  // pred: ^bb0
-// CHECK-NEXT:     %9 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/refinements/basic_refinements.ora":30:20)
-// CHECK-NEXT:     sir.revert %9 : !sir.ptr<1>, %0 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":30:20)
+// CHECK-NEXT:     %7 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/refinements/basic_refinements.ora":30:20)
+// CHECK-NEXT:     sir.revert %7 : !sir.ptr<1>, %0 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":30:20)
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/basic_refinements.ora":30:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/basic_refinements.ora":30:5)
-// CHECK-NEXT:   func.func @testBasisPoints(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":35:24)) attributes {ora.param_names = ["fee"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testBasisPoints(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":35:24)) attributes {ora.param_binding_ids = ["file:0:pattern:6"], ora.param_names = ["fee"], ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c10000 = sir.const 10000 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":1:1)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
@@ -100,16 +92,14 @@
 // CHECK-NEXT:     %9 = sir.and %8 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":1:1)
 // CHECK-NEXT:     %10 = sir.bitcast %9 : !sir.u256 : i1 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":1:1)
 // CHECK-NEXT:     %11 = sir.bitcast %10 : i1 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":35:24)
-// CHECK-NEXT:     %12 = sir.iszero %11 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":35:24)
-// CHECK-NEXT:     %13 = sir.iszero %12 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":35:24)
-// CHECK-NEXT:     sir.cond_br %13 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":35:24)
+// CHECK-NEXT:     sir.cond_br %11 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":35:24)
 // CHECK-NEXT:   ^bb1:  // pred: ^bb0
-// CHECK-NEXT:     %14 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/refinements/basic_refinements.ora":35:24)
-// CHECK-NEXT:     sir.revert %14 : !sir.ptr<1>, %0 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":35:24)
+// CHECK-NEXT:     %12 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/refinements/basic_refinements.ora":35:24)
+// CHECK-NEXT:     sir.revert %12 : !sir.ptr<1>, %0 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":35:24)
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/basic_refinements.ora":35:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/basic_refinements.ora":35:5)
-// CHECK-NEXT:   func.func @testSubtyping(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":40:22)) attributes {ora.param_names = ["amount"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testSubtyping(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":40:22)) attributes {ora.param_binding_ids = ["file:0:pattern:7"], ora.param_names = ["amount"], ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c1000 = sir.const 1000 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":1:1)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
@@ -119,16 +109,14 @@
 // CHECK-NEXT:     %5 = sir.and %4 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":1:1)
 // CHECK-NEXT:     %6 = sir.bitcast %5 : !sir.u256 : i1 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":1:1)
 // CHECK-NEXT:     %7 = sir.bitcast %6 : i1 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":40:22)
-// CHECK-NEXT:     %8 = sir.iszero %7 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":40:22)
-// CHECK-NEXT:     %9 = sir.iszero %8 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":40:22)
-// CHECK-NEXT:     sir.cond_br %9 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":40:22)
+// CHECK-NEXT:     sir.cond_br %7 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":40:22)
 // CHECK-NEXT:   ^bb1:  // pred: ^bb0
-// CHECK-NEXT:     %10 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/refinements/basic_refinements.ora":40:22)
-// CHECK-NEXT:     sir.revert %10 : !sir.ptr<1>, %0 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":40:22)
+// CHECK-NEXT:     %8 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/refinements/basic_refinements.ora":40:22)
+// CHECK-NEXT:     sir.revert %8 : !sir.ptr<1>, %0 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":40:22)
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/basic_refinements.ora":40:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/basic_refinements.ora":40:5)
-// CHECK-NEXT:   func.func @testCombined(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":45:21)) -> !sir.u256 attributes {ora.param_names = ["amount"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testCombined(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":45:21)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:0:pattern:8"], ora.param_names = ["amount"], ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 0 : !sir.u256 loc(unknown)
@@ -139,18 +127,16 @@
 // CHECK-NEXT:     %6 = sir.and %5 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":1:1)
 // CHECK-NEXT:     %7 = sir.bitcast %6 : !sir.u256 : i1 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":1:1)
 // CHECK-NEXT:     %8 = sir.bitcast %7 : i1 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":45:21)
-// CHECK-NEXT:     %9 = sir.iszero %8 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":45:21)
-// CHECK-NEXT:     %10 = sir.iszero %9 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":45:21)
-// CHECK-NEXT:     sir.cond_br %10 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":45:21)
+// CHECK-NEXT:     sir.cond_br %8 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":45:21)
 // CHECK-NEXT:   ^bb1:  // pred: ^bb0
-// CHECK-NEXT:     %11 = sir.bitcast %2 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/refinements/basic_refinements.ora":45:21)
-// CHECK-NEXT:     sir.revert %11 : !sir.ptr<1>, %2 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":45:21)
+// CHECK-NEXT:     %9 = sir.bitcast %2 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/refinements/basic_refinements.ora":45:21)
+// CHECK-NEXT:     sir.revert %9 : !sir.ptr<1>, %2 : !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":45:21)
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
-// CHECK-NEXT:     %12 = sir.malloc %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/refinements/basic_refinements.ora":48:9)))
-// CHECK-NEXT:     sir.store %12 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/refinements/basic_refinements.ora":48:9)))
-// CHECK-NEXT:     sir.return %12 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/refinements/basic_refinements.ora":48:9)))
+// CHECK-NEXT:     %10 = sir.malloc %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/refinements/basic_refinements.ora":48:9)))
+// CHECK-NEXT:     sir.store %10 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/refinements/basic_refinements.ora":48:9)))
+// CHECK-NEXT:     sir.return %10 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/refinements/basic_refinements.ora":48:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/basic_refinements.ora":45:5)
-// CHECK-NEXT:   func.func @testVariables(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":52:22)) attributes {ora.param_names = ["total_input"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testVariables(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/basic_refinements.ora":52:22)) attributes {ora.param_binding_ids = ["file:0:pattern:9"], ora.param_names = ["total_input"], ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/basic_refinements.ora":52:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/basic_refinements.ora":52:5)
 // CHECK-NEXT: } loc("{{.*}}/ora-example/refinements/basic_refinements.ora":3:1)

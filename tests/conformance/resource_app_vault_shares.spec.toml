@@ -1,0 +1,53 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "deposit(address,uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000000", 1000, 100]
+returns = {}
+
+[[call]]
+fn = "transferShares(address,address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000000", "0x3000000000000000000000000000000000000000", 35]
+returns = {}
+
+[[call]]
+fn = "redeem(address,uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x3000000000000000000000000000000000000000", 10, 90]
+returns = {}
+
+[[call]]
+fn = "shareBalance(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000000"]
+returns = { u256 = 65 }
+
+[[call]]
+fn = "shareBalance(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x3000000000000000000000000000000000000000"]
+returns = { u256 = 25 }
+
+[[call]]
+fn = "totalShares()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 90 }
+
+[[call]]
+fn = "assets()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 910 }

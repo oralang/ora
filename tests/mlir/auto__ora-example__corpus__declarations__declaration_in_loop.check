@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/declarations/declaration_in_loop.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @let_in_while
+// CHECK-LABEL: func.func @var_in_while
+// CHECK-LABEL: func.func @multi_decl_in_loop
+// CHECK-LABEL: func.func @dependent_decl
+// CHECK-LABEL: func.func @nested_loop_decl
+// CHECK-LABEL: func.func @for_loop_decl
+// CHECK-LABEL: func.func @decl_with_break
+// CHECK-LABEL: func.func @decl_with_continue

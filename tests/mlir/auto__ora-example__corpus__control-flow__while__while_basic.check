@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/control-flow/while/while_basic.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @test_simple_while
+// CHECK-LABEL: func.func @test_while_bool
+// CHECK-LABEL: func.func @test_while_true
+// CHECK-LABEL: func.func @test_while_equality

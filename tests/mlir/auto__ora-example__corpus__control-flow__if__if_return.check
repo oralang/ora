@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/control-flow/if/if_return.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @guard_check
+// CHECK-LABEL: func.func @return_both_branches
+// CHECK-LABEL: func.func @multi_guard
+// CHECK-LABEL: func.func @nested_return
+// CHECK-LABEL: func.func @compute_then_return

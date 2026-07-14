@@ -39,7 +39,7 @@ pub fn buildAtOffset(
     file: *const compiler.ast.AstFile,
     offset: u32,
 ) !types.SelectionRange {
-    var ranges = std.ArrayList(types.Range){};
+    var ranges = std.ArrayList(types.Range).empty;
     defer ranges.deinit(arena);
 
     for (file.root_items) |item_id| {
@@ -129,6 +129,7 @@ fn itemTextRange(item: compiler.ast.nodes.Item) ?compiler.TextRange {
         .Struct => |struct_decl| struct_decl.range,
         .Bitfield => |bitfield_decl| bitfield_decl.range,
         .Enum => |enum_decl| enum_decl.range,
+        .Resource => |resource_decl| resource_decl.range,
         .Trait => |trait_decl| trait_decl.range,
         .Impl => |impl_decl| impl_decl.range,
         .TypeAlias => |type_alias| type_alias.range,

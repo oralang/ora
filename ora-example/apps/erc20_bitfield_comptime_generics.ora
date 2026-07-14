@@ -53,7 +53,7 @@ contract ERC20BitfieldComptimeGenerics {
     }
 
     pub fn init(initial_supply: u256)
-        modifies total_supply, balances[msg.sender], token_flags, account_flags[msg.sender]
+        modifies total_supply, balances[std.msg.sender()], token_flags, account_flags[std.msg.sender()]
     {
         let deployer: NonZeroAddress = std.msg.sender();
 
@@ -98,7 +98,7 @@ contract ERC20BitfieldComptimeGenerics {
     pub fn setPaused(next: bool)
         modifies token_flags
     {
-        let f: TokenFlags = token_flags;
+        var f: TokenFlags = token_flags;
         f.paused = next;
         token_flags = f;
     }
@@ -116,7 +116,7 @@ contract ERC20BitfieldComptimeGenerics {
     }
 
     pub fn approve(spender: NonZeroAddress, amount: u256) -> bool
-        modifies allowances[msg.sender][spender]
+        modifies allowances[std.msg.sender()][spender]
     {
         let owner: address = std.msg.sender();
         allowances[owner][spender] = amount;
@@ -125,7 +125,7 @@ contract ERC20BitfieldComptimeGenerics {
     }
 
     pub fn transfer(to: NonZeroAddress, amount: MinValue<u256, 1>) -> bool
-        modifies balances[msg.sender], balances[to], account_flags[msg.sender]
+        modifies balances[std.msg.sender()], balances[to], account_flags[std.msg.sender()]
         guard balances[to] <= std.constants.U256_MAX - amount
     {
         let sender: NonZeroAddress = std.msg.sender();
@@ -145,7 +145,7 @@ contract ERC20BitfieldComptimeGenerics {
         balances[sender] = sub(u256, book.sender_before, book.amount);
         balances[to] = add(u256, book.recipient_before, book.amount);
 
-        let meta: AccountFlags = account_flags[sender];
+        var meta: AccountFlags = account_flags[sender];
         meta.nonce = meta.nonce +% 1;
         account_flags[sender] = meta;
 
@@ -154,7 +154,7 @@ contract ERC20BitfieldComptimeGenerics {
     }
 
     pub fn transferFrom(from: NonZeroAddress, to: NonZeroAddress, amount: MinValue<u256, 1>) -> bool
-        modifies allowances[from][msg.sender], balances[from], balances[to]
+        modifies allowances[from][std.msg.sender()], balances[from], balances[to]
         guard balances[to] <= std.constants.U256_MAX - amount
     {
         let spender: NonZeroAddress = std.msg.sender();

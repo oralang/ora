@@ -14,8 +14,9 @@ const ConstEvalResult = sema.ConstEvalResult;
 const ConstValue = ora_types.ConstValue;
 
 fn compilerPhaseDebugEnabled() bool {
-    const value = std.process.getEnvVarOwned(std.heap.page_allocator, "ORA_COMPILER_PHASE_DEBUG") catch return false;
-    defer std.heap.page_allocator.free(value);
+    if (!@import("builtin").link_libc) return false;
+    const value_ptr = std.c.getenv("ORA_COMPILER_PHASE_DEBUG") orelse return false;
+    const value = std.mem.span(value_ptr);
     return value.len != 0 and !std.mem.eql(u8, value, "0");
 }
 
@@ -118,19 +119,19 @@ pub const CompilerDb = struct {
             .allocator = allocator,
             .options = .{},
             .sources = source.SourceStore.init(allocator),
-            .syntax_slots = .{},
-            .ast_slots = .{},
-            .module_graph_slots = .{},
-            .item_index_slots = .{},
-            .resolution_slots = .{},
-            .typecheck_slots = .{},
-            .consteval_slots = .{},
-            .consteval_tainted_slots = .{},
-            .consteval_in_progress = .{},
-            .consteval_sentinel_slots = .{},
-            .verification_slots = .{},
-            .module_verification_slots = .{},
-            .hir_slots = .{},
+            .syntax_slots = .empty,
+            .ast_slots = .empty,
+            .module_graph_slots = .empty,
+            .item_index_slots = .empty,
+            .resolution_slots = .empty,
+            .typecheck_slots = .empty,
+            .consteval_slots = .empty,
+            .consteval_tainted_slots = .empty,
+            .consteval_in_progress = .empty,
+            .consteval_sentinel_slots = .empty,
+            .verification_slots = .empty,
+            .module_verification_slots = .empty,
+            .hir_slots = .empty,
         };
     }
 
@@ -289,7 +290,7 @@ pub const CompilerDb = struct {
         const slot = &self.module_graph_slots.items[package_id.index()];
         if (slot.* == null) {
             const package = self.sources.package(package_id);
-            var inputs: std.ArrayList(sema.ModuleGraphInput) = .{};
+            var inputs: std.ArrayList(sema.ModuleGraphInput) = .empty;
             defer inputs.deinit(self.allocator);
             for (package.modules.items) |module_id| {
                 const module = self.sources.module(module_id);
@@ -463,7 +464,7 @@ pub const CompilerDb = struct {
             errdefer result.deinit();
 
             const arena = result.arena.allocator();
-            var facts: std.ArrayList(sema.VerificationFact) = .{};
+            var facts: std.ArrayList(sema.VerificationFact) = .empty;
             defer facts.deinit(arena);
 
             if (ast_file.root_items.len != 0) {
@@ -730,6 +731,8 @@ pub const CompilerDb = struct {
         for (item_regions) |*region| region.* = .none;
         for (item_effects) |*effect| effect.* = .pure;
         @memset(item_modifies, null);
+        const item_call_hints = try arena_allocator.alloc(ast.nodes.CallHint, ast_file.items.len);
+        @memset(item_call_hints, .none);
         for (pattern_types) |*pattern_type| pattern_type.* = sema.LocatedType.unlocated(.{ .unknown = {} });
         for (expr_types) |*expr_type| expr_type.* = .{ .unknown = {} };
         for (body_types) |*body_type| body_type.* = .{ .unknown = {} };
@@ -741,6 +744,7 @@ pub const CompilerDb = struct {
             .item_regions = item_regions,
             .item_effects = item_effects,
             .item_modifies = item_modifies,
+            .item_call_hints = item_call_hints,
             .pattern_types = pattern_types,
             .pattern_initializers = pattern_initializers,
             .pattern_binding_kinds = pattern_binding_kinds,
@@ -769,7 +773,9 @@ pub const CompilerDb = struct {
         return .{
             .context = self,
             .ast_file = astFileForComptime,
+            .module_path = modulePathForComptime,
             .item_index = itemIndexForComptime,
+            .resolution = resolveNamesForComptime,
             .module_typecheck = moduleTypeCheckForComptime,
             .lookup_item = lookupItemForComptime,
             .resolve_import_alias = resolveImportAliasForComptime,
@@ -793,6 +799,7 @@ pub const CompilerDb = struct {
         return .{
             .context = self,
             .ast_file = astFileForComptime,
+            .module_path = modulePathForComptime,
             .item_index = itemIndexForComptime,
             .resolution = resolveNamesForComptime,
             .module_typecheck = moduleTypeCheckForComptime,
@@ -853,6 +860,11 @@ fn constEvalForComptime(context: *anyopaque, module_id: source.ModuleId) anyerro
 fn astFileForComptime(context: *anyopaque, module_id: source.ModuleId) anyerror!*const ast.AstFile {
     const self: *CompilerDb = @ptrCast(@alignCast(context));
     return self.astFile(self.sources.module(module_id).file_id);
+}
+
+fn modulePathForComptime(context: *anyopaque, module_id: source.ModuleId) anyerror![]const u8 {
+    const self: *CompilerDb = @ptrCast(@alignCast(context));
+    return self.sources.file(self.sources.module(module_id).file_id).path;
 }
 
 fn itemIndexForComptime(context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.ItemIndexResult {

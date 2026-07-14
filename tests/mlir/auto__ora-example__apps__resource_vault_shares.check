@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/apps/resource_vault_shares.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @deposit
+// CHECK-LABEL: func.func @transferShares
+// CHECK-LABEL: func.func @redeem
+// CHECK-LABEL: func.func @shareBalance
+// CHECK-LABEL: func.func @totalShares
+// CHECK-LABEL: func.func @assets

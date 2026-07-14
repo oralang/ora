@@ -20,7 +20,7 @@ pub fn build(
 ) !?[]types.DocumentLink {
     if (imports.len == 0) return null;
 
-    var links = std.ArrayList(types.DocumentLink){};
+    var links = std.ArrayList(types.DocumentLink).empty;
     errdefer links.deinit(arena);
 
     for (imports) |import_item| {

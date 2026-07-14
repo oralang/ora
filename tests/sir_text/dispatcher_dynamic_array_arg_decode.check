@@ -23,7 +23,7 @@
 // CHECK: return
 
 // CHECK-LABEL:     bb1 {
-// CHECK: v8 = add v5 a_sum
+// CHECK: v8 = add 0x4 a_sum
 // CHECK: calldatasize
 // CHECK: lt
 // CHECK: => {{.*}} ? @bb2 : @abi_decode_revert_0

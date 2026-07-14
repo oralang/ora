@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/error-union/try_propagation.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @validate
+// CHECK-LABEL: func.func @double
+// CHECK-LABEL: func.func @validate_and_double
+// CHECK-LABEL: func.func @process

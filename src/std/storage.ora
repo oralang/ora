@@ -1,0 +1,9 @@
+comptime const words = @import("std/storage/words");
+
+fn derive(comptime namespace: string) -> StorageSlot {
+    @compileError("std.storage.derive is a compiler intrinsic; call std.storage.derive(namespace, keys...) from user code");
+}
+
+fn range(slot: StorageSlot, comptime len: u256) -> StorageRange {
+    return @storageRange(slot, len);
+}

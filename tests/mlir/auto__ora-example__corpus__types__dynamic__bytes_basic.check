@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/dynamic/bytes_basic.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @setData
+// CHECK-LABEL: func.func @getData
+// CHECK-LABEL: func.func @passthrough
+// CHECK-LABEL: func.func @localBinding

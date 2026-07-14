@@ -1,0 +1,4 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/modifies/pass_staticcall_modifies_empty_frame.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @f

@@ -1,0 +1,47 @@
+comptime const std = @import("std");
+
+resource PointUnit = u256;
+
+contract ResourcePoints {
+    storage var points: map<address, Resource<PointUnit>>;
+    storage var total_awarded: PointUnit;
+    storage var total_spent: PointUnit;
+
+    pub fn award(to: address, amount: PointUnit)
+        modifies points[to], total_awarded
+        requires @amount(points[to]) <= @cast(PointUnit, std.constants.U256_MAX) - amount
+        requires total_awarded <= @cast(PointUnit, std.constants.U256_MAX) - amount
+    {
+        @create(points[to], amount);
+        total_awarded += amount;
+    }
+
+    pub fn transfer(from: address, to: address, amount: PointUnit)
+        modifies points[from], points[to]
+        requires @amount(points[from]) >= amount
+        requires @amount(points[to]) <= @cast(PointUnit, std.constants.U256_MAX) - amount
+    {
+        @move(points[from], points[to], amount);
+    }
+
+    pub fn spend(from: address, amount: PointUnit)
+        modifies points[from], total_spent
+        requires @amount(points[from]) >= amount
+        requires total_spent <= @cast(PointUnit, std.constants.U256_MAX) - amount
+    {
+        @destroy(points[from], amount);
+        total_spent += amount;
+    }
+
+    pub fn balanceOf(owner: address) -> PointUnit {
+        return @amount(points[owner]);
+    }
+
+    pub fn totalAwarded() -> PointUnit {
+        return total_awarded;
+    }
+
+    pub fn totalSpent() -> PointUnit {
+        return total_spent;
+    }
+}

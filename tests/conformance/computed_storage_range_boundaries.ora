@@ -1,0 +1,37 @@
+comptime const std_storage = @import("std/storage");
+
+contract ComputedStorageRangeBoundaries {
+    fn baseSlot(owner: address) -> StorageSlot {
+        return std_storage.derive("ora.test.computed.range", owner);
+    }
+
+    fn payloadRange(owner: address, comptime len: u256) -> StorageRange {
+        return std_storage.range(baseSlot(owner), len);
+    }
+
+    pub fn seed(owner: address)
+        modifies std_storage.range(std_storage.derive("ora.test.computed.range", owner), 4)
+    {
+        let slot: StorageSlot = baseSlot(owner);
+        std_storage.words.store(slot, 0, 11);
+        std_storage.words.store(slot, 1, 22);
+        std_storage.words.store(slot, 2, 33);
+        std_storage.words.store(slot, 3, 44);
+    }
+
+    pub fn erase_zero(owner: address)
+        modifies std_storage.range(std_storage.derive("ora.test.computed.range", owner), 0)
+    {
+        std_storage.words.erase(payloadRange(owner, 0));
+    }
+
+    pub fn erase_two(owner: address)
+        modifies std_storage.range(std_storage.derive("ora.test.computed.range", owner), 2)
+    {
+        std_storage.words.erase(payloadRange(owner, 2));
+    }
+
+    pub fn read_at(owner: address, offset: u256) -> u256 {
+        return std_storage.words.load(baseSlot(owner), offset);
+    }
+}

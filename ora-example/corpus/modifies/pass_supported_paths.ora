@@ -13,8 +13,8 @@ contract Vault {
         modifies total
         modifies config.owner
         modifies balances[owner]
-        modifies balances[msg.sender]
-        modifies balances[tx.origin]
+        modifies balances[std.msg.sender()]
+        modifies balances[std.tx.origin()]
         modifies buckets[42]
         modifies allowances[owner][spender]
         ensures total == value

@@ -115,7 +115,7 @@ LogicalResult ConvertLogOp::matchAndRewrite(
         logOp = rewriter.create<sir::Log4Op>(loc, dataPtr, dataLen, topics[0], topics[1], topics[2], topics[3]);
         break;
     default:
-        llvm_unreachable("topic count checked before log op creation");
+        return rewriter.notifyMatchFailure(op, "event log topic count escaped validation");
     }
     if (auto nameAttr = op.getEventNameAttr())
     {

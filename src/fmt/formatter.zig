@@ -22,6 +22,10 @@ pub const Formatter = struct {
     source: []const u8,
     tokens: []const lib.Token = &.{},
     trivia: []const lib.lexer.TriviaPiece = &.{},
+    /// High-water mark of trivia pieces already emitted inline (same-line
+    /// trailing comments hoisted by formatSemicolon), so emitLeadingComments
+    /// never re-emits them on the next line.
+    trivia_emitted_until: u32 = 0,
     paren_depth: usize = 0,
     bracket_depth: usize = 0,
     pending_space: bool = false,
@@ -69,7 +73,9 @@ pub const Formatter = struct {
         for (self.tokens, 0..) |token, index| {
             if (token.type == .Eof) break;
             const next = self.peekNonEof(index + 1);
-            try self.emitLeadingComments(token);
+            if (self.last_token_type != .At) {
+                try self.emitLeadingComments(token);
+            }
             try self.formatToken(token, next);
         }
 
@@ -92,7 +98,7 @@ pub const Formatter = struct {
         switch (token.type) {
             .LeftBrace => try self.formatLeftBrace(token),
             .RightBrace => try self.formatRightBrace(token, next),
-            .Semicolon => try self.formatSemicolon(),
+            .Semicolon => try self.formatSemicolon(token, next),
             .Comma => try self.formatComma(next),
             .Colon => try self.formatColon(next),
             .Arrow => try self.formatArrow(),
@@ -107,7 +113,9 @@ pub const Formatter = struct {
             },
             else => {
                 try self.emitPreTokenSpacing(token);
-                try self.writer.write(self.originalSpan(token));
+                if (!try self.emitRecoveredKeywordPrefix(token, next)) {
+                    try self.writer.write(self.originalSpan(token));
+                }
                 try self.emitPostTokenSpacing(token, next);
             },
         }
@@ -115,7 +123,7 @@ pub const Formatter = struct {
     }
 
     fn emitLeadingComments(self: *Formatter, token: lib.Token) FormatError!void {
-        var i = token.leading_trivia_start;
+        var i = @max(token.leading_trivia_start, self.trivia_emitted_until);
         const end = token.leading_trivia_start + token.leading_trivia_len;
         var newline_count: u32 = 0;
         while (i < end and i < self.trivia.len) : (i += 1) {
@@ -183,10 +191,37 @@ pub const Formatter = struct {
         self.pending_space = if (next) |n| isBraceTrailer(n.type) else false;
     }
 
-    fn formatSemicolon(self: *Formatter) FormatError!void {
+    fn formatSemicolon(self: *Formatter, token: lib.Token, next: ?lib.Token) FormatError!void {
         try self.writer.write(";");
         self.pending_space = false;
         if (self.paren_depth == 0 and self.bracket_depth == 0) {
+            // A comment on the same line as the semicolon lexes as leading
+            // trivia of the NEXT token; hoist it back before the newline so
+            // `x = 1; // why` keeps its author's layout.
+            if (next) |next_token| {
+                var i = @max(next_token.leading_trivia_start, self.trivia_emitted_until);
+                const end = next_token.leading_trivia_start + next_token.leading_trivia_len;
+                // Skip whitespace pieces; stop at the first newline, comment,
+                // or end — only a comment still on the semicolon's line hoists.
+                while (i < end and i < self.trivia.len and self.trivia[i].kind == .Whitespace) i += 1;
+                if (i < end and i < self.trivia.len) {
+                    const piece = self.trivia[i];
+                    const is_comment = switch (piece.kind) {
+                        .LineComment, .DocLineComment, .BlockComment, .DocBlockComment => true,
+                        else => false,
+                    };
+                    const ends_line = i + 1 >= end or i + 1 >= self.trivia.len or self.trivia[i + 1].kind == .Newline;
+                    if (is_comment and ends_line and piece.span.start_line == token.range.end_line) {
+                        const start: usize = @intCast(piece.span.start_offset);
+                        const stop: usize = @intCast(piece.span.end_offset);
+                        if (start < stop and stop <= self.source.len) {
+                            try self.writer.space();
+                            try self.writer.write(self.source[start..stop]);
+                            self.trivia_emitted_until = i + 1;
+                        }
+                    }
+                }
+            }
             try self.writer.newline();
         } else {
             try self.writer.space();
@@ -286,7 +321,36 @@ pub const Formatter = struct {
         if (written.len == 0 or written[written.len - 1] == ' ' or written[written.len - 1] == '\n') return;
         try self.writer.space();
     }
+
+    fn emitRecoveredKeywordPrefix(self: *Formatter, token: lib.Token, next: ?lib.Token) FormatError!bool {
+        const split = recoveredKeywordPrefix(self.originalSpan(token), token, next) orelse return false;
+        try self.writer.write(split.keyword);
+        try self.writer.space();
+        try self.writer.write(split.suffix);
+        return true;
+    }
 };
+
+const KeywordPrefixSplit = struct {
+    keyword: []const u8,
+    suffix: []const u8,
+};
+
+fn recoveredKeywordPrefix(text: []const u8, token: lib.Token, next: ?lib.Token) ?KeywordPrefixSplit {
+    if (token.type != .Identifier) return null;
+    const keyword = "modifies";
+    if (!std.mem.startsWith(u8, text, keyword)) return null;
+    if (text.len == keyword.len) return null;
+
+    const suffix = text[keyword.len..];
+    if (suffix.len == 0 or !lib.lexer.isIdentifierStart(suffix[0])) return null;
+    const next_token = next orelse return null;
+    switch (next_token.type) {
+        .LeftBracket, .Dot, .Comma, .LeftBrace => {},
+        else => return null,
+    }
+    return .{ .keyword = keyword, .suffix = suffix };
+}
 
 fn isBraceTrailer(token: lib.TokenType) bool {
     return switch (token) {
@@ -305,6 +369,7 @@ fn needsLeadingSpace(current: lib.TokenType, previous: ?lib.TokenType) bool {
 
 fn shouldForceLeadingSpace(current: lib.TokenType, previous: ?lib.TokenType) bool {
     const prev = previous orelse return false;
+    if (isWordBoundaryToken(current) and (isWordBoundaryToken(prev) or canEndExpression(prev))) return true;
     return switch (current) {
         .LeftBrace => switch (prev) {
             .LeftParen, .LeftBracket, .Dot => false,
@@ -347,10 +412,17 @@ fn isKeywordThatNeedsSpaceAfter(source: []const u8, token: lib.Token, next: ?lib
         .Continue,
         .Return,
         .Requires,
+        .Guard,
         .Ensures,
+        .EnsuresOk,
+        .EnsuresErr,
         .Invariant,
+        .Modifies,
+        .Decreases,
+        .Increases,
         .Assume,
         .Havoc,
+        .Inline,
         .Comptime,
         .Import,
         .Struct,
@@ -363,6 +435,7 @@ fn isKeywordThatNeedsSpaceAfter(source: []const u8, token: lib.Token, next: ?lib
         .Staticcall,
         .Errors,
         .Error,
+        .Resource,
         .Try,
         .Catch,
         .Ghost,
@@ -372,6 +445,102 @@ fn isKeywordThatNeedsSpaceAfter(source: []const u8, token: lib.Token, next: ?lib
         .Forall,
         .Exists,
         .Where,
+        => true,
+        else => false,
+    };
+}
+
+fn isWordBoundaryToken(token: lib.TokenType) bool {
+    return switch (token) {
+        .Contract,
+        .Pub,
+        .Fn,
+        .Let,
+        .Var,
+        .Const,
+        .Immutable,
+        .Storage,
+        .Memory,
+        .Tstore,
+        .Init,
+        .Log,
+        .If,
+        .Else,
+        .While,
+        .For,
+        .Break,
+        .Continue,
+        .Return,
+        .Requires,
+        .Guard,
+        .Ensures,
+        .EnsuresOk,
+        .EnsuresErr,
+        .Invariant,
+        .Old,
+        .Result,
+        .Modifies,
+        .Decreases,
+        .Increases,
+        .Assume,
+        .Havoc,
+        .Inline,
+        .Comptime,
+        .As,
+        .Import,
+        .Struct,
+        .Bitfield,
+        .Enum,
+        .Extern,
+        .Trait,
+        .Impl,
+        .Call,
+        .Staticcall,
+        .Errors,
+        .True,
+        .False,
+        .Error,
+        .Resource,
+        .Try,
+        .Catch,
+        .Switch,
+        .Match,
+        .Ghost,
+        .Assert,
+        .Void,
+        .From,
+        .To,
+        .Forall,
+        .Exists,
+        .Where,
+        .U8,
+        .U16,
+        .U32,
+        .U64,
+        .U128,
+        .U160,
+        .U256,
+        .I8,
+        .I16,
+        .I32,
+        .I64,
+        .I128,
+        .I256,
+        .Bool,
+        .Address,
+        .String,
+        .Map,
+        .Slice,
+        .Bytes,
+        .Identifier,
+        .StringLiteral,
+        .RawStringLiteral,
+        .CharacterLiteral,
+        .IntegerLiteral,
+        .BinaryLiteral,
+        .HexLiteral,
+        .AddressLiteral,
+        .BytesLiteral,
         => true,
         else => false,
     };
@@ -393,6 +562,7 @@ fn isAlwaysSpacedOperator(token: lib.TokenType) bool {
         .GreaterEqual,
         .AmpersandEqual,
         .AmpersandAmpersand,
+        .Pipe,
         .PipeEqual,
         .PipePipe,
         .CaretEqual,
@@ -417,7 +587,7 @@ fn isAlwaysSpacedOperator(token: lib.TokenType) bool {
 
 fn isPrefixOperator(token: lib.TokenType, previous: ?lib.TokenType) bool {
     return switch (token) {
-        .Bang, .Tilde => true,
+        .Bang, .Tilde, .At => true,
         .Ampersand, .Star, .Minus => previous == null or !canEndExpression(previous.?),
         else => false,
     };

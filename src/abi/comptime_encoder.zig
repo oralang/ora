@@ -33,7 +33,7 @@ pub fn encodeComptimeValue(
     layout: abi_layout.LayoutNode,
     value: ComptimeAbiValue,
 ) ![]const u8 {
-    var out: std.ArrayList(u8) = .{};
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
     if (!layout.isDynamic()) {
         try appendStaticEncoding(allocator, heap, &out, layout, value);
@@ -61,9 +61,9 @@ fn appendSingleElementTupleEncoding(
     element_layout: abi_layout.LayoutNode,
     value: ComptimeAbiValue,
 ) anyerror!void {
-    var head: std.ArrayList(u8) = .{};
+    var head: std.ArrayList(u8) = .empty;
     defer head.deinit(allocator);
-    var tail: std.ArrayList(u8) = .{};
+    var tail: std.ArrayList(u8) = .empty;
     defer tail.deinit(allocator);
 
     const head_size = element_layout.headSlotWordCount() * 32;
@@ -162,9 +162,9 @@ fn appendTupleEncoding(
 ) anyerror!void {
     if (elements.len == 0) return;
 
-    var head: std.ArrayList(u8) = .{};
+    var head: std.ArrayList(u8) = .empty;
     defer head.deinit(allocator);
-    var tail: std.ArrayList(u8) = .{};
+    var tail: std.ArrayList(u8) = .empty;
     defer tail.deinit(allocator);
 
     var head_size: usize = 0;
@@ -283,9 +283,9 @@ fn appendArrayElementsEncoding(
         return;
     }
 
-    var head: std.ArrayList(u8) = .{};
+    var head: std.ArrayList(u8) = .empty;
     defer head.deinit(allocator);
-    var tail: std.ArrayList(u8) = .{};
+    var tail: std.ArrayList(u8) = .empty;
     defer tail.deinit(allocator);
 
     const head_size = elems.len * element_layout.headSlotWordCount() * 32;

@@ -2,6 +2,7 @@ const std = @import("std");
 const ast = @import("../ast/mod.zig");
 const ora_types = @import("ora_types");
 const builtin = ora_types.builtin;
+const integer_constants = ora_types.integer_constants;
 const model = @import("model.zig");
 const refinements = ora_types.refinement_semantics;
 
@@ -18,6 +19,8 @@ pub fn descriptorFromTypeExpr(allocator: std.mem.Allocator, file: *const ast.Ast
                 .base_type = try storeType(allocator, .{ .address = {} }),
                 .args = &.{},
             } }
+        else if (try resourceDomainDescriptorFromPathName(allocator, file, item_index, path.name)) |resource_domain|
+            resource_domain
         else
             descriptorFromPathName(file, item_index, path.name),
         .Generic => |generic| try descriptorFromGenericType(allocator, file, item_index, generic),
@@ -63,6 +66,8 @@ pub fn descriptorFromPathName(file: *const ast.AstFile, item_index: *const ItemI
     const trimmed = std.mem.trim(u8, name, " \t\n\r");
     if (descriptorFromBuiltinName(trimmed)) |ty| return ty;
     if (parseFixedBytesType(trimmed)) |fixed_bytes| return .{ .fixed_bytes = fixed_bytes };
+    if (std.mem.eql(u8, trimmed, "StorageSlot")) return .{ .storage_slot = {} };
+    if (std.mem.eql(u8, trimmed, "StorageRange")) return .{ .storage_range = {} };
     if (invalidIntegerTypeName(trimmed)) return .{ .unknown = {} };
     if (item_index.lookup(trimmed)) |item_id| {
         return switch (file.item(item_id).*) {
@@ -70,10 +75,24 @@ pub fn descriptorFromPathName(file: *const ast.AstFile, item_index: *const ItemI
             .Struct => .{ .struct_ = .{ .name = trimmed } },
             .Bitfield => .{ .bitfield = .{ .name = trimmed } },
             .Enum => .{ .enum_ = .{ .name = trimmed } },
+            .Resource => .{ .unknown = {} },
             else => .{ .named = .{ .name = trimmed } },
         };
     }
     return .{ .named = .{ .name = trimmed } };
+}
+
+fn resourceDomainDescriptorFromPathName(allocator: std.mem.Allocator, file: *const ast.AstFile, item_index: *const ItemIndexResult, name: []const u8) !?Type {
+    const trimmed = std.mem.trim(u8, name, " \t\n\r");
+    const item_id = item_index.lookup(trimmed) orelse return null;
+    const resource = switch (file.item(item_id).*) {
+        .Resource => |resource| resource,
+        else => return null,
+    };
+    return .{ .resource_domain = .{
+        .name = resource.name,
+        .carrier_type = try storeType(allocator, try descriptorFromTypeExpr(allocator, file, item_index, resource.carrier_type)),
+    } };
 }
 
 pub fn descriptorFromBuiltinName(name: []const u8) ?Type {
@@ -120,7 +139,7 @@ pub fn descriptorFromGenericType(allocator: std.mem.Allocator, file: *const ast.
                 .Type => |type_expr_id| .{ .refinement = .{
                     .name = generic.name,
                     .base_type = try storeType(allocator, try descriptorFromTypeExpr(allocator, file, item_index, type_expr_id)),
-                    .args = try refinementArgsFromAst(allocator, generic.args),
+                    .args = try refinementArgsFromAst(allocator, file, generic.args),
                 } },
                 else => .{ .unknown = {} },
             };
@@ -138,6 +157,15 @@ pub fn descriptorFromGenericType(allocator: std.mem.Allocator, file: *const ast.
         return .{ .error_union = .{
             .payload_type = try storeType(allocator, payload_type),
             .error_types = error_types,
+        } };
+    }
+
+    if (std.mem.eql(u8, generic.name, "Resource")) {
+        if (generic.args.len != 1 or generic.args[0] != .Type) return .{ .unknown = {} };
+        const domain_type = try descriptorFromTypeExpr(allocator, file, item_index, generic.args[0].Type);
+        if (domain_type.kind() != .resource_domain) return .{ .unknown = {} };
+        return .{ .resource_place = .{
+            .domain_type = try storeType(allocator, domain_type),
         } };
     }
 
@@ -168,6 +196,10 @@ pub fn inferItemType(allocator: std.mem.Allocator, file: *const ast.AstFile, ite
         .Struct => |struct_item| .{ .struct_ = .{ .name = struct_item.name } },
         .Bitfield => |bitfield_item| .{ .bitfield = .{ .name = bitfield_item.name } },
         .Enum => |enum_item| .{ .enum_ = .{ .name = enum_item.name } },
+        .Resource => |resource| .{ .resource_domain = .{
+            .name = resource.name,
+            .carrier_type = try storeType(allocator, try descriptorFromTypeExpr(allocator, file, item_index, resource.carrier_type)),
+        } },
         .ErrorDecl => |error_decl| .{ .named = .{ .name = error_decl.name } },
         .TypeAlias => |type_alias| try descriptorFromTypeExpr(allocator, file, item_index, type_alias.target_type),
         .GhostBlock => .{ .unknown = {} },
@@ -190,9 +222,14 @@ pub fn mergeExprType(current: Type, next: Type) Type {
 pub fn typeEql(lhs: Type, rhs: Type) bool {
     if (lhs.kind() != rhs.kind()) return false;
     return switch (lhs) {
-        .unknown, .never, .void, .bool, .comptime_integer, .string, .address, .bytes => true,
+        .unknown, .never, .void, .bool, .comptime_integer, .string, .address, .bytes, .storage_slot, .storage_range => true,
         .fixed_bytes => |left| left.len == rhs.fixed_bytes.len,
         .external_proxy => |left| std.mem.eql(u8, left.trait_name, rhs.external_proxy.trait_name),
+        .resource_domain => |left| blk: {
+            const right = rhs.resource_domain;
+            break :blk std.mem.eql(u8, left.name, right.name) and typeEql(left.carrier_type.*, right.carrier_type.*);
+        },
+        .resource_place => |left| typeEql(left.domain_type.*, rhs.resource_place.domain_type.*),
         .integer => |left| blk: {
             const right = rhs.integer;
             break :blk left.bits == right.bits and left.signed == right.signed and std.meta.eql(left.spelling, right.spelling);
@@ -264,6 +301,8 @@ pub fn typesAssignable(expected_type: Type, actual_type: Type) bool {
     if (actual_type.kind() == .never) return true;
     if (expected_type.kind() == .never) return actual_type.kind() == .never;
     if (typeEql(expected_type, actual_type)) return true;
+    if (expected_type.kind() == .resource_domain or actual_type.kind() == .resource_domain) return false;
+    if (expected_type.kind() == .resource_place or actual_type.kind() == .resource_place) return false;
 
     if (expected_type.kind() == .refinement and actual_type.kind() == .refinement) {
         return refinementSubtypeAssignable(expected_type.refinement, actual_type.refinement);
@@ -406,16 +445,26 @@ fn errorSetContainsAll(expected_errors: []const Type, actual_errors: []const Typ
     return true;
 }
 
-pub fn refinementArgsFromAst(allocator: std.mem.Allocator, args: []const ast.TypeArg) ![]const model.RefinementArg {
+pub fn refinementArgsFromAst(allocator: std.mem.Allocator, file: *const ast.AstFile, args: []const ast.TypeArg) ![]const model.RefinementArg {
     if (args.len == 0) return &.{};
     const semantic_args = try allocator.alloc(model.RefinementArg, args.len);
     for (args, 0..) |arg, index| {
         semantic_args[index] = switch (arg) {
-            .Type => .Type,
+            .Type => |type_expr| if (refinementIntegerConstantArg(file, type_expr)) |text|
+                .{ .Integer = .{ .text = text } }
+            else
+                .Type,
             .Integer => |literal| .{ .Integer = .{ .text = literal.text } },
         };
     }
     return semantic_args;
+}
+
+fn refinementIntegerConstantArg(file: *const ast.AstFile, type_expr: ast.TypeExprId) ?[]const u8 {
+    return switch (file.typeExpr(type_expr).*) {
+        .Path => |path| integer_constants.lookup(path.name),
+        else => null,
+    };
 }
 
 fn refinementArgSliceEql(lhs: []const model.RefinementArg, rhs: []const model.RefinementArg) bool {

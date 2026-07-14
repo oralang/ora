@@ -1,0 +1,8 @@
+contract ComptimeContinueWithoutLoop {
+    pub fn run() -> u256 {
+        comptime {
+            continue;
+        }
+        return 1;
+    }
+}

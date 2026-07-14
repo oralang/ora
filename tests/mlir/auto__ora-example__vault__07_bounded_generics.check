@@ -1,0 +1,5 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/vault/07_bounded_generics.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @inspect_token
+// CHECK-LABEL: func.func @run

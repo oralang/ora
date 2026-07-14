@@ -21,9 +21,18 @@ const refinements = ora_types.refinement_semantics;
 const project_config = @import("config/mod.zig");
 const import_graph = @import("ora_imports");
 const log = @import("log");
+const runtime_checks = @import("mlir/runtime_checks.zig");
+const formal_obligation = @import("formal/obligation.zig");
+const formal_obligation_from_mlir = @import("formal/obligation_from_mlir.zig");
+const formal_obligation_from_z3 = @import("formal/obligation_from_z3.zig");
+const formal_obligation_to_lean = @import("formal/obligation_to_lean.zig");
+const formal_canonical_z3_measure = @import("formal/canonical_z3_measure.zig");
+const formal_dispatcher_table_gate = @import("formal/dispatcher_table_gate.zig");
 const Metrics = lib.metrics.Metrics;
 const allocation_stats = lib.lsp.allocation_stats;
 const ManagedArrayList = std.array_list.Managed;
+
+const proof_sidecar_schema_version: u32 = 1;
 
 /// MLIR-related command line options
 const MlirOptions = struct {
@@ -35,6 +44,9 @@ const MlirOptions = struct {
     opt_level: ?[]const u8,
     output_dir: ?[]const u8,
     output_file: ?[]const u8 = null,
+    /// Final user-facing artifact directory when output_dir points at a
+    /// compiler-owned staging root.
+    artifact_display_dir: ?[]const u8 = null,
     debug_enabled: bool = false,
     debug_info: bool = false,
     canonicalize: bool = true,
@@ -46,6 +58,10 @@ const MlirOptions = struct {
     z3_proofs: bool = false,
     minimize_cores: bool = false,
     keep_proved_checks: bool = false,
+    lean_proofs_requested: bool = false,
+    lean_proofs_mode: cli_args.LeanProofMode = .none,
+    lean_proofs_path: ?[]const u8 = null,
+    measure_canonical_z3: bool = false,
     emit_smt_report: bool = false,
     mlir_pass_pipeline: ?[]const u8 = null,
     mlir_verify_each_pass: bool = false,
@@ -55,12 +71,19 @@ const MlirOptions = struct {
     mlir_print_ir_pass: ?[]const u8 = null,
     mlir_crash_reproducer: ?[]const u8 = null,
     mlir_print_op_on_diagnostic: bool = false,
+    mlir_run_sir_framework_canonicalizer: bool = false,
     cpp_lowering_stub: bool = false,
     persist_ora_mlir: bool = false,
     persist_sir_mlir: bool = false,
     suppress_artifact_logs: bool = false,
+    // D6 optimization profile (gas | balanced | size): the objective the
+    // backend optimizes dispatch shapes for. Orthogonal to opt_level, which
+    // controls MLIR pass effort. Resolution: --optimize > [[targets]] >
+    // [compiler] > balanced (applied at the sinora seam).
+    optimize: ?project_config.OptimizeProfile = null,
     chain_id: u64 = compiler.compile_options.default_chain_id,
     metrics: *Metrics = undefined,
+    process_environ: std.process.Environ = std.process.Environ.empty,
 
     fn getOptimizationLevel(self: MlirOptions) OptimizationLevel {
         if (self.opt_level) |level| {
@@ -87,10 +110,39 @@ const ChainIdSelection = struct {
     }
 };
 
+fn libcEnv(comptime name: [:0]const u8) ?[]const u8 {
+    if (!@import("builtin").link_libc) return null;
+    return if (std.c.getenv(name)) |value| std.mem.span(value) else null;
+}
+
 const CompileContext = struct {
     include_roots: ?[]const []const u8,
     resolver_options: import_graph.ResolverOptions,
     chain_id: u64,
+};
+
+const BuildFileContext = struct {
+    include_roots: ?[]const []const u8 = null,
+    resolver_options: import_graph.ResolverOptions = .{},
+    init_args: ?[]project_config.InitArg = null,
+    output_dir: ?[]u8 = null,
+    chain_id: u64,
+    optimize: ?project_config.OptimizeProfile = null,
+
+    fn deinit(self: *BuildFileContext, allocator: std.mem.Allocator) void {
+        if (self.include_roots) |include_roots| {
+            freeResolvedIncludeRoots(allocator, include_roots);
+            self.include_roots = null;
+        }
+        if (self.init_args) |init_args| {
+            freeCombinedInitArgs(allocator, init_args);
+            self.init_args = null;
+        }
+        if (self.output_dir) |output_dir| {
+            allocator.free(output_dir);
+            self.output_dir = null;
+        }
+    }
 };
 
 fn compileOptionsForChain(chain_id: u64) compiler.compile_options.CompileOptions {
@@ -101,8 +153,8 @@ fn compileOptionsForChainWithMetrics(chain_id: u64, instrumentation: ?*Metrics) 
     return .{ .chain_id = chain_id, .instrumentation = instrumentation };
 }
 
-fn rawArgsRequestMetrics(allocator: std.mem.Allocator) !bool {
-    var iterator = try std.process.argsWithAllocator(allocator);
+fn rawArgsRequestMetrics(args: std.process.Args, allocator: std.mem.Allocator) !bool {
+    var iterator = try std.process.Args.Iterator.initAllocator(args, allocator);
     defer iterator.deinit();
 
     while (iterator.next()) |arg| {
@@ -111,6 +163,24 @@ fn rawArgsRequestMetrics(allocator: std.mem.Allocator) !bool {
         }
     }
     return false;
+}
+
+fn exitCli(code: u8) noreturn {
+    std.process.exit(code);
+}
+
+fn collectProcessArgs(allocator: std.mem.Allocator, args: std.process.Args) ![]const []const u8 {
+    var iterator = try std.process.Args.Iterator.initAllocator(args, allocator);
+    defer iterator.deinit();
+
+    var list: std.ArrayList([]const u8) = .empty;
+    errdefer list.deinit(allocator);
+
+    while (iterator.next()) |arg| {
+        try list.append(allocator, arg);
+    }
+
+    return list.toOwnedSlice(allocator);
 }
 
 const OptimizationLevel = enum {
@@ -133,6 +203,59 @@ const Subcommand = enum {
     Debug,
     Fmt,
 };
+
+fn hasMlirPipelineDebugOptions(options: cli_args.CliOptions) bool {
+    return options.mlir_pass_pipeline != null or
+        options.mlir_verify_each_pass or
+        options.mlir_pass_timing or
+        options.mlir_print_ir != null or
+        options.mlir_print_ir_pass != null or
+        options.mlir_crash_reproducer != null or
+        options.mlir_print_op_on_diagnostic;
+}
+
+fn mlirPassStatisticsTotalWork(stats: @import("mlir_c_api").c.OraMlirPassStatisticsC) u64 {
+    return stats.ora_functions_canonicalized +
+        stats.ora_functions_cse_processed +
+        stats.ora_storage_reads_reused +
+        stats.ora_calls_inlined +
+        stats.ora_source_inline_failures +
+        stats.sir_constants_deduplicated +
+        stats.sir_unused_allocas_removed +
+        stats.sir_unused_loads_removed +
+        stats.sir_unused_pure_ops_removed +
+        stats.sir_framework_functions_processed +
+        stats.ora_symbols_dced;
+}
+
+fn recordMlirPassStatistics(metrics: *Metrics, stats: @import("mlir_c_api").c.OraMlirPassStatisticsC) void {
+    metrics.addCounter("mlir.func-canon", stats.ora_functions_canonicalized);
+    metrics.addCounter("mlir.func-cse", stats.ora_functions_cse_processed);
+    metrics.addCounter("mlir.sload-cse", stats.ora_storage_reads_reused);
+    metrics.addCounter("mlir.inline", stats.ora_calls_inlined);
+    metrics.addCounter("mlir.inline-fail", stats.ora_source_inline_failures);
+    metrics.addCounter("mlir.sir-const-dedup", stats.sir_constants_deduplicated);
+    metrics.addCounter("mlir.sir-rm-alloca", stats.sir_unused_allocas_removed);
+    metrics.addCounter("mlir.sir-rm-load", stats.sir_unused_loads_removed);
+    metrics.addCounter("mlir.sir-rm-pure", stats.sir_unused_pure_ops_removed);
+    metrics.addCounter("mlir.sir-fw-funcs", stats.sir_framework_functions_processed);
+    metrics.addCounter("mlir.symbol-dce", stats.ora_symbols_dced);
+}
+
+fn setMlirModuleBoolAttr(ctx: @import("mlir_c_api").c.MlirContext, module: @import("mlir_c_api").c.MlirModule, name: []const u8) void {
+    const c = @import("mlir_c_api").c;
+    const attr = c.oraBoolAttrCreate(ctx, true);
+    c.oraOperationSetAttributeByName(
+        c.oraModuleGetOperation(module),
+        c.oraStringRefCreate(name.ptr, name.len),
+        attr,
+    );
+}
+
+fn enableSirFrameworkCanonicalizerIfRequested(ctx: @import("mlir_c_api").c.MlirContext, module: @import("mlir_c_api").c.MlirModule, options: MlirOptions) void {
+    if (!options.mlir_run_sir_framework_canonicalizer) return;
+    setMlirModuleBoolAttr(ctx, module, "ora.phase0.run_sir_framework_canonicalizer");
+}
 
 const DebugCliOptions = struct {
     filtered_args: std.ArrayList([]const u8),
@@ -160,9 +283,9 @@ const DebugCliOptions = struct {
 
     fn init() DebugCliOptions {
         return .{
-            .filtered_args = .{},
-            .init_arg_values = .{},
-            .arg_values = .{},
+            .filtered_args = .empty,
+            .init_arg_values = .empty,
+            .arg_values = .empty,
         };
     }
 
@@ -391,49 +514,50 @@ fn parseDebugCliOptions(allocator: std.mem.Allocator, args: []const []const u8) 
     return opts;
 }
 
-fn initProjectLayout(target_dir: []const u8) !void {
+fn initProjectLayout(io: std.Io, target_dir: []const u8) !void {
+    const cwd = std.Io.Dir.cwd();
     var exists = true;
-    std.fs.cwd().access(target_dir, .{}) catch |err| switch (err) {
+    cwd.access(io, target_dir, .{}) catch |err| switch (err) {
         error.FileNotFound => exists = false,
         else => return err,
     };
 
     if (!exists) {
-        try std.fs.cwd().makePath(target_dir);
+        try cwd.createDirPath(io, target_dir);
     }
 
-    var root_dir = std.fs.cwd().openDir(target_dir, .{ .iterate = true }) catch |err| switch (err) {
+    var root_dir = cwd.openDir(io, target_dir, .{ .iterate = true }) catch |err| switch (err) {
         error.NotDir => return error.InitTargetIsFile,
         else => return err,
     };
-    defer root_dir.close();
+    defer root_dir.close(io);
 
     var iter = root_dir.iterate();
-    if ((try iter.next()) != null) {
+    if ((try iter.next(io)) != null) {
         return error.InitTargetNotEmpty;
     }
 
-    try root_dir.makePath("contracts");
-    try root_dir.writeFile(.{
+    try root_dir.createDirPath(io, "contracts");
+    try root_dir.writeFile(io, .{
         .sub_path = "ora.toml",
         .data = InitTemplates.ora_toml,
     });
-    try root_dir.writeFile(.{
+    try root_dir.writeFile(io, .{
         .sub_path = "contracts/main.ora",
         .data = InitTemplates.main_contract,
     });
-    try root_dir.writeFile(.{
+    try root_dir.writeFile(io, .{
         .sub_path = "README.md",
         .data = InitTemplates.readme_md,
     });
 }
 
-fn runInitCommand(target_dir: []const u8) !void {
+fn runInitCommand(io: std.Io, target_dir: []const u8) !void {
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    try initProjectLayout(target_dir);
+    try initProjectLayout(io, target_dir);
 
     try stdout.print("Initialized Ora project in {s}\n", .{target_dir});
     try stdout.print("Next step: cd {s} && ora build\n", .{target_dir});
@@ -445,46 +569,47 @@ fn runInitCommand(target_dir: []const u8) !void {
 // ============================================================================
 
 /// Ora CLI application
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const backing_allocator = gpa.allocator();
-    const metrics_requested = try rawArgsRequestMetrics(backing_allocator);
+    const metrics_requested = try rawArgsRequestMetrics(init.minimal.args, backing_allocator);
     var counting_allocator = allocation_stats.CountingAllocator.init(backing_allocator);
     const allocator = if (metrics_requested) counting_allocator.allocator() else backing_allocator;
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try collectProcessArgs(allocator, init.minimal.args);
+    defer allocator.free(args);
 
     if (args.len < 2) {
-        try printUsage();
+        try printUsage(io);
         return;
     }
 
     if (std.mem.eql(u8, args[1], "-h") or std.mem.eql(u8, args[1], "--help")) {
-        try printUsage();
+        try printUsage(io);
         return;
     }
 
     if (args.len >= 2 and std.mem.eql(u8, args[1], "init")) {
         if (args.len == 3 and (std.mem.eql(u8, args[2], "-h") or std.mem.eql(u8, args[2], "--help"))) {
-            try printUsage();
+            try printUsage(io);
             return;
         }
         if (args.len > 3) {
             std.debug.print("error: init accepts at most one optional <path>\n", .{});
-            try printUsage();
-            std.process.exit(2);
+            try printUsage(io);
+            exitCli(2);
         }
         const target_dir = if (args.len == 3) args[2] else ".";
-        runInitCommand(target_dir) catch |err| switch (err) {
+        runInitCommand(io, target_dir) catch |err| switch (err) {
             error.InitTargetNotEmpty => {
                 std.debug.print("error: init target '{s}' is not empty\n", .{target_dir});
-                std.process.exit(2);
+                exitCli(2);
             },
             error.InitTargetIsFile => {
                 std.debug.print("error: init target '{s}' is a file, expected directory\n", .{target_dir});
-                std.process.exit(2);
+                exitCli(2);
             },
             else => return err,
         };
@@ -510,13 +635,13 @@ pub fn main() !void {
     var debug_cli: ?DebugCliOptions = null;
     defer if (debug_cli) |*opts| opts.deinit(allocator);
 
-    var parse_args: std.ArrayList([]const u8) = .{};
+    var parse_args: std.ArrayList([]const u8) = .empty;
     defer parse_args.deinit(allocator);
     if (subcommand == .Debug) {
         debug_cli = parseDebugCliOptions(allocator, args_to_parse) catch |err| {
             std.debug.print("error: invalid debug arguments: {s}\n", .{@errorName(err)});
-            try printUsage();
-            std.process.exit(2);
+            try printUsage(io);
+            exitCli(2);
         };
         try parse_args.appendSlice(allocator, debug_cli.?.filtered_args.items);
     } else {
@@ -524,16 +649,23 @@ pub fn main() !void {
     }
 
     var parsed = cli_args.parseArgs(parse_args.items) catch |err| {
-        std.debug.print("error: invalid arguments: {s}\n", .{@errorName(err)});
-        try printUsage();
-        std.process.exit(2);
+        if (err == error.UnsupportedLeanProofMode) {
+            std.debug.print(
+                "error: --lean-proofs=kernel/both is a repository check, not a contract compilation mode; run `zig build check-formal-sync`\n",
+                .{},
+            );
+        } else {
+            std.debug.print("error: invalid arguments: {s}\n", .{@errorName(err)});
+        }
+        try printUsage(io);
+        exitCli(2);
     };
 
     if (subcommand == .Fmt) {
         parsed.fmt = true;
     }
     if (parsed.show_help) {
-        try printUsage();
+        try printUsage(io);
         return;
     }
     if (parsed.show_version) {
@@ -567,6 +699,10 @@ pub fn main() !void {
     const z3_proofs: bool = parsed.z3_proofs;
     const minimize_cores: bool = parsed.minimize_cores;
     const keep_proved_checks: bool = parsed.keep_proved_checks;
+    const lean_proofs_requested: bool = parsed.lean_proofs_requested;
+    const lean_proofs_mode: cli_args.LeanProofMode = parsed.lean_proofs_mode;
+    const lean_proofs_path: ?[]const u8 = parsed.lean_proofs_path;
+    const measure_canonical_z3: bool = parsed.measure_canonical_z3;
     const emit_smt_report: bool = parsed.emit_smt_report;
     const mlir_pass_pipeline: ?[]const u8 = parsed.mlir_pass_pipeline;
     const mlir_verify_each_pass: bool = parsed.mlir_verify_each_pass;
@@ -576,12 +712,13 @@ pub fn main() !void {
     const mlir_print_ir_pass: ?[]const u8 = parsed.mlir_print_ir_pass;
     const mlir_crash_reproducer: ?[]const u8 = parsed.mlir_crash_reproducer;
     const mlir_print_op_on_diagnostic: bool = parsed.mlir_print_op_on_diagnostic;
+    const mlir_run_sir_framework_canonicalizer: bool = parsed.mlir_run_sir_framework_canonicalizer;
     const cpp_lowering_stub: bool = parsed.cpp_lowering_stub;
     var debug_enabled: bool = parsed.debug;
     const debug_info: bool = parsed.debug_info;
     if (!debug_enabled) {
-        if (std.posix.getenv("ORA_DEBUG")) |env_value| {
-            if (env_value[0] != 0 and env_value[0] != '0') {
+        if (init.environ_map.get("ORA_DEBUG")) |env_value| {
+            if (env_value.len != 0 and env_value[0] != '0') {
                 debug_enabled = true;
             }
         }
@@ -607,14 +744,23 @@ pub fn main() !void {
     if (fmt) {
         if (output_dir != null or output_file != null or hasEmitFlags(parsed)) {
             std.debug.print("error: fmt mode accepts only fmt options and an input path.\n", .{});
-            std.process.exit(2);
+            exitCli(2);
         }
         if (input_file == null) {
             std.debug.print("error: fmt requires an input file or directory\n", .{});
-            try printUsage();
-            std.process.exit(2);
+            try printUsage(io);
+            exitCli(2);
         }
-        try runFmt(allocator, input_file.?, fmt_check, fmt_diff, fmt_stdout, fmt_width);
+        runFmt(allocator, input_file.?, fmt_check, fmt_diff, fmt_stdout, fmt_width) catch |err| switch (err) {
+            error.FormatCheckFailed,
+            error.FormatInputAccessFailed,
+            error.FormatInputReadFailed,
+            => exitCli(1),
+            error.InvalidFmtStdoutDirectory,
+            error.FormatterFailed,
+            => exitCli(2),
+            else => return err,
+        };
         return;
     }
 
@@ -628,49 +774,55 @@ pub fn main() !void {
     };
     if (command_kind == .Build and emit_flags_requested) {
         std.debug.print("error: build mode does not accept emit selectors. Use 'ora emit --emit=<list> ...' for debug outputs.\n", .{});
-        std.process.exit(2);
+        exitCli(2);
     }
 
     if (command_kind != .Fmt and hasFmtFlags(parsed)) {
         std.debug.print("error: formatter options require 'ora fmt'.\n", .{});
-        std.process.exit(2);
+        exitCli(2);
     }
 
     if (output_dir) |dir| {
         if (bytecodeFileExtension(dir)) {
             std.debug.print("error: '-o/--out-dir' expects a directory; use '--out-file' for '{s}'.\n", .{dir});
-            std.process.exit(2);
+            exitCli(2);
         }
     }
 
     if (output_file != null and command_kind != .Emit) {
         std.debug.print("error: --out-file is only valid with 'ora emit --emit=bytecode'.\n", .{});
-        std.process.exit(2);
+        exitCli(2);
     }
 
     if (output_file != null and (!parsed.emit_bytecode or emitOutputCount(parsed) != 1)) {
         std.debug.print("error: --out-file requires exactly '--emit=bytecode'.\n", .{});
-        std.process.exit(2);
+        exitCli(2);
+    }
+
+    if (output_file != null and output_dir != null) {
+        std.debug.print("error: --out-file cannot be combined with '-o/--out-dir'.\n", .{});
+        exitCli(2);
     }
 
     if (command_kind == .Build and !verify_z3) {
         std.debug.print("error: build mode requires SMT verification; '--no-verify' is not supported.\n", .{});
-        std.process.exit(2);
+        exitCli(2);
+    }
+
+    if (measure_canonical_z3 and !verify_z3) {
+        std.debug.print("error: --measure-canonical-z3 requires SMT verification; remove --no-verify.\n", .{});
+        exitCli(2);
     }
 
     if (command_kind == .Debug and parsed.input_file == null) {
         std.debug.print("error: debug requires an input file.\n", .{});
-        std.process.exit(2);
+        exitCli(2);
     }
 
-    if ((mlir_verify_each_pass or mlir_pass_timing) and mlir_pass_pipeline == null) {
-        std.debug.print("error: MLIR debug options verify-each and timing require --mlir-pass-pipeline.\n", .{});
-        std.process.exit(2);
-    }
-
-    if (mlir_print_ir_pass != null and mlir_print_ir == null) {
-        std.debug.print("error: MLIR debug option print-ir-pass requires print-ir:<mode>.\n", .{});
-        std.process.exit(2);
+    if (hasMlirPipelineDebugOptions(parsed)) {
+        std.debug.print("error: MLIR pass/debug options other than statistics are reserved until Ora's built-in MLIR debug plumbing is wired.\n", .{});
+        std.debug.print("hint: use --mlir-debug=statistics for supported MLIR pass statistics today.\n", .{});
+        exitCli(2);
     }
 
     if (command_kind == .Emit) {
@@ -683,6 +835,14 @@ pub fn main() !void {
         }
     }
 
+    const cli_optimize: ?project_config.OptimizeProfile = if (parsed.optimize) |raw|
+        project_config.optimizeProfileFromString(raw) catch {
+            std.debug.print("error: invalid --optimize value '{s}' (expected gas|balanced|size)\n", .{raw});
+            exitCli(2);
+        }
+    else
+        null;
+
     // create MLIR options structure
     const mlir_options = MlirOptions{
         .emit_mlir = emit_mlir,
@@ -691,6 +851,7 @@ pub fn main() !void {
         .emit_bytecode = emit_bytecode,
         .emit_cfg_mode = emit_cfg_mode,
         .opt_level = mlir_opt_level,
+        .optimize = cli_optimize,
         .output_dir = output_dir,
         .output_file = output_file,
         .debug_enabled = debug_enabled,
@@ -704,6 +865,10 @@ pub fn main() !void {
         .z3_proofs = z3_proofs,
         .minimize_cores = minimize_cores,
         .keep_proved_checks = keep_proved_checks,
+        .lean_proofs_requested = lean_proofs_requested,
+        .lean_proofs_mode = lean_proofs_mode,
+        .lean_proofs_path = lean_proofs_path,
+        .measure_canonical_z3 = measure_canonical_z3,
         .emit_smt_report = emit_smt_report,
         .mlir_pass_pipeline = mlir_pass_pipeline,
         .mlir_verify_each_pass = mlir_verify_each_pass,
@@ -713,17 +878,24 @@ pub fn main() !void {
         .mlir_print_ir_pass = mlir_print_ir_pass,
         .mlir_crash_reproducer = mlir_crash_reproducer,
         .mlir_print_op_on_diagnostic = mlir_print_op_on_diagnostic,
+        .mlir_run_sir_framework_canonicalizer = mlir_run_sir_framework_canonicalizer,
         .cpp_lowering_stub = cpp_lowering_stub,
         .persist_ora_mlir = false,
         .persist_sir_mlir = false,
         .chain_id = cli_chain_id orelse compiler.compile_options.default_chain_id,
         .metrics = &metrics,
+        .process_environ = init.minimal.environ,
     };
 
     if (command_kind == .Debug) {
         const debug_options = debug_cli.?;
         const file_path = parsed.input_file.?;
-        const compile_context = try discoverCompileContextForFile(allocator, file_path, chain_ids);
+        const compile_context = discoverCompileContextForFile(allocator, file_path, chain_ids) catch |err| switch (err) {
+            error.ProjectConfigLoadFailed,
+            error.ProjectTargetMatchFailed,
+            error.ProjectIncludeRootsFailed,
+            => exitCli(2),
+        };
         defer if (compile_context.include_roots) |include_roots| {
             freeResolvedIncludeRoots(allocator, include_roots);
         };
@@ -758,198 +930,165 @@ pub fn main() !void {
             return;
         }
 
-        const artifact_root = try runDebugArtifacts(
+        const artifact_root = runDebugArtifacts(
             allocator,
             file_path,
             parsed.output_dir,
             debug_mlir_options,
             compile_context.resolver_options,
-        );
+        ) catch |err| switch (err) {
+            error.CompilerCompileFailed, error.ArtifactEmissionBlocked => exitCli(1),
+            error.InvalidGeneratedMlir => exitCli(2),
+            else => return err,
+        };
         defer allocator.free(artifact_root);
 
         if (debug_options.no_tui) return;
 
-        {
-            try launchDebuggerTui(
-                allocator,
-                file_path,
-                artifact_root,
-                debug_options.init_signature,
-                debug_options.init_arg_values.items,
-                debug_options.init_calldata_hex,
-                debug_options.signature,
-                debug_options.arg_values.items,
-                debug_options.calldata_hex,
-                debug_options.gas_limit,
-                debug_options.max_steps,
-                debug_options.deploy_step_cap,
-                debug_options.artifact_max_bytes,
-            );
-        }
+        const debugger_exit_code = try launchDebuggerTui(
+            allocator,
+            file_path,
+            artifact_root,
+            debug_options.init_signature,
+            debug_options.init_arg_values.items,
+            debug_options.init_calldata_hex,
+            debug_options.signature,
+            debug_options.arg_values.items,
+            debug_options.calldata_hex,
+            debug_options.gas_limit,
+            debug_options.max_steps,
+            debug_options.deploy_step_cap,
+            debug_options.artifact_max_bytes,
+        );
+        if (debugger_exit_code != 0) exitCli(debugger_exit_code);
         return;
     }
 
     if (command_kind == .Build) {
-        var matched_include_roots: ?[]const []const u8 = null;
-        defer if (matched_include_roots) |include_roots| {
-            freeResolvedIncludeRoots(allocator, include_roots);
-        };
-        var matched_init_args: ?[]project_config.InitArg = null;
-        defer if (matched_init_args) |init_args| {
-            freeCombinedInitArgs(allocator, init_args);
-        };
-        var matched_output_dir: ?[]u8 = null;
-        defer if (matched_output_dir) |out_dir| {
-            allocator.free(out_dir);
-        };
-
-        var build_resolver_options: import_graph.ResolverOptions = .{};
-        var build_output_dir: ?[]const u8 = output_dir;
-        var build_chain_id = mlir_options.chain_id;
+        var build_file_context: ?BuildFileContext = null;
+        defer if (build_file_context) |*context| context.deinit(allocator);
         if (input_file) |build_file_path| {
-            const start_dir = std.fs.path.dirname(build_file_path) orelse ".";
-            const loaded_opt = project_config.loadDiscoveredFromStartDir(allocator, start_dir) catch |err| {
-                std.debug.print("error: failed to load ora.toml: {s}\n", .{@errorName(err)});
-                std.process.exit(2);
+            build_file_context = resolveBuildFileContext(
+                allocator,
+                build_file_path,
+                output_dir,
+                mlir_options.chain_id,
+                chain_ids,
+            ) catch |err| switch (err) {
+                error.ProjectConfigLoadFailed,
+                error.ProjectTargetMatchFailed,
+                error.ProjectIncludeRootsFailed,
+                error.ProjectOutputDirResolveFailed,
+                => exitCli(2),
+                else => return err,
             };
-
-            if (loaded_opt) |loaded_value| {
-                var loaded = loaded_value;
-                defer loaded.deinit(allocator);
-
-                matched_init_args = try combineInitArgSlices(allocator, loaded.config.compiler_init_args, &.{});
-
-                const target_idx_opt = project_config.findMatchingTargetIndex(allocator, &loaded, build_file_path) catch |err| {
-                    std.debug.print("error: failed to match target in ora.toml: {s}\n", .{@errorName(err)});
-                    std.process.exit(2);
-                };
-
-                const target_chain_id = if (target_idx_opt) |target_idx| loaded.config.targets[target_idx].chain_id else null;
-                build_chain_id = chain_ids.resolve(loaded.config.compiler_chain_id, target_chain_id);
-
-                if (target_idx_opt) |target_idx| {
-                    const target = loaded.config.targets[target_idx];
-                    if (matched_init_args) |init_args| {
-                        freeCombinedInitArgs(allocator, init_args);
-                        matched_init_args = null;
-                    }
-                    if (target.kind == .contract) {
-                        matched_init_args = try combineInitArgSlices(allocator, loaded.config.compiler_init_args, target.init_args);
-                    } else {
-                        matched_init_args = try allocator.alloc(project_config.InitArg, 0);
-                    }
-                    matched_include_roots = resolveIncludeRootsForTarget(allocator, loaded.config_dir, target.include_paths) catch |err| {
-                        std.debug.print("error: failed to resolve include_paths for target '{s}': {s}\n", .{ target.name, @errorName(err) });
-                        std.process.exit(2);
-                    };
-                    build_resolver_options.include_roots = matched_include_roots.?;
-
-                    if (build_output_dir == null) {
-                        if (target.output_dir) |target_out| {
-                            matched_output_dir = project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, target_out) catch |err| {
-                                std.debug.print("error: failed to resolve target output_dir for '{s}': {s}\n", .{ target.name, @errorName(err) });
-                                std.process.exit(2);
-                            };
-                        } else {
-                            const base_output = if (loaded.config.compiler_output_dir) |compiler_out|
-                                project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, compiler_out) catch |err| {
-                                    std.debug.print("error: failed to resolve compiler.output_dir: {s}\n", .{@errorName(err)});
-                                    std.process.exit(2);
-                                }
-                            else
-                                project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, "artifacts") catch |err| {
-                                    std.debug.print("error: failed to resolve default project output_dir: {s}\n", .{@errorName(err)});
-                                    std.process.exit(2);
-                                };
-                            defer allocator.free(base_output);
-
-                            if (loaded.config.targets.len > 1) {
-                                matched_output_dir = std.fs.path.join(allocator, &.{ base_output, target.name }) catch {
-                                    std.debug.print("error: failed to allocate target output path\n", .{});
-                                    std.process.exit(2);
-                                };
-                            } else {
-                                matched_output_dir = allocator.dupe(u8, base_output) catch {
-                                    std.debug.print("error: failed to allocate target output path\n", .{});
-                                    std.process.exit(2);
-                                };
-                            }
-                        }
-                        build_output_dir = matched_output_dir.?;
-                    }
-                } else if (build_output_dir == null) {
-                    const base_output = if (loaded.config.compiler_output_dir) |compiler_out|
-                        project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, compiler_out) catch |err| {
-                            std.debug.print("error: failed to resolve compiler.output_dir: {s}\n", .{@errorName(err)});
-                            std.process.exit(2);
-                        }
-                    else
-                        project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, "artifacts") catch |err| {
-                            std.debug.print("error: failed to resolve default project output_dir: {s}\n", .{@errorName(err)});
-                            std.process.exit(2);
-                        };
-                    defer allocator.free(base_output);
-
-                    matched_output_dir = std.fs.path.join(allocator, &.{ base_output, std.fs.path.stem(build_file_path) }) catch {
-                        std.debug.print("error: failed to allocate default project output path\n", .{});
-                        std.process.exit(2);
-                    };
-                    build_output_dir = matched_output_dir.?;
-                }
-            }
         }
 
         var build_mlir_options = mlir_options;
-        build_mlir_options.chain_id = build_chain_id;
+        if (build_file_context) |context| {
+            build_mlir_options.chain_id = context.chain_id;
+            if (build_mlir_options.optimize == null) build_mlir_options.optimize = context.optimize;
+        }
 
         const build_result = if (input_file) |build_file_path|
             runBuildArtifacts(
                 allocator,
                 build_file_path,
-                build_output_dir,
+                if (build_file_context) |context| context.output_dir orelse output_dir else output_dir,
                 build_mlir_options,
-                build_resolver_options,
-                if (matched_init_args) |init_args| init_args else @as([]const project_config.InitArg, &.{}),
+                if (build_file_context) |context| context.resolver_options else @as(import_graph.ResolverOptions, .{}),
+                if (build_file_context) |context| context.init_args orelse @as([]const project_config.InitArg, &.{}) else @as([]const project_config.InitArg, &.{}),
             )
         else
             runBuildFromDiscoveredConfig(allocator, output_dir, mlir_options, chain_ids);
 
         var stderr_buffer_build: [1024]u8 = undefined;
-        var stderr_writer_build = std.fs.File.stderr().writer(&stderr_buffer_build);
+        var stderr_writer_build = std.Io.File.stderr().writer(std.Io.Threaded.global_single_threaded.io(), &stderr_buffer_build);
         const stderr_build = &stderr_writer_build.interface;
         try metrics.report(stderr_build);
         try stderr_build.flush();
 
         build_result catch |err| switch (err) {
-            error.VerificationFailed => std.process.exit(1),
+            error.CompilerCompileFailed, error.VerificationFailed => exitCli(1),
+            error.ArtifactEmissionBlocked => exitCli(1),
+            error.InvalidGeneratedMlir,
+            error.InvalidBuildOutputDirectory,
+            error.ProjectConfigLoadFailed,
+            error.MissingProjectConfig,
+            => exitCli(2),
             else => return err,
         };
         return;
     }
 
     if (input_file == null) {
-        try printUsage();
+        try printUsage(io);
         return;
     }
 
     const file_path = input_file.?;
 
-    const compile_context = try discoverCompileContextForFile(allocator, file_path, chain_ids);
+    const compile_context = discoverCompileContextForFile(allocator, file_path, chain_ids) catch |err| switch (err) {
+        error.ProjectConfigLoadFailed,
+        error.ProjectTargetMatchFailed,
+        error.ProjectIncludeRootsFailed,
+        => exitCli(2),
+    };
     defer if (compile_context.include_roots) |include_roots| {
         freeResolvedIncludeRoots(allocator, include_roots);
     };
 
+    const direct_emit_stages_output_dir = output_dir != null and
+        (emit_abi or emit_abi_solidity or emit_abi_extras or emit_mlir or emit_mlir_sir or emit_cfg or emit_sir_text or emit_bytecode or emit_smt_report);
+    const direct_emit_stages_output_file = output_file != null and emit_bytecode;
+    var direct_emit_staging_root: ?[]u8 = null;
+    var direct_emit_staged_output_file: ?[]u8 = null;
+    var direct_emit_verification_failed = false;
+    defer if (direct_emit_staged_output_file) |path| allocator.free(path);
+    defer discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
+    const emit_output_dir = if (direct_emit_stages_output_dir) blk: {
+        try invalidateDirectEmitOutputs(allocator, std.fs.path.stem(file_path), output_dir.?);
+        direct_emit_staging_root = try createArtifactStagingRoot(allocator, output_dir.?);
+        break :blk direct_emit_staging_root.?;
+    } else output_dir;
+    const emit_output_file = if (direct_emit_stages_output_file) blk: {
+        const final_file = output_file.?;
+        try invalidateDirectEmitOutputFile(allocator, final_file);
+        const output_file_dir = std.fs.path.dirname(final_file) orelse ".";
+        direct_emit_staging_root = try createArtifactStagingRoot(allocator, output_file_dir);
+        direct_emit_staged_output_file = try std.fs.path.join(allocator, &[_][]const u8{
+            direct_emit_staging_root.?,
+            std.fs.path.basename(final_file),
+        });
+        break :blk direct_emit_staged_output_file.?;
+    } else output_file;
+
     if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_sir_text and !emit_bytecode and !emit_cfg and !emit_smt_report and !emit_abi and !emit_abi_solidity and !emit_abi_extras) {
         std.debug.print("error: emit requires an explicit --emit=<list> mode.\n", .{});
-        std.process.exit(2);
+        exitCli(2);
     }
 
     var emit_mlir_options = mlir_options;
     emit_mlir_options.chain_id = compile_context.chain_id;
+    emit_mlir_options.output_dir = emit_output_dir;
+    emit_mlir_options.output_file = emit_output_file;
+    emit_mlir_options.artifact_display_dir = output_dir;
+    if (direct_emit_staging_root != null) {
+        emit_mlir_options.suppress_artifact_logs = true;
+    }
 
     if (emit_abi or emit_abi_solidity or emit_abi_extras) {
-        runAbiEmit(allocator, file_path, output_dir, emit_abi, emit_abi_solidity, emit_abi_extras, compile_context.resolver_options, emit_mlir_options.chain_id, &metrics, debug_enabled, false) catch |err| switch (err) {
-            error.MissingContract => std.process.exit(2),
+        runAbiEmit(allocator, file_path, emit_output_dir, emit_abi, emit_abi_solidity, emit_abi_extras, compile_context.resolver_options, emit_mlir_options.chain_id, &metrics, debug_enabled, false) catch |err| switch (err) {
+            error.CompilerCompileFailed,
+            error.ArtifactEmissionBlocked,
+            => {
+                discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
+                exitCli(1);
+            },
+            error.MissingContract => {
+                discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
+                exitCli(2);
+            },
             else => return err,
         };
     }
@@ -961,16 +1100,71 @@ pub fn main() !void {
             (emit_typed_ast_format orelse "tree")
         else
             (emit_ast_format orelse "tree");
-        try runCompilerAstEmit(allocator, file_path, format, emit_typed_ast, compile_context.resolver_options, emit_mlir_options.chain_id, &metrics, debug_enabled);
+        runCompilerAstEmit(allocator, file_path, format, emit_typed_ast, compile_context.resolver_options, emit_mlir_options.chain_id, &metrics, debug_enabled) catch |err| switch (err) {
+            error.CompilerCompileFailed,
+            error.CompilationDiagnosticsFailed,
+            => {
+                discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
+                exitCli(1);
+            },
+            error.InvalidAstFormat => {
+                discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
+                exitCli(2);
+            },
+            else => return err,
+        };
     } else if (emit_cfg or emit_sir_text or emit_bytecode or emit_smt_report) {
-        try runMlirEmitAdvanced(allocator, file_path, emit_mlir_options, compile_context.resolver_options, debug_enabled);
+        runMlirEmitAdvanced(allocator, file_path, emit_mlir_options, compile_context.resolver_options, debug_enabled) catch |err| switch (err) {
+            error.CompilerCompileFailed, error.ArtifactEmissionBlocked => {
+                discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
+                exitCli(1);
+            },
+            error.VerificationFailed => direct_emit_verification_failed = true,
+            error.InvalidGeneratedMlir => {
+                discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
+                exitCli(2);
+            },
+            else => return err,
+        };
     } else if (emit_mlir or emit_mlir_sir) {
-        try runCompilerMlirEmit(allocator, file_path, emit_mlir_options, compile_context.resolver_options, debug_enabled);
+        runCompilerMlirEmit(allocator, file_path, emit_mlir_options, compile_context.resolver_options, debug_enabled) catch |err| switch (err) {
+            error.CompilerCompileFailed, error.OraToSirConversionFailed, error.MlirPrintFailed, error.ArtifactEmissionBlocked => {
+                discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
+                exitCli(1);
+            },
+            error.InvalidGeneratedMlir => {
+                discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
+                exitCli(2);
+            },
+            else => return err,
+        };
+    }
+
+    if (direct_emit_staging_root) |staging_root| {
+        const final_dir = if (direct_emit_stages_output_file)
+            (std.fs.path.dirname(output_file.?) orelse ".")
+        else
+            output_dir.?;
+        const moved = try moveAllArtifactFiles(allocator, staging_root, final_dir);
+        if (moved != 0) {
+            var stdout_buffer: [1024]u8 = undefined;
+            var stdout_writer = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
+            const stdout = &stdout_writer.interface;
+            if (direct_emit_stages_output_file) {
+                try stdout.print("Bytecode saved to {s}\n", .{output_file.?});
+            } else {
+                try stdout.print("Artifacts saved to {s}\n", .{output_dir.?});
+            }
+            try stdout.flush();
+        }
+    }
+    if (direct_emit_verification_failed) {
+        exitCli(1);
     }
 
     // print metrics report (no-op when --metrics is not passed)
     var stderr_buffer: [1024]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_writer = std.Io.File.stderr().writer(std.Io.Threaded.global_single_threaded.io(), &stderr_buffer);
     const stderr = &stderr_writer.interface;
     try metrics.report(stderr);
     try stderr.flush();
@@ -986,17 +1180,18 @@ fn moveArtifactFile(
     defer allocator.free(src_path);
     const dst_path = try std.fs.path.join(allocator, &[_][]const u8{ target_dir, file_name });
     defer allocator.free(dst_path);
-    try std.fs.cwd().makePath(target_dir);
-    std.fs.cwd().rename(src_path, dst_path) catch |err| switch (err) {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try std.Io.Dir.cwd().createDirPath(io, target_dir);
+    std.Io.Dir.rename(.cwd(), src_path, .cwd(), dst_path, io) catch |err| switch (err) {
         error.FileNotFound => {
-            std.fs.cwd().access(dst_path, .{}) catch |dst_err| switch (dst_err) {
+            std.Io.Dir.cwd().access(io, dst_path, .{}) catch |dst_err| switch (dst_err) {
                 error.FileNotFound => {
-                    std.fs.cwd().access(src_path, .{}) catch |src_err| switch (src_err) {
+                    std.Io.Dir.cwd().access(io, src_path, .{}) catch |src_err| switch (src_err) {
                         error.FileNotFound => return error.FileNotFound,
                         else => return src_err,
                     };
-                    try std.fs.cwd().copyFile(src_path, std.fs.cwd(), dst_path, .{});
-                    try std.fs.cwd().deleteFile(src_path);
+                    try std.Io.Dir.copyFile(.cwd(), src_path, .cwd(), dst_path, io, .{});
+                    try std.Io.Dir.cwd().deleteFile(io, src_path);
                 },
                 else => return dst_err,
             };
@@ -1013,11 +1208,216 @@ fn moveArtifactFileIfExists(
 ) !void {
     const src_path = try std.fs.path.join(allocator, &[_][]const u8{ root_dir, file_name });
     defer allocator.free(src_path);
-    std.fs.cwd().access(src_path, .{}) catch |err| switch (err) {
+    std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), src_path, .{}) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
     try moveArtifactFile(allocator, root_dir, file_name, target_dir);
+}
+
+fn createArtifactStagingRoot(allocator: std.mem.Allocator, artifact_root: []const u8) ![]u8 {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const random_source = std.Random.IoSource{ .io = io };
+    var attempt: usize = 0;
+    while (attempt < 8) : (attempt += 1) {
+        const staging_root = try std.fmt.allocPrint(allocator, "{s}/.ora-staging-{x}", .{
+            artifact_root,
+            random_source.interface().int(u64),
+        });
+        errdefer allocator.free(staging_root);
+
+        std.Io.Dir.cwd().access(io, staging_root, .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                try std.Io.Dir.cwd().createDirPath(io, staging_root);
+                return staging_root;
+            },
+            else => return err,
+        };
+
+        allocator.free(staging_root);
+    }
+    return error.ArtifactStagingCollision;
+}
+
+fn discardArtifactStagingRoot(allocator: std.mem.Allocator, staging_root: *?[]u8) void {
+    if (staging_root.*) |root| {
+        std.Io.Dir.cwd().deleteTree(std.Io.Threaded.global_single_threaded.io(), root) catch {};
+        allocator.free(root);
+        staging_root.* = null;
+    }
+}
+
+fn moveArtifactFilesWithSuffixesIfExists(
+    allocator: std.mem.Allocator,
+    root_dir: []const u8,
+    suffixes: []const []const u8,
+    target_dir: []const u8,
+) !void {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var dir = std.Io.Dir.cwd().openDir(io, root_dir, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer dir.close(io);
+
+    var iter = dir.iterate();
+    while (try iter.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        var matched = false;
+        for (suffixes) |suffix| {
+            if (std.mem.endsWith(u8, entry.name, suffix)) {
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) continue;
+        try moveArtifactFile(allocator, root_dir, entry.name, target_dir);
+    }
+}
+
+fn moveAllArtifactFiles(
+    allocator: std.mem.Allocator,
+    root_dir: []const u8,
+    target_dir: []const u8,
+) !usize {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var dir = std.Io.Dir.cwd().openDir(io, root_dir, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return 0,
+        else => return err,
+    };
+    defer dir.close(io);
+
+    var moved: usize = 0;
+    var iter = dir.iterate();
+    while (try iter.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        try moveArtifactFile(allocator, root_dir, entry.name, target_dir);
+        moved += 1;
+    }
+    return moved;
+}
+
+fn deleteArtifactFileIfExists(allocator: std.mem.Allocator, dir: []const u8, file_name: []const u8) !void {
+    const path = try std.fs.path.join(allocator, &[_][]const u8{ dir, file_name });
+    defer allocator.free(path);
+    std.Io.Dir.cwd().deleteFile(std.Io.Threaded.global_single_threaded.io(), path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+}
+
+fn deleteStemArtifactFilesWithSuffixesIfExists(
+    allocator: std.mem.Allocator,
+    dir_path: []const u8,
+    stem: []const u8,
+    suffixes: []const []const u8,
+) !void {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer dir.close(io);
+
+    var iter = dir.iterate();
+    while (try iter.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        for (suffixes) |suffix| {
+            if (!artifactNameMatchesStemSuffix(entry.name, stem, suffix)) continue;
+            try deleteArtifactFileIfExists(allocator, dir_path, entry.name);
+            break;
+        }
+    }
+}
+
+fn artifactNameMatchesStemSuffix(name: []const u8, stem: []const u8, suffix: []const u8) bool {
+    if (!std.mem.endsWith(u8, name, suffix)) return false;
+    if (name.len == stem.len + suffix.len and std.mem.startsWith(u8, name, stem)) return true;
+    return name.len > stem.len + suffix.len and
+        std.mem.startsWith(u8, name, stem) and
+        name[stem.len] == '.';
+}
+
+fn invalidateBuildArtifactOutputs(
+    allocator: std.mem.Allocator,
+    stem: []const u8,
+    abi_dir: []const u8,
+    bin_dir: []const u8,
+    sir_dir: []const u8,
+    verify_dir: []const u8,
+    mlir_dir: []const u8,
+) !void {
+    const abi_suffixes = [_][]const u8{ ".abi.json", ".abi.sol.json", ".abi.extras.json" };
+    try deleteStemArtifactFilesWithSuffixesIfExists(allocator, abi_dir, stem, &abi_suffixes);
+    const bin_suffixes = [_][]const u8{ ".hex", ".sourcemap.json", ".debug.json" };
+    try deleteStemArtifactFilesWithSuffixesIfExists(allocator, bin_dir, stem, &bin_suffixes);
+    const sir_suffixes = [_][]const u8{".sir"};
+    try deleteStemArtifactFilesWithSuffixesIfExists(allocator, sir_dir, stem, &sir_suffixes);
+    const verify_suffixes = [_][]const u8{ ".smt.report.md", ".smt.report.json", ".proof.json", ".lean.proof.json", ".lean.dispatcher.proof.json", ".canonical-z3.measure.json" };
+    try deleteStemArtifactFilesWithSuffixesIfExists(allocator, verify_dir, stem, &verify_suffixes);
+    const mlir_suffixes = [_][]const u8{ ".ora.mlir", ".sir.mlir" };
+    try deleteStemArtifactFilesWithSuffixesIfExists(allocator, mlir_dir, stem, &mlir_suffixes);
+}
+
+fn invalidateDirectEmitOutputs(
+    allocator: std.mem.Allocator,
+    stem: []const u8,
+    output_dir: []const u8,
+) !void {
+    const direct_emit_suffixes = [_][]const u8{
+        ".abi.json",
+        ".abi.sol.json",
+        ".abi.extras.json",
+        ".hex",
+        ".sourcemap.json",
+        ".debug.json",
+        ".proof.json",
+        ".lean.proof.json",
+        ".lean.dispatcher.proof.json",
+        ".sir",
+        ".smt.report.md",
+        ".smt.report.json",
+        ".ora.dot",
+        ".sir.dot",
+        ".sir.pre-opt.dot",
+        ".sir.post-opt.dot",
+        ".ora.mlir",
+        ".sir.mlir",
+        ".mlir",
+    };
+    try deleteStemArtifactFilesWithSuffixesIfExists(allocator, output_dir, stem, &direct_emit_suffixes);
+}
+
+fn invalidateDirectEmitOutputFile(
+    allocator: std.mem.Allocator,
+    output_file: []const u8,
+) !void {
+    const output_dir = std.fs.path.dirname(output_file) orelse ".";
+    const output_name = std.fs.path.basename(output_file);
+    try deleteArtifactFileIfExists(allocator, output_dir, output_name);
+
+    const output_stem = std.fs.path.stem(output_name);
+    const sidecar_suffixes = [_][]const u8{ ".sourcemap.json", ".debug.json" };
+    try deleteStemArtifactFilesWithSuffixesIfExists(allocator, output_dir, output_stem, &sidecar_suffixes);
+}
+
+fn promoteStagedAbiBundle(
+    allocator: std.mem.Allocator,
+    staging_abi_dir: []const u8,
+    abi_dir: []const u8,
+    stem: []const u8,
+) !void {
+    const abi_json_file = try std.fmt.allocPrint(allocator, "{s}.abi.json", .{stem});
+    defer allocator.free(abi_json_file);
+    try moveArtifactFile(allocator, staging_abi_dir, abi_json_file, abi_dir);
+
+    const abi_sol_json_file = try std.fmt.allocPrint(allocator, "{s}.abi.sol.json", .{stem});
+    defer allocator.free(abi_sol_json_file);
+    try moveArtifactFile(allocator, staging_abi_dir, abi_sol_json_file, abi_dir);
+
+    const abi_extras_json_file = try std.fmt.allocPrint(allocator, "{s}.abi.extras.json", .{stem});
+    defer allocator.free(abi_extras_json_file);
+    try moveArtifactFile(allocator, staging_abi_dir, abi_extras_json_file, abi_dir);
 }
 
 fn runBuildArtifacts(
@@ -1029,7 +1429,7 @@ fn runBuildArtifacts(
     configured_init_args: []const project_config.InitArg,
 ) !void {
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     const stem = std.fs.path.stem(file_path);
@@ -1042,13 +1442,14 @@ fn runBuildArtifacts(
         std.mem.endsWith(u8, artifact_root, ".bin"))
     {
         try stdout.print("error: build mode expects '-o' to be a directory, got '{s}'\n", .{artifact_root});
-        std.process.exit(2);
+        try stdout.flush();
+        return error.InvalidBuildOutputDirectory;
     }
 
     // Never delete a user-supplied output root. Build writes its known artifact
     // files under stable subdirectories and may overwrite files it owns, but it
     // must not recursively remove unrelated user data.
-    try std.fs.cwd().makePath(artifact_root);
+    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), artifact_root);
 
     const abi_dir = try std.fs.path.join(allocator, &[_][]const u8{ artifact_root, "abi" });
     defer allocator.free(abi_dir);
@@ -1061,16 +1462,28 @@ fn runBuildArtifacts(
     const mlir_dir = try std.fs.path.join(allocator, &[_][]const u8{ artifact_root, "mlir" });
     defer allocator.free(mlir_dir);
 
-    try std.fs.cwd().makePath(abi_dir);
-    try std.fs.cwd().makePath(bin_dir);
-    try std.fs.cwd().makePath(sir_dir);
-    try std.fs.cwd().makePath(verify_dir);
-    try std.fs.cwd().makePath(mlir_dir);
+    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), abi_dir);
+    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), bin_dir);
+    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), sir_dir);
+    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), verify_dir);
+    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), mlir_dir);
+
+    try invalidateBuildArtifactOutputs(allocator, stem, abi_dir, bin_dir, sir_dir, verify_dir, mlir_dir);
+
+    const staging_root = try createArtifactStagingRoot(allocator, artifact_root);
+    defer allocator.free(staging_root);
+    defer std.Io.Dir.cwd().deleteTree(std.Io.Threaded.global_single_threaded.io(), staging_root) catch {};
+
+    const staging_abi_dir = try std.fs.path.join(allocator, &[_][]const u8{ staging_root, "abi" });
+    defer allocator.free(staging_abi_dir);
 
     try validateConfiguredInitArgs(allocator, file_path, resolver_options, base_options.chain_id, configured_init_args);
 
-    // ABI bundle
-    try runAbiEmit(allocator, file_path, abi_dir, true, true, true, resolver_options, base_options.chain_id, base_options.metrics, base_options.debug_enabled, true);
+    // Trusted artifacts are written to a compiler-owned staging root first. Only
+    // diagnostic SMT reports may be promoted on failure; deployable artifacts are
+    // promoted into the public layout after verification and backend emission
+    // both succeed.
+    try runAbiEmit(allocator, file_path, staging_abi_dir, true, true, true, resolver_options, base_options.chain_id, base_options.metrics, base_options.debug_enabled, true);
 
     // SIR + bytecode + SMT report (verification is mandatory for build mode).
     var build_mlir_options = base_options;
@@ -1078,7 +1491,8 @@ fn runBuildArtifacts(
     build_mlir_options.emit_mlir_sir = true;
     build_mlir_options.emit_sir_text = true;
     build_mlir_options.emit_bytecode = true;
-    build_mlir_options.output_dir = artifact_root;
+    build_mlir_options.output_dir = staging_root;
+    build_mlir_options.artifact_display_dir = verify_dir;
     build_mlir_options.verify_z3 = true;
     build_mlir_options.emit_smt_report = true;
     build_mlir_options.persist_ora_mlir = true;
@@ -1093,38 +1507,61 @@ fn runBuildArtifacts(
 
     const smt_md_file = try std.fmt.allocPrint(allocator, "{s}.smt.report.md", .{stem});
     defer allocator.free(smt_md_file);
-    try moveArtifactFileIfExists(allocator, artifact_root, smt_md_file, verify_dir);
+    try moveArtifactFileIfExists(allocator, staging_root, smt_md_file, verify_dir);
 
     const smt_json_file = try std.fmt.allocPrint(allocator, "{s}.smt.report.json", .{stem});
     defer allocator.free(smt_json_file);
-    try moveArtifactFileIfExists(allocator, artifact_root, smt_json_file, verify_dir);
+    try moveArtifactFileIfExists(allocator, staging_root, smt_json_file, verify_dir);
+
+    const lean_proof_file = try std.fmt.allocPrint(allocator, "{s}.lean.proof.json", .{stem});
+    defer allocator.free(lean_proof_file);
+    try moveArtifactFileIfExists(allocator, staging_root, lean_proof_file, verify_dir);
+
+    const lean_dispatcher_proof_file = try std.fmt.allocPrint(allocator, "{s}.lean.dispatcher.proof.json", .{stem});
+    defer allocator.free(lean_dispatcher_proof_file);
+    try moveArtifactFileIfExists(allocator, staging_root, lean_dispatcher_proof_file, verify_dir);
+
+    const lean_obligations_file = try std.fmt.allocPrint(allocator, "{s}.lean.obligations.lean", .{stem});
+    defer allocator.free(lean_obligations_file);
+    try moveArtifactFileIfExists(allocator, staging_root, lean_obligations_file, verify_dir);
+
+    const canonical_z3_measure_file = try std.fmt.allocPrint(allocator, "{s}.canonical-z3.measure.json", .{stem});
+    defer allocator.free(canonical_z3_measure_file);
+    try moveArtifactFileIfExists(allocator, staging_root, canonical_z3_measure_file, verify_dir);
 
     if (verification_failed) {
+        try stdout.print(
+            "error: build blocked because formal verification did not authorize artifact emission\n",
+            .{},
+        );
+        try stdout.flush();
         return error.VerificationFailed;
     }
 
+    try promoteStagedAbiBundle(allocator, staging_abi_dir, abi_dir, stem);
+
     const ora_mlir_file = try std.fmt.allocPrint(allocator, "{s}.ora.mlir", .{stem});
     defer allocator.free(ora_mlir_file);
-    try moveArtifactFile(allocator, artifact_root, ora_mlir_file, mlir_dir);
+    try moveArtifactFile(allocator, staging_root, ora_mlir_file, mlir_dir);
 
     // Reorganize generated outputs under stable subfolders only after a successful
     // verification/build run. Verification failures intentionally stop before
     // OraToSIR and bytecode emission, so these artifacts do not exist yet.
     const sir_file = try std.fmt.allocPrint(allocator, "{s}.sir", .{stem});
     defer allocator.free(sir_file);
-    try moveArtifactFile(allocator, artifact_root, sir_file, sir_dir);
+    try moveArtifactFile(allocator, staging_root, sir_file, sir_dir);
 
     const hex_file = try std.fmt.allocPrint(allocator, "{s}.hex", .{stem});
     defer allocator.free(hex_file);
-    try moveArtifactFile(allocator, artifact_root, hex_file, bin_dir);
+    try moveArtifactFile(allocator, staging_root, hex_file, bin_dir);
 
     const source_map_file = try std.fmt.allocPrint(allocator, "{s}.sourcemap.json", .{stem});
     defer allocator.free(source_map_file);
-    try moveArtifactFileIfExists(allocator, artifact_root, source_map_file, bin_dir);
+    try moveArtifactFileIfExists(allocator, staging_root, source_map_file, bin_dir);
 
     const sir_mlir_file = try std.fmt.allocPrint(allocator, "{s}.sir.mlir", .{stem});
     defer allocator.free(sir_mlir_file);
-    try moveArtifactFile(allocator, artifact_root, sir_mlir_file, mlir_dir);
+    try moveArtifactFile(allocator, staging_root, sir_mlir_file, mlir_dir);
 
     try printBuildArtifactSummary(allocator, stdout, artifact_root, stem, bin_dir, sir_dir, verify_dir, mlir_dir);
     try stdout.flush();
@@ -1181,7 +1618,7 @@ fn runDebugArtifacts(
     resolver_options: import_graph.ResolverOptions,
 ) ![]u8 {
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     const stem = std.fs.path.stem(file_path);
@@ -1191,17 +1628,45 @@ fn runDebugArtifacts(
 
     // Debug artifact output follows the same safety rule as build output:
     // create directories and overwrite compiler-owned files, never wipe roots.
-    try std.fs.cwd().makePath(artifact_root);
+    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), artifact_root);
 
     const abi_dir = try std.fs.path.join(allocator, &[_][]const u8{ artifact_root, "abi" });
     defer allocator.free(abi_dir);
-    try std.fs.cwd().makePath(abi_dir);
+    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), abi_dir);
 
-    try runAbiEmit(allocator, file_path, abi_dir, true, true, true, resolver_options, base_options.chain_id, base_options.metrics, base_options.debug_enabled, true);
+    const staging_root = try createArtifactStagingRoot(allocator, artifact_root);
+    defer allocator.free(staging_root);
+    defer std.Io.Dir.cwd().deleteTree(std.Io.Threaded.global_single_threaded.io(), staging_root) catch {};
+
+    const staging_abi_dir = try std.fs.path.join(allocator, &[_][]const u8{ staging_root, "abi" });
+    defer allocator.free(staging_abi_dir);
+
+    const debug_suffixes = [_][]const u8{
+        ".hex",
+        ".deploy.hex",
+        ".sir",
+        ".sourcemap.json",
+        ".debug.json",
+        ".proof.json",
+        ".lean.proof.json",
+        ".lean.dispatcher.proof.json",
+        ".smt.report.md",
+        ".smt.report.json",
+        ".sir.dot",
+        ".ora.dot",
+    };
+    try deleteStemArtifactFilesWithSuffixesIfExists(allocator, artifact_root, stem, &debug_suffixes);
+    const abi_suffixes = [_][]const u8{ ".abi.json", ".abi.sol.json", ".abi.extras.json" };
+    try deleteStemArtifactFilesWithSuffixesIfExists(allocator, abi_dir, stem, &abi_suffixes);
+
+    try runAbiEmit(allocator, file_path, staging_abi_dir, true, true, true, resolver_options, base_options.chain_id, base_options.metrics, base_options.debug_enabled, true);
 
     var debug_mlir_options = base_options;
-    debug_mlir_options.output_dir = artifact_root;
+    debug_mlir_options.output_dir = staging_root;
     try runMlirEmitAdvanced(allocator, file_path, debug_mlir_options, resolver_options, debug_mlir_options.debug_enabled);
+
+    try promoteStagedAbiBundle(allocator, staging_abi_dir, abi_dir, stem);
+    try moveArtifactFilesWithSuffixesIfExists(allocator, staging_root, &debug_suffixes, artifact_root);
 
     try stdout.print("Debugger artifacts saved to {s}\n", .{artifact_root});
     try stdout.flush();
@@ -1210,17 +1675,19 @@ fn runDebugArtifacts(
 }
 
 fn pathExists(path: []const u8) bool {
-    std.fs.cwd().access(path, .{}) catch return false;
+    std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), path, .{}) catch return false;
     return true;
 }
 
 fn absolutePathAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     if (std.fs.path.isAbsolute(path)) return try allocator.dupe(u8, path);
-    return try std.fs.cwd().realpathAlloc(allocator, path);
+    const real_z = try std.Io.Dir.cwd().realPathFileAlloc(std.Io.Threaded.global_single_threaded.io(), path, allocator);
+    defer allocator.free(real_z);
+    return allocator.dupe(u8, real_z);
 }
 
 fn findOraRepoRoot(allocator: std.mem.Allocator) ![]u8 {
-    const exe_dir = try std.fs.selfExeDirPathAlloc(allocator);
+    const exe_dir = try std.process.executableDirPathAlloc(std.Io.Threaded.global_single_threaded.io(), allocator);
     defer allocator.free(exe_dir);
 
     const from_exe = try std.fs.path.resolve(allocator, &[_][]const u8{ exe_dir, "..", ".." });
@@ -1230,7 +1697,9 @@ fn findOraRepoRoot(allocator: std.mem.Allocator) ![]u8 {
     if (pathExists(probe)) return from_exe;
 
     allocator.free(from_exe);
-    const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
+    const cwd_z = try std.Io.Dir.cwd().realPathFileAlloc(std.Io.Threaded.global_single_threaded.io(), ".", allocator);
+    defer allocator.free(cwd_z);
+    const cwd = try allocator.dupe(u8, cwd_z);
     errdefer allocator.free(cwd);
     const cwd_probe = try std.fs.path.join(allocator, &[_][]const u8{ cwd, "lib", "evm", "build.zig" });
     defer allocator.free(cwd_probe);
@@ -1258,30 +1727,34 @@ fn launchDebuggerDap(allocator: std.mem.Allocator) !void {
         // Same auto-build pattern launchDebuggerTui uses — keeps
         // `ora debug --dap` working from a fresh checkout without
         // requiring a separate `zig build install` step.
-        var build_child = std.process.Child.init(&.{ "zig", "build", "install" }, allocator);
-        build_child.cwd = evm_dir;
+        const io = std.Io.Threaded.global_single_threaded.io();
         // stdin/stdout are the DAP JSON-RPC channel. The build step
         // must neither consume client input nor emit unframed output
         // before the first Content-Length frame.
-        build_child.stdin_behavior = .Ignore;
-        build_child.stdout_behavior = .Ignore;
-        build_child.stderr_behavior = .Inherit;
-        try build_child.spawn();
-        const term = try build_child.wait();
+        var build_child = try std.process.spawn(io, .{
+            .argv = &.{ "zig", "build", "install" },
+            .cwd = .{ .path = evm_dir },
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .inherit,
+        });
+        const term = try build_child.wait(io);
         switch (term) {
-            .Exited => |code| if (code != 0) return error.DapBuildFailed,
+            .exited => |code| if (code != 0) return error.DapBuildFailed,
             else => return error.DapBuildFailed,
         }
     }
 
-    var child = std.process.Child.init(&.{dap_bin}, allocator);
-    child.stdin_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
-    try child.spawn();
-    const term = try child.wait();
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var child = try std.process.spawn(io, .{
+        .argv = &.{dap_bin},
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
+    const term = try child.wait(io);
     switch (term) {
-        .Exited => |code| if (code != 0) return error.DapExited,
+        .exited => |code| if (code != 0) return error.DapExited,
         else => return error.DapExited,
     }
 }
@@ -1300,7 +1773,7 @@ fn launchDebuggerTui(
     max_steps: ?[]const u8,
     deploy_step_cap: ?[]const u8,
     artifact_max_bytes: ?[]const u8,
-) !void {
+) !u8 {
     const repo_root = try findOraRepoRoot(allocator);
     defer allocator.free(repo_root);
 
@@ -1311,15 +1784,17 @@ fn launchDebuggerTui(
     defer allocator.free(debugger_bin);
 
     if (!pathExists(debugger_bin)) {
-        var build_child = std.process.Child.init(&.{ "zig", "build", "install" }, allocator);
-        build_child.cwd = evm_dir;
-        build_child.stdin_behavior = .Inherit;
-        build_child.stdout_behavior = .Inherit;
-        build_child.stderr_behavior = .Inherit;
-        try build_child.spawn();
-        const build_term = try build_child.wait();
+        const io = std.Io.Threaded.global_single_threaded.io();
+        var build_child = try std.process.spawn(io, .{
+            .argv = &.{ "zig", "build", "install" },
+            .cwd = .{ .path = evm_dir },
+            .stdin = .inherit,
+            .stdout = .inherit,
+            .stderr = .inherit,
+        });
+        const build_term = try build_child.wait(io);
         switch (build_term) {
-            .Exited => |code| if (code != 0) return error.DebuggerBuildFailed,
+            .exited => |code| if (code != 0) return error.DebuggerBuildFailed,
             else => return error.DebuggerBuildFailed,
         }
     }
@@ -1357,7 +1832,7 @@ fn launchDebuggerTui(
     );
     defer allocator.free(deploy_hex_abs);
 
-    var argv: std.ArrayList([]const u8) = .{};
+    var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
     try argv.appendSlice(allocator, &.{ debugger_bin, deploy_hex_abs, srcmap_abs, source_abs });
     try argv.appendSlice(allocator, &.{ "--debug-info", debug_abs });
@@ -1378,16 +1853,18 @@ fn launchDebuggerTui(
     if (deploy_step_cap) |v| try argv.appendSlice(allocator, &.{ "--deploy-step-cap", v });
     if (artifact_max_bytes) |v| try argv.appendSlice(allocator, &.{ "--artifact-max-bytes", v });
 
-    var child = std.process.Child.init(argv.items, allocator);
-    child.stdin_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
-    try child.spawn();
-    const term = try child.wait();
-    switch (term) {
-        .Exited => |code| if (code != 0) std.process.exit(@intCast(code)),
-        else => std.process.exit(1),
-    }
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var child = try std.process.spawn(io, .{
+        .argv = argv.items,
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
+    const term = try child.wait(io);
+    return switch (term) {
+        .exited => |code| @intCast(code),
+        else => 1,
+    };
 }
 
 fn prepareDebuggerDeployHex(
@@ -1404,14 +1881,24 @@ fn prepareDebuggerDeployHex(
         return try allocator.dupe(u8, base_hex_abs);
     }
 
-    const base_hex_text = try std.fs.cwd().readFileAlloc(allocator, base_hex_abs, 16 * 1024 * 1024);
+    const base_hex_text = try std.Io.Dir.cwd().readFileAlloc(
+        std.Io.Threaded.global_single_threaded.io(),
+        base_hex_abs,
+        allocator,
+        std.Io.Limit.limited(16 * 1024 * 1024),
+    );
     defer allocator.free(base_hex_text);
     const base_bytes = try decodeHexAllocLocal(allocator, base_hex_text);
     defer allocator.free(base_bytes);
 
     const init_bytes = if (init_signature) |sig| blk: {
         if (abi_abs_opt) |abi_abs| {
-            const abi_json = try std.fs.cwd().readFileAlloc(allocator, abi_abs, 16 * 1024 * 1024);
+            const abi_json = try std.Io.Dir.cwd().readFileAlloc(
+                std.Io.Threaded.global_single_threaded.io(),
+                abi_abs,
+                allocator,
+                std.Io.Limit.limited(16 * 1024 * 1024),
+            );
             defer allocator.free(abi_json);
             break :blk try encodeConstructorArgsAllocLocal(allocator, abi_json, sig, init_arg_values);
         }
@@ -1428,23 +1915,27 @@ fn prepareDebuggerDeployHex(
 
     const deploy_hex_name = try std.fmt.allocPrint(allocator, "{s}.deploy.hex", .{stem});
     defer allocator.free(deploy_hex_name);
-    const deploy_hex_path_rel = try std.fs.path.join(allocator, &[_][]const u8{ artifact_root, deploy_hex_name });
-    defer allocator.free(deploy_hex_path_rel);
+    const staging_root = try createArtifactStagingRoot(allocator, artifact_root);
+    defer allocator.free(staging_root);
+    defer std.Io.Dir.cwd().deleteTree(std.Io.Threaded.global_single_threaded.io(), staging_root) catch {};
+    const staged_deploy_hex_path = try std.fs.path.join(allocator, &[_][]const u8{ staging_root, deploy_hex_name });
+    defer allocator.free(staged_deploy_hex_path);
 
-    const deploy_hex_file = if (std.fs.path.isAbsolute(deploy_hex_path_rel))
-        try std.fs.createFileAbsolute(deploy_hex_path_rel, .{})
-    else
-        try std.fs.cwd().createFile(deploy_hex_path_rel, .{});
-    defer deploy_hex_file.close();
-
-    var writer_buffer: [4096]u8 = undefined;
-    var writer = deploy_hex_file.writer(&writer_buffer);
-    const out = &writer.interface;
+    var hex_out = std.Io.Writer.Allocating.init(allocator);
+    defer hex_out.deinit();
+    const out = &hex_out.writer;
     for (combined) |byte| {
         try out.print("{X:0>2}", .{byte});
     }
-    try out.flush();
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = staged_deploy_hex_path,
+        .data = hex_out.written(),
+    });
 
+    try moveArtifactFile(allocator, staging_root, deploy_hex_name, artifact_root);
+
+    const deploy_hex_path_rel = try std.fs.path.join(allocator, &[_][]const u8{ artifact_root, deploy_hex_name });
+    defer allocator.free(deploy_hex_path_rel);
     return try absolutePathAlloc(allocator, deploy_hex_path_rel);
 }
 
@@ -1559,7 +2050,7 @@ fn combineInitArgSlices(
     compiler_init_args: []const project_config.InitArg,
     target_init_args: []const project_config.InitArg,
 ) ![]project_config.InitArg {
-    var combined = std.ArrayList(project_config.InitArg){};
+    var combined = std.ArrayList(project_config.InitArg).empty;
     defer {
         for (combined.items) |arg| {
             allocator.free(arg.name);
@@ -1603,6 +2094,99 @@ fn freeCombinedInitArgs(allocator: std.mem.Allocator, init_args: []project_confi
     allocator.free(init_args);
 }
 
+fn resolveBuildFileContext(
+    allocator: std.mem.Allocator,
+    build_file_path: []const u8,
+    cli_output_dir: ?[]const u8,
+    base_chain_id: u64,
+    chain_ids: ChainIdSelection,
+) !BuildFileContext {
+    var context = BuildFileContext{ .chain_id = base_chain_id };
+    errdefer context.deinit(allocator);
+
+    const start_dir = std.fs.path.dirname(build_file_path) orelse ".";
+    const loaded_opt = project_config.loadDiscoveredFromStartDir(allocator, start_dir) catch |err| {
+        std.debug.print("error: failed to load ora.toml: {s}\n", .{@errorName(err)});
+        return error.ProjectConfigLoadFailed;
+    };
+    if (loaded_opt == null) return context;
+
+    var loaded = loaded_opt.?;
+    defer loaded.deinit(allocator);
+
+    context.init_args = try combineInitArgSlices(allocator, loaded.config.compiler_init_args, &.{});
+    context.optimize = loaded.config.compiler_optimize;
+
+    const target_idx_opt = project_config.findMatchingTargetIndex(allocator, &loaded, build_file_path) catch |err| {
+        std.debug.print("error: failed to match target in ora.toml: {s}\n", .{@errorName(err)});
+        return error.ProjectTargetMatchFailed;
+    };
+
+    const target_chain_id = if (target_idx_opt) |target_idx| loaded.config.targets[target_idx].chain_id else null;
+    context.chain_id = chain_ids.resolve(loaded.config.compiler_chain_id, target_chain_id);
+
+    if (target_idx_opt) |target_idx| {
+        const target = loaded.config.targets[target_idx];
+        if (target.optimize) |profile| context.optimize = profile;
+        if (context.init_args) |init_args| {
+            freeCombinedInitArgs(allocator, init_args);
+            context.init_args = null;
+        }
+        context.init_args = if (target.kind == .contract)
+            try combineInitArgSlices(allocator, loaded.config.compiler_init_args, target.init_args)
+        else
+            try allocator.alloc(project_config.InitArg, 0);
+
+        context.include_roots = resolveIncludeRootsForTarget(allocator, loaded.config_dir, target.include_paths) catch |err| {
+            std.debug.print("error: failed to resolve include_paths for target '{s}': {s}\n", .{ target.name, @errorName(err) });
+            return error.ProjectIncludeRootsFailed;
+        };
+        context.resolver_options.include_roots = context.include_roots.?;
+
+        if (cli_output_dir == null) {
+            if (target.output_dir) |target_out| {
+                context.output_dir = project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, target_out) catch |err| {
+                    std.debug.print("error: failed to resolve target output_dir for '{s}': {s}\n", .{ target.name, @errorName(err) });
+                    return error.ProjectOutputDirResolveFailed;
+                };
+            } else {
+                const base_output = if (loaded.config.compiler_output_dir) |compiler_out|
+                    project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, compiler_out) catch |err| {
+                        std.debug.print("error: failed to resolve compiler.output_dir: {s}\n", .{@errorName(err)});
+                        return error.ProjectOutputDirResolveFailed;
+                    }
+                else
+                    project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, "artifacts") catch |err| {
+                        std.debug.print("error: failed to resolve default project output_dir: {s}\n", .{@errorName(err)});
+                        return error.ProjectOutputDirResolveFailed;
+                    };
+                defer allocator.free(base_output);
+
+                context.output_dir = if (loaded.config.targets.len > 1)
+                    try std.fs.path.join(allocator, &.{ base_output, target.name })
+                else
+                    try allocator.dupe(u8, base_output);
+            }
+        }
+    } else if (cli_output_dir == null) {
+        const base_output = if (loaded.config.compiler_output_dir) |compiler_out|
+            project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, compiler_out) catch |err| {
+                std.debug.print("error: failed to resolve compiler.output_dir: {s}\n", .{@errorName(err)});
+                return error.ProjectOutputDirResolveFailed;
+            }
+        else
+            project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, "artifacts") catch |err| {
+                std.debug.print("error: failed to resolve default project output_dir: {s}\n", .{@errorName(err)});
+                return error.ProjectOutputDirResolveFailed;
+            };
+        defer allocator.free(base_output);
+
+        context.output_dir = try std.fs.path.join(allocator, &.{ base_output, std.fs.path.stem(build_file_path) });
+    }
+
+    return context;
+}
+
 fn isHexDigit(ch: u8) bool {
     return (ch >= '0' and ch <= '9') or
         (ch >= 'a' and ch <= 'f') or
@@ -1642,6 +2226,7 @@ fn validateInitArgValue(ty: compiler.sema.Type, raw_value: []const u8) !void {
         },
         .string => {},
         .refinement => |refinement| try validateInitArgValue(refinement.base_type.*, value),
+        .resource_domain => |resource| try validateInitArgValue(resource.carrier_type.*, value),
         else => return error.UnsupportedInitArgType,
     }
 }
@@ -1766,18 +2351,18 @@ fn runBuildFromDiscoveredConfig(
     chain_ids: ChainIdSelection,
 ) !void {
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     const loaded_opt = project_config.loadDiscovered(allocator) catch |err| {
         try stdout.print("error: failed to load ora.toml: {s}\n", .{@errorName(err)});
         try stdout.flush();
-        std.process.exit(2);
+        return error.ProjectConfigLoadFailed;
     };
     if (loaded_opt == null) {
         try stdout.print("error: build mode without <file.ora> requires ora.toml with [[targets]]\n", .{});
         try stdout.flush();
-        std.process.exit(2);
+        return error.MissingProjectConfig;
     }
 
     var loaded = loaded_opt.?;
@@ -1824,6 +2409,8 @@ fn runBuildFromDiscoveredConfig(
 
         var target_options = base_options;
         target_options.chain_id = chain_ids.resolve(loaded.config.compiler_chain_id, target.chain_id);
+        if (target_options.optimize == null)
+            target_options.optimize = target.optimize orelse loaded.config.compiler_optimize;
 
         try runBuildArtifacts(
             allocator,
@@ -1846,7 +2433,7 @@ fn discoverCompileContextForFile(
     const start_dir = std.fs.path.dirname(file_path) orelse ".";
     const loaded_opt = project_config.loadDiscoveredFromStartDir(allocator, start_dir) catch |err| {
         std.debug.print("error: failed to load ora.toml: {s}\n", .{@errorName(err)});
-        std.process.exit(2);
+        return error.ProjectConfigLoadFailed;
     };
 
     if (loaded_opt == null) {
@@ -1862,14 +2449,14 @@ fn discoverCompileContextForFile(
 
     const target_idx_opt = project_config.findMatchingTargetIndex(allocator, &loaded, file_path) catch |err| {
         std.debug.print("error: failed to match target in ora.toml: {s}\n", .{@errorName(err)});
-        std.process.exit(2);
+        return error.ProjectTargetMatchFailed;
     };
 
     if (target_idx_opt) |target_idx| {
         const target = loaded.config.targets[target_idx];
         const include_roots = resolveIncludeRootsForTarget(allocator, loaded.config_dir, target.include_paths) catch |err| {
             std.debug.print("error: failed to resolve include_paths for target '{s}': {s}\n", .{ target.name, @errorName(err) });
-            std.process.exit(2);
+            return error.ProjectIncludeRootsFailed;
         };
         return .{
             .include_roots = include_roots,
@@ -1891,9 +2478,9 @@ fn discoverCompileContextForFile(
 // SECTION 2: Usage & Help Text
 // ============================================================================
 
-fn printUsage() !void {
+fn printUsage(io: std.Io) !void {
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
     try stdout.print("Ora Compiler v0.2 - Asuka\n", .{});
     try stdout.print("Usage: ora <file.ora>\n", .{});
@@ -1923,12 +2510,16 @@ fn printUsage() !void {
     try stdout.print("  -O0, -Onone            - No optimization (default)\n", .{});
     try stdout.print("  -O1, -Obasic           - Basic optimizations\n", .{});
     try stdout.print("  -O2, -Oaggressive      - Aggressive optimizations\n", .{});
+    try stdout.print("  --optimize=<profile>   - Codegen objective: gas | balanced | size\n", .{});
+    try stdout.print("                           (runtime gas vs deploy size; default balanced;\n", .{});
+    try stdout.print("                           also ora.toml [compiler]/[[targets]] optimize)\n", .{});
     try stdout.print("\nMLIR Options:\n", .{});
     try stdout.print("  --no-validate-mlir     - Disable automatic MLIR validation (not recommended)\n", .{});
     try stdout.print("  --no-canonicalize      - Skip Ora MLIR canonicalization pass\n", .{});
     try stdout.print("  --cpp-lowering-stub    - Use experimental C++ lowering stub (contract+func)\n", .{});
-    try stdout.print("  --mlir-pass-pipeline <pipeline> - Run custom MLIR pass pipeline on Ora MLIR\n", .{});
-    try stdout.print("  --mlir-debug=<list>    - Comma list: verify-each, timing, statistics, print-ir:<mode>, print-ir-pass:<name>, crash-reproducer:<path>, print-op-on-diagnostic\n", .{});
+    try stdout.print("  --mlir-pass-pipeline <pipeline> - Reserved until MLIR pass debug plumbing is wired\n", .{});
+    try stdout.print("  --mlir-debug=<list>    - MLIR diagnostics: statistics (other pass debug options reserved)\n", .{});
+    try stdout.print("  --mlir-run-sir-framework-canonicalizer - Compatibility flag; SIR framework canonicalizer/DCE now runs by default\n", .{});
     try stdout.print("\nAnalysis Options:\n", .{});
     try stdout.print("  --verify               - Run Z3 verification on MLIR annotations (default)\n", .{});
     try stdout.print("  --verify=basic|full    - Verification mode (default: full)\n", .{});
@@ -1937,6 +2528,10 @@ fn printUsage() !void {
     try stdout.print("  --explain              - Enable unsat-core explain mode for SMT verification\n", .{});
     try stdout.print("  --z3-proofs            - Emit raw Z3 proof objects in SMT reports/debug output (slower)\n", .{});
     try stdout.print("  --keep-proved-checks   - Keep SMT-proved guards/requires/ensures/invariants as runtime checks (falsification harness)\n", .{});
+    try stdout.print("  --lean-proofs[=mode]   - Run Lean gates; userland is the contract-level mode (default)\n", .{});
+    try stdout.print("                           kernel/both are rejected by the contract CLI; use zig build check-formal-sync\n", .{});
+    try stdout.print("                           Legacy: --lean-proofs <proofs.json> supplies external proof rows\n", .{});
+    try stdout.print("  --measure-canonical-z3 - Emit canonical-vs-live SMT hash measurement JSON\n", .{});
     try stdout.print("  --minimize-cores       - Greedily minimize explain-mode unsat cores; implies --explain\n", .{});
     try stdout.print("  --debug                - Enable compiler debug output\n", .{});
     try stdout.print("  --debug-info           - Preserve source-stable lowering for debugger artifacts\n", .{});
@@ -2020,7 +2615,7 @@ fn writeCompilerDiagnosticSnippet(
 // Z3 verification output formatting
 // ---------------------------------------------------------------------------
 
-const z3_errors = @import("z3/errors.zig");
+const z3_verification = @import("ora_z3_verification");
 
 /// Parse guard_id format: "guard:{path}:{line}:{col}:{len}:{refinement_kind}:{var_name}"
 const ParsedGuard = struct {
@@ -2092,7 +2687,7 @@ fn formatHexValue(raw: []const u8) []const u8 {
     return raw; // keep full for now
 }
 
-fn printVerificationDiagnostics(stdout: anytype, diagnostics: []const z3_errors.Diagnostic) !void {
+fn printVerificationDiagnostics(stdout: anytype, diagnostics: []const z3_verification.Diagnostic) !void {
     // Group diagnostics by function name.
     try stdout.print("\n", .{});
     try stdout.print("Verification Report: {d} refinement guard{s} can be violated\n", .{
@@ -2150,24 +2745,24 @@ fn printVerificationDiagnostics(stdout: anytype, diagnostics: []const z3_errors.
 
 test "verification diagnostics explain registry-backed NonZero guard violations" {
     const allocator = std.testing.allocator;
-    var counterexample = z3_errors.Counterexample.init(allocator);
+    var counterexample = z3_verification.Counterexample.init(allocator);
     defer counterexample.deinit();
 
-    var diagnostics = [_]z3_errors.Diagnostic{.{
+    var diagnostics = [_]z3_verification.Diagnostic{.{
         .guard_id = "guard:test.ora:1:2:3:NonZero:amount",
         .function_name = "deposit",
         .counterexample = counterexample,
         .allocator = allocator,
     }};
 
-    var buffer: std.ArrayList(u8) = .{};
-    defer buffer.deinit(allocator);
+    var buffer = std.Io.Writer.Allocating.init(allocator);
+    defer buffer.deinit();
 
-    try printVerificationDiagnostics(buffer.writer(allocator), diagnostics[0..]);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "`amount` can be zero") != null);
+    try printVerificationDiagnostics(&buffer.writer, diagnostics[0..]);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.written(), "`amount` can be zero") != null);
 }
 
-fn printRuntimeGuardSummary(stdout: anytype, diagnostics: []const z3_errors.Diagnostic) !void {
+fn printRuntimeGuardSummary(stdout: anytype, diagnostics: []const z3_verification.Diagnostic) !void {
     try stdout.print("\nRefinement guards: {d} kept as runtime check{s}\n", .{
         diagnostics.len,
         if (diagnostics.len != 1) @as([]const u8, "s") else "",
@@ -2188,7 +2783,7 @@ fn printRuntimeGuardSummary(stdout: anytype, diagnostics: []const z3_errors.Diag
     }
 }
 
-fn printVerificationErrors(stdout: anytype, errors: []const z3_errors.VerificationError) !void {
+fn printVerificationErrors(stdout: anytype, errors: []const z3_verification.VerificationError) !void {
     var degraded_count: usize = 0;
     for (errors) |err| {
         if (err.error_type == .EncodingDegraded) degraded_count += 1;
@@ -2243,9 +2838,12 @@ fn printVerificationErrors(stdout: anytype, errors: []const z3_errors.Verificati
 /// Read a single line from a source file by line number (1-based).
 /// Returns null if the file can't be read or the line doesn't exist.
 fn readSourceLineFromFile(file_path: []const u8, line_number: u32) ?[]const u8 {
-    const file = std.fs.cwd().openFile(file_path, .{}) catch return null;
-    defer file.close();
-    const content = file.readToEndAlloc(std.heap.page_allocator, 1024 * 1024) catch return null;
+    const content = std.Io.Dir.cwd().readFileAlloc(
+        std.Io.Threaded.global_single_threaded.io(),
+        file_path,
+        std.heap.page_allocator,
+        std.Io.Limit.limited(1024 * 1024),
+    ) catch return null;
     // Note: we leak this allocation — it's diagnostic output, called once.
     var current_line: u32 = 1;
     var line_start: usize = 0;
@@ -2254,7 +2852,7 @@ fn readSourceLineFromFile(file_path: []const u8, line_number: u32) ?[]const u8 {
             if (current_line == line_number) {
                 const line = content[line_start..i];
                 // Trim trailing whitespace
-                return std.mem.trimRight(u8, line, " \t\r");
+                return std.mem.trimEnd(u8, line, " \t\r");
             }
             current_line += 1;
             line_start = i + 1;
@@ -2262,7 +2860,7 @@ fn readSourceLineFromFile(file_path: []const u8, line_number: u32) ?[]const u8 {
     }
     // Last line (no trailing newline)
     if (current_line == line_number and line_start < content.len) {
-        return std.mem.trimRight(u8, content[line_start..], " \t\r\n");
+        return std.mem.trimEnd(u8, content[line_start..], " \t\r\n");
     }
     return null;
 }
@@ -2289,7 +2887,7 @@ fn verifyMlirModule(stdout: anytype, module: @import("mlir_c_api").c.MlirModule,
     if (mlir_c.mlirOperationVerify(module_op)) return;
     try stdout.print("error: internal compiler error: generated {s} is invalid\n", .{stage});
     try stdout.flush();
-    std.process.exit(2);
+    return error.InvalidGeneratedMlir;
 }
 
 fn writeCompilerDiagnosticSecondaryLabels(
@@ -2339,55 +2937,91 @@ fn exitOnCompilerErrors(
     if (!compilerDiagnosticsHasErrors(diagnostics_list)) return;
     try writeCompilerDiagnosticsText(writer, sources, diagnostics_list, debug_enabled);
     try writer.flush();
-    std.process.exit(1);
+    return error.CompilationDiagnosticsFailed;
 }
 
-fn rejectIfNotEmittable(
+fn writeCompilationErrorsText(
     writer: anytype,
-    sources: ?*const compiler.source.SourceStore,
-    lowering: *const compiler.hir.LoweringResult,
+    db: *compiler.db.CompilerDb,
+    module_id: compiler.source.ModuleId,
     debug_enabled: bool,
 ) !void {
-    try exitOnCompilerErrors(writer, sources, &lowering.diagnostics, debug_enabled);
-    try writeDetectOnlyTypeFallbacks(writer, sources, lowering, debug_enabled);
-    if (lowering.isEmittable()) return;
+    const root_module = db.sources.module(module_id);
+    const package = db.sources.package(root_module.package_id);
 
-    try writer.print("Compiler error: HIR lowering produced non-emittable fallback state; refusing to emit artifacts\n", .{});
-    if (lowering.type_fallback_count != 0) {
-        try writer.print("  type fallbacks: {d}\n", .{lowering.type_fallback_count});
-    }
-    if (lowering.placeholder_count != 0) {
-        try writer.print("  placeholders: {d}\n", .{lowering.placeholder_count});
-    }
-    if (lowering.default_value_count != 0) {
-        try writer.print("  default values: {d}\n", .{lowering.default_value_count});
-    }
-    try writer.flush();
-    std.process.exit(1);
-}
+    for (package.modules.items) |current_module_id| {
+        const module = db.sources.module(current_module_id);
 
-fn rejectIfExecutableFallbacksSurvive(
-    writer: anytype,
-    lowering: *const compiler.hir.LoweringResult,
-) !void {
-    if (compiler.hir.findExecutableFallback(lowering.module.raw_module)) |violation| {
-        try writer.print(
-            "Compiler error: HIR contains executable fallback '{s}' ({s}); refusing to emit artifacts\n",
-            .{ violation.op_name, violation.reason },
-        );
-        try writer.flush();
-        std.process.exit(1);
+        const syntax_diags = try db.syntaxDiagnostics(module.file_id);
+        if (compilerDiagnosticsHasErrors(syntax_diags)) {
+            try writeCompilerDiagnosticsText(writer, &db.sources, syntax_diags, debug_enabled);
+        }
+
+        const ast_diags = try db.astDiagnostics(module.file_id);
+        if (compilerDiagnosticsHasErrors(ast_diags)) {
+            try writeCompilerDiagnosticsText(writer, &db.sources, ast_diags, debug_enabled);
+        }
+
+        const resolution_diags = try db.resolutionDiagnostics(current_module_id);
+        if (compilerDiagnosticsHasErrors(resolution_diags)) {
+            try writeCompilerDiagnosticsText(writer, &db.sources, resolution_diags, debug_enabled);
+        }
+
+        const module_typecheck = try db.moduleTypeCheck(current_module_id);
+        if (compilerDiagnosticsHasErrors(&module_typecheck.diagnostics)) {
+            try writeCompilerDiagnosticsText(writer, &db.sources, &module_typecheck.diagnostics, debug_enabled);
+        }
     }
 }
 
-fn exitIfCompilationNotArtifactEmittable(
+fn rejectIfArtifactEmissionBlocked(
     writer: anytype,
-    compilation: *const compiler.driver.Compilation,
+    compilation: *compiler.driver.Compilation,
+    decision: compiler.driver.ArtifactEmissionDecision,
+    debug_enabled: bool,
 ) !void {
-    if (compilation.isArtifactEmittable()) return;
-    try writer.print("Compiler error: compilation is not emittable; refusing to emit artifacts\n", .{});
+    switch (decision) {
+        .allowed => return,
+        .blocked => |reason| switch (reason) {
+            .package_diagnostics => {
+                try writeCompilationErrorsText(writer, &compilation.db, compilation.root_module_id, debug_enabled);
+                try writer.print("Compiler error: compilation is not emittable; refusing to emit artifacts\n", .{});
+            },
+            .hir_diagnostics => {
+                const lowering = compilation.db.lowerToHir(compilation.root_module_id) catch |err| {
+                    try writer.print("Compiler error: HIR lowering failed while explaining artifact barrier: {s}\n", .{@errorName(err)});
+                    try writer.flush();
+                    return err;
+                };
+                try writeCompilerDiagnosticsText(writer, &compilation.db.sources, &lowering.diagnostics, debug_enabled);
+                try writer.print("Compiler error: HIR lowering produced diagnostics; refusing to emit artifacts\n", .{});
+            },
+            .hir_executable_fallbacks => |counts| {
+                const lowering = compilation.db.lowerToHir(compilation.root_module_id) catch null;
+                if (lowering) |hir_result| {
+                    try writeDetectOnlyTypeFallbacks(writer, &compilation.db.sources, hir_result, debug_enabled);
+                }
+                try writer.print("Compiler error: HIR lowering produced non-emittable fallback state; refusing to emit artifacts\n", .{});
+                if (counts.type_fallback_count != 0) {
+                    try writer.print("  type fallbacks: {d}\n", .{counts.type_fallback_count});
+                }
+                if (counts.placeholder_count != 0) {
+                    try writer.print("  placeholders: {d}\n", .{counts.placeholder_count});
+                }
+                if (counts.default_value_count != 0) {
+                    try writer.print("  default values: {d}\n", .{counts.default_value_count});
+                }
+            },
+            .structural_executable_fallback => |violation| {
+                try writer.print(
+                    "Compiler error: HIR contains executable fallback '{s}' ({s}); refusing to emit artifacts\n",
+                    .{ violation.op_name, violation.reason },
+                );
+            },
+        },
+    }
     try writer.flush();
-    std.process.exit(1);
+    return error.ArtifactEmissionBlocked;
 }
 
 fn writeDetectOnlyTypeFallbacks(
@@ -2397,8 +3031,8 @@ fn writeDetectOnlyTypeFallbacks(
     debug_enabled: bool,
 ) !void {
     const report_enabled = debug_enabled or blk: {
-        if (std.posix.getenv("ORA_REPORT_TYPE_FALLBACKS")) |env_value| {
-            break :blk env_value[0] != 0 and env_value[0] != '0';
+        if (libcEnv("ORA_REPORT_TYPE_FALLBACKS")) |env_value| {
+            break :blk env_value.len != 0 and env_value[0] != '0';
         }
         break :blk false;
     };
@@ -2470,6 +3104,76 @@ fn writeJsonString(writer: anytype, text: []const u8) !void {
         },
     };
     try writer.writeByte('"');
+}
+
+fn artifactRelativePath(root: []const u8, path: []const u8) []const u8 {
+    if (root.len == 0 or !std.fs.path.isAbsolute(path)) return path;
+    if (!std.mem.startsWith(u8, path, root)) return path;
+
+    const suffix = path[root.len..];
+    if (suffix.len == 0) return ".";
+    if (suffix[0] == '/' or suffix[0] == '\\') return suffix[1..];
+    return path;
+}
+
+fn writeArtifactPathJson(writer: anytype, root: []const u8, path: []const u8) !void {
+    try writeJsonString(writer, artifactRelativePath(root, path));
+}
+
+test "debug artifact source paths strip cwd prefix only at path boundary" {
+    try std.testing.expectEqualStrings("tests/main.ora", artifactRelativePath("/repo/ora", "/repo/ora/tests/main.ora"));
+    try std.testing.expectEqualStrings("/repo/ora2/tests/main.ora", artifactRelativePath("/repo/ora", "/repo/ora2/tests/main.ora"));
+    try std.testing.expectEqualStrings("tests/main.ora", artifactRelativePath("/repo/ora", "tests/main.ora"));
+}
+
+test "FV proof sidecar uses versioned schema envelope" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "out");
+
+    const output_dir = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/out", .{tmp.sub_path});
+    defer std.testing.allocator.free(output_dir);
+
+    const cwd = try std.process.currentPathAlloc(std.Io.Threaded.global_single_threaded.io(), std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+    const source_path = try std.fs.path.join(std.testing.allocator, &.{ cwd, "contracts/main.ora" });
+    defer std.testing.allocator.free(source_path);
+
+    const positions = [_]z3_verification.ProvenGuardPosition{.{
+        .file = source_path,
+        .line = 7,
+        .column = 11,
+        .status = "proved_safe",
+    }};
+    try writeProofSidecar(std.testing.allocator, output_dir, "main", positions[0..]);
+
+    const json = try tmp.dir.readFileAlloc(std.testing.io, "out/main.proof.json", std.testing.allocator, std.Io.Limit.limited(4096));
+    defer std.testing.allocator.free(json);
+
+    try std.testing.expect(std.mem.startsWith(u8, json, "{\"schema_version\":1,\"proofs\":["));
+    try std.testing.expect(!std.mem.startsWith(u8, json, "["));
+
+    const Entry = struct {
+        file: []const u8,
+        line: u32,
+        column: u32,
+        status: []const u8,
+    };
+    const Sidecar = struct {
+        schema_version: u32,
+        proofs: []const Entry,
+    };
+    const parsed = try std.json.parseFromSlice(Sidecar, std.testing.allocator, json, .{
+        .ignore_unknown_fields = false,
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(proof_sidecar_schema_version, parsed.value.schema_version);
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.proofs.len);
+    try std.testing.expectEqualStrings("contracts/main.ora", parsed.value.proofs[0].file);
+    try std.testing.expectEqual(@as(u32, 7), parsed.value.proofs[0].line);
+    try std.testing.expectEqual(@as(u32, 11), parsed.value.proofs[0].column);
+    try std.testing.expectEqualStrings("proved_safe", parsed.value.proofs[0].status);
 }
 
 const DebugLocalInfo = struct {
@@ -2561,12 +3265,16 @@ fn formatConstDebugValue(allocator: std.mem.Allocator, value: ora_types.ConstVal
             var out = try std.ArrayList(u8).initCapacity(allocator, 2 + bytes.len * 2);
             errdefer out.deinit(allocator);
             try out.appendSlice(allocator, "0x");
-            for (bytes) |byte| try out.writer(allocator).print("{x:0>2}", .{byte});
+            for (bytes) |byte| {
+                var encoded: [2]u8 = undefined;
+                const piece = try std.fmt.bufPrint(&encoded, "{x:0>2}", .{byte});
+                try out.appendSlice(allocator, piece);
+            }
             break :blk try out.toOwnedSlice(allocator);
         },
         .string => |text| try std.fmt.allocPrint(allocator, "\"{s}\"", .{text}),
         .tuple => |elements| blk: {
-            var parts: std.ArrayList([]const u8) = .{};
+            var parts: std.ArrayList([]const u8) = .empty;
             defer {
                 for (parts.items) |part| allocator.free(part);
                 parts.deinit(allocator);
@@ -2574,7 +3282,7 @@ fn formatConstDebugValue(allocator: std.mem.Allocator, value: ora_types.ConstVal
             for (elements) |element| {
                 try parts.append(allocator, try formatConstDebugValue(allocator, element));
             }
-            var out = std.ArrayList(u8){};
+            var out = std.ArrayList(u8).empty;
             errdefer out.deinit(allocator);
             try out.append(allocator, '(');
             for (parts.items, 0..) |part, index| {
@@ -2845,6 +3553,7 @@ fn stmtRange(stmt: compiler.ast.Stmt) compiler.source.TextRange {
         .Try => |s| s.range,
         .Log => |s| s.range,
         .Lock => |s| s.range,
+        .CallHint => |s| s.range,
         .Unlock => |s| s.range,
         .Assert => |s| s.range,
         .Assume => |s| s.range,
@@ -2873,7 +3582,7 @@ fn statementUsesAnyName(
     defer arena.deinit();
     const arena_allocator = arena.allocator();
 
-    var names: std.ArrayList([]const u8) = .{};
+    var names: std.ArrayList([]const u8) = .empty;
     defer names.deinit(arena_allocator);
 
     const stmt = ast_file.statement(statement_id).*;
@@ -2884,6 +3593,7 @@ fn statementUsesAnyName(
             for (l.args) |arg| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, arg, &names) catch return true;
         },
         .Lock => |s| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, s.path, &names) catch return true,
+        .CallHint => return true,
         .Unlock => |s| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, s.path, &names) catch return true,
         .Assert => |a| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, a.condition, &names) catch return true,
         .Assume => |a| compiler.ast.collectNamesInExpr(arena_allocator, ast_file, a.condition, &names) catch return true,
@@ -3050,7 +3760,7 @@ fn collectBodyScopeDebugInfo(
                 // walking into nested bodies needs a stmt walker
                 // that doesn't exist yet; staying conservative
                 // there avoids false dead-binding signals.
-                var binding_names: std.ArrayList([]const u8) = .{};
+                var binding_names: std.ArrayList([]const u8) = .empty;
                 defer binding_names.deinit(allocator);
                 try collectPatternBindingNames(allocator, ast_file, decl.pattern, &binding_names);
                 const live_end = computeNarrowedLiveEnd(ast_file, &body, stmt_idx, binding_names.items) orelse body.range.end;
@@ -3147,7 +3857,7 @@ fn collectBodyScopeDebugInfo(
                 try collectBodyScopeDebugInfo(allocator, db, const_eval, global_slots, ast_file, file_id, function_name, contract_name, while_stmt.body, scope_id, "while", while_stmt.label, &.{}, state, scopes, locals);
             },
             .For => |for_stmt| {
-                var bindings = std.ArrayList(ExtraScopeBinding){};
+                var bindings = std.ArrayList(ExtraScopeBinding).empty;
                 defer bindings.deinit(allocator);
                 try bindings.append(allocator, .{
                     .pattern_id = for_stmt.item_pattern,
@@ -3241,7 +3951,7 @@ fn collectItemDebugScopes(
         },
         .Function => |function_item| {
             if (function_item.is_comptime or function_item.is_ghost) return;
-            var param_bindings: std.ArrayList(ExtraScopeBinding) = .{};
+            var param_bindings: std.ArrayList(ExtraScopeBinding) = .empty;
             defer param_bindings.deinit(allocator);
             for (function_item.parameters) |parameter| {
                 if (parameter.is_comptime) continue;
@@ -3316,8 +4026,8 @@ fn buildSourceScopeDebugInfo(
     root_module_id: compiler.ModuleId,
     global_slots: *const DebugGlobalSlots,
 ) !DebugSourceScopeBundle {
-    var scopes: std.ArrayList(DebugScopeInfo) = .{};
-    var locals: std.ArrayList(DebugLocalInfo) = .{};
+    var scopes: std.ArrayList(DebugScopeInfo) = .empty;
+    var locals: std.ArrayList(DebugLocalInfo) = .empty;
     errdefer scopes.deinit(allocator);
     errdefer locals.deinit(allocator);
 
@@ -3450,7 +4160,7 @@ fn putExecutableStatementStart(
     const gop = try line_map.getOrPut(file_path);
     if (!gop.found_existing) {
         gop.key_ptr.* = try allocator.dupe(u8, file_path);
-        gop.value_ptr.* = .{};
+        gop.value_ptr.* = .empty;
     }
 
     for (gop.value_ptr.items) |*entry| {
@@ -3601,6 +4311,7 @@ fn collectExecutableStmtLines(
         .Assert => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, statement_id, node.range, .runtime_guard),
         .Log => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, statement_id, node.range, .runtime),
         .Lock => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, statement_id, node.range, .runtime),
+        .CallHint => {},
         .Unlock => |node| try addExecutableRangeStart(allocator, sources, line_map, file_id, statement_id, node.range, .runtime),
         .Block => |node| try collectExecutableBodyLines(allocator, sources, ast_file, file_id, node.body, line_map),
         .LabeledBlock => |node| try collectExecutableBodyLines(allocator, sources, ast_file, file_id, node.body, line_map),
@@ -3684,7 +4395,15 @@ fn writeCompilerType(writer: anytype, ty: compiler.sema.Type) !void {
         .address => try writer.writeAll("address"),
         .bytes => try writer.writeAll("bytes"),
         .fixed_bytes => |fixed_bytes| try writer.print("bytes{d}", .{fixed_bytes.len}),
+        .storage_slot => try writer.writeAll("StorageSlot"),
+        .storage_range => try writer.writeAll("StorageRange"),
         .external_proxy => |proxy| try writer.print("external<{s}>", .{proxy.trait_name}),
+        .resource_domain => |resource| try writer.writeAll(resource.name),
+        .resource_place => |place| {
+            try writer.writeAll("Resource<");
+            try writeCompilerType(writer, place.domain_type.*);
+            try writer.writeAll(">");
+        },
         .integer => |integer| if (integer.spelling) |spelling|
             try writer.writeAll(spelling)
         else
@@ -3797,6 +4516,7 @@ fn compilerItemKindName(item: compiler.ast.Item) []const u8 {
         .Struct => "Struct",
         .Bitfield => "Bitfield",
         .Enum => "Enum",
+        .Resource => "Resource",
         .Trait => "Trait",
         .Impl => "Impl",
         .TypeAlias => "TypeAlias",
@@ -3816,6 +4536,7 @@ fn compilerItemName(item: compiler.ast.Item) ?[]const u8 {
         .Struct => |struct_item| struct_item.name,
         .Bitfield => |bitfield_item| bitfield_item.name,
         .Enum => |enum_item| enum_item.name,
+        .Resource => |resource_item| resource_item.name,
         .Trait => |trait_item| trait_item.name,
         .Impl => |impl_item| impl_item.target_name,
         .TypeAlias => |type_alias| type_alias.name,
@@ -3853,10 +4574,10 @@ fn writeCompilerAst(
             }
             if (typecheck) |typed| {
                 try writer.writeAll(", \"type\": ");
-                var type_buffer: std.ArrayList(u8) = .{};
-                defer type_buffer.deinit(allocator);
-                try writeCompilerType(type_buffer.writer(allocator), typed.item_types[item_id.index()]);
-                try writeJsonString(writer, type_buffer.items);
+                var type_buffer = std.Io.Writer.Allocating.init(allocator);
+                defer type_buffer.deinit();
+                try writeCompilerType(&type_buffer.writer, typed.item_types[item_id.index()]);
+                try writeJsonString(writer, type_buffer.written());
             }
             try writer.writeByte('}');
         }
@@ -3901,7 +4622,7 @@ fn runCompilerAstEmit(
     debug_enabled: bool,
 ) !void {
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     var compilation = compiler.driver.compilePackageWithOptions(allocator, file_path, .{
@@ -3910,7 +4631,7 @@ fn runCompilerAstEmit(
     }) catch |err| {
         try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
         try stdout.flush();
-        std.process.exit(1);
+        return error.CompilerCompileFailed;
     };
     defer compilation.deinit();
 
@@ -3924,7 +4645,7 @@ fn runCompilerAstEmit(
         error.InvalidArgument => {
             try stdout.print("error: unsupported AST format '{s}' (use 'tree' or 'json')\n", .{format});
             try stdout.flush();
-            std.process.exit(2);
+            return error.InvalidAstFormat;
         },
         else => return err,
     };
@@ -3941,7 +4662,7 @@ fn runCompilerMlirEmit(
     const c = @import("mlir_c_api").c;
 
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
     const stdout = &stdout_writer.interface;
     const m = mlir_options.metrics;
 
@@ -3951,27 +4672,69 @@ fn runCompilerMlirEmit(
     }) catch |err| {
         try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
         try stdout.flush();
-        std.process.exit(1);
+        return error.CompilerCompileFailed;
     };
     defer compilation.deinit();
 
-    _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id, debug_enabled);
-
-    const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
-    try rejectIfNotEmittable(stdout, &compilation.db.sources, lowering, debug_enabled);
-    try rejectIfExecutableFallbacksSurvive(stdout, lowering);
+    const artifact_decision = try compilation.artifactEmissionDecision();
+    try rejectIfArtifactEmissionBlocked(stdout, &compilation, artifact_decision, debug_enabled);
+    const lowering = switch (artifact_decision) {
+        .allowed => |hir_result| hir_result,
+        .blocked => unreachable,
+    };
     if (mlir_options.validate_mlir) {
         try verifyMlirModule(stdout, lowering.module.raw_module, "Ora MLIR");
     }
+    if (mlir_options.emit_mlir) {
+        try emitMlirModuleText(
+            allocator,
+            stdout,
+            lowering.module.raw_module,
+            file_path,
+            mlir_options.output_dir,
+            ".ora.mlir",
+            "Ora MLIR",
+            mlir_options.suppress_artifact_logs,
+        );
+    }
     if (mlir_options.emit_mlir_sir) {
-        if (!c.oraConvertToSIR(lowering.context, lowering.module.raw_module, mlir_options.debug_info)) {
+        var mlir_pass_stats: c.OraMlirPassStatisticsC = std.mem.zeroes(c.OraMlirPassStatisticsC);
+        enableSirFrameworkCanonicalizerIfRequested(lowering.context, lowering.module.raw_module, mlir_options);
+        m.begin("ora-to-sir");
+        if (!c.oraConvertToSIRWithStatisticsOut(lowering.context, lowering.module.raw_module, mlir_options.debug_info, mlir_options.mlir_pass_statistics, &mlir_pass_stats)) {
+            m.cancel();
             try stdout.print("Compiler error: Ora to SIR conversion failed\n", .{});
             try stdout.flush();
-            std.process.exit(1);
+            return error.OraToSirConversionFailed;
         }
+        m.endWith(mlirPassStatisticsTotalWork(mlir_pass_stats));
+        recordMlirPassStatistics(m, mlir_pass_stats);
+        try emitMlirModuleText(
+            allocator,
+            stdout,
+            lowering.module.raw_module,
+            file_path,
+            mlir_options.output_dir,
+            ".sir.mlir",
+            "SIR MLIR",
+            mlir_options.suppress_artifact_logs,
+        );
     }
+    try stdout.flush();
+}
 
-    const module_op = c.oraModuleGetOperation(lowering.module.raw_module);
+fn emitMlirModuleText(
+    allocator: std.mem.Allocator,
+    stdout: anytype,
+    module: @import("mlir_c_api").c.MlirModule,
+    file_path: []const u8,
+    output_dir: ?[]const u8,
+    suffix: []const u8,
+    label: []const u8,
+    suppress_log: bool,
+) !void {
+    const c = @import("mlir_c_api").c;
+    const module_op = c.oraModuleGetOperation(module);
     const text_ref = c.oraOperationPrintToString(module_op);
     defer if (text_ref.data != null) {
         const mlir_c = @import("mlir_c_api");
@@ -3981,17 +4744,36 @@ fn runCompilerMlirEmit(
     if (text_ref.data == null or text_ref.length == 0) {
         try stdout.print("Compiler error: failed to print MLIR module\n", .{});
         try stdout.flush();
-        std.process.exit(1);
+        return error.MlirPrintFailed;
     }
-    try stdout.print("{s}", .{text_ref.data[0..text_ref.length]});
-    try stdout.flush();
+    const content = text_ref.data[0..text_ref.length];
+    if (output_dir) |dir| {
+        try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), dir);
+        const basename = std.fs.path.stem(file_path);
+        const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, suffix });
+        defer allocator.free(filename);
+        const output_file = try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
+        defer allocator.free(output_file);
+        try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+            .sub_path = output_file,
+            .data = content,
+        });
+        if (!suppress_log) try stdout.print("{s} saved to {s}\n", .{ label, output_file });
+    } else {
+        try stdout.print("{s}", .{content});
+    }
 }
 
 fn runCompilerTokenEmit(
     allocator: std.mem.Allocator,
     file_path: []const u8,
 ) !void {
-    const source_text = try std.fs.cwd().readFileAlloc(allocator, file_path, std.math.maxInt(usize));
+    const source_text = try std.Io.Dir.cwd().readFileAlloc(
+        std.Io.Threaded.global_single_threaded.io(),
+        file_path,
+        allocator,
+        .unlimited,
+    );
     defer allocator.free(source_text);
 
     var lexer = lib.Lexer.init(allocator, source_text);
@@ -4001,7 +4783,7 @@ fn runCompilerTokenEmit(
     defer allocator.free(tokens);
 
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     for (tokens) |token| {
@@ -4034,18 +4816,16 @@ fn emitCfgDot(
             .sir => ".sir.dot",
         };
 
-        std.fs.cwd().makeDir(dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
+        try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), dir);
 
         const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, suffix });
         defer allocator.free(filename);
         const output_file = try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
         defer allocator.free(output_file);
-        var dot_file = try std.fs.cwd().createFile(output_file, .{});
-        defer dot_file.close();
-        try dot_file.writeAll(dot);
+        try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+            .sub_path = output_file,
+            .data = dot,
+        });
 
         if (mode == .sir) {
             const graphs = try mlir_cfg.generateFunctionCFGs(ctx, module, allocator, .{ .mode = .sir });
@@ -4061,9 +4841,10 @@ fn emitCfgDot(
                 defer allocator.free(per_function_filename);
                 const per_function_output = try std.fs.path.join(allocator, &[_][]const u8{ dir, per_function_filename });
                 defer allocator.free(per_function_output);
-                var per_function_file = try std.fs.cwd().createFile(per_function_output, .{});
-                defer per_function_file.close();
-                try per_function_file.writeAll(graph.dot);
+                try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+                    .sub_path = per_function_output,
+                    .data = graph.dot,
+                });
             }
         }
     } else {
@@ -4094,10 +4875,7 @@ fn emitSirCfgOptimizationDiff(
     defer diff.deinit(allocator);
 
     if (output_dir) |dir| {
-        std.fs.cwd().makeDir(dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
+        try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), dir);
 
         const basename = std.fs.path.stem(file_path);
         const before_filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".sir.pre-opt.dot" });
@@ -4107,15 +4885,17 @@ fn emitSirCfgOptimizationDiff(
 
         const before_output = try std.fs.path.join(allocator, &[_][]const u8{ dir, before_filename });
         defer allocator.free(before_output);
-        var before_file = try std.fs.cwd().createFile(before_output, .{});
-        defer before_file.close();
-        try before_file.writeAll(diff.before);
+        try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+            .sub_path = before_output,
+            .data = diff.before,
+        });
 
         const after_output = try std.fs.path.join(allocator, &[_][]const u8{ dir, after_filename });
         defer allocator.free(after_output);
-        var after_file = try std.fs.cwd().createFile(after_output, .{});
-        defer after_file.close();
-        try after_file.writeAll(diff.after);
+        try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+            .sub_path = after_output,
+            .data = diff.after,
+        });
     } else {
         try stdout.print("// SIR CFG before framework canonicalizer\n{s}\n", .{diff.before});
         try stdout.print("// SIR CFG after framework canonicalizer\n{s}", .{diff.after});
@@ -4132,7 +4912,7 @@ fn runMlirEmitAdvanced(
     const c = @import("mlir_c_api").c;
 
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
     const stdout = &stdout_writer.interface;
     const m = mlir_options.metrics;
 
@@ -4146,40 +4926,60 @@ fn runMlirEmitAdvanced(
     }) catch |err| {
         try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
         try stdout.flush();
-        std.process.exit(1);
+        return error.CompilerCompileFailed;
     };
     defer compilation.deinit();
 
-    _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id, debug_enabled);
-
-    const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
-    try rejectIfNotEmittable(stdout, &compilation.db.sources, lowering, debug_enabled);
-    try rejectIfExecutableFallbacksSurvive(stdout, lowering);
+    const artifact_decision = try compilation.artifactEmissionDecision();
+    try rejectIfArtifactEmissionBlocked(stdout, &compilation, artifact_decision, debug_enabled);
+    const lowering = switch (artifact_decision) {
+        .allowed => |hir_result| hir_result,
+        .blocked => unreachable,
+    };
     const final_module = lowering.module.raw_module;
     const ctx = lowering.context;
     const cfg_mode_is_ora = if (mlir_options.emit_cfg_mode) |mode| std.ascii.eqlIgnoreCase(mode, "ora") else false;
     const cfg_mode_is_sir = if (mlir_options.emit_cfg_mode) |mode| std.ascii.eqlIgnoreCase(mode, "sir") else false;
     const cfg_mode_is_sir_diff = if (mlir_options.emit_cfg_mode) |mode| std.ascii.eqlIgnoreCase(mode, "sir-diff") else false;
+    const needs_userland_lean_gate = mlir_options.lean_proofs_mode.includesUserland();
+    if (mlir_options.lean_proofs_mode.includesKernel()) {
+        try stdout.print("error: --lean-proofs=kernel/both is not wired into contract compilation yet; run `zig build check-formal-sync` for compiler-kernel Lean checks.\n", .{});
+        try stdout.flush();
+        return error.VerificationFailed;
+    }
+    const needs_lean_dispatcher_gate = needs_userland_lean_gate;
     const needs_sir_conversion = mlir_options.emit_mlir_sir or
         mlir_options.emit_sir_text or
         mlir_options.emit_bytecode or
-        cfg_mode_is_sir;
+        cfg_mode_is_sir or
+        needs_lean_dispatcher_gate;
     const needs_refinement_cleanup = needs_sir_conversion or cfg_mode_is_sir_diff;
 
     if (mlir_options.validate_mlir) {
         try verifyMlirModule(stdout, final_module, "Ora MLIR");
     }
 
-    var verification_result_opt: ?@import("z3/errors.zig").VerificationResult = null;
+    var verification_result_opt: ?z3_verification.VerificationResult = null;
     var verification_failed = false;
-    var pending_smt_report: ?@import("z3/mod.zig").SmtReportArtifacts = null;
+    var verification_report_blocked_artifacts = false;
+    var pending_smt_report: ?z3_verification.SmtReportArtifacts = null;
+    var pending_smt_report_write_artifacts = false;
+    var formal_result_for_smt_report: ?formal_obligation_from_mlir.CollectResult = null;
+    var z3_formal_query_bindings: []const z3_verification.FormalQueryBinding = &.{};
     defer {
         if (verification_result_opt) |*vr| vr.deinit();
         if (pending_smt_report) |*report| report.deinit(mlir_allocator);
+        if (z3_formal_query_bindings.len > 0) allocator.free(z3_formal_query_bindings);
+        if (formal_result_for_smt_report) |*result| result.deinit();
+    }
+
+    if (mlir_options.lean_proofs_requested and !mlir_options.verify_z3) {
+        try stdout.print("error: --lean-proofs requires SMT verification; remove --no-verify.\n", .{});
+        try stdout.flush();
+        return error.VerificationFailed;
     }
 
     if (mlir_options.verify_z3) {
-        const z3_verification = @import("z3/verification.zig");
         var verifier = try z3_verification.VerificationPass.initWithProofs(mlir_allocator, mlir_options.z3_proofs);
         defer verifier.deinit();
 
@@ -4196,6 +4996,16 @@ fn runMlirEmitAdvanced(
         verifier.setExplainCores(mlir_options.explain_cores);
         verifier.setMinimizeCores(mlir_options.minimize_cores);
 
+        const needs_external_lean_proof_gate = mlir_options.lean_proofs_path != null;
+        const needs_automatic_lean_proof_gate = needs_userland_lean_gate and mlir_options.lean_proofs_path == null;
+        const needs_lean_proof_gate = needs_external_lean_proof_gate or needs_automatic_lean_proof_gate;
+        // Guard erasure now requires first-class formal identity at the SMT
+        // verdict site. Collect the manifest once before verification so
+        // prepared GuardViolate rows can authorize erasure fail-closed.
+        formal_result_for_smt_report = try formal_obligation_from_mlir.collect(allocator, final_module, .{});
+        z3_formal_query_bindings = try z3FormalQueryBindingsFromFormal(allocator, formal_result_for_smt_report.?.query_bindings);
+        verifier.setFormalQueryBindings(z3_formal_query_bindings);
+
         const verification_result = try verifier.runVerificationPass(final_module);
 
         if (verification_result.diagnostics.items.len > 0) {
@@ -4208,12 +5018,78 @@ fn runMlirEmitAdvanced(
             }
         }
 
-        if (mlir_options.emit_smt_report) {
+        const needs_formal_smt_report_context = needs_lean_proof_gate or mlir_options.measure_canonical_z3;
+        const needs_unknown_recipe = !verification_result.success and hasUnknownVerificationError(&verification_result);
+        if (mlir_options.emit_smt_report or needs_formal_smt_report_context or needs_unknown_recipe) {
             pending_smt_report = try verifier.buildSmtReport(final_module, file_path, &verification_result);
+            pending_smt_report_write_artifacts = mlir_options.emit_smt_report or needs_lean_proof_gate;
+            if (pending_smt_report) |report| {
+                verification_report_blocked_artifacts = report.blocksTrustedArtifacts();
+            }
         }
 
-        if (!verification_result.success) {
+        var lean_artifact_gate_allowed = false;
+        var lean_artifact_gate_failed = false;
+        if (needs_external_lean_proof_gate) {
+            lean_artifact_gate_allowed = applyLeanProofArtifactGate(
+                allocator,
+                file_path,
+                &formal_result_for_smt_report.?,
+                mlir_options.lean_proofs_path.?,
+                pending_smt_report.?,
+                mlir_options,
+                stdout,
+            ) catch |err| blk: {
+                try stdout.print("Lean proof gate failed: {s}\n", .{@errorName(err)});
+                lean_artifact_gate_failed = true;
+                break :blk false;
+            };
+        } else if (needs_automatic_lean_proof_gate) {
+            lean_artifact_gate_allowed = applyAutomaticLeanProofArtifactGate(
+                allocator,
+                file_path,
+                &formal_result_for_smt_report.?,
+                pending_smt_report.?,
+                mlir_options,
+                stdout,
+            ) catch |err| blk: {
+                try stdout.print("Automatic Lean proof gate failed: {s}\n", .{@errorName(err)});
+                lean_artifact_gate_failed = true;
+                break :blk false;
+            };
+        }
+
+        if (lean_artifact_gate_failed) {
+            verification_failed = true;
+        }
+        if (needs_lean_proof_gate and !lean_artifact_gate_allowed) {
+            try stdout.writeAll(
+                "error: Lean userland obligation proof gate rejected the contract\n",
+            );
+            verification_failed = true;
+        }
+        if (!verification_result.success and !lean_artifact_gate_allowed) {
             try printVerificationErrors(stdout, verification_result.errors.items);
+            if (needs_unknown_recipe and !needs_userland_lean_gate) {
+                if (pending_smt_report) |*report| {
+                    maybeEmitLeanUnknownRecipe(
+                        allocator,
+                        file_path,
+                        final_module,
+                        if (formal_result_for_smt_report) |*result| result else null,
+                        report.*,
+                        mlir_options,
+                        stdout,
+                    ) catch |err| {
+                        try stdout.print("note: could not emit Lean proof recipe: {s}\n", .{@errorName(err)});
+                    };
+                }
+            }
+            try stdout.flush();
+            verification_failed = true;
+        }
+        if (verification_report_blocked_artifacts and verification_result.success and !lean_artifact_gate_allowed) {
+            try stdout.print("Verification failed: SMT report did not authorize trusted artifact emission\n", .{});
             try stdout.flush();
             verification_failed = true;
         }
@@ -4222,7 +5098,6 @@ fn runMlirEmitAdvanced(
     }
 
     if (mlir_options.emit_smt_report and !mlir_options.verify_z3) {
-        const z3_verification = @import("z3/verification.zig");
         var verifier = try z3_verification.VerificationPass.initWithProofs(mlir_allocator, mlir_options.z3_proofs);
         defer verifier.deinit();
         if (mlir_options.verify_mode) |mode| {
@@ -4239,34 +5114,68 @@ fn runMlirEmitAdvanced(
         pending_smt_report = try verifier.buildSmtReport(final_module, file_path, null);
     }
 
+    if (verification_failed) {
+        const z3_status: []const u8 = if (verification_result_opt) |*result|
+            if (result.success) "accepted" else "rejected"
+        else
+            "not-run";
+        const lean_status: []const u8 = if (needs_userland_lean_gate)
+            "rejected"
+        else
+            "not-requested";
+        try stdout.print(
+            "error: userland verification failed (Z3: {s}, Lean obligation gate: {s})\n",
+            .{ z3_status, lean_status },
+        );
+        if (pending_smt_report) |*report| {
+            if (mlir_options.measure_canonical_z3) {
+                if (formal_result_for_smt_report) |*formal_result| {
+                    try writeCanonicalZ3MeasurementArtifact(
+                        allocator,
+                        file_path,
+                        mlir_options.output_dir,
+                        formal_result,
+                        report.*,
+                        stdout,
+                        mlir_options.suppress_artifact_logs,
+                    );
+                }
+            }
+            if (pending_smt_report_write_artifacts) {
+                try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
+            }
+            report.deinit(mlir_allocator);
+            pending_smt_report = null;
+        }
+        try stdout.flush();
+        return error.VerificationFailed;
+    }
+
     // Write the FV proof sidecar before the canonicalize / cleanup
     // passes scrub proven guards from the MLIR module. The TUI's
-    // `fv` overlay reads `<stem>.proof.json` to mark proved-safe
-    // source lines (lib/evm/src/debug_info.zig:OpMeta.proof_status
-    // documents the schema; the sidecar uses the same string
-    // values).
+    // `fv` overlay reads the versioned `<stem>.proof.json` envelope
+    // to mark proved-safe source lines. The entries use the same
+    // status strings as lib/evm/src/debug_info.zig:OpMeta.proof_status.
     if (verification_result_opt) |*vr| {
         if (vr.proven_guard_positions.items.len > 0) {
             if (mlir_options.output_dir) |out_dir| {
                 const stem = std.fs.path.stem(file_path);
-                writeProofSidecar(allocator, out_dir, stem, vr.proven_guard_positions.items) catch |err| {
-                    try stdout.print("Warning: could not write proof sidecar: {s}\n", .{@errorName(err)});
-                };
+                try writeProofSidecar(allocator, out_dir, stem, vr.proven_guard_positions.items);
             }
         }
     }
 
-    if (verification_failed) {
-        return error.VerificationFailed;
-    }
-
     if (mlir_options.canonicalize and (mlir_options.emit_mlir or needs_sir_conversion)) {
+        var mlir_pass_stats: c.OraMlirPassStatisticsC = std.mem.zeroes(c.OraMlirPassStatisticsC);
         m.begin("canonicalization");
-        if (!c.oraCanonicalizeOraMLIR(ctx, final_module)) {
+        if (!c.oraCanonicalizeOraMLIRWithStatisticsOut(ctx, final_module, mlir_options.mlir_pass_statistics, &mlir_pass_stats)) {
+            m.cancel();
             try stdout.print("❌ Ora MLIR canonicalization failed\n", .{});
             try stdout.flush();
             return error.OraMlirCanonicalizationFailed;
         }
+        m.endWith(mlirPassStatisticsTotalWork(mlir_pass_stats));
+        recordMlirPassStatistics(m, mlir_pass_stats);
     }
 
     if (mlir_options.emit_mlir or mlir_options.persist_ora_mlir) {
@@ -4281,18 +5190,16 @@ fn runMlirEmitAdvanced(
             const mlir_content_ora = mlir_str_ora.data[0..mlir_str_ora.length];
             if (mlir_options.persist_ora_mlir) {
                 if (mlir_options.output_dir) |output_dir| {
-                    std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
-                        error.PathAlreadyExists => {},
-                        else => return err,
-                    };
+                    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), output_dir);
                     const basename = std.fs.path.stem(file_path);
                     const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".ora.mlir" });
                     defer allocator.free(filename);
                     const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
                     defer allocator.free(output_file);
-                    var mlir_file = try std.fs.cwd().createFile(output_file, .{});
-                    defer mlir_file.close();
-                    try mlir_file.writeAll(mlir_content_ora);
+                    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+                        .sub_path = output_file,
+                        .data = mlir_content_ora,
+                    });
                 }
             }
             if (mlir_options.emit_mlir) {
@@ -4333,6 +5240,18 @@ fn runMlirEmitAdvanced(
         }
     }
 
+    if (!mlir_options.keep_proved_checks) {
+        if (verification_result_opt) |*vr| {
+            if (vr.success) {
+                // Resource runtime-check erasure is intentionally tied only to
+                // the original SMT verification result. Userland Lean proofs
+                // may unblock artifact emission, but must not set the marker
+                // consumed by OraToSIR's `resourceRuntimeChecksProved`.
+                runtime_checks.markVerifiedResourceRuntimeChecks(ctx, final_module);
+            }
+        }
+    }
+
     if (cfg_mode_is_sir_diff) {
         try emitSirCfgOptimizationDiff(
             allocator,
@@ -4346,11 +5265,17 @@ fn runMlirEmitAdvanced(
     }
 
     if (needs_sir_conversion) {
-        if (!c.oraConvertToSIR(ctx, final_module, mlir_options.debug_info)) {
+        var mlir_pass_stats: c.OraMlirPassStatisticsC = std.mem.zeroes(c.OraMlirPassStatisticsC);
+        enableSirFrameworkCanonicalizerIfRequested(ctx, final_module, mlir_options);
+        m.begin("ora-to-sir");
+        if (!c.oraConvertToSIRWithStatisticsOut(ctx, final_module, mlir_options.debug_info, mlir_options.mlir_pass_statistics, &mlir_pass_stats)) {
+            m.cancel();
             try stdout.print("Error: Ora to SIR conversion failed\n", .{});
             try stdout.flush();
             return error.OraToSirConversionFailed;
         }
+        m.endWith(mlirPassStatisticsTotalWork(mlir_pass_stats));
+        recordMlirPassStatistics(m, mlir_pass_stats);
     }
 
     const explicit_sir_mlir_output = mlir_options.emit_mlir_sir and !mlir_options.emit_sir_text and !mlir_options.emit_bytecode;
@@ -4366,39 +5291,36 @@ fn runMlirEmitAdvanced(
 
         if (mlir_str_sir.data == null or mlir_str_sir.length == 0) {
             try stdout.print("Failed to print SIR MLIR\n", .{});
-            return;
+            try stdout.flush();
+            return error.SirMlirPrintFailed;
         }
 
         const mlir_content_sir = mlir_str_sir.data[0..mlir_str_sir.length];
         if (mlir_options.persist_sir_mlir and mlir_options.output_dir != null) {
             const output_dir = mlir_options.output_dir.?;
-            std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
-                error.PathAlreadyExists => {},
-                else => return err,
-            };
+            try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), output_dir);
             const basename = std.fs.path.stem(file_path);
             const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".sir.mlir" });
             defer allocator.free(filename);
             const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
             defer allocator.free(output_file);
-            var mlir_file = try std.fs.cwd().createFile(output_file, .{});
-            defer mlir_file.close();
-            try mlir_file.writeAll(mlir_content_sir);
+            try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+                .sub_path = output_file,
+                .data = mlir_content_sir,
+            });
         }
         if (explicit_sir_mlir_output) {
             if (mlir_options.output_dir) |output_dir| {
-                std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
-                    error.PathAlreadyExists => {},
-                    else => return err,
-                };
+                try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), output_dir);
                 const basename = std.fs.path.stem(file_path);
                 const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".mlir" });
                 defer allocator.free(filename);
                 const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
                 defer allocator.free(output_file);
-                var mlir_file = try std.fs.cwd().createFile(output_file, .{});
-                defer mlir_file.close();
-                try mlir_file.writeAll(mlir_content_sir);
+                try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+                    .sub_path = output_file,
+                    .data = mlir_content_sir,
+                });
                 try stdout.print("SIR MLIR saved to {s}\n", .{output_file});
             } else {
                 try stdout.print("{s}", .{mlir_content_sir});
@@ -4419,12 +5341,37 @@ fn runMlirEmitAdvanced(
         );
     }
 
-    if (mlir_options.emit_sir_text or mlir_options.emit_bytecode) {
+    var dispatcher_intent_json: ?[]u8 = null;
+    defer if (dispatcher_intent_json) |json| allocator.free(json);
+    if (needs_lean_dispatcher_gate) {
+        const intent_ref = c.oraExtractSIRDispatcherIntentFacts(ctx, final_module);
+        defer if (intent_ref.data != null) {
+            const mlir_c = @import("mlir_c_api");
+            mlir_c.freeStringRef(intent_ref);
+        };
+        if (intent_ref.data == null or intent_ref.length == 0) {
+            try stdout.print(
+                "error: Lean dispatcher userland proof failed: dispatcher intent extraction returned no facts for '{s}'\n",
+                .{file_path},
+            );
+            try stdout.flush();
+            return error.VerificationFailed;
+        }
+        dispatcher_intent_json = try allocator.dupe(u8, intent_ref.data[0..intent_ref.length]);
+    }
+
+    var dispatcher_check: ?formal_dispatcher_table_gate.CheckResult = null;
+    defer if (dispatcher_check) |*check| check.deinit();
+
+    if (mlir_options.emit_sir_text or mlir_options.emit_bytecode or needs_lean_dispatcher_gate) {
         if (!c.oraBuildSIRDispatcher(ctx, final_module)) {
             try stdout.print("Error: SIR dispatcher build failed\n", .{});
             try stdout.flush();
             return error.SirDispatcherBuildFailed;
         }
+    }
+
+    if (mlir_options.emit_sir_text or mlir_options.emit_bytecode or needs_lean_dispatcher_gate) {
         if (!c.oraLegalizeSIRText(ctx, final_module)) {
             try stdout.print("Error: SIR text legalizer failed\n", .{});
             try stdout.flush();
@@ -4443,7 +5390,7 @@ fn runMlirEmitAdvanced(
 
         // Extract source locations from SIR MLIR (sidecar to SIR text).
         // Op indices match the SIR text op ordering for later correlation
-        // with Sensei's bytecode offsets.
+        // with backend bytecode offsets.
         const mlir_c_api = @import("mlir_c_api");
         const sir_locations_ref = c.oraExtractSIRLocations(ctx, final_module);
         defer if (sir_locations_ref.data != null) {
@@ -4476,6 +5423,27 @@ fn runMlirEmitAdvanced(
             null;
 
         const sir_text = sir_text_ref.data[0..sir_text_ref.length];
+        if (needs_lean_dispatcher_gate) {
+            const dispatcher_intent = dispatcher_intent_json orelse {
+                try stdout.writeAll("Lean dispatcher userland proof failed: dispatcher intent facts are unavailable\n");
+                try stdout.flush();
+                return error.VerificationFailed;
+            };
+            dispatcher_check = formal_dispatcher_table_gate.checkCurrentModule(
+                allocator,
+                ctx,
+                final_module,
+                dispatcher_intent,
+                sir_text,
+                file_path,
+                mlir_options.process_environ,
+                stdout,
+            ) catch |err| {
+                try stdout.print("Lean dispatcher userland proof failed: {s}\n", .{@errorName(err)});
+                try stdout.flush();
+                return error.VerificationFailed;
+            };
+        }
         const sir_global_slots_ref: c.MlirStringRef = if (mlir_options.debug_info)
             c.oraExtractSIRGlobalSlots(ctx, final_module)
         else
@@ -4503,41 +5471,69 @@ fn runMlirEmitAdvanced(
 
         if (mlir_options.emit_sir_text) {
             if (mlir_options.output_dir) |output_dir| {
-                std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
-                    error.PathAlreadyExists => {},
-                    else => return err,
-                };
+                try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), output_dir);
                 const basename = std.fs.path.stem(file_path);
                 const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".sir" });
                 defer allocator.free(filename);
                 const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
                 defer allocator.free(output_file);
-                var sir_file = try std.fs.cwd().createFile(output_file, .{});
-                defer sir_file.close();
-                try sir_file.writeAll(sir_text);
+                try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+                    .sub_path = output_file,
+                    .data = sir_text,
+                });
             } else {
                 try stdout.print("{s}", .{sir_text});
             }
         }
         if (mlir_options.emit_bytecode) {
             if (mlir_options.emit_sir_text and mlir_options.output_dir == null) try stdout.print("\n", .{});
-            try emitBytecodeFromSirText(allocator, &compilation.db, compilation.root_module_id, &compilation.db.sources, sir_text, file_path, mlir_options.output_dir, mlir_options.output_file, sir_locations, sir_line_map, sir_debug_info, source_scopes, stdout, mlir_options.suppress_artifact_logs);
+            try emitBytecodeFromSirText(allocator, &compilation.db, compilation.root_module_id, &compilation.db.sources, sir_text, file_path, mlir_options.output_dir, mlir_options.output_file, sir_locations, sir_line_map, sir_debug_info, source_scopes, stdout, mlir_options.suppress_artifact_logs, mlir_options.optimize, if (dispatcher_check) |*check| check else null);
+        } else if (dispatcher_check) |*check| {
+            try writeLeanDispatcherProofCertificate(
+                allocator,
+                file_path,
+                mlir_options.output_dir,
+                check.certificate_json,
+                stdout,
+                mlir_options.suppress_artifact_logs,
+            );
+            try check.writeVerificationSummary(stdout, false);
+            try stdout.print("Lean dispatcher userland SIR proof accepted\n", .{});
         }
     }
 
     if (pending_smt_report) |*report| {
-        try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
+        if (mlir_options.measure_canonical_z3) {
+            if (formal_result_for_smt_report) |*formal_result| {
+                try writeCanonicalZ3MeasurementArtifact(
+                    allocator,
+                    file_path,
+                    mlir_options.output_dir,
+                    formal_result,
+                    report.*,
+                    stdout,
+                    mlir_options.suppress_artifact_logs,
+                );
+            }
+        }
+        if (pending_smt_report_write_artifacts) {
+            try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
+        }
         report.deinit(mlir_allocator);
         pending_smt_report = null;
     }
 
     try stdout.flush();
-    if (verification_failed) return error.VerificationFailed;
+    if (verification_failed) {
+        try stdout.writeAll("error: formal verification failed after SIR lowering\n");
+        try stdout.flush();
+        return error.VerificationFailed;
+    }
 }
 
 fn printVersion() !void {
     var stdout_buffer: [8192]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
     const stdout = &stdout_writer.interface;
     const logo =
         \\=================
@@ -4602,7 +5598,7 @@ fn printVersion() !void {
 /// Print unified diff between original and formatted code
 fn printUnifiedDiff(_: std.mem.Allocator, original: []const u8, formatted: []const u8, file_path: []const u8) !void {
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     try stdout.print("--- {s}\n", .{file_path});
@@ -4649,9 +5645,9 @@ fn formatSingleFile(
     const fmt_mod = @import("fmt/mod.zig");
 
     // Read source file
-    const source = std.fs.cwd().readFileAlloc(allocator, file_path, std.math.maxInt(usize)) catch |err| {
+    const source = std.Io.Dir.cwd().readFileAlloc(std.Io.Threaded.global_single_threaded.io(), file_path, allocator, .unlimited) catch |err| {
         std.debug.print("error: cannot read file '{s}': {s}\n", .{ file_path, @errorName(err) });
-        std.process.exit(1);
+        return error.FormatInputReadFailed;
     };
     defer allocator.free(source);
 
@@ -4661,7 +5657,7 @@ fn formatSingleFile(
 
     const formatted = formatter.format() catch |err| {
         std.debug.print("error: failed to format {s}: {}\n", .{ file_path, err });
-        std.process.exit(2);
+        return error.FormatterFailed;
     };
     defer allocator.free(formatted);
 
@@ -4686,13 +5682,15 @@ fn formatSingleFile(
     }
 
     if (stdout) {
-        try std.fs.File.stdout().writeAll(formatted);
+        var stdout_writer = std.Io.File.stdout().writerStreaming(std.Io.Threaded.global_single_threaded.io(), &.{});
+        try stdout_writer.interface.writeAll(formatted);
+        try stdout_writer.interface.flush();
         return false;
     }
 
     // Write formatted output
     if (!already_formatted) {
-        try std.fs.cwd().writeFile(.{ .sub_path = file_path, .data = formatted });
+        try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{ .sub_path = file_path, .data = formatted });
     }
     return false;
 }
@@ -4705,11 +5703,13 @@ fn formatDirectoryRecursive(
     options: anytype,
     found_mismatch: *bool,
 ) !void {
-    var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
-    defer dir.close();
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var cwd = std.Io.Dir.cwd();
+    var dir = try cwd.openDir(io, dir_path, .{ .iterate = true });
+    defer dir.close(io);
 
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(io)) |entry| {
         const child_path = try std.fs.path.join(allocator, &.{ dir_path, entry.name });
         defer allocator.free(child_path);
 
@@ -4735,30 +5735,32 @@ fn runFmt(allocator: std.mem.Allocator, file_path: []const u8, check: bool, diff
         .indent_size = 4,
     };
 
-    var dir_probe = std.fs.cwd().openDir(file_path, .{}) catch |err| switch (err) {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var cwd = std.Io.Dir.cwd();
+    var dir_probe = cwd.openDir(io, file_path, .{}) catch |err| switch (err) {
         error.NotDir => null,
         else => {
             std.debug.print("error: cannot access '{s}': {s}\n", .{ file_path, @errorName(err) });
-            std.process.exit(1);
+            return error.FormatInputAccessFailed;
         },
     };
     if (dir_probe) |*dir| {
-        dir.close();
+        dir.close(io);
         if (stdout) {
             std.debug.print("error: --stdout does not support directory inputs\n", .{});
-            std.process.exit(2);
+            return error.InvalidFmtStdoutDirectory;
         }
 
         var found_mismatch = false;
         try formatDirectoryRecursive(allocator, file_path, check, diff, options, &found_mismatch);
         if (found_mismatch) {
-            std.process.exit(1);
+            return error.FormatCheckFailed;
         }
         return;
     }
 
     if (try formatSingleFile(allocator, file_path, check, diff, stdout, options)) {
-        std.process.exit(1);
+        return error.FormatCheckFailed;
     }
 }
 
@@ -4781,7 +5783,7 @@ fn runAbiEmit(
     allow_missing_contract: bool,
 ) !void {
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     var compilation = compiler.driver.compilePackageWithOptions(allocator, file_path, .{
@@ -4790,12 +5792,12 @@ fn runAbiEmit(
     }) catch |err| {
         try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
         try stdout.flush();
-        std.process.exit(1);
+        return error.CompilerCompileFailed;
     };
     defer compilation.deinit();
 
-    _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id, debug_enabled);
-    try exitIfCompilationNotArtifactEmittable(stdout, &compilation);
+    const artifact_decision = try compilation.artifactEmissionDecision();
+    try rejectIfArtifactEmissionBlocked(stdout, &compilation, artifact_decision, debug_enabled);
 
     var contract_abi = lib.abi.generateCompilerAbi(allocator, &compilation) catch |err| switch (err) {
         error.MissingContract => {
@@ -4812,10 +5814,8 @@ fn runAbiEmit(
     const emit_sidecar = emit_abi_extras or (emit_abi and output_dir != null);
 
     if (output_dir) |out_dir| {
-        std.fs.cwd().makeDir(out_dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
+        const io = std.Io.Threaded.global_single_threaded.io();
+        try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), out_dir);
         if (emit_abi) {
             const abi_json = try contract_abi.toJson(allocator);
             defer allocator.free(abi_json);
@@ -4823,9 +5823,9 @@ fn runAbiEmit(
             defer allocator.free(pretty_json);
             const abi_path = try std.fmt.allocPrint(allocator, "{s}/{s}.abi.json", .{ out_dir, base_name });
             defer allocator.free(abi_path);
-            var abi_file = try std.fs.cwd().createFile(abi_path, .{});
-            defer abi_file.close();
-            try abi_file.writeAll(pretty_json);
+            var abi_file = try std.Io.Dir.cwd().createFile(io, abi_path, .{});
+            defer abi_file.close(io);
+            try abi_file.writeStreamingAll(io, pretty_json);
         }
         if (emit_abi_solidity) {
             const abi_json = try contract_abi.toSolidityJson(allocator);
@@ -4834,9 +5834,9 @@ fn runAbiEmit(
             defer allocator.free(pretty_json);
             const abi_path = try std.fmt.allocPrint(allocator, "{s}/{s}.abi.sol.json", .{ out_dir, base_name });
             defer allocator.free(abi_path);
-            var abi_file = try std.fs.cwd().createFile(abi_path, .{});
-            defer abi_file.close();
-            try abi_file.writeAll(pretty_json);
+            var abi_file = try std.Io.Dir.cwd().createFile(io, abi_path, .{});
+            defer abi_file.close(io);
+            try abi_file.writeStreamingAll(io, pretty_json);
         }
         if (emit_sidecar) {
             const extras_json = try contract_abi.toExtrasJson(allocator);
@@ -4845,9 +5845,9 @@ fn runAbiEmit(
             defer allocator.free(pretty_json);
             const extras_path = try std.fmt.allocPrint(allocator, "{s}/{s}.abi.extras.json", .{ out_dir, base_name });
             defer allocator.free(extras_path);
-            var extras_file = try std.fs.cwd().createFile(extras_path, .{});
-            defer extras_file.close();
-            try extras_file.writeAll(pretty_json);
+            var extras_file = try std.Io.Dir.cwd().createFile(io, extras_path, .{});
+            defer extras_file.close(io);
+            try extras_file.writeStreamingAll(io, pretty_json);
         }
     } else {
         if (emit_abi) {
@@ -4886,7 +5886,7 @@ fn writeSmtReportArtifacts(
     allocator: std.mem.Allocator,
     file_path: []const u8,
     output_dir: ?[]const u8,
-    report: @import("z3/mod.zig").SmtReportArtifacts,
+    report: z3_verification.SmtReportArtifacts,
     stdout: anytype,
     suppress_log: bool,
 ) !void {
@@ -4902,10 +5902,7 @@ fn writeSmtReportArtifacts(
     defer if (json_path_buf) |buf| allocator.free(buf);
 
     const md_path = if (output_dir) |dir| blk: {
-        std.fs.cwd().makeDir(dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
+        try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), dir);
         md_path_buf = try std.fs.path.join(allocator, &[_][]const u8{ dir, md_name });
         break :blk md_path_buf.?;
     } else md_name;
@@ -4915,16 +5912,18 @@ fn writeSmtReportArtifacts(
         break :blk json_path_buf.?;
     } else json_name;
 
-    var md_file = try std.fs.cwd().createFile(md_path, .{});
-    defer md_file.close();
-    try md_file.writeAll(report.markdown);
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = md_path,
+        .data = report.markdown,
+    });
 
     const pretty_json = try formatJsonPretty(allocator, report.json);
     defer allocator.free(pretty_json);
 
-    var json_file = try std.fs.cwd().createFile(json_path, .{});
-    defer json_file.close();
-    try json_file.writeAll(pretty_json);
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = json_path,
+        .data = pretty_json,
+    });
 
     if (!suppress_log) {
         try stdout.print("SMT report saved to {s}\n", .{md_path});
@@ -4932,21 +5931,1179 @@ fn writeSmtReportArtifacts(
     }
 }
 
+fn writeCanonicalZ3MeasurementArtifact(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    output_dir: ?[]const u8,
+    formal_result: *const formal_obligation_from_mlir.CollectResult,
+    report: z3_verification.SmtReportArtifacts,
+    stdout: anytype,
+    suppress_log: bool,
+) !void {
+    const query_manifest = report.query_manifest orelse return error.MissingPreparedQueryManifest;
+
+    var overlay = try formal_obligation_from_z3.overlayPreparedQueryResults(
+        allocator,
+        formal_result.set,
+        query_manifest.rows,
+    );
+    defer overlay.deinit();
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+    try formal_canonical_z3_measure.writeJson(&out.writer, allocator, file_path, overlay.set);
+    const json = try out.toOwnedSlice();
+    defer allocator.free(json);
+
+    const base_name = std.fs.path.stem(file_path);
+    const filename = try std.fmt.allocPrint(allocator, "{s}.canonical-z3.measure.json", .{base_name});
+    defer allocator.free(filename);
+
+    var path_buf: ?[]u8 = null;
+    defer if (path_buf) |buf| allocator.free(buf);
+
+    const path = if (output_dir) |dir| blk: {
+        try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), dir);
+        path_buf = try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
+        break :blk path_buf.?;
+    } else filename;
+
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = path,
+        .data = json,
+    });
+
+    if (!suppress_log) {
+        try stdout.print("Canonical Z3 measurement saved to {s}\n", .{path});
+    }
+}
+
+const LeanObligationContext = struct {
+    allocator: std.mem.Allocator,
+    owned_formal_result: ?formal_obligation_from_mlir.CollectResult = null,
+    merged_result: formal_obligation_from_z3.OverlayResult,
+    generated_namespace: []const u8,
+    obligations_source: ?[]const u8 = null,
+
+    fn deinit(self: *LeanObligationContext) void {
+        if (self.obligations_source) |source| self.allocator.free(source);
+        self.allocator.free(self.generated_namespace);
+        self.merged_result.deinit();
+        if (self.owned_formal_result) |*result| result.deinit();
+        self.* = undefined;
+    }
+};
+
+fn collectLeanObligationContext(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    final_module: @import("mlir_c_api").c.MlirModule,
+    smt_report: z3_verification.SmtReportArtifacts,
+) !LeanObligationContext {
+    var formal_result = try formal_obligation_from_mlir.collect(allocator, final_module, .{});
+    errdefer formal_result.deinit();
+
+    var context = try collectLeanObligationContextFromFormalResult(allocator, file_path, &formal_result, smt_report);
+    context.owned_formal_result = formal_result;
+    return context;
+}
+
+fn collectLeanObligationContextFromFormalResult(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    formal_result: *const formal_obligation_from_mlir.CollectResult,
+    smt_report: z3_verification.SmtReportArtifacts,
+) !LeanObligationContext {
+    const query_manifest = smt_report.query_manifest orelse return error.MissingPreparedQueryManifest;
+
+    var merged_result = try formal_obligation_from_z3.overlayPreparedQueryResults(allocator, formal_result.set, query_manifest.rows);
+    errdefer merged_result.deinit();
+
+    const generated_namespace = try leanProofGeneratedNamespace(allocator, file_path);
+    errdefer allocator.free(generated_namespace);
+
+    return .{
+        .allocator = allocator,
+        .merged_result = merged_result,
+        .generated_namespace = generated_namespace,
+    };
+}
+
+fn renderLeanObligationsSource(
+    allocator: std.mem.Allocator,
+    set: formal_obligation.ObligationSet,
+    generated_namespace: []const u8,
+) ![]const u8 {
+    var obligations_source_out = std.Io.Writer.Allocating.init(allocator);
+    errdefer obligations_source_out.deinit();
+    try formal_obligation_to_lean.writeModule(&obligations_source_out.writer, set, .{
+        .namespace = generated_namespace,
+        .proof_surface = true,
+    });
+    return try obligations_source_out.toOwnedSlice();
+}
+
+fn buildLeanObligationContext(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    formal_result: *const formal_obligation_from_mlir.CollectResult,
+    smt_report: z3_verification.SmtReportArtifacts,
+) !LeanObligationContext {
+    var context = try collectLeanObligationContextFromFormalResult(allocator, file_path, formal_result, smt_report);
+    errdefer context.deinit();
+
+    context.obligations_source = try renderLeanObligationsSource(
+        allocator,
+        context.merged_result.set,
+        context.generated_namespace,
+    );
+    return context;
+}
+
+fn z3FormalQueryBindingsFromFormal(
+    allocator: std.mem.Allocator,
+    bindings: []const formal_obligation.FormalQueryBinding,
+) ![]const z3_verification.FormalQueryBinding {
+    if (bindings.len == 0) return &.{};
+    // Keep the Z3 layer independent of the formal obligation module. This
+    // adapter is the only mirror-type bridge between the two packages.
+    const converted = try allocator.alloc(z3_verification.FormalQueryBinding, bindings.len);
+    for (bindings, converted) |binding, *out| {
+        out.* = .{
+            .source_op_id = binding.source_op_id,
+            .kind = @tagName(binding.kind),
+            .logical_role = if (binding.logical_role) |role| @tagName(role) else null,
+            .guard_id = binding.guard_id,
+            .query_id = binding.query_id,
+            .assumption_ids = binding.assumption_ids,
+            .obligation_ids = binding.obligation_ids,
+        };
+    }
+    return converted;
+}
+
+fn hasUnknownVerificationError(result: *const z3_verification.VerificationResult) bool {
+    for (result.errors.items) |err| {
+        if (err.error_type == .Unknown) return true;
+    }
+    return false;
+}
+
+fn isLeanUnknownRecipeTarget(query: @import("formal/obligation.zig").VerificationQuery) bool {
+    if (query.backend != .z3) return false;
+    if (query.obligation_ids.len == 0) return false;
+    const result = query.result orelse return false;
+    return result.status == .unknown and
+        !result.degraded and
+        !result.vacuous and
+        !result.vacuity_unknown;
+}
+
+const LeanFormulaProjectionSummary = struct {
+    term: u32 = 0,
+    origin_value: u32 = 0,
+
+    fn addFormula(self: *LeanFormulaProjectionSummary, formula: @import("formal/obligation.zig").FormulaRef) void {
+        switch (formula) {
+            .term => self.term +|= 1,
+            .origin_value => self.origin_value +|= 1,
+        }
+    }
+
+    fn addKind(self: *LeanFormulaProjectionSummary, kind: @import("formal/obligation.zig").Kind) void {
+        switch (kind) {
+            .logical => |logical| self.addFormula(logical.formula),
+            .runtime_guard => |guard| self.addFormula(guard.formula),
+            .resource => |resource| if (resource.amount) |amount| self.addFormula(amount),
+            .type_wf,
+            .type_relation,
+            .region_relation,
+            .effect_frame,
+            .quantifier,
+            .filtered_input,
+            .backend_fact,
+            => {},
+        }
+    }
+
+    fn total(self: LeanFormulaProjectionSummary) u32 {
+        return self.term +| self.origin_value;
+    }
+
+    fn termRatioBasisPoints(self: LeanFormulaProjectionSummary) u32 {
+        const denominator = self.total();
+        if (denominator == 0) return 0;
+        return @intCast((@as(u64, self.term) * 10_000) / @as(u64, denominator));
+    }
+
+    fn hasOpaqueFormula(self: LeanFormulaProjectionSummary) bool {
+        return self.origin_value != 0;
+    }
+};
+
+fn findLeanObligationById(
+    set: @import("formal/obligation.zig").ObligationSet,
+    id: @import("formal/obligation.zig").Id,
+) ?@import("formal/obligation.zig").Obligation {
+    for (set.obligations) |item| {
+        if (item.id == id) return item;
+    }
+    return null;
+}
+
+fn findLeanAssumptionById(
+    set: @import("formal/obligation.zig").ObligationSet,
+    id: @import("formal/obligation.zig").Id,
+) ?@import("formal/obligation.zig").Assumption {
+    for (set.assumptions) |item| {
+        if (item.id == id) return item;
+    }
+    return null;
+}
+
+fn projectionSummaryForLeanQuery(
+    set: @import("formal/obligation.zig").ObligationSet,
+    query: @import("formal/obligation.zig").VerificationQuery,
+) LeanFormulaProjectionSummary {
+    var summary: LeanFormulaProjectionSummary = .{};
+    for (query.assumption_ids) |id| {
+        const assumption = findLeanAssumptionById(set, id) orelse continue;
+        if (assumption.formula) |formula| summary.addFormula(formula);
+    }
+    for (query.obligation_ids) |id| {
+        const item = findLeanObligationById(set, id) orelse continue;
+        summary.addKind(item.kind);
+    }
+    return summary;
+}
+
+fn projectionSummaryForLeanSet(set: @import("formal/obligation.zig").ObligationSet) LeanFormulaProjectionSummary {
+    var summary: LeanFormulaProjectionSummary = .{};
+    for (set.assumptions) |assumption| {
+        if (assumption.formula) |formula| summary.addFormula(formula);
+    }
+    for (set.obligations) |item| {
+        summary.addKind(item.kind);
+    }
+    return summary;
+}
+
+fn plainUnknownPreparedRows(report: z3_verification.SmtReportArtifacts) usize {
+    const query_manifest = report.query_manifest orelse return 0;
+    var count: usize = 0;
+    for (query_manifest.rows) |row| {
+        const status = row.result_status orelse continue;
+        if (status != .unknown) continue;
+        if (row.vacuous or row.vacuity_unknown or row.verified_with_caveats) continue;
+        count += 1;
+    }
+    return count;
+}
+
+fn plainUnknownPreparedRowCountForLeanSet(set: formal_obligation.ObligationSet) usize {
+    var count: usize = 0;
+    for (set.queries) |query| {
+        if (isLeanUnknownRecipeTarget(query)) count += 1;
+    }
+    return count;
+}
+
+fn freeVarIdsEqual(lhs: formal_obligation.FreeVarId, rhs: formal_obligation.FreeVarId) bool {
+    return lhs.file_id == rhs.file_id and lhs.pattern_id == rhs.pattern_id;
+}
+
+fn appendUniqueFreeVarId(
+    allocator: std.mem.Allocator,
+    ids: *std.ArrayList(formal_obligation.FreeVarId),
+    id: formal_obligation.FreeVarId,
+) !void {
+    for (ids.items) |existing| {
+        if (freeVarIdsEqual(existing, id)) return;
+    }
+    try ids.append(allocator, id);
+}
+
+fn collectFreeVarsFromTerm(
+    allocator: std.mem.Allocator,
+    set: formal_obligation.ObligationSet,
+    term_id: formal_obligation.TermId,
+    ids: *std.ArrayList(formal_obligation.FreeVarId),
+    fuel: u32,
+) !void {
+    if (fuel == 0) return error.LeanAutoProofTermCycle;
+    if (term_id >= set.terms.len) return error.InvalidTermReference;
+    switch (set.terms[term_id]) {
+        .variable => |variable| switch (variable) {
+            .free => |free| try appendUniqueFreeVarId(allocator, ids, free.id),
+            .bound => {},
+        },
+        .old => |operand| try collectFreeVarsFromTerm(allocator, set, operand, ids, fuel - 1),
+        .unary => |unary| try collectFreeVarsFromTerm(allocator, set, unary.operand, ids, fuel - 1),
+        .binary => |binary| {
+            try collectFreeVarsFromTerm(allocator, set, binary.lhs, ids, fuel - 1);
+            try collectFreeVarsFromTerm(allocator, set, binary.rhs, ids, fuel - 1);
+        },
+        .refinement_predicate => |predicate| {
+            try collectFreeVarsFromTerm(allocator, set, predicate.value, ids, fuel - 1);
+            for (predicate.args) |arg| try collectFreeVarsFromTerm(allocator, set, arg, ids, fuel - 1);
+        },
+        .quantified => |quantified| {
+            if (quantified.condition) |condition| try collectFreeVarsFromTerm(allocator, set, condition, ids, fuel - 1);
+            try collectFreeVarsFromTerm(allocator, set, quantified.body, ids, fuel - 1);
+        },
+        .bool_lit,
+        .int_lit,
+        .result,
+        .place_read,
+        => {},
+    }
+}
+
+fn collectFreeVarsFromFormula(
+    allocator: std.mem.Allocator,
+    set: formal_obligation.ObligationSet,
+    formula: formal_obligation.FormulaRef,
+    ids: *std.ArrayList(formal_obligation.FreeVarId),
+) !void {
+    switch (formula) {
+        .term => |term_id| try collectFreeVarsFromTerm(allocator, set, term_id, ids, 256),
+        .origin_value => {},
+    }
+}
+
+fn collectFreeVarsFromQuery(
+    allocator: std.mem.Allocator,
+    set: formal_obligation.ObligationSet,
+    query: formal_obligation.VerificationQuery,
+) ![]formal_obligation.FreeVarId {
+    var ids: std.ArrayList(formal_obligation.FreeVarId) = .empty;
+    errdefer ids.deinit(allocator);
+    for (query.assumption_ids) |id| {
+        const assumption = findLeanAssumptionById(set, id) orelse return error.InvalidDependency;
+        if (assumption.formula) |formula| try collectFreeVarsFromFormula(allocator, set, formula, &ids);
+    }
+    for (query.obligation_ids) |id| {
+        const item = findLeanObligationById(set, id) orelse return error.InvalidDependency;
+        if (formal_obligation.kindFormula(item.kind)) |formula| {
+            try collectFreeVarsFromFormula(allocator, set, formula, &ids);
+        }
+    }
+    return try ids.toOwnedSlice(allocator);
+}
+
+fn writeLeanFreeVarId(writer: anytype, id: formal_obligation.FreeVarId) !void {
+    try writer.print("{{ file_id := {d}, pattern_id := {d} }}", .{ id.file_id, id.pattern_id });
+}
+
+fn writeLeanAutoWitnessEnv(
+    writer: anytype,
+    free_vars: []const formal_obligation.FreeVarId,
+) !void {
+    if (free_vars.len == 0) {
+        try writer.writeAll("Env.empty");
+        return;
+    }
+    for (free_vars, 0..) |_, index| {
+        try writer.writeByte('(');
+        if (index == 0) {
+            try writer.writeAll("Env.empty");
+        }
+    }
+    for (free_vars, 0..) |free_var, index| {
+        try writer.writeAll(".setFree ");
+        try writeLeanFreeVarId(writer, free_var);
+        try writer.print(" (.u256 (BitVec.ofNat 256 {d})))", .{index});
+    }
+}
+
+fn writeLeanAutoFreeVarEqFacts(
+    writer: anytype,
+    free_vars: []const formal_obligation.FreeVarId,
+) !void {
+    for (free_vars, 0..) |lhs, lhs_index| {
+        for (free_vars, 0..) |rhs, rhs_index| {
+            try writer.print("  have h_auto_free_{d}_{d} : ((", .{ lhs_index, rhs_index });
+            try writeLeanFreeVarId(writer, lhs);
+            try writer.writeAll(" : FreeVarId) == ");
+            try writeLeanFreeVarId(writer, rhs);
+            try writer.print(") = {s} := by rfl\n", .{if (freeVarIdsEqual(lhs, rhs)) "true" else "false"});
+        }
+    }
+}
+
+fn writeLeanAutoSimpSet(writer: anytype, free_var_count: usize) !void {
+    try writer.writeAll(
+        \\[
+        \\      assumptionsDenoteInEnv,
+        \\      assumptionsDenoteInEnv?,
+        \\      assumptionAnd?,
+        \\      assumptionDenotesInEnv?,
+        \\      obligationDenotesInEnv,
+        \\      obligationDenotesInEnv?,
+        \\      formulaDenotes?,
+        \\      denoteFormula?,
+        \\      denoteValue?,
+        \\      effectFrameGoalDenotes?,
+        \\      resourceGoalDenotes?,
+        \\      resourceGoalAmount?,
+        \\      resourceGoalSource?,
+        \\      resourceGoalDestination?,
+        \\      emittedManifest,
+        \\      emittedTerms,
+        \\      emittedAssumptions,
+        \\      emittedObligations,
+        \\      Env.setFree,
+        \\      Env.lookupVar,
+        \\      Env.lookupFree,
+        \\      lookupFreeBinding,
+        \\      Env.lookupBound,
+        \\      Env.lookupPlace,
+        \\      Env.lookupEntryPlace,
+        \\      Env.pushBound,
+        \\      Value.eqProp?,
+        \\      BinderRef.isU256,
+        \\      BoundVarRef.isU256,
+        \\      TyRef.isU256,
+        \\      TyRef.isI256,
+        \\      TyRef.isU256Carrier,
+        \\      compilerTypeIdU256,
+        \\      compilerTypeIdI256,
+        \\      compilerTypeIdBool,
+        \\      Ora.Spec.expectedCompilerTypeIdU256,
+        \\      Ora.Spec.expectedCompilerTypeIdI256,
+        \\      Ora.Spec.expectedCompilerTypeIdBool,
+        \\      U256.sle,
+        \\      U256.slt,
+        \\      U256.sge,
+        \\      U256.sgt
+    );
+    for (0..free_var_count) |lhs_index| {
+        for (0..free_var_count) |rhs_index| {
+            try writer.print(",\n      h_auto_free_{d}_{d}", .{ lhs_index, rhs_index });
+        }
+    }
+    try writer.writeAll(
+        \\
+        \\    ]
+    );
+}
+
+fn printLeanFormulaProjectionSummary(stdout: anytype, summary: LeanFormulaProjectionSummary) !void {
+    try stdout.print(
+        "formula projection: term={d}, origin_value={d}, total={d}, term_ratio_basis_points={d}",
+        .{ summary.term, summary.origin_value, summary.total(), summary.termRatioBasisPoints() },
+    );
+}
+
+fn leanSemanticSupportAvailable(support: formal_obligation_to_lean.SemanticSupport) bool {
+    return switch (support) {
+        .supported => true,
+        .unsupported => false,
+    };
+}
+
+fn printLeanTypeRef(stdout: anytype, ty: formal_obligation.TypeRef) !void {
+    switch (ty) {
+        .spelling => |text| try stdout.print("`{s}`", .{text}),
+        .compiler_type_id => |id| {
+            if (ora_types.builtin.lookupBuiltinByComptimeTypeId(id)) |spec| {
+                try stdout.print("`{s}`", .{spec.source_name});
+            } else {
+                try stdout.print("compiler_type_id:{d}", .{id});
+            }
+        },
+    }
+}
+
+fn printLeanSemanticUnsupportedReason(
+    stdout: anytype,
+    reason: formal_obligation_to_lean.SemanticUnsupportedReason,
+) !void {
+    switch (reason) {
+        .empty_query => try stdout.writeAll("    reason: query has no obligation ids, so no Lean semantic proposition can be emitted\n"),
+        .invalid_dependency => try stdout.writeAll("    reason: query references a missing obligation or assumption row\n"),
+        .unsupported_obligation_kind => try stdout.writeAll("    reason: this obligation kind is not in the Lean semantic proof fragment yet\n"),
+        .unsupported_effect_frame_relation => |relation| try stdout.print(
+            "    reason: effect-frame relation `{s}` is not in the Lean semantic proof fragment yet\n",
+            .{@tagName(relation)},
+        ),
+        .unsupported_origin_value => try stdout.writeAll("    reason: formula is still an MLIR origin_value; Lean proof export only supports projected Term formulas today\n"),
+        .unsupported_term_kind => try stdout.writeAll("    reason: this term shape is not in the Lean semantic proof fragment yet\n"),
+        .missing_type => try stdout.writeAll("    reason: term is missing type metadata required by the Lean semantic proof fragment\n"),
+        .unsupported_type => |ty| {
+            try stdout.writeAll("    reason: unsupported Lean semantic type ");
+            try printLeanTypeRef(stdout, ty);
+            try stdout.writeAll("; the current Lean semantic proof fragment supports bool formulas and u256 values only\n");
+        },
+        .unsupported_comparison_width => try stdout.writeAll("    reason: signed comparison width is outside the current Lean semantic proof fragment; only 256-bit signed comparisons are supported today\n"),
+        .unknown_signedness => try stdout.writeAll("    reason: signed comparison operand is missing compiler type-id signedness metadata\n"),
+        .mixed_signedness => try stdout.writeAll("    reason: comparison predicate signedness does not match both operand types\n"),
+        .unsupported_arithmetic_width => try stdout.writeAll("    reason: arithmetic value width is outside the current Lean semantic proof fragment; only 256-bit arithmetic values are supported today\n"),
+        .unknown_arithmetic_signedness => try stdout.writeAll("    reason: arithmetic value is missing compiler type-id signedness metadata\n"),
+        .mixed_arithmetic_signedness => try stdout.writeAll("    reason: arithmetic operation signedness does not match the value type\n"),
+        .missing_key_disjoint_evidence => try stdout.writeAll("    reason: evidence-backed storage frame has no key-disjointness evidence rows\n"),
+        .unsupported_key_disjoint_evidence_formula => try stdout.writeAll("    reason: key-disjointness evidence must be a direct requires free-variable disequality in the Lean fragment\n"),
+        .unsupported_key_disjoint_evidence_kind => try stdout.writeAll("    reason: key-disjointness evidence kind is not supported by the Lean fragment\n"),
+        .key_disjoint_evidence_type_unsupported => try stdout.writeAll("    reason: key-disjointness evidence currently supports only 256-bit carrier free variables\n"),
+        .key_disjoint_evidence_owner_mismatch => try stdout.writeAll("    reason: key-disjointness evidence references an assumption from a different owner\n"),
+        .key_disjoint_evidence_path_mismatch => try stdout.writeAll("    reason: key-disjointness evidence does not match the first differing parameter keys of the read/write paths\n"),
+    }
+}
+
+fn writeLeanObligationModuleArtifact(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    output_dir: ?[]const u8,
+    display_dir: ?[]const u8,
+    source: []const u8,
+) ![]const u8 {
+    const base_name = std.fs.path.stem(file_path);
+    const filename = try std.fmt.allocPrint(allocator, "{s}.lean.obligations.lean", .{base_name});
+    defer allocator.free(filename);
+
+    var write_path_buf: ?[]u8 = null;
+    defer if (write_path_buf) |buf| allocator.free(buf);
+    var display_path_buf: ?[]u8 = null;
+
+    const write_path = if (output_dir) |dir| blk: {
+        try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), dir);
+        write_path_buf = try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
+        break :blk write_path_buf.?;
+    } else filename;
+
+    const display_path = if (display_dir) |dir| blk: {
+        display_path_buf = try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
+        break :blk display_path_buf.?;
+    } else if (output_dir) |dir| blk: {
+        display_path_buf = try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
+        break :blk display_path_buf.?;
+    } else try allocator.dupe(u8, filename);
+    errdefer allocator.free(display_path);
+
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = write_path,
+        .data = source,
+    });
+
+    return display_path;
+}
+
+fn printIdListInline(stdout: anytype, ids: []const formal_obligation.Id) !void {
+    try stdout.writeByte('[');
+    for (ids, 0..) |id, index| {
+        if (index != 0) try stdout.writeAll(", ");
+        try stdout.print("{d}", .{id});
+    }
+    try stdout.writeByte(']');
+}
+
+fn printLeanUnknownRecipeSource(stdout: anytype, source: @import("formal/obligation.zig").SourceRef) !void {
+    if (source.file) |file| {
+        try stdout.print("{s}", .{file});
+        if (source.line != 0) try stdout.print(":{d}", .{source.line});
+        if (source.column != 0) try stdout.print(":{d}", .{source.column});
+    } else if (source.line != 0) {
+        try stdout.print("line {d}", .{source.line});
+        if (source.column != 0) try stdout.print(":{d}", .{source.column});
+    } else {
+        try stdout.writeAll("unknown source");
+    }
+}
+
+fn maybeEmitLeanUnknownRecipe(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    final_module: @import("mlir_c_api").c.MlirModule,
+    precollected_formal_result: ?*const formal_obligation_from_mlir.CollectResult,
+    smt_report: z3_verification.SmtReportArtifacts,
+    mlir_options: MlirOptions,
+    stdout: anytype,
+) !void {
+    var context = if (precollected_formal_result) |formal_result|
+        try collectLeanObligationContextFromFormalResult(allocator, file_path, formal_result, smt_report)
+    else
+        try collectLeanObligationContext(allocator, file_path, final_module, smt_report);
+    defer context.deinit();
+
+    var recipe_count: usize = 0;
+    var unavailable_count: usize = 0;
+    for (context.merged_result.set.queries) |query| {
+        if (!isLeanUnknownRecipeTarget(query)) continue;
+        const projection = projectionSummaryForLeanQuery(context.merged_result.set, query);
+        const semantic_support = formal_obligation_to_lean.querySemanticSupport(context.merged_result.set, query);
+        if (projection.hasOpaqueFormula() or !leanSemanticSupportAvailable(semantic_support)) {
+            unavailable_count += 1;
+        } else {
+            recipe_count += 1;
+        }
+    }
+
+    const unknown_rows = plainUnknownPreparedRows(smt_report);
+    const classified_targets = recipe_count + unavailable_count;
+    const unmatched_unknown_rows = if (unknown_rows > classified_targets) unknown_rows - classified_targets else 0;
+    if (unavailable_count != 0 or unmatched_unknown_rows != 0) {
+        try stdout.writeAll("Lean proof recipe unavailable for some Z3 UNKNOWN obligations:\n");
+        for (context.merged_result.set.queries) |query| {
+            if (!isLeanUnknownRecipeTarget(query)) continue;
+            const projection = projectionSummaryForLeanQuery(context.merged_result.set, query);
+            const semantic_support = formal_obligation_to_lean.querySemanticSupport(context.merged_result.set, query);
+            if (!projection.hasOpaqueFormula() and leanSemanticSupportAvailable(semantic_support)) continue;
+            try stdout.print("  - query: emittedQuery_{d} (", .{query.id});
+            try printLeanUnknownRecipeSource(stdout, query.source);
+            try stdout.writeAll(")\n    ");
+            try printLeanFormulaProjectionSummary(stdout, projection);
+            try stdout.writeByte('\n');
+            if (projection.hasOpaqueFormula()) {
+                try stdout.writeAll("    reason: formula is still an MLIR origin_value; Lean proof export only supports projected Term formulas today\n");
+            } else {
+                switch (semantic_support) {
+                    .supported => try stdout.writeAll("    reason: this obligation kind is not in the Lean semantic proof fragment yet\n"),
+                    .unsupported => |reason| try printLeanSemanticUnsupportedReason(stdout, reason),
+                }
+            }
+        }
+        if (unmatched_unknown_rows != 0) {
+            const projection = projectionSummaryForLeanSet(context.merged_result.set);
+            try stdout.print("  - unmatched UNKNOWN prepared rows: {d}\n    ", .{unmatched_unknown_rows});
+            try printLeanFormulaProjectionSummary(stdout, projection);
+            try stdout.writeByte('\n');
+            try stdout.writeAll("    reason: no matching Lean-dischargeable obligation query was derived from the MLIR manifest\n");
+        }
+        try stdout.writeByte('\n');
+    }
+
+    if (recipe_count == 0) return;
+
+    const obligations_source = renderLeanObligationsSource(
+        allocator,
+        context.merged_result.set,
+        context.generated_namespace,
+    ) catch |err| switch (err) {
+        error.UnsupportedOriginValue => {
+            const projection = projectionSummaryForLeanSet(context.merged_result.set);
+            try stdout.writeAll("Lean proof recipe unavailable for some Z3 UNKNOWN obligations:\n");
+            try stdout.writeAll("  - manifest contains formulas outside the Lean Term fragment\n    ");
+            try printLeanFormulaProjectionSummary(stdout, projection);
+            try stdout.writeByte('\n');
+            try stdout.writeAll("    reason: formula is still an MLIR origin_value; Lean proof export only supports projected Term formulas today\n\n");
+            return;
+        },
+        error.UnsupportedObligationKind => {
+            const projection = projectionSummaryForLeanSet(context.merged_result.set);
+            try stdout.writeAll("Lean proof recipe unavailable for some Z3 UNKNOWN obligations:\n");
+            try stdout.writeAll("  - manifest contains obligation kinds outside the Lean semantic proof fragment\n    ");
+            try printLeanFormulaProjectionSummary(stdout, projection);
+            try stdout.writeByte('\n');
+            try stdout.writeAll("    reason: this obligation kind is not in the Lean semantic proof fragment yet\n\n");
+            return;
+        },
+        else => return err,
+    };
+    defer allocator.free(obligations_source);
+
+    const module_path = try writeLeanObligationModuleArtifact(
+        allocator,
+        file_path,
+        mlir_options.output_dir,
+        mlir_options.artifact_display_dir,
+        obligations_source,
+    );
+    defer allocator.free(module_path);
+
+    try stdout.writeAll("Lean proof recipe for Z3 UNKNOWN obligations:\n");
+    try stdout.print("  obligation module: {s}\n", .{module_path});
+    try stdout.print("  generated namespace: {s}\n", .{context.generated_namespace});
+    for (context.merged_result.set.queries) |query| {
+        if (!isLeanUnknownRecipeTarget(query)) continue;
+        const projection = projectionSummaryForLeanQuery(context.merged_result.set, query);
+        const semantic_support = formal_obligation_to_lean.querySemanticSupport(context.merged_result.set, query);
+        if (projection.hasOpaqueFormula() or !leanSemanticSupportAvailable(semantic_support)) continue;
+        try stdout.print("  - query: emittedQuery_{d} (", .{query.id});
+        try printLeanUnknownRecipeSource(stdout, query.source);
+        try stdout.writeAll(")\n");
+        try stdout.print(
+            "    theorem shape: theorem discharge_q{d} : {s}.emittedQuery_{d} := by ...\n",
+            .{ query.id, context.generated_namespace, query.id },
+        );
+        try stdout.print("    proof row: query_id={d}, obligation_ids=", .{query.id});
+        try printIdListInline(stdout, query.obligation_ids);
+        try stdout.writeAll(", assumption_ids=");
+        try printIdListInline(stdout, query.assumption_ids);
+        try stdout.writeByte('\n');
+    }
+    try stdout.writeAll("  pass the proof manifest with `--lean-proofs <proofs.json>`\n\n");
+}
+
+fn applyLeanProofArtifactGate(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    formal_result: *const formal_obligation_from_mlir.CollectResult,
+    proof_manifest_path: []const u8,
+    smt_report: z3_verification.SmtReportArtifacts,
+    mlir_options: MlirOptions,
+    stdout: anytype,
+) !bool {
+    const proof_manifest = @import("formal/proof_manifest.zig");
+    const proof_check = @import("formal/proof_check.zig");
+
+    var context = try buildLeanObligationContext(allocator, file_path, formal_result, smt_report);
+    defer context.deinit();
+
+    const proof_manifest_bytes = try std.Io.Dir.cwd().readFileAlloc(
+        std.Io.Threaded.global_single_threaded.io(),
+        proof_manifest_path,
+        allocator,
+        .unlimited,
+    );
+    defer allocator.free(proof_manifest_bytes);
+
+    var parsed_manifest = try proof_manifest.parseProofManifestJson(allocator, proof_manifest_bytes);
+    defer parsed_manifest.deinit();
+
+    var applied = try proof_check.applyProofRows(
+        allocator,
+        context.merged_result.set,
+        parsed_manifest.rows,
+        context.generated_namespace,
+        context.obligations_source.?,
+        mlir_options.process_environ,
+        stdout,
+    );
+    defer if (applied) |*result| result.deinit();
+
+    const decided_set = if (applied) |*result| result.set else context.merged_result.set;
+    const decision = decided_set.artifactDecision();
+    if (applied) |*result| {
+        try writeLeanProofCertificate(
+            allocator,
+            file_path,
+            mlir_options.output_dir,
+            result.certificate_json,
+            stdout,
+            mlir_options.suppress_artifact_logs,
+        );
+    }
+
+    switch (decision) {
+        .allowed => return true,
+        .blocked => |reason| {
+            if (reason == .blocking_diagnostic) {
+                try printLeanProofGateDiagnostics(stdout, decided_set);
+            }
+            try stdout.print("Lean proof gate did not authorize artifact emission: {s}\n", .{@tagName(reason)});
+            return false;
+        },
+    }
+}
+
+fn leanAutoProofScratchSegment(allocator: std.mem.Allocator, file_path: []const u8) ![]const u8 {
+    const stem = std.fs.path.stem(file_path);
+    var component = std.Io.Writer.Allocating.init(allocator);
+    defer component.deinit();
+    try component.writer.writeAll("AutoProof_");
+    for (stem) |byte| {
+        if (std.ascii.isAlphanumeric(byte) or byte == '_') {
+            try component.writer.writeByte(byte);
+        } else {
+            try component.writer.writeByte('_');
+        }
+    }
+    const hash = std.hash.Wyhash.hash(0, file_path);
+    const pid = std.posix.system.getpid();
+    return try std.fmt.allocPrint(allocator, "{s}_{x}_{d}", .{ component.written(), hash, pid });
+}
+
+fn buildAutomaticLeanProofModuleSource(
+    allocator: std.mem.Allocator,
+    obligations_source: []const u8,
+    module_namespace: []const u8,
+    set: formal_obligation.ObligationSet,
+    queries: []const formal_obligation.VerificationQuery,
+) ![]const u8 {
+    const namespace_start = std.mem.indexOf(u8, obligations_source, "namespace ") orelse return error.LeanObligationsMissingNamespace;
+    const body_start = (std.mem.indexOfPos(u8, obligations_source, namespace_start, "\n") orelse return error.LeanObligationsMissingNamespace) + 1;
+    const end_start = std.mem.lastIndexOf(u8, obligations_source, "\nend ") orelse return error.LeanObligationsMissingNamespace;
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    errdefer out.deinit();
+    const writer = &out.writer;
+
+    try writer.writeAll(obligations_source[0..namespace_start]);
+    try writer.writeAll("namespace ");
+    try writer.writeAll(module_namespace);
+    try writer.writeByte('\n');
+    try writer.writeAll(obligations_source[body_start..end_start]);
+    try writer.writeByte('\n');
+
+    for (queries) |query| {
+        const free_vars = try collectFreeVarsFromQuery(allocator, set, query);
+        defer allocator.free(free_vars);
+
+        try writer.print("theorem discharge_q{d} : emittedQuery_{d} := by\n", .{ query.id, query.id });
+        try writeLeanAutoFreeVarEqFacts(writer, free_vars);
+        try writer.writeAll("  unfold ");
+        try writer.print("emittedQuery_{d}", .{query.id});
+        try writer.writeAll(" obligationFollowsFromAssumptions\n");
+        try writer.writeAll("  constructor\n");
+        try writer.writeAll("  · refine ⟨");
+        try writeLeanAutoWitnessEnv(writer, free_vars);
+        try writer.writeAll(", ?_⟩\n");
+        try writer.writeAll("    simp ");
+        try writeLeanAutoSimpSet(writer, free_vars.len);
+        try writer.writeAll(" <;> try decide\n");
+        try writer.writeAll("  · intro env hAssumptions\n");
+        try writer.writeAll("    simp ");
+        try writeLeanAutoSimpSet(writer, free_vars.len);
+        try writer.writeAll(" at hAssumptions ⊢\n");
+        try writer.writeAll("    repeat intro\n");
+        try writer.writeAll("    first\n");
+        try writer.writeAll("    | assumption\n");
+        try writer.writeAll("    | exact U256.ult_implies_ule _ _ (by assumption)\n");
+        try writer.writeAll("    | exact stable_place_read_self_eq_denotes env _\n");
+        try writer.writeAll("    | simp_all ");
+        try writeLeanAutoSimpSet(writer, free_vars.len);
+        try writer.writeAll("\n\n");
+    }
+
+    try writer.writeAll("end ");
+    try writer.writeAll(module_namespace);
+    try writer.writeByte('\n');
+    return try out.toOwnedSlice();
+}
+
+fn applyAutomaticLeanProofArtifactGate(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    formal_result: *const formal_obligation_from_mlir.CollectResult,
+    smt_report: z3_verification.SmtReportArtifacts,
+    mlir_options: MlirOptions,
+    stdout: anytype,
+) !bool {
+    const proof_check = @import("formal/proof_check.zig");
+
+    var context = try collectLeanObligationContextFromFormalResult(allocator, file_path, formal_result, smt_report);
+    defer context.deinit();
+
+    var target_queries: std.ArrayList(formal_obligation.VerificationQuery) = .empty;
+    defer target_queries.deinit(allocator);
+    var unavailable_count: usize = 0;
+    for (context.merged_result.set.queries) |query| {
+        if (!isLeanUnknownRecipeTarget(query)) continue;
+        const projection = projectionSummaryForLeanQuery(context.merged_result.set, query);
+        const semantic_support = formal_obligation_to_lean.querySemanticSupport(context.merged_result.set, query);
+        if (projection.hasOpaqueFormula() or !leanSemanticSupportAvailable(semantic_support)) {
+            unavailable_count += 1;
+            continue;
+        }
+        try target_queries.append(allocator, query);
+    }
+
+    const unknown_rows = plainUnknownPreparedRows(smt_report);
+    const classified_targets = plainUnknownPreparedRowCountForLeanSet(context.merged_result.set);
+    const unmatched_unknown_rows = if (unknown_rows > classified_targets) unknown_rows - classified_targets else 0;
+    if (unavailable_count != 0 or unmatched_unknown_rows != 0) {
+        try stdout.writeAll("Automatic Lean proof gate cannot cover all Z3 UNKNOWN userland obligations.\n");
+        if (unavailable_count != 0) {
+            try stdout.print("  unsupported Lean-fragment UNKNOWN queries: {d}\n", .{unavailable_count});
+        }
+        if (unmatched_unknown_rows != 0) {
+            try stdout.print("  unmatched UNKNOWN prepared rows: {d}\n", .{unmatched_unknown_rows});
+        }
+        return false;
+    }
+
+    if (target_queries.items.len == 0) {
+        return true;
+    }
+
+    context.obligations_source = try renderLeanObligationsSource(
+        allocator,
+        context.merged_result.set,
+        context.generated_namespace,
+    );
+
+    const scratch_segment = try leanAutoProofScratchSegment(allocator, file_path);
+    defer allocator.free(scratch_segment);
+    const scratch_rel = try std.fmt.allocPrint(allocator, "formal/Ora/AutoProofScratch/{s}", .{scratch_segment});
+    defer allocator.free(scratch_rel);
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try std.Io.Dir.cwd().createDirPath(io, scratch_rel);
+    defer std.Io.Dir.cwd().deleteTree(io, scratch_rel) catch {};
+    defer std.Io.Dir.cwd().deleteDir(io, "formal/Ora/AutoProofScratch") catch {};
+
+    const module_name = try std.fmt.allocPrint(allocator, "Ora.AutoProofScratch.{s}.Proofs", .{scratch_segment});
+    defer allocator.free(module_name);
+    const proof_path = try std.fmt.allocPrint(allocator, "{s}/Proofs.lean", .{scratch_rel});
+    defer allocator.free(proof_path);
+    const proof_source = try buildAutomaticLeanProofModuleSource(
+        allocator,
+        context.obligations_source.?,
+        module_name,
+        context.merged_result.set,
+        target_queries.items,
+    );
+    defer allocator.free(proof_source);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = proof_path, .data = proof_source });
+
+    const rows = try allocator.alloc(proof_check.ProofRow, target_queries.items.len);
+    defer allocator.free(rows);
+    var theorem_names: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (theorem_names.items) |name| allocator.free(name);
+        theorem_names.deinit(allocator);
+    }
+    for (target_queries.items, rows) |query, *row| {
+        const theorem_name = try std.fmt.allocPrint(allocator, "{s}.discharge_q{d}", .{ module_name, query.id });
+        try theorem_names.append(allocator, theorem_name);
+        row.* = .{
+            .query_id = query.id,
+            .obligation_ids = query.obligation_ids,
+            .assumption_ids = query.assumption_ids,
+            .module_name = module_name,
+            .theorem_name = theorem_name,
+            .path = proof_path,
+            .content_sha256 = null,
+        };
+    }
+
+    var applied = try proof_check.applyProofRows(
+        allocator,
+        context.merged_result.set,
+        rows,
+        context.generated_namespace,
+        context.obligations_source.?,
+        mlir_options.process_environ,
+        stdout,
+    );
+    defer if (applied) |*result| result.deinit();
+    if (applied == null) {
+        try stdout.writeAll(
+            "Automatic Lean proof gate failed: the generated proof checker did not accept every targeted Z3 UNKNOWN obligation.\n",
+        );
+        return false;
+    }
+
+    const decided_set = applied.?.set;
+    const decision = decided_set.artifactDecision();
+    try writeLeanProofCertificate(
+        allocator,
+        file_path,
+        mlir_options.output_dir,
+        applied.?.certificate_json,
+        stdout,
+        mlir_options.suppress_artifact_logs,
+    );
+    switch (decision) {
+        .allowed => return true,
+        .blocked => |reason| {
+            if (reason == .blocking_diagnostic) {
+                try printLeanProofGateDiagnostics(stdout, decided_set);
+            }
+            try stdout.print("Automatic Lean proof gate did not authorize artifact emission: {s}\n", .{@tagName(reason)});
+            return false;
+        },
+    }
+}
+
+fn printLeanProofGateDiagnostics(stdout: anytype, set: @import("formal/obligation.zig").ObligationSet) !void {
+    var printed_header = false;
+    for (set.diagnostics) |diagnostic| {
+        if (!diagnostic.blocks_artifacts) continue;
+        if (!printed_header) {
+            try stdout.print("Formal proof gate diagnostics:\n", .{});
+            printed_header = true;
+        }
+        try stdout.print("  - {s}: {s}", .{ @tagName(diagnostic.kind), diagnostic.message });
+        try printFormalSourceRef(stdout, diagnostic.source);
+        try stdout.writeByte('\n');
+    }
+}
+
+fn printFormalSourceRef(stdout: anytype, source: @import("formal/obligation.zig").SourceRef) !void {
+    if (source.file) |file| {
+        try stdout.print(" ({s}", .{file});
+        if (source.line != 0) try stdout.print(":{d}", .{source.line});
+        if (source.column != 0) try stdout.print(":{d}", .{source.column});
+        try stdout.writeByte(')');
+    } else if (source.line != 0) {
+        try stdout.print(" (line {d}", .{source.line});
+        if (source.column != 0) try stdout.print(":{d}", .{source.column});
+        try stdout.writeByte(')');
+    }
+}
+
+fn writeLeanProofCertificate(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    output_dir: ?[]const u8,
+    certificate_json: []const u8,
+    stdout: anytype,
+    suppress_log: bool,
+) !void {
+    const base_name = std.fs.path.stem(file_path);
+    const filename = try std.fmt.allocPrint(allocator, "{s}.lean.proof.json", .{base_name});
+    defer allocator.free(filename);
+
+    var path_buf: ?[]u8 = null;
+    defer if (path_buf) |buf| allocator.free(buf);
+
+    const path = if (output_dir) |dir| blk: {
+        try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), dir);
+        path_buf = try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
+        break :blk path_buf.?;
+    } else filename;
+
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = path,
+        .data = certificate_json,
+    });
+
+    if (!suppress_log) {
+        try stdout.print("Lean proof certificate saved to {s}\n", .{path});
+    }
+}
+
+fn writeLeanDispatcherProofCertificate(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    output_dir: ?[]const u8,
+    certificate_json: []const u8,
+    stdout: anytype,
+    suppress_log: bool,
+) !void {
+    const base_name = std.fs.path.stem(file_path);
+    const filename = try std.fmt.allocPrint(allocator, "{s}.lean.dispatcher.proof.json", .{base_name});
+    defer allocator.free(filename);
+
+    var path_buf: ?[]u8 = null;
+    defer if (path_buf) |buf| allocator.free(buf);
+
+    const path = if (output_dir) |dir| blk: {
+        try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), dir);
+        path_buf = try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
+        break :blk path_buf.?;
+    } else filename;
+
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = path,
+        .data = certificate_json,
+    });
+
+    if (!suppress_log) {
+        try stdout.print("Lean dispatcher proof certificate saved to {s}\n", .{path});
+    }
+}
+
+fn leanProofGeneratedNamespace(allocator: std.mem.Allocator, file_path: []const u8) ![]const u8 {
+    const stem = std.fs.path.stem(file_path);
+    var component_out = std.Io.Writer.Allocating.init(allocator);
+    defer component_out.deinit();
+    const writer = &component_out.writer;
+
+    try writer.writeAll("Source_");
+    for (stem) |byte| {
+        if (std.ascii.isAlphanumeric(byte) or byte == '_') {
+            try writer.writeByte(byte);
+        } else {
+            try writer.writeByte('_');
+        }
+    }
+
+    const hash = std.hash.Wyhash.hash(0, file_path);
+    return try std.fmt.allocPrint(
+        allocator,
+        "Ora.Generated.Obligations.{s}_{x}",
+        .{ component_out.written(), hash },
+    );
+}
+
 // ============================================================================
 // SECTION 6: MLIR Integration & Code Generation
 // ============================================================================
 
-fn resolveSenseiSirPath(allocator: std.mem.Allocator) ![]const u8 {
-    if (std.posix.getenv("ORA_SENSEI_SIR")) |path| {
-        return allocator.dupe(u8, path);
+fn resolveSinoraPath(allocator: std.mem.Allocator) ![]const u8 {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const candidates = [_][]const u8{
+        "sinora/zig-out/bin/sinora",
+        "zig-out/bin/sinora",
+        "/usr/local/bin/sinora",
+    };
+    for (candidates) |path| {
+        if (std.Io.Dir.cwd().access(io, path, .{}) catch null) |_| {
+            return allocator.dupe(u8, path);
+        }
     }
+    return error.SinoraNotFound;
+}
 
-    const default_path = "vendor/sensei/senseic/target/release/sir";
-    if (std.fs.cwd().access(default_path, .{}) catch null) |_| {
-        return allocator.dupe(u8, default_path);
+// Runs Sinora to produce deployment bytecode from a SIR file. Returns owned
+// stdout (caller frees + trims); failures are reported with the saved SIR path
+// so the emitted text can be inspected directly.
+fn runSinoraBytecode(
+    allocator: std.mem.Allocator,
+    sinora_path: []const u8,
+    sir_file_path: []const u8,
+    source_map_path: ?[]const u8,
+    dispatcher_report_path: ?[]const u8,
+    optimize_arg: []const u8,
+    stdout: anytype,
+) ![]const u8 {
+    var argv_buf: [8][]const u8 = undefined;
+    var argc: usize = 0;
+    argv_buf[argc] = sinora_path;
+    argc += 1;
+    argv_buf[argc] = "emit-release";
+    argc += 1;
+    argv_buf[argc] = optimize_arg;
+    argc += 1;
+    if (source_map_path) |path| {
+        argv_buf[argc] = "--source-map";
+        argc += 1;
+        argv_buf[argc] = path;
+        argc += 1;
     }
+    if (dispatcher_report_path) |path| {
+        argv_buf[argc] = "--dispatcher-proof-report";
+        argc += 1;
+        argv_buf[argc] = path;
+        argc += 1;
+    }
+    argv_buf[argc] = sir_file_path;
+    argc += 1;
 
-    return error.SenseiSirNotFound;
+    const max_output = 16 * 1024 * 1024;
+    var process_io = std.Io.Threaded.init(allocator, .{
+        .async_limit = .nothing,
+        .concurrent_limit = .nothing,
+    });
+    defer process_io.deinit();
+
+    const run_result = try std.process.run(allocator, process_io.io(), .{
+        .argv = argv_buf[0..argc],
+        .stdout_limit = std.Io.Limit.limited(max_output),
+        .stderr_limit = std.Io.Limit.limited(max_output),
+    });
+    defer allocator.free(run_result.stderr);
+    errdefer allocator.free(run_result.stdout);
+
+    const failed = switch (run_result.term) {
+        .exited => |code| code != 0,
+        else => true,
+    };
+    if (failed) {
+        try stdout.print("\nError: Sinora bytecode emission failed\n", .{});
+        const trimmed = std.mem.trim(u8, run_result.stderr, " \n\r\t");
+        if (trimmed.len > 0) try stdout.print("  {s}\n", .{trimmed});
+        try stdout.print("SIR input saved to: {s}\n", .{sir_file_path});
+        try stdout.flush();
+        return error.SinoraBytecodeEmissionFailed;
+    }
+    return run_result.stdout;
+}
+
+fn hexByteLength(hex: []const u8) usize {
+    const payload = if (std.mem.startsWith(u8, hex, "0x")) hex[2..] else hex;
+    return payload.len / 2;
 }
 
 fn emitBytecodeFromSirText(
@@ -4964,130 +7121,114 @@ fn emitBytecodeFromSirText(
     source_scopes: ?DebugSourceScopeBundle,
     stdout: anytype,
     suppress_log: bool,
+    optimize: ?project_config.OptimizeProfile,
+    dispatcher_check: ?*formal_dispatcher_table_gate.CheckResult,
 ) !void {
-    const sir_path = try resolveSenseiSirPath(allocator);
-    defer allocator.free(sir_path);
-
     const basename = std.fs.path.stem(file_path);
     const sir_extension = ".sir";
     const sir_filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, sir_extension });
     defer allocator.free(sir_filename);
 
     const temp_root = "/tmp/ora_sir";
-    std.fs.makeDirAbsolute(temp_root) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    const temp_dir = try std.fmt.allocPrint(allocator, "{s}/{x}", .{ temp_root, std.crypto.random.int(u64) });
+    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), temp_root);
+    const random_source = std.Random.IoSource{ .io = std.Io.Threaded.global_single_threaded.io() };
+    const temp_dir = try std.fmt.allocPrint(allocator, "{s}/{x}", .{ temp_root, random_source.interface().int(u64) });
     defer allocator.free(temp_dir);
-    std.fs.makeDirAbsolute(temp_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
+    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), temp_dir);
     const sir_file_path = try std.fs.path.join(allocator, &[_][]const u8{ temp_dir, sir_filename });
     defer allocator.free(sir_file_path);
 
-    var sir_file = try std.fs.createFileAbsolute(sir_file_path, .{});
-    defer sir_file.close();
-    try sir_file.writeAll(sir_text);
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = sir_file_path,
+        .data = sir_text,
+    });
 
-    // If we have source locations, tell Sensei to produce a source map
-    const sensei_srcmap_path = if (sir_locations_json != null)
-        try std.fs.path.join(allocator, &[_][]const u8{ temp_dir, "sensei_srcmap.json" })
+    const sinora_srcmap_path = if (sir_debug_info_json != null)
+        try std.fs.path.join(allocator, &[_][]const u8{ temp_dir, "sinora_srcmap.json" })
     else
         null;
-    defer if (sensei_srcmap_path) |p| allocator.free(p);
+    defer if (sinora_srcmap_path) |p| allocator.free(p);
+    const dispatcher_report_path = if (dispatcher_check != null)
+        try std.fs.path.join(allocator, &[_][]const u8{ temp_dir, "dispatcher_bytecode_report.json" })
+    else
+        null;
+    defer if (dispatcher_report_path) |p| allocator.free(p);
 
-    // Build argv: sir <input> [--source-map <path>]
-    var argv_buf: [4][]const u8 = undefined;
-    var argc: usize = 0;
-    argv_buf[argc] = sir_path;
-    argc += 1;
-    argv_buf[argc] = sir_file_path;
-    argc += 1;
-    if (sensei_srcmap_path) |srcmap_path| {
-        argv_buf[argc] = "--source-map";
-        argc += 1;
-        argv_buf[argc] = srcmap_path;
-        argc += 1;
-    }
-    const argv = argv_buf[0..argc];
-    var child = std.process.Child.init(argv, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
+    const sinora_path = resolveSinoraPath(allocator) catch |err| {
+        if (err == error.SinoraNotFound) {
+            try stdout.print("\nError: Sinora binary not found; run `zig build sinora`\n", .{});
+        }
+        return err;
+    };
+    defer allocator.free(sinora_path);
 
-    try child.spawn();
+    // The profile is always passed explicitly so the subprocess invocation
+    // is self-documenting and independent of sinora's own default.
+    const resolved_optimize = optimize orelse .balanced;
+    const optimize_arg = try std.fmt.allocPrint(allocator, "--optimize={s}", .{resolved_optimize.name()});
+    defer allocator.free(optimize_arg);
 
-    const max_output = 16 * 1024 * 1024;
-    const stdout_bytes = try child.stdout.?.readToEndAlloc(allocator, max_output);
-    defer allocator.free(stdout_bytes);
-    const stderr_bytes = try child.stderr.?.readToEndAlloc(allocator, max_output);
-    defer allocator.free(stderr_bytes);
-
-    const term = try child.wait();
-    switch (term) {
-        .Exited => |code| {
-            if (code != 0) {
-                try stdout.print("\nError: sensei bytecode compilation failed (exit code {d})\n", .{code});
-                // Show sensei's error output (the actual error reason)
-                const trimmed_stderr = std.mem.trim(u8, stderr_bytes, " \n\r\t");
-                if (trimmed_stderr.len > 0) {
-                    // Extract the meaningful error line (skip Rust backtrace noise)
-                    var line_iter = std.mem.splitScalar(u8, trimmed_stderr, '\n');
-                    while (line_iter.next()) |line| {
-                        const trimmed = std.mem.trim(u8, line, " \r\t");
-                        if (trimmed.len == 0) continue;
-                        // Skip Rust backtrace/thread info noise
-                        if (std.mem.startsWith(u8, trimmed, "note: run with")) continue;
-                        if (std.mem.startsWith(u8, trimmed, "stack backtrace:")) continue;
-                        if (trimmed.len > 3 and trimmed[0] >= '0' and trimmed[0] <= '9' and trimmed[1] == ':') continue;
-                        try stdout.print("  {s}\n", .{trimmed});
-                    }
-                } else {
-                    const trimmed_stdout_err = std.mem.trim(u8, stdout_bytes, " \n\r\t");
-                    if (trimmed_stdout_err.len > 0) {
-                        try stdout.print("  {s}\n", .{trimmed_stdout_err});
-                    }
-                }
-                try stdout.print("SIR input saved to: {s}\n", .{sir_file_path});
-                try stdout.flush();
-                std.process.exit(1);
-            }
-        },
-        else => {
-            try stdout.print("\nError: sensei bytecode compiler terminated unexpectedly\n", .{});
-            try stdout.print("SIR input saved to: {s}\n", .{sir_file_path});
-            try stdout.flush();
-            std.process.exit(1);
-        },
-    }
-
-    const bytecode = std.mem.trim(u8, stdout_bytes, " \n\r\t");
-    if (bytecode.len == 0) {
-        try stdout.print("\nError: sensei produced empty bytecode\n", .{});
+    const sinora_stdout = try runSinoraBytecode(
+        allocator,
+        sinora_path,
+        sir_file_path,
+        sinora_srcmap_path,
+        dispatcher_report_path,
+        optimize_arg,
+        stdout,
+    );
+    defer allocator.free(sinora_stdout);
+    const sinora_bytecode = std.mem.trim(u8, sinora_stdout, " \n\r\t");
+    if (sinora_bytecode.len == 0) {
+        try stdout.print("\nError: Sinora produced empty bytecode\n", .{});
         try stdout.print("SIR input saved to: {s}\n", .{sir_file_path});
         try stdout.flush();
-        std.process.exit(1);
+        return error.SinoraEmptyBytecode;
+    }
+    if (dispatcher_check) |check| {
+        const report_path = dispatcher_report_path orelse return error.DispatcherBytecodeReportMissing;
+        const report_json = try std.Io.Dir.cwd().readFileAlloc(
+            std.Io.Threaded.global_single_threaded.io(),
+            report_path,
+            allocator,
+            std.Io.Limit.limited(16 * 1024 * 1024),
+        );
+        defer allocator.free(report_json);
+        check.validateAndBindBytecode(allocator, report_json, sinora_bytecode) catch |err| {
+            try stdout.print(
+                "Lean dispatcher userland bytecode proof failed: {s}\n",
+                .{@errorName(err)},
+            );
+            try stdout.flush();
+            return error.VerificationFailed;
+        };
+        try writeLeanDispatcherProofCertificate(
+            allocator,
+            file_path,
+            output_dir,
+            check.certificate_json,
+            stdout,
+            suppress_log,
+        );
+        try check.writeVerificationSummary(stdout, true);
+        try stdout.print("Lean dispatcher userland proof accepted (SIR + bytecode)\n", .{});
+    }
+    if (!suppress_log) {
+        try stdout.print("Sinora bytecode emitted ({d} bytes)\n", .{hexByteLength(sinora_bytecode)});
     }
 
     var bytecode_output_path: ?[]const u8 = null;
     defer if (bytecode_output_path) |p| allocator.free(p);
 
     if (output_file) |out_path| {
-        var out_file = if (std.fs.path.isAbsolute(out_path))
-            try std.fs.createFileAbsolute(out_path, .{})
-        else
-            try std.fs.cwd().createFile(out_path, .{});
-        defer out_file.close();
-        try out_file.writeAll(bytecode);
+        try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+            .sub_path = out_path,
+            .data = sinora_bytecode,
+        });
         bytecode_output_path = try allocator.dupe(u8, out_path);
         if (!suppress_log) try stdout.print("Bytecode saved to {s}\n", .{out_path});
     } else if (output_dir) |out_dir| {
-        std.fs.cwd().makeDir(out_dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
+        try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), out_dir);
 
         const extension = ".hex";
         const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, extension });
@@ -5095,25 +7236,36 @@ fn emitBytecodeFromSirText(
         const output_path = try std.fs.path.join(allocator, &[_][]const u8{ out_dir, filename });
         defer allocator.free(output_path);
 
-        var out_file = if (std.fs.path.isAbsolute(output_path))
-            try std.fs.createFileAbsolute(output_path, .{})
-        else
-            try std.fs.cwd().createFile(output_path, .{});
-        defer out_file.close();
-        try out_file.writeAll(bytecode);
+        try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+            .sub_path = output_path,
+            .data = sinora_bytecode,
+        });
         bytecode_output_path = try allocator.dupe(u8, output_path);
         if (!suppress_log) try stdout.print("Bytecode saved to {s}\n", .{output_path});
     } else {
-        try stdout.print("{s}\n", .{bytecode});
+        try stdout.print("{s}\n", .{sinora_bytecode});
     }
 
-    // Merge source maps: sir_locations (op_idx → file:line:col) + sensei (op_idx → pc)
-    // into final .sourcemap.json
-    if (sir_locations_json != null and sensei_srcmap_path != null and bytecode_output_path != null) {
-        try mergeSourceMaps(allocator, db, root_module_id, sir_locations_json.?, sir_line_map_json, sir_debug_info_json, sensei_srcmap_path.?, bytecode_output_path.?, stdout, suppress_log);
+    // Build-provenance sidecar: records which optimization profile produced
+    // this bytecode so audits never have to guess.
+    if (bytecode_output_path) |bytecode_path| {
+        const build_info_path = try std.mem.concat(allocator, u8, &[_][]const u8{ bytecode_path, ".build.json" });
+        defer allocator.free(build_info_path);
+        const build_info = try std.fmt.allocPrint(allocator, "{{\n  \"optimize\": \"{s}\"\n}}\n", .{resolved_optimize.name()});
+        defer allocator.free(build_info);
+        try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+            .sub_path = build_info_path,
+            .data = build_info,
+        });
+    }
+
+    // Merge source maps: SIR locations (op_idx -> file:line:col) + Sinora's
+    // backend source map (op_idx -> pc) into final .sourcemap.json.
+    if (sir_locations_json != null and sinora_srcmap_path != null and bytecode_output_path != null) {
+        try mergeSourceMaps(allocator, db, root_module_id, sir_locations_json.?, sir_line_map_json, sir_debug_info_json, sinora_srcmap_path.?, bytecode_output_path.?, stdout, suppress_log);
     }
     if (sir_debug_info_json != null and bytecode_output_path != null) {
-        try writeDebugInfoSidecar(allocator, db, root_module_id, sources, sir_debug_info_json.?, source_scopes, bytecode_output_path.?, stdout);
+        try writeDebugInfoSidecar(allocator, db, root_module_id, sources, sir_debug_info_json.?, source_scopes, bytecode_output_path.?, stdout, suppress_log);
     }
 }
 
@@ -5124,37 +7276,44 @@ fn mergeSourceMaps(
     sir_locations_json: []const u8,
     sir_line_map_json: ?[]const u8,
     sir_debug_info_json: ?[]const u8,
-    sensei_srcmap_path: []const u8,
+    backend_srcmap_path: []const u8,
     bytecode_output_path: []const u8,
     stdout: anytype,
     suppress_log: bool,
 ) !void {
-    // Read Sensei's source map: {"runtime_start_pc":123,"ops":[{"idx":0,"pc":0},{"idx":1,"pc":5},...]}
-    const sensei_json = std.fs.cwd().readFileAlloc(allocator, sensei_srcmap_path, 16 * 1024 * 1024) catch |err| {
-        try stdout.print("Warning: could not read Sensei source map: {}\n", .{err});
-        return;
+    // Read Sinora's source map: {"runtime_start_pc":123,"ops":[{"idx":0,"pc":0},{"idx":1,"pc":5},...]}
+    const backend_json = std.Io.Dir.cwd().readFileAlloc(
+        std.Io.Threaded.global_single_threaded.io(),
+        backend_srcmap_path,
+        allocator,
+        std.Io.Limit.limited(16 * 1024 * 1024),
+    ) catch |err| {
+        try stdout.print("Error: could not read backend source map: {}\n", .{err});
+        try stdout.flush();
+        return err;
     };
-    defer allocator.free(sensei_json);
+    defer allocator.free(backend_json);
 
-    // Parse Sensei ops into a map: op_idx → pc
-    const SenseiMap = struct {
+    // Parse backend ops into a map: op_idx -> pc.
+    const BackendMap = struct {
         runtime_start_pc: ?u32 = null,
         ops: []const struct { idx: u32, pc: u32 } = &.{},
     };
-    const sensei_parsed = std.json.parseFromSlice(SenseiMap, allocator, sensei_json, .{
+    const backend_parsed = std.json.parseFromSlice(BackendMap, allocator, backend_json, .{
         .ignore_unknown_fields = true,
     }) catch |err| {
-        try stdout.print("Warning: could not parse Sensei source map: {}\n", .{err});
-        return;
+        try stdout.print("Error: could not parse backend source map: {}\n", .{err});
+        try stdout.flush();
+        return err;
     };
-    defer sensei_parsed.deinit();
+    defer backend_parsed.deinit();
 
     // Build lookup: op_idx → pc
     var idx_to_pc = std.AutoHashMap(u32, u32).init(allocator);
     defer idx_to_pc.deinit();
     var max_mapped_idx: u32 = 0;
     var have_mapped_idx = false;
-    for (sensei_parsed.value.ops) |op| {
+    for (backend_parsed.value.ops) |op| {
         try idx_to_pc.put(op.idx, op.pc);
         if (!have_mapped_idx or op.idx > max_mapped_idx) {
             max_mapped_idx = op.idx;
@@ -5167,8 +7326,9 @@ fn mergeSourceMaps(
     const sir_locs = std.json.parseFromSlice([]const LocEntry, allocator, sir_locations_json, .{
         .ignore_unknown_fields = true,
     }) catch |err| {
-        try stdout.print("Warning: could not parse SIR locations: {}\n", .{err});
-        return;
+        try stdout.print("Error: could not parse SIR locations: {}\n", .{err});
+        try stdout.flush();
+        return err;
     };
     defer sir_locs.deinit();
 
@@ -5179,8 +7339,9 @@ fn mergeSourceMaps(
         const sir_lines = std.json.parseFromSlice([]const SirLineEntry, allocator, json, .{
             .ignore_unknown_fields = true,
         }) catch |err| {
-            try stdout.print("Warning: could not parse SIR line map: {}\n", .{err});
-            return;
+            try stdout.print("Error: could not parse SIR line map: {}\n", .{err});
+            try stdout.flush();
+            return err;
         };
         defer sir_lines.deinit();
         for (sir_lines.value) |line_entry| {
@@ -5226,8 +7387,9 @@ fn mergeSourceMaps(
         const parsed_debug = std.json.parseFromSlice(DebugInfoParse, allocator, json, .{
             .ignore_unknown_fields = true,
         }) catch |err| {
-            try stdout.print("Warning: could not parse SIR debug info for source-map provenance: {}\n", .{err});
-            return;
+            try stdout.print("Error: could not parse SIR debug info for source-map provenance: {}\n", .{err});
+            try stdout.flush();
+            return err;
         };
         defer parsed_debug.deinit();
         for (parsed_debug.value.ops) |op| {
@@ -5250,20 +7412,22 @@ fn mergeSourceMaps(
 
     var executable_lines = try buildExecutableLineMap(allocator, db, root_module_id);
     defer deinitExecutableLineMap(allocator, &executable_lines);
+    const artifact_path_root = try std.process.currentPathAlloc(std.Io.Threaded.global_single_threaded.io(), allocator);
+    defer allocator.free(artifact_path_root);
 
-    // Merge: for each SIR location entry, look up its PC from Sensei
+    // Merge: for each SIR location entry, look up its backend PC.
     // Collect unique source files
-    var sources: std.ArrayList([]const u8) = .{};
+    var sources: std.ArrayList([]const u8) = .empty;
     defer sources.deinit(allocator);
     var source_indices = std.StringHashMap(u32).init(allocator);
     defer source_indices.deinit();
 
     // Build merged entries
-    var out: std.ArrayList(u8) = .{};
-    defer out.deinit(allocator);
-    const writer = out.writer(allocator);
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+    const writer = &out.writer;
 
-    try writer.print("{{\"version\":1,\"runtime_start_pc\":{},\"sources\":[", .{sensei_parsed.value.runtime_start_pc orelse 0});
+    try writer.print("{{\"version\":1,\"runtime_start_pc\":{},\"sources\":[", .{backend_parsed.value.runtime_start_pc orelse 0});
 
     // First pass: collect sources and build entries
     const MergedEntry = struct {
@@ -5287,7 +7451,7 @@ fn mergeSourceMaps(
         stmt: bool,
         kind: ?ExecutableStatementKind = null,
     };
-    var entries: std.ArrayList(MergedEntry) = .{};
+    var entries: std.ArrayList(MergedEntry) = .empty;
     defer entries.deinit(allocator);
 
     var missing_idx_count: usize = 0;
@@ -5478,7 +7642,7 @@ fn mergeSourceMaps(
     // Emit sources array
     for (sources.items, 0..) |src, i| {
         if (i > 0) try writer.writeAll(",");
-        try writeJsonString(writer, src);
+        try writeArtifactPathJson(writer, artifact_path_root, src);
     }
     try writer.writeAll("],\"entries\":[");
 
@@ -5517,7 +7681,7 @@ fn mergeSourceMaps(
             }
             if (entry.synthetic_path) |synthetic_path| {
                 try writer.writeAll(",\"synthetic_path\":");
-                try writeJsonString(writer, synthetic_path);
+                try writeArtifactPathJson(writer, artifact_path_root, synthetic_path);
             }
         }
         if (entry.is_hoisted) {
@@ -5544,17 +7708,18 @@ fn mergeSourceMaps(
         try allocator.dupe(u8, srcmap_name);
     defer allocator.free(srcmap_path);
 
-    var srcmap_file = try std.fs.cwd().createFile(srcmap_path, .{});
-    defer srcmap_file.close();
-    try srcmap_file.writeAll(out.items);
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = srcmap_path,
+        .data = out.written(),
+    });
 
     if (!suppress_log) try stdout.print("Source map saved to {s} ({d} entries)\n", .{ srcmap_path, entries.items.len });
 }
 
 /// Write the FV proof sidecar `<output_dir>/<stem>.proof.json`.
 ///
-/// Format: a flat JSON array of objects, one per proved guard:
-///   [{"file":"...", "line":N, "column":N, "status":"proved_safe"}, ...]
+/// Format: a versioned JSON envelope with one entry per proved guard:
+///   {"schema_version":1,"proofs":[{"file":"...","line":N,"column":N,"status":"proved_safe"}]}
 ///
 /// Today only `proved_safe` is emitted (UNSAT guards). The schema
 /// is open to `proved_unsafe` and `dynamic` once the verifier
@@ -5564,27 +7729,32 @@ fn writeProofSidecar(
     allocator: std.mem.Allocator,
     output_dir: []const u8,
     stem: []const u8,
-    positions: []const @import("z3/errors.zig").ProvenGuardPosition,
+    positions: []const z3_verification.ProvenGuardPosition,
 ) !void {
     const filename = try std.fmt.allocPrint(allocator, "{s}/{s}.proof.json", .{ output_dir, stem });
     defer allocator.free(filename);
 
-    var out: std.ArrayList(u8) = .{};
-    defer out.deinit(allocator);
-    var w = out.writer(allocator);
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+    const w = &out.writer;
+    const artifact_path_root = try std.process.currentPathAlloc(std.Io.Threaded.global_single_threaded.io(), allocator);
+    defer allocator.free(artifact_path_root);
 
-    try w.writeAll("[");
+    try w.print("{{\"schema_version\":{d},\"proofs\":[", .{proof_sidecar_schema_version});
     for (positions, 0..) |pos, i| {
         if (i != 0) try w.writeAll(",");
         try w.writeAll("{\"file\":");
-        try writeJsonString(w, pos.file);
+        try writeArtifactPathJson(w, artifact_path_root, pos.file);
         try w.print(",\"line\":{d},\"column\":{d},\"status\":", .{ pos.line, pos.column });
         try writeJsonString(w, pos.status);
         try w.writeAll("}");
     }
-    try w.writeAll("]\n");
+    try w.writeAll("]}\n");
 
-    try std.fs.cwd().writeFile(.{ .sub_path = filename, .data = out.items });
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = filename,
+        .data = out.written(),
+    });
 }
 
 fn writeDebugInfoSidecar(
@@ -5596,6 +7766,7 @@ fn writeDebugInfoSidecar(
     source_scopes: ?DebugSourceScopeBundle,
     bytecode_output_path: []const u8,
     stdout: anytype,
+    suppress_log: bool,
 ) !void {
     const DebugOp = struct {
         idx: u32,
@@ -5632,21 +7803,22 @@ fn writeDebugInfoSidecar(
         try allocator.dupe(u8, debug_name);
     defer allocator.free(debug_path);
 
-    var debug_file = try std.fs.cwd().createFile(debug_path, .{});
-    defer debug_file.close();
-    var out: std.ArrayList(u8) = .{};
-    defer out.deinit(allocator);
-    const writer = out.writer(allocator);
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+    const writer = &out.writer;
     const parsed_debug = std.json.parseFromSlice(DebugInfoParse, allocator, sir_debug_info_json, .{
         .ignore_unknown_fields = true,
     }) catch |err| {
-        try stdout.print("Warning: could not parse debug sidecar for visibility enrichment: {}\n", .{err});
-        return;
+        try stdout.print("Error: could not parse debug sidecar for visibility enrichment: {}\n", .{err});
+        try stdout.flush();
+        return err;
     };
     defer parsed_debug.deinit();
 
     var executable_lines = try buildExecutableLineMap(allocator, db, root_module_id);
     defer deinitExecutableLineMap(allocator, &executable_lines);
+    const artifact_path_root = try std.process.currentPathAlloc(std.Io.Threaded.global_single_threaded.io(), allocator);
+    defer allocator.free(artifact_path_root);
 
     const EnrichedOp = struct {
         idx: u32,
@@ -5713,7 +7885,7 @@ fn writeDebugInfoSidecar(
         try writeJsonString(writer, op.block);
         try writer.writeAll(",\"file\":");
         if (op.file) |file| {
-            try writeJsonString(writer, file);
+            try writeArtifactPathJson(writer, artifact_path_root, file);
         } else {
             try writer.writeAll("null");
         }
@@ -5746,7 +7918,7 @@ fn writeDebugInfoSidecar(
         }
         if (op.synthetic_path) |synthetic_path| {
             try writer.writeAll(",\"synthetic_path\":");
-            try writeJsonString(writer, synthetic_path);
+            try writeArtifactPathJson(writer, artifact_path_root, synthetic_path);
         }
         if (op.kind) |kind| {
             try writer.writeAll(",\"kind\":");
@@ -5774,7 +7946,7 @@ fn writeDebugInfoSidecar(
                 try writer.writeAll("null");
             }
             try writer.writeAll(",\"file\":");
-            try writeJsonString(writer, scope.file_path);
+            try writeArtifactPathJson(writer, artifact_path_root, scope.file_path);
             try writer.writeAll(",\"function\":");
             try writeJsonString(writer, scope.function_name);
             try writer.writeAll(",\"contract\":");
@@ -5919,9 +8091,12 @@ fn writeDebugInfoSidecar(
         }
     }
     try writer.writeAll("]}");
-    try debug_file.writeAll(out.items);
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = debug_path,
+        .data = out.written(),
+    });
 
-    try stdout.print("Debug info saved to {s}\n", .{debug_path});
+    if (!suppress_log) try stdout.print("Debug info saved to {s}\n", .{debug_path});
 }
 
 test "build config init_args: validates init parameters" {
@@ -5929,7 +8104,7 @@ test "build config init_args: validates init parameters" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "Main.ora",
         .data =
         \\contract Main {
@@ -5963,7 +8138,7 @@ test "build config init_args: unknown init arg errors" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "Main.ora",
         .data =
         \\contract Main {
@@ -5992,7 +8167,7 @@ test "build config init_args: missing init function errors" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "Main.ora",
         .data =
         \\contract Main {
@@ -6018,7 +8193,7 @@ test "build config init_args: invalid constructor shape errors" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "Main.ora",
         .data =
         \\contract Main {
@@ -6056,11 +8231,11 @@ test "init command: scaffolds new project layout" {
     const readme_path = try std.fmt.allocPrint(allocator, "{s}/README.md", .{target_path});
     defer allocator.free(readme_path);
 
-    const toml = try std.fs.cwd().readFileAlloc(allocator, toml_path, 64 * 1024);
+    const toml = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, toml_path, allocator, std.Io.Limit.limited(64 * 1024));
     defer allocator.free(toml);
-    const contract = try std.fs.cwd().readFileAlloc(allocator, contract_path, 64 * 1024);
+    const contract = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, contract_path, allocator, std.Io.Limit.limited(64 * 1024));
     defer allocator.free(contract);
-    const readme = try std.fs.cwd().readFileAlloc(allocator, readme_path, 64 * 1024);
+    const readme = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, readme_path, allocator, std.Io.Limit.limited(64 * 1024));
     defer allocator.free(readme);
 
     try std.testing.expect(std.mem.indexOf(u8, toml, "[[targets]]") != null);
@@ -6074,8 +8249,8 @@ test "init command: rejects non-empty target directory" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("occupied");
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "occupied");
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "occupied/existing.txt",
         .data = "keep",
     });
@@ -6101,12 +8276,12 @@ test "compiler typed AST writer prints root item types" {
     const ast_file = try compilation.db.astFile(module.file_id);
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
 
-    var buffer: std.ArrayList(u8) = .{};
-    defer buffer.deinit(allocator);
-    try writeCompilerAst(allocator, buffer.writer(allocator), ast_file, typecheck, &typecheck.diagnostics, "tree", false);
+    var buffer = std.Io.Writer.Allocating.init(allocator);
+    defer buffer.deinit();
+    try writeCompilerAst(allocator, &buffer.writer, ast_file, typecheck, &typecheck.diagnostics, "tree", false);
 
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "Compiler typed AST") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "Function id : fn(u256) -> u256") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.written(), "Compiler typed AST") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.written(), "Function id : fn(u256) -> u256") != null);
 }
 
 test "compiler JSON AST writer includes diagnostics array" {
@@ -6124,12 +8299,12 @@ test "compiler JSON AST writer includes diagnostics array" {
     const ast_file = try compilation.db.astFile(module.file_id);
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
 
-    var buffer: std.ArrayList(u8) = .{};
-    defer buffer.deinit(allocator);
-    try writeCompilerAst(allocator, buffer.writer(allocator), ast_file, typecheck, &typecheck.diagnostics, "json", false);
+    var buffer = std.Io.Writer.Allocating.init(allocator);
+    defer buffer.deinit();
+    try writeCompilerAst(allocator, &buffer.writer, ast_file, typecheck, &typecheck.diagnostics, "json", false);
 
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"root_items\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"diagnostics\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.written(), "\"root_items\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.written(), "\"diagnostics\"") != null);
 }
 
 test "simple test" {

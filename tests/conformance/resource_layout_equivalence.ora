@@ -1,0 +1,30 @@
+resource TokenUnit = u256;
+comptime const std = @import("std");
+
+contract ResourceLayoutEquivalence {
+    storage var raw_balances: map<address, u256>;
+    storage var resource_balances: map<address, Resource<TokenUnit>>;
+
+    pub fn write_raw(owner: address, amount: u256)
+        modifies raw_balances[owner]
+        ensures raw_balances[owner] == amount
+    {
+        raw_balances[owner] = amount;
+    }
+
+    pub fn issue_resource(owner: address, amount: TokenUnit)
+        modifies resource_balances[owner]
+        requires @amount(resource_balances[owner]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        ensures @amount(resource_balances[owner]) == old(@amount(resource_balances[owner])) + amount
+    {
+        @create(resource_balances[owner], amount);
+    }
+
+    pub fn rawBalance(owner: address) -> u256 {
+        return raw_balances[owner];
+    }
+
+    pub fn resourceBalance(owner: address) -> TokenUnit {
+        return @amount(resource_balances[owner]);
+    }
+}

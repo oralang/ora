@@ -1,0 +1,82 @@
+{
+  "comparisons": [
+    {
+      "added": 0,
+      "base": "debug",
+      "candidate": "release",
+      "categories": {
+        "bytecode_bytes": {
+          "base_total": 152888,
+          "candidate_total": 152888,
+          "delta": 0,
+          "keys": 88,
+          "pct": 0.0
+        },
+        "deploy_gas": {
+          "base_total": 30465574,
+          "candidate_total": 30465574,
+          "delta": 0,
+          "keys": 89,
+          "pct": 0.0
+        },
+        "runtime_gas": {
+          "base_total": 8406945,
+          "candidate_total": 8406945,
+          "delta": 0,
+          "keys": 591,
+          "pct": 0.0
+        }
+      },
+      "common": 768,
+      "removed": 0
+    },
+    {
+      "added": 0,
+      "base": "release",
+      "candidate": "debug",
+      "categories": {
+        "bytecode_bytes": {
+          "base_total": 152888,
+          "candidate_total": 152888,
+          "delta": 0,
+          "keys": 88,
+          "pct": 0.0
+        },
+        "deploy_gas": {
+          "base_total": 30465574,
+          "candidate_total": 30465574,
+          "delta": 0,
+          "keys": 89,
+          "pct": 0.0
+        },
+        "runtime_gas": {
+          "base_total": 8406945,
+          "candidate_total": 8406945,
+          "delta": 0,
+          "keys": 591,
+          "pct": 0.0
+        }
+      },
+      "common": 768,
+      "removed": 0
+    }
+  ],
+  "totals": {
+    "debug": {
+      "bytecode_bytes": 152888,
+      "deploy_gas": 30465574,
+      "metrics": 768,
+      "runtime_gas": 8406945
+    },
+    "release": {
+      "bytecode_bytes": 152888,
+      "deploy_gas": 30465574,
+      "metrics": 768,
+      "runtime_gas": 8406945
+    }
+  },
+  "variants": [
+    "debug",
+    "release"
+  ]
+}

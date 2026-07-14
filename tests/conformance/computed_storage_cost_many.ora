@@ -1,0 +1,24 @@
+contract ComputedStorageCostMany {
+    storage var payload0: map<address, u256>;
+    storage var payload1: map<address, u256>;
+    storage var payload2: map<address, u256>;
+    storage var payload3: map<address, u256>;
+
+    pub fn store_four(owner: address, a: u256, b: u256, c: u256, d: u256) {
+        payload0[owner] = a;
+        payload1[owner] = b;
+        payload2[owner] = c;
+        payload3[owner] = d;
+    }
+
+    pub fn sum_four(owner: address) -> u256 {
+        return payload0[owner] + payload1[owner] + payload2[owner] + payload3[owner];
+    }
+
+    pub fn clear_four(owner: address) {
+        payload0[owner] = 0;
+        payload1[owner] = 0;
+        payload2[owner] = 0;
+        payload3[owner] = 0;
+    }
+}

@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/refinement/in_range_basic.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @setLevel
+// CHECK-LABEL: func.func @getLevel
+// CHECK-LABEL: func.func @compare
+// CHECK-LABEL: func.func @addRanged
+// CHECK-LABEL: func.func @toPlain
+// CHECK-LABEL: func.func @isHigh

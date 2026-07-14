@@ -22,7 +22,7 @@ contract Vault {
     }
 
     pub fn wrong_sender_literal(recipient: address, value: u256)
-        modifies balances[msg.sender]
+        modifies balances[std.msg.sender()]
     {
         balances[recipient] = value;
     }

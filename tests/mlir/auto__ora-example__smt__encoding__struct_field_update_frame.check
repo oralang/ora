@@ -1,0 +1,5 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/encoding/struct_field_update_frame.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @setX
+// CHECK-LABEL: func.func @setY

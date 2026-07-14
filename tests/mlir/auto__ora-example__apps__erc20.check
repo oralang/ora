@@ -2,9 +2,20 @@
 // INPUT: ora-example/apps/erc20.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK-LABEL: func.func @init
-// CHECK-LABEL: func.func @getTotalSupply
+// CHECK-LABEL: func.func @caller
+// CHECK-LABEL: func.func @tokenValue
+// CHECK-LABEL: func.func @totalSupply
+// CHECK-LABEL: func.func @name
+// CHECK-LABEL: func.func @symbol
+// CHECK-LABEL: func.func @decimals
 // CHECK-LABEL: func.func @balanceOf
-// CHECK-LABEL: func.func @transfer
-// CHECK-LABEL: func.func @approve
 // CHECK-LABEL: func.func @allowance
+// CHECK-LABEL: func.func @allowanceValue
+// CHECK-LABEL: func.func @transfer
+// CHECK-LABEL: func.func @requireBalance__inline__owner_refined_NonZeroAddress
+// CHECK-LABEL: func.func @approve
+// CHECK-LABEL: func.func @allowanceAmount
 // CHECK-LABEL: func.func @transferFrom
+// CHECK-LABEL: func.func @requireAllowance__inline__owner_refined_NonZeroAddress__spender_refined_NonZeroAddress
+// CHECK-LABEL: func.func @mint
+// CHECK-LABEL: func.func @burn

@@ -17,6 +17,28 @@ pub const TargetKind = enum {
     library,
 };
 
+/// Optimization profile: how the backend weighs runtime gas against code
+/// size (deploy cost). `gas` optimizes runtime only, `size` suits
+/// deploy-constrained contracts (e.g. factory-deployed children),
+/// `balanced` is the default. Resolution order: --optimize CLI flag >
+/// [[targets]] optimize > [compiler] optimize > balanced.
+pub const OptimizeProfile = enum {
+    gas,
+    balanced,
+    size,
+
+    pub fn name(self: OptimizeProfile) []const u8 {
+        return @tagName(self);
+    }
+};
+
+pub fn optimizeProfileFromString(value: []const u8) ConfigError!OptimizeProfile {
+    inline for (@typeInfo(OptimizeProfile).@"enum".fields) |field| {
+        if (std.mem.eql(u8, value, field.name)) return @field(OptimizeProfile, field.name);
+    }
+    return ConfigError.InvalidToml;
+}
+
 pub const InitArg = struct {
     name: []const u8,
     value: []const u8,
@@ -35,6 +57,7 @@ pub const Target = struct {
     init_args: []InitArg,
     output_dir: ?[]const u8,
     chain_id: ?u64,
+    optimize: ?OptimizeProfile,
 
     fn deinit(self: *Target, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
@@ -58,6 +81,7 @@ pub const ProjectConfig = struct {
     compiler_output_dir: ?[]const u8,
     compiler_chain_id: ?u64,
     compiler_init_args: []InitArg,
+    compiler_optimize: ?OptimizeProfile,
     targets: []Target,
 
     pub fn deinit(self: *ProjectConfig, allocator: std.mem.Allocator) void {
@@ -101,10 +125,11 @@ const TargetBuilder = struct {
     name: ?[]const u8 = null,
     kind: TargetKind = .contract,
     root: ?[]const u8 = null,
-    include_paths: std.ArrayList([]const u8) = .{},
-    init_args: std.ArrayList(InitArg) = .{},
+    include_paths: std.ArrayList([]const u8) = .empty,
+    init_args: std.ArrayList(InitArg) = .empty,
     output_dir: ?[]const u8 = null,
     chain_id: ?u64 = null,
+    optimize: ?OptimizeProfile = null,
 
     fn deinit(self: *TargetBuilder, allocator: std.mem.Allocator) void {
         if (self.name) |name| allocator.free(name);
@@ -230,13 +255,28 @@ const TargetBuilder = struct {
             .init_args = init_args,
             .output_dir = output_dir_copy,
             .chain_id = self.chain_id,
+            .optimize = self.optimize,
         };
     }
 };
 
+fn processIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
 fn fileExists(path: []const u8) bool {
-    std.fs.cwd().access(path, .{}) catch return false;
+    std.Io.Dir.cwd().access(processIo(), path, .{}) catch return false;
     return true;
+}
+
+fn cwdRealpathAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const real_z = try std.Io.Dir.cwd().realPathFileAlloc(processIo(), path, allocator);
+    defer allocator.free(real_z);
+    return allocator.dupe(u8, real_z);
+}
+
+fn cwdReadFileAlloc(allocator: std.mem.Allocator, path: []const u8, limit: usize) ![]u8 {
+    return std.Io.Dir.cwd().readFileAlloc(processIo(), path, allocator, std.Io.Limit.limited(limit));
 }
 
 fn stripInlineComment(line: []const u8) []const u8 {
@@ -280,7 +320,7 @@ fn parseTomlStringArrayOwned(allocator: std.mem.Allocator, value: []const u8) Co
         return allocator.alloc([]const u8, 0) catch ConfigError.OutOfMemory;
     }
 
-    var items = std.ArrayList([]const u8){};
+    var items = std.ArrayList([]const u8).empty;
     defer {
         for (items.items) |entry| allocator.free(entry);
         items.deinit(allocator);
@@ -376,7 +416,7 @@ pub fn discoverConfigPathFromStartDir(allocator: std.mem.Allocator, start_dir: [
         }
         allocator.free(Ora_toml);
 
-        const probe_real = std.fs.cwd().realpathAlloc(allocator, probe) catch break;
+        const probe_real = cwdRealpathAlloc(allocator, probe) catch break;
         defer allocator.free(probe_real);
         const parent_real = std.fs.path.dirname(probe_real) orelse break;
         if (std.mem.eql(u8, parent_real, probe_real)) {
@@ -399,7 +439,7 @@ pub fn resolvePathFromConfigDir(allocator: std.mem.Allocator, config_dir: []cons
 }
 
 pub fn loadProjectConfigFile(allocator: std.mem.Allocator, config_path: []const u8) ConfigError!ProjectConfig {
-    const source = std.fs.cwd().readFileAlloc(allocator, config_path, 1024 * 1024) catch |err| switch (err) {
+    const source = cwdReadFileAlloc(allocator, config_path, 1024 * 1024) catch |err| switch (err) {
         error.FileNotFound => return ConfigError.FileNotFound,
         else => return ConfigError.InvalidToml,
     };
@@ -410,6 +450,7 @@ pub fn loadProjectConfigFile(allocator: std.mem.Allocator, config_path: []const 
     var compiler_output_dir: ?[]const u8 = null;
     errdefer if (compiler_output_dir) |output_dir| allocator.free(output_dir);
     var compiler_chain_id: ?u64 = null;
+    var compiler_optimize: ?OptimizeProfile = null;
     var compiler_init_args = allocator.alloc(InitArg, 0) catch return ConfigError.OutOfMemory;
     errdefer {
         for (compiler_init_args) |*arg| arg.deinit(allocator);
@@ -418,11 +459,11 @@ pub fn loadProjectConfigFile(allocator: std.mem.Allocator, config_path: []const 
     var pending_array_key: ?[]u8 = null;
     defer if (pending_array_key) |key| allocator.free(key);
     var pending_array_section: Section = .top;
-    var pending_array_value = std.ArrayList(u8){};
+    var pending_array_value = std.ArrayList(u8).empty;
     defer pending_array_value.deinit(allocator);
     var section: Section = .top;
 
-    var target_builders = std.ArrayList(TargetBuilder){};
+    var target_builders = std.ArrayList(TargetBuilder).empty;
     defer {
         for (target_builders.items) |*target_builder| {
             target_builder.deinit(allocator);
@@ -542,6 +583,10 @@ pub fn loadProjectConfigFile(allocator: std.mem.Allocator, config_path: []const 
                     compiler_output_dir = parsed;
                 } else if (std.mem.eql(u8, key, "chain_id")) {
                     compiler_chain_id = try parseTomlUnsigned(value);
+                } else if (std.mem.eql(u8, key, "optimize")) {
+                    const parsed = try parseTomlStringOwned(allocator, value);
+                    defer allocator.free(parsed);
+                    compiler_optimize = try optimizeProfileFromString(parsed);
                 } else if (std.mem.eql(u8, key, "init_args")) {
                     const parsed = try parseTomlStringArrayOwned(allocator, value);
                     defer {
@@ -592,6 +637,10 @@ pub fn loadProjectConfigFile(allocator: std.mem.Allocator, config_path: []const 
                     current.setOutputDir(allocator, parsed);
                 } else if (std.mem.eql(u8, key, "chain_id")) {
                     current.setChainId(try parseTomlUnsigned(value));
+                } else if (std.mem.eql(u8, key, "optimize")) {
+                    const parsed = try parseTomlStringOwned(allocator, value);
+                    defer allocator.free(parsed);
+                    current.optimize = try optimizeProfileFromString(parsed);
                 } else if (std.mem.eql(u8, key, "include_paths")) {
                     const parsed = try parseTomlStringArrayOwned(allocator, value);
                     defer {
@@ -648,6 +697,7 @@ pub fn loadProjectConfigFile(allocator: std.mem.Allocator, config_path: []const 
         .compiler_output_dir = compiler_output_dir,
         .compiler_chain_id = compiler_chain_id,
         .compiler_init_args = compiler_init_args,
+        .compiler_optimize = compiler_optimize,
         .targets = targets,
     };
 }
@@ -681,7 +731,7 @@ pub fn findMatchingTargetIndex(
     loaded: *const LoadedProjectConfig,
     entry_file_path: []const u8,
 ) ConfigError!?usize {
-    const entry_real = std.fs.cwd().realpathAlloc(allocator, entry_file_path) catch {
+    const entry_real = cwdRealpathAlloc(allocator, entry_file_path) catch {
         return null;
     };
     defer allocator.free(entry_real);
@@ -690,7 +740,7 @@ pub fn findMatchingTargetIndex(
         const target_path = try resolvePathFromConfigDir(allocator, loaded.config_dir, target.root);
         defer allocator.free(target_path);
 
-        const target_real = std.fs.cwd().realpathAlloc(allocator, target_path) catch {
+        const target_real = cwdRealpathAlloc(allocator, target_path) catch {
             continue;
         };
         defer allocator.free(target_real);

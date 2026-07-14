@@ -138,6 +138,21 @@ zig build test
 ./zig-out/bin/ora --emit-yul ora-example/basic_storage.ora
 ```
 
+Metrics baselines are reviewed artifacts. `scripts/metrics-check.py --check`
+and `scripts/compile-metrics-check.py --check` must run against the committed
+baseline. Do not use `--update` as part of the same validation command; run it
+only to intentionally regenerate a baseline, then review the diff line by line
+before committing it.
+
+For optimization work, `scripts/metrics-check.py --check-size` is the
+deterministic bytecode-size gate. It still reports deploy/runtime gas drift as
+local evidence, but only bytecode-size drift controls that mode's exit code.
+Use `--report-dir <dir>` to keep `current.tsv`, `compare.tsv`, `changed.tsv`,
+and `summary.json` with a review run.
+For opt-in optimization experiments, the metrics harness accepts simple extra
+compiler flags through `ORA_METRICS_COMPILER_ARGS`; use this only for review
+reports, not for committed baseline regeneration.
+
 ### Code Quality
 
 ```bash
@@ -478,4 +493,3 @@ By contributing to Ora, you agree that your contributions will be licensed under
 ---
 
 Thank you for contributing to Ora! 🎉
-

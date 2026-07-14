@@ -62,3 +62,29 @@ test "lsp document symbol: converts byte ranges to utf16" {
     try std.testing.expectEqual(expected_start.character, symbols[0].selectionRange.start.character);
     try std.testing.expectEqual(expected_end.character, symbols[0].selectionRange.end.character);
 }
+
+test "lsp document symbol: marks inline function detail" {
+    const source =
+        \\contract Math {
+        \\    inline fn choose(mode: u256) -> u256 { return mode; }
+        \\}
+    ;
+
+    var index = try test_analysis.semanticIndex(std.testing.allocator, source);
+    defer index.deinit(std.testing.allocator);
+
+    var lines = try line_index.LineIndex.init(std.testing.allocator, source);
+    defer lines.deinit(std.testing.allocator);
+
+    var response_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer response_arena.deinit();
+
+    const symbols = try document_symbol.build(response_arena.allocator(), source, &lines, .utf8, &index);
+
+    try std.testing.expectEqual(@as(usize, 1), symbols.len);
+    try std.testing.expect(symbols[0].children != null);
+    try std.testing.expectEqual(@as(usize, 1), symbols[0].children.?.len);
+    try std.testing.expectEqualStrings("choose", symbols[0].children.?[0].name);
+    try std.testing.expect(symbols[0].children.?[0].detail != null);
+    try std.testing.expectEqualStrings("inline (mode: u256) -> u256", symbols[0].children.?[0].detail.?);
+}

@@ -1,0 +1,1 @@
+expect_error = "resource struct-field places inside maps are not supported yet; use a direct storage Resource<T> root, direct struct field, or map value resource place"

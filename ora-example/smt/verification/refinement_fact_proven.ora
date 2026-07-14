@@ -4,7 +4,7 @@
 // Focus:
 // SMT should know NonZeroAddress implies addr != ZERO_ADDRESS.
 //
-// This case derives NonZeroAddress from a trusted builtin (`std.msg.sender`) so
+// This case derives NonZeroAddress from a trusted builtin (`std.msg.sender()`) so
 // we isolate fact propagation without public-entry guard-violation noise.
 //
 // Run with:

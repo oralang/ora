@@ -1,0 +1,4 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/soundness/conditional_return_split.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @withdraw

@@ -1,0 +1,33 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/operators/arithmetic/signed_arithmetic.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @add_i8
+// CHECK-LABEL: func.func @sub_i8
+// CHECK-LABEL: func.func @mul_i8
+// CHECK-LABEL: func.func @div_i8
+// CHECK-LABEL: func.func @mod_i8
+// CHECK-LABEL: func.func @add_i16
+// CHECK-LABEL: func.func @sub_i16
+// CHECK-LABEL: func.func @mul_i16
+// CHECK-LABEL: func.func @div_i16
+// CHECK-LABEL: func.func @mod_i16
+// CHECK-LABEL: func.func @add_i32
+// CHECK-LABEL: func.func @sub_i32
+// CHECK-LABEL: func.func @mul_i32
+// CHECK-LABEL: func.func @div_i32
+// CHECK-LABEL: func.func @mod_i32
+// CHECK-LABEL: func.func @add_i64
+// CHECK-LABEL: func.func @sub_i64
+// CHECK-LABEL: func.func @mul_i64
+// CHECK-LABEL: func.func @div_i64
+// CHECK-LABEL: func.func @mod_i64
+// CHECK-LABEL: func.func @add_i128
+// CHECK-LABEL: func.func @sub_i128
+// CHECK-LABEL: func.func @mul_i128
+// CHECK-LABEL: func.func @div_i128
+// CHECK-LABEL: func.func @mod_i128
+// CHECK-LABEL: func.func @add_i256
+// CHECK-LABEL: func.func @sub_i256
+// CHECK-LABEL: func.func @mul_i256
+// CHECK-LABEL: func.func @div_i256
+// CHECK-LABEL: func.func @mod_i256

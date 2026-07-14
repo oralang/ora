@@ -1,8 +1,9 @@
 {
   "version": 1,
-  "description": "By-construction coverage map for OraToSIR conversion patterns. Every pattern listed here must have at least one executing test; high-churn patterns must also have at least one SIR golden.",
+  "description": "By-construction coverage map for OraToSIR conversion patterns. Every pattern listed here must have at least one executing test; high-churn patterns must also have at least one SIR golden. Ora MLIR goldens are tracked separately when the pre-conversion dialect shape is part of the invariant.",
   "ci_commands": [
     "zig build check-oratosir-coverage",
+    "zig build check-mlir-ora",
     "zig build check-mlir-sir",
     "zig build check-sir-text",
     "zig build test-conformance",
@@ -17,7 +18,7 @@
       "conversion": "Public entry dispatcher construction, selector extraction/switch routing, calldata size/canonicality checks, public function icall, and return/revert routing",
       "high_churn": true,
       "executing_tests": [
-        "src/compiler.test.oratosir.zig#compiler abiDecode N3b4 validates public calldata bool and address params before call",
+        "src/compiler.test.oratosir.abi.zig#compiler abiDecode N3b4 validates public calldata bool and address params before call",
         "tests/conformance/counter.spec.toml",
         "tests/conformance/external_return_decode.spec.toml"
       ],
@@ -58,7 +59,7 @@
       "conversion": "Public dispatcher fixed-bytes argument decode: left-aligned bytesN word mask, canonicality check, invalid-fixed-bytes revert, and payload passed to the user function",
       "high_churn": true,
       "executing_tests": [
-        "src/compiler.test.oratosir.zig#compiler abiDecode N3b4 validates public calldata bool and address params before call",
+        "src/compiler.test.oratosir.abi.zig#compiler abiDecode N3b4 validates public calldata bool and address params before call",
         "tests/sir_text/dispatcher_fixed_bytes_arg_decode.check#shr v4 a_take"
       ],
       "sir_goldens": [
@@ -123,7 +124,7 @@
       "conversion": "Public dispatcher mixed dynamic tuple argument decode: outer tuple offset validation, nested dynamic string bounds/padding checks, pointer-backed tuple carrier materialization, and user call",
       "high_churn": true,
       "executing_tests": [
-        "src/compiler.test.oratosir.zig#compiler abiDecode N3b4 validates public calldata dynamic tuple params before call",
+        "src/compiler.test.oratosir.abi.zig#compiler abiDecode N3b4 validates public calldata dynamic tuple params before call",
         "tests/conformance/dispatcher_dynamic_tuple_arg.spec.toml",
         "tests/sir_text/dispatcher_dynamic_tuple_arg_decode.check#icall @value"
       ],
@@ -252,7 +253,7 @@
       "executing_tests": [
         "tests/conformance/result_memref_scalar.spec.toml",
         "tests/conformance/result_memref_opaque.spec.toml",
-        "src/compiler.test.oratosir.zig#compiler stores opaque Result values into local Result memrefs through OraToSIR"
+        "src/compiler.test.oratosir.adt_error.zig#compiler stores opaque Result values into local Result memrefs through OraToSIR"
       ],
       "sir_goldens": [
         "tests/sir_text/result_memref_scalar.check#fn run:",
@@ -316,6 +317,257 @@
         "tests/mlir_sir/auto__ora-example__memory__basic_memory.check#sir.malloc",
         "tests/mlir_sir/auto__ora-example__regions__coercions__implicit_storage_to_stack.check#sir.sload",
         "tests/mlir_sir/auto__ora-example__regions__region_ok_memory_to_storage.check#sir.sstore"
+      ]
+    },
+    {
+      "id": "resource.move.distinct_place",
+      "tier": "Resource",
+      "area": "Storage/Resource",
+      "conversion": "Resource move between statically distinct storage roots: derive both places once, load source and destination, check source underflow and destination overflow, then store both updated values",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/resource_signed_negative_balance.spec.toml"
+      ],
+      "ora_goldens": [
+        "tests/mlir/resource_move_distinct_slots.check#ora.global \"pending\"",
+        "tests/mlir/resource_move_distinct_slots.check#ora.global \"settled\"",
+        "tests/mlir/resource_move_distinct_slots.check#domain = \"TokenUnit\""
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/resource_move_distinct_slots.check#func.func @settle",
+        "tests/mlir_sir/resource_move_distinct_slots.check#sir.sstore %hash_pending",
+        "tests/sir_text/resource_move_distinct_slots.check#slot_pending = const 0x0",
+        "tests/sir_text/resource_move_distinct_slots.check#sstore hash_pending [[SRC_AFTER]]",
+        "tests/sir_text/resource_move_distinct_slots.check#sstore hash_settled [[DST_AFTER]]"
+      ]
+    },
+    {
+      "id": "resource.move.static_self_place",
+      "tier": "Resource",
+      "area": "Storage/Resource",
+      "conversion": "Resource move from a statically self-identical place: check source sufficiency, preserve the value, and avoid creating an alias branch or storage write",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/resource_self_transfer.spec.toml"
+      ],
+      "ora_goldens": [
+        "tests/mlir/resource_move_dynamic_alias.check#\"ora.move\"",
+        "tests/mlir/resource_move_dynamic_alias.check#domain = \"TokenUnit\""
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/resource_move_self_static.check#func.func @selfTransfer",
+        "tests/mlir_sir/resource_move_self_static.check#[[SAME_OK:%[0-9]+]] = sir.iszero [[SAME_UNDERFLOW]]",
+        "tests/mlir_sir/resource_move_self_static.check#CHECK-NOT: %hash_balances_{{[0-9]+}} = sir.keccak256",
+        "tests/mlir_sir/resource_move_self_static.check#CHECK-NOT: sir.sstore %hash_balances"
+      ]
+    },
+    {
+      "id": "resource.move.dynamic_alias_branch",
+      "tier": "Resource",
+      "area": "Storage/Resource",
+      "conversion": "Resource move between comparable dynamic places: compare derived place identities, route same-place transfers through a checked no-write path, and route distinct places through checked subtract/add stores",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/resource_basic_transfer.spec.toml",
+        "tests/conformance/resource_self_transfer.spec.toml"
+      ],
+      "ora_goldens": [
+        "tests/mlir/resource_move_dynamic_alias.check#ora.read_slots = [\"balances[param#0]\", \"balances[param#1]\"]",
+        "tests/mlir/resource_move_dynamic_alias.check#ora.write_slots = [\"balances[param#0]\", \"balances[param#1]\"]",
+        "tests/mlir/resource_move_dynamic_alias.check#operandSegmentSizes = array<i32: 2, 2, 1>"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/resource_move_dynamic_alias.check#func.func @transfer_maybe_same",
+        "tests/mlir_sir/resource_move_dynamic_alias.check#[[SAME:%[0-9]+]] = sir.eq %hash_balances",
+        "tests/sir_text/resource_move_dynamic_alias.check#[[SAME:v[0-9]+]] = eq hash_balances hash_balances_0",
+        "tests/sir_text/resource_move_dynamic_alias.check#=> [[SAME]] ? @bb5 : @bb7",
+        "tests/sir_text/resource_move_dynamic_alias.check#sstore hash_balances [[SRC_AFTER]]",
+        "tests/sir_text/resource_move_dynamic_alias.check#sstore hash_balances_0 [[DST_AFTER]]"
+      ]
+    },
+    {
+      "id": "resource.create_destroy.checked_arithmetic",
+      "tier": "Resource",
+      "area": "Storage/Resource",
+      "conversion": "Resource create and destroy lower to carrier load plus checked add/sub and a single durable store after the arithmetic guard",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/resource_create_destroy.spec.toml"
+      ],
+      "ora_goldens": [
+        "tests/mlir/resource_create_destroy.check#\"ora.create\"",
+        "tests/mlir/resource_create_destroy.check#\"ora.move\"",
+        "tests/mlir/resource_create_destroy.check#\"ora.destroy\""
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/resource_create_destroy.check#func.func @issue",
+        "tests/mlir_sir/resource_create_destroy.check#func.func @retire",
+        "tests/sir_text/resource_create_destroy.check#fn issue:",
+        "tests/sir_text/resource_create_destroy.check#sstore hash_balances [[AFTER]]",
+        "tests/sir_text/resource_create_destroy.check#fn retire:"
+      ]
+    },
+    {
+      "id": "resource.create.checked_add",
+      "tier": "Resource",
+      "area": "Storage/Resource",
+      "conversion": "Resource create lowers to load, checked carrier add, overflow guard, then one store to the target place",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/resource_create_destroy.spec.toml"
+      ],
+      "ora_goldens": [
+        "tests/mlir/resource_create_destroy.check#\"ora.create\"",
+        "tests/mlir/resource_create_destroy.check#domain = \"TokenUnit\""
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/resource_create_checked_add.check#func.func @issue",
+        "tests/mlir_sir/resource_create_checked_add.check#[[AFTER:%[0-9]+]] = sir.add [[BEFORE]]",
+        "tests/mlir_sir/resource_create_checked_add.check#sir.sstore %hash_balances"
+      ]
+    },
+    {
+      "id": "resource.destroy.checked_sub",
+      "tier": "Resource",
+      "area": "Storage/Resource",
+      "conversion": "Resource destroy lowers to load, checked carrier subtract, underflow guard, then one store to the target place",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/resource_create_destroy.spec.toml"
+      ],
+      "ora_goldens": [
+        "tests/mlir/resource_create_destroy.check#\"ora.destroy\"",
+        "tests/mlir/resource_create_destroy.check#domain = \"TokenUnit\""
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/resource_destroy_checked_sub.check#func.func @retire",
+        "tests/mlir_sir/resource_destroy_checked_sub.check#[[AFTER:%[0-9]+]] = sir.sub [[BEFORE]]",
+        "tests/mlir_sir/resource_destroy_checked_sub.check#sir.sstore %hash_balances"
+      ]
+    },
+    {
+      "id": "resource.move.failure_atomicity",
+      "tier": "Resource",
+      "area": "Storage/Resource",
+      "conversion": "Resource move failure paths check source underflow and destination overflow before storage writes, so failed moves have no partial durable state update",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/resource_failure_atomicity.spec.toml"
+      ],
+      "ora_goldens": [
+        "tests/mlir/resource_failure_atomicity.check#func.func @transferUnchecked",
+        "tests/mlir/resource_failure_atomicity.check#domain = \"TokenUnit\"",
+        "tests/mlir/resource_failure_atomicity.check#carrier_signed = false"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/resource_move_source_underflow_atomic.check#func.func @transferUnchecked",
+        "tests/mlir_sir/resource_move_destination_overflow_atomic.check#func.func @transferUnchecked",
+        "tests/sir_text/resource_failure_atomicity.check#=> [[SRC_OK]] ? @bb4 : @bb1",
+        "tests/sir_text/resource_failure_atomicity.check#=> [[DST_OK]] ? @bb5 : @bb1",
+        "tests/sir_text/resource_failure_atomicity.check#sstore hash_balances [[SRC_AFTER]]"
+      ]
+    },
+    {
+      "id": "resource.signed_amount_nonnegative_guard",
+      "tier": "Resource",
+      "area": "Storage/Resource",
+      "conversion": "Signed resource create/destroy/move amounts are checked non-negative before the signed carrier arithmetic can mutate the place",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/resource_signed_amount.spec.toml"
+      ],
+      "ora_goldens": [
+        "tests/mlir/resource_signed_negative_balance.check#arith.cmpi sge",
+        "tests/mlir/resource_signed_negative_balance.check#carrier_signed = true"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/resource_signed_amount_guard.check#func.func @credit",
+        "tests/mlir_sir/resource_signed_amount_guard.check#[[NEG_AMOUNT:%[0-9]+]] = sir.slt %arg1",
+        "tests/mlir_sir/resource_signed_amount_guard.check#sir.sstore %hash_debts"
+      ]
+    },
+    {
+      "id": "resource.signed_negative_balance",
+      "tier": "Resource",
+      "area": "Storage/Resource",
+      "conversion": "Signed resource moves enforce non-negative amount and signed carrier bounds while permitting the source resource balance to become negative when the signed range is respected",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/resource_signed_negative_balance.spec.toml"
+      ],
+      "ora_goldens": [
+        "tests/mlir/resource_signed_negative_balance.check#arith.cmpi sge",
+        "tests/mlir/resource_signed_negative_balance.check#domain = \"DebtUnit\"",
+        "tests/mlir/resource_signed_negative_balance.check#carrier_signed = true"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/resource_signed_negative_balance.check#[[NEG_AMOUNT:%[0-9]+]] = sir.slt %arg0 : !sir.u256, %c0",
+        "tests/mlir_sir/resource_signed_negative_balance.check#sir.sstore %c0",
+        "tests/sir_text/resource_signed_negative_balance.check#[[NEG_AMOUNT:v[0-9]+]] = slt v0 0x0",
+        "tests/sir_text/resource_signed_negative_balance.check#sstore 0x0 [[SRC_AFTER]]",
+        "tests/sir_text/resource_signed_negative_balance.check#sstore 0x1 [[DST_AFTER]]"
+      ]
+    },
+    {
+      "id": "resource.transient_immediate",
+      "tier": "Resource",
+      "area": "Storage/Resource",
+      "conversion": "Transient Resource<T> places lower to immediate tload/tstore effects with checked arithmetic, not staged storage or durable sstore operations",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/resource_transient_immediate.spec.toml"
+      ],
+      "ora_goldens": [
+        "tests/mlir/resource_transient_immediate.check#\"ora.tstore.global\"()",
+        "tests/mlir/resource_transient_immediate.check#ora.read_slots = [\"transient:scratch\"]",
+        "tests/mlir/resource_transient_immediate.check#operandSegmentSizes = array<i32: 1, 1, 1>"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/resource_transient_immediate.check#func.func @issue",
+        "tests/mlir_sir/resource_transient_immediate.check#sir.tstore %slot_scratch",
+        "tests/sir_text/resource_transient_immediate.check#fn issue:",
+        "tests/sir_text/resource_transient_immediate.check#tstore 0x0 [[AFTER]]",
+        "tests/sir_text/resource_transient_immediate.check#fn retire:"
+      ]
+    },
+    {
+      "id": "resource.layout_equivalence",
+      "tier": "Resource",
+      "area": "Storage/Resource",
+      "conversion": "Resource<T> storage map values reuse the same key/root/hash/load/store shape as their carrier type rather than introducing a parallel resource layout",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/resource_layout_equivalence.spec.toml"
+      ],
+      "ora_goldens": [
+        "tests/mlir/resource_layout_equivalence.check#ora.global \"raw_balances\"",
+        "tests/mlir/resource_layout_equivalence.check#ora.global \"resource_balances\"",
+        "tests/mlir/resource_layout_equivalence.check#\"ora.create\""
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/resource_layout_equivalence.check#func.func @rawBalance",
+        "tests/mlir_sir/resource_layout_equivalence.check#func.func @resourceBalance",
+        "tests/sir_text/resource_layout_equivalence.check#fn rawBalance:",
+        "tests/sir_text/resource_layout_equivalence.check#fn resourceBalance:",
+        "tests/sir_text/resource_layout_equivalence.check#value = sload [[RESOURCE_SLOT]]"
+      ]
+    },
+    {
+      "id": "resource.move.value_level_op_removed_or_replaced",
+      "tier": "Resource",
+      "area": "Storage/Resource",
+      "conversion": "The old value-level ora.move is gone from the post-conversion IR; resource ora.move must lower to explicit load/check/store SIR instead of being erased",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/resource_basic_transfer.spec.toml"
+      ],
+      "ora_goldens": [
+        "tests/mlir/resource_create_destroy.check#\"ora.move\""
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/resource_move_dynamic_alias.check#// CHECK-NOT: ora.move",
+        "tests/mlir_sir/resource_move_distinct_slots.check#// CHECK-NOT: ora.move",
+        "tests/sir_text/resource_move_dynamic_alias.check#sstore hash_balances [[SRC_AFTER]]"
       ]
     },
     {

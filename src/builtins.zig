@@ -7,6 +7,7 @@ pub const Kind = enum {
     abi_signature,
     add_with_overflow,
     bit_cast,
+    call_hint,
     cast,
     chain_id,
     compile_error,
@@ -24,12 +25,21 @@ pub const Kind = enum {
     mul_with_overflow,
     neg_with_overflow,
     power_with_overflow,
+    resource_amount,
+    resource_create,
+    resource_destroy,
+    resource_move,
     selector,
     shl_with_overflow,
     shr_with_overflow,
     size_of,
     slice,
     struct_fields,
+    storage_derive,
+    storage_range,
+    storage_range_erase,
+    storage_word_load,
+    storage_word_store,
     sub_with_overflow,
     trait_methods,
     truncate,
@@ -43,7 +53,38 @@ pub const Entry = struct {
     signature: []const u8,
     documentation: []const u8,
     example: []const u8,
+    /// Closed argument-value set for directive builtins whose argument is a
+    /// keyword-like state (e.g. @callHint). Drives LSP completion and hover
+    /// in argument position; empty for value-taking builtins.
+    arg_values: []const ArgValue = &.{},
 };
+
+pub const ArgValue = struct {
+    name: []const u8,
+    documentation: []const u8,
+};
+
+pub const call_hint_states = [_]ArgValue{
+    .{ .name = "likely", .documentation = "High call volume: candidate for the hot dispatch prefix (1-3 exact selector checks). Also legitimate on views that other contracts read on-chain via staticcall — they pay dispatch gas even though eth_call does not." },
+    .{ .name = "none", .documentation = "Default; identical to writing no hint. The dispatcher uses its heuristic: state-mutating functions ahead of read-only ones, declaration order within each class." },
+    .{ .name = "unlikely", .documentation = "Low call volume: sorted behind unhinted functions of its class." },
+    .{ .name = "cold", .documentation = "Almost never called (admin, migration, emergency paths): sorted last and excluded from the hot-set count, so demoting rare setters lets transfer-shaped contracts keep the hot-prefix split." },
+};
+
+comptime {
+    // Keep the LSP-facing state list in lockstep with the language enum —
+    // a state added to one but not the other must not compile.
+    const CallHint = @import("ast/nodes.zig").CallHint;
+    const fields = @typeInfo(CallHint).@"enum".fields;
+    if (call_hint_states.len != fields.len) @compileError("call_hint_states must cover every ast.nodes.CallHint state");
+    for (fields) |field| {
+        var found = false;
+        for (call_hint_states) |state| {
+            if (std.mem.eql(u8, state.name, field.name)) found = true;
+        }
+        if (!found) @compileError("call_hint_states missing CallHint state: " ++ field.name);
+    }
+}
 
 pub const entries = [_]Entry{
     .{ .name = "abiDecode", .kind = .abi_decode, .signature = "@abiDecode(T, bytes) -> Result<T, AbiDecodeError>", .documentation = "Decode ABI bytes into a typed value and report strict decoding errors.", .example = "const decoded = @abiDecode(u256, payload);" },
@@ -52,6 +93,7 @@ pub const entries = [_]Entry{
     .{ .name = "abiSignature", .kind = .abi_signature, .signature = "@abiSignature(function) -> string", .documentation = "Return the canonical ABI signature for a function reference.", .example = "const sig = @abiSignature(Token.transfer);" },
     .{ .name = "addWithOverflow", .kind = .add_with_overflow, .signature = "@addWithOverflow(lhs, rhs) -> (value, overflow)", .documentation = "Add two integers and return both the wrapped result and overflow flag.", .example = "const wrapped = @addWithOverflow(a, b);" },
     .{ .name = "bitCast", .kind = .bit_cast, .signature = "@bitCast(T, value) -> T", .documentation = "Reinterpret a value as another type with the same bit representation.", .example = "const raw = @bitCast(u256, value);" },
+    .{ .name = "callHint", .kind = .call_hint, .signature = "@callHint(hint) void", .documentation = "Hint the expected call frequency of a public contract function (likely, unlikely, cold, or none). Must be the function body's first statement; re-orders selector dispatch for gas and never changes behavior.", .example = "@callHint(likely);", .arg_values = &call_hint_states },
     .{ .name = "cast", .kind = .cast, .signature = "@cast(T, value) -> T", .documentation = "Convert a value to a target type using Ora's checked conversion rules.", .example = "const wide = @cast(u256, small);" },
     .{ .name = "chainId", .kind = .chain_id, .signature = "@chainId() -> u256", .documentation = "Return the current EVM chain id.", .example = "const id = @chainId();" },
     .{ .name = "compileError", .kind = .compile_error, .signature = "@compileError(message) -> noreturn", .documentation = "Emit a compile-time error with the provided message.", .example = "@compileError(\"unsupported type\");" },
@@ -69,12 +111,21 @@ pub const entries = [_]Entry{
     .{ .name = "mulWithOverflow", .kind = .mul_with_overflow, .signature = "@mulWithOverflow(lhs, rhs) -> (value, overflow)", .documentation = "Multiply two integers and return both the wrapped result and overflow flag.", .example = "const wrapped = @mulWithOverflow(a, b);" },
     .{ .name = "negWithOverflow", .kind = .neg_with_overflow, .signature = "@negWithOverflow(value) -> (value, overflow)", .documentation = "Negate an integer and return both the wrapped result and overflow flag.", .example = "const wrapped = @negWithOverflow(value);" },
     .{ .name = "powerWithOverflow", .kind = .power_with_overflow, .signature = "@powerWithOverflow(base, exp) -> (value, overflow)", .documentation = "Exponentiate integers and return both the wrapped result and overflow flag.", .example = "const wrapped = @powerWithOverflow(base, exp);" },
+    .{ .name = "amount", .kind = .resource_amount, .signature = "@amount(place) -> T", .documentation = "Read the quantity stored at a Resource<T> place without mutating it.", .example = "const current = @amount(balances[owner]);" },
+    .{ .name = "create", .kind = .resource_create, .signature = "@create(place, amount) -> void", .documentation = "Create a quantity in a resource place as an explicit resource-domain boundary delta.", .example = "@create(balances[to], amount);" },
+    .{ .name = "destroy", .kind = .resource_destroy, .signature = "@destroy(place, amount) -> void", .documentation = "Destroy a quantity from a resource place as an explicit resource-domain boundary delta.", .example = "@destroy(balances[from], amount);" },
+    .{ .name = "move", .kind = .resource_move, .signature = "@move(from, to, amount) -> void", .documentation = "Move a quantity between two resource places in the same resource domain.", .example = "@move(balances[from], balances[to], amount);" },
     .{ .name = "selector", .kind = .selector, .signature = "@selector(function) -> u32", .documentation = "Return the four-byte ABI selector for a function reference.", .example = "const selector = @selector(Token.transfer);" },
     .{ .name = "shlWithOverflow", .kind = .shl_with_overflow, .signature = "@shlWithOverflow(lhs, rhs) -> (value, overflow)", .documentation = "Shift left and return both the wrapped result and overflow flag.", .example = "const wrapped = @shlWithOverflow(value, bits);" },
     .{ .name = "shrWithOverflow", .kind = .shr_with_overflow, .signature = "@shrWithOverflow(lhs, rhs) -> (value, overflow)", .documentation = "Shift right and return both the result and overflow flag.", .example = "const wrapped = @shrWithOverflow(value, bits);" },
     .{ .name = "sizeOf", .kind = .size_of, .signature = "@sizeOf(T) -> u256", .documentation = "Return the ABI/storage size of a type where supported.", .example = "const size = @sizeOf(u256);" },
     .{ .name = "slice", .kind = .slice, .signature = "@slice(value, start, length) -> string|bytes", .documentation = "Take a bounded slice from a string or bytes value.", .example = "const part = @slice(data, 0, 32);" },
     .{ .name = "structFields", .kind = .struct_fields, .signature = "@structFields(Struct) -> comptime metadata", .documentation = "Return compile-time metadata for the fields of a struct.", .example = "const fields = @structFields(VaultConfig);" },
+    .{ .name = "storageDerive", .kind = .storage_derive, .signature = "@storageDerive(namespace, keys...) -> StorageSlot", .documentation = "Derive an opaque computed-storage slot from a compile-time namespace and scalar runtime keys.", .example = "const slot = @storageDerive(\"vault.position\", owner);" },
+    .{ .name = "storageRange", .kind = .storage_range, .signature = "@storageRange(slot, len) -> StorageRange", .documentation = "Create an opaque bounded computed-storage range from a slot and word count.", .example = "const range = @storageRange(slot, 4);" },
+    .{ .name = "storageRangeErase", .kind = .storage_range_erase, .signature = "@storageRangeErase(range) -> void", .documentation = "Erase every word in a bounded computed-storage range.", .example = "@storageRangeErase(range);" },
+    .{ .name = "storageWordLoad", .kind = .storage_word_load, .signature = "@storageWordLoad(slot, offset) -> u256", .documentation = "Load a storage word through an opaque computed-storage capability.", .example = "const word = @storageWordLoad(slot, 0);" },
+    .{ .name = "storageWordStore", .kind = .storage_word_store, .signature = "@storageWordStore(slot, offset, value) -> void", .documentation = "Store one word through an opaque computed-storage capability.", .example = "@storageWordStore(slot, 0, value);" },
     .{ .name = "subWithOverflow", .kind = .sub_with_overflow, .signature = "@subWithOverflow(lhs, rhs) -> (value, overflow)", .documentation = "Subtract two integers and return both the wrapped result and overflow flag.", .example = "const wrapped = @subWithOverflow(a, b);" },
     .{ .name = "traitMethods", .kind = .trait_methods, .signature = "@traitMethods(Trait) -> comptime metadata", .documentation = "Return compile-time metadata for methods required by a trait.", .example = "const methods = @traitMethods(Token);" },
     .{ .name = "truncate", .kind = .truncate, .signature = "@truncate(T, value) -> T", .documentation = "Truncate an integer value to a narrower target type.", .example = "const small = @truncate(u32, value);" },

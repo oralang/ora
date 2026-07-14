@@ -1,7 +1,7 @@
 // ============================================================================
 // Guard Generation for Builtin Functions
 // ============================================================================
-// Tests that guards are skipped for trusted builtins (std.transaction.sender, std.msg.sender)
+// Tests that guards are skipped for trusted builtins (std.msg.sender(), std.msg.sender())
 // ============================================================================
 
 comptime const std = @import("std");
@@ -12,10 +12,10 @@ contract BuiltinGuards {
     // NonZeroAddress from Trusted Builtins (No Guard)
     // ============================================================================
     
-    // std.transaction.sender() should NOT require guard for NonZeroAddress
-    // EVM guarantees tx.origin is never zero
+    // std.msg.sender() should NOT require guard for NonZeroAddress
+    // EVM guarantees transaction sender is never zero
     fn testTransactionSenderNoGuard() {
-        let owner: NonZeroAddress = std.transaction.sender(); // No guard needed
+        let owner: NonZeroAddress = std.msg.sender(); // No guard needed
     }
     
     // std.msg.sender() should NOT require guard for NonZeroAddress

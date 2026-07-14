@@ -1,6 +1,6 @@
 //===- SIRTextEmitter.h - SIR Text Emitter ---------------------------===//
 //
-// Emits Sensei SIR text from SIR MLIR. The emitter is a pure serializer:
+// Emits Plank SIR text from SIR MLIR. The emitter is a pure serializer:
 // it assumes the input module already satisfies SIR text constraints.
 //
 //===----------------------------------------------------------------------===//
@@ -19,7 +19,7 @@ namespace mlir
 {
     namespace ora
     {
-        /// Emit Sensei SIR text for a module. Input must be SIR-legal.
+        /// Emit Plank SIR text for a module. Input must be SIR-legal.
         std::string emitSIRText(ModuleOp module);
 
         /// Extract source locations from SIR MLIR ops as JSON.

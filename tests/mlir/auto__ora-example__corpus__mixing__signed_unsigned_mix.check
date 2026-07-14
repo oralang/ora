@@ -1,0 +1,12 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/mixing/signed_unsigned_mix.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @set_unsigned
+// CHECK-LABEL: func.func @set_signed
+// CHECK-LABEL: func.func @unsigned_arithmetic
+// CHECK-LABEL: func.func @signed_arithmetic
+// CHECK-LABEL: func.func @signed_comparison
+// CHECK-LABEL: func.func @unsigned_comparison
+// CHECK-LABEL: func.func @mixed_i8_i256
+// CHECK-LABEL: func.func @signed_negation
+// CHECK-LABEL: func.func @both_storages

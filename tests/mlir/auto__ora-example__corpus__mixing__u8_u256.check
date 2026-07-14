@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/mixing/u8_u256.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @widen_assignment
+// CHECK-LABEL: func.func @widen_from_storage
+// CHECK-LABEL: func.func @store_both
+// CHECK-LABEL: func.func @add_widened
+// CHECK-LABEL: func.func @mixed_locals

@@ -26,6 +26,10 @@ const default_measured_runs: usize = 5;
 const default_corpus_root = "ora-example";
 const expected_pass_exception = "ora-example/refinements/negative_tests/fail_refinement_bounds.ora";
 
+fn exitCli(code: u8) noreturn {
+    std.process.exit(code);
+}
+
 const RunResult = struct {
     phases: []metrics_mod.Phase,
     source_bytes: u64,
@@ -48,29 +52,29 @@ const Options = struct {
     warmup_runs: usize = default_warmup_runs,
     measured_runs: usize = default_measured_runs,
     time_output: ?[]const u8 = null,
-    paths: std.ArrayList([]const u8) = .{},
+    paths: std.ArrayList([]const u8) = .empty,
 
     fn deinit(self: *Options, allocator: std.mem.Allocator) void {
         self.paths.deinit(allocator);
     }
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try collectArgs(allocator, init.minimal.args);
+    defer freeArgs(allocator, args);
 
     var options = try parseOptions(allocator, args[1..]);
     defer options.deinit(allocator);
     if (options.measured_runs == 0) {
         std.debug.print("compile-metrics: --runs must be at least 1\n", .{});
-        std.process.exit(2);
+        exitCli(2);
     }
 
-    var paths: std.ArrayList([]const u8) = .{};
+    var paths: std.ArrayList([]const u8) = .empty;
     defer {
         freeStringList(allocator, paths.items);
         paths.deinit(allocator);
@@ -84,13 +88,14 @@ pub fn main() !void {
     }
     sortStrings(paths.items);
 
+    const io = std.Io.Threaded.global_single_threaded.io();
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
-    var time_file: ?std.fs.File = if (options.time_output) |path| try std.fs.cwd().createFile(path, .{}) else null;
-    defer if (time_file) |*file| file.close();
+    var time_file: ?std.Io.File = if (options.time_output) |path| try std.Io.Dir.cwd().createFile(io, path, .{}) else null;
+    defer if (time_file) |*file| file.close(io);
     var time_buffer: [4096]u8 = undefined;
-    var time_writer = if (time_file) |*file| file.writer(&time_buffer) else null;
+    var time_writer = if (time_file) |*file| file.writer(io, &time_buffer) else null;
 
     for (paths.items) |path| {
         if (expectedFailure(path)) continue;
@@ -108,7 +113,28 @@ pub fn main() !void {
     try stdout.flush();
 }
 
-fn parseOptions(allocator: std.mem.Allocator, args: []const [:0]u8) !Options {
+fn collectArgs(allocator: std.mem.Allocator, process_args: std.process.Args) ![][]u8 {
+    var iterator = try std.process.Args.Iterator.initAllocator(process_args, allocator);
+    defer iterator.deinit();
+
+    var list: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (list.items) |arg| allocator.free(arg);
+        list.deinit(allocator);
+    }
+
+    while (iterator.next()) |arg| {
+        try list.append(allocator, try allocator.dupe(u8, arg));
+    }
+    return list.toOwnedSlice(allocator);
+}
+
+fn freeArgs(allocator: std.mem.Allocator, args: [][]u8) void {
+    for (args) |arg| allocator.free(arg);
+    allocator.free(args);
+}
+
+fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8) !Options {
     var options = Options{};
     errdefer options.deinit(allocator);
 
@@ -135,7 +161,7 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const [:0]u8) !Options {
             options.time_output = arg["--time-output=".len..];
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try printUsage();
-            std.process.exit(0);
+            exitCli(0);
         } else if (std.mem.startsWith(u8, arg, "-")) {
             return error.UnknownArgument;
         } else {
@@ -148,8 +174,9 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const [:0]u8) !Options {
 }
 
 fn printUsage() !void {
+    const io = std.Io.Threaded.global_single_threaded.io();
     var stderr_buffer: [1024]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
     const stderr = &stderr_writer.interface;
     try stderr.writeAll(
         \\Usage: compile-metrics [--warmup N] [--runs N] [path...]
@@ -163,7 +190,8 @@ fn printUsage() !void {
 }
 
 fn collectPath(allocator: std.mem.Allocator, path: []const u8, out: *std.ArrayList([]const u8)) !void {
-    const stat = try std.fs.cwd().statFile(path);
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const stat = try std.Io.Dir.cwd().statFile(io, path, .{});
     switch (stat.kind) {
         .file => {
             if (std.mem.endsWith(u8, path, ".ora")) {
@@ -176,12 +204,13 @@ fn collectPath(allocator: std.mem.Allocator, path: []const u8, out: *std.ArrayLi
 }
 
 fn collectOraFiles(allocator: std.mem.Allocator, root_path: []const u8, out: *std.ArrayList([]const u8)) !void {
-    var dir = try std.fs.cwd().openDir(root_path, .{ .iterate = true });
-    defer dir.close();
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var dir = try std.Io.Dir.cwd().openDir(io, root_path, .{ .iterate = true });
+    defer dir.close(io);
 
     var walker = try dir.walk(allocator);
     defer walker.deinit();
-    while (try walker.next()) |entry| {
+    while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.path, ".ora")) continue;
         const full_path = try std.fs.path.join(allocator, &.{ root_path, entry.path });

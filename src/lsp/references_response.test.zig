@@ -23,7 +23,7 @@ const RecordingConverter = struct {
 };
 
 test "lsp references response: appends locations for uri ranges" {
-    var locations = std.ArrayList(types.Location){};
+    var locations = std.ArrayList(types.Location).empty;
     defer locations.deinit(testing.allocator);
 
     var calls: usize = 0;
@@ -55,7 +55,7 @@ test "lsp references response: appends locations for uri ranges" {
 }
 
 test "lsp references response: empty ranges do not call converter" {
-    var locations = std.ArrayList(types.Location){};
+    var locations = std.ArrayList(types.Location).empty;
     defer locations.deinit(testing.allocator);
 
     var calls: usize = 0;

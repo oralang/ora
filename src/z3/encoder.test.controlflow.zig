@@ -14,6 +14,41 @@ const expectSingleSelectTrigger = prelude.expectSingleSelectTrigger;
 const expectNoQuantifiedConstraints = prelude.expectNoQuantifiedConstraints;
 const astContainsQuantifier = prelude.astContainsQuantifier;
 
+fn parseModule(ctx: mlir.MlirContext, text: []const u8) !mlir.MlirModule {
+    const module = mlir.oraModuleCreateParse(ctx, mlir.oraStringRefCreate(text.ptr, text.len));
+    if (mlir.oraModuleIsNull(module)) return error.MlirParseFailed;
+    return module;
+}
+
+fn findFirstOpByName(module: mlir.MlirModule, name: []const u8) ?mlir.MlirOperation {
+    if (mlir.oraModuleIsNull(module)) return null;
+    return findFirstOpByNameInOp(mlir.oraModuleGetOperation(module), name);
+}
+
+fn findFirstOpByNameInOp(op: mlir.MlirOperation, expected: []const u8) ?mlir.MlirOperation {
+    if (mlir.oraOperationIsNull(op)) return null;
+
+    const name_ref = mlir.oraOperationGetName(op);
+    if (name_ref.data != null and std.mem.eql(u8, name_ref.data[0..name_ref.length], expected)) return op;
+
+    const num_regions = mlir.oraOperationGetNumRegions(op);
+    var region_index: usize = 0;
+    while (region_index < num_regions) : (region_index += 1) {
+        const region = mlir.oraOperationGetRegion(op, region_index);
+        if (mlir.oraRegionIsNull(region)) continue;
+
+        var block = mlir.oraRegionGetFirstBlock(region);
+        while (!mlir.oraBlockIsNull(block)) : (block = mlir.oraBlockGetNextInRegion(block)) {
+            var child = mlir.oraBlockGetFirstOperation(block);
+            while (!mlir.oraOperationIsNull(child)) : (child = mlir.oraOperationGetNextInBlock(child)) {
+                if (findFirstOpByNameInOp(child, expected)) |found| return found;
+            }
+        }
+    }
+
+    return null;
+}
+
 test "quantified bytes and string binders use sequence sort" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -21,8 +56,8 @@ test "quantified bytes and string binders use sequence sort" {
     var encoder = Encoder.init(&z3_ctx, testing.allocator);
     defer encoder.deinit();
 
-    const bytes_sort = encoder.quantifiedVarSortFromTypeStringForTesting("bytes");
-    const string_sort = encoder.quantifiedVarSortFromTypeStringForTesting("string");
+    const bytes_sort = try encoder.quantifiedVarSortFromTypeStringForTesting("bytes");
+    const string_sort = try encoder.quantifiedVarSortFromTypeStringForTesting("string");
 
     try testing.expect(z3.Z3_is_seq_sort(z3_ctx.ctx, bytes_sort));
     try testing.expect(z3.Z3_is_seq_sort(z3_ctx.ctx, string_sort));
@@ -5280,6 +5315,105 @@ test "quantified operation with placeholder keeps bound variable name" {
     const qstr = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, qast));
     try testing.expect(std.mem.indexOf(u8, qstr, "forall") != null);
     try testing.expect(std.mem.indexOf(u8, qstr, "i") != null);
+}
+
+test "quantified operation rejects unsupported quantifier instead of defaulting to forall" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const body_attr = mlir.oraIntegerAttrCreateI64FromType(i1_ty, 1);
+    const body_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, body_attr);
+    const body = mlir.oraOperationGetResult(body_op, 0);
+
+    const qop = mlir.oraQuantifiedOpCreate(
+        mlir_ctx,
+        loc,
+        stringRef("every"),
+        stringRef("i"),
+        stringRef("u256"),
+        mlir.MlirValue{ .ptr = null },
+        false,
+        body,
+        i1_ty,
+    );
+
+    try testing.expectError(error.UnsupportedOperation, encoder.encodeOperation(qop));
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("ora.quantified unsupported quantifier attribute", encoder.degradationReason().?);
+}
+
+test "quantified operation rejects missing quantifier instead of defaulting to forall" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    // Deliberately unregistered: 'quantifier' is a required property, so a
+    // registered-dialect parse rejects this op before the encoder guard can
+    // fire. Unregistered parsing makes the encoder the rejecting component.
+    mlir.oraContextSetAllowUnregisteredDialects(mlir_ctx, true);
+
+    const text =
+        \\module {
+        \\  func.func @bad(%flag: i1) {
+        \\    %q = "ora.quantified"(%flag) {variable = "i", variable_type = "u256"} : (i1) -> i1
+        \\    func.return
+        \\  }
+        \\}
+    ;
+    const module = try parseModule(mlir_ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    const qop = findFirstOpByName(module, "ora.quantified") orelse return error.TestUnexpectedResult;
+    try testing.expectError(error.UnsupportedOperation, encoder.encodeOperation(qop));
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("ora.quantified missing quantifier attribute", encoder.degradationReason().?);
+}
+
+test "quantified operation rejects missing variable instead of defaulting to q" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    // Deliberately unregistered: 'variable' is a required property, so a
+    // registered-dialect parse rejects this op before the encoder guard can
+    // fire. Unregistered parsing makes the encoder the rejecting component.
+    mlir.oraContextSetAllowUnregisteredDialects(mlir_ctx, true);
+
+    const text =
+        \\module {
+        \\  func.func @bad(%flag: i1) {
+        \\    %q = "ora.quantified"(%flag) {quantifier = "forall", variable_type = "u256"} : (i1) -> i1
+        \\    func.return
+        \\  }
+        \\}
+    ;
+    const module = try parseModule(mlir_ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    const qop = findFirstOpByName(module, "ora.quantified") orelse return error.TestUnexpectedResult;
+    try testing.expectError(error.UnsupportedOperation, encoder.encodeOperation(qop));
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("ora.quantified missing variable attribute", encoder.degradationReason().?);
 }
 
 test "quantified forall and exists have expected solver semantics" {

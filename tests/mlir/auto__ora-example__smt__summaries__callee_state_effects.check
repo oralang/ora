@@ -1,0 +1,5 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/summaries/callee_state_effects.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @incrementCounter
+// CHECK-LABEL: func.func @doIncrement

@@ -1,0 +1,8 @@
+contract ComptimeLocalMissingInitializer {
+    pub fn run() -> u256 {
+        comptime {
+            let value: u256;
+        }
+        return 1;
+    }
+}

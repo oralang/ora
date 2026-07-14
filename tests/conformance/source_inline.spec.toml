@@ -1,0 +1,265 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "echo(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [123]
+returns = { u256 = 123 }
+
+[[call]]
+fn = "chooseValue(bool,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [true, 91]
+returns = { u256 = 91 }
+
+[[call]]
+fn = "chooseValue(bool,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [false, 91]
+returns = { u256 = 0 }
+
+[[call]]
+fn = "nestedChoice(bool,bool,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [true, true, 44]
+returns = { u256 = 44 }
+
+[[call]]
+fn = "nestedChoice(bool,bool,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [true, false, 44]
+returns = { u256 = 1 }
+
+[[call]]
+fn = "nestedChoice(bool,bool,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [false, true, 44]
+returns = { u256 = 0 }
+
+[[call]]
+fn = "modeOne()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 7 }
+
+[[call]]
+fn = "modeTwo()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 9 }
+
+[[call]]
+fn = "implicitOne()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 7 }
+
+[[call]]
+fn = "implicitTwo()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 9 }
+
+[[call]]
+fn = "literalFlagTrue()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 11 }
+
+[[call]]
+fn = "literalFlagFalse()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 12 }
+
+[[call]]
+fn = "structured(bool,uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [true, 1, 55]
+returns = { u256 = 55 }
+
+[[call]]
+fn = "structured(bool,uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [false, 1, 55]
+returns = { u256 = 4 }
+
+[[call]]
+fn = "structured(bool,uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [true, 2, 55]
+returns = { u256 = 9 }
+
+[[call]]
+fn = "loopThree()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 3 }
+
+[[call]]
+fn = "set(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [77]
+returns = {}
+
+[[call.storage]]
+slot = "0x0"
+value = "0x4d"
+
+[[call]]
+fn = "maybeSet(bool,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [true, 33]
+returns = {}
+
+[[call.storage]]
+slot = "0x0"
+value = "0x4d"
+
+[[call]]
+fn = "maybeSet(bool,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [false, 88]
+returns = {}
+
+[[call.storage]]
+slot = "0x0"
+value = "0x58"
+
+[[call]]
+fn = "get()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 88 }
+
+[[call]]
+fn = "inlineTryOk()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 23 }
+
+[[call]]
+fn = "inlineTryErr()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 999 }
+
+[[call]]
+fn = "inlinePropagateErr()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+reverts = { any = true }
+
+[[call]]
+fn = "inlineResult(bool,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [true, 51]
+returns = { u256 = 51 }
+
+[[call]]
+fn = "inlineResult(bool,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [false, 51]
+reverts = { any = true }
+
+[[call]]
+fn = "inlineCheckTwo(bool,bool)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [false, false]
+returns = { u256 = 37 }
+
+[[call]]
+fn = "inlineCheckTwo(bool,bool)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [true, false]
+reverts = { any = true }
+
+[[call]]
+fn = "inlineCheckTwo(bool,bool)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [false, true]
+reverts = { any = true }
+
+[[call]]
+fn = "checkedAdd(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [5, 7]
+returns = { u256 = 12 }
+
+[[call]]
+fn = "checkedAdd(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [115792089237316195423570985008687907853269984665640564039457584007913129639935, 1]
+reverts = { any = true }
+
+[[call]]
+fn = "checkedSignedAdd(int256,int256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [5, -2]
+returns = { int256 = 3 }
+
+[[call]]
+fn = "checkedSignedAdd(int256,int256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [57896044618658097711785492504343953926634992332820282019728792003956564819967, 1]
+reverts = { any = true }
+
+[[call]]
+fn = "checkedSignedAdd(int256,int256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-57896044618658097711785492504343953926634992332820282019728792003956564819968, -1]
+reverts = { any = true }
+
+[[call]]
+fn = "inlinePayloadPropagate(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [19, 5]
+reverts = { data = "0x6d58dbb000000000000000000000000000000000000000000000000000000000000000130000000000000000000000000000000000000000000000000000000000000005" }
+
+[[call]]
+fn = "singleEval()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 14 }
+
+[[call.storage]]
+slot = "0x0"
+value = "0x1"

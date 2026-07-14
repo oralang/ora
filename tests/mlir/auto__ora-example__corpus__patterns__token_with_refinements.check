@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/patterns/token_with_refinements.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @init
+// CHECK-LABEL: func.func @getTotalSupply
+// CHECK-LABEL: func.func @balanceOf
+// CHECK-LABEL: func.func @transfer
+// CHECK-LABEL: func.func @approve
+// CHECK-LABEL: func.func @transferFrom
+// CHECK-LABEL: func.func @allowance

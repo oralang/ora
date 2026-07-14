@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/mixing/mixed_width_comparison.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @u8_lt_u256
+// CHECK-LABEL: func.func @u32_eq_u128
+// CHECK-LABEL: func.func @u8_ge_u64
+// CHECK-LABEL: func.func @u16_le_u256
+// CHECK-LABEL: func.func @u32_ne_u256
+// CHECK-LABEL: func.func @u64_gt_u128
+// CHECK-LABEL: func.func @multi_compare
+// CHECK-LABEL: func.func @storage_compare

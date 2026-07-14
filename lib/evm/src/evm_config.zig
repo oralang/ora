@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const primitives = @import("voltaire");
+const primitives = @import("primitives.zig");
 const Hardfork = primitives.Hardfork;
 const Address = primitives.Address.Address;
 

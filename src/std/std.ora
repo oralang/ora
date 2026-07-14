@@ -1,4 +1,12 @@
+/// Numeric bounds and common address constants.
 comptime const constants = @import("std/constants");
+/// Byte-slice helpers (`eq`, `at`, `concat`, `slice`, ...).
 comptime const bytes = @import("std/bytes");
+/// `Result<T, E>` helpers (`is_ok`, `is_err`, `unwrap_or`).
 comptime const result = @import("std/result");
+// NOTE: std/storage is NOT re-exported here: `storage` is a keyword and
+// cannot be an import alias. Import it directly: @import("std/storage").
+/// ERC-165 interface-id computation over traits.
 comptime const interfaces = @import("std/interfaces");
+/// ERC standard interfaces (ERC-20/165/721/1155/2612) with pinned selectors.
+comptime const erc = @import("std/erc");

@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/mixing/enum_in_struct.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @create_order
+// CHECK-LABEL: func.func @fill_order
+// CHECK-LABEL: func.func @cancel_order
+// CHECK-LABEL: func.func @get_order_amount
+// CHECK-LABEL: func.func @get_order_price
+// CHECK-LABEL: func.func @get_order_value

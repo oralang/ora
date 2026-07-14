@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/resources/storage_struct_resource_field.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @issue
+// CHECK-LABEL: func.func @sweep
+// CHECK-LABEL: func.func @reserveBalance
+// CHECK-LABEL: func.func @treasuryBalance

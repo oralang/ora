@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/mixing/map_of_structs.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @create_account
+// CHECK-LABEL: func.func @get_balance
+// CHECK-LABEL: func.func @get_nonce
+// CHECK-LABEL: func.func @is_active
+// CHECK-LABEL: func.func @increment_nonce
+// CHECK-LABEL: func.func @deactivate
+// CHECK-LABEL: func.func @add_balance

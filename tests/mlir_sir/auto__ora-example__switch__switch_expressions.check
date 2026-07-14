@@ -2,35 +2,26 @@
 // INPUT: ora-example/switch/switch_expressions.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {switch_result = 0 : ui64}, ora.global_slots_built, sir.enum_values = {UserRole.Admin = 3 : i8, UserRole.Guest = 0 : i8, UserRole.Member = 1 : i8, UserRole.Moderator = 2 : i8}} {
-// CHECK-NEXT:   func.func @test_basic_switch(%arg0: !sir.u256 loc("{{.*}}/ora-example/switch/switch_expressions.ora":17:30)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.effect = "writes", ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xde20aa76", ora.visibility = "pub", ora.write_slots = ["switch_result"]} {
-// CHECK-NEXT:     %0 = sir.const 2 : !sir.u256 loc(unknown)
-// CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
-// CHECK-NEXT:     %slot_switch_result = sir.const 0 : !sir.u256 loc(unknown)
+// CHECK-NEXT:   func.func @test_basic_switch(%arg0: !sir.u256 loc("{{.*}}/ora-example/switch/switch_expressions.ora":17:30)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "writes", ora.param_binding_ids = ["file:0:pattern:0"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xde20aa76", ora.visibility = "pub", ora.write_slots = ["switch_result"], ora.write_slots_complete = true} {
+// CHECK-NEXT:     %slot_switch_result = sir.const 0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/switch/switch_expressions.ora":21:17)))
 // CHECK-NEXT:     %c999 = sir.const 999 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c30 = sir.const 30 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c20 = sir.const 20 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c10 = sir.const 10 : !sir.u256 loc(unknown)
-// CHECK-NEXT:     %2 = sir.eq %arg0 : !sir.u256, %slot_switch_result : !sir.u256 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/switch/switch_expressions.ora":19:9)))
-// CHECK-NEXT:     sir.cond_br %2 : !sir.u256, ^bb1, ^bb5 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/switch/switch_expressions.ora":19:9)))
+// CHECK-NEXT:     sir.switch %arg0 : !sir.u256, {{\[\[}}0, 1, 2{{\]\]}}, ^bb1, ^bb2, ^bb3, ^bb4 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/switch/switch_expressions.ora":19:9)))
 // CHECK-NEXT:   ^bb1:  // pred: ^bb0
 // CHECK-NEXT:     sir.sstore %slot_switch_result : !sir.u256, %c10 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/switch/switch_expressions.ora":21:17)))
-// CHECK-NEXT:     sir.br ^bb7 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/switch/switch_expressions.ora":20:13)))
-// CHECK-NEXT:   ^bb2:  // pred: ^bb5
+// CHECK-NEXT:     sir.br ^bb5 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/switch/switch_expressions.ora":20:13)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.sstore %slot_switch_result : !sir.u256, %c20 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/switch/switch_expressions.ora":24:17)))
-// CHECK-NEXT:     sir.br ^bb7 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/switch/switch_expressions.ora":23:13)))
-// CHECK-NEXT:   ^bb3:  // pred: ^bb6
+// CHECK-NEXT:     sir.br ^bb5 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/switch/switch_expressions.ora":23:13)))
+// CHECK-NEXT:   ^bb3:  // pred: ^bb0
 // CHECK-NEXT:     sir.sstore %slot_switch_result : !sir.u256, %c30 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/switch/switch_expressions.ora":27:17)))
-// CHECK-NEXT:     sir.br ^bb7 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/switch/switch_expressions.ora":26:13)))
-// CHECK-NEXT:   ^bb4:  // pred: ^bb6
+// CHECK-NEXT:     sir.br ^bb5 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/switch/switch_expressions.ora":26:13)))
+// CHECK-NEXT:   ^bb4:  // pred: ^bb0
 // CHECK-NEXT:     sir.sstore %slot_switch_result : !sir.u256, %c999 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/switch/switch_expressions.ora":30:17)))
-// CHECK-NEXT:     sir.br ^bb7 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/switch/switch_expressions.ora":19:9)))
-// CHECK-NEXT:   ^bb5:  // pred: ^bb0
-// CHECK-NEXT:     %3 = sir.eq %arg0 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/switch/switch_expressions.ora":19:9)))
-// CHECK-NEXT:     sir.cond_br %3 : !sir.u256, ^bb2, ^bb6 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/switch/switch_expressions.ora":19:9)))
-// CHECK-NEXT:   ^bb6:  // pred: ^bb5
-// CHECK-NEXT:     %4 = sir.eq %arg0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/switch/switch_expressions.ora":19:9)))
-// CHECK-NEXT:     sir.cond_br %4 : !sir.u256, ^bb3, ^bb4 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/switch/switch_expressions.ora":19:9)))
-// CHECK-NEXT:   ^bb7:  // 4 preds: ^bb1, ^bb2, ^bb3, ^bb4
+// CHECK-NEXT:     sir.br ^bb5 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/switch/switch_expressions.ora":19:9)))
+// CHECK-NEXT:   ^bb5:  // 4 preds: ^bb1, ^bb2, ^bb3, ^bb4
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/switch/switch_expressions.ora":17:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/switch/switch_expressions.ora":17:5)
 // CHECK-NEXT: } loc("{{.*}}/ora-example/switch/switch_expressions.ora":14:1)

@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/declarations/comptime_let.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @basic_comptime
+// CHECK-LABEL: func.func @comptime_arithmetic
+// CHECK-LABEL: func.func @comptime_multi_decl
+// CHECK-LABEL: func.func @multiple_comptime_blocks
+// CHECK-LABEL: func.func @comptime_bool

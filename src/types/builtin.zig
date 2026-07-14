@@ -67,6 +67,11 @@ pub const BuiltinTypeSpec = struct {
     comptime_type_id: u32,
 };
 
+pub const BuiltinIntegerInfo = struct {
+    width: u16,
+    signed: bool,
+};
+
 pub const primitive_comptime_type_id_min: u32 = 1;
 pub const primitive_comptime_type_id_max: u32 = 18;
 
@@ -193,12 +198,13 @@ pub fn builtinByteWidth(id: BuiltinTypeId) ?u16 {
     return lookupBuiltinById(id).byte_width;
 }
 
-pub fn builtinBitWidth(id: BuiltinTypeId) ?u16 {
-    return lookupBuiltinById(id).bit_width;
-}
-
-pub fn builtinSignedness(id: BuiltinTypeId) ?bool {
-    return lookupBuiltinById(id).signed;
+pub fn integerInfoByComptimeTypeId(type_id: u32) ?BuiltinIntegerInfo {
+    const spec = lookupBuiltinByComptimeTypeId(type_id) orelse return null;
+    if (spec.category != .Integer) return null;
+    return .{
+        .width = spec.bit_width orelse return null,
+        .signed = spec.signed orelse return null,
+    };
 }
 
 pub fn parseIntegerBuiltin(name: []const u8) ?BuiltinTypeSpec {
@@ -217,9 +223,9 @@ pub fn lookupIntegerBuiltin(signed: bool, bits: u16) ?BuiltinTypeSpec {
 /// Parses a fixed-bytes family name like "bytes20" into its length, or null.
 ///
 /// The suffix must be a plain canonical decimal: no leading zero ("bytes01"),
-/// no sign ("bytes+5"), no digit separators ("bytes1_6"). The legacy comptime
+/// no sign ("bytes+5"), no digit separators ("bytes1_6"). The previous comptime
 /// parser leaned on std.fmt.parseInt and silently accepted all of those, aliasing
-/// e.g. "bytes01" to bytes1 — a latent bug. This is the canonical definition;
+/// e.g. "bytes01" to bytes1. This is the canonical definition;
 /// such spellings are not fixed-bytes type names.
 pub fn parseFixedBytesName(name: []const u8) ?u8 {
     if (!std.mem.startsWith(u8, name, fixed_bytes_prefix)) return null;
@@ -354,6 +360,19 @@ test "integer builtin metadata is table-driven" {
     try std.testing.expect(parseIntegerBuiltin("bytes32") == null);
     try std.testing.expect(parseIntegerBuiltin("u24") == null);
     try std.testing.expect(parseIntegerBuiltin("i96") == null);
+}
+
+test "integer info lookup by frozen comptime id" {
+    const u256_info = integerInfoByComptimeTypeId(6) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 256), u256_info.width);
+    try std.testing.expectEqual(false, u256_info.signed);
+
+    const i256_info = integerInfoByComptimeTypeId(12) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 256), i256_info.width);
+    try std.testing.expectEqual(true, i256_info.signed);
+
+    try std.testing.expect(integerInfoByComptimeTypeId(13) == null);
+    try std.testing.expect(integerInfoByComptimeTypeId(19) == null);
 }
 
 test "supported integer type names text is table-driven" {

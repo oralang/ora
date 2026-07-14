@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/storage/computed_range_erase.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @payloadSlot
+// CHECK-LABEL: func.func @seed
+// CHECK-LABEL: func.func @std
+// CHECK-LABEL: func.func @eraseNothing
+// CHECK-LABEL: func.func @erasePrefix
+// CHECK-LABEL: func.func @readAt
+// CHECK-LABEL: func.func @std

@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/control-flow/state_machine.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @run_machine
+// CHECK-LABEL: func.func @two_phase
+// CHECK-LABEL: func.func @stepping_counter
+// CHECK-LABEL: func.func @accumulate

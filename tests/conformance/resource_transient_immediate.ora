@@ -1,0 +1,18 @@
+resource TokenUnit = u256;
+
+contract ResourceTransientConformance {
+    tstore var scratch: Resource<TokenUnit>;
+
+    pub fn issueThenBalance(amount: TokenUnit) -> TokenUnit {
+        @create(scratch, amount);
+        return @amount(scratch);
+    }
+
+    pub fn issueRetireThenBalance(issue_amount: TokenUnit, retire_amount: TokenUnit) -> TokenUnit
+        requires issue_amount >= retire_amount
+    {
+        @create(scratch, issue_amount);
+        @destroy(scratch, retire_amount);
+        return @amount(scratch);
+    }
+}

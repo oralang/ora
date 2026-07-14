@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/dynamic/string_storage.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @setNames
+// CHECK-LABEL: func.func @setBio
+// CHECK-LABEL: func.func @getFirstName
+// CHECK-LABEL: func.func @getLastName
+// CHECK-LABEL: func.func @getBio
+// CHECK-LABEL: func.func @copyFirstToLast
+// CHECK-LABEL: func.func @swapNames

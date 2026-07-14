@@ -1,0 +1,374 @@
+fn init:
+    entry {
+        v0 = runtime_start_offset
+        v1 = runtime_length
+        v2 = malloc v1
+        codecopy v2 v0 v1
+        return v2 v1
+    }
+
+fn lt_i8:
+    entry v0 v1 -> v17 v3 {
+        v2 = const 0xF8
+        v3 = const 0x20
+        v4 = const 0x1
+        v5 = const 0xFF
+        v6 = and v1 v5
+        v7 = and v0 v5
+        v8 = shl v2 v7
+        v9 = sar v2 v8
+        v10 = shl v2 v6
+        v11 = sar v2 v10
+        v12 = slt v9 v11
+        v13 = and v12 v4
+        v14 = iszero v13
+        v15 = iszero v14
+        v16 = and v15 v4
+        v17 = malloc v3
+        mstore256 v17 v16
+        iret
+    }
+
+fn le_i8:
+    entry v0 v1 -> v19 v3 {
+        v2 = const 0xF8
+        v3 = const 0x20
+        v4 = const 0x1
+        v5 = const 0xFF
+        v6 = and v1 v5
+        v7 = and v0 v5
+        v8 = shl v2 v7
+        v9 = sar v2 v8
+        v10 = shl v2 v6
+        v11 = sar v2 v10
+        v12 = slt v9 v11
+        v13 = eq v9 v11
+        v14 = or v12 v13
+        v15 = and v14 v4
+        v16 = iszero v15
+        v17 = iszero v16
+        v18 = and v17 v4
+        v19 = malloc v3
+        mstore256 v19 v18
+        iret
+    }
+
+fn gt_i8:
+    entry v0 v1 -> v17 v3 {
+        v2 = const 0xF8
+        v3 = const 0x20
+        v4 = const 0x1
+        v5 = const 0xFF
+        v6 = and v1 v5
+        v7 = and v0 v5
+        v8 = shl v2 v7
+        v9 = sar v2 v8
+        v10 = shl v2 v6
+        v11 = sar v2 v10
+        v12 = sgt v9 v11
+        v13 = and v12 v4
+        v14 = iszero v13
+        v15 = iszero v14
+        v16 = and v15 v4
+        v17 = malloc v3
+        mstore256 v17 v16
+        iret
+    }
+
+fn ge_i8:
+    entry v0 v1 -> v19 v3 {
+        v2 = const 0xF8
+        v3 = const 0x20
+        v4 = const 0x1
+        v5 = const 0xFF
+        v6 = and v1 v5
+        v7 = and v0 v5
+        v8 = shl v2 v7
+        v9 = sar v2 v8
+        v10 = shl v2 v6
+        v11 = sar v2 v10
+        v12 = sgt v9 v11
+        v13 = eq v9 v11
+        v14 = or v12 v13
+        v15 = and v14 v4
+        v16 = iszero v15
+        v17 = iszero v16
+        v18 = and v17 v4
+        v19 = malloc v3
+        mstore256 v19 v18
+        iret
+    }
+
+fn lt_i256:
+    entry v0 v1 -> v9 v2 {
+        v2 = const 0x20
+        v3 = const 0x1
+        v4 = slt v0 v1
+        v5 = and v4 v3
+        v6 = iszero v5
+        v7 = iszero v6
+        v8 = and v7 v3
+        v9 = malloc v2
+        mstore256 v9 v8
+        iret
+    }
+
+fn le_i256:
+    entry v0 v1 -> v11 v2 {
+        v2 = const 0x20
+        v3 = const 0x1
+        v4 = slt v0 v1
+        v5 = eq v0 v1
+        v6 = or v4 v5
+        v7 = and v6 v3
+        v8 = iszero v7
+        v9 = iszero v8
+        v10 = and v9 v3
+        v11 = malloc v2
+        mstore256 v11 v10
+        iret
+    }
+
+fn gt_i256:
+    entry v0 v1 -> v9 v2 {
+        v2 = const 0x20
+        v3 = const 0x1
+        v4 = sgt v0 v1
+        v5 = and v4 v3
+        v6 = iszero v5
+        v7 = iszero v6
+        v8 = and v7 v3
+        v9 = malloc v2
+        mstore256 v9 v8
+        iret
+    }
+
+fn ge_i256:
+    entry v0 v1 -> v11 v2 {
+        v2 = const 0x20
+        v3 = const 0x1
+        v4 = sgt v0 v1
+        v5 = eq v0 v1
+        v6 = or v4 v5
+        v7 = and v6 v3
+        v8 = iszero v7
+        v9 = iszero v8
+        v10 = and v9 v3
+        v11 = malloc v2
+        mstore256 v11 v10
+        iret
+    }
+
+fn main:
+    main_entry {
+        zero = const 0x0
+        selector_offset = const 0x4
+        word_size = const 0x20
+        min_cdsize_1arg = const 0x23
+        arg1_offset = const 0x24
+        min_cdsize_2args = const 0x43
+        arg2_offset = const 0x44
+        min_cdsize_3args = const 0x63
+        selector_shift = const 0xE0
+        v0 = codesize
+        v1 = mload256 word_size
+        v2 = lt v1 v0
+        sel_zero = const 0x0
+        sel_mask = sub sel_zero v2
+        sel_t = and sel_mask v0
+        sel_inv = not sel_mask
+        sel_f = and sel_inv v1
+        v3 = or sel_t sel_f
+        mstore256 word_size v3
+        cv = callvalue
+        cv_nonzero = iszero cv
+        => cv_nonzero ? @load_selector : @revert_error
+    }
+    load_selector {
+        zero_0 = const 0x0
+        selector_shift_0 = const 0xE0
+        selector_word = calldataload zero_0
+        selector = shr selector_shift_0 selector_word
+        switch selector {
+        0x15CE21F5 => @lt_i8_
+        0x784FD89C => @le_i8_
+        0x723B3E97 => @gt_i8_
+        0xB84CEE1C => @ge_i8_
+        0x352EB6EE => @lt_i256_
+        0x0DF8D814 => @le_i256_
+        0x9844E78A => @gt_i256_
+        0x98058C22 => @ge_i256_
+        default => @revert_error
+    }
+    }
+    revert_error {
+        zero_1 = const 0x0
+        revert zero_1 zero_1
+    }
+    lt_i8_ {
+        cdsize_lt_i8 = calldatasize
+        min_cdsize_2args_0 = const 0x43
+        valid_lt_i8 = lt min_cdsize_2args_0 cdsize_lt_i8
+        => valid_lt_i8 ? @bb0 : @revert_error
+    }
+    lt_i8_exec {
+        v12 v13 = icall @lt_i8 v5 v8
+        return v12 v13
+    }
+    le_i8_ {
+        cdsize_le_i8 = calldatasize
+        min_cdsize_2args_1 = const 0x43
+        valid_le_i8 = lt min_cdsize_2args_1 cdsize_le_i8
+        => valid_le_i8 ? @bb2 : @revert_error
+    }
+    le_i8_exec {
+        v20 v21 = icall @le_i8 v15 v18
+        return v20 v21
+    }
+    gt_i8_ {
+        cdsize_gt_i8 = calldatasize
+        min_cdsize_2args_2 = const 0x43
+        valid_gt_i8 = lt min_cdsize_2args_2 cdsize_gt_i8
+        => valid_gt_i8 ? @bb4 : @revert_error
+    }
+    gt_i8_exec {
+        v28 v29 = icall @gt_i8 v23 v26
+        return v28 v29
+    }
+    ge_i8_ {
+        cdsize_ge_i8 = calldatasize
+        min_cdsize_2args_3 = const 0x43
+        valid_ge_i8 = lt min_cdsize_2args_3 cdsize_ge_i8
+        => valid_ge_i8 ? @bb6 : @revert_error
+    }
+    ge_i8_exec {
+        v36 v37 = icall @ge_i8 v31 v34
+        return v36 v37
+    }
+    lt_i256_ {
+        cdsize_lt_i256 = calldatasize
+        min_cdsize_2args_4 = const 0x43
+        valid_lt_i256 = lt min_cdsize_2args_4 cdsize_lt_i256
+        => valid_lt_i256 ? @lt_i256_exec : @revert_error
+    }
+    bb0 {
+        selector_offset_0 = const 0x4
+        a_lt_i8 = calldataload selector_offset_0
+        v4 = const 0x0
+        v5 = signextend v4 a_lt_i8
+        v6 = eq a_lt_i8 v5
+        => v6 ? @bb1 : @abi_decode_revert_3
+    }
+    bb1 {
+        arg1_offset_0 = const 0x24
+        b_lt_i8 = calldataload arg1_offset_0
+        v7 = const 0x0
+        v8 = signextend v7 b_lt_i8
+        v9 = eq b_lt_i8 v8
+        => v9 ? @lt_i8_exec : @abi_decode_revert_3
+    }
+    lt_i256_exec {
+        selector_offset_4 = const 0x4
+        a_lt_i256 = calldataload selector_offset_4
+        arg1_offset_4 = const 0x24
+        b_lt_i256 = calldataload arg1_offset_4
+        v38 v39 = icall @lt_i256 a_lt_i256 b_lt_i256
+        return v38 v39
+    }
+    le_i256_ {
+        cdsize_le_i256 = calldatasize
+        min_cdsize_2args_5 = const 0x43
+        valid_le_i256 = lt min_cdsize_2args_5 cdsize_le_i256
+        => valid_le_i256 ? @le_i256_exec : @revert_error
+    }
+    abi_decode_revert_3 {
+        word_size_0 = const 0x20
+        v10 = const 0x3
+        v11 = sallocany 0x20
+        mstore256 v11 v10
+        revert v11 word_size_0
+    }
+    le_i256_exec {
+        selector_offset_5 = const 0x4
+        a_le_i256 = calldataload selector_offset_5
+        arg1_offset_5 = const 0x24
+        b_le_i256 = calldataload arg1_offset_5
+        v40 v41 = icall @le_i256 a_le_i256 b_le_i256
+        return v40 v41
+    }
+    gt_i256_ {
+        cdsize_gt_i256 = calldatasize
+        min_cdsize_2args_6 = const 0x43
+        valid_gt_i256 = lt min_cdsize_2args_6 cdsize_gt_i256
+        => valid_gt_i256 ? @gt_i256_exec : @revert_error
+    }
+    bb2 {
+        selector_offset_1 = const 0x4
+        a_le_i8 = calldataload selector_offset_1
+        v14 = const 0x0
+        v15 = signextend v14 a_le_i8
+        v16 = eq a_le_i8 v15
+        => v16 ? @bb3 : @abi_decode_revert_3
+    }
+    bb3 {
+        arg1_offset_1 = const 0x24
+        b_le_i8 = calldataload arg1_offset_1
+        v17 = const 0x0
+        v18 = signextend v17 b_le_i8
+        v19 = eq b_le_i8 v18
+        => v19 ? @le_i8_exec : @abi_decode_revert_3
+    }
+    gt_i256_exec {
+        selector_offset_6 = const 0x4
+        a_gt_i256 = calldataload selector_offset_6
+        arg1_offset_6 = const 0x24
+        b_gt_i256 = calldataload arg1_offset_6
+        v42 v43 = icall @gt_i256 a_gt_i256 b_gt_i256
+        return v42 v43
+    }
+    ge_i256_ {
+        cdsize_ge_i256 = calldatasize
+        min_cdsize_2args_7 = const 0x43
+        valid_ge_i256 = lt min_cdsize_2args_7 cdsize_ge_i256
+        => valid_ge_i256 ? @ge_i256_exec : @revert_error
+    }
+    bb4 {
+        selector_offset_2 = const 0x4
+        a_gt_i8 = calldataload selector_offset_2
+        v22 = const 0x0
+        v23 = signextend v22 a_gt_i8
+        v24 = eq a_gt_i8 v23
+        => v24 ? @bb5 : @abi_decode_revert_3
+    }
+    ge_i256_exec {
+        selector_offset_7 = const 0x4
+        a_ge_i256 = calldataload selector_offset_7
+        arg1_offset_7 = const 0x24
+        b_ge_i256 = calldataload arg1_offset_7
+        v44 v45 = icall @ge_i256 a_ge_i256 b_ge_i256
+        return v44 v45
+    }
+    bb5 {
+        arg1_offset_2 = const 0x24
+        b_gt_i8 = calldataload arg1_offset_2
+        v25 = const 0x0
+        v26 = signextend v25 b_gt_i8
+        v27 = eq b_gt_i8 v26
+        => v27 ? @gt_i8_exec : @abi_decode_revert_3
+    }
+    bb6 {
+        selector_offset_3 = const 0x4
+        a_ge_i8 = calldataload selector_offset_3
+        v30 = const 0x0
+        v31 = signextend v30 a_ge_i8
+        v32 = eq a_ge_i8 v31
+        => v32 ? @bb7 : @abi_decode_revert_3
+    }
+    bb7 {
+        arg1_offset_3 = const 0x24
+        b_ge_i8 = calldataload arg1_offset_3
+        v33 = const 0x0
+        v34 = signextend v33 b_ge_i8
+        v35 = eq b_ge_i8 v34
+        => v35 ? @ge_i8_exec : @abi_decode_revert_3
+    }

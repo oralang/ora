@@ -23,7 +23,7 @@ contract AssignmentGuards {
     
     // Assignment from trusted builtin should NOT generate guard
     fn testStorageAssignmentFromBuiltin() {
-        owner = std.transaction.sender(); // No guard - trusted source
+        owner = std.msg.sender(); // No guard - trusted source
     }
     
     // ============================================================================

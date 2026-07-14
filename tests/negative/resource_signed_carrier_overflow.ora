@@ -1,0 +1,9 @@
+resource SmallDebt = i8;
+
+contract ResourceSignedCarrierOverflow {
+    storage var debts: map<address, Resource<SmallDebt>>;
+
+    pub fn bad(to: address) {
+        @create(debts[to], 128);
+    }
+}

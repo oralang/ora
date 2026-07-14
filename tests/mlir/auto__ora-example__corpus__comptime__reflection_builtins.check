@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/comptime/reflection_builtins.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @field_count
+// CHECK-LABEL: func.func @first_field_name
+// CHECK-LABEL: func.func @first_field_type_is_address
+// CHECK-LABEL: func.func @address_type_name
+// CHECK-LABEL: func.func @address_size
+// CHECK-LABEL: func.func @method_count
+// CHECK-LABEL: func.func @transfer_param_count
+// CHECK-LABEL: func.func @transfer_returns_bool

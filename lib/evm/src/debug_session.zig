@@ -5,7 +5,7 @@
 //! source-map-rebase logic. This module is the single home for that code so
 //! the two consumers can't drift.
 const std = @import("std");
-const primitives = @import("voltaire");
+const primitives = @import("primitives.zig");
 const evm_mod = @import("evm.zig");
 const evm_config = @import("evm_config.zig");
 const frame_mod = @import("frame.zig");
@@ -73,7 +73,12 @@ pub fn loadArtifact(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 
 /// Read a debugger artifact from disk, capped at `max_bytes`.
 pub fn loadArtifactWithCap(allocator: std.mem.Allocator, path: []const u8, max_bytes: usize) ![]u8 {
-    return std.fs.cwd().readFileAlloc(allocator, path, max_bytes);
+    return std.Io.Dir.cwd().readFileAlloc(
+        std.Io.Threaded.global_single_threaded.io(),
+        path,
+        allocator,
+        std.Io.Limit.limited(max_bytes),
+    );
 }
 
 /// Per-EVM-config helpers. The two binaries do `DebugSession(.{})` once at
@@ -171,7 +176,7 @@ pub fn DebugSession(comptime config: evm_config.EvmConfig) type {
                 return try SourceMap.fromEntries(allocator, creation_source_map.entries);
             }
 
-            var rebased: std.ArrayList(SourceMap.Entry) = .{};
+            var rebased: std.ArrayList(SourceMap.Entry) = .empty;
             defer rebased.deinit(allocator);
 
             for (creation_source_map.entries) |entry| {

@@ -169,7 +169,7 @@ fn createAbiDecodeOpWithModeAndFailureError(
 ) !mlir.MlirOperation {
     const attrs = try attrsForReturnType(allocator, mlir_context, layout_context, return_type);
     const enum_variant_count = layout_context.enumVariantCount(return_type);
-    var op_attrs: std.ArrayList(mlir.MlirNamedAttribute) = .{};
+    var op_attrs: std.ArrayList(mlir.MlirNamedAttribute) = .empty;
     defer op_attrs.deinit(allocator);
     try op_attrs.append(allocator, mlir_helpers.namedAttr(mlir_context, "return_types", attrs.return_types));
     try op_attrs.append(allocator, mlir_helpers.namedAttr(mlir_context, "layout", attrs.layout));

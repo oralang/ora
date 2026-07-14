@@ -1,0 +1,16 @@
+resource TokenUnit = u256;
+
+contract ResourceSmtMovePairSum {
+    storage var left: Resource<TokenUnit>;
+    storage var right: Resource<TokenUnit>;
+
+    pub fn move_left_to_right(amount: TokenUnit)
+        modifies left, right
+        requires @amount(left) >= amount
+        requires @amount(left) <= 100
+        requires @amount(right) <= 100
+        ensures @amount(left) + @amount(right) == old(@amount(left)) + old(@amount(right))
+    {
+        @move(left, right, amount);
+    }
+}

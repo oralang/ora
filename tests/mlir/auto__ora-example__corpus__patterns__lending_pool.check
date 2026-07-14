@@ -1,0 +1,16 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/patterns/lending_pool.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @init
+// CHECK-LABEL: func.func @accrueInterest
+// CHECK-LABEL: func.func @getHealthFactor
+// CHECK-LABEL: func.func @deposit
+// CHECK-LABEL: func.func @withdraw
+// CHECK-LABEL: func.func @borrow
+// CHECK-LABEL: func.func @repay
+// CHECK-LABEL: func.func @liquidate
+// CHECK-LABEL: func.func @getDeposit
+// CHECK-LABEL: func.func @getBorrow
+// CHECK-LABEL: func.func @getCollateral
+// CHECK-LABEL: func.func @getTotalDeposits
+// CHECK-LABEL: func.func @getTotalBorrows

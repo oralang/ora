@@ -25,7 +25,7 @@ pub fn helper(value: u256) -> u256 {
 }
 
 pub fn caller() -> address {
-    return std.transaction.sender;
+    return std.msg.sender();
 }
 
 pub fn run(amount: u256) -> u256 {
@@ -199,11 +199,11 @@ def main() -> int:
 
             std_hover = client.request(
                 "textDocument/hover",
-                {"textDocument": {"uri": valid_uri}, "position": position_of(VALID_SOURCE, "sender;", 0)},
+                {"textDocument": {"uri": valid_uri}, "position": position_of(VALID_SOURCE, "sender();", 0)},
             )
             std_hover_text = std_hover.get("contents", {}).get("value", "") if isinstance(std_hover, dict) else ""
-            require("std.transaction.sender: address" in std_hover_text, "std.transaction.sender hover missing type")
-            require("Alias of `std.msg.sender`" in std_hover_text, "std.transaction.sender hover missing docs")
+            require("std.msg.sender: address" in std_hover_text, "std.msg.sender hover missing type")
+            require("Address of the immediate caller" in std_hover_text, "std.msg.sender hover missing docs")
 
             completion = client.request(
                 "textDocument/completion",
@@ -219,11 +219,11 @@ def main() -> int:
                 "textDocument/completion",
                 {
                     "textDocument": {"uri": valid_uri},
-                    "position": position_of(VALID_SOURCE, "std.transaction.sender", 0, len("std.transaction.")),
+                    "position": position_of(VALID_SOURCE, "std.msg.sender", 0, len("std.msg.")),
                     "context": {"triggerKind": 2, "triggerCharacter": "."},
                 },
             )
-            require(has_label(std_completion, "sender"), "std.transaction completion did not include sender")
+            require(has_label(std_completion, "sender"), "std.msg completion did not include sender")
 
             definition = client.request(
                 "textDocument/definition",

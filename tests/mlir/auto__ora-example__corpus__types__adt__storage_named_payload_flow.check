@@ -1,0 +1,5 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/adt/storage_named_payload_flow.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @save
+// CHECK-LABEL: func.func @read_amount

@@ -1,0 +1,87 @@
+// @callHint execution target: three cold-hinted setters demote out of the
+// hot set, so transfer/transferFrom/approve ride the hot switch while the
+// cold table carries the demoted setters and twelve views. Order is pinned
+// at SIR level in src/compiler.test.oratosir.dispatcher.zig; this spec proves the
+// hinted dispatcher routes every layer correctly with state transitions.
+contract HintedToken {
+    storage var total: u256;
+
+    pub fn transfer(to: address, amount: u256) -> bool {
+        total = total + amount;
+        return true;
+    }
+
+    pub fn transferFrom(from: address, to: address, amount: u256) -> bool {
+        total = total + amount;
+        return true;
+    }
+
+    pub fn approve(spender: address, amount: u256) -> bool {
+        total = total + amount;
+        return true;
+    }
+
+    pub fn mint(to: address, amount: u256) {
+        @callHint(cold);
+        total = total + amount;
+    }
+
+    pub fn burn(amount: u256) {
+        @callHint(cold);
+        total = total - amount;
+    }
+
+    pub fn pause() {
+        @callHint(cold);
+        total = 0;
+    }
+
+    pub fn totalSupply() -> u256 {
+        return total;
+    }
+
+    pub fn v0() -> u256 {
+        return 300;
+    }
+
+    pub fn v1() -> u256 {
+        return 301;
+    }
+
+    pub fn v2() -> u256 {
+        return 302;
+    }
+
+    pub fn v3() -> u256 {
+        return 303;
+    }
+
+    pub fn v4() -> u256 {
+        return 304;
+    }
+
+    pub fn v5() -> u256 {
+        return 305;
+    }
+
+    pub fn v6() -> u256 {
+        return 306;
+    }
+
+    pub fn v7() -> u256 {
+        return 307;
+    }
+
+    pub fn v8() -> u256 {
+        return 308;
+    }
+
+    pub fn v9() -> u256 {
+        return 309;
+    }
+
+    pub fn v10() -> u256 {
+        return 310;
+    }
+
+}

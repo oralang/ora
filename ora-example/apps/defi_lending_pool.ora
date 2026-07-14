@@ -85,7 +85,7 @@ contract LendingPool {
     }
     // Simple ownership check - 3 statements
     fn only_owner() -> bool {
-        return std.transaction.sender == owner;
+        return std.msg.sender() == owner;
     }
     // Simple pause check - 2 statements
     fn when_not_paused() -> bool {
@@ -337,11 +337,11 @@ contract LendingPool {
     pub fn deposit(amount: u256) -> bool
     requires(amount>0)
     requires(when_not_paused())
-    requires(deposits[std.transaction.sender] <= std.constants.U256_MAX - amount)
-    requires(collateral[std.transaction.sender] <= std.constants.U256_MAX - amount)
+    requires(deposits[std.msg.sender()] <= std.constants.U256_MAX - amount)
+    requires(collateral[std.msg.sender()] <= std.constants.U256_MAX - amount)
     requires(total_deposits <= std.constants.U256_MAX - amount)
     {
-        let user: address = std.transaction.sender;
+        let user: address = std.msg.sender();
         // Update state
         deposits[user] += amount;
         total_deposits += amount;
@@ -380,10 +380,10 @@ contract LendingPool {
     requires amount>0
     requires when_not_paused()
     requires amount <= get_available_liquidity()
-    requires borrows[std.transaction.sender] <= std.constants.U256_MAX - amount
+    requires borrows[std.msg.sender()] <= std.constants.U256_MAX - amount
     requires total_borrows <= std.constants.U256_MAX - amount
     {
-        let user: address = std.transaction.sender;
+        let user: address = std.msg.sender();
         if (!is_valid_amount(amount)) {
             return false;
         }
@@ -395,9 +395,9 @@ contract LendingPool {
     // Repay function - ~70 statements  
     pub fn repay(amount: u256) -> bool
     requires amount>0
-    requires borrows[std.transaction.sender]>0
+    requires borrows[std.msg.sender()]>0
     {
-        let user: address = std.transaction.sender;
+        let user: address = std.msg.sender();
         if (!is_valid_amount(amount)) {
             return false;
         }
@@ -424,13 +424,13 @@ contract LendingPool {
     pub fn withdraw(amount: u256) -> bool
     requires(amount>0)
     requires(when_not_paused())
-    requires(deposits[std.transaction.sender] >= amount)
-    requires(collateral[std.transaction.sender] >= amount)
+    requires(deposits[std.msg.sender()] >= amount)
+    requires(collateral[std.msg.sender()] >= amount)
     requires(amount <= get_available_liquidity())
     requires(total_deposits >= amount)
-    requires(borrows[std.transaction.sender] == 0)
+    requires(borrows[std.msg.sender()] == 0)
     {
-        let user: address = std.transaction.sender;
+        let user: address = std.msg.sender();
         if (!is_valid_amount(amount)) {
             return false;
         }
@@ -446,15 +446,15 @@ contract LendingPool {
     requires(borrower != std.constants.ZERO_ADDRESS)
     requires(repay_amount>0)
     requires(when_not_paused())
-    requires(borrower != std.transaction.sender)
+    requires(borrower != std.msg.sender())
     requires(borrows[borrower]>0)
     requires(collateral[borrower]>0)
     requires(total_borrows >= borrows[borrower])
     requires(deposits[borrower] >= collateral[borrower])
-    requires(deposits[std.transaction.sender] <= std.constants.U256_MAX - collateral[borrower])
-    requires(collateral[std.transaction.sender] <= std.constants.U256_MAX - collateral[borrower])
+    requires(deposits[std.msg.sender()] <= std.constants.U256_MAX - collateral[borrower])
+    requires(collateral[std.msg.sender()] <= std.constants.U256_MAX - collateral[borrower])
     {
-        let liquidator: address = std.transaction.sender;
+        let liquidator: address = std.msg.sender();
         if (borrower == liquidator) {
             return false;
         }

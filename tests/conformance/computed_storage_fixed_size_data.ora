@@ -1,0 +1,126 @@
+comptime const std_storage = @import("std/storage");
+comptime const fixed = @import("std/storage/fixed_size_data");
+
+contract ComputedStorageFixedSizeData {
+    fn payloadSlot(owner: address) -> StorageSlot {
+        return std_storage.derive("ora.test.computed.fixed.payload", owner);
+    }
+
+    fn otherSlot(owner: address) -> StorageSlot {
+        return std_storage.derive("ora.test.computed.fixed.other", owner);
+    }
+
+    pub fn store_empty(owner: address)
+        modifies std_storage.range(std_storage.derive("ora.test.computed.fixed.payload", owner), 0)
+    {
+        let slot: StorageSlot = payloadSlot(owner);
+        let empty: [u256; 0] = [];
+        fixed.store(slot, empty);
+    }
+
+    pub fn store_one(owner: address, word: u256)
+        modifies std_storage.range(std_storage.derive("ora.test.computed.fixed.payload", owner), 1)
+    {
+        let slot: StorageSlot = payloadSlot(owner);
+        let data: [u256; 1] = [word];
+        fixed.store(slot, data);
+    }
+
+    pub fn store_three(owner: address, first: u256, second: u256, third: u256)
+        modifies std_storage.range(std_storage.derive("ora.test.computed.fixed.payload", owner), 3)
+    {
+        let slot: StorageSlot = payloadSlot(owner);
+        let data: [u256; 3] = [first, second, third];
+        fixed.store(slot, data);
+    }
+
+    pub fn store_four(owner: address, first: u256, second: u256, third: u256, fourth: u256)
+        modifies std_storage.range(std_storage.derive("ora.test.computed.fixed.payload", owner), 4)
+    {
+        let slot: StorageSlot = payloadSlot(owner);
+        let data: [u256; 4] = [first, second, third, fourth];
+        fixed.store(slot, data);
+    }
+
+    pub fn store_sixteen(owner: address)
+        modifies std_storage.range(std_storage.derive("ora.test.computed.fixed.payload", owner), 16)
+    {
+        let slot: StorageSlot = payloadSlot(owner);
+        let data: [u256; 16] = [
+            1, 2, 3, 4,
+            5, 6, 7, 8,
+            9, 10, 11, 12,
+            13, 14, 15, 16,
+        ];
+        fixed.store(slot, data);
+    }
+
+    pub fn store_other(owner: address, word: u256)
+        modifies std_storage.range(std_storage.derive("ora.test.computed.fixed.other", owner), 1)
+    {
+        let slot: StorageSlot = otherSlot(owner);
+        let data: [u256; 1] = [word];
+        fixed.store(slot, data);
+    }
+
+    pub fn first(owner: address) -> u256 {
+        let slot: StorageSlot = payloadSlot(owner);
+        let data: [u256; 3] = fixed.load(slot, 3);
+        return data[0];
+    }
+
+    pub fn second(owner: address) -> u256 {
+        let slot: StorageSlot = payloadSlot(owner);
+        let data: [u256; 3] = fixed.load(slot, 3);
+        return data[1];
+    }
+
+    pub fn third(owner: address) -> u256 {
+        let slot: StorageSlot = payloadSlot(owner);
+        let data: [u256; 3] = fixed.load(slot, 3);
+        return data[2];
+    }
+
+    pub fn sum_four(owner: address) -> u256 {
+        let slot: StorageSlot = payloadSlot(owner);
+        let data: [u256; 4] = fixed.load(slot, 4);
+        return data[0] + data[1] + data[2] + data[3];
+    }
+
+    pub fn sum_sixteen(owner: address) -> u256 {
+        let slot: StorageSlot = payloadSlot(owner);
+        let data: [u256; 16] = fixed.load(slot, 16);
+        return data[0] + data[1] + data[2] + data[3]
+            + data[4] + data[5] + data[6] + data[7]
+            + data[8] + data[9] + data[10] + data[11]
+            + data[12] + data[13] + data[14] + data[15];
+    }
+
+    pub fn other(owner: address) -> u256 {
+        let slot: StorageSlot = otherSlot(owner);
+        let data: [u256; 1] = fixed.load(slot, 1);
+        return data[0];
+    }
+
+    pub fn has_payload(owner: address) -> bool {
+        return fixed.hasData(payloadSlot(owner), 3);
+    }
+
+    pub fn erase_payload(owner: address)
+        modifies std_storage.range(std_storage.derive("ora.test.computed.fixed.payload", owner), 3)
+    {
+        fixed.erase(payloadSlot(owner), 3);
+    }
+
+    pub fn erase_four(owner: address)
+        modifies std_storage.range(std_storage.derive("ora.test.computed.fixed.payload", owner), 4)
+    {
+        fixed.erase(payloadSlot(owner), 4);
+    }
+
+    pub fn erase_sixteen(owner: address)
+        modifies std_storage.range(std_storage.derive("ora.test.computed.fixed.payload", owner), 16)
+    {
+        fixed.erase(payloadSlot(owner), 16);
+    }
+}

@@ -42,7 +42,7 @@ pub const OccurrenceIndex = struct {
         const resolved_names = try definition.collectDefinitionsCached(allocator, analysis);
         defer allocator.free(resolved_names);
 
-        var occurrences = std.ArrayList(Occurrence){};
+        var occurrences = std.ArrayList(Occurrence).empty;
         var builder_growth_events: usize = 0;
         errdefer {
             deinitOccurrences(allocator, occurrences.items);
@@ -227,7 +227,7 @@ pub fn referencesAtOccurrenceIndex(
     target_definition_range: frontend.Range,
     include_declaration: bool,
 ) ![]frontend.Range {
-    var ranges = std.ArrayList(frontend.Range){};
+    var ranges = std.ArrayList(frontend.Range).empty;
     errdefer ranges.deinit(allocator);
 
     if (index.name_indexes.len == index.occurrences.len) {
@@ -365,7 +365,7 @@ pub fn buildImportedMemberIndexFromTokens(
         return emptyImportedMemberIndex(allocator);
     }
 
-    var occurrences = std.ArrayList(ImportedMemberOccurrence){};
+    var occurrences = std.ArrayList(ImportedMemberOccurrence).empty;
     var builder_growth_events: usize = 0;
     errdefer {
         deinitImportedMemberOccurrences(allocator, occurrences.items);
@@ -419,7 +419,7 @@ pub fn importedMemberReferencesTo(
     target_path: []const u8,
     target_name: []const u8,
 ) ![]frontend.Range {
-    var ranges = std.ArrayList(frontend.Range){};
+    var ranges = std.ArrayList(frontend.Range).empty;
     errdefer ranges.deinit(allocator);
 
     for (index.occurrences) |occurrence| {
@@ -444,7 +444,7 @@ const NameIndexBuilder = struct {
 };
 
 fn buildRangeIndexes(allocator: Allocator, occurrences: []const Occurrence) !RangeIndexBuilder {
-    var indexes = std.ArrayList(RangeIndexEntry){};
+    var indexes = std.ArrayList(RangeIndexEntry).empty;
     var growth_events: usize = 0;
     errdefer indexes.deinit(allocator);
 
@@ -470,7 +470,7 @@ fn buildRangeIndexes(allocator: Allocator, occurrences: []const Occurrence) !Ran
 }
 
 fn buildNameIndexes(allocator: Allocator, occurrences: []const Occurrence) !NameIndexBuilder {
-    var indexes = std.ArrayList(NameIndexEntry){};
+    var indexes = std.ArrayList(NameIndexEntry).empty;
     var growth_events: usize = 0;
     errdefer indexes.deinit(allocator);
 

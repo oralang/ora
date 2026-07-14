@@ -271,18 +271,40 @@ test "sortFromPrintedType degrades on named struct without declaration metadata"
     try testing.expectEqualStrings("printed product type requires exact metadata-backed sort reconstruction", encoder.degradationReason().?);
 }
 
-test "unknown quantified binder types degrade before opaque bv256 fallback" {
+test "unknown quantified binder types fail closed instead of using opaque bv256 fallback" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
     var encoder = Encoder.init(&z3_ctx, testing.allocator);
     defer encoder.deinit();
 
-    const opaque_sort = encoder.quantifiedVarSortFromTypeStringForTesting("FutureType");
-    try testing.expectEqual(@as(u32, z3.Z3_BV_SORT), @as(u32, @intCast(z3.Z3_get_sort_kind(z3_ctx.ctx, opaque_sort))));
-    try testing.expectEqual(@as(u32, 256), @as(u32, @intCast(z3.Z3_get_bv_sort_size(z3_ctx.ctx, opaque_sort))));
+    try testing.expectError(error.UnsupportedOperation, encoder.quantifiedVarSortFromTypeStringForTesting("FutureType"));
     try testing.expect(encoder.isDegraded());
-    try testing.expectEqualStrings("unsupported quantified binder type encoded via opaque bv256 fallback", encoder.degradationReason().?);
+    try testing.expectEqualStrings("unsupported quantified binder type", encoder.degradationReason().?);
+}
+
+test "malformed quantified binder integer width fails closed instead of defaulting to u256" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    try testing.expectError(error.UnsupportedOperation, encoder.quantifiedVarSortFromTypeStringForTesting("uabc"));
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("ora.quantified binder integer type has malformed width", encoder.degradationReason().?);
+}
+
+test "zero-width quantified binder integer fails closed instead of defaulting to u256" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    try testing.expectError(error.UnsupportedOperation, encoder.quantifiedVarSortFromTypeStringForTesting("u0"));
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("ora.quantified binder integer type has zero width", encoder.degradationReason().?);
 }
 
 test "printed memref and slice sorts match shaped array encoding" {

@@ -1,0 +1,3 @@
+contract ResourceRuntimeAssetAddressDomain {
+    storage var balances: map<address, Resource<msg.sender>>;
+}

@@ -1,4 +1,4 @@
-//===- SIRDialect.td - Sensei IR dialect definition -------------*- tablegen -*-===//
+//===- SIRDialect.td - Plank SIR dialect definition -------------*- tablegen -*-===//
 //
 // Defines the SIR MLIR dialect.
 //
@@ -15,7 +15,7 @@ include "mlir/IR/BuiltinAttributes.td"
 def SIR_Dialect : Dialect {
   let name = "sir";
   let cppNamespace = "::sir";
-  let summary = "Sensei IR (SIR) dialect for low-level EVM-like operations";
+  let summary = "Plank SIR dialect for low-level EVM-like operations";
   let description = [{
     SIR is a low-level, SSA-based IR targeting the EVM. This MLIR dialect is a
     typed representation of SIR, with:

@@ -18,6 +18,7 @@ pub fn resolveNames(
     var result = NameResolutionResult{
         .arena = std.heap.ArenaAllocator.init(allocator),
         .expr_bindings = &[_]?ResolvedBinding{},
+        .pattern_bindings = &[_]?ResolvedBinding{},
         .diagnostics = diagnostics.DiagnosticList.init(allocator),
     };
     errdefer result.deinit();
@@ -25,6 +26,8 @@ pub fn resolveNames(
     const arena = result.arena.allocator();
     const bindings = try arena.alloc(?ResolvedBinding, file.expressions.len);
     @memset(bindings, null);
+    const pattern_bindings = try arena.alloc(?ResolvedBinding, file.patterns.len);
+    @memset(pattern_bindings, null);
 
     var root_binding_capacity: usize = 0;
     for (item_index.entries) |entry| {
@@ -55,6 +58,7 @@ pub fn resolveNames(
         .file = file,
         .item_index = item_index,
         .bindings = bindings,
+        .pattern_bindings = pattern_bindings,
         .diagnostics = &result.diagnostics,
     };
 
@@ -63,6 +67,7 @@ pub fn resolveNames(
     }
 
     result.expr_bindings = bindings;
+    result.pattern_bindings = pattern_bindings;
     return result;
 }
 
@@ -96,6 +101,7 @@ const Resolver = struct {
     file: *const ast.AstFile,
     item_index: *const ItemIndexResult,
     bindings: []?ResolvedBinding,
+    pattern_bindings: []?ResolvedBinding,
     diagnostics: *diagnostics.DiagnosticList,
 
     fn resolveItem(self: *Resolver, item_id: ast.ItemId, env: *const Env) anyerror!void {
@@ -111,6 +117,7 @@ const Resolver = struct {
                         .Struct => member.Struct.name,
                         .Bitfield => member.Bitfield.name,
                         .Enum => member.Enum.name,
+                        .Resource => member.Resource.name,
                         .TypeAlias => member.TypeAlias.name,
                         .LogDecl => member.LogDecl.name,
                         .ErrorDecl => member.ErrorDecl.name,
@@ -308,6 +315,10 @@ const Resolver = struct {
 
     fn resolvePattern(self: *Resolver, pattern_id: ast.PatternId, env: *const Env) anyerror!void {
         switch (self.file.pattern(pattern_id).*) {
+            .Name => |name| {
+                if (std.mem.eql(u8, name.name, "_")) return;
+                self.pattern_bindings[pattern_id.index()] = env.lookup(name.name);
+            },
             .Field => |field| try self.resolvePattern(field.base, env),
             .Index => |index| {
                 try self.resolvePattern(index.base, env);
@@ -404,14 +415,11 @@ const Resolver = struct {
             },
             .Field => |field| {
                 if (self.emitDeprecatedErrorNamespace(expr_id, field)) return;
-                if (options.modifies_clause and self.isModifiesEnvironmentKey(expr_id)) return;
                 try self.resolveExprWithOptions(field.base, env, options);
             },
             .Index => |index| {
                 try self.resolveExprWithOptions(index.base, env, options);
-                if (!options.modifies_clause or !self.isModifiesEnvironmentKey(index.index)) {
-                    try self.resolveExprWithOptions(index.index, env, options);
-                }
+                try self.resolveExprWithOptions(index.index, env, options);
             },
             .Group => |group| try self.resolveExprWithOptions(group.expr, env, options),
             .Old => |old| try self.resolveExprWithOptions(old.expr, env, options),
@@ -425,23 +433,13 @@ const Resolver = struct {
         }
     }
 
-    fn isModifiesEnvironmentKey(self: *Resolver, expr_id: ast.ExprId) bool {
-        const field = switch (self.file.expression(expr_id).*) {
-            .Group => |group| return self.isModifiesEnvironmentKey(group.expr),
-            .Field => |field| field,
-            else => return false,
-        };
-        const base = self.file.expression(field.base).*;
-        return base == .Name and
-            ((std.mem.eql(u8, base.Name.name, "msg") and std.mem.eql(u8, field.name, "sender")) or
-                (std.mem.eql(u8, base.Name.name, "tx") and std.mem.eql(u8, field.name, "origin")));
-    }
-
     fn bindPatternIfName(self: *Resolver, env: *Env, pattern_id: ast.PatternId) !void {
         switch (self.file.pattern(pattern_id).*) {
             .Name => |name| {
                 if (std.mem.eql(u8, name.name, "_")) return;
-                try env.bindings.put(name.name, .{ .pattern = pattern_id });
+                const binding: ResolvedBinding = .{ .pattern = pattern_id };
+                self.pattern_bindings[pattern_id.index()] = binding;
+                try env.bindings.put(name.name, binding);
             },
             .StructDestructure => |destructure| {
                 for (destructure.fields) |field| try self.bindPatternIfName(env, field.binding);

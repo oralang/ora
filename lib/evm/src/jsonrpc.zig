@@ -43,22 +43,23 @@ pub fn writeJsonEscaped(writer: anytype, s: []const u8) !void {
 /// copy of `s` like `"foo\\nbar"` (with surrounding quotes
 /// included). Caller frees.
 pub fn allocJsonString(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
-    var buf: std.ArrayList(u8) = .{};
-    errdefer buf.deinit(allocator);
-    try buf.append(allocator, '"');
-    try writeJsonEscaped(buf.writer(allocator), s);
-    try buf.append(allocator, '"');
-    return try buf.toOwnedSlice(allocator);
+    var buf = std.Io.Writer.Allocating.init(allocator);
+    errdefer buf.deinit();
+    const writer = &buf.writer;
+    try writer.writeByte('"');
+    try writeJsonEscaped(writer, s);
+    try writer.writeByte('"');
+    return try buf.toOwnedSlice();
 }
 
 /// Write a Content-Length-framed body to `file`. Header is
 /// allocated on `allocator` so we can control its lifetime; the
 /// body slice is borrowed.
-pub fn writeFramed(allocator: std.mem.Allocator, file: std.fs.File, body: []const u8) !void {
+pub fn writeFramed(allocator: std.mem.Allocator, file: std.Io.File, body: []const u8) !void {
     const header = try std.fmt.allocPrint(allocator, "Content-Length: {d}\r\n\r\n", .{body.len});
     defer allocator.free(header);
-    try file.writeAll(header);
-    try file.writeAll(body);
+    try file.writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), header);
+    try file.writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), body);
 }
 
 /// Defensive cap on a single message body. 16 MiB matches the
@@ -79,7 +80,7 @@ pub const kMaxMessageBytes: usize = 16 * 1024 * 1024;
 ///     `kMaxMessageBytes`
 ///   - `error.UnexpectedEndOfStream` — header parsed OK but
 ///     body read short
-pub fn readDapMessage(allocator: std.mem.Allocator, file: std.fs.File) ![]u8 {
+pub fn readDapMessage(allocator: std.mem.Allocator, file: std.Io.File) ![]u8 {
     return readDapMessageReader(allocator, FileSource{ .file = file });
 }
 
@@ -91,11 +92,11 @@ pub const Source = struct {
 };
 
 const FileSource = struct {
-    file: std.fs.File,
+    file: std.Io.File,
 
     fn read(ctx: *anyopaque, buf: []u8) anyerror!usize {
-        const self: *FileSource = @alignCast(@ptrCast(ctx));
-        return self.file.read(buf);
+        const self: *FileSource = @ptrCast(@alignCast(ctx));
+        return self.file.readStreaming(std.Io.Threaded.global_single_threaded.io(), &.{buf});
     }
 };
 
@@ -176,10 +177,10 @@ fn readDapMessageInner(allocator: std.mem.Allocator, source: Source) ![]u8 {
 const testing = std.testing;
 
 fn escapedToOwned(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
-    var buf: std.ArrayList(u8) = .{};
-    errdefer buf.deinit(allocator);
-    try writeJsonEscaped(buf.writer(allocator), s);
-    return try buf.toOwnedSlice(allocator);
+    var buf = std.Io.Writer.Allocating.init(allocator);
+    errdefer buf.deinit();
+    try writeJsonEscaped(&buf.writer, s);
+    return try buf.toOwnedSlice();
 }
 
 test "writeJsonEscaped: plain ASCII passes through unchanged" {
@@ -256,7 +257,7 @@ const BufferSource = struct {
     cursor: usize = 0,
 
     fn read(ctx: *anyopaque, buf: []u8) anyerror!usize {
-        const self: *BufferSource = @alignCast(@ptrCast(ctx));
+        const self: *BufferSource = @ptrCast(@alignCast(ctx));
         const remaining = self.bytes.len - self.cursor;
         const n = @min(buf.len, remaining);
         if (n == 0) return 0;
@@ -309,7 +310,7 @@ test "readDapMessage: oversized Content-Length is rejected without allocating" {
 }
 
 test "readDapMessage: header longer than 256 bytes errors" {
-    var bytes: std.ArrayList(u8) = .{};
+    var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(testing.allocator);
     try bytes.appendSlice(testing.allocator, "X-Long: ");
     try bytes.appendNTimes(testing.allocator, 'a', 300);

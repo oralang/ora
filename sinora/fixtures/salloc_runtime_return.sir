@@ -1,0 +1,17 @@
+fn init:
+    entry {
+        start = runtime_start_offset
+        len = runtime_length
+        ptr = malloc len
+        codecopy ptr start len
+        return ptr len
+    }
+
+fn main:
+    entry {
+        ptr = salloc 0x20
+        len = const 0x20
+        value = const 0x2a
+        mstore256 ptr value
+        return ptr len
+    }

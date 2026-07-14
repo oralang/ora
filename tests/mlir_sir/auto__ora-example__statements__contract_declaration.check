@@ -2,7 +2,7 @@
 // INPUT: ora-example/statements/contract_declaration.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slot_ambiguous_names = ["owner"], ora.global_slots = {owner = 1 : ui64, owner = 0 : ui64, value = 0 : ui64}, ora.global_slots_built} {
-// CHECK-NEXT:   func.func @init() attributes {ora.effect = "writes", ora.init = true, ora.visibility = "pub", ora.write_slots = ["owner"]} {
+// CHECK-NEXT:   func.func @init() attributes {ora.dispatch_class = "mutating", ora.effect = "writes", ora.init = true, ora.visibility = "pub", ora.write_slots = ["owner"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_owner = sir.const 1 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/statements/contract_declaration.ora":22:9)))
 // CHECK-NEXT:     %1 = sir.const 103929005307130220006098923584552504982110632080 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/statements/contract_declaration.ora":22:17)))

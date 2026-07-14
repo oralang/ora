@@ -1,0 +1,9 @@
+resource TokenUnit = u256;
+
+contract ResourceAmountWrongDomain {
+    storage var balances: map<address, Resource<TokenUnit>>;
+
+    pub fn bad(from: address, to: address, amount: u256) {
+        @move(balances[from], balances[to], amount);
+    }
+}

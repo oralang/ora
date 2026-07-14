@@ -1,0 +1,9 @@
+contract ComptimeRuntimeAssignment {
+    pub fn run(input: u256) -> u256 {
+        var total: u256 = 0;
+        comptime {
+            total = input;
+        }
+        return total;
+    }
+}

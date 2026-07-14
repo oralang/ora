@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/operators/arithmetic/negation.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @negate_i8
+// CHECK-LABEL: func.func @negate_i16
+// CHECK-LABEL: func.func @negate_i32
+// CHECK-LABEL: func.func @negate_i64
+// CHECK-LABEL: func.func @negate_i128
+// CHECK-LABEL: func.func @negate_i256
+// CHECK-LABEL: func.func @double_negate_i256

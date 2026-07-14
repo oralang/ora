@@ -1,0 +1,24 @@
+resource TokenUnit = u256;
+comptime const std = @import("std");
+
+extern trait Hook {
+    call fn ping(self) -> bool;
+}
+
+error ExternalCallFailed;
+
+contract ResourceLockExternalCall {
+    storage var hook: address;
+    storage var balances: map<address, Resource<TokenUnit>>;
+
+    pub fn issue_then_call(owner: address, amount: TokenUnit) -> !bool | ExternalCallFailed
+        modifies balances[owner]
+        requires @amount(balances[owner]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    {
+        @create(balances[owner], amount);
+        @lock(balances[owner]);
+        let ok: bool = try external<Hook>(hook, gas: 50000).ping();
+        @unlock(balances[owner]);
+        return Ok(ok);
+    }
+}

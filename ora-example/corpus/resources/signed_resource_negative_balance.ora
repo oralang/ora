@@ -1,0 +1,36 @@
+resource DebtUnit = i256;
+
+contract ResourceSignedNegativeBalance {
+    storage var pending: Resource<DebtUnit>;
+    storage var settled: Resource<DebtUnit>;
+
+    pub fn seed(amount: DebtUnit)
+        modifies pending
+        requires amount >= 0
+        requires amount <= 100
+        requires @amount(pending) <= 100
+        ensures @amount(pending) == old(@amount(pending)) + amount
+    {
+        @create(pending, amount);
+    }
+
+    pub fn settle(amount: DebtUnit)
+        modifies pending, settled
+        requires amount >= 0
+        requires amount <= 100
+        requires @amount(pending) >= -100
+        requires @amount(settled) <= 100
+        ensures @amount(pending) == old(@amount(pending)) - amount
+        ensures @amount(settled) == old(@amount(settled)) + amount
+    {
+        @move(pending, settled, amount);
+    }
+
+    pub fn pendingBalance() -> DebtUnit {
+        return @amount(pending);
+    }
+
+    pub fn settledBalance() -> DebtUnit {
+        return @amount(settled);
+    }
+}

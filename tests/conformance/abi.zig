@@ -1,5 +1,4 @@
 const std = @import("std");
-const testing = std.testing;
 const types = @import("types.zig");
 
 pub const ArgValue = types.ArgValue;
@@ -36,7 +35,7 @@ pub fn parseArgArray(allocator: std.mem.Allocator, value: []const u8) ![]ArgValu
     const tokens = try splitTopLevelItems(allocator, trimmed[1 .. trimmed.len - 1]);
     defer allocator.free(tokens);
 
-    var args = std.ArrayList(ArgValue){};
+    var args: std.ArrayList(ArgValue) = .empty;
     errdefer args.deinit(allocator);
     for (tokens) |token| {
         if (token.len == 0) return error.InvalidArgs;
@@ -113,9 +112,9 @@ fn encodeAbiSequence(allocator: std.mem.Allocator, wires: []const []const u8, ar
         }
     }
 
-    var head = std.ArrayList(u8){};
+    var head: std.ArrayList(u8) = .empty;
     errdefer head.deinit(allocator);
-    var tail = std.ArrayList(u8){};
+    var tail: std.ArrayList(u8) = .empty;
     defer tail.deinit(allocator);
 
     for (wires, args) |wire, arg| {
@@ -136,6 +135,7 @@ fn encodeAbiSequence(allocator: std.mem.Allocator, wires: []const []const u8, ar
 }
 
 fn encodeAbiValue(allocator: std.mem.Allocator, wire_type: []const u8, arg: ArgValue) anyerror![]u8 {
+    if (fixedArrayInfo(wire_type)) |info| return try encodeFixedArray(allocator, info, arg);
     if (arrayElementType(wire_type)) |element_type| return try encodeDynamicArray(allocator, element_type, arg);
     if (std.mem.eql(u8, wire_type, "bytes")) {
         const bytes = try parseHexBytes(allocator, try argAsLiteral(arg));
@@ -149,6 +149,31 @@ fn encodeAbiValue(allocator: std.mem.Allocator, wire_type: []const u8, arg: ArgV
     errdefer allocator.free(out);
     try encodeStaticAbiWord(out[0..32], wire_type, arg);
     return out;
+}
+
+const FixedArrayInfo = struct {
+    element_type: []const u8,
+    len: usize,
+};
+
+fn encodeFixedArray(allocator: std.mem.Allocator, info: FixedArrayInfo, arg: ArgValue) anyerror![]u8 {
+    if ((try staticAbiWordCount(allocator, info.element_type)) == null) return error.UnsupportedDynamicFixedArrayElement;
+
+    const elements = try parseDelimitedItems(allocator, try argAsLiteral(arg), '[', ']');
+    defer allocator.free(elements);
+    if (elements.len != info.len) return error.FixedArrayLengthMismatch;
+
+    const wires = try allocator.alloc([]const u8, elements.len);
+    defer allocator.free(wires);
+    const values = try allocator.alloc(ArgValue, elements.len);
+    defer allocator.free(values);
+
+    for (elements, 0..) |element, i| {
+        wires[i] = info.element_type;
+        values[i] = try parseArgValue(element);
+    }
+
+    return try encodeAbiSequence(allocator, wires, values);
 }
 
 fn encodeDynamicArray(allocator: std.mem.Allocator, element_type: []const u8, arg: ArgValue) anyerror![]u8 {
@@ -168,7 +193,7 @@ fn encodeDynamicArray(allocator: std.mem.Allocator, element_type: []const u8, ar
     const body = try encodeAbiSequence(allocator, wires, values);
     defer allocator.free(body);
 
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try appendU256Word(&out, allocator, @intCast(elements.len));
     try out.appendSlice(allocator, body);
@@ -189,7 +214,7 @@ fn encodeTuple(allocator: std.mem.Allocator, wire_type: []const u8, arg: ArgValu
 }
 
 fn encodeDynamicBytes(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try appendU256Word(&out, allocator, @intCast(bytes.len));
     try out.appendSlice(allocator, bytes);
@@ -208,6 +233,10 @@ fn paddedAbiByteLen(len: usize) usize {
 }
 
 fn staticAbiWordCount(allocator: std.mem.Allocator, wire_type: []const u8) anyerror!?usize {
+    if (fixedArrayInfo(wire_type)) |info| {
+        const element_words = (try staticAbiWordCount(allocator, info.element_type)) orelse return error.UnsupportedDynamicFixedArrayElement;
+        return element_words * info.len;
+    }
     if (arrayElementType(wire_type) != null) return null;
     if (std.mem.eql(u8, wire_type, "bytes") or std.mem.eql(u8, wire_type, "string")) return null;
     if (tupleInner(wire_type) != null) {
@@ -235,6 +264,17 @@ fn isStaticAbiScalar(wire_type: []const u8) bool {
 fn arrayElementType(wire_type: []const u8) ?[]const u8 {
     if (!std.mem.endsWith(u8, wire_type, "[]")) return null;
     return wire_type[0 .. wire_type.len - 2];
+}
+
+fn fixedArrayInfo(wire_type: []const u8) ?FixedArrayInfo {
+    if (wire_type.len < 3 or wire_type[wire_type.len - 1] != ']') return null;
+    const open = std.mem.lastIndexOfScalar(u8, wire_type, '[') orelse return null;
+    if (open == 0) return null;
+    const len_text = wire_type[open + 1 .. wire_type.len - 1];
+    if (len_text.len == 0) return null;
+    const len = std.fmt.parseInt(usize, len_text, 10) catch return null;
+    if (len == 0) return null;
+    return .{ .element_type = wire_type[0..open], .len = len };
 }
 
 fn tupleInner(wire_type: []const u8) ?[]const u8 {
@@ -295,13 +335,13 @@ pub fn expectStaticReturn(wire_type: []const u8, expected: ArgValue, actual_word
 
     if (static_wire_map.get(wire_type)) |kind| switch (kind) {
         .bool => {
-            try testing.expectEqual(try argAsBool(expected), std.mem.readInt(u256, actual_word[0..32], .big) != 0);
+            if ((std.mem.readInt(u256, actual_word[0..32], .big) != 0) != try argAsBool(expected)) return error.StaticReturnMismatch;
             return;
         },
         .address => {
             const expected_bytes = try parseHexBytesFixed(20, try argAsLiteral(expected));
-            try testing.expect(std.mem.allEqual(u8, actual_word[0..12], 0));
-            try testing.expectEqualSlices(u8, &expected_bytes, actual_word[12..32]);
+            if (!std.mem.allEqual(u8, actual_word[0..12], 0)) return error.StaticReturnMismatch;
+            if (!std.mem.eql(u8, &expected_bytes, actual_word[12..32])) return error.StaticReturnMismatch;
             return;
         },
     };
@@ -310,7 +350,7 @@ pub fn expectStaticReturn(wire_type: []const u8, expected: ArgValue, actual_word
         const bits = try parseAbiIntBits(wire_type, "uint");
         const expected_value = try parseUnsignedArg(expected);
         if (expected_value > maxUnsignedValue(bits)) return error.ValueOutOfRange;
-        try testing.expectEqual(expected_value, std.mem.readInt(u256, actual_word[0..32], .big) & maxUnsignedValue(bits));
+        if ((std.mem.readInt(u256, actual_word[0..32], .big) & maxUnsignedValue(bits)) != expected_value) return error.StaticReturnMismatch;
         return;
     }
 
@@ -328,7 +368,7 @@ pub fn expectStaticReturn(wire_type: []const u8, expected: ArgValue, actual_word
     if (parseFixedBytesWireType(wire_type)) |len| {
         var expected_word: [32]u8 = undefined;
         try encodeStaticAbiWord(&expected_word, wire_type, expected);
-        try testing.expectEqualSlices(u8, expected_word[0..len], actual_word[0..len]);
+        if (!std.mem.eql(u8, expected_word[0..len], actual_word[0..len])) return error.StaticReturnMismatch;
         return;
     }
 
@@ -476,7 +516,7 @@ pub fn splitTopLevelItems(allocator: std.mem.Allocator, text: []const u8) ![][]c
     const trimmed = std.mem.trim(u8, text, " \t");
     if (trimmed.len == 0) return allocator.alloc([]const u8, 0);
 
-    var items = std.ArrayList([]const u8){};
+    var items: std.ArrayList([]const u8) = .empty;
     errdefer items.deinit(allocator);
 
     var paren_depth: usize = 0;

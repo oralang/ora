@@ -1,0 +1,44 @@
+// INPUT: tests/conformance/computed_storage_words.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+
+// CHECK-LABEL: fn dataSlot:
+// CHECK: large_const 0xF24214CAFFA3F656D7FCF2A4C4F6FBB17C2AF9FA6895CD40015A93632108A214
+// CHECK: mstore256
+// CHECK: mstore256
+// CHECK: [[DATA_BASE:v[0-9]+]] = keccak256
+// CHECK: mstore256 {{.*}} [[DATA_BASE]]
+// CHECK: mload256
+
+// CHECK-LABEL: fn otherSlot:
+// CHECK: large_const 0xEFB4CB5C55A70BE387F9E4C44E71D4B65148EAB717D6EAF8B2720821D9F0F119
+// CHECK: mstore256
+// CHECK: mstore256
+// CHECK: [[OTHER_BASE:v[0-9]+]] = keccak256
+// CHECK: mstore256 {{.*}} [[OTHER_BASE]]
+// CHECK: mload256
+
+// CHECK-LABEL: fn write_pair:
+// CHECK: [[PAIR_ONE:[A-Za-z0-9_]+]] = const 0x1
+// CHECK: [[PAIR_ZERO:[A-Za-z0-9_]+]] = const 0x0
+// CHECK: [[PAIR_BASE:v[0-9]+]] = icall @dataSlot v0
+// CHECK: [[PAIR_FIRST:v[0-9]+]] = add [[PAIR_BASE]] [[PAIR_ZERO]]
+// CHECK: sstore [[PAIR_FIRST]] v1
+// CHECK: [[PAIR_SECOND:v[0-9]+]] = add [[PAIR_BASE]] 0x1
+// CHECK: sstore [[PAIR_SECOND]] v2
+
+// CHECK-LABEL: fn write_other:
+// CHECK: [[OTHER_ZERO:[A-Za-z0-9_]+]] = const 0x0
+// CHECK: [[OTHER_WRITE_BASE:v[0-9]+]] = icall @otherSlot v0
+// CHECK: [[OTHER_WRITE_SLOT:v[0-9]+]] = add [[OTHER_WRITE_BASE]] [[OTHER_ZERO]]
+// CHECK: sstore [[OTHER_WRITE_SLOT]] v1
+
+// CHECK-LABEL: fn clear_pair:
+// CHECK: [[CLEAR_ONE:[A-Za-z0-9_]+]] = const 0x1
+// CHECK: [[CLEAR_ZERO:[A-Za-z0-9_]+]] = const 0x0
+// CHECK: [[CLEAR_COUNT:[A-Za-z0-9_]+]] = const 0x2
+// CHECK: [[CLEAR_BASE:v[0-9]+]] = icall @dataSlot v0
+// CHECK: [[CLEAR_MAX:v[0-9]+]] = add [[CLEAR_BASE]] [[CLEAR_ONE]]
+// CHECK: [[CLEAR_WRAP:v[0-9]+]] = lt [[CLEAR_MAX]] [[CLEAR_BASE]]
+// CHECK: [[CLEAR_IN_RANGE:v[0-9]+]] = lt {{v[0-9]+}} 0x2
+// CHECK: [[CLEAR_SLOT:v[0-9]+]] = add [[CLEAR_BASE]] {{v[0-9]+}}
+// CHECK: sstore [[CLEAR_SLOT]] 0x0

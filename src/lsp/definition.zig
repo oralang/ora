@@ -534,6 +534,7 @@ const Resolver = struct {
             .Bitfield => |bitfield_decl| .{ .range = bitfield_decl.range, .name = bitfield_decl.name },
             .Enum => |enum_decl| .{ .range = enum_decl.range, .name = enum_decl.name },
             .Trait => |trait_decl| .{ .range = trait_decl.range, .name = trait_decl.name },
+            .Resource => |resource_decl| .{ .range = resource_decl.range, .name = resource_decl.name },
             .TypeAlias => |alias_decl| .{ .range = alias_decl.range, .name = alias_decl.name },
             .LogDecl => |log_decl| .{ .range = log_decl.range, .name = log_decl.name },
             .ErrorDecl => |error_decl| .{ .range = error_decl.range, .name = error_decl.name },
@@ -563,7 +564,7 @@ const Resolver = struct {
 const DefinitionCollector = struct {
     allocator: Allocator,
     resolver: Resolver,
-    names: std.ArrayList(ResolvedName) = .{},
+    names: std.ArrayList(ResolvedName) = .empty,
 
     fn init(allocator: Allocator, analysis: *const Analysis) DefinitionCollector {
         return .{

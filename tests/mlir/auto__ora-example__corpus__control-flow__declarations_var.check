@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/control-flow/declarations_var.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @test_basic_var
+// CHECK-LABEL: func.func @test_reassignment
+// CHECK-LABEL: func.func @test_compound_assignments
+// CHECK-LABEL: func.func @test_var_bool
+// CHECK-LABEL: func.func @test_multiple_vars
+// CHECK-LABEL: func.func @test_var_in_loop
+// CHECK-LABEL: func.func @test_var_in_branches

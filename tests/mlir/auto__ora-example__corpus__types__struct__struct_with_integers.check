@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/struct/struct_with_integers.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @create
+// CHECK-LABEL: func.func @store_all
+// CHECK-LABEL: func.func @read_small
+// CHECK-LABEL: func.func @read_medium
+// CHECK-LABEL: func.func @read_large

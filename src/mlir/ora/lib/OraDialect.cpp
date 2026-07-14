@@ -96,6 +96,30 @@ namespace mlir
                 return {};
             }
 
+            static bool isIntegerWidth(::mlir::Type type, unsigned width)
+            {
+                if (auto base = getRefinementBaseType(type))
+                    type = base;
+                if (auto oraInt = llvm::dyn_cast<ora::IntegerType>(type))
+                    return oraInt.getWidth() == width;
+                if (auto builtinInt = llvm::dyn_cast<::mlir::IntegerType>(type))
+                    return builtinInt.getWidth() == width;
+                return false;
+            }
+
+            static bool isComputedStorageWordType(::mlir::Type type)
+            {
+                return isIntegerWidth(type, 256);
+            }
+
+            static bool isComputedStorageKeyType(::mlir::Type type)
+            {
+                if (auto base = getRefinementBaseType(type))
+                    type = base;
+                return isComputedStorageWordType(type) ||
+                       llvm::isa<AddressType, NonZeroAddressType>(type);
+            }
+
             static ::mlir::OpFoldResult foldAddressCarrierRoundTrip(::mlir::Value value, ::mlir::Type resultType)
             {
                 if (value.getType() == resultType)
@@ -764,18 +788,6 @@ namespace mlir
     {
         namespace
         {
-            static bool isStaticallyZeroIntegerValue(::mlir::Value value)
-            {
-                if (auto constOp = value.getDefiningOp<arith::ConstantOp>())
-                {
-                    if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(constOp.getValue()))
-                    {
-                        return intAttr.getValue().isZero();
-                    }
-                }
-                return false;
-            }
-
             static std::optional<mlir::IntegerAttr> getConstantIntegerAttr(::mlir::Value value)
             {
                 if (auto constOp = value.getDefiningOp<arith::ConstantOp>())
@@ -1014,20 +1026,6 @@ namespace mlir
             }
         } // namespace
 
-        ::mlir::LogicalResult DivOp::verify()
-        {
-            if (isStaticallyZeroIntegerValue(getRhs()))
-                return emitOpError("divisor must not be a statically known zero constant");
-            return success();
-        }
-
-        ::mlir::LogicalResult RemOp::verify()
-        {
-            if (isStaticallyZeroIntegerValue(getRhs()))
-                return emitOpError("divisor must not be a statically known zero constant");
-            return success();
-        }
-
         ::mlir::LogicalResult SLoadOp::verify()
         {
             auto global = lookupGlobalFor(*this, getGlobalName());
@@ -1057,6 +1055,68 @@ namespace mlir
                                      << " for '" << getGlobalName() << "'";
             }
 
+            return success();
+        }
+
+        ::mlir::LogicalResult StorageDeriveOp::verify()
+        {
+            auto hashAttr = (*this)->getAttrOfType<IntegerAttr>("namespace_hash");
+            if (!hashAttr)
+                return emitOpError("requires 256-bit integer 'namespace_hash' attribute");
+            if (hashAttr.getValue().getBitWidth() != 256)
+                return emitOpError("'namespace_hash' must be a 256-bit integer attribute");
+            if (!isComputedStorageWordType(getSlot().getType()))
+                return emitOpError() << "result type must be a 256-bit integer storage slot, got "
+                                     << getSlot().getType();
+            for (auto key : getKeys())
+            {
+                if (!isComputedStorageKeyType(key.getType()))
+                    return emitOpError() << "key operand type must be address or 256-bit integer, got "
+                                         << key.getType();
+            }
+            return success();
+        }
+
+        ::mlir::LogicalResult StorageWordLoadOp::verify()
+        {
+            if (!isComputedStorageWordType(getSlot().getType()))
+                return emitOpError() << "slot operand must be a 256-bit integer storage slot, got "
+                                     << getSlot().getType();
+            if (!isComputedStorageWordType(getOffset().getType()))
+                return emitOpError() << "offset operand must be a 256-bit integer word offset, got "
+                                     << getOffset().getType();
+            if (!isComputedStorageWordType(getResult().getType()))
+                return emitOpError() << "result type must be a 256-bit integer word, got "
+                                     << getResult().getType();
+            return success();
+        }
+
+        ::mlir::LogicalResult StorageWordStoreOp::verify()
+        {
+            if (!isComputedStorageWordType(getSlot().getType()))
+                return emitOpError() << "slot operand must be a 256-bit integer storage slot, got "
+                                     << getSlot().getType();
+            if (!isComputedStorageWordType(getOffset().getType()))
+                return emitOpError() << "offset operand must be a 256-bit integer word offset, got "
+                                     << getOffset().getType();
+            if (!isComputedStorageWordType(getValue().getType()))
+                return emitOpError() << "stored value must be a 256-bit integer word, got "
+                                     << getValue().getType();
+            return success();
+        }
+
+        ::mlir::LogicalResult StorageRangeEraseOp::verify()
+        {
+            if (!isComputedStorageWordType(getSlot().getType()))
+                return emitOpError() << "slot operand must be a 256-bit integer storage slot, got "
+                                     << getSlot().getType();
+            auto wordCountAttr = (*this)->getAttrOfType<IntegerAttr>("word_count");
+            if (!wordCountAttr)
+                return emitOpError("requires 'word_count' attribute");
+            if (wordCountAttr.getValue().getBitWidth() != 64)
+                return emitOpError("'word_count' must be a 64-bit integer attribute");
+            if (wordCountAttr.getValue().isNegative())
+                return emitOpError("'word_count' must be non-negative");
             return success();
         }
 
@@ -1365,6 +1425,149 @@ namespace mlir
             }
 
             return success();
+        }
+
+        static bool isSupportedResourceCarrierType(Type type)
+        {
+            return llvm::isa<ora::IntegerType, mlir::IntegerType>(type);
+        }
+
+        static ::mlir::LogicalResult verifyResourceMetadata(Operation *op, Value amount, Type &carrierType)
+        {
+            auto domainAttr = op->getAttrOfType<StringAttr>("domain");
+            if (!domainAttr || domainAttr.getValue().empty())
+                return op->emitOpError("requires non-empty 'domain' resource attribute");
+
+            auto carrierAttr = op->getAttrOfType<TypeAttr>("carrier_type");
+            if (!carrierAttr)
+                return op->emitOpError("requires 'carrier_type' resource attribute");
+
+            carrierType = carrierAttr.getValue();
+            if (!isSupportedResourceCarrierType(carrierType))
+                return op->emitOpError() << "resource carrier_type must be an integer type, got " << carrierType;
+
+            auto signedAttr = op->getAttrOfType<BoolAttr>("carrier_signed");
+            if (!signedAttr)
+                return op->emitOpError("requires 'carrier_signed' resource attribute");
+
+            if (amount.getType() != carrierType)
+                return op->emitOpError() << "amount type " << amount.getType()
+                                         << " does not match resource carrier_type " << carrierType;
+
+            return success();
+        }
+
+        static bool isResourceDirectPlaceProjection(Value value)
+        {
+            Operation *definingOp = value.getDefiningOp();
+            if (!definingOp)
+                return false;
+
+            if (llvm::isa<SLoadOp, TLoadOp>(definingOp))
+                return true;
+
+            if (auto extract = llvm::dyn_cast<StructFieldExtractOp>(definingOp))
+                return isResourceDirectPlaceProjection(extract.getStructValue());
+
+            if (auto cast = llvm::dyn_cast<mlir::UnrealizedConversionCastOp>(definingOp))
+            {
+                auto inputs = cast.getInputs();
+                if (inputs.size() == 1)
+                    return isResourceDirectPlaceProjection(inputs[0]);
+            }
+
+            return false;
+        }
+
+        static ::mlir::LogicalResult verifyResourcePlacePath(Operation *op, OperandRange place, Type carrierType, StringRef label)
+        {
+            if (place.empty())
+            {
+                return op->emitOpError() << label
+                                         << " place must be a storage root or a map root followed by at least one key";
+            }
+
+            if (place.size() == 1)
+            {
+                Value root = place.front();
+                if (root.getType() != carrierType)
+                {
+                    return op->emitOpError() << label << " direct place type " << root.getType()
+                                             << " does not match resource carrier_type " << carrierType;
+                }
+
+                if (!isResourceDirectPlaceProjection(root))
+                {
+                    return op->emitOpError() << label
+                                             << " direct place must be a storage or transient root loaded by ora.sload/ora.tload or a struct-field projection of one; copied values are not resource places";
+                }
+
+                return success();
+            }
+
+            auto mapType = llvm::dyn_cast<MapType>(place.front().getType());
+            if (!mapType)
+            {
+                return op->emitOpError() << label << " place root must have !ora.map<key, value> type, got "
+                                         << place.front().getType();
+            }
+
+            for (unsigned i = 1; i < place.size(); ++i)
+            {
+                Value key = place[i];
+                if (key.getType() != mapType.getKeyType())
+                {
+                    return op->emitOpError() << label << " place key #" << (i - 1)
+                                             << " type " << key.getType()
+                                             << " does not match map key type " << mapType.getKeyType();
+                }
+
+                Type valueType = mapType.getValueType();
+                if (i + 1 == place.size())
+                {
+                    if (valueType != carrierType)
+                    {
+                        return op->emitOpError() << label << " place resolves to " << valueType
+                                                 << " but resource carrier_type is " << carrierType;
+                    }
+                    return success();
+                }
+
+                mapType = llvm::dyn_cast<MapType>(valueType);
+                if (!mapType)
+                {
+                    return op->emitOpError() << label
+                                             << " place has extra keys after a non-map value type " << valueType;
+                }
+            }
+
+            return op->emitOpError() << label << " place does not resolve to a resource value";
+        }
+
+        ::mlir::LogicalResult MoveOp::verify()
+        {
+            Type carrierType;
+            if (failed(verifyResourceMetadata(getOperation(), getAmount(), carrierType)))
+                return failure();
+            if (failed(verifyResourcePlacePath(getOperation(), getSourcePlace(), carrierType, "source")))
+                return failure();
+            return verifyResourcePlacePath(getOperation(), getDestinationPlace(), carrierType, "destination");
+        }
+
+        ::mlir::LogicalResult CreateOp::verify()
+        {
+            Type carrierType;
+            if (failed(verifyResourceMetadata(getOperation(), getAmount(), carrierType)))
+                return failure();
+            return verifyResourcePlacePath(getOperation(), getPlace(), carrierType, "target");
+        }
+
+        ::mlir::LogicalResult DestroyOp::verify()
+        {
+            Type carrierType;
+            if (failed(verifyResourceMetadata(getOperation(), getAmount(), carrierType)))
+                return failure();
+            return verifyResourcePlacePath(getOperation(), getPlace(), carrierType, "target");
         }
 
         ::mlir::LogicalResult ErrorUnwrapOp::verify()
@@ -2239,76 +2442,6 @@ namespace mlir
                 }
             };
 
-            enum class SignedBinaryFoldKind
-            {
-                Div,
-                Rem,
-            };
-
-            template <typename OpT, SignedBinaryFoldKind Kind>
-            struct FoldSignedAwareBinaryConstants : public OpRewritePattern<OpT>
-            {
-                using OpRewritePattern<OpT>::OpRewritePattern;
-
-                LogicalResult matchAndRewrite(OpT op, PatternRewriter &rewriter) const override
-                {
-                    auto lhsVal = getConstantIntegerAttr(op.getLhs());
-                    auto rhsVal = getConstantIntegerAttr(op.getRhs());
-                    if (!lhsVal || !rhsVal || rhsVal->getValue().isZero())
-                        return failure();
-
-                    auto resultOraType = llvm::dyn_cast<ora::IntegerType>(op.getResult().getType());
-                    if (!resultOraType)
-                        return failure();
-
-                    llvm::APInt result = lhsVal->getValue();
-                    if constexpr (Kind == SignedBinaryFoldKind::Div)
-                        result = resultOraType.getIsSigned()
-                                     ? lhsVal->getValue().sdiv(rhsVal->getValue())
-                                     : lhsVal->getValue().udiv(rhsVal->getValue());
-                    else
-                        result = resultOraType.getIsSigned()
-                                     ? lhsVal->getValue().srem(rhsVal->getValue())
-                                     : lhsVal->getValue().urem(rhsVal->getValue());
-
-                    return replaceOpWithConstant(
-                        rewriter,
-                        op,
-                        op.getResult().getType(),
-                        result);
-                }
-            };
-
-            struct FoldDivIdentity : public OpRewritePattern<DivOp>
-            {
-                using OpRewritePattern<DivOp>::OpRewritePattern;
-
-                LogicalResult matchAndRewrite(DivOp op, PatternRewriter &rewriter) const override
-                {
-                    if (isIntegerConstant(op.getRhs(), 1))
-                        return replaceOpWithValueIfSameType(rewriter, op, op.getLhs());
-                    return failure();
-                }
-            };
-
-            struct FoldRemByOne : public OpRewritePattern<RemOp>
-            {
-                using OpRewritePattern<RemOp>::OpRewritePattern;
-
-                LogicalResult matchAndRewrite(RemOp op, PatternRewriter &rewriter) const override
-                {
-                    auto rhsVal = getConstantIntegerAttr(op.getRhs());
-                    if (!rhsVal || rhsVal->getValue() != 1)
-                        return failure();
-
-                    return replaceOpWithConstant(
-                        rewriter,
-                        op,
-                        op.getResult().getType(),
-                        llvm::APInt::getZero(rhsVal->getValue().getBitWidth()));
-                }
-            };
-
             struct FoldPowerConstants : public OpRewritePattern<PowerOp>
             {
                 using OpRewritePattern<PowerOp>::OpRewritePattern;
@@ -2430,14 +2563,6 @@ namespace mlir
                 results.add<
                     FoldBinaryIntegerConstants<OpT, Kind>,
                     FoldBinaryIntegerIdentity<OpT, Kind>>(context);
-            }
-
-            template <typename OpT, SignedBinaryFoldKind Kind, typename IdentityPatternT>
-            static void addSignedAwareBinaryCanonicalizers(RewritePatternSet &results, MLIRContext *context)
-            {
-                results.add<
-                    FoldSignedAwareBinaryConstants<OpT, Kind>,
-                    IdentityPatternT>(context);
             }
 
             template <typename OpT, ShiftFoldKind Kind>
@@ -2876,14 +3001,6 @@ namespace mlir
                 results, context);                                                 \
         }
 
-#define DEFINE_ORA_SIGNED_BINARY_CANONICALIZER(OpT, Kind, IdentityPatternT)        \
-        void OpT::getCanonicalizationPatterns(RewritePatternSet &results,          \
-                                              MLIRContext *context)                \
-        {                                                                          \
-            addSignedAwareBinaryCanonicalizers<OpT, SignedBinaryFoldKind::Kind,    \
-                                               IdentityPatternT>(results, context);\
-        }
-
 #define DEFINE_ORA_SHIFT_CANONICALIZER(OpT, Kind)                                  \
         void OpT::getCanonicalizationPatterns(RewritePatternSet &results,          \
                                               MLIRContext *context)                \
@@ -2899,14 +3016,9 @@ namespace mlir
             results.add<__VA_ARGS__>(context);                                     \
         }
 
-        DEFINE_ORA_BINARY_CANONICALIZER(AddOp, Add)
         DEFINE_ORA_BINARY_CANONICALIZER(AddWrappingOp, Add)
-        DEFINE_ORA_BINARY_CANONICALIZER(MulOp, Mul)
         DEFINE_ORA_BINARY_CANONICALIZER(MulWrappingOp, Mul)
-        DEFINE_ORA_BINARY_CANONICALIZER(SubOp, Sub)
         DEFINE_ORA_BINARY_CANONICALIZER(SubWrappingOp, Sub)
-        DEFINE_ORA_SIGNED_BINARY_CANONICALIZER(DivOp, Div, FoldDivIdentity)
-        DEFINE_ORA_SIGNED_BINARY_CANONICALIZER(RemOp, Rem, FoldRemByOne)
         DEFINE_ORA_PATTERN_CANONICALIZER(PowerOp, FoldPowerConstants, FoldPowerIdentity)
         DEFINE_ORA_SHIFT_CANONICALIZER(ShlWrappingOp, Left)
         DEFINE_ORA_SHIFT_CANONICALIZER(ShrWrappingOp, Right)
@@ -2924,7 +3036,6 @@ namespace mlir
         DEFINE_ORA_PATTERN_CANONICALIZER(StructFieldUpdateOp, FoldStructFieldUpdateNoop, FoldStructFieldUpdateIntoInit, FoldStructFieldUpdateOverwrite)
 
 #undef DEFINE_ORA_BINARY_CANONICALIZER
-#undef DEFINE_ORA_SIGNED_BINARY_CANONICALIZER
 #undef DEFINE_ORA_SHIFT_CANONICALIZER
 #undef DEFINE_ORA_PATTERN_CANONICALIZER
 
@@ -2997,63 +3108,6 @@ namespace mlir
         //===----------------------------------------------------------------------===//
         // Result Naming (via OpAsmOpInterface)
         //===----------------------------------------------------------------------===//
-
-        // Arithmetic operations: use semantic names
-        void AddOp::getAsmResultNames(::mlir::OpAsmSetValueNameFn setNameFn)
-        {
-            auto nameAttr = (*this)->getAttrOfType<StringAttr>("ora.result_name_0");
-            if (nameAttr)
-            {
-                setNameFn(getResult(), nameAttr.getValue());
-            }
-            else
-            {
-                // Default semantic name for addition
-                setNameFn(getResult(), "sum");
-            }
-        }
-
-        void SubOp::getAsmResultNames(::mlir::OpAsmSetValueNameFn setNameFn)
-        {
-            auto nameAttr = (*this)->getAttrOfType<StringAttr>("ora.result_name_0");
-            if (nameAttr)
-            {
-                setNameFn(getResult(), nameAttr.getValue());
-            }
-            else
-            {
-                // Default semantic name for subtraction
-                setNameFn(getResult(), "difference");
-            }
-        }
-
-        void MulOp::getAsmResultNames(::mlir::OpAsmSetValueNameFn setNameFn)
-        {
-            auto nameAttr = (*this)->getAttrOfType<StringAttr>("ora.result_name_0");
-            if (nameAttr)
-            {
-                setNameFn(getResult(), nameAttr.getValue());
-            }
-            else
-            {
-                // Default semantic name for multiplication
-                setNameFn(getResult(), "product");
-            }
-        }
-
-        void DivOp::getAsmResultNames(::mlir::OpAsmSetValueNameFn setNameFn)
-        {
-            auto nameAttr = (*this)->getAttrOfType<StringAttr>("ora.result_name_0");
-            if (nameAttr)
-            {
-                setNameFn(getResult(), nameAttr.getValue());
-            }
-            else
-            {
-                // Default semantic name for division
-                setNameFn(getResult(), "quotient");
-            }
-        }
 
         // Memory load: use variable name
         void MLoadOp::getAsmResultNames(::mlir::OpAsmSetValueNameFn setNameFn)

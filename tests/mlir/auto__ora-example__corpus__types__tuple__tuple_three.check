@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/tuple/tuple_three.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @create_three
+// CHECK-LABEL: func.func @mixed_three
+// CHECK-LABEL: func.func @return_three
+// CHECK-LABEL: func.func @use_three

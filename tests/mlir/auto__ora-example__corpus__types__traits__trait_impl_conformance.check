@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/traits/trait_impl_conformance.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @LedgerView
+// CHECK-LABEL: func.func @LedgerView
+// CHECK-LABEL: func.func @read_total
+// CHECK-LABEL: func.func @is_empty
+// CHECK-LABEL: func.func @ok

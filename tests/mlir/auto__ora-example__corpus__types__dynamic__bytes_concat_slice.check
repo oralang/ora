@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/dynamic/bytes_concat_slice.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @join_bytes
+// CHECK-LABEL: func.func @join_bytes_builtin
+// CHECK-LABEL: func.func @cut_bytes
+// CHECK-LABEL: func.func @cut_bytes_std
+// CHECK-LABEL: func.func @std

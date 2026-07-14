@@ -9,7 +9,7 @@ contract CustomBitfieldStorageSmoke {
     storage var flags: CustomFlags;
 
     pub fn configure(code: u8, delta: i16, amount: u32) {
-        let f: CustomFlags = flags;
+        var f: CustomFlags = flags;
         f.enabled = true;
         f.code = code;
         f.delta = delta;
@@ -18,13 +18,13 @@ contract CustomBitfieldStorageSmoke {
     }
 
     pub fn set_delta(value: i16) {
-        let f: CustomFlags = flags;
+        var f: CustomFlags = flags;
         f.delta = value;
         flags = f;
     }
 
     pub fn set_code(value: u8) {
-        let f: CustomFlags = flags;
+        var f: CustomFlags = flags;
         f.code = value;
         flags = f;
     }

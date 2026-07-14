@@ -1,0 +1,34 @@
+resource TokenUnit = u256;
+comptime const std = @import("std");
+
+contract ResourceDirectStorage {
+    storage var reserve: Resource<TokenUnit>;
+    storage var treasury: Resource<TokenUnit>;
+
+    pub fn issue(amount: TokenUnit)
+        requires @amount(reserve) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    {
+        @create(reserve, amount);
+    }
+
+    pub fn retire(amount: TokenUnit)
+        requires @amount(reserve) >= amount
+    {
+        @destroy(reserve, amount);
+    }
+
+    pub fn sweep(amount: TokenUnit)
+        requires @amount(reserve) >= amount
+        requires @amount(treasury) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    {
+        @move(reserve, treasury, amount);
+    }
+
+    pub fn reserveBalance() -> TokenUnit {
+        return @amount(reserve);
+    }
+
+    pub fn treasuryBalance() -> TokenUnit {
+        return @amount(treasury);
+    }
+}

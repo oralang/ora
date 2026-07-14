@@ -7,7 +7,7 @@ pub const AbiDoc = struct {
     parsed: std.json.Parsed(std.json.Value),
 
     pub fn load(allocator: std.mem.Allocator, path: []const u8) !AbiDoc {
-        const bytes = try std.fs.cwd().readFileAlloc(allocator, path, 4 * 1024 * 1024);
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(std.Io.Threaded.global_single_threaded.io(), path, allocator, std.Io.Limit.limited(4 * 1024 * 1024));
         errdefer allocator.free(bytes);
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
         errdefer parsed.deinit();
@@ -71,7 +71,7 @@ pub const AbiDoc = struct {
         const components = getObjectField(type_value, "components");
         if (components != .array) return error.InvalidAbi;
 
-        var out = std.ArrayList(u8){};
+        var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(self.allocator);
         try out.append(self.allocator, '(');
         for (components.array.items, 0..) |component, i| {
@@ -122,7 +122,7 @@ fn inputWires(doc: *const AbiDoc, callable: std.json.Value) ![]const []const u8 
 fn typeRefWires(doc: *const AbiDoc, callable: std.json.Value, field: []const u8) ![]const []const u8 {
     const refs = getObjectField(callable, field);
     if (refs != .array) return error.InvalidAbi;
-    var wires = std.ArrayList([]const u8){};
+    var wires: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (wires.items) |wire| doc.allocator.free(wire);
         wires.deinit(doc.allocator);

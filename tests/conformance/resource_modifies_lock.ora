@@ -1,0 +1,29 @@
+resource TokenUnit = u256;
+comptime const std = @import("std");
+
+contract ResourceModifiesLock {
+    storage var balances: map<address, Resource<TokenUnit>>;
+
+    pub fn issueAndLock(to: address, amount: TokenUnit)
+        modifies balances[to]
+        requires @amount(balances[to]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    {
+        @create(balances[to], amount);
+        @lock(balances[to]);
+        @unlock(balances[to]);
+    }
+
+    pub fn transferWithLock(from: address, to: address, amount: TokenUnit)
+        modifies balances[from], balances[to]
+    {
+        @move(balances[from], balances[to], amount);
+        @lock(balances[from]);
+        @lock(balances[to]);
+        @unlock(balances[to]);
+        @unlock(balances[from]);
+    }
+
+    pub fn balanceOf(owner: address) -> TokenUnit {
+        return @amount(balances[owner]);
+    }
+}

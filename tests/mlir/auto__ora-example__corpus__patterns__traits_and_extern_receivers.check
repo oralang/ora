@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/patterns/traits_and_extern_receivers.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @NetValue
+// CHECK-LABEL: func.func @NetValue
+// CHECK-LABEL: func.func @NetValue
+// CHECK-LABEL: func.func @buffered_quote
+// CHECK-LABEL: func.func @compare_snapshots
+// CHECK-LABEL: func.func @debt_is_covered
+// CHECK-LABEL: func.func @ok

@@ -63,7 +63,7 @@ contract RefinementToBase {
         let max_value: MaxValue<u256, 1000> = 500;
         let base2: u256 = max_value; // Valid: MaxValue <: u256
         
-        let non_zero: NonZeroAddress = std.transaction.sender();
+        let non_zero: NonZeroAddress = std.msg.sender();
         let addr: address = non_zero; // Valid: NonZeroAddress <: address
     }
 }

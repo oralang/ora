@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const testing = std.testing;
-const primitives = @import("voltaire");
+const primitives = @import("primitives.zig");
 const Address = primitives.Address.Address;
 const Hardfork = primitives.Hardfork;
 
@@ -335,9 +335,9 @@ test "Debugger: stepOver replay produces an identical trace" {
         op: []const u8,
     };
 
-    var first: std.ArrayList(Trace) = .{};
+    var first: std.ArrayList(Trace) = .empty;
     defer first.deinit(allocator);
-    var second: std.ArrayList(Trace) = .{};
+    var second: std.ArrayList(Trace) = .empty;
     defer second.deinit(allocator);
 
     inline for (.{ &first, &second }) |out| {
@@ -396,9 +396,9 @@ test "Debugger: replay determinism across block-context opcodes" {
         .{ .pc = 7, .file = "fx.ora", .line = 1, .col = 1, .statement_id = 1, .is_statement = false },
     };
 
-    var first_stack: std.ArrayList(u256) = .{};
+    var first_stack: std.ArrayList(u256) = .empty;
     defer first_stack.deinit(allocator);
-    var second_stack: std.ArrayList(u256) = .{};
+    var second_stack: std.ArrayList(u256) = .empty;
     defer second_stack.deinit(allocator);
 
     inline for (.{ &first_stack, &second_stack }) |out| {

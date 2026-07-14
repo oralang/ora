@@ -1,0 +1,11 @@
+resource UsdcAmount = u256;
+resource DaiAmount = u256;
+
+contract StaticAssetCrossDomain {
+    storage var usdc: map<address, Resource<UsdcAmount>>;
+    storage var dai: map<address, Resource<DaiAmount>>;
+
+    pub fn bad(from: address, to: address, amount: UsdcAmount) {
+        @move(usdc[from], dai[to], amount);
+    }
+}

@@ -144,6 +144,92 @@ test "compiler allows writes around extern staticcall" {
     try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.items.len);
 }
 
+test "compiler treats computed storage writes as storage around extern call" {
+    const source_text =
+        \\extern trait Hook {
+        \\    call fn notify(self) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Vault {
+        \\    storage var hook: address;
+        \\
+        \\    pub fn bad(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("computed.external.same", owner), 1)
+        \\    {
+        \\        let slot: StorageSlot = @storageDerive("computed.external.same", owner);
+        \\        @storageWordStore(slot, 0, value);
+        \\        let ok = external<Hook>(hook, gas: 50000).notify();
+        \\        _ = ok;
+        \\        @storageWordStore(slot, 0, value + 1);
+        \\    }
+        \\
+        \\    pub fn ok(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("computed.external.before", owner), 1)
+        \\        modifies @storageRange(@storageDerive("computed.external.after", owner), 1)
+        \\    {
+        \\        let before: StorageSlot = @storageDerive("computed.external.before", owner);
+        \\        let after: StorageSlot = @storageDerive("computed.external.after", owner);
+        \\        @storageWordStore(before, 0, value);
+        \\        let ok_result = external<Hook>(hook, gas: 50000).notify();
+        \\        _ = ok_result;
+        \\        @storageWordStore(after, 0, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot write storage slot '$computed_storage' after external call because it was written before the call"));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(&typecheck.diagnostics, "cannot write storage slot '$computed_storage' after external call because it was written before the call"));
+}
+
+test "compiler treats imported computed storage helpers as storage around extern call" {
+    const source_text =
+        \\comptime const std_storage = @import("std/storage");
+        \\
+        \\extern trait Hook {
+        \\    call fn notify(self) -> bool;
+        \\}
+        \\
+        \\contract Vault {
+        \\    storage var hook: address;
+        \\
+        \\    pub fn bad(owner: address, value: u256)
+        \\        modifies std_storage.range(std_storage.derive("computed.external.imported", owner), 1)
+        \\    {
+        \\        let slot: StorageSlot = std_storage.derive("computed.external.imported", owner);
+        \\        std_storage.words.store(slot, 0, value);
+        \\        let ok = external<Hook>(hook, gas: 50000).notify();
+        \\        _ = ok;
+        \\        std_storage.words.store(slot, 0, value + 1);
+        \\    }
+        \\
+        \\    pub fn ok(owner: address, value: u256)
+        \\        modifies std_storage.range(std_storage.derive("computed.external.imported.before", owner), 1)
+        \\        modifies std_storage.range(std_storage.derive("computed.external.imported.after", owner), 1)
+        \\    {
+        \\        let before: StorageSlot = std_storage.derive("computed.external.imported.before", owner);
+        \\        let after: StorageSlot = std_storage.derive("computed.external.imported.after", owner);
+        \\        std_storage.words.store(before, 0, value);
+        \\        let ok_result = external<Hook>(hook, gas: 50000).notify();
+        \\        _ = ok_result;
+        \\        std_storage.words.store(after, 0, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot write storage slot '$computed_storage' after external call because it was written before the call"));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(&typecheck.diagnostics, "cannot write storage slot '$computed_storage' after external call because it was written before the call"));
+}
+
 test "compiler allows post-call writes when pre-call storage write is branch-local" {
     const source_text =
         \\extern trait ERC20 {
@@ -331,8 +417,31 @@ test "compiler lowers sema effect summaries onto HIR functions" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.effect = \"readwrites\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.read_slots"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots_complete = true"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"total\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"transient:pending\""));
+}
+
+test "compiler omits complete write-slot marker for computed storage writes" {
+    const source_text =
+        \\contract Effects {
+        \\    pub fn write_raw(owner: u256, value: u256) {
+        \\        let slot: StorageSlot = @storageDerive("effects.raw", owner);
+        \\        @storageWordStore(slot, 0, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"$computed_storage"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots_complete = true"));
 }
 
 test "compiler does not report root locks as persistent storage reads" {
@@ -374,6 +483,7 @@ test "compiler does not report root locks as persistent storage reads" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.sload \"guard\""));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.read_slots = [\"guard\"]"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots = [\"total\"]"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots_complete = true"));
 }
 
 test "compiler includes guard clause reads in effect summaries" {
@@ -412,7 +522,9 @@ test "compiler includes guard clause reads in effect summaries" {
     defer testing.allocator.free(hir_text);
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.read_slots = [\"flags\"]"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots = []"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.effect = \"reads\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots_complete = true"));
 }
 
 test "compiler composes callee effects into caller summaries" {
@@ -492,6 +604,14 @@ test "compiler tracks keyed map effects by parameter" {
         },
         else => return error.TestUnexpectedResult,
     }
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"balances"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots_complete = true"));
 }
 
 test "compiler rejects direct writes to locked slots" {
@@ -995,6 +1115,12 @@ test "compiler tracks log and havoc effect kinds" {
         },
         else => return error.TestUnexpectedResult,
     }
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots_complete = true"));
 }
 
 test "compiler tracks lock and unlock effect kinds" {

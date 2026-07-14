@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/signed/checked_div_guards.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @safe_div
+// CHECK-LABEL: func.func @safe_rem
+// CHECK-LABEL: func.func @unsigned_div
+// CHECK-LABEL: func.func @safe_negate

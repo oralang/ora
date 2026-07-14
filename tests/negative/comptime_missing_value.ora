@@ -1,0 +1,5 @@
+contract ComptimeMissingValue {
+    pub fn run() -> u256 {
+        return comptime {};
+    }
+}

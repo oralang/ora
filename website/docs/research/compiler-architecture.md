@@ -13,7 +13,8 @@ and testable across phases.
 1. **Parsing and AST**: syntax and source spans are preserved.
 2. **Type resolution**: types and refinements are committed in a typed AST.
 3. **Ora MLIR**: semantic lowering into explicit operations and regions.
-4. **Sensei-IR (SIR) and backend**: lowering toward EVM bytecode.
+4. **Sensei-IR (SIR) and [Sinora](../sinora)**: owned Zig lowering from SIR
+   to EVM bytecode.
 
 ## Research emphasis
 

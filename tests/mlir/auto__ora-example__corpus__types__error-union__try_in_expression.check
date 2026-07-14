@@ -1,0 +1,8 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/error-union/try_in_expression.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @parse_amount
+// CHECK-LABEL: func.func @validate_amount
+// CHECK-LABEL: func.func @process
+// CHECK-LABEL: func.func @add_parsed
+// CHECK-LABEL: func.func @check_and_return

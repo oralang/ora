@@ -36,12 +36,16 @@ test "strings: empty string" {
 
 test "strings: escape sequences" {
     const allocator = testing.allocator;
-    // only test supported escape sequences: \n, \t, \\
-    // note: \" might have parsing edge cases, so test separately
     const test_cases = [_][]const u8{
         "\"\\n\"", // newline
         "\"\\t\"", // tab
+        "\"\\r\"", // carriage return
         "\"\\\\\"", // backslash
+        "\"\\\"\"", // double quote
+        "\"\\'\"", // single quote
+        "\"\\0\"", // null byte
+        "\"\\x41\"", // hex byte
+        "\"\\xFF\"", // non-ASCII value byte via ASCII source escape
     };
 
     for (test_cases) |source| {
@@ -55,6 +59,35 @@ test "strings: escape sequences" {
     }
 }
 
+test "strings: escaped quote stays inside normal string" {
+    const allocator = testing.allocator;
+    const source = "\"a\\\"b\"";
+
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    try testing.expectEqual(lexer.TokenType.StringLiteral, tokens[0].type);
+    try testing.expectEqualStrings("a\"b", tokens[0].value.?.*.string);
+    try testing.expectEqual(lexer.TokenType.Eof, tokens[1].type);
+}
+
+test "strings: hex escape can produce non ASCII value byte" {
+    const allocator = testing.allocator;
+    const source = "\"\\xFF\"";
+
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
+
+    try testing.expectEqual(lexer.TokenType.StringLiteral, tokens[0].type);
+    try testing.expectEqualSlices(u8, &[_]u8{0xff}, tokens[0].value.?.*.string);
+}
+
 test "strings: raw string literal" {
     const allocator = testing.allocator;
     const source = "r\"raw string\"";
@@ -66,6 +99,16 @@ test "strings: raw string literal" {
     defer allocator.free(tokens);
 
     try testing.expectEqual(lexer.TokenType.RawStringLiteral, tokens[0].type);
+}
+
+test "strings: raw string literal rejects non ASCII source bytes" {
+    const allocator = testing.allocator;
+    const source = "r\"caf\xc3\xa9\"";
+
+    var lex = lexer.Lexer.init(allocator, source);
+    defer lex.deinit();
+
+    try testing.expectError(lexer.LexerError.InvalidCharacterInString, lex.scanTokens());
 }
 
 test "strings: character literal" {

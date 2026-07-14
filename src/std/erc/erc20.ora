@@ -1,0 +1,84 @@
+// ERC-20 (EIP-20) external interfaces and canonical selectors.
+// Bare ABI declarations by design: no requires/ensures summaries are
+// attached, so the verifier never assumes behavior of arbitrary foreign
+// tokens (fee-on-transfer and rebasing tokens violate naive summaries).
+
+/// Minimal ERC-20 token interface for external calls.
+///
+/// Call through a proxy: `external<IERC20>(token, gas: g).balanceOf(owner)`.
+///
+/// Decoding is strict per the standard: tokens that return no data from
+/// `transfer`/`approve` (USDT-class) fail the `bool` decode. A tolerant
+/// safe-transfer wrapper is planned once raw calls are available.
+extern trait IERC20 {
+    /// Total token supply. `totalSupply()`, selector `0x18160ddd`.
+    staticcall fn totalSupply(self) -> u256;
+    /// Token balance of `owner`. `balanceOf(address)`, selector `0x70a08231`.
+    staticcall fn balanceOf(self, owner: address) -> u256;
+    /// Remaining allowance granted by `owner` to `spender`.
+    /// `allowance(address,address)`, selector `0xdd62ed3e`.
+    staticcall fn allowance(self, owner: address, spender: address) -> u256;
+    /// Transfers `amount` to `to`; returns success.
+    /// `transfer(address,uint256)`, selector `0xa9059cbb`.
+    call fn transfer(self, to: address, amount: u256) -> bool;
+    /// Sets `spender`'s allowance to `amount`; returns success.
+    /// `approve(address,uint256)`, selector `0x095ea7b3`.
+    call fn approve(self, spender: address, amount: u256) -> bool;
+    /// Transfers `amount` from `from` to `to` using allowance; returns success.
+    /// `transferFrom(address,address,uint256)`, selector `0x23b872dd`.
+    call fn transferFrom(self, from: address, to: address, amount: u256) -> bool;
+}
+
+/// Optional ERC-20 metadata extension (EIP-20 `name`/`symbol`/`decimals`).
+extern trait IERC20Metadata {
+    /// Token name. `name()`, selector `0x06fdde03`.
+    staticcall fn name(self) -> string;
+    /// Token ticker symbol. `symbol()`, selector `0x95d89b41`.
+    staticcall fn symbol(self) -> string;
+    /// Display decimals. `decimals()`, selector `0x313ce567`.
+    staticcall fn decimals(self) -> u8;
+}
+
+/// Selector of `IERC20.totalSupply`, derived from the trait declaration.
+comptime const SELECTOR_TOTAL_SUPPLY: bytes4 = @selector(IERC20.totalSupply);
+/// Selector of `IERC20.balanceOf`, derived from the trait declaration.
+comptime const SELECTOR_BALANCE_OF: bytes4 = @selector(IERC20.balanceOf);
+/// Selector of `IERC20.allowance`, derived from the trait declaration.
+comptime const SELECTOR_ALLOWANCE: bytes4 = @selector(IERC20.allowance);
+/// Selector of `IERC20.transfer`, derived from the trait declaration.
+comptime const SELECTOR_TRANSFER: bytes4 = @selector(IERC20.transfer);
+/// Selector of `IERC20.approve`, derived from the trait declaration.
+comptime const SELECTOR_APPROVE: bytes4 = @selector(IERC20.approve);
+/// Selector of `IERC20.transferFrom`, derived from the trait declaration.
+comptime const SELECTOR_TRANSFER_FROM: bytes4 = @selector(IERC20.transferFrom);
+
+// Pins every derived selector against the EIP-20 vectors. A mismatch means
+// the trait declarations (or the selector machinery) drifted from the
+// standard and fails the build of every importer.
+comptime const SELECTORS_PINNED: bool = comptime {
+    const total_supply: bytes4 = hex"18160ddd";
+    const balance_of: bytes4 = hex"70a08231";
+    const allowance: bytes4 = hex"dd62ed3e";
+    const transfer: bytes4 = hex"a9059cbb";
+    const approve: bytes4 = hex"095ea7b3";
+    const transfer_from: bytes4 = hex"23b872dd";
+    if (SELECTOR_TOTAL_SUPPLY != total_supply) {
+        @compileError("IERC20.totalSupply selector drifted from EIP-20 vector 0x18160ddd");
+    }
+    if (SELECTOR_BALANCE_OF != balance_of) {
+        @compileError("IERC20.balanceOf selector drifted from EIP-20 vector 0x70a08231");
+    }
+    if (SELECTOR_ALLOWANCE != allowance) {
+        @compileError("IERC20.allowance selector drifted from EIP-20 vector 0xdd62ed3e");
+    }
+    if (SELECTOR_TRANSFER != transfer) {
+        @compileError("IERC20.transfer selector drifted from EIP-20 vector 0xa9059cbb");
+    }
+    if (SELECTOR_APPROVE != approve) {
+        @compileError("IERC20.approve selector drifted from EIP-20 vector 0x095ea7b3");
+    }
+    if (SELECTOR_TRANSFER_FROM != transfer_from) {
+        @compileError("IERC20.transferFrom selector drifted from EIP-20 vector 0x23b872dd");
+    }
+    true;
+};

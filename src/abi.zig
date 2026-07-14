@@ -410,9 +410,9 @@ pub const ContractAbi = struct {
 
     fn defaultErrorMessageTemplate(self: *const ContractAbi, allocator: std.mem.Allocator, callable: AbiCallable) ![]const u8 {
         _ = self;
-        var buffer = std.ArrayList(u8){};
-        defer buffer.deinit(allocator);
-        const writer = buffer.writer(allocator);
+        var buffer = std.Io.Writer.Allocating.init(allocator);
+        errdefer buffer.deinit();
+        const writer = &buffer.writer;
 
         try writer.writeAll(callable.name);
 
@@ -428,7 +428,7 @@ pub const ContractAbi = struct {
             try writer.writeAll("}");
         }
 
-        return buffer.toOwnedSlice(allocator);
+        return buffer.toOwnedSlice();
     }
 
     fn uiHintForType(self: *const ContractAbi, type_id: []const u8) UiFieldHint {
@@ -473,9 +473,9 @@ pub const ContractAbi = struct {
     }
 
     pub fn toJson(self: *const ContractAbi, allocator: std.mem.Allocator) ![]const u8 {
-        var buffer = try std.ArrayList(u8).initCapacity(allocator, 4096);
-        defer buffer.deinit(allocator);
-        const writer = buffer.writer(allocator);
+        var buffer = try std.Io.Writer.Allocating.initCapacity(allocator, 4096);
+        errdefer buffer.deinit();
+        const writer = &buffer.writer;
 
         try writer.writeByte('{');
 
@@ -523,8 +523,48 @@ pub const ContractAbi = struct {
         }
         try writer.writeByte(']');
 
+        if (self.hasComputedStorageLayout()) {
+            try writeObjectKey(writer, &first, "storageLayout");
+            try self.writeStorageLayout(writer);
+        }
+
         try writer.writeByte('}');
-        return buffer.toOwnedSlice(allocator);
+        return buffer.toOwnedSlice();
+    }
+
+    fn hasComputedStorageLayout(self: *const ContractAbi) bool {
+        for (self.callables) |callable| {
+            for (callable.effects) |effect| {
+                if (effect.path) |path| {
+                    if (computedStorageEffectPath(path)) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    fn writeStorageLayout(self: *const ContractAbi, writer: anytype) !void {
+        try writer.writeByte('{');
+        var first = true;
+        try writeObjectKey(writer, &first, "computedAccesses");
+        try writer.writeByte('[');
+        var wrote_any = false;
+        for (self.callables) |callable| {
+            for (callable.effects) |effect| {
+                const path = effect.path orelse continue;
+                if (!computedStorageEffectPath(path)) continue;
+                if (wrote_any) try writer.writeByte(',');
+                wrote_any = true;
+                try writer.writeByte('{');
+                var access_first = true;
+                try writeObjectStringField(writer, &access_first, "callable", callable.id);
+                try writeObjectStringField(writer, &access_first, "kind", effectKindString(effect.kind));
+                try writeObjectStringField(writer, &access_first, "path", path);
+                try writer.writeByte('}');
+            }
+        }
+        try writer.writeByte(']');
+        try writer.writeByte('}');
     }
 
     fn writeCallableExtras(self: *const ContractAbi, writer: anytype, callable: AbiCallable) !void {
@@ -544,9 +584,9 @@ pub const ContractAbi = struct {
     }
 
     pub fn toExtrasJson(self: *const ContractAbi, allocator: std.mem.Allocator) ![]const u8 {
-        var buffer = try std.ArrayList(u8).initCapacity(allocator, 2048);
-        defer buffer.deinit(allocator);
-        const writer = buffer.writer(allocator);
+        var buffer = try std.Io.Writer.Allocating.initCapacity(allocator, 2048);
+        errdefer buffer.deinit();
+        const writer = &buffer.writer;
 
         try writer.writeByte('{');
         var first = true;
@@ -603,13 +643,13 @@ pub const ContractAbi = struct {
         try writer.writeByte('}');
 
         try writer.writeByte('}');
-        return buffer.toOwnedSlice(allocator);
+        return buffer.toOwnedSlice();
     }
 
     pub fn toSolidityJson(self: *const ContractAbi, allocator: std.mem.Allocator) ![]const u8 {
-        var buffer = try std.ArrayList(u8).initCapacity(allocator, 2048);
-        defer buffer.deinit(allocator);
-        const writer = buffer.writer(allocator);
+        var buffer = try std.Io.Writer.Allocating.initCapacity(allocator, 2048);
+        errdefer buffer.deinit();
+        const writer = &buffer.writer;
 
         try writer.writeByte('[');
         var emitted: usize = 0;
@@ -670,7 +710,7 @@ pub const ContractAbi = struct {
         }
 
         try writer.writeByte(']');
-        return buffer.toOwnedSlice(allocator);
+        return buffer.toOwnedSlice();
     }
 };
 
@@ -756,9 +796,9 @@ const CompilerAbiGenerator = struct {
         return .{
             .allocator = allocator,
             .compilation = compilation,
-            .callables = .{},
-            .types = .{},
-            .runtime_messages = .{},
+            .callables = .empty,
+            .types = .empty,
+            .runtime_messages = .empty,
             .payload_lookup = AbiTypePayloadLookup.init(allocator),
             .callable_ids = std.StringHashMap(void).init(allocator),
             .runtime_message_selectors = std.StringHashMap([]const u8).init(allocator),
@@ -828,21 +868,21 @@ const CompilerAbiGenerator = struct {
         }
 
         const callables = try self.callables.toOwnedSlice(self.allocator);
-        self.callables = .{};
+        self.callables = .empty;
         errdefer {
             for (callables) |*callable| callable.deinit();
             self.allocator.free(callables);
         }
 
         const types = try self.types.toOwnedSlice(self.allocator);
-        self.types = .{};
+        self.types = .empty;
         errdefer {
             for (types) |*typ| typ.deinit();
             self.allocator.free(types);
         }
 
         const runtime_messages = try self.runtime_messages.toOwnedSlice(self.allocator);
-        self.runtime_messages = .{};
+        self.runtime_messages = .empty;
         errdefer {
             for (runtime_messages) |*message| message.deinit();
             self.allocator.free(runtime_messages);
@@ -1014,12 +1054,12 @@ const CompilerAbiGenerator = struct {
         const has_self = functionHasBareSelf(ctx.file, function);
         const offset: usize = if (has_self) 1 else 0;
 
-        var signature_types: std.ArrayList([]const u8) = .{};
+        var signature_types: std.ArrayList([]const u8) = .empty;
         defer {
             for (signature_types.items) |item| self.allocator.free(item);
             signature_types.deinit(self.allocator);
         }
-        var inputs: std.ArrayList(AbiInput) = .{};
+        var inputs: std.ArrayList(AbiInput) = .empty;
         defer inputs.deinit(self.allocator);
 
         for (function.parameters[offset..], 0..) |parameter, index| {
@@ -1036,7 +1076,7 @@ const CompilerAbiGenerator = struct {
             });
         }
 
-        var outputs: std.ArrayList(AbiInput) = .{};
+        var outputs: std.ArrayList(AbiInput) = .empty;
         defer outputs.deinit(self.allocator);
         if (function_type.return_types.len != 0) {
             const raw_return = function_type.return_types[0];
@@ -1059,7 +1099,7 @@ const CompilerAbiGenerator = struct {
         const id = try self.buildCallableId(contract_name, signature);
         try self.ensureCallableIdUnique(id);
 
-        var effects: std.ArrayList(AbiEffect) = .{};
+        var effects: std.ArrayList(AbiEffect) = .empty;
         defer effects.deinit(self.allocator);
         try self.buildEffects(ctx.typecheck.itemEffect(function_item_id), &effects);
 
@@ -1083,12 +1123,12 @@ const CompilerAbiGenerator = struct {
         function_item_id: compiler.ItemId,
         function: compiler.ast.FunctionItem,
     ) anyerror!void {
-        var signature_types: std.ArrayList([]const u8) = .{};
+        var signature_types: std.ArrayList([]const u8) = .empty;
         defer {
             for (signature_types.items) |item| self.allocator.free(item);
             signature_types.deinit(self.allocator);
         }
-        var inputs: std.ArrayList(AbiInput) = .{};
+        var inputs: std.ArrayList(AbiInput) = .empty;
         defer inputs.deinit(self.allocator);
 
         for (function.parameters) |parameter| {
@@ -1105,7 +1145,7 @@ const CompilerAbiGenerator = struct {
         const id = try self.buildCallableId(contract_name, signature);
         try self.ensureCallableIdUnique(id);
 
-        var effects: std.ArrayList(AbiEffect) = .{};
+        var effects: std.ArrayList(AbiEffect) = .empty;
         defer effects.deinit(self.allocator);
         try self.buildEffects(ctx.typecheck.itemEffect(function_item_id), &effects);
 
@@ -1128,12 +1168,12 @@ const CompilerAbiGenerator = struct {
         contract_name: []const u8,
         err: compiler.ast.ErrorDeclItem,
     ) anyerror!void {
-        var signature_types: std.ArrayList([]const u8) = .{};
+        var signature_types: std.ArrayList([]const u8) = .empty;
         defer {
             for (signature_types.items) |item| self.allocator.free(item);
             signature_types.deinit(self.allocator);
         }
-        var inputs: std.ArrayList(AbiInput) = .{};
+        var inputs: std.ArrayList(AbiInput) = .empty;
         defer inputs.deinit(self.allocator);
 
         for (err.parameters) |parameter| {
@@ -1209,12 +1249,12 @@ const CompilerAbiGenerator = struct {
         contract_name: []const u8,
         log_decl: compiler.ast.LogDeclItem,
     ) anyerror!void {
-        var signature_types: std.ArrayList([]const u8) = .{};
+        var signature_types: std.ArrayList([]const u8) = .empty;
         defer {
             for (signature_types.items) |item| self.allocator.free(item);
             signature_types.deinit(self.allocator);
         }
-        var inputs: std.ArrayList(AbiInput) = .{};
+        var inputs: std.ArrayList(AbiInput) = .empty;
         defer inputs.deinit(self.allocator);
 
         for (log_decl.fields) |field| {
@@ -1298,13 +1338,13 @@ const CompilerAbiGenerator = struct {
         slots: []const compiler.sema.EffectSlot,
         effects: *std.ArrayList(AbiEffect),
     ) !void {
-        var paths: std.ArrayList([]const u8) = .{};
+        var paths: std.ArrayList([]const u8) = .empty;
         defer {
             for (paths.items) |path| self.allocator.free(path);
             paths.deinit(self.allocator);
         }
         for (slots) |slot| {
-            try paths.append(self.allocator, try self.allocator.dupe(u8, slot.name));
+            try paths.append(self.allocator, try self.effectSlotPath(slot));
         }
         sortStringArrayList(&paths);
         for (paths.items) |path| {
@@ -1314,6 +1354,13 @@ const CompilerAbiGenerator = struct {
                 .event_id = null,
             });
         }
+    }
+
+    fn effectSlotPath(self: *CompilerAbiGenerator, slot: compiler.sema.EffectSlot) ![]const u8 {
+        if (std.mem.eql(u8, slot.name, "$computed_storage")) {
+            return try compiler.sema.formatEffectSlotPath(self.allocator, slot);
+        }
+        return try self.allocator.dupe(u8, slot.name);
     }
 
     fn resolveSemaType(
@@ -1347,6 +1394,8 @@ const CompilerAbiGenerator = struct {
                 return self.resolvedTypeForIndex(idx);
             },
             .refinement => |refinement| return self.resolveRefinementType(ctx, refinement),
+            .resource_domain => |resource| return self.resolveSemaType(ctx, resource.carrier_type.*, &.{}),
+            .resource_place => return error.UnsupportedAbiType,
             .array => |array| return self.resolveArrayType(ctx, array),
             .slice => |slice| return self.resolveSliceType(ctx, slice),
             .tuple => |elements| return self.resolveTupleType(ctx, elements),
@@ -1441,7 +1490,7 @@ const CompilerAbiGenerator = struct {
     ) anyerror!ResolvedType {
         var component_ids = try self.allocator.alloc([]const u8, elements.len);
         errdefer self.allocator.free(component_ids);
-        var wire_parts: std.ArrayList([]const u8) = .{};
+        var wire_parts: std.ArrayList([]const u8) = .empty;
         defer {
             for (wire_parts.items) |part| self.allocator.free(part);
             wire_parts.deinit(self.allocator);
@@ -1472,7 +1521,7 @@ const CompilerAbiGenerator = struct {
     ) anyerror!ResolvedType {
         var fields = try self.allocator.alloc(AbiFieldRef, fields_input.len);
         errdefer self.allocator.free(fields);
-        var wire_parts: std.ArrayList([]const u8) = .{};
+        var wire_parts: std.ArrayList([]const u8) = .empty;
         defer {
             for (wire_parts.items) |part| self.allocator.free(part);
             wire_parts.deinit(self.allocator);
@@ -1506,7 +1555,7 @@ const CompilerAbiGenerator = struct {
         if (ctx.typecheck.instantiatedStructByName(name)) |instantiated| {
             var fields = try self.allocator.alloc(AbiFieldRef, instantiated.fields.len);
             errdefer self.allocator.free(fields);
-            var wire_parts: std.ArrayList([]const u8) = .{};
+            var wire_parts: std.ArrayList([]const u8) = .empty;
             defer {
                 for (wire_parts.items) |part| self.allocator.free(part);
                 wire_parts.deinit(self.allocator);
@@ -1541,7 +1590,7 @@ const CompilerAbiGenerator = struct {
         const struct_item = owner_ctx.file.item(ref.item_id).Struct;
         var fields = try self.allocator.alloc(AbiFieldRef, struct_item.fields.len);
         errdefer self.allocator.free(fields);
-        var wire_parts: std.ArrayList([]const u8) = .{};
+        var wire_parts: std.ArrayList([]const u8) = .empty;
         defer {
             for (wire_parts.items) |part| self.allocator.free(part);
             wire_parts.deinit(self.allocator);
@@ -1922,6 +1971,10 @@ fn effectKindString(kind: AbiEffectKind) []const u8 {
     };
 }
 
+fn computedStorageEffectPath(path: []const u8) bool {
+    return std.mem.startsWith(u8, path, "$computed_storage[");
+}
+
 fn projectStateMutability(callable: AbiCallable) []const u8 {
     var has_reads = false;
     var has_writes = false;
@@ -1945,7 +1998,7 @@ fn projectStateMutability(callable: AbiCallable) []const u8 {
 }
 
 fn parseUnsignedIntLiteral(raw: []const u8) ?u256 {
-    var cleaned_storage = std.ArrayList(u8){};
+    var cleaned_storage = std.ArrayList(u8).empty;
     defer cleaned_storage.deinit(std.heap.page_allocator);
 
     for (raw) |ch| {
@@ -1977,13 +2030,13 @@ fn sortStringSlices(values: [][]const u8) void {
 }
 
 fn buildCanonicalTypePayload(allocator: std.mem.Allocator, node: *const AbiTypeNode) ![]const u8 {
-    var buffer = try std.ArrayList(u8).initCapacity(allocator, 256);
-    defer buffer.deinit(allocator);
+    var buffer = try std.Io.Writer.Allocating.initCapacity(allocator, 256);
+    errdefer buffer.deinit();
 
-    const writer = buffer.writer(allocator);
+    const writer = &buffer.writer;
     try writeTypeNodeObject(writer, node, false);
 
-    return buffer.toOwnedSlice(allocator);
+    return buffer.toOwnedSlice();
 }
 
 fn writeTypeNodeObject(writer: anytype, node: *const AbiTypeNode, include_type_id: bool) !void {

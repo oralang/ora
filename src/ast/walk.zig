@@ -131,6 +131,7 @@ pub fn walkStmt(
         },
         .Log => |log_stmt| for (log_stmt.args) |arg| try walkExpr(Visitor, visitor, ast_file, arg, options),
         .Lock => |lock_stmt| try walkExpr(Visitor, visitor, ast_file, lock_stmt.path, options),
+        .CallHint => {},
         .Unlock => |unlock_stmt| try walkExpr(Visitor, visitor, ast_file, unlock_stmt.path, options),
         .Assert => |assert_stmt| try walkExpr(Visitor, visitor, ast_file, assert_stmt.condition, options),
         .Assume => |assume_stmt| try walkExpr(Visitor, visitor, ast_file, assume_stmt.condition, options),
@@ -553,14 +554,14 @@ test "walkExpr switch pattern option preserves legacy name collection" {
     };
     defer ast_file.deinit();
 
-    var legacy_names: std.ArrayList([]const u8) = .{};
+    var legacy_names: std.ArrayList([]const u8) = .empty;
     defer legacy_names.deinit(testing.allocator);
     try collectNamesInExpr(testing.allocator, &ast_file, ExprId.fromIndex(3), &legacy_names);
     try testing.expectEqual(@as(usize, 2), legacy_names.items.len);
     try testing.expectEqualStrings("condition", legacy_names.items[0]);
     try testing.expectEqualStrings("value", legacy_names.items[1]);
 
-    var walked_names: std.ArrayList([]const u8) = .{};
+    var walked_names: std.ArrayList([]const u8) = .empty;
     defer walked_names.deinit(testing.allocator);
     var visitor = CollectNamesVisitor{
         .allocator = testing.allocator,
@@ -667,7 +668,7 @@ test "walkBody visits statements and nested bodies in source order" {
     var ast_file = initTestAstFile(root_items[0..], items[0..], bodies[0..], statements[0..], expressions[0..], type_exprs[0..], patterns[0..]);
     defer ast_file.deinit();
 
-    var events: std.ArrayList(u32) = .{};
+    var events: std.ArrayList(u32) = .empty;
     defer events.deinit(testing.allocator);
     var visitor = EnterOrderVisitor{ .allocator = testing.allocator, .events = &events };
     try walkBody(EnterOrderVisitor, &visitor, &ast_file, bid(0), .{});
@@ -807,7 +808,7 @@ test "walkExpr visits expression children in source order" {
     var ast_file = initTestAstFile(root_items[0..], items[0..], bodies[0..], statements[0..], expressions[0..], type_exprs[0..], patterns[0..]);
     defer ast_file.deinit();
 
-    var events: std.ArrayList(u32) = .{};
+    var events: std.ArrayList(u32) = .empty;
     defer events.deinit(testing.allocator);
     var visitor = EnterOrderVisitor{ .allocator = testing.allocator, .events = &events };
     try walkExpr(EnterOrderVisitor, &visitor, &ast_file, eid(40), .{});
@@ -882,7 +883,7 @@ test "walkPattern and walkSwitchPattern visit pattern children in order" {
     var ast_file = initTestAstFile(root_items[0..], items[0..], bodies[0..], statements[0..], expressions[0..], type_exprs[0..], patterns[0..]);
     defer ast_file.deinit();
 
-    var pattern_events: std.ArrayList(u32) = .{};
+    var pattern_events: std.ArrayList(u32) = .empty;
     defer pattern_events.deinit(testing.allocator);
     var pattern_visitor = EnterOrderVisitor{ .allocator = testing.allocator, .events = &pattern_events };
     try walkPattern(EnterOrderVisitor, &pattern_visitor, &ast_file, pid(4), .{});
@@ -907,7 +908,7 @@ test "walkPattern and walkSwitchPattern visit pattern children in order" {
     };
     const root_pattern: nodes.SwitchPattern = .{ .Or = .{ .range = r, .alternatives = alternatives[0..] } };
 
-    var switch_events: std.ArrayList(u32) = .{};
+    var switch_events: std.ArrayList(u32) = .empty;
     defer switch_events.deinit(testing.allocator);
     var switch_visitor = EnterOrderVisitor{ .allocator = testing.allocator, .events = &switch_events };
     try walkSwitchPattern(EnterOrderVisitor, &switch_visitor, &ast_file, root_pattern, .{});
@@ -963,7 +964,7 @@ test "walkExpr options control body-bearing and optional expression children" {
     var ast_file = initTestAstFile(root_items[0..], items[0..], bodies[0..], statements[0..], expressions[0..], type_exprs[0..], patterns[0..]);
     defer ast_file.deinit();
 
-    var default_events: std.ArrayList(u32) = .{};
+    var default_events: std.ArrayList(u32) = .empty;
     defer default_events.deinit(testing.allocator);
     var default_visitor = EnterOrderVisitor{ .allocator = testing.allocator, .events = &default_events };
     try walkExpr(EnterOrderVisitor, &default_visitor, &ast_file, eid(12), .{});
@@ -981,7 +982,7 @@ test "walkExpr options control body-bearing and optional expression children" {
     };
     try testing.expectEqualSlices(u32, expected_default[0..], default_events.items);
 
-    var option_events: std.ArrayList(u32) = .{};
+    var option_events: std.ArrayList(u32) = .empty;
     defer option_events.deinit(testing.allocator);
     var option_visitor = EnterOrderVisitor{ .allocator = testing.allocator, .events = &option_events };
     try walkExpr(EnterOrderVisitor, &option_visitor, &ast_file, eid(12), .{
@@ -1025,7 +1026,7 @@ test "walkExpr enter and exit hooks use pre-order and post-order" {
     var ast_file = initTestAstFile(root_items[0..], items[0..], bodies[0..], statements[0..], expressions[0..], type_exprs[0..], patterns[0..]);
     defer ast_file.deinit();
 
-    var events: std.ArrayList(u32) = .{};
+    var events: std.ArrayList(u32) = .empty;
     defer events.deinit(testing.allocator);
     var visitor = ExprEnterExitVisitor{ .allocator = testing.allocator, .events = &events };
     try walkExpr(ExprEnterExitVisitor, &visitor, &ast_file, eid(0), .{});

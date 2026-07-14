@@ -234,7 +234,7 @@ filled and later entries were omitted.
 - **[Language reference](website/docs/)** — feature docs: types, regions, error unions, traits, verification, comptime
 - **[Compiler Field Guide](website/docs/compiler/field-guide/)** — contributor onboarding (14 chapters)
 - **[What Ora Proves](website/docs/compiler/what-ora-proves.md)** — public SMT soundness model and trust boundaries
-- **[Formal specification](docs/formal-specs/ora-2.md)** — type system calculus
+- **[Formal specification](docs/formal-specs/type_system_spec_v1.md)** — type system calculus
 - **[CLI and config reference](docs/ora-cli-imports-config-reference.md)** — full CLI, import system, and `ora.toml` schema
 - **[Examples](ora-example/)** — apps, vault tiers, and feature demos
 

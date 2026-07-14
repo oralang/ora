@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/operators/assignment/wrapping_assign.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @wrapping_add_assign_u256
+// CHECK-LABEL: func.func @wrapping_sub_assign_u256
+// CHECK-LABEL: func.func @wrapping_mul_assign_u256
+// CHECK-LABEL: func.func @wrapping_add_assign_u8
+// CHECK-LABEL: func.func @wrapping_sub_assign_u8
+// CHECK-LABEL: func.func @wrapping_mul_assign_u8
+// CHECK-LABEL: func.func @all_wrapping_sequence

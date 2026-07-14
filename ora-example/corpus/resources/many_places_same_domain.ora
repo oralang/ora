@@ -1,0 +1,40 @@
+resource TokenUnit = u256;
+comptime const std = @import("std");
+
+contract ManyPlacesSameDomain {
+    storage var user_balances: map<address, Resource<TokenUnit>>;
+    storage var reserve: Resource<TokenUnit>;
+    storage var fees: Resource<TokenUnit>;
+
+    pub fn issue_user(to: address, amount: TokenUnit)
+        requires @amount(user_balances[to]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    {
+        @create(user_balances[to], amount);
+    }
+
+    pub fn collect_fee(from: address, amount: TokenUnit)
+        requires @amount(user_balances[from]) >= amount
+        requires @amount(fees) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    {
+        @move(user_balances[from], fees, amount);
+    }
+
+    pub fn fund_reserve(from: address, amount: TokenUnit)
+        requires @amount(user_balances[from]) >= amount
+        requires @amount(reserve) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    {
+        @move(user_balances[from], reserve, amount);
+    }
+
+    pub fn balanceOf(owner: address) -> TokenUnit {
+        return @amount(user_balances[owner]);
+    }
+
+    pub fn reserveBalance() -> TokenUnit {
+        return @amount(reserve);
+    }
+
+    pub fn feesBalance() -> TokenUnit {
+        return @amount(fees);
+    }
+}

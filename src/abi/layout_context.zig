@@ -94,7 +94,7 @@ pub const LayoutContext = struct {
     }
 
     pub fn signatureForMethod(self: *const LayoutContext, name: []const u8, has_self: bool, param_types: []const Type) anyerror![]const u8 {
-        var parts: std.ArrayList([]const u8) = .{};
+        var parts: std.ArrayList([]const u8) = .empty;
         defer {
             for (parts.items) |part| self.allocator.free(part);
             parts.deinit(self.allocator);
@@ -164,7 +164,8 @@ pub const LayoutContext = struct {
             },
             .contract => true,
             .refinement => |refinement| self.errorTypeHasPayloadWithAllocator(allocator, refinement.base_type.*),
-            .unknown, .never, .void, .function, .map, .external_proxy => false,
+            .resource_domain => |resource| self.errorTypeHasPayloadWithAllocator(allocator, resource.carrier_type.*),
+            .unknown, .never, .void, .function, .map, .external_proxy, .resource_place => false,
             else => true,
         };
     }
@@ -197,6 +198,8 @@ pub const LayoutContext = struct {
             .struct_ => |named| self.normalizeStruct(arena, named.name),
             .contract => error.UnsupportedAbiType,
             .refinement => |refinement| self.normalizeType(arena, refinement.base_type.*),
+            .resource_domain => |resource| self.normalizeType(arena, resource.carrier_type.*),
+            .resource_place => error.UnsupportedAbiType,
             .error_union => |error_union| self.normalizeErrorUnion(arena, error_union),
             .tuple => |elements| blk: {
                 const normalized = try arena.alloc(Type, elements.len);

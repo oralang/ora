@@ -29,9 +29,9 @@ pub fn build(
         for (child_lists) |*list| list.deinit(arena);
         arena.free(child_lists);
     }
-    for (child_lists) |*list| list.* = .{};
+    for (child_lists) |*list| list.* = .empty;
 
-    var roots = std.ArrayList(usize){};
+    var roots = std.ArrayList(usize).empty;
     defer roots.deinit(arena);
 
     for (symbols, 0..) |symbol, symbol_index| {
@@ -75,12 +75,22 @@ fn buildRecursive(
 
     return .{
         .name = symbol.name,
-        .detail = symbol.detail,
+        .detail = try documentSymbolDetail(arena, symbol),
         .kind = @enumFromInt(semantic_index.toLspKind(symbol.kind)),
         .range = protocol_ranges.byteRangeToLspOrRaw(source, line_index, encoding, symbol.range),
         .selectionRange = protocol_ranges.byteRangeToLspOrRaw(source, line_index, encoding, symbol.selection_range),
         .children = children,
     };
+}
+
+fn documentSymbolDetail(arena: Allocator, symbol: semantic_index.Symbol) !?[]const u8 {
+    if (!isInlineFunction(symbol)) return symbol.detail;
+    const detail = symbol.detail orelse return "inline";
+    return try std.fmt.allocPrint(arena, "inline {s}", .{detail});
+}
+
+fn isInlineFunction(symbol: semantic_index.Symbol) bool {
+    return symbol.is_inline and (symbol.kind == .function or symbol.kind == .method);
 }
 
 pub fn buildFlat(

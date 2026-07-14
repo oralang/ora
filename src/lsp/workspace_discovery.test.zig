@@ -10,6 +10,12 @@ fn pathFromTmpAlloc(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, rel_p
     return std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, rel_path });
 }
 
+fn realPathAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const real_z = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, path, allocator);
+    defer allocator.free(real_z);
+    return allocator.dupe(u8, real_z);
+}
+
 const FakeDocs = struct {
     allocator: std.mem.Allocator,
     open_uri: ?[]const u8 = null,
@@ -61,28 +67,28 @@ test "lsp workspace discovery: discovers unopened importers and caches result" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("project");
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "project");
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "project/target.ora",
         .data = "contract Target { pub fn called() {} }",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "project/importer.ora",
         .data = "const target = @import(\"./target.ora\"); contract Importer {}",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "project/other.ora",
         .data = "contract Other {}",
     });
 
     const target_rel = try pathFromTmpAlloc(allocator, tmp, "project/target.ora");
     defer allocator.free(target_rel);
-    const target_path = try std.fs.cwd().realpathAlloc(allocator, target_rel);
+    const target_path = try realPathAlloc(allocator, target_rel);
     defer allocator.free(target_path);
 
     const root_rel = try pathFromTmpAlloc(allocator, tmp, "project");
     defer allocator.free(root_rel);
-    const root = try std.fs.cwd().realpathAlloc(allocator, root_rel);
+    const root = try realPathAlloc(allocator, root_rel);
     defer allocator.free(root);
 
     var docs = FakeDocs{ .allocator = allocator };

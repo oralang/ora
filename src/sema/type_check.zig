@@ -11,6 +11,7 @@ const region_rules = @import("region.zig");
 const lookup_index = @import("lookup.zig");
 const unique_list = @import("unique_list.zig");
 const compiler_query = @import("../compiler_query.zig");
+const generic_call_args = @import("../generic_call_args.zig");
 const builtins = @import("../builtins.zig");
 const ora_types = @import("ora_types");
 const type_builtin = ora_types.builtin;
@@ -46,11 +47,20 @@ const ImplInterface = model.ImplInterface;
 const external_call_failed_error_types = [_]Type{
     .{ .named = .{ .name = "ExternalCallFailed" } },
 };
+const computed_storage_effect_root = "$computed_storage";
+const std_storage_module_path = "embedded://std/storage.ora";
+const std_fixed_size_data_module_path = "embedded://std/storage/fixed_size_data.ora";
 const EffectSummaryState = enum { unvisited, visiting, done };
 const ConstEvalResult = model.ConstEvalResult;
 const ConstValue = ora_types.ConstValue;
 const BigInt = std.math.big.int.Managed;
 const IntegerResolutionResult = enum { not_applicable, resolved, overflow };
+const ResourcePlaceInfo = struct {
+    domain_type: Type,
+    carrier_type: Type,
+    region: Region,
+    slot: ?EffectSlot = null,
+};
 const descriptorFromTypeExpr = descriptors.descriptorFromTypeExpr;
 const descriptorFromPathName = descriptors.descriptorFromPathName;
 const refinementArgsFromAst = descriptors.refinementArgsFromAst;
@@ -68,6 +78,20 @@ fn builtinKind(name: []const u8) ?BuiltinKind {
 fn isReferenceConstevalBuiltin(kind: BuiltinKind) bool {
     return switch (kind) {
         .selector, .abi_signature, .event_topic, .struct_fields, .trait_methods => true,
+        else => false,
+    };
+}
+
+fn isReflectionMetadataBuiltin(kind: BuiltinKind) bool {
+    return switch (kind) {
+        .struct_fields, .trait_methods => true,
+        else => false,
+    };
+}
+
+fn isResourceBoundaryBuiltin(kind: BuiltinKind) bool {
+    return switch (kind) {
+        .resource_move, .resource_create, .resource_destroy => true,
         else => false,
     };
 }
@@ -127,6 +151,8 @@ fn typeContainsUnknown(ty: Type) bool {
             }
             break :blk false;
         },
+        .resource_domain => |resource| typeContainsUnknown(resource.carrier_type.*),
+        .resource_place => |place| typeContainsUnknown(place.domain_type.*),
         .refinement => |refinement| typeContainsUnknown(refinement.base_type.*),
         else => false,
     };
@@ -156,6 +182,8 @@ fn typeContainsMap(ty: Type) bool {
             }
             break :blk false;
         },
+        .resource_domain => |resource| typeContainsMap(resource.carrier_type.*),
+        .resource_place => |place| typeContainsMap(place.domain_type.*),
         .function => |function| blk: {
             for (function.param_types) |param_type| {
                 if (typeContainsMap(param_type)) break :blk true;
@@ -169,6 +197,101 @@ fn typeContainsMap(ty: Type) bool {
         else => false,
     };
 }
+
+fn typeContainsStorageCapability(ty: Type) bool {
+    return switch (ty) {
+        .storage_slot, .storage_range => true,
+        .tuple => |elements| blk: {
+            for (elements) |element| {
+                if (typeContainsStorageCapability(element)) break :blk true;
+            }
+            break :blk false;
+        },
+        .anonymous_struct => |struct_type| blk: {
+            for (struct_type.fields) |field| {
+                if (typeContainsStorageCapability(field.ty)) break :blk true;
+            }
+            break :blk false;
+        },
+        .array => |array| typeContainsStorageCapability(array.element_type.*),
+        .slice => |slice| typeContainsStorageCapability(slice.element_type.*),
+        .map => |map| (map.key_type != null and typeContainsStorageCapability(map.key_type.?.*)) or
+            (map.value_type != null and typeContainsStorageCapability(map.value_type.?.*)),
+        .error_union => |error_union| blk: {
+            if (typeContainsStorageCapability(error_union.payload_type.*)) break :blk true;
+            for (error_union.error_types) |error_type| {
+                if (typeContainsStorageCapability(error_type)) break :blk true;
+            }
+            break :blk false;
+        },
+        .resource_domain => |resource| typeContainsStorageCapability(resource.carrier_type.*),
+        .function => |function| blk: {
+            for (function.param_types) |param_type| {
+                if (typeContainsStorageCapability(param_type)) break :blk true;
+            }
+            for (function.return_types) |return_type| {
+                if (typeContainsStorageCapability(return_type)) break :blk true;
+            }
+            break :blk false;
+        },
+        .refinement => |refinement| typeContainsStorageCapability(refinement.base_type.*),
+        else => false,
+    };
+}
+
+fn resourcePlaceReadType(ty: Type) ?Type {
+    if (ty.kind() != .resource_place) return null;
+    return ty.resource_place.domain_type.*;
+}
+
+fn typeContainsResourcePlace(ty: Type) bool {
+    return switch (ty) {
+        .resource_place => true,
+        .tuple => |elements| blk: {
+            for (elements) |element| {
+                if (typeContainsResourcePlace(element)) break :blk true;
+            }
+            break :blk false;
+        },
+        .anonymous_struct => |struct_type| blk: {
+            for (struct_type.fields) |field| {
+                if (typeContainsResourcePlace(field.ty)) break :blk true;
+            }
+            break :blk false;
+        },
+        .array => |array| typeContainsResourcePlace(array.element_type.*),
+        .slice => |slice| typeContainsResourcePlace(slice.element_type.*),
+        .map => |map| (map.key_type != null and typeContainsResourcePlace(map.key_type.?.*)) or
+            (map.value_type != null and typeContainsResourcePlace(map.value_type.?.*)),
+        .error_union => |error_union| blk: {
+            if (typeContainsResourcePlace(error_union.payload_type.*)) break :blk true;
+            for (error_union.error_types) |error_type| {
+                if (typeContainsResourcePlace(error_type)) break :blk true;
+            }
+            break :blk false;
+        },
+        .function => |function| blk: {
+            for (function.param_types) |param_type| {
+                if (typeContainsResourcePlace(param_type)) break :blk true;
+            }
+            for (function.return_types) |return_type| {
+                if (typeContainsResourcePlace(return_type)) break :blk true;
+            }
+            break :blk false;
+        },
+        .refinement => |refinement| typeContainsResourcePlace(refinement.base_type.*),
+        else => false,
+    };
+}
+
+fn typeContainsOpaqueRuntimeCapability(ty: Type) bool {
+    return typeContainsStorageCapability(ty) or typeContainsResourcePlace(ty);
+}
+
+const OpaqueRuntimeCapabilityKind = enum {
+    storage,
+    resource,
+};
 
 fn typesFlowCompatible(expected_type: Type, actual_type: Type) bool {
     if (expected_type.kind() == .refinement) {
@@ -234,6 +357,8 @@ fn scaledFlowCompatible(expected: model.RefinementType, actual_type: Type) bool 
 fn keySegmentEql(lhs: KeySegment, rhs: KeySegment) bool {
     return switch (lhs) {
         .parameter => |index| rhs == .parameter and rhs.parameter == index,
+        .comptime_parameter => |index| rhs == .comptime_parameter and rhs.comptime_parameter == index,
+        .comptime_range_parameter => |index| rhs == .comptime_range_parameter and rhs.comptime_range_parameter == index,
         .constant => |value| rhs == .constant and std.mem.eql(u8, rhs.constant, value),
         .msg_sender => rhs == .msg_sender,
         .tx_origin => rhs == .tx_origin,
@@ -243,14 +368,14 @@ fn keySegmentEql(lhs: KeySegment, rhs: KeySegment) bool {
 
 fn keySegmentMayAlias(lhs: KeySegment, rhs: KeySegment) bool {
     return switch (lhs) {
-        .unknown, .msg_sender, .tx_origin => true,
+        .unknown, .msg_sender, .tx_origin, .comptime_parameter, .comptime_range_parameter => true,
         .parameter => |lhs_index| switch (rhs) {
             .parameter => |rhs_index| lhs_index == rhs_index,
-            .unknown, .msg_sender, .tx_origin, .constant => true,
+            .unknown, .msg_sender, .tx_origin, .comptime_parameter, .comptime_range_parameter, .constant => true,
         },
         .constant => |lhs_value| switch (rhs) {
             .constant => |rhs_value| std.mem.eql(u8, lhs_value, rhs_value),
-            .unknown, .msg_sender, .tx_origin, .parameter => true,
+            .unknown, .msg_sender, .tx_origin, .parameter, .comptime_parameter, .comptime_range_parameter => true,
         },
     };
 }
@@ -463,6 +588,7 @@ pub fn typeCheck(
         .item_types = &.{},
         .item_regions = &.{},
         .item_effects = &.{},
+        .item_call_hints = &.{},
         .item_modifies = &.{},
         .pattern_types = &.{},
         .pattern_initializers = &.{},
@@ -490,6 +616,7 @@ pub fn typeCheck(
     var item_regions = try arena.alloc(Region, file.items.len);
     const item_effects = try arena.alloc(Effect, file.items.len);
     const item_modifies = try arena.alloc(?[]EffectSlot, file.items.len);
+    const item_call_hints = try arena.alloc(ast.nodes.CallHint, file.items.len);
     var pattern_types = try arena.alloc(LocatedType, file.patterns.len);
     var pattern_initializers: []?ast.ExprId = &.{};
     var pattern_binding_kinds: []?ast.BindingKind = &.{};
@@ -504,6 +631,7 @@ pub fn typeCheck(
     @memset(item_regions, .none);
     @memset(item_effects, .pure);
     @memset(item_modifies, null);
+    @memset(item_call_hints, .none);
     @memset(pattern_types, LocatedType.unlocated(.{ .unknown = {} }));
     @memset(expr_types, .{ .unknown = {} });
     @memset(body_types, .{ .void = {} });
@@ -579,6 +707,7 @@ pub fn typeCheck(
         .item_regions = item_regions,
         .item_effects = item_effects,
         .item_modifies = item_modifies,
+        .item_call_hints = item_call_hints,
         .pattern_types = pattern_types,
         .pattern_initializers = pattern_initializers,
         .pattern_binding_kinds = pattern_binding_kinds,
@@ -586,14 +715,14 @@ pub fn typeCheck(
         .call_resolutions = call_resolutions,
         .expr_effects = expr_effects,
         .effect_states = effect_states,
-        .instantiated_structs = .{},
+        .instantiated_structs = .empty,
         .instantiated_struct_lookup = std.StringHashMap(usize).init(arena),
-        .instantiated_enums = .{},
+        .instantiated_enums = .empty,
         .instantiated_enum_lookup = std.StringHashMap(usize).init(arena),
-        .instantiated_bitfields = .{},
+        .instantiated_bitfields = .empty,
         .instantiated_bitfield_lookup = std.StringHashMap(usize).init(arena),
-        .trait_interfaces = .{},
-        .impl_interfaces = .{},
+        .trait_interfaces = .empty,
+        .impl_interfaces = .empty,
         .catch_error_tag_patterns = catch_error_tag_patterns,
         .opaque_multi_error_patterns = opaque_multi_error_patterns,
         .diagnostics = &result.diagnostics,
@@ -666,6 +795,9 @@ pub fn typeCheck(
                 else
                     try typechecker.resolveTypeExpr(type_alias.target_type);
             },
+            .Resource => |resource| {
+                item_types[index] = try typechecker.resolveResourceDomainType(ast.ItemId.fromIndex(index), resource);
+            },
             else => {},
         }
     }
@@ -701,6 +833,7 @@ pub fn typeCheck(
     result.item_regions = item_regions;
     result.item_effects = item_effects;
     result.item_modifies = item_modifies;
+    result.item_call_hints = item_call_hints;
     result.pattern_types = pattern_types;
     result.pattern_initializers = pattern_initializers;
     result.pattern_binding_kinds = pattern_binding_kinds;
@@ -726,7 +859,7 @@ const ExprEffectList = struct {
 
     inline_buffer: [inline_capacity]ExprEffect = undefined,
     inline_len: usize = 0,
-    spill: std.ArrayList(ExprEffect) = .{},
+    spill: std.ArrayList(ExprEffect) = .empty,
 
     fn append(self: *ExprEffectList, allocator: std.mem.Allocator, entry: ExprEffect) !void {
         if (self.spill.capacity == 0 and self.inline_len < inline_capacity) {
@@ -766,6 +899,7 @@ const TypeChecker = struct {
     item_regions: []Region,
     item_effects: []Effect,
     item_modifies: []?[]EffectSlot,
+    item_call_hints: []ast.nodes.CallHint,
     pattern_types: []LocatedType,
     pattern_initializers: []?ast.ExprId,
     pattern_binding_kinds: []?ast.BindingKind,
@@ -785,12 +919,18 @@ const TypeChecker = struct {
     opaque_multi_error_patterns: []bool = &.{},
     try_scope_depth: usize = 0,
     active_aliases: InlineItemIdStack = .{},
+    active_resources: InlineItemIdStack = .{},
     current_return_type: ?Type = null,
     current_spec_clause_kind: ?ast.SpecClauseKind = null,
     current_contract: ?ast.ItemId = null,
     current_function_item: ?ast.ItemId = null,
+    /// The one statement id where `@callHint` is legal in the function
+    /// currently being checked (its body's first statement), or null.
+    allowed_call_hint_stmt: ?ast.StmtId = null,
     comptime_depth: usize = 0,
     effect_scratch_depth: usize = 0,
+    allow_resource_boundary_builtin_statement: bool = false,
+    allow_resource_place_operand: bool = false,
     diagnostics: *diagnostics.DiagnosticList,
 
     fn setCallResolution(self: *TypeChecker, expr_id: ast.ExprId, resolved: ResolvedCall) !void {
@@ -878,6 +1018,30 @@ const TypeChecker = struct {
         };
     }
 
+    fn stdStorageFunctionCall(self: *const TypeChecker, call: ast.CallExpr, name: []const u8) !bool {
+        const query = self.import_query orelse return false;
+        const callee_field = switch (self.file.expression(call.callee).*) {
+            .Field => |field| field,
+            .Group => |group| switch (self.file.expression(group.expr).*) {
+                .Field => |field| field,
+                else => return false,
+            },
+            else => return false,
+        };
+        if (!std.mem.eql(u8, callee_field.name, name)) return false;
+        const module_id = (try self.importedModuleForExpr(callee_field.base)) orelse return false;
+        const module_path = try query.modulePath(module_id);
+        return std.mem.eql(u8, module_path, std_storage_module_path);
+    }
+
+    fn stdStorageDeriveCall(self: *const TypeChecker, call: ast.CallExpr) !bool {
+        return try self.stdStorageFunctionCall(call, "derive");
+    }
+
+    fn stdStorageRangeCall(self: *const TypeChecker, call: ast.CallExpr) !bool {
+        return try self.stdStorageFunctionCall(call, "range");
+    }
+
     fn importedItemType(self: *const TypeChecker, module_id: source.ModuleId, name: []const u8) !?Type {
         const query = self.import_query orelse return null;
         const item_id = (try query.lookupItem(module_id, name)) orelse return null;
@@ -917,7 +1081,14 @@ const TypeChecker = struct {
         return false;
     }
 
-    fn importedFunctionCallResolution(self: *TypeChecker, call: ast.CallExpr) !?ResolvedCall {
+    const ImportedFunctionCandidate = struct {
+        module_id: source.ModuleId,
+        item_id: ast.ItemId,
+        file: *const ast.AstFile,
+        function: ast.FunctionItem,
+    };
+
+    fn importedFunctionCandidate(self: *TypeChecker, call: ast.CallExpr) !?ImportedFunctionCandidate {
         const query = self.import_query orelse return null;
         const callee_field = switch (self.file.expression(call.callee).*) {
             .Field => |field| field,
@@ -936,22 +1107,37 @@ const TypeChecker = struct {
             else => return null,
         };
         if (function.parent_contract != null or function.is_comptime) return null;
-
-        const bindings = if (function.is_generic) blk: {
-            const inferred = (try self.genericTypeBindingsForImportedCall(target_module_id, target_file, function, call)) orelse return null;
-            break :blk inferred;
-        } else &.{};
-
-        const runtime_parameter_types = (try self.importedRuntimeParameterTypes(target_module_id, target_file, target_item_id, function, bindings)) orelse return null;
-        if (!function.is_generic and call.args.len != runtime_parameter_types.len) return null;
-        const return_type = (try self.importedFunctionReturnType(target_module_id, target_file, target_item_id, function, bindings)) orelse return null;
         return .{
             .module_id = target_module_id,
             .item_id = target_item_id,
+            .file = target_file,
+            .function = function,
+        };
+    }
+
+    fn importedFunctionCallResolution(self: *TypeChecker, call: ast.CallExpr) !?ResolvedCall {
+        const candidate = (try self.importedFunctionCandidate(call)) orelse return null;
+        const bindings = if (candidate.function.is_generic) blk: {
+            const inferred = (try self.genericTypeBindingsForImportedCall(candidate.module_id, candidate.file, candidate.function, call)) orelse return null;
+            break :blk inferred;
+        } else &.{};
+
+        const runtime_parameter_types = (try self.importedRuntimeParameterTypes(candidate.module_id, candidate.file, candidate.item_id, candidate.function, bindings)) orelse return null;
+        if (!candidate.function.is_generic and call.args.len != runtime_parameter_types.len) return null;
+        const return_type = (try self.importedFunctionReturnType(candidate.module_id, candidate.file, candidate.item_id, candidate.function, bindings)) orelse return null;
+        return .{
+            .module_id = candidate.module_id,
+            .item_id = candidate.item_id,
             .generic_bindings = bindings,
             .runtime_parameter_types = runtime_parameter_types,
             .return_type = return_type,
         };
+    }
+
+    fn importedGenericCallBindingFailed(self: *TypeChecker, call: ast.CallExpr) !bool {
+        const candidate = (try self.importedFunctionCandidate(call)) orelse return false;
+        if (!candidate.function.is_generic) return false;
+        return (try self.genericTypeBindingsForImportedCall(candidate.module_id, candidate.file, candidate.function, call)) == null;
     }
 
     fn importedRuntimeParameterTypes(
@@ -1052,25 +1238,22 @@ const TypeChecker = struct {
         function: ast.FunctionItem,
         call: ast.CallExpr,
     ) !?[]const GenericTypeBinding {
-        const comptime_count = self.leadingComptimeParameterCount(function);
-        const inferable_type_count = self.leadingGenericTypeParameterCountInFile(target_file, function);
+        const comptime_count = self.comptimeParameterCount(function);
         if (comptime_count == 0) return &.{};
         const runtime_params = try self.runtimeFunctionParameters(function);
         const effective_runtime_count = runtime_params.len;
 
-        if (call.args.len >= comptime_count + effective_runtime_count) {
+        if (call.args.len == comptime_count + effective_runtime_count) {
             const bindings = try self.arena.alloc(GenericTypeBinding, comptime_count);
-            for (function.parameters[0..comptime_count], 0..) |parameter, index| {
-                const name = self.patternNameInFile(target_file, parameter.pattern) orelse return null;
-                const value = (try self.genericBindingValueForImportedCallArg(target_file, parameter, call.args[index])) orelse return null;
-                bindings[index] = .{ .name = name, .value = value };
-            }
+            self.bindExplicitImportedGenericCallArguments(target_file, function, call, bindings) catch |err| switch (err) {
+                error.InvalidGenericArgumentCount => return null,
+                else => return err,
+            };
             try self.validateImportedGenericTraitBounds(target_module_id, function, call.range, bindings);
             return bindings;
         }
 
         if (call.args.len != effective_runtime_count) return null;
-        if (comptime_count != inferable_type_count) return null;
 
         const bindings = try self.arena.alloc(GenericTypeBinding, comptime_count);
         for (bindings) |*binding| {
@@ -1080,14 +1263,14 @@ const TypeChecker = struct {
         for (call.args, runtime_params) |arg, param| {
             const arg_type = self.expr_types[arg.index()];
             if (arg_type.kind() == .unknown) continue;
-            self.inferBindingFromArgTypeInFile(target_file, function, inferable_type_count, param.type_expr, arg_type, bindings);
+            self.inferBindingFromArgTypeInFile(target_file, function, comptime_count, param.type_expr, arg_type, bindings);
         }
 
         try self.refineGenericBindingsForImportedRuntimeArgs(
             target_module_id,
             target_file,
             function,
-            inferable_type_count,
+            comptime_count,
             runtime_params,
             call.args,
             bindings,
@@ -1128,6 +1311,12 @@ const TypeChecker = struct {
                 var indexed_count: usize = 0;
                 for (log_decl.fields) |field| {
                     const field_type = try self.resolveTypeExpr(field.type_expr);
+                    if (try self.typeContainsOpaqueRuntimeCapabilityResolved(field_type)) {
+                        try self.emitRangeError(field.range, "log field '{s}' cannot expose opaque runtime capability type '{s}'", .{
+                            field.name,
+                            diagnosticTypeDisplayName(self, field_type),
+                        });
+                    }
                     if (!field.indexed) continue;
                     indexed_count += 1;
                     if (indexed_count > 3) {
@@ -1143,6 +1332,7 @@ const TypeChecker = struct {
                 try self.checkLogMetadata(log_decl);
             },
             .Function => |function| {
+                try self.validateInlineFunctionRules(item_id, function);
                 try self.validateConstructorFunction(function);
                 const previous_return_type = self.current_return_type;
                 const previous_function_item = self.current_function_item;
@@ -1155,6 +1345,14 @@ const TypeChecker = struct {
                 self.current_function_item = item_id;
                 defer self.current_function_item = previous_function_item;
                 defer self.current_return_type = previous_return_type;
+                const previous_allowed_call_hint = self.allowed_call_hint_stmt;
+                self.allowed_call_hint_stmt = blk: {
+                    const body_stmts = self.file.body(function.body).statements;
+                    if (body_stmts.len == 0) break :blk null;
+                    if (self.file.statement(body_stmts[0]).* != .CallHint) break :blk null;
+                    break :blk body_stmts[0];
+                };
+                defer self.allowed_call_hint_stmt = previous_allowed_call_hint;
                 try self.validatePublicFunctionAbi(function);
                 try self.validateRuntimeMapFunctionBoundary(function);
                 try self.checkDuplicateTraitBounds(function.trait_bounds);
@@ -1190,6 +1388,8 @@ const TypeChecker = struct {
                 if (has_modifies_clause) {
                     try self.validateModifiesSubset(function.range, declared_modifies.items(), function_effect.writeSlots());
                     self.item_modifies[item_id.index()] = try declared_modifies.toOwnedSlice(self.arena);
+                } else if (function.visibility == .public and self.effectHasComputedStorageWrite(function_effect)) {
+                    try self.validatePublicComputedStorageModifies(function.range, function_effect.writeSlots());
                 }
                 if (function_effect.hasLock() or function_effect.hasUnlock()) {
                     var locked_slots = InlineEffectSlotList{};
@@ -1294,11 +1494,13 @@ const TypeChecker = struct {
                     if (try self.emitIntegerOverflowIfNeeded(field.range, expr_id, expected_type)) {
                         // Keep lowering/recovery moving after reporting the overflow.
                     } else if (actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
+                        try self.contextualizeLiteral(expr_id, expected_type);
+                        const contextual_actual_type = self.expr_types[expr_id.index()];
                         const expected = LocatedType.withRegion(expected_type, self.item_regions[item_id.index()]);
                         const actual_located = self.exprLocatedType(expr_id);
-                        const actual = locatedValue(actual_type, actual_located.region, actual_located.provenance);
-                        if (!typesFlowCompatible(expected_type, actual_type)) {
-                            try self.emitNamedSubjectExpectedTypeFoundRange(field.range, "field", field.name, expected_type, actual_type);
+                        const actual = locatedValue(contextual_actual_type, actual_located.region, actual_located.provenance);
+                        if (!typesFlowCompatible(expected_type, contextual_actual_type)) {
+                            try self.emitNamedSubjectExpectedTypeFoundRange(field.range, "field", field.name, expected_type, contextual_actual_type);
                         } else if (!region_rules.regionAssignable(actual.region, expected.region)) {
                             try self.emitNamedSubjectExpectedRegionFoundRange(field.range, "field", field.name, expected.region, actual.region);
                         }
@@ -1312,6 +1514,7 @@ const TypeChecker = struct {
                     self.item_types[item_id.index()] = self.expr_types[constant.value.index()];
                 } else {
                     const expected_type = self.item_types[item_id.index()];
+                    try self.contextualizeLiteral(constant.value, expected_type);
                     const actual_type = self.expr_types[constant.value.index()];
                     if (try self.emitIntegerOverflowIfNeeded(constant.range, constant.value, expected_type)) {
                         // Keep lowering/recovery moving after reporting the overflow.
@@ -1382,7 +1585,7 @@ const TypeChecker = struct {
     }
 
     fn validateRuntimeAdtCycleForStruct(self: *TypeChecker, item_id: ast.ItemId, struct_item: ast.StructItem) anyerror!void {
-        var active = std.ArrayList(ast.ItemId){};
+        var active = std.ArrayList(ast.ItemId).empty;
         defer active.deinit(self.arena);
         try active.append(self.arena, item_id);
 
@@ -1523,7 +1726,7 @@ const TypeChecker = struct {
     }
 
     fn validateRuntimeAdtCycleForEnum(self: *TypeChecker, item_id: ast.ItemId, enum_item: ast.EnumItem) anyerror!void {
-        var active = std.ArrayList(ast.ItemId){};
+        var active = std.ArrayList(ast.ItemId).empty;
         defer active.deinit(self.arena);
         try active.append(self.arena, item_id);
 
@@ -1605,7 +1808,7 @@ const TypeChecker = struct {
 
         switch (self.file.item(item_id).*) {
             .Struct => |struct_item| {
-                var next_active = std.ArrayList(ast.ItemId){};
+                var next_active = std.ArrayList(ast.ItemId).empty;
                 defer next_active.deinit(self.arena);
                 try next_active.appendSlice(self.arena, active);
                 try next_active.append(self.arena, item_id);
@@ -1615,7 +1818,7 @@ const TypeChecker = struct {
                 }
             },
             .Enum => |enum_item| {
-                var next_active = std.ArrayList(ast.ItemId){};
+                var next_active = std.ArrayList(ast.ItemId).empty;
                 defer next_active.deinit(self.arena);
                 try next_active.appendSlice(self.arena, active);
                 try next_active.append(self.arena, item_id);
@@ -1660,6 +1863,62 @@ const TypeChecker = struct {
         }
     }
 
+    fn validateInlineFunctionRules(self: *TypeChecker, item_id: ast.ItemId, function: ast.FunctionItem) anyerror!void {
+        if (!function.is_inline) return;
+
+        if (function.visibility == .public) {
+            try self.emitRangeError(function.range, "inline functions must be private", .{});
+        }
+        if (std.mem.eql(u8, function.name, "init")) {
+            try self.emitRangeError(function.range, "constructor init() cannot be inline", .{});
+        }
+        if (try self.inlineFunctionReferencesTarget(item_id, item_id)) {
+            try self.emitRangeError(function.range, "inline functions must not be recursive", .{});
+        }
+    }
+
+    fn inlineFunctionReferencesTarget(
+        self: *TypeChecker,
+        target_id: ast.ItemId,
+        current_id: ast.ItemId,
+    ) anyerror!bool {
+        return try self.inlineFunctionReferencesTargetWithStack(target_id, current_id, &.{});
+    }
+
+    fn inlineFunctionReferencesTargetWithStack(
+        self: *TypeChecker,
+        target_id: ast.ItemId,
+        current_id: ast.ItemId,
+        stack: []const ast.ItemId,
+    ) anyerror!bool {
+        for (stack) |seen| {
+            if (itemIdEql(seen, current_id)) return false;
+        }
+
+        const current_function = switch (self.file.item(current_id).*) {
+            .Function => |function| function,
+            else => return false,
+        };
+
+        var callees = InlineItemIdList{};
+        try self.collectFunctionDirectCallees(self.arena, current_id, current_function, &callees);
+
+        var next_stack = try self.arena.alloc(ast.ItemId, stack.len + 1);
+        @memcpy(next_stack[0..stack.len], stack);
+        next_stack[stack.len] = current_id;
+
+        for (callees.items()) |callee_id| {
+            const callee_function = switch (self.file.item(callee_id).*) {
+                .Function => |function| function,
+                else => continue,
+            };
+            if (!callee_function.is_inline) continue;
+            if (itemIdEql(callee_id, target_id)) return true;
+            if (try self.inlineFunctionReferencesTargetWithStack(target_id, callee_id, next_stack)) return true;
+        }
+        return false;
+    }
+
     fn validatePublicFunctionAbi(self: *TypeChecker, function: ast.FunctionItem) anyerror!void {
         if (self.current_contract == null) return;
         if (function.visibility != .public) return;
@@ -1671,6 +1930,13 @@ const TypeChecker = struct {
             const param_type = self.pattern_types[parameter.pattern.index()].type;
             if (public_abi.supportsType(param_type, .input)) continue;
             const name = self.patternName(parameter.pattern) orelse "<param>";
+            if (try self.typeContainsOpaqueRuntimeCapabilityResolved(param_type)) {
+                try self.emitRangeError(parameter.range, "public function parameter '{s}' cannot expose opaque runtime capability type '{s}'", .{
+                    name,
+                    diagnosticTypeDisplayName(self, param_type),
+                });
+                continue;
+            }
             if (param_type.kind() == .error_union) {
                 try self.emitRangeError(
                     parameter.range,
@@ -1686,6 +1952,13 @@ const TypeChecker = struct {
         }
 
         if (function.return_type != null and !public_abi.supportsType(self.current_return_type.?, .output)) {
+            if (try self.typeContainsOpaqueRuntimeCapabilityResolved(self.current_return_type.?)) {
+                try self.emitRangeError(function.range, "public function '{s}' cannot expose opaque runtime capability return type '{s}'", .{
+                    function.name,
+                    diagnosticTypeDisplayName(self, self.current_return_type.?),
+                });
+                return;
+            }
             try self.emitRangeError(function.range, "public function '{s}' uses unsupported return ABI type '{s}'", .{
                 function.name,
                 diagnosticTypeDisplayName(self, self.current_return_type.?),
@@ -1699,10 +1972,12 @@ const TypeChecker = struct {
             if (self.parameterIsBareSelf(parameter)) continue;
             const parameter_type = self.pattern_types[parameter.pattern.index()].type;
             try self.checkRuntimeMapParameter(parameter.range, parameter.pattern, parameter_type);
+            try self.checkRuntimeResourcePlaceParameter(parameter.range, parameter.pattern, parameter_type);
         }
 
         if (function.return_type != null) {
             try self.checkRuntimeMapReturn(function.range, function.name, self.current_return_type.?);
+            try self.checkRuntimeResourcePlaceReturn(function.range, function.name, self.current_return_type.?);
         }
     }
 
@@ -1747,7 +2022,184 @@ const TypeChecker = struct {
         });
     }
 
+    fn typeContainsOpaqueRuntimeCapabilityResolved(self: *TypeChecker, ty: Type) anyerror!bool {
+        if (try self.typeContainsCapabilityResolved(ty, .storage, 0)) return true;
+        return self.typeContainsCapabilityResolved(ty, .resource, 0);
+    }
+
+    fn typeContainsStorageCapabilityResolved(self: *TypeChecker, ty: Type) anyerror!bool {
+        return self.typeContainsCapabilityResolved(ty, .storage, 0);
+    }
+
+    fn typeContainsResourcePlaceResolved(self: *TypeChecker, ty: Type) anyerror!bool {
+        return self.typeContainsCapabilityResolved(ty, .resource, 0);
+    }
+
+    fn typeContainsCapabilityResolved(
+        self: *TypeChecker,
+        ty: Type,
+        kind: OpaqueRuntimeCapabilityKind,
+        depth: u8,
+    ) anyerror!bool {
+        if (depth > 64) return true;
+        switch (kind) {
+            .storage => if (typeContainsStorageCapability(ty)) return true,
+            .resource => if (typeContainsResourcePlace(ty)) return true,
+        }
+
+        return switch (ty) {
+            .tuple => |elements| blk: {
+                for (elements) |element| {
+                    if (try self.typeContainsCapabilityResolved(element, kind, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .anonymous_struct => |struct_type| blk: {
+                for (struct_type.fields) |field| {
+                    if (try self.typeContainsCapabilityResolved(field.ty, kind, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .array => |array| try self.typeContainsCapabilityResolved(array.element_type.*, kind, depth + 1),
+            .slice => |slice| try self.typeContainsCapabilityResolved(slice.element_type.*, kind, depth + 1),
+            .map => |map| (map.key_type != null and try self.typeContainsCapabilityResolved(map.key_type.?.*, kind, depth + 1)) or
+                (map.value_type != null and try self.typeContainsCapabilityResolved(map.value_type.?.*, kind, depth + 1)),
+            .error_union => |error_union| try self.typeContainsCapabilityResolved(error_union.payload_type.*, kind, depth + 1),
+            .resource_domain => |resource| try self.typeContainsCapabilityResolved(resource.carrier_type.*, kind, depth + 1),
+            .function => |function| blk: {
+                for (function.param_types) |param_type| {
+                    if (try self.typeContainsCapabilityResolved(param_type, kind, depth + 1)) break :blk true;
+                }
+                for (function.return_types) |return_type| {
+                    if (try self.typeContainsCapabilityResolved(return_type, kind, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .refinement => |refinement| try self.typeContainsCapabilityResolved(refinement.base_type.*, kind, depth + 1),
+            .struct_ => |named| try self.namedStructContainsCapability(named.name, kind, depth + 1),
+            .named => |named| blk: {
+                if (self.isActiveGenericTypeParameterName(named.name)) break :blk false;
+                const item_id = self.lookupTypeItemInScope(named.name) orelse break :blk true;
+                break :blk try self.itemContainsCapability(item_id, kind, depth + 1);
+            },
+            .bitfield => |named| blk: {
+                if (self.instantiatedBitfieldByName(named.name)) |instantiated| {
+                    for (instantiated.fields) |field| {
+                        if (try self.typeContainsCapabilityResolved(field.ty, kind, depth + 1)) break :blk true;
+                    }
+                }
+                break :blk false;
+            },
+            else => false,
+        };
+    }
+
+    fn namedStructContainsCapability(
+        self: *TypeChecker,
+        name: []const u8,
+        kind: OpaqueRuntimeCapabilityKind,
+        depth: u8,
+    ) anyerror!bool {
+        if (self.instantiatedStructByName(name)) |instantiated| {
+            for (instantiated.fields) |field| {
+                if (try self.typeContainsCapabilityResolved(field.ty, kind, depth + 1)) return true;
+            }
+            return false;
+        }
+        const item_id = self.lookupTypeItemInScope(name) orelse return false;
+        return self.itemContainsCapability(item_id, kind, depth + 1);
+    }
+
+    fn isActiveGenericTypeParameterName(self: *const TypeChecker, name: []const u8) bool {
+        const function_item_id = self.current_function_item orelse return false;
+        const item = self.file.item(function_item_id).*;
+        if (item != .Function or !item.Function.is_generic) return false;
+        for (item.Function.parameters) |parameter| {
+            if (!self.isGenericTypeParameter(parameter)) continue;
+            const parameter_name = self.patternName(parameter.pattern) orelse continue;
+            if (std.mem.eql(u8, parameter_name, name)) return true;
+        }
+        return false;
+    }
+
+    fn itemContainsCapability(
+        self: *TypeChecker,
+        item_id: ast.ItemId,
+        kind: OpaqueRuntimeCapabilityKind,
+        depth: u8,
+    ) anyerror!bool {
+        if (depth > 64) return true;
+        return switch (self.file.item(item_id).*) {
+            .Struct => |struct_item| blk: {
+                for (struct_item.fields) |field| {
+                    const field_type = descriptorFromTypeExpr(self.arena, self.file, self.item_index, field.type_expr) catch break :blk true;
+                    if (try self.typeContainsCapabilityResolved(field_type, kind, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .TypeAlias => |type_alias| blk: {
+                const target_type = descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch break :blk true;
+                break :blk try self.typeContainsCapabilityResolved(target_type, kind, depth + 1);
+            },
+            .Bitfield => |bitfield_item| blk: {
+                for (bitfield_item.fields) |field| {
+                    const field_type = descriptorFromTypeExpr(self.arena, self.file, self.item_index, field.type_expr) catch break :blk true;
+                    if (try self.typeContainsCapabilityResolved(field_type, kind, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            else => false,
+        };
+    }
+
+    fn checkRuntimeResourcePlaceParameter(
+        self: *TypeChecker,
+        range: source.TextRange,
+        pattern_id: ast.PatternId,
+        ty: Type,
+    ) !void {
+        if (!try self.typeContainsResourcePlaceResolved(ty)) return;
+        const name = self.patternName(pattern_id) orelse "<param>";
+        try self.emitRangeError(range, "function parameter '{s}' cannot have resource place type '{s}' as a runtime value; use storage Resource<T> places directly", .{
+            name,
+            diagnosticTypeDisplayName(self, ty),
+        });
+    }
+
+    fn checkRuntimeResourcePlaceReturn(
+        self: *TypeChecker,
+        range: source.TextRange,
+        function_name: []const u8,
+        ty: Type,
+    ) !void {
+        if (!try self.typeContainsResourcePlaceResolved(ty)) return;
+        try self.emitRangeError(range, "function '{s}' cannot return resource place type '{s}'; resource places are not first-class runtime values", .{
+            function_name,
+            diagnosticTypeDisplayName(self, ty),
+        });
+    }
+
+    fn checkRuntimeResourcePlaceLocal(
+        self: *TypeChecker,
+        range: source.TextRange,
+        pattern_id: ast.PatternId,
+        ty: Type,
+    ) !void {
+        if (!try self.typeContainsResourcePlaceResolved(ty)) return;
+        const name = self.patternName(pattern_id) orelse "<local>";
+        try self.emitRangeError(range, "local '{s}' cannot have resource place type '{s}' as a runtime value; use storage Resource<T> places directly", .{
+            name,
+            diagnosticTypeDisplayName(self, ty),
+        });
+    }
+
     fn checkStorageResultTypeSupport(self: *TypeChecker, range: source.TextRange, ty: Type) !void {
+        if (try self.typeContainsStorageCapabilityResolved(ty)) {
+            try self.emitRangeError(range, "storage declarations cannot use opaque storage capability type '{s}'", .{
+                diagnosticTypeDisplayName(self, ty),
+            });
+            return;
+        }
         try self.checkResultCarrierTypeSupport(range, ty, "storage Result values");
     }
 
@@ -1897,7 +2349,7 @@ const TypeChecker = struct {
                 .Contract => |contract_item| contract_item,
                 else => return null,
             };
-            var fields: std.ArrayList(Type) = .{};
+            var fields: std.ArrayList(Type) = .empty;
             for (contract_item.members) |member_id| {
                 switch (self.checker.file.item(member_id).*) {
                     .Field => |field| {
@@ -2328,7 +2780,7 @@ const TypeChecker = struct {
 
         inline_items: [inline_capacity]ImplKey = undefined,
         inline_len: usize = 0,
-        spill: std.ArrayList(ImplKey) = .{},
+        spill: std.ArrayList(ImplKey) = .empty,
 
         fn contains(self: *const InlineImplKeySet, key: ImplKey) bool {
             for (self.inline_items[0..self.inline_len]) |seen| {
@@ -2481,6 +2933,49 @@ const TypeChecker = struct {
         }
     }
 
+    fn checkCallHintStatement(self: *TypeChecker, statement_id: ast.StmtId, hint_stmt: ast.nodes.CallHintStmt) !void {
+        // A silently ignored gas hint would lie to auditors, so every
+        // misplacement is an error, never a no-op.
+        const item_id = self.current_function_item orelse {
+            try self.emitRangeError(hint_stmt.range, "`@callHint` is only allowed as the first statement of a public contract function body", .{});
+            return;
+        };
+        const placement_ok = if (self.allowed_call_hint_stmt) |allowed| allowed.index() == statement_id.index() else false;
+        if (!placement_ok) {
+            try self.emitRangeError(hint_stmt.range, "`@callHint` must be the first statement of a public contract function body", .{});
+            return;
+        }
+        const function = switch (self.file.item(item_id).*) {
+            .Function => |function| function,
+            else => {
+                try self.emitRangeError(hint_stmt.range, "`@callHint` is only allowed in public contract functions", .{});
+                return;
+            },
+        };
+        if (function.visibility != .public or function.parent_contract == null) {
+            try self.emitRangeError(hint_stmt.range, "`@callHint` re-orders selector dispatch and is only allowed in public contract functions", .{});
+            return;
+        }
+        if (std.mem.eql(u8, function.name, "init")) {
+            try self.emitRangeError(hint_stmt.range, "`@callHint` is not allowed on `init`: constructors are not dispatched", .{});
+            return;
+        }
+        const hint = hint_stmt.hint orelse {
+            try self.emitRangeError(hint_stmt.range, "invalid `@callHint` argument; expected `likely`, `unlikely`, `cold`, or `none`", .{});
+            return;
+        };
+        if (hint == .likely) {
+            var likely_count: usize = 0;
+            for (self.item_call_hints) |recorded| {
+                if (recorded == .likely) likely_count += 1;
+            }
+            if (likely_count >= 4) {
+                try self.emitRangeWarning(hint_stmt.range, "more than 4 functions marked `@callHint(likely)`; a long hot prefix stops being hot — later entries pay for every check ahead of them", .{});
+            }
+        }
+        self.item_call_hints[item_id.index()] = hint;
+    }
+
     fn visitStmt(self: *TypeChecker, statement_id: ast.StmtId) anyerror!void {
         switch (self.file.statement(statement_id).*) {
             .VariableDecl => |decl| {
@@ -2531,6 +3026,9 @@ const TypeChecker = struct {
                 }
                 if (decl.storage_class != .storage) {
                     try self.checkRuntimeMapLocal(decl.range, decl.pattern, self.pattern_types[decl.pattern.index()].type);
+                    if (self.comptime_depth == 0) {
+                        try self.checkRuntimeResourcePlaceLocal(decl.range, decl.pattern, self.pattern_types[decl.pattern.index()].type);
+                    }
                     try self.checkLocalResultAggregateTypeSupport(decl.range, self.pattern_types[decl.pattern.index()].type);
                 }
             },
@@ -2610,8 +3108,9 @@ const TypeChecker = struct {
             .Log => |log_stmt| {
                 try self.checkLogStatement(log_stmt);
             },
-            .Lock => |lock_stmt| try self.visitExpr(lock_stmt.path),
-            .Unlock => |unlock_stmt| try self.visitExpr(unlock_stmt.path),
+            .Lock => |lock_stmt| try self.visitResourcePlaceOperandExpr(lock_stmt.path),
+            .Unlock => |unlock_stmt| try self.visitResourcePlaceOperandExpr(unlock_stmt.path),
+            .CallHint => |hint_stmt| try self.checkCallHintStatement(statement_id, hint_stmt),
             .Assert => |assert_stmt| {
                 try self.visitExpr(assert_stmt.condition);
                 try self.checkBoolCondition(assert_stmt.condition, "assert condition");
@@ -2623,8 +3122,13 @@ const TypeChecker = struct {
             .Havoc => {},
             .Assign => |assign| {
                 try self.visitExpr(assign.value);
+                if (try self.emitNonVarAssignmentIfNeeded(assign.target)) return;
                 const expected = try self.patternLocatedType(assign.target);
                 const expected_type = expected.type;
+                if (expected_type.kind() == .resource_place) {
+                    try self.emitRangeError(assign.range, "resource places can only be mutated with @move, @create, or @destroy", .{});
+                    return;
+                }
                 try self.contextualizeLiteral(assign.value, expected_type);
                 const actual_type = self.expr_types[assign.value.index()];
                 if (try self.emitIntegerOverflowIfNeeded(assign.range, assign.value, expected_type)) {
@@ -2639,11 +3143,56 @@ const TypeChecker = struct {
                     }
                 }
             },
-            .Expr => |expr_stmt| try self.visitExpr(expr_stmt.expr),
+            .Expr => |expr_stmt| {
+                const previous = self.allow_resource_boundary_builtin_statement;
+                self.allow_resource_boundary_builtin_statement = self.exprIsResourceBoundaryBuiltinStatement(expr_stmt.expr);
+                defer self.allow_resource_boundary_builtin_statement = previous;
+                try self.visitExpr(expr_stmt.expr);
+            },
             .Block => |block| try self.visitBody(block.body),
             .LabeledBlock => |block| try self.visitBody(block.body),
             else => {},
         }
+    }
+
+    fn exprIsResourceBoundaryBuiltinStatement(self: *const TypeChecker, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.exprIsResourceBoundaryBuiltinStatement(group.expr),
+            .Builtin => |builtin| if (builtinKind(builtin.name)) |kind| isResourceBoundaryBuiltin(kind) else false,
+            else => false,
+        };
+    }
+
+    fn visitResourcePlaceOperandExpr(self: *TypeChecker, expr_id: ast.ExprId) anyerror!void {
+        const previous = self.allow_resource_place_operand;
+        self.allow_resource_place_operand = true;
+        defer self.allow_resource_place_operand = previous;
+        try self.visitExpr(expr_id);
+    }
+
+    fn visitResourceBoundaryBuiltinArgumentExprs(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr) !void {
+        switch (kind) {
+            .resource_move => {
+                if (builtin.args.len > 0) try self.visitResourcePlaceOperandExpr(builtin.args[0]);
+                if (builtin.args.len > 1) try self.visitResourcePlaceOperandExpr(builtin.args[1]);
+                if (builtin.args.len > 2) try self.visitExpr(builtin.args[2]);
+                if (builtin.args.len > 3) for (builtin.args[3..]) |arg| try self.visitExpr(arg);
+            },
+            .resource_create, .resource_destroy => {
+                if (builtin.args.len > 0) try self.visitResourcePlaceOperandExpr(builtin.args[0]);
+                if (builtin.args.len > 1) try self.visitExpr(builtin.args[1]);
+                if (builtin.args.len > 2) for (builtin.args[2..]) |arg| try self.visitExpr(arg);
+            },
+            else => {
+                for (builtin.args) |arg| try self.visitExpr(arg);
+            },
+        }
+    }
+
+    fn emitImplicitResourceReadIfDisallowed(self: *TypeChecker, expr_id: ast.ExprId, ty: Type) !void {
+        if (self.allow_resource_place_operand) return;
+        if (ty.kind() != .resource_place) return;
+        try self.emitExprError(expr_id, "resource place is not a value; use @amount(place)", .{});
     }
 
     fn visitExpr(self: *TypeChecker, expr_id: ast.ExprId) anyerror!void {
@@ -2796,7 +3345,7 @@ const TypeChecker = struct {
             },
             .Name => {
                 const binding_type = self.typeForBinding(self.resolution.expr_bindings[expr_id.index()]);
-                self.expr_types[expr_id.index()] = if (binding_type.kind() != .unknown)
+                const resolved_type: Type = if (binding_type.kind() != .unknown)
                     binding_type
                 else switch (self.file.expression(expr_id).*) {
                     .Name => |name| if (std.mem.eql(u8, name.name, "result"))
@@ -2805,6 +3354,8 @@ const TypeChecker = struct {
                         self.typeValueNameType(name.name),
                     else => .{ .unknown = {} },
                 };
+                try self.emitImplicitResourceReadIfDisallowed(expr_id, resolved_type);
+                self.expr_types[expr_id.index()] = resourcePlaceReadType(resolved_type) orelse resolved_type;
             },
             .Result => {
                 self.expr_types[expr_id.index()] = self.currentResultType();
@@ -2858,13 +3409,25 @@ const TypeChecker = struct {
                 }
             },
             .Call => |call| {
-                try self.visitExpr(call.callee);
-                for (call.args) |arg| try self.visitExpr(arg);
                 if (call.args.len == 0) {
-                    if (self.environmentIntrinsicValueType(call.callee)) |result_type| {
+                    if (self.environmentIntrinsicCallReturnType(call.callee)) |result_type| {
+                        self.expr_types[call.callee.index()] = result_type;
                         self.expr_types[expr_id.index()] = result_type;
                         return;
                     }
+                }
+
+                try self.visitExpr(call.callee);
+                for (call.args) |arg| try self.visitExpr(arg);
+                if (try self.stdStorageDeriveCall(call)) {
+                    self.expr_types[expr_id.index()] = .{ .storage_slot = {} };
+                    try self.checkStorageDeriveCallArguments(self.exprRange(expr_id), call.args, "std.storage.derive");
+                    return;
+                }
+                if (try self.stdStorageRangeCall(call)) {
+                    self.expr_types[expr_id.index()] = .{ .storage_range = {} };
+                    try self.checkStorageRangeCallArguments(self.exprRange(expr_id), call.args, "std.storage.range");
+                    return;
                 }
                 const imported_resolution = try self.importedFunctionCallResolution(call);
                 if (imported_resolution) |resolved| {
@@ -2887,7 +3450,9 @@ const TypeChecker = struct {
                 } else {
                     const callee_type = self.callableType(call.callee);
                     const callee_expr_type = self.expr_types[call.callee.index()];
-                    if (callee_type.kind() != .function) {
+                    if (imported_resolution == null and try self.importedGenericCallBindingFailed(call)) {
+                        try self.emitExprError(expr_id, "could not infer generic type arguments", .{});
+                    } else if (callee_type.kind() != .function) {
                         const bad_type = if (callee_expr_type.kind() != .unknown) callee_expr_type else callee_type;
                         if (bad_type.kind() != .unknown) {
                             try self.emitExprError(expr_id, "type '{s}' is not callable", .{diagnosticTypeDisplayName(self, bad_type)});
@@ -2934,19 +3499,59 @@ const TypeChecker = struct {
                 };
 
                 if (isReferenceConstevalBuiltin(kind)) {
+                    if (isReflectionMetadataBuiltin(kind) and self.comptime_depth == 0) {
+                        try self.checkBuiltinArguments(kind, builtin);
+                        self.expr_types[expr_id.index()] = .{ .unknown = {} };
+                        return;
+                    }
                     self.expr_types[expr_id.index()] = try self.builtinReturnType(kind, builtin);
                     try self.checkBuiltinArguments(kind, builtin);
                     return;
                 }
 
-                for (builtin.args) |arg| try self.visitExpr(arg);
+                if (kind == .resource_amount) {
+                    if (builtin.args.len == 1) {
+                        try self.visitResourcePlaceOperandExpr(builtin.args[0]);
+                    } else {
+                        for (builtin.args) |arg| try self.visitExpr(arg);
+                    }
+                    const place = try self.checkResourceAmountBuiltinArguments(builtin);
+                    self.expr_types[expr_id.index()] = if (place) |info| info.domain_type else .{ .unknown = {} };
+                    return;
+                }
+
+                if (isResourceBoundaryBuiltin(kind)) {
+                    const allowed_as_statement = self.allow_resource_boundary_builtin_statement;
+                    const previous = self.allow_resource_boundary_builtin_statement;
+                    self.allow_resource_boundary_builtin_statement = false;
+                    defer self.allow_resource_boundary_builtin_statement = previous;
+
+                    try self.visitResourceBoundaryBuiltinArgumentExprs(kind, builtin);
+                    if (!allowed_as_statement) {
+                        try self.emitExprError(expr_id, "@{s} is statement-only and cannot be used in expression position", .{
+                            builtin.name,
+                        });
+                        self.expr_types[expr_id.index()] = .{ .unknown = {} };
+                        return;
+                    }
+                    self.expr_types[expr_id.index()] = try self.builtinReturnType(kind, builtin);
+                    try self.checkBuiltinArguments(kind, builtin);
+                    return;
+                }
+
                 if (kind == .lock or kind == .unlock) {
+                    if (builtin.args.len == 1) {
+                        try self.visitResourcePlaceOperandExpr(builtin.args[0]);
+                    } else {
+                        for (builtin.args) |arg| try self.visitExpr(arg);
+                    }
                     try self.emitExprError(expr_id, "@{s} is statement-only and cannot be used in expression position", .{
                         builtin.name,
                     });
                     self.expr_types[expr_id.index()] = .{ .unknown = {} };
                     return;
                 }
+                for (builtin.args) |arg| try self.visitExpr(arg);
                 const result_type = try self.builtinReturnType(kind, builtin);
                 self.expr_types[expr_id.index()] = result_type;
                 if (try self.emitBuiltinIntegerOverflowIfNeeded(expr_id, builtin, result_type)) {
@@ -2956,11 +3561,15 @@ const TypeChecker = struct {
             },
             .Field => |field| {
                 try self.visitExpr(field.base);
+                if (try self.emitInvalidEnvironmentFieldForm(expr_id)) return;
+
                 const base_type = self.expr_types[field.base.index()];
-                const result_type = self.environmentIntrinsicValueType(expr_id) orelse
+                const place_or_value_type = self.environmentIntrinsicFieldValueType(expr_id) orelse
                     try self.fieldAccessTypeForExpr(field.base, field.name);
+                try self.emitImplicitResourceReadIfDisallowed(expr_id, place_or_value_type);
+                const result_type = resourcePlaceReadType(place_or_value_type) orelse place_or_value_type;
                 self.expr_types[expr_id.index()] = result_type;
-                if (result_type.kind() == .unknown and base_type.kind() != .unknown) {
+                if (place_or_value_type.kind() == .unknown and base_type.kind() != .unknown) {
                     if (!try self.emitTraitMethodFieldError(expr_id, field, base_type)) {
                         try self.emitExprError(expr_id, "type '{s}' has no field '{s}'", .{
                             diagnosticTypeDisplayName(self, base_type),
@@ -2973,9 +3582,11 @@ const TypeChecker = struct {
                 try self.visitExpr(index.base);
                 try self.visitExpr(index.index);
                 const base_type = self.expr_types[index.base.index()];
-                const result_type = self.indexAccessType(base_type, index.index);
+                const place_or_value_type = self.indexAccessType(base_type, index.index);
+                try self.emitImplicitResourceReadIfDisallowed(expr_id, place_or_value_type);
+                const result_type = resourcePlaceReadType(place_or_value_type) orelse place_or_value_type;
                 self.expr_types[expr_id.index()] = result_type;
-                if (result_type.kind() == .unknown and base_type.kind() != .unknown) {
+                if (place_or_value_type.kind() == .unknown and base_type.kind() != .unknown) {
                     try self.emitExprError(expr_id, "type '{s}' is not indexable", .{diagnosticTypeDisplayName(self, base_type)});
                 }
             },
@@ -2997,6 +3608,30 @@ const TypeChecker = struct {
             },
             .Error => self.expr_types[expr_id.index()] = .{ .unknown = {} },
         }
+    }
+
+    fn emitInvalidEnvironmentFieldForm(self: *TypeChecker, expr_id: ast.ExprId) !bool {
+        if (self.exprPathMatches(expr_id, &.{ "std", "msg", "sender" })) {
+            try self.emitExprError(expr_id, "`std.msg.sender` must be called as `std.msg.sender()`", .{});
+            self.expr_types[expr_id.index()] = .{ .unknown = {} };
+            return true;
+        }
+        if (self.exprPathMatches(expr_id, &.{ "std", "tx", "sender" })) {
+            try self.emitExprError(expr_id, "`std.tx.sender` is not supported; use `std.tx.origin()`", .{});
+            self.expr_types[expr_id.index()] = .{ .unknown = {} };
+            return true;
+        }
+        if (self.exprPathMatches(expr_id, &.{ "std", "tx", "origin" })) {
+            try self.emitExprError(expr_id, "`std.tx.origin` must be called as `std.tx.origin()`", .{});
+            self.expr_types[expr_id.index()] = .{ .unknown = {} };
+            return true;
+        }
+        if (self.exprPathMatches(expr_id, &.{ "std", "transaction", "sender" })) {
+            try self.emitExprError(expr_id, "`std.transaction.sender` is not supported; use `std.msg.sender()`", .{});
+            self.expr_types[expr_id.index()] = .{ .unknown = {} };
+            return true;
+        }
+        return false;
     }
 
     fn typeForBinding(self: *const TypeChecker, binding: ?ResolvedBinding) Type {
@@ -3212,15 +3847,10 @@ const TypeChecker = struct {
         var inline_bindings: [inline_generic_binding_capacity]GenericTypeBinding = undefined;
         const bindings = (try self.genericTypeBindingsForCall(function, call, inline_bindings[0..])) orelse return .{ .unknown = {} };
         const runtime_parameters = try self.runtimeFunctionParameters(function);
-        const comptime_count = self.leadingComptimeParameterCount(function);
         const method_receiver_supplied = self.callSuppliesMethodReceiver(call.callee) and self.functionHasRuntimeSelf(function);
         const effective_runtime_count = runtime_parameters.len - @as(usize, if (method_receiver_supplied) 1 else 0);
-        const explicit_generics = call.args.len >= comptime_count + effective_runtime_count;
-        const runtime_arg_count = if (explicit_generics)
-            call.args.len - comptime_count
-        else
-            call.args.len;
-        if (effective_runtime_count != runtime_arg_count) return .{ .unknown = {} };
+        const runtime_args = (try self.runtimeCallArgsForFunctionWithReceiver(function, call, method_receiver_supplied)) orelse return .{ .unknown = {} };
+        if (effective_runtime_count != runtime_args.len) return .{ .unknown = {} };
         if (function.return_type) |type_expr| {
             return try self.resolveTypeExprWithBindings(type_expr, bindings);
         }
@@ -3259,26 +3889,23 @@ const TypeChecker = struct {
         call: ast.CallExpr,
         scratch: []GenericTypeBinding,
     ) !?[]const GenericTypeBinding {
-        const comptime_count = self.leadingComptimeParameterCount(function);
-        const inferable_type_count = self.leadingGenericTypeParameterCount(function);
+        const comptime_count = self.comptimeParameterCount(function);
         if (comptime_count == 0) return &.{};
         const runtime_params = try self.runtimeFunctionParameters(function);
         const method_receiver_supplied = self.callSuppliesMethodReceiver(call.callee) and self.functionHasRuntimeSelf(function);
         const effective_runtime_count = runtime_params.len - @as(usize, if (method_receiver_supplied) 1 else 0);
 
-        if (call.args.len >= comptime_count + effective_runtime_count) {
+        if (call.args.len == comptime_count + effective_runtime_count) {
             const bindings = try self.genericTypeBindingBuffer(comptime_count, scratch);
-            for (function.parameters[0..comptime_count], 0..) |parameter, index| {
-                const name = self.patternName(parameter.pattern) orelse return null;
-                const value = (try self.genericBindingValueForCallArg(parameter, call.args[index])) orelse return null;
-                bindings[index] = .{ .name = name, .value = value };
-            }
+            self.bindExplicitGenericCallArguments(function, call, method_receiver_supplied, bindings) catch |err| switch (err) {
+                error.InvalidGenericArgumentCount => return null,
+                else => return err,
+            };
             try self.validateGenericTraitBounds(function, call.range, bindings);
             return bindings;
         }
 
         if (call.args.len != effective_runtime_count) return null;
-        if (comptime_count != inferable_type_count) return null;
 
         const bindings = try self.genericTypeBindingBuffer(comptime_count, scratch);
         for (bindings) |*binding| {
@@ -3289,16 +3916,54 @@ const TypeChecker = struct {
         for (call.args, infer_runtime_params) |arg, param| {
             const arg_type = self.expr_types[arg.index()];
             if (arg_type.kind() == .unknown) continue;
-            self.inferBindingFromArgType(function, inferable_type_count, param.type_expr, arg_type, bindings);
+            self.inferBindingFromArgType(function, comptime_count, param.type_expr, arg_type, bindings);
         }
 
-        try self.refineGenericBindingsForRuntimeArgs(function, inferable_type_count, infer_runtime_params, call.args, bindings);
+        try self.refineGenericBindingsForRuntimeArgs(function, comptime_count, infer_runtime_params, call.args, bindings);
 
         for (bindings) |binding| {
             if (binding.name.len == 0) return null;
         }
         try self.validateGenericTraitBounds(function, call.range, bindings);
         return bindings;
+    }
+
+    fn bindExplicitImportedGenericCallArguments(
+        self: *TypeChecker,
+        target_file: *const ast.AstFile,
+        function: ast.FunctionItem,
+        call: ast.CallExpr,
+        bindings: []GenericTypeBinding,
+    ) !void {
+        var iter = generic_call_args.iterator(function, call, .{});
+        while (try iter.next()) |entry| {
+            if (entry.comptime_index) |binding_index| {
+                if (binding_index >= bindings.len) return error.InvalidGenericArgumentCount;
+                const name = self.patternNameInFile(target_file, entry.parameter.pattern) orelse return error.InvalidGenericArgumentCount;
+                const value = (try self.genericBindingValueForImportedCallArg(target_file, entry.parameter, entry.arg)) orelse return error.InvalidGenericArgumentCount;
+                bindings[binding_index] = .{ .name = name, .value = value };
+            }
+        }
+        if (iter.comptime_index != bindings.len or iter.arg_index != call.args.len) return error.InvalidGenericArgumentCount;
+    }
+
+    fn bindExplicitGenericCallArguments(
+        self: *TypeChecker,
+        function: ast.FunctionItem,
+        call: ast.CallExpr,
+        method_receiver_supplied: bool,
+        bindings: []GenericTypeBinding,
+    ) !void {
+        var iter = generic_call_args.iterator(function, call, .{ .skip_first_runtime_parameter = method_receiver_supplied });
+        while (try iter.next()) |entry| {
+            if (entry.comptime_index) |binding_index| {
+                if (binding_index >= bindings.len) return error.InvalidGenericArgumentCount;
+                const name = self.patternName(entry.parameter.pattern) orelse return error.InvalidGenericArgumentCount;
+                const value = (try self.genericBindingValueForCallArg(entry.parameter, entry.arg)) orelse return error.InvalidGenericArgumentCount;
+                bindings[binding_index] = .{ .name = name, .value = value };
+            }
+        }
+        if (iter.comptime_index != bindings.len or iter.arg_index != call.args.len) return error.InvalidGenericArgumentCount;
     }
 
     fn validateGenericFunctionInstantiation(self: *TypeChecker, function: ast.FunctionItem, bindings: []const GenericTypeBinding) anyerror!void {
@@ -3345,6 +4010,7 @@ const TypeChecker = struct {
             },
             .Log => |log_stmt| for (log_stmt.args) |arg| try self.validateGenericExprInstantiation(arg, bindings),
             .Lock => |lock_stmt| try self.validateGenericExprInstantiation(lock_stmt.path, bindings),
+            .CallHint => {},
             .Unlock => |unlock_stmt| try self.validateGenericExprInstantiation(unlock_stmt.path, bindings),
             .Assert => |assert_stmt| try self.validateGenericExprInstantiation(assert_stmt.condition, bindings),
             .Assume => |assume_stmt| try self.validateGenericExprInstantiation(assume_stmt.condition, bindings),
@@ -3463,6 +4129,9 @@ const TypeChecker = struct {
         // exports them for verifier framing only after the caller stores them
         // in item_modifies, which happens after the compiler-derived write-set
         // subset check succeeds for the same body.
+        const previous = self.allow_resource_place_operand;
+        self.allow_resource_place_operand = true;
+        defer self.allow_resource_place_operand = previous;
         try self.visitModifiesExpr(clause.expr);
         try self.collectModifiesExprSlots(clause.expr, slots);
     }
@@ -3510,15 +4179,7 @@ const TypeChecker = struct {
     }
 
     fn isModifiesEnvironmentKey(self: *TypeChecker, expr_id: ast.ExprId) bool {
-        const field = switch (self.file.expression(expr_id).*) {
-            .Group => |group| return self.isModifiesEnvironmentKey(group.expr),
-            .Field => |field| field,
-            else => return false,
-        };
-        const base = self.file.expression(field.base).*;
-        return base == .Name and
-            ((std.mem.eql(u8, base.Name.name, "msg") and std.mem.eql(u8, field.name, "sender")) or
-                (std.mem.eql(u8, base.Name.name, "tx") and std.mem.eql(u8, field.name, "origin")));
+        return self.environmentKeySegmentForExpr(expr_id) != null;
     }
 
     fn collectModifiesExprSlots(self: *TypeChecker, expr_id: ast.ExprId, slots: *InlineEffectSlotList) !void {
@@ -3563,6 +4224,24 @@ const TypeChecker = struct {
                 try self.validateModifiesKeyExpr(index.index);
                 break :blk self.slotWithIndexKey(base_slot, index.index);
             },
+            .Builtin => |builtin| blk: {
+                if (builtinKind(builtin.name) != .storage_range) break :blk null;
+                if (builtin.args.len != 2) break :blk null;
+                if (!self.exprIsIntegerLiteral(builtin.args[1])) {
+                    try self.emitExprError(builtin.args[1], "`modifies` computed storage ranges require a literal bounded word count in v1", .{});
+                    break :blk null;
+                }
+                break :blk self.computedStorageRangeSlot(expr_id);
+            },
+            .Call => |call| blk: {
+                if (!(try self.stdStorageRangeCall(call))) break :blk null;
+                if (call.args.len != 2) break :blk null;
+                if (!self.exprIsIntegerLiteral(call.args[1])) {
+                    try self.emitExprError(call.args[1], "`modifies` computed storage ranges require a literal bounded word count in v1", .{});
+                    break :blk null;
+                }
+                break :blk self.computedStorageRangeSlot(expr_id);
+            },
             else => null,
         };
     }
@@ -3578,19 +4257,20 @@ const TypeChecker = struct {
                         .item => {},
                     }
                 }
-                try self.emitExprError(expr_id, "`modifies` map keys must be literals, function parameters, `msg.sender`, or `tx.origin` in v1", .{});
+                try self.emitExprError(expr_id, "`modifies` map keys must be literals, function parameters, `std.msg.sender()`, or `std.tx.origin()` in v1", .{});
             },
             .Field => |field| {
-                const base = self.file.expression(field.base).*;
-                if (base == .Name and
-                    ((std.mem.eql(u8, base.Name.name, "msg") and std.mem.eql(u8, field.name, "sender")) or
-                        (std.mem.eql(u8, base.Name.name, "tx") and std.mem.eql(u8, field.name, "origin"))))
-                {
+                if (self.environmentKeySegmentForExpr(expr_id) != null) {
                     return;
                 }
-                try self.emitExprError(expr_id, "`modifies` map keys must be literals, function parameters, `msg.sender`, or `tx.origin` in v1", .{});
+                _ = field;
+                try self.emitExprError(expr_id, "`modifies` map keys must be literals, function parameters, `std.msg.sender()`, or `std.tx.origin()` in v1", .{});
             },
-            else => try self.emitExprError(expr_id, "`modifies` map keys must be literals, function parameters, `msg.sender`, or `tx.origin` in v1", .{}),
+            .Call => {
+                if (self.environmentKeySegmentForExpr(expr_id) != null) return;
+                try self.emitExprError(expr_id, "`modifies` map keys must be literals, function parameters, `std.msg.sender()`, or `std.tx.origin()` in v1", .{});
+            },
+            else => try self.emitExprError(expr_id, "`modifies` map keys must be literals, function parameters, `std.msg.sender()`, or `std.tx.origin()` in v1", .{}),
         }
     }
 
@@ -3604,17 +4284,60 @@ const TypeChecker = struct {
         }
     }
 
+    fn validatePublicComputedStorageModifies(self: *TypeChecker, range: source.TextRange, actual_writes: []const EffectSlot) !void {
+        for (actual_writes) |write_slot| {
+            if (!self.effectSlotIsComputedStorage(write_slot)) continue;
+            const display = try self.effectSlotDisplayName(write_slot);
+            try self.emitRangeError(range, "computed storage write to '{s}' requires a `modifies` computed storage range", .{display});
+        }
+    }
+
     fn modifiesDeclaresSlot(self: *TypeChecker, declared_slots: []const EffectSlot, write_slot: EffectSlot) bool {
-        _ = self;
         for (declared_slots) |declared_slot| {
             if (effectSlotEql(declared_slot, write_slot)) return true;
+            if (self.computedStorageRangeCoversWrite(declared_slot, write_slot)) return true;
         }
         return false;
     }
 
+    fn computedStorageRangeCoversWrite(self: *TypeChecker, declared_slot: EffectSlot, write_slot: EffectSlot) bool {
+        if (declared_slot.region != .storage or write_slot.region != .storage) return false;
+        if (!std.mem.eql(u8, declared_slot.name, computed_storage_effect_root)) return false;
+        if (!std.mem.eql(u8, write_slot.name, computed_storage_effect_root)) return false;
+        if (declared_slot.field_path != null or write_slot.field_path != null) return false;
+        const declared_path = declared_slot.key_path orelse return false;
+        const write_path = write_slot.key_path orelse return false;
+        if (declared_path.len == 0 or declared_path.len != write_path.len) return false;
+        for (declared_path[0 .. declared_path.len - 1], write_path[0 .. write_path.len - 1]) |declared_segment, write_segment| {
+            if (!keySegmentEql(declared_segment, write_segment)) return false;
+        }
+        const declared_tail = declared_path[declared_path.len - 1];
+        if (declared_tail == .unknown) return true;
+        const declared_len = self.rangeLengthForSegment(declared_tail) orelse return false;
+        const write_tail = write_path[write_path.len - 1];
+        switch (write_tail) {
+            .constant => |offset_text| {
+                if (self.rangeLengthForSegment(write_tail)) |write_len| return write_len <= declared_len;
+                const offset = parseUnsignedIntegerLiteralU256(offset_text) orelse return false;
+                return offset < declared_len;
+            },
+            .unknown => return false,
+            else => return false,
+        }
+    }
+
+    fn rangeLengthForSegment(self: *const TypeChecker, segment: KeySegment) ?u256 {
+        _ = self;
+        if (segment != .constant) return null;
+        const value = segment.constant;
+        if (!std.mem.startsWith(u8, value, "0..")) return null;
+        return parseUnsignedIntegerLiteralU256(value["0..".len..]);
+    }
+
     fn effectSlotDisplayName(self: *TypeChecker, slot: EffectSlot) ![]const u8 {
-        var buffer: std.ArrayList(u8) = .{};
-        const writer = buffer.writer(self.arena);
+        var buffer = std.Io.Writer.Allocating.init(self.arena);
+        errdefer buffer.deinit();
+        const writer = &buffer.writer;
         try writer.writeAll(slot.name);
         if (slot.field_path) |field_path| {
             for (field_path) |field_name| {
@@ -3631,6 +4354,8 @@ const TypeChecker = struct {
                     } else {
                         try writer.print("param#{d}", .{index});
                     },
+                    .comptime_parameter => |index| try writer.print("comptime_param#{d}", .{index}),
+                    .comptime_range_parameter => |index| try writer.print("comptime_range_param#{d}", .{index}),
                     .constant => |value| try writer.writeAll(value),
                     .msg_sender => try writer.writeAll("msg.sender"),
                     .tx_origin => try writer.writeAll("tx.origin"),
@@ -3639,7 +4364,7 @@ const TypeChecker = struct {
                 try writer.writeByte(']');
             }
         }
-        return buffer.items;
+        return buffer.toOwnedSlice();
     }
 
     fn switchPatternContainsResult(self: *TypeChecker, pattern: ast.SwitchPattern) bool {
@@ -3773,7 +4498,7 @@ const TypeChecker = struct {
         const start = first_runtime orelse return &.{};
         if (!has_comptime_after_runtime) return function.parameters[start..];
 
-        var parameters: std.ArrayList(ast.Parameter) = .{};
+        var parameters: std.ArrayList(ast.Parameter) = .empty;
         for (function.parameters) |parameter| {
             if (parameter.is_comptime) continue;
             try parameters.append(self.arena, parameter);
@@ -3790,6 +4515,11 @@ const TypeChecker = struct {
             count += 1;
         }
         return count;
+    }
+
+    fn comptimeParameterCount(self: *const TypeChecker, function: ast.FunctionItem) usize {
+        _ = self;
+        return generic_call_args.comptimeParameterCount(function);
     }
 
     fn leadingGenericTypeParameterCount(self: *const TypeChecker, function: ast.FunctionItem) usize {
@@ -3837,7 +4567,6 @@ const TypeChecker = struct {
                 .Function => |function| function,
                 else => return,
             };
-            const comptime_count = self.leadingComptimeParameterCount(function);
             const runtime_parameters = try self.runtimeFunctionParameters(function);
             var inline_bindings: [inline_generic_binding_capacity]GenericTypeBinding = undefined;
             const bindings = if (function.is_generic)
@@ -3847,11 +4576,7 @@ const TypeChecker = struct {
             if (function.is_generic) {
                 try self.validateGenericFunctionInstantiation(function, bindings);
             }
-            const explicit_generics = call.args.len >= comptime_count + runtime_parameters.len;
-            const runtime_args = if (explicit_generics)
-                call.args[comptime_count..]
-            else
-                call.args;
+            const runtime_args = (try self.runtimeCallArgsForFunction(function, call)) orelse return;
             if (runtime_parameters.len != runtime_args.len) return;
             for (runtime_args, runtime_parameters) |arg, parameter| {
                 const param_type = if (function.is_generic)
@@ -3888,8 +4613,7 @@ const TypeChecker = struct {
 
     fn checkImportedCallArguments(self: *TypeChecker, call: ast.CallExpr, resolved: ResolvedCall) !void {
         const param_types = resolved.runtime_parameter_types;
-        if (call.args.len < param_types.len) return;
-        const runtime_args = call.args[call.args.len - param_types.len ..];
+        const runtime_args = (try self.runtimeCallArgsForImportedFunction(call, resolved)) orelse return;
         for (runtime_args, param_types) |arg, param_type| {
             try self.contextualizeLiteral(arg, param_type);
             if (try self.emitIntegerOverflowIfNeeded(self.exprRange(arg), arg, param_type)) continue;
@@ -3900,6 +4624,45 @@ const TypeChecker = struct {
                 try self.emitExpectedArgumentTypeFoundExpr(arg, param_type, arg_type);
             }
         }
+    }
+
+    fn runtimeCallArgsForImportedFunction(self: *TypeChecker, call: ast.CallExpr, resolved: ResolvedCall) !?[]const ast.ExprId {
+        const query = self.import_query orelse return null;
+        const target_file = try query.astFile(resolved.module_id);
+        const function = switch (target_file.item(resolved.item_id).*) {
+            .Function => |function| function,
+            else => return null,
+        };
+        return try self.runtimeCallArgsForFunctionWithReceiver(function, call, false);
+    }
+
+    fn runtimeCallArgsForFunction(self: *TypeChecker, function: ast.FunctionItem, call: ast.CallExpr) !?[]const ast.ExprId {
+        const method_receiver_supplied = self.callSuppliesMethodReceiver(call.callee) and self.functionHasRuntimeSelf(function);
+        return try self.runtimeCallArgsForFunctionWithReceiver(function, call, method_receiver_supplied);
+    }
+
+    fn runtimeCallArgsForFunctionWithReceiver(
+        self: *TypeChecker,
+        function: ast.FunctionItem,
+        call: ast.CallExpr,
+        method_receiver_supplied: bool,
+    ) !?[]const ast.ExprId {
+        const runtime_parameters = try self.runtimeFunctionParameters(function);
+        const effective_runtime_count = runtime_parameters.len - @as(usize, if (method_receiver_supplied) 1 else 0);
+        if (!function.is_generic or call.args.len == effective_runtime_count) return call.args;
+        if (call.args.len != generic_call_args.explicitArgumentCount(function, .{ .skip_first_runtime_parameter = method_receiver_supplied })) return null;
+
+        const runtime_args = try self.arena.alloc(ast.ExprId, effective_runtime_count);
+        var out_index: usize = 0;
+        var iter = generic_call_args.iterator(function, call, .{ .skip_first_runtime_parameter = method_receiver_supplied });
+        while ((iter.next() catch return null)) |entry| {
+            if (entry.runtime_index == null) continue;
+            if (out_index >= runtime_args.len) return null;
+            runtime_args[out_index] = entry.arg;
+            out_index += 1;
+        }
+        if (out_index != runtime_args.len) return null;
+        return runtime_args;
     }
 
     fn checkBuiltinArguments(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr) !void {
@@ -3927,7 +4690,180 @@ const TypeChecker = struct {
             .trait_methods => try self.checkReflectionBuiltinArguments(builtin, "traitMethods", "trait", TypeChecker.resolveBuiltinTraitReference),
             .concat => try self.checkConcatBuiltinArguments(builtin),
             .slice => try self.checkSliceBuiltinArguments(builtin),
+            .storage_derive => try self.checkStorageDeriveBuiltinArguments(builtin),
+            .storage_range => try self.checkStorageRangeBuiltinArguments(builtin),
+            .storage_range_erase => try self.checkStorageRangeEraseBuiltinArguments(builtin),
+            .storage_word_load => try self.checkStorageWordLoadBuiltinArguments(builtin),
+            .storage_word_store => try self.checkStorageWordStoreBuiltinArguments(builtin),
+            .resource_amount => _ = try self.checkResourceAmountBuiltinArguments(builtin),
+            .resource_move, .resource_create, .resource_destroy => try self.checkResourceBuiltinArguments(kind, builtin),
             else => {},
+        }
+    }
+
+    fn checkResourceAmountBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !?ResourcePlaceInfo {
+        if (builtin.args.len != 1) {
+            try self.emitRangeError(builtin.range, "@amount expects 1 argument", .{});
+            return null;
+        }
+
+        const place = (self.resourcePlaceForExpr(builtin.args[0]) catch |err| switch (err) {
+            error.UnsupportedResourcePlaceShape => return null,
+            else => return err,
+        }) orelse {
+            try self.emitExprError(builtin.args[0], "@amount expects a Resource<T> place", .{});
+            return null;
+        };
+        return place;
+    }
+
+    fn checkResourceBuiltinArguments(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr) !void {
+        const expected_args: usize = switch (kind) {
+            .resource_move => 3,
+            .resource_create, .resource_destroy => 2,
+            else => unreachable,
+        };
+        if (builtin.args.len != expected_args) {
+            try self.emitRangeError(builtin.range, "@{s} expects {d} arguments", .{ builtin.name, expected_args });
+            return;
+        }
+
+        const first_place = (self.resourcePlaceForExpr(builtin.args[0]) catch |err| switch (err) {
+            error.UnsupportedResourcePlaceShape => return,
+            else => return err,
+        }) orelse {
+            switch (kind) {
+                .resource_move => try self.emitExprError(builtin.args[0], "@move expects Resource<T> places as its first two arguments", .{}),
+                .resource_create => try self.emitExprError(builtin.args[0], "@create expects a Resource<T> place as its first argument", .{}),
+                .resource_destroy => try self.emitExprError(builtin.args[0], "@destroy expects a Resource<T> place as its first argument", .{}),
+                else => unreachable,
+            }
+            return;
+        };
+
+        const domain_type = first_place.domain_type;
+        if (kind == .resource_move) {
+            const second_place = (self.resourcePlaceForExpr(builtin.args[1]) catch |err| switch (err) {
+                error.UnsupportedResourcePlaceShape => return,
+                else => return err,
+            }) orelse {
+                try self.emitExprError(builtin.args[1], "@move expects Resource<T> places as its first two arguments", .{});
+                return;
+            };
+            if (!sameConcreteType(domain_type, second_place.domain_type)) {
+                try self.emitRangeError(builtin.range, "cannot move between Resource<{s}> and Resource<{s}>", .{
+                    diagnosticTypeDisplayName(self, domain_type),
+                    diagnosticTypeDisplayName(self, second_place.domain_type),
+                });
+                return;
+            }
+        }
+
+        const amount_expr = builtin.args[expected_args - 1];
+        try self.contextualizeLiteral(amount_expr, domain_type);
+        const actual_type = self.expr_types[amount_expr.index()];
+        if (actual_type.kind() != .unknown and !typesFlowCompatible(domain_type, actual_type)) {
+            try self.emitExprError(amount_expr, "resource amount must have type {s}", .{
+                diagnosticTypeDisplayName(self, domain_type),
+            });
+            return;
+        }
+        try self.checkResourceAmountNonNegative(amount_expr, domain_type);
+    }
+
+    fn resourcePlaceForExpr(self: *TypeChecker, expr_id: ast.ExprId) !?ResourcePlaceInfo {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| try self.resourcePlaceForExpr(group.expr),
+            .Name => self.resourcePlaceFromLocated(expr_id, self.locatedTypeForBinding(self.resolution.expr_bindings[expr_id.index()])),
+            .Field => |field| blk: {
+                if (!try self.validateResourcePlacePathKeys(expr_id)) break :blk null;
+                const base = self.exprLocatedType(field.base);
+                const place_type = try self.fieldAccessTypeForExpr(field.base, field.name);
+                if (place_type.kind() == .resource_place and (base.region == .storage or base.region == .transient)) {
+                    if (!self.resourceFieldBaseIsDirectRootPath(field.base)) {
+                        try self.emitExprError(
+                            expr_id,
+                            "resource struct-field places inside maps are not supported yet; use a direct storage Resource<T> root, direct struct field, or map value resource place",
+                            .{},
+                        );
+                        return error.UnsupportedResourcePlaceShape;
+                    }
+                }
+                break :blk self.resourcePlaceFromLocated(expr_id, .{
+                    .type = place_type,
+                    .region = base.region,
+                    .provenance = if (base.region == .storage) .storage else base.provenance,
+                });
+            },
+            .Index => |index| blk: {
+                if (!try self.validateResourcePlacePathKeys(expr_id)) break :blk null;
+                const base = self.exprLocatedType(index.base);
+                const base_type = self.expr_types[index.base.index()];
+                const place_type = self.indexAccessType(base_type, index.index);
+                break :blk self.resourcePlaceFromLocated(expr_id, .{
+                    .type = place_type,
+                    .region = base.region,
+                    .provenance = if (base.region == .storage) .storage else base.provenance,
+                });
+            },
+            else => null,
+        };
+    }
+
+    fn resourceFieldBaseIsDirectRootPath(self: *TypeChecker, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.resourceFieldBaseIsDirectRootPath(group.expr),
+            .Field => |field| self.resourceFieldBaseIsDirectRootPath(field.base),
+            .Name => blk: {
+                const located = self.locatedTypeForBinding(self.resolution.expr_bindings[expr_id.index()]);
+                break :blk located.region == .storage or located.region == .transient;
+            },
+            else => false,
+        };
+    }
+
+    fn validateResourcePlacePathKeys(self: *TypeChecker, expr_id: ast.ExprId) !bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| try self.validateResourcePlacePathKeys(group.expr),
+            .Field => |field| try self.validateResourcePlacePathKeys(field.base),
+            .Index => |index| (try self.validateResourcePlacePathKeys(index.base)) and
+                (try self.validateResourcePlaceKeyExpr(index.index)),
+            else => true,
+        };
+    }
+
+    fn resourcePlaceFromLocated(self: *TypeChecker, expr_id: ast.ExprId, located: LocatedType) ?ResourcePlaceInfo {
+        if (located.type.kind() != .resource_place) return null;
+        if (located.region != .storage and located.region != .transient) return null;
+        const domain_type = located.type.resource_place.domain_type.*;
+        const carrier_type: Type = if (domain_type.kind() == .resource_domain)
+            domain_type.resource_domain.carrier_type.*
+        else
+            .{ .unknown = {} };
+        return .{
+            .domain_type = domain_type,
+            .carrier_type = carrier_type,
+            .region = located.region,
+            .slot = self.lockSlotForExpr(expr_id),
+        };
+    }
+
+    fn validateResourcePlaceKeyExpr(self: *TypeChecker, expr_id: ast.ExprId) !bool {
+        if (self.keySegmentForExpr(expr_id) != .unknown) return true;
+        try self.emitExprError(expr_id, "resource place key expression must be side-effect-free", .{});
+        return false;
+    }
+
+    fn checkResourceAmountNonNegative(self: *TypeChecker, expr_id: ast.ExprId, domain_type: Type) !void {
+        if (domain_type.kind() != .resource_domain) return;
+        const carrier = unwrapRefinement(domain_type.resource_domain.carrier_type.*);
+        if (carrier.kind() != .integer or !carrier.integer.signed) return;
+        const value = (try self.integerValueForResolution(expr_id)) orelse {
+            return;
+        };
+        if (value != .integer) return;
+        if (!value.integer.isPositive() and !value.integer.eqlZero()) {
+            try self.emitExprError(expr_id, "resource amount must be non-negative", .{});
         }
     }
 
@@ -3935,6 +4871,24 @@ const TypeChecker = struct {
         _ = kind;
         if (builtin.type_arg == null or builtin.args.len != 1) {
             try self.emitRangeError(builtin.range, "@{s} expects a type argument and 1 value argument", .{builtin.name});
+            return;
+        }
+
+        const target_type = try self.resolveTypeExprInCurrentContext(builtin.type_arg.?);
+        if (try self.typeContainsOpaqueRuntimeCapabilityResolved(target_type)) {
+            try self.emitRangeError(builtin.range, "@{s} cannot construct opaque runtime capability type '{s}'", .{
+                builtin.name,
+                diagnosticTypeDisplayName(self, target_type),
+            });
+            return;
+        }
+
+        const source_type = self.expr_types[builtin.args[0].index()];
+        if (try self.typeContainsOpaqueRuntimeCapabilityResolved(source_type)) {
+            try self.emitRangeError(builtin.range, "@{s} cannot reinterpret opaque runtime capability type '{s}'", .{
+                builtin.name,
+                diagnosticTypeDisplayName(self, source_type),
+            });
         }
     }
 
@@ -4078,6 +5032,180 @@ const TypeChecker = struct {
         }
     }
 
+    fn checkStorageDeriveBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
+        try self.checkStorageDeriveCallArguments(builtin.range, builtin.args, "@storageDerive");
+    }
+
+    fn checkStorageDeriveCallArguments(self: *TypeChecker, range: source.TextRange, args: []const ast.ExprId, label: []const u8) !void {
+        if (args.len == 0) {
+            try self.emitRangeError(range, "{s} expects a literal namespace string and optional scalar keys", .{label});
+            return;
+        }
+
+        if (!self.exprIsStringLiteral(args[0])) {
+            try self.emitRangeError(self.exprRange(args[0]), "{s} namespace must be a string literal", .{label});
+        }
+
+        for (args[1..]) |arg| {
+            if (self.environmentKeySegmentForExpr(arg) != null) continue;
+            try self.contextualizeLiteral(arg, u256Type());
+            const arg_type = self.expr_types[arg.index()];
+            if (self.storageDeriveKeyTypeSupported(arg_type)) continue;
+            try self.emitRangeError(
+                self.exprRange(arg),
+                "{s} key type '{s}' is not supported; use an integer, bool, address, fixed bytes, or refinement over one of those types",
+                .{ label, diagnosticTypeDisplayName(self, arg_type) },
+            );
+        }
+    }
+
+    fn checkStorageWordLoadBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
+        if (builtin.args.len != 2) {
+            try self.emitRangeError(builtin.range, "@storageWordLoad expects a StorageSlot and word offset", .{});
+            return;
+        }
+
+        try self.checkStorageSlotFirstArgument(builtin.args[0], "@storageWordLoad");
+        const offset_type = try self.storageWordCompatibleArgType(builtin.args[1]);
+        if (!self.storageDeriveKeyTypeSupported(offset_type)) {
+            try self.emitRangeError(self.exprRange(builtin.args[1]), "@storageWordLoad offset must be an integer-compatible word offset, found '{s}'", .{
+                diagnosticTypeDisplayName(self, offset_type),
+            });
+        }
+    }
+
+    fn checkStorageRangeBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
+        try self.checkStorageRangeCallArguments(builtin.range, builtin.args, "@storageRange");
+    }
+
+    fn checkStorageRangeCallArguments(self: *TypeChecker, range: source.TextRange, args: []const ast.ExprId, label: []const u8) !void {
+        if (args.len != 2) {
+            try self.emitRangeError(range, "{s} expects a StorageSlot and bounded word count", .{label});
+            return;
+        }
+
+        try self.checkStorageSlotFirstArgument(args[0], label);
+        const len_type = try self.storageWordCompatibleArgType(args[1]);
+        if (!self.storageDeriveKeyTypeSupported(len_type)) {
+            try self.emitRangeError(self.exprRange(args[1]), "{s} length must be an integer-compatible word count, found '{s}'", .{
+                label,
+                diagnosticTypeDisplayName(self, len_type),
+            });
+        } else if (!(try self.exprIsBoundedStorageRangeLen(args[1]))) {
+            try self.emitRangeError(self.exprRange(args[1]), "{s} length must be a compile-time integer literal or comptime integer parameter", .{label});
+        }
+    }
+
+    fn checkStorageSlotFirstArgument(self: *TypeChecker, arg: ast.ExprId, label: []const u8) !void {
+        const slot_type = self.expr_types[arg.index()];
+        if (slot_type.kind() != .storage_slot) {
+            try self.emitRangeError(self.exprRange(arg), "{s} expects StorageSlot as its first argument, found '{s}'", .{
+                label,
+                diagnosticTypeDisplayName(self, slot_type),
+            });
+        }
+    }
+
+    fn storageWordCompatibleArgType(self: *TypeChecker, arg: ast.ExprId) !Type {
+        try self.contextualizeLiteral(arg, u256Type());
+        return self.expr_types[arg.index()];
+    }
+
+    fn checkStorageRangeEraseBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
+        if (builtin.args.len != 1) {
+            try self.emitRangeError(builtin.range, "@storageRangeErase expects a StorageRange", .{});
+            return;
+        }
+
+        const range_type = self.expr_types[builtin.args[0].index()];
+        if (range_type.kind() != .storage_range) {
+            try self.emitRangeError(self.exprRange(builtin.args[0]), "@storageRangeErase expects StorageRange, found '{s}'", .{
+                diagnosticTypeDisplayName(self, range_type),
+            });
+        }
+    }
+
+    fn checkStorageWordStoreBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
+        if (builtin.args.len != 3) {
+            try self.emitRangeError(builtin.range, "@storageWordStore expects a StorageSlot, word offset, and u256 value", .{});
+            return;
+        }
+
+        try self.checkStorageSlotFirstArgument(builtin.args[0], "@storageWordStore");
+        const offset_type = try self.storageWordCompatibleArgType(builtin.args[1]);
+        if (!self.storageDeriveKeyTypeSupported(offset_type)) {
+            try self.emitRangeError(self.exprRange(builtin.args[1]), "@storageWordStore offset must be an integer-compatible word offset, found '{s}'", .{
+                diagnosticTypeDisplayName(self, offset_type),
+            });
+        }
+
+        const value_type = try self.storageWordCompatibleArgType(builtin.args[2]);
+        if (!self.storageDeriveKeyTypeSupported(value_type)) {
+            try self.emitRangeError(self.exprRange(builtin.args[2]), "@storageWordStore value must be an integer-compatible word, found '{s}'", .{
+                diagnosticTypeDisplayName(self, value_type),
+            });
+        }
+    }
+
+    fn exprIsStringLiteral(self: *const TypeChecker, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .StringLiteral => true,
+            .Group => |group| self.exprIsStringLiteral(group.expr),
+            else => false,
+        };
+    }
+
+    fn exprIsIntegerLiteral(self: *const TypeChecker, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .IntegerLiteral => true,
+            .Group => |group| self.exprIsIntegerLiteral(group.expr),
+            else => false,
+        };
+    }
+
+    fn exprIsBoundedStorageRangeLen(self: *TypeChecker, expr_id: ast.ExprId) !bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| try self.exprIsBoundedStorageRangeLen(group.expr),
+            .IntegerLiteral => true,
+            .Name => blk: {
+                if (try self.integerValueForResolution(expr_id)) |value| {
+                    break :blk value == .integer;
+                }
+                const binding = self.resolution.expr_bindings[expr_id.index()] orelse break :blk false;
+                switch (binding) {
+                    .pattern => |pattern_id| break :blk try self.patternIsComptimeIntegerParameter(pattern_id),
+                    .item => break :blk false,
+                }
+            },
+            else => if (try self.integerValueForResolution(expr_id)) |value|
+                value == .integer
+            else
+                false,
+        };
+    }
+
+    fn patternIsComptimeIntegerParameter(self: *TypeChecker, pattern_id: ast.PatternId) !bool {
+        const function_item = self.current_function_item orelse return false;
+        const function = switch (self.file.item(function_item).*) {
+            .Function => |function| function,
+            else => return false,
+        };
+        for (function.parameters) |parameter| {
+            if (parameter.pattern.index() != pattern_id.index()) continue;
+            return try self.comptimeIntegerParameter(parameter);
+        }
+        return false;
+    }
+
+    fn storageDeriveKeyTypeSupported(self: *const TypeChecker, ty: Type) bool {
+        _ = self;
+        if (typeContainsOpaqueRuntimeCapability(ty)) return false;
+        return switch (unwrapRefinement(ty)) {
+            .integer, .comptime_integer, .bool, .address, .fixed_bytes => true,
+            else => false,
+        };
+    }
+
     fn checkAbiFunctionReferenceBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
         if (builtin.args.len != 1) {
             try self.emitRangeError(builtin.range, "@{s} expects 1 argument", .{builtin.name});
@@ -4109,6 +5237,10 @@ const TypeChecker = struct {
     ) !void {
         if (builtin.args.len != 1) {
             try self.emitRangeError(builtin.range, "@" ++ builtin_name ++ " expects 1 argument, found {d}", .{builtin.args.len});
+            return;
+        }
+        if (self.comptime_depth == 0) {
+            try self.emitRangeError(builtin.range, "@" ++ builtin_name ++ " is comptime-only; wrap it in a comptime block", .{});
             return;
         }
 
@@ -4499,6 +5631,7 @@ const TypeChecker = struct {
             },
             .Array => |array| {
                 if (arg_type.kind() != .array) return;
+                self.inferBindingFromArraySizeInFile(target_file, function, generic_count, array.size, arg_type.array.len, bindings);
                 self.inferBindingFromTypeExprInFile(target_file, function, generic_count, array.element, arg_type.array.element_type.*, bindings);
             },
             .Slice => |slice| {
@@ -4516,6 +5649,24 @@ const TypeChecker = struct {
         }
     }
 
+    fn inferBindingFromArraySizeInFile(
+        self: *TypeChecker,
+        target_file: *const ast.AstFile,
+        function: ast.FunctionItem,
+        generic_count: usize,
+        size: ast.TypeArraySize,
+        arg_len: ?u32,
+        bindings: []GenericTypeBinding,
+    ) void {
+        const len = arg_len orelse return;
+        const name = switch (size) {
+            .Name => |path| std.mem.trim(u8, path.name, " \t\n\r"),
+            .Integer => return,
+        };
+        const value_text = std.fmt.allocPrint(self.arena, "{d}", .{len}) catch return;
+        self.bindGenericIntegerNameInFile(target_file, function, generic_count, name, value_text, bindings);
+    }
+
     fn bindGenericTypeNameInFile(
         self: *TypeChecker,
         target_file: *const ast.AstFile,
@@ -4525,7 +5676,11 @@ const TypeChecker = struct {
         arg_type: Type,
         bindings: []GenericTypeBinding,
     ) void {
-        for (function.parameters[0..generic_count], 0..) |param, index| {
+        var index: usize = 0;
+        for (function.parameters) |param| {
+            if (!param.is_comptime) continue;
+            if (index >= generic_count) break;
+            defer index += 1;
             const param_name = self.patternNameInFile(target_file, param.pattern) orelse continue;
             if (!std.mem.eql(u8, name, param_name)) continue;
             if (!self.isGenericTypeParameterInFile(target_file, param)) continue;
@@ -4543,6 +5698,47 @@ const TypeChecker = struct {
             bindings[index] = .{ .name = param_name, .value = .{ .ty = arg_type } };
             return;
         }
+    }
+
+    fn bindGenericIntegerNameInFile(
+        self: *TypeChecker,
+        target_file: *const ast.AstFile,
+        function: ast.FunctionItem,
+        generic_count: usize,
+        name: []const u8,
+        integer_text: []const u8,
+        bindings: []GenericTypeBinding,
+    ) void {
+        var index: usize = 0;
+        for (function.parameters) |param| {
+            if (!param.is_comptime) continue;
+            if (index >= generic_count) break;
+            defer index += 1;
+            const param_name = self.patternNameInFile(target_file, param.pattern) orelse continue;
+            if (!std.mem.eql(u8, name, param_name)) continue;
+            if (!self.isGenericIntegerParameterInFile(target_file, param)) continue;
+
+            if (bindings[index].name.len > 0) {
+                if (genericBindingInteger(bindings[index])) |existing| {
+                    if (!std.mem.eql(u8, existing, integer_text)) {
+                        bindings[index].name = "";
+                    }
+                }
+                return;
+            }
+
+            bindings[index] = .{ .name = param_name, .value = .{ .integer = integer_text } };
+            return;
+        }
+    }
+
+    fn isGenericIntegerParameterInFile(self: *const TypeChecker, target_file: *const ast.AstFile, parameter: ast.Parameter) bool {
+        _ = self;
+        if (!parameter.is_comptime) return false;
+        return switch (target_file.typeExpr(parameter.type_expr).*) {
+            .Path => |path| descriptors.integerTypeFromName(std.mem.trim(u8, path.name, " \t\n\r")) != null,
+            else => false,
+        };
     }
 
     fn isGenericTypeParameter(self: *const TypeChecker, parameter: ast.Parameter) bool {
@@ -4973,9 +6169,32 @@ const TypeChecker = struct {
             .Bitfield => .{ .bitfield = .{ .name = name } },
             .Enum => .{ .enum_ = .{ .name = name } },
             .ErrorDecl => .{ .named = .{ .name = name } },
+            .Resource => |resource| try self.resolveResourceDomainType(item_id, resource),
             .TypeAlias => |type_alias| try self.resolveTypeAliasTarget(item_id, type_alias, bindings),
             else => null,
         };
+    }
+
+    fn resolveResourceDomainType(self: *TypeChecker, item_id: ast.ItemId, resource: ast.ResourceItem) !Type {
+        if (self.active_resources.contains(item_id)) {
+            try self.emitRangeError(resource.range, "recursive resource declaration '{s}' is not supported", .{resource.name});
+            return .{ .unknown = {} };
+        }
+        try self.active_resources.push(self.arena, item_id);
+        defer _ = self.active_resources.pop();
+
+        const carrier_type = try self.resolveTypeExpr(resource.carrier_type);
+        if (carrier_type.kind() != .unknown and unwrapRefinement(carrier_type).kind() != .integer) {
+            try self.emitRangeError(resource.range, "resource carrier for '{s}' must be an integer type, found '{s}'", .{
+                resource.name,
+                diagnosticTypeDisplayName(self, carrier_type),
+            });
+            return .{ .unknown = {} };
+        }
+        return .{ .resource_domain = .{
+            .name = resource.name,
+            .carrier_type = try self.storeType(carrier_type),
+        } };
     }
 
     fn resolvePathTypeName(
@@ -5002,6 +6221,8 @@ const TypeChecker = struct {
         }
         if (descriptors.descriptorFromBuiltinName(trimmed)) |ty| return ty;
         if (descriptors.parseFixedBytesType(trimmed)) |fixed_bytes| return .{ .fixed_bytes = fixed_bytes };
+        if (std.mem.eql(u8, trimmed, "StorageSlot")) return .{ .storage_slot = {} };
+        if (std.mem.eql(u8, trimmed, "StorageRange")) return .{ .storage_range = {} };
         if (try self.importedTypeForPath(trimmed)) |imported_type| return imported_type;
         if (self.lookupTypeItemInScope(trimmed)) |item_id| {
             if (try self.descriptorFromTypeItem(item_id, trimmed, bindings)) |ty| return ty;
@@ -5114,6 +6335,27 @@ const TypeChecker = struct {
             } };
         }
 
+        if (std.mem.eql(u8, generic.name, "Resource")) {
+            if (generic.args.len != 1) {
+                try self.emitGenericArityError(generic.range, "type", "Resource", 1, generic.args.len);
+                return .{ .unknown = {} };
+            }
+            if (generic.args[0] != .Type) {
+                try self.emitRangeError(generic.range, "Resource<T> expects a resource-domain type argument", .{});
+                return .{ .unknown = {} };
+            }
+            const domain_type = try self.resolveTypeExprWithBindings(generic.args[0].Type, bindings);
+            if (domain_type.kind() != .resource_domain) {
+                try self.emitRangeError(generic.range, "Resource<T> expects a resource-domain type argument, found '{s}'", .{
+                    diagnosticTypeDisplayName(self, domain_type),
+                });
+                return .{ .unknown = {} };
+            }
+            return .{ .resource_place = .{
+                .domain_type = try self.storeType(domain_type),
+            } };
+        }
+
         if (std.mem.eql(u8, generic.name, "Result")) {
             if (generic.args.len != 2) {
                 try self.emitGenericArityError(generic.range, "type", "Result", 2, generic.args.len);
@@ -5142,7 +6384,7 @@ const TypeChecker = struct {
         if (refinements.isKnownName(generic.name)) {
             if (generic.args.len > 0 and generic.args[0] == .Type) {
                 const resolved_args = try self.substituteGenericArgs(generic.args, bindings);
-                const semantic_args = try refinementArgsFromAst(self.arena, resolved_args);
+                const semantic_args = try refinementArgsFromAst(self.arena, self.file, resolved_args);
                 const base_type = try self.resolveTypeExprWithBindings(generic.args[0].Type, bindings);
                 if (!try self.validateRefinementGenericBounds(generic.range, generic.name, base_type, semantic_args)) {
                     return .{ .unknown = {} };
@@ -5381,6 +6623,7 @@ const TypeChecker = struct {
             .not_applicable => {},
             .resolved, .overflow => return,
         }
+        if (try self.resolveResourceDomainLiteralExpression(self.exprRange(expr_id), expr_id, expected_type)) return;
         if (try self.resolveAddressLiteralExpression(self.exprRange(expr_id), expr_id, expected_type)) return;
 
         const expr = self.file.expression(expr_id).*;
@@ -5467,6 +6710,24 @@ const TypeChecker = struct {
                 self.expr_types[expr_id.index()] = expected_type;
             },
             else => {},
+        }
+    }
+
+    fn resolveResourceDomainLiteralExpression(self: *TypeChecker, range: source.TextRange, expr_id: ast.ExprId, expected_type: Type) !bool {
+        if (expected_type.kind() != .resource_domain) return false;
+        const value = (try self.integerValueForResolution(expr_id)) orelse return false;
+        if (value != .integer) return false;
+        const carrier_type = expected_type.resource_domain.carrier_type.*;
+        switch (try self.resolveIntegerExpression(range, expr_id, carrier_type)) {
+            .not_applicable => return false,
+            .resolved => {
+                self.expr_types[expr_id.index()] = expected_type;
+                return true;
+            },
+            .overflow => {
+                self.expr_types[expr_id.index()] = .{ .unknown = {} };
+                return true;
+            },
         }
     }
 
@@ -5579,7 +6840,7 @@ const TypeChecker = struct {
     }
 
     fn mangleGenericStructName(self: *TypeChecker, base_name: []const u8, bindings: []const GenericTypeBinding) anyerror![]const u8 {
-        var name = std.ArrayList(u8){};
+        var name = std.ArrayList(u8).empty;
         var total_len = base_name.len;
         for (bindings) |binding| {
             total_len += 2 + switch (binding.value) {
@@ -5887,6 +7148,12 @@ const TypeChecker = struct {
 
     fn builtinReturnType(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr) !Type {
         return switch (kind) {
+            // Statement-only directive: reaching it in expression position
+            // means it was written somewhere it cannot re-order dispatch.
+            .call_hint => {
+                try self.emitRangeError(builtin.range, "`@callHint` must be the first statement of a public contract function body; it cannot be used as an expression", .{});
+                return .{ .void = {} };
+            },
             .cast, .bit_cast, .truncate => {
                 if (builtin.type_arg) |type_expr| return try self.resolveTypeExprInCurrentContext(type_expr);
                 if (kind == .truncate and builtin.args.len > 0) {
@@ -5931,7 +7198,15 @@ const TypeChecker = struct {
                 return .{ .unknown = {} };
             },
 
-            .size_of, .keccak256, .chain_id => descriptorFromPathName(self.file, self.item_index, "u256"),
+            .size_of, .keccak256, .chain_id, .storage_word_load => descriptorFromPathName(self.file, self.item_index, "u256"),
+
+            .resource_amount => if (builtin.args.len == 1) self.expr_types[builtin.args[0].index()] else .{ .unknown = {} },
+
+            .storage_range_erase, .storage_word_store, .resource_move, .resource_create, .resource_destroy => .{ .void = {} },
+
+            .storage_derive => .{ .storage_slot = {} },
+
+            .storage_range => .{ .storage_range = {} },
 
             .abi_encode => .{ .bytes = {} },
 
@@ -6285,6 +7560,7 @@ const TypeChecker = struct {
             .Block => |block| try self.validateBodyExternalCalls(block.body, state),
             .LabeledBlock => |block| try self.validateBodyExternalCalls(block.body, state),
             .Lock => |lock_stmt| try self.validateExprExternalCalls(lock_stmt.path, state),
+            .CallHint => {},
             .Unlock => |unlock_stmt| try self.validateExprExternalCalls(unlock_stmt.path, state),
             .Assign => |assign| {
                 try self.validateExprExternalCalls(assign.value, state);
@@ -6337,16 +7613,52 @@ const TypeChecker = struct {
                         switch (self.checker.file.item(callee_id).*) {
                             .Function => |function| {
                                 try self.checker.ensureFunctionEffectSummary(callee_id, function);
-                                const writes = self.checker.item_effects[callee_id.index()].writeSlots();
-                                try self.checker.emitExternalCallWriteDiagnostics(call.range, writes, self.state.frozen_pre_call_writes.items());
-                                try self.checker.mergeStorageSlots(&self.state.current_writes, writes);
+                                try self.recordCallWrites(expr_id, call, self.checker.file, function, self.checker.item_effects[callee_id.index()]);
                             },
                             else => {},
                         }
+                    } else if (try self.checker.importedCallEffect(expr_id)) |imported| {
+                        try self.recordCallWrites(expr_id, call, imported.file, imported.function, imported.effect);
                     }
+                },
+                .Builtin => |builtin| {
+                    var effects = EffectCollectorState.init();
+                    if (builtinKind(builtin.name)) |kind| switch (kind) {
+                        .storage_word_store => if (builtin.args.len == 3) {
+                            if (self.checker.computedStorageWordSlot(builtin.args[0], builtin.args[1])) |slot| {
+                                try self.checker.appendUniqueEffectSlot(&effects.writes, slot);
+                            }
+                        },
+                        .storage_range_erase => if (builtin.args.len == 1) {
+                            if (self.checker.computedStorageRangeSlot(builtin.args[0])) |slot| {
+                                try self.checker.appendUniqueEffectSlot(&effects.writes, slot);
+                            }
+                        },
+                        .resource_move, .resource_create, .resource_destroy => try self.checker.collectResourceBuiltinEffects(kind, builtin, &effects),
+                        else => {},
+                    };
+                    try self.recordWrites(builtin.range, effects.writes.items());
                 },
                 else => {},
             }
+        }
+
+        fn recordCallWrites(
+            self: *@This(),
+            expr_id: ast.ExprId,
+            call: ast.CallExpr,
+            function_file: *const ast.AstFile,
+            function: ast.FunctionItem,
+            effect: Effect,
+        ) !void {
+            var effects = EffectCollectorState.init();
+            try self.checker.mergeCallEffect(&effects, expr_id, call, function_file, function, effect);
+            try self.recordWrites(call.range, effects.writes.items());
+        }
+
+        fn recordWrites(self: *@This(), range: source.TextRange, writes: []const EffectSlot) !void {
+            try self.checker.emitExternalCallWriteDiagnostics(range, writes, self.state.frozen_pre_call_writes.items());
+            try self.checker.mergeStorageSlots(&self.state.current_writes, writes);
         }
     };
 
@@ -6435,6 +7747,7 @@ const TypeChecker = struct {
                 try self.validateExprLocks(lock_stmt.path, locked_slots);
                 if (try self.runtimeLockSlotForExpr(lock_stmt.path, "`@lock`")) |slot| try self.appendUniqueEffectSlot(locked_slots, slot);
             },
+            .CallHint => {},
             .Unlock => |unlock_stmt| {
                 try self.validateExprLocks(unlock_stmt.path, locked_slots);
                 if (try self.runtimeLockSlotForExpr(unlock_stmt.path, "`@unlock`")) |slot| self.removeLockedSlot(locked_slots, slot);
@@ -6449,23 +7762,24 @@ const TypeChecker = struct {
     }
 
     fn validateExprLocks(self: *TypeChecker, expr_id: ast.ExprId, locked_slots: *InlineEffectSlotList) anyerror!void {
-        _ = locked_slots;
         var visitor = LockExprValidator{
             .checker = self,
+            .locked_slots = locked_slots,
         };
         try ast.walk.walkExpr(LockExprValidator, &visitor, self.file, expr_id, validation_expr_walk_options);
     }
 
     fn validateSwitchPatternLocks(self: *TypeChecker, pattern: ast.SwitchPattern, locked_slots: *InlineEffectSlotList) anyerror!void {
-        _ = locked_slots;
         var visitor = LockExprValidator{
             .checker = self,
+            .locked_slots = locked_slots,
         };
         try ast.walk.walkSwitchPattern(LockExprValidator, &visitor, self.file, pattern, validation_expr_walk_options);
     }
 
     const LockExprValidator = struct {
         checker: *TypeChecker,
+        locked_slots: *InlineEffectSlotList,
 
         pub fn exitExpr(self: *@This(), file: *const ast.AstFile, expr_id: ast.ExprId) anyerror!void {
             switch (file.expression(expr_id).*) {
@@ -6476,6 +7790,13 @@ const TypeChecker = struct {
                             else => {},
                         }
                     }
+                },
+                .Builtin => |builtin| {
+                    const kind = builtinKind(builtin.name) orelse return;
+                    if (!isResourceBoundaryBuiltin(kind)) return;
+                    var state = EffectCollectorState.init();
+                    try self.checker.collectResourceBuiltinEffects(kind, builtin, &state);
+                    try self.checker.emitLockedWriteDiagnostics(builtin.range, state.writes.items(), self.locked_slots.items());
                 },
                 else => {},
             }
@@ -6506,6 +7827,46 @@ const TypeChecker = struct {
             },
             else => null,
         };
+    }
+
+    fn placeSlotForExpr(self: *TypeChecker, expr_id: ast.ExprId) ?EffectSlot {
+        return switch (self.file.expression(expr_id).*) {
+            .Name => |name| self.lookupNamedFieldSlot(name.name),
+            .Group => |group| self.placeSlotForExpr(group.expr),
+            .Field => |field| blk: {
+                const base = self.placeSlotForExpr(field.base) orelse break :blk null;
+                break :blk self.slotWithField(base, field.name);
+            },
+            .Index => |index| blk: {
+                const base = self.placeSlotForExpr(index.base) orelse break :blk null;
+                break :blk self.slotWithIndexKey(base, index.index);
+            },
+            else => null,
+        };
+    }
+
+    fn collectResourceBuiltinEffects(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr, state: *EffectCollectorState) !void {
+        switch (kind) {
+            .resource_move => {
+                if (builtin.args.len != 3) return;
+                try self.collectResourcePlaceReadWrite(builtin.args[0], state);
+                try self.collectResourcePlaceReadWrite(builtin.args[1], state);
+            },
+            .resource_create, .resource_destroy => {
+                if (builtin.args.len != 2) return;
+                try self.collectResourcePlaceReadWrite(builtin.args[0], state);
+            },
+            else => return,
+        }
+    }
+
+    fn collectResourcePlaceReadWrite(self: *TypeChecker, expr_id: ast.ExprId, state: *EffectCollectorState) !void {
+        const slot = self.placeSlotForExpr(expr_id) orelse {
+            try self.emitExprError(expr_id, "resource operation place does not resolve to a storage or transient effect slot", .{});
+            return;
+        };
+        try self.appendUniqueEffectSlot(&state.reads, slot);
+        try self.appendUniqueEffectSlot(&state.writes, slot);
     }
 
     fn runtimeLockSlotForExpr(self: *TypeChecker, expr_id: ast.ExprId, op_name: []const u8) !?EffectSlot {
@@ -6583,12 +7944,24 @@ const TypeChecker = struct {
         return false;
     }
 
+    fn effectHasComputedStorageWrite(self: *const TypeChecker, effect: Effect) bool {
+        for (effect.writeSlots()) |slot| {
+            if (self.effectSlotIsComputedStorage(slot)) return true;
+        }
+        return false;
+    }
+
+    fn effectSlotIsComputedStorage(self: *const TypeChecker, slot: EffectSlot) bool {
+        _ = self;
+        return slot.region == .storage and std.mem.eql(u8, slot.name, computed_storage_effect_root);
+    }
+
     const InlineEffectSlotList = struct {
         const inline_capacity = 4;
 
         inline_items: [inline_capacity]EffectSlot = undefined,
         inline_len: usize = 0,
-        spill: std.ArrayList(EffectSlot) = .{},
+        spill: std.ArrayList(EffectSlot) = .empty,
 
         fn items(self: *const InlineEffectSlotList) []const EffectSlot {
             if (self.spill.capacity != 0) return self.spill.items;
@@ -6664,7 +8037,7 @@ const TypeChecker = struct {
 
         inline_buffer: [inline_capacity]EffectCollectorState = undefined,
         inline_len: usize = 0,
-        spill: std.ArrayList(EffectCollectorState) = .{},
+        spill: std.ArrayList(EffectCollectorState) = .empty,
 
         fn current(self: *EffectStateStack) ?*EffectCollectorState {
             if (self.spill.capacity == 0) {
@@ -6870,13 +8243,36 @@ const TypeChecker = struct {
                         switch (self.checker.file.item(callee_id).*) {
                             .Function => |function| {
                                 try self.checker.ensureFunctionEffectSummary(callee_id, function);
-                                try self.checker.mergeEffect(self.current(), self.checker.item_effects[callee_id.index()]);
+                                try self.checker.mergeCallEffect(self.current(), expr_id, call, self.checker.file, function, self.checker.item_effects[callee_id.index()]);
                             },
                             else => {},
                         }
+                    } else if (try self.checker.importedCallEffect(expr_id)) |imported| {
+                        try self.checker.mergeCallEffect(self.current(), expr_id, call, imported.file, imported.function, imported.effect);
                     } else if (self.checker.callableType(call.callee).kind() == .function) {
                         self.current().flags.has_external = true;
                     }
+                },
+                .Builtin => |builtin| {
+                    if (builtinKind(builtin.name)) |kind| switch (kind) {
+                        .storage_word_load => if (builtin.args.len == 2) {
+                            if (self.checker.computedStorageWordSlot(builtin.args[0], builtin.args[1])) |slot| {
+                                try self.checker.appendUniqueEffectSlot(&self.current().reads, slot);
+                            }
+                        },
+                        .storage_word_store => if (builtin.args.len == 3) {
+                            if (self.checker.computedStorageWordSlot(builtin.args[0], builtin.args[1])) |slot| {
+                                try self.checker.appendUniqueEffectSlot(&self.current().writes, slot);
+                            }
+                        },
+                        .storage_range_erase => if (builtin.args.len == 1) {
+                            if (self.checker.computedStorageRangeSlot(builtin.args[0])) |slot| {
+                                try self.checker.appendUniqueEffectSlot(&self.current().writes, slot);
+                            }
+                        },
+                        .resource_move, .resource_create, .resource_destroy => try self.checker.collectResourceBuiltinEffects(kind, builtin, self.current()),
+                        else => {},
+                    };
                 },
                 else => {},
             }
@@ -7000,6 +8396,10 @@ const TypeChecker = struct {
 
     fn slotWithIndexKey(self: *TypeChecker, base: EffectSlot, index_expr: ast.ExprId) ?EffectSlot {
         const segment = self.keySegmentForExpr(index_expr);
+        return self.slotWithKeySegment(base, segment);
+    }
+
+    fn slotWithKeySegment(self: *TypeChecker, base: EffectSlot, segment: KeySegment) ?EffectSlot {
         const base_len: usize = if (base.key_path) |path| path.len else 0;
         const path = self.arena.alloc(KeySegment, base_len + 1) catch return null;
         if (base.key_path) |existing| @memcpy(path[0..existing.len], existing);
@@ -7007,6 +8407,277 @@ const TypeChecker = struct {
         var slot = base;
         slot.key_path = path;
         return slot;
+    }
+
+    fn computedStorageUnknownSlot(self: *TypeChecker) EffectSlot {
+        _ = self;
+        return .{
+            .name = computed_storage_effect_root,
+            .region = .storage,
+        };
+    }
+
+    fn computedStorageDerivedSlot(self: *TypeChecker, builtin: ast.BuiltinExpr) ?EffectSlot {
+        return self.computedStorageDerivedSlotFromArgs(builtin.args);
+    }
+
+    fn computedStorageDerivedSlotFromArgs(self: *TypeChecker, args: []const ast.ExprId) ?EffectSlot {
+        if (args.len == 0) return null;
+        var slot = self.computedStorageUnknownSlot();
+        slot.key_path = &.{};
+        for (args) |arg| {
+            slot = self.slotWithKeySegment(slot, self.keySegmentForExpr(arg)) orelse return null;
+        }
+        return slot;
+    }
+
+    fn computedStorageSlotExpr(self: *TypeChecker, expr_id: ast.ExprId) ?EffectSlot {
+        return self.computedStorageSlotExprMode(expr_id, true);
+    }
+
+    fn computedStorageSlotExprMode(self: *TypeChecker, expr_id: ast.ExprId, summarize_calls: bool) ?EffectSlot {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.computedStorageSlotExprMode(group.expr, summarize_calls),
+            .Builtin => |builtin| if (builtinKind(builtin.name) == .storage_derive)
+                self.computedStorageDerivedSlot(builtin)
+            else
+                null,
+            .Call => |call| blk: {
+                if (self.stdStorageDeriveCall(call) catch false) {
+                    break :blk self.computedStorageDerivedSlotFromArgs(call.args);
+                }
+                if (summarize_calls) {
+                    if (self.computedStorageSlotReturnedByCall(expr_id, call)) |slot| break :blk slot;
+                }
+                break :blk if (self.expr_types[expr_id.index()].kind() == .storage_slot)
+                    self.computedStorageUnknownSlot()
+                else
+                    null;
+            },
+            .Name => blk: {
+                if (self.resolution.expr_bindings[expr_id.index()]) |binding| {
+                    switch (binding) {
+                        .pattern => |pattern_id| if (self.initializerExprForPattern(pattern_id)) |initializer| {
+                            if (self.computedStorageSlotExprMode(initializer, summarize_calls)) |slot| break :blk slot;
+                        } else if (self.runtimeParameterIndexForPattern(pattern_id)) |index| {
+                            var slot = self.computedStorageUnknownSlot();
+                            slot.key_path = &.{};
+                            break :blk self.slotWithKeySegment(slot, .{ .parameter = index });
+                        },
+                        .item => {},
+                    }
+                }
+                if (self.expr_types[expr_id.index()].kind() == .storage_slot) {
+                    break :blk self.computedStorageUnknownSlot();
+                }
+                break :blk null;
+            },
+            else => if (self.expr_types[expr_id.index()].kind() == .storage_slot)
+                self.computedStorageUnknownSlot()
+            else
+                null,
+        };
+    }
+
+    fn computedStorageSlotReturnedByCall(self: *TypeChecker, expr_id: ast.ExprId, call: ast.CallExpr) ?EffectSlot {
+        if (self.computedStorageSlotReturnedByLocalCall(call)) |slot| return slot;
+        return self.computedStorageSlotReturnedByImportedCall(expr_id, call);
+    }
+
+    fn computedStorageSlotReturnedByLocalCall(self: *TypeChecker, call: ast.CallExpr) ?EffectSlot {
+        const callee_id = self.calleeFunctionItem(call.callee) orelse return null;
+        const function = switch (self.file.item(callee_id).*) {
+            .Function => |function| function,
+            else => return null,
+        };
+
+        const returned_slot = blk: {
+            const previous_function_item = self.current_function_item;
+            self.current_function_item = callee_id;
+            defer self.current_function_item = previous_function_item;
+            break :blk self.computedStorageSlotReturnExprInFunction(function) orelse return null;
+        };
+
+        return self.substituteCallEffectSlot(null, call, self.file, function, returned_slot) catch null;
+    }
+
+    fn computedStorageSlotReturnedByImportedCall(self: *TypeChecker, expr_id: ast.ExprId, call: ast.CallExpr) ?EffectSlot {
+        const target = (self.importedCallTarget(expr_id) catch return null) orelse return null;
+        const returned_slot = self.computedStorageSlotReturnExprInImportedFunction(target) orelse return null;
+        return self.substituteCallEffectSlot(null, call, target.file, target.function, returned_slot) catch null;
+    }
+
+    fn computedStorageSlotReturnExprInFunction(self: *TypeChecker, function: ast.FunctionItem) ?EffectSlot {
+        const value_expr = self.simpleReturnValueExprInFile(self.file, function) orelse return null;
+        return self.computedStorageSlotExprMode(value_expr, false);
+    }
+
+    fn computedStorageWordSlot(self: *TypeChecker, slot_expr: ast.ExprId, offset_expr: ast.ExprId) ?EffectSlot {
+        const base = self.computedStorageSlotExpr(slot_expr) orelse return null;
+        if (base.key_path == null) return base;
+        return self.slotWithKeySegment(base, self.keySegmentForExpr(offset_expr));
+    }
+
+    fn computedStorageRangeSlot(self: *TypeChecker, expr_id: ast.ExprId) ?EffectSlot {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.computedStorageRangeSlot(group.expr),
+            .Builtin => |builtin| if (builtinKind(builtin.name) == .storage_range and builtin.args.len == 2) blk: {
+                var base = self.computedStorageSlotExpr(builtin.args[0]) orelse break :blk null;
+                if (base.key_path == null) break :blk base;
+                base = self.slotWithKeySegment(base, self.computedStorageRangeSegmentForExpr(builtin.args[1])) orelse break :blk null;
+                break :blk base;
+            } else null,
+            .Call => |call| blk: {
+                if (self.stdStorageRangeCall(call) catch false) {
+                    if (call.args.len != 2) break :blk null;
+                    var base = self.computedStorageSlotExpr(call.args[0]) orelse break :blk null;
+                    if (base.key_path == null) break :blk base;
+                    base = self.slotWithKeySegment(base, self.computedStorageRangeSegmentForExpr(call.args[1])) orelse break :blk null;
+                    break :blk base;
+                }
+                if (self.computedStorageRangeReturnedByCall(expr_id, call)) |slot| break :blk slot;
+                break :blk if (self.expr_types[expr_id.index()].kind() == .storage_range)
+                    self.computedStorageUnknownSlot()
+                else
+                    null;
+            },
+            .Name => blk: {
+                if (self.resolution.expr_bindings[expr_id.index()]) |binding| {
+                    switch (binding) {
+                        .pattern => |pattern_id| if (self.initializerExprForPattern(pattern_id)) |initializer| {
+                            if (self.computedStorageRangeSlot(initializer)) |slot| break :blk slot;
+                        } else if (self.runtimeParameterIndexForPattern(pattern_id)) |index| {
+                            var slot = self.computedStorageUnknownSlot();
+                            slot.key_path = &.{};
+                            break :blk self.slotWithKeySegment(slot, .{ .parameter = index });
+                        },
+                        .item => {},
+                    }
+                }
+                if (self.expr_types[expr_id.index()].kind() == .storage_range) {
+                    break :blk self.computedStorageUnknownSlot();
+                }
+                break :blk null;
+            },
+            else => if (self.expr_types[expr_id.index()].kind() == .storage_range)
+                self.computedStorageUnknownSlot()
+            else
+                null,
+        };
+    }
+
+    fn computedStorageRangeReturnedByCall(self: *TypeChecker, expr_id: ast.ExprId, call: ast.CallExpr) ?EffectSlot {
+        if (self.computedStorageRangeReturnedByLocalCall(call)) |slot| return slot;
+        return self.computedStorageRangeReturnedByImportedCall(expr_id, call);
+    }
+
+    fn computedStorageRangeReturnedByLocalCall(self: *TypeChecker, call: ast.CallExpr) ?EffectSlot {
+        const callee_id = self.calleeFunctionItem(call.callee) orelse return null;
+        const function = switch (self.file.item(callee_id).*) {
+            .Function => |function| function,
+            else => return null,
+        };
+
+        const returned_slot = blk: {
+            const previous_function_item = self.current_function_item;
+            self.current_function_item = callee_id;
+            defer self.current_function_item = previous_function_item;
+            break :blk self.computedStorageRangeReturnExprInFunction(function) orelse return null;
+        };
+
+        return self.substituteCallEffectSlot(null, call, self.file, function, returned_slot) catch null;
+    }
+
+    fn computedStorageRangeReturnedByImportedCall(self: *TypeChecker, expr_id: ast.ExprId, call: ast.CallExpr) ?EffectSlot {
+        const target = (self.importedCallTarget(expr_id) catch return null) orelse return null;
+        const returned_slot = self.computedStorageRangeReturnExprInImportedFunction(target) orelse return null;
+        return self.substituteCallEffectSlot(null, call, target.file, target.function, returned_slot) catch null;
+    }
+
+    fn computedStorageRangeReturnExprInFunction(self: *TypeChecker, function: ast.FunctionItem) ?EffectSlot {
+        const value_expr = self.simpleReturnValueExprInFile(self.file, function) orelse return null;
+        return self.computedStorageRangeSlot(value_expr);
+    }
+
+    const SemaFileView = struct {
+        checker: TypeChecker,
+
+        fn imported(owner: *TypeChecker, target: ImportedCallTarget) SemaFileView {
+            var checker = owner.*;
+            checker.module_id = target.module_id;
+            checker.file = target.file;
+            checker.item_index = target.item_index;
+            checker.resolution = target.resolution;
+            checker.item_types = target.typecheck.item_types;
+            checker.item_regions = target.typecheck.item_regions;
+            checker.item_effects = target.typecheck.item_effects;
+            checker.item_modifies = target.typecheck.item_modifies;
+            checker.pattern_types = target.typecheck.pattern_types;
+            checker.pattern_initializers = target.typecheck.pattern_initializers;
+            checker.pattern_binding_kinds = target.typecheck.pattern_binding_kinds;
+            checker.expr_types = target.typecheck.expr_types;
+            checker.call_resolutions = target.typecheck.call_resolutions;
+            checker.expr_effects = .{};
+            checker.current_contract = null;
+            checker.current_function_item = target.item_id;
+            return .{ .checker = checker };
+        }
+    };
+
+    fn computedStorageSlotReturnExprInImportedFunction(self: *TypeChecker, target: ImportedCallTarget) ?EffectSlot {
+        var view = SemaFileView.imported(self, target);
+        return view.checker.computedStorageSlotReturnExprInFunction(target.function);
+    }
+
+    fn computedStorageRangeReturnExprInImportedFunction(self: *TypeChecker, target: ImportedCallTarget) ?EffectSlot {
+        var view = SemaFileView.imported(self, target);
+        return view.checker.computedStorageRangeReturnExprInFunction(target.function);
+    }
+
+    fn simpleReturnValueExprInFile(self: *TypeChecker, file: *const ast.AstFile, function: ast.FunctionItem) ?ast.ExprId {
+        _ = self;
+        const body = file.body(function.body).*;
+        if (body.statements.len == 0) return null;
+        for (body.statements[0 .. body.statements.len - 1]) |stmt_id| {
+            switch (file.statement(stmt_id).*) {
+                .VariableDecl => {},
+                else => return null,
+            }
+        }
+        return switch (file.statement(body.statements[body.statements.len - 1]).*) {
+            .Return => |ret| ret.value,
+            else => null,
+        };
+    }
+
+    fn computedStorageRangeSegmentForExpr(self: *TypeChecker, expr_id: ast.ExprId) KeySegment {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.computedStorageRangeSegmentForExpr(group.expr),
+            .IntegerLiteral => |literal| self.rangeSegmentForIntegerLiteral(literal.text),
+            .Name => blk: {
+                if (self.resolution.expr_bindings[expr_id.index()]) |binding| {
+                    switch (binding) {
+                        .pattern => |pattern_id| if (self.comptimeParameterIndexForPattern(pattern_id)) |index| {
+                            break :blk .{ .comptime_range_parameter = index };
+                        },
+                        .item => {},
+                    }
+                }
+                if (self.integerLiteralValueForExpr(expr_id)) |value| break :blk self.rangeSegmentForLength(value);
+                break :blk .unknown;
+            },
+            else => .unknown,
+        };
+    }
+
+    fn rangeSegmentForIntegerLiteral(self: *TypeChecker, text: []const u8) KeySegment {
+        const value = parseUnsignedIntegerLiteralU256(integerLiteralValueText(text)) orelse return .unknown;
+        return self.rangeSegmentForLength(value);
+    }
+
+    fn rangeSegmentForLength(self: *TypeChecker, value: u256) KeySegment {
+        const label = std.fmt.allocPrint(self.arena, "0..{d}", .{value}) catch return .unknown;
+        return .{ .constant = label };
     }
 
     fn slotWithField(self: *TypeChecker, base: EffectSlot, field_name: []const u8) ?EffectSlot {
@@ -7026,8 +8697,10 @@ const TypeChecker = struct {
             .Name => blk: {
                 if (self.resolution.expr_bindings[expr_id.index()]) |binding| {
                     switch (binding) {
-                        .pattern => |pattern_id| if (self.parameterIndexForPattern(pattern_id)) |index| {
+                        .pattern => |pattern_id| if (self.runtimeParameterIndexForPattern(pattern_id)) |index| {
                             break :blk .{ .parameter = index };
+                        } else if (self.comptimeParameterIndexForPattern(pattern_id)) |index| {
+                            break :blk .{ .comptime_parameter = index };
                         } else if (self.localAliasEnvironmentKeySegment(pattern_id)) |segment| break :blk segment,
                         .item => {},
                     }
@@ -7054,37 +8727,164 @@ const TypeChecker = struct {
         return self.environmentKeySegmentForExpr(value);
     }
 
+    fn emitNonVarAssignmentIfNeeded(self: *TypeChecker, pattern_id: ast.PatternId) !bool {
+        return switch (self.file.pattern(pattern_id).*) {
+            .Name => |name| blk: {
+                if (std.mem.eql(u8, name.name, "_")) break :blk false;
+                const binding = if (pattern_id.index() < self.resolution.pattern_bindings.len)
+                    self.resolution.pattern_bindings[pattern_id.index()]
+                else
+                    null;
+                break :blk try self.emitNonVarBindingAssignmentIfNeeded(name.range, name.name, binding);
+            },
+            .Field => |field| try self.emitNonVarAssignmentIfNeeded(field.base),
+            .Index => |index| try self.emitNonVarAssignmentIfNeeded(index.base),
+            .StructDestructure => |destructure| blk: {
+                var emitted = false;
+                for (destructure.fields) |field| {
+                    emitted = try self.emitNonVarAssignmentIfNeeded(field.binding) or emitted;
+                }
+                break :blk emitted;
+            },
+            .Error => false,
+        };
+    }
+
+    fn emitNonVarBindingAssignmentIfNeeded(
+        self: *TypeChecker,
+        range: source.TextRange,
+        name: []const u8,
+        binding: ?ResolvedBinding,
+    ) !bool {
+        const kind: ?ast.BindingKind = if (binding) |resolved| switch (resolved) {
+            .pattern => |decl_pattern| self.patternBindingKind(decl_pattern),
+            .item => |item_id| return try self.emitNonVarItemAssignmentIfNeeded(range, name, item_id),
+        } else null;
+        const binding_kind = kind orelse return false;
+        switch (binding_kind) {
+            .var_ => return false,
+            .let_, .constant => {
+                try self.emitRangeError(range, "cannot assign to local '{s}' declared with '{s}'", .{ name, bindingKindKeyword(binding_kind) });
+                return true;
+            },
+            .immutable => {
+                try self.emitRangeError(range, "cannot assign to immutable local '{s}'", .{name});
+                return true;
+            },
+        }
+    }
+
+    fn emitNonVarItemAssignmentIfNeeded(
+        self: *TypeChecker,
+        range: source.TextRange,
+        name: []const u8,
+        item_id: ast.ItemId,
+    ) !bool {
+        switch (self.file.item(item_id).*) {
+            .Field => |field| {
+                switch (field.binding_kind) {
+                    .var_ => return false,
+                    .let_, .constant => {
+                        try self.emitRangeError(range, "cannot assign to {s} '{s}' declared with '{s}'", .{
+                            fieldBindingSubject(field),
+                            name,
+                            bindingKindKeyword(field.binding_kind),
+                        });
+                        return true;
+                    },
+                    .immutable => {
+                        try self.emitRangeError(range, "cannot assign to immutable {s} '{s}'", .{
+                            fieldBindingSubject(field),
+                            name,
+                        });
+                        return true;
+                    },
+                }
+            },
+            .Constant => {
+                try self.emitRangeError(range, "cannot assign to global constant '{s}'", .{name});
+                return true;
+            },
+            else => return false,
+        }
+    }
+
+    fn patternBindingKind(self: *const TypeChecker, pattern_id: ast.PatternId) ?ast.BindingKind {
+        if (pattern_id.index() >= self.pattern_binding_kinds.len) return null;
+        return self.pattern_binding_kinds[pattern_id.index()];
+    }
+
+    fn fieldBindingSubject(field: ast.FieldItem) []const u8 {
+        return switch (field.storage_class) {
+            .none => "contract field",
+            .storage => "storage variable",
+            .tstore => "transient variable",
+            .memory => "memory variable",
+        };
+    }
+
+    fn bindingKindKeyword(kind: ast.BindingKind) []const u8 {
+        return switch (kind) {
+            .let_ => "let",
+            .constant => "const",
+            .var_ => "var",
+            .immutable => "immutable",
+        };
+    }
+
     fn environmentKeySegmentForExpr(self: *TypeChecker, expr_id: ast.ExprId) ?KeySegment {
         return switch (self.file.expression(expr_id).*) {
             .Group => |group| self.environmentKeySegmentForExpr(group.expr),
-            .Call => |call| if (call.args.len == 0) self.environmentKeySegmentForExpr(call.callee) else null,
-            .Field => blk: {
-                const msg_sender_paths = [_][]const []const u8{
-                    &.{ "msg", "sender" },
-                    &.{ "std", "msg", "sender" },
-                    &.{ "std", "transaction", "sender" },
-                };
-                for (msg_sender_paths) |path| {
-                    if (self.exprPathMatches(expr_id, path)) break :blk .msg_sender;
-                }
-                const tx_origin_paths = [_][]const []const u8{
-                    &.{ "tx", "origin" },
-                    &.{ "std", "tx", "origin" },
-                };
-                for (tx_origin_paths) |path| {
-                    if (self.exprPathMatches(expr_id, path)) break :blk .tx_origin;
-                }
-                break :blk null;
-            },
+            .Call => |call| if (call.args.len == 0)
+                self.environmentKeySegmentForCalledPath(call.callee) orelse self.environmentKeySegmentReturnedByInlineCall(call)
+            else
+                null,
             else => null,
         };
     }
 
-    fn environmentIntrinsicValueType(self: *TypeChecker, expr_id: ast.ExprId) ?Type {
+    fn environmentKeySegmentForCalledPath(self: *TypeChecker, expr_id: ast.ExprId) ?KeySegment {
+        if (self.exprPathMatches(expr_id, &.{ "std", "msg", "sender" })) return .msg_sender;
+        if (self.exprPathMatches(expr_id, &.{ "std", "tx", "origin" })) return .tx_origin;
+        return null;
+    }
+
+    fn environmentKeySegmentReturnedByInlineCall(self: *TypeChecker, call: ast.CallExpr) ?KeySegment {
+        const callee_id = self.calleeFunctionItem(call.callee) orelse return null;
+        const function = switch (self.file.item(callee_id).*) {
+            .Function => |function| function,
+            else => return null,
+        };
+        if (!function.is_inline) return null;
+        const returned = self.simpleReturnValueExprInFile(self.file, function) orelse return null;
+        return self.environmentKeySegmentForExpr(returned);
+    }
+
+    fn environmentIntrinsicCallReturnType(self: *TypeChecker, expr_id: ast.ExprId) ?Type {
         const address_paths = [_][]const []const u8{
             &.{ "std", "msg", "sender" },
-            &.{ "std", "transaction", "sender" },
             &.{ "std", "tx", "origin" },
+            &.{ "std", "block", "coinbase" },
+        };
+        for (address_paths) |path| {
+            if (self.exprPathMatches(expr_id, path)) return addressType();
+        }
+
+        const integer_paths = [_][]const []const u8{
+            &.{ "std", "msg", "value" },
+            &.{ "std", "transaction", "gasprice" },
+            &.{ "std", "block", "timestamp" },
+            &.{ "std", "block", "number" },
+        };
+        for (integer_paths) |path| {
+            if (self.exprPathMatches(expr_id, path)) return u256Type();
+        }
+
+        return null;
+    }
+
+    fn environmentIntrinsicFieldValueType(self: *TypeChecker, expr_id: ast.ExprId) ?Type {
+        const address_paths = [_][]const []const u8{
             &.{ "std", "block", "coinbase" },
         };
         for (address_paths) |path| {
@@ -7129,15 +8929,48 @@ const TypeChecker = struct {
         return null;
     }
 
+    fn runtimeParameterIndexForPattern(self: *const TypeChecker, pattern_id: ast.PatternId) ?u32 {
+        const function_item = self.current_function_item orelse return null;
+        const function = switch (self.file.item(function_item).*) {
+            .Function => |function| function,
+            else => return null,
+        };
+        var runtime_index: u32 = 0;
+        for (function.parameters) |parameter| {
+            if (parameter.pattern.index() == pattern_id.index()) {
+                return if (parameter.is_comptime) null else runtime_index;
+            }
+            if (!parameter.is_comptime) runtime_index += 1;
+        }
+        return null;
+    }
+
+    fn comptimeParameterIndexForPattern(self: *const TypeChecker, pattern_id: ast.PatternId) ?u32 {
+        const function_item = self.current_function_item orelse return null;
+        const function = switch (self.file.item(function_item).*) {
+            .Function => |function| function,
+            else => return null,
+        };
+        for (function.parameters, 0..) |parameter, index| {
+            if (!parameter.is_comptime) continue;
+            if (parameter.pattern.index() == pattern_id.index()) return @intCast(index);
+        }
+        return null;
+    }
+
     fn parameterNameForIndex(self: *const TypeChecker, parameter_index: u32) ?[]const u8 {
         const function_item = self.current_function_item orelse return null;
         const function = switch (self.file.item(function_item).*) {
             .Function => |function| function,
             else => return null,
         };
-        const index: usize = @intCast(parameter_index);
-        if (index >= function.parameters.len) return null;
-        return self.patternName(function.parameters[index].pattern);
+        var runtime_index: u32 = 0;
+        for (function.parameters) |parameter| {
+            if (parameter.is_comptime) continue;
+            if (runtime_index == parameter_index) return self.patternName(parameter.pattern);
+            runtime_index += 1;
+        }
+        return null;
     }
 
     fn effectSlotsMayAlias(self: *const TypeChecker, lhs: EffectSlot, rhs: EffectSlot) bool {
@@ -7152,6 +8985,223 @@ const TypeChecker = struct {
         state.mergeFlags(effect.flags());
         for (effect.readSlots()) |slot| try self.appendUniqueEffectSlot(&state.reads, slot);
         for (effect.writeSlots()) |slot| try self.appendUniqueEffectSlot(&state.writes, slot);
+    }
+
+    const ImportedCallTarget = struct {
+        module_id: source.ModuleId,
+        item_id: ast.ItemId,
+        file: *const ast.AstFile,
+        item_index: *const ItemIndexResult,
+        resolution: *const NameResolutionResult,
+        typecheck: *const TypeCheckResult,
+        function: ast.FunctionItem,
+    };
+
+    const ImportedCallEffect = struct {
+        file: *const ast.AstFile,
+        function: ast.FunctionItem,
+        effect: Effect,
+    };
+
+    fn importedCallTarget(self: *TypeChecker, expr_id: ast.ExprId) !?ImportedCallTarget {
+        if (self.call_resolutions.len == 0 or expr_id.index() >= self.call_resolutions.len) return null;
+        const resolved = self.call_resolutions[expr_id.index()] orelse return null;
+        const query = self.import_query orelse return null;
+        const target_file = try query.astFile(resolved.module_id);
+        const target_item_index = try query.itemIndex(resolved.module_id);
+        const target_resolution = try query.nameResolution(resolved.module_id);
+        const target_typecheck = try query.moduleTypeCheck(resolved.module_id);
+        const function = switch (target_file.item(resolved.item_id).*) {
+            .Function => |function| function,
+            else => return null,
+        };
+        return .{
+            .module_id = resolved.module_id,
+            .item_id = resolved.item_id,
+            .file = target_file,
+            .item_index = target_item_index,
+            .resolution = target_resolution,
+            .typecheck = target_typecheck,
+            .function = function,
+        };
+    }
+
+    fn importedCallEffect(self: *TypeChecker, expr_id: ast.ExprId) !?ImportedCallEffect {
+        const target = (try self.importedCallTarget(expr_id)) orelse return null;
+        return .{
+            .file = target.file,
+            .function = target.function,
+            .effect = target.typecheck.itemEffect(target.item_id),
+        };
+    }
+
+    fn mergeCallEffect(self: *TypeChecker, state: *EffectCollectorState, expr_id: ast.ExprId, call: ast.CallExpr, function_file: *const ast.AstFile, function: ast.FunctionItem, effect: Effect) !void {
+        state.mergeFlags(effect.flags());
+        for (effect.readSlots()) |slot| {
+            try self.appendUniqueEffectSlot(&state.reads, try self.substituteCallEffectSlot(expr_id, call, function_file, function, slot));
+        }
+        for (effect.writeSlots()) |slot| {
+            try self.appendUniqueEffectSlot(&state.writes, try self.substituteCallEffectSlot(expr_id, call, function_file, function, slot));
+        }
+    }
+
+    fn substituteCallEffectSlot(self: *TypeChecker, expr_id: ?ast.ExprId, call: ast.CallExpr, function_file: *const ast.AstFile, function: ast.FunctionItem, slot: EffectSlot) !EffectSlot {
+        if (!std.mem.eql(u8, slot.name, computed_storage_effect_root)) return slot;
+        const key_path = slot.key_path orelse return slot;
+        var substituted = slot;
+        substituted.key_path = &.{};
+        for (key_path) |segment| {
+            if (segment == .parameter) {
+                if (self.callArgForParameter(function_file, function, call, segment.parameter)) |arg_expr| {
+                    if (self.expr_types[arg_expr.index()].kind() == .storage_slot) {
+                        if (self.computedStorageSlotExpr(arg_expr)) |arg_slot| {
+                            if (arg_slot.key_path) |arg_path| {
+                                for (arg_path) |arg_segment| {
+                                    substituted = self.slotWithKeySegment(substituted, arg_segment) orelse return slot;
+                                }
+                                continue;
+                            }
+                        }
+                    } else if (self.expr_types[arg_expr.index()].kind() == .storage_range) {
+                        if (self.computedStorageRangeSlot(arg_expr)) |arg_slot| {
+                            if (arg_slot.key_path) |arg_path| {
+                                for (arg_path) |arg_segment| {
+                                    substituted = self.slotWithKeySegment(substituted, arg_segment) orelse return slot;
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    substituted = self.slotWithKeySegment(substituted, self.keySegmentForExpr(arg_expr)) orelse return slot;
+                    continue;
+                }
+            } else if (segment == .comptime_parameter) {
+                if (self.callArgForFunctionParameter(function_file, function, call, segment.comptime_parameter)) |arg_expr| {
+                    substituted = self.slotWithKeySegment(substituted, self.keySegmentForExpr(arg_expr)) orelse return slot;
+                    continue;
+                }
+            } else if (segment == .comptime_range_parameter) {
+                if (self.callArgForFunctionParameter(function_file, function, call, segment.comptime_range_parameter)) |arg_expr| {
+                    substituted = self.slotWithKeySegment(substituted, self.computedStorageRangeSegmentForExpr(arg_expr)) orelse return slot;
+                    continue;
+                }
+            }
+            substituted = self.slotWithKeySegment(substituted, segment) orelse return slot;
+        }
+        if (expr_id) |call_expr_id| {
+            return self.specializedStdFixedDataEffectSlot(call_expr_id, call, function, substituted) orelse substituted;
+        }
+        return substituted;
+    }
+
+    fn specializedStdFixedDataEffectSlot(self: *TypeChecker, expr_id: ast.ExprId, call: ast.CallExpr, function: ast.FunctionItem, slot: EffectSlot) ?EffectSlot {
+        const module_path = self.resolvedCallModulePath(expr_id) orelse return null;
+        if (!std.mem.eql(u8, module_path, std_fixed_size_data_module_path)) return null;
+        const key_path = slot.key_path orelse return null;
+        if (key_path.len == 0 or key_path[key_path.len - 1] != .unknown) return null;
+
+        const len = if (std.mem.eql(u8, function.name, "store"))
+            self.fixedDataStoreCallLength(call)
+        else if (std.mem.eql(u8, function.name, "load") or
+            std.mem.eql(u8, function.name, "erase") or
+            std.mem.eql(u8, function.name, "hasData"))
+            self.fixedDataExplicitLength(call)
+        else
+            null;
+        const word_count = len orelse return null;
+        return self.slotWithReplacedTail(slot, self.rangeSegmentForLength(word_count));
+    }
+
+    fn resolvedCallModulePath(self: *TypeChecker, expr_id: ast.ExprId) ?[]const u8 {
+        if (self.call_resolutions.len == 0 or expr_id.index() >= self.call_resolutions.len) return null;
+        const resolved = self.call_resolutions[expr_id.index()] orelse return null;
+        const query = self.import_query orelse return null;
+        return query.modulePath(resolved.module_id) catch null;
+    }
+
+    fn fixedDataStoreCallLength(self: *TypeChecker, call: ast.CallExpr) ?u256 {
+        if (call.args.len < 2) return null;
+        const data_type = self.expr_types[call.args[1].index()];
+        if (data_type.kind() != .array) return null;
+        return data_type.array.len orelse return null;
+    }
+
+    fn fixedDataExplicitLength(self: *TypeChecker, call: ast.CallExpr) ?u256 {
+        if (call.args.len < 2) return null;
+        return self.integerLiteralValueForExpr(call.args[1]);
+    }
+
+    fn integerLiteralValueForExpr(self: *TypeChecker, expr_id: ast.ExprId) ?u256 {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.integerLiteralValueForExpr(group.expr),
+            .IntegerLiteral => |literal| parseUnsignedIntegerLiteralU256(integerLiteralValueText(literal.text)),
+            else => null,
+        };
+    }
+
+    fn slotWithReplacedTail(self: *TypeChecker, slot: EffectSlot, segment: KeySegment) ?EffectSlot {
+        const key_path = slot.key_path orelse return null;
+        if (key_path.len == 0) return null;
+        const path = self.arena.alloc(KeySegment, key_path.len) catch return null;
+        @memcpy(path, key_path);
+        path[path.len - 1] = segment;
+        var result = slot;
+        result.key_path = path;
+        return result;
+    }
+
+    fn callArgForParameter(self: *TypeChecker, function_file: *const ast.AstFile, function: ast.FunctionItem, call: ast.CallExpr, parameter_index: u32) ?ast.ExprId {
+        const runtime_param_index: usize = @intCast(parameter_index);
+        const method_receiver_supplied = self.callSuppliesMethodReceiver(call.callee) and model.functionHasRuntimeSelf(function_file, function);
+        if (method_receiver_supplied) {
+            if (runtime_param_index == 0) return self.methodReceiverExpr(call.callee);
+        }
+
+        if (!function.is_generic) {
+            const adjusted = if (method_receiver_supplied) runtime_param_index - 1 else runtime_param_index;
+            if (adjusted < call.args.len) return call.args[adjusted];
+            return null;
+        }
+
+        const runtime_parameters = self.runtimeFunctionParameters(function) catch return null;
+        const effective_runtime_count = runtime_parameters.len - @as(usize, if (method_receiver_supplied) 1 else 0);
+        const comptime_count = self.comptimeParameterCount(function);
+        const explicit_generics = call.args.len == comptime_count + effective_runtime_count;
+        if (explicit_generics) {
+            var iter = generic_call_args.iterator(function, call, .{ .skip_first_runtime_parameter = method_receiver_supplied });
+            while ((iter.next() catch return null)) |entry| {
+                if (entry.runtime_index) |current_runtime_index| {
+                    if (current_runtime_index == runtime_param_index) return entry.arg;
+                }
+            }
+            return null;
+        }
+        const adjusted = if (method_receiver_supplied) runtime_param_index - 1 else runtime_param_index;
+        if (adjusted < call.args.len) return call.args[adjusted];
+        return null;
+    }
+
+    fn callArgForFunctionParameter(self: *TypeChecker, function_file: *const ast.AstFile, function: ast.FunctionItem, call: ast.CallExpr, parameter_index: u32) ?ast.ExprId {
+        const method_receiver_supplied = self.callSuppliesMethodReceiver(call.callee) and model.functionHasRuntimeSelf(function_file, function);
+        var arg_index: usize = 0;
+        for (function.parameters, 0..) |parameter, index| {
+            if (method_receiver_supplied and !parameter.is_comptime and std.mem.eql(u8, self.patternNameInFile(function_file, parameter.pattern) orelse "", "self")) {
+                if (index == parameter_index) return self.methodReceiverExpr(call.callee);
+                continue;
+            }
+            if (arg_index >= call.args.len) return null;
+            if (index == parameter_index) return call.args[arg_index];
+            arg_index += 1;
+        }
+        return null;
+    }
+
+    fn methodReceiverExpr(self: *const TypeChecker, callee: ast.ExprId) ?ast.ExprId {
+        return switch (self.file.expression(callee).*) {
+            .Group => |group| self.methodReceiverExpr(group.expr),
+            .Field => |field| field.base,
+            else => null,
+        };
     }
 
     fn calleeFunctionItem(self: *const TypeChecker, expr_id: ast.ExprId) ?ast.ItemId {
@@ -7221,7 +9271,7 @@ const TypeChecker = struct {
 
         inline_items: [inline_capacity]ast.ItemId = undefined,
         inline_len: usize = 0,
-        spill: std.ArrayList(ast.ItemId) = .{},
+        spill: std.ArrayList(ast.ItemId) = .empty,
 
         fn items(self: *const InlineItemIdStack) []const ast.ItemId {
             if (self.spill.capacity != 0) return self.spill.items;
@@ -7268,7 +9318,7 @@ const TypeChecker = struct {
 
         inline_items: [inline_capacity]ast.ItemId = undefined,
         inline_len: usize = 0,
-        spill: std.ArrayList(ast.ItemId) = .{},
+        spill: std.ArrayList(ast.ItemId) = .empty,
 
         fn items(self: *const InlineItemIdList) []const ast.ItemId {
             if (self.spill.capacity != 0) return self.spill.items;
@@ -8312,11 +10362,11 @@ const TypeChecker = struct {
     fn validateOrSwitchPatternBindings(self: *TypeChecker, or_pattern: ast.nodes.OrSwitchPattern) !void {
         if (or_pattern.alternatives.len == 0) return;
 
-        var expected: std.ArrayList(OrPatternBinding) = .{};
+        var expected: std.ArrayList(OrPatternBinding) = .empty;
         try self.collectSwitchPatternBindings(or_pattern.alternatives[0], &expected);
 
         for (or_pattern.alternatives[1..]) |alternative| {
-            var actual: std.ArrayList(OrPatternBinding) = .{};
+            var actual: std.ArrayList(OrPatternBinding) = .empty;
             try self.collectSwitchPatternBindings(alternative, &actual);
 
             if (expected.items.len != actual.items.len) {
@@ -9244,6 +11294,11 @@ fn anonymousStructFieldType(base_type: Type, field_name: []const u8) ?Type {
 fn arithmeticResultType(lhs_type: Type, rhs_type: Type) Type {
     const lhs = unwrapRefinement(lhs_type);
     const rhs = unwrapRefinement(rhs_type);
+    if (lhs.kind() == .resource_domain or rhs.kind() == .resource_domain) {
+        if (lhs.kind() == .resource_domain and rhs.kind() == .comptime_integer) return lhs;
+        if (rhs.kind() == .resource_domain and lhs.kind() == .comptime_integer) return rhs;
+        return if (sameConcreteType(lhs, rhs)) lhs else .{ .unknown = {} };
+    }
     if (isGenericTypeParam(lhs) and isGenericTypeParam(rhs) and sameConcreteType(lhs, rhs)) return lhs;
     if (isGenericTypeParam(lhs) and isIntegerType(rhs)) return lhs;
     if (isIntegerType(lhs) and isGenericTypeParam(rhs)) return rhs;
@@ -9315,6 +11370,31 @@ fn integerLiteralValueText(text: []const u8) []const u8 {
     return text[0 .. text.len - suffix.len];
 }
 
+fn parseUnsignedIntegerLiteralU256(text: []const u8) ?u256 {
+    const trimmed = std.mem.trim(u8, text, " \t\n\r");
+    const base: u8 = if (std.mem.startsWith(u8, trimmed, "0x"))
+        16
+    else if (std.mem.startsWith(u8, trimmed, "0b"))
+        2
+    else
+        10;
+    const digits = if (base == 10) trimmed else trimmed[2..];
+    var result: u256 = 0;
+    var digit_count: usize = 0;
+    for (digits) |char| {
+        if (char == '_') continue;
+        const digit = std.fmt.charToDigit(char, base) catch return null;
+        const shifted = @mulWithOverflow(result, @as(u256, base));
+        if (shifted[1] != 0) return null;
+        const summed = @addWithOverflow(shifted[0], @as(u256, digit));
+        if (summed[1] != 0) return null;
+        result = summed[0];
+        digit_count += 1;
+    }
+    if (digit_count == 0) return null;
+    return result;
+}
+
 fn integerLiteralTypeSuffix(text: []const u8) ?[]const u8 {
     const unsigned_index = std.mem.lastIndexOfScalar(u8, text, 'u');
     const signed_index = std.mem.lastIndexOfScalar(u8, text, 'i');
@@ -9377,12 +11457,16 @@ fn binaryComptimeIntegerOperandResolutionType(op: ast.BinaryOp, lhs_type: Type, 
 
     const lhs = unwrapRefinement(lhs_type);
     const rhs = unwrapRefinement(rhs_type);
+    if (lhs.kind() == .resource_domain and rhs.kind() == .comptime_integer) return lhs;
+    if (rhs.kind() == .resource_domain and lhs.kind() == .comptime_integer) return rhs;
     if (lhs.kind() == .comptime_integer and rhs.kind() == .integer) return rhs;
     if (rhs.kind() == .comptime_integer and lhs.kind() == .integer) return lhs;
     return null;
 }
 
 fn integerOperandsHaveResolutionTarget(lhs: Type, rhs: Type) bool {
+    if (lhs.kind() == .resource_domain and rhs.kind() == .comptime_integer) return true;
+    if (rhs.kind() == .resource_domain and lhs.kind() == .comptime_integer) return true;
     if (!isIntegerType(lhs) or !isIntegerType(rhs)) return false;
     if (lhs.kind() == .comptime_integer or rhs.kind() == .comptime_integer) return true;
     return sameIntegerShape(lhs.integer, rhs.integer);
@@ -9426,6 +11510,8 @@ fn typeHasUnresolvedInteger(ty: Type) bool {
             }
             return false;
         },
+        .resource_domain => |resource| typeHasUnresolvedInteger(resource.carrier_type.*),
+        .resource_place => |place| typeHasUnresolvedInteger(place.domain_type.*),
         .refinement => |refinement| typeHasUnresolvedInteger(refinement.base_type.*),
         else => false,
     };
@@ -9514,6 +11600,11 @@ fn sameConcreteType(lhs_type: Type, rhs_type: Type) bool {
         .unknown, .never, .void, .bool, .comptime_integer, .string, .address, .bytes => true,
         .fixed_bytes => |left| left.len == rhs_type.fixed_bytes.len,
         .external_proxy => |left| std.mem.eql(u8, left.trait_name, rhs_type.external_proxy.trait_name),
+        .resource_domain => |left| blk: {
+            const right = rhs_type.resource_domain;
+            break :blk std.mem.eql(u8, left.name, right.name) and sameConcreteType(left.carrier_type.*, right.carrier_type.*);
+        },
+        .resource_place => |left| sameConcreteType(left.domain_type.*, rhs_type.resource_place.domain_type.*),
         .integer => |left| blk: {
             const right = rhs_type.integer;
             break :blk left.bits == right.bits and left.signed == right.signed and std.meta.eql(left.spelling, right.spelling);
@@ -9587,8 +11678,24 @@ fn appendDiagnosticTypeDisplayName(allocator: std.mem.Allocator, buffer: *std.Ar
         .string => try buffer.appendSlice(allocator, "string"),
         .address => try buffer.appendSlice(allocator, "address"),
         .bytes => try buffer.appendSlice(allocator, "bytes"),
-        .fixed_bytes => |fixed_bytes| try buffer.writer(allocator).print("bytes{d}", .{fixed_bytes.len}),
-        .external_proxy => |proxy| try buffer.writer(allocator).print("external<{s}>", .{proxy.trait_name}),
+        .fixed_bytes => |fixed_bytes| {
+            const text = try std.fmt.allocPrint(allocator, "bytes{d}", .{fixed_bytes.len});
+            defer allocator.free(text);
+            try buffer.appendSlice(allocator, text);
+        },
+        .storage_slot => try buffer.appendSlice(allocator, "StorageSlot"),
+        .storage_range => try buffer.appendSlice(allocator, "StorageRange"),
+        .external_proxy => |proxy| {
+            const text = try std.fmt.allocPrint(allocator, "external<{s}>", .{proxy.trait_name});
+            defer allocator.free(text);
+            try buffer.appendSlice(allocator, text);
+        },
+        .resource_domain => |resource| try buffer.appendSlice(allocator, resource.name),
+        .resource_place => |place| {
+            try buffer.appendSlice(allocator, "Resource<");
+            try appendDiagnosticTypeDisplayName(allocator, buffer, place.domain_type.*);
+            try buffer.append(allocator, '>');
+        },
         .named => |named| try buffer.appendSlice(allocator, named.name),
         .function => |function| try buffer.appendSlice(allocator, function.name orelse "function"),
         .contract => |named| try buffer.appendSlice(allocator, named.name),
@@ -9599,7 +11706,9 @@ fn appendDiagnosticTypeDisplayName(allocator: std.mem.Allocator, buffer: *std.Ar
             try buffer.appendSlice(allocator, "struct { ");
             for (struct_type.fields, 0..) |field, index| {
                 if (index != 0) try buffer.appendSlice(allocator, ", ");
-                try buffer.writer(allocator).print("{s}: ", .{field.name});
+                const field_prefix = try std.fmt.allocPrint(allocator, "{s}: ", .{field.name});
+                defer allocator.free(field_prefix);
+                try buffer.appendSlice(allocator, field_prefix);
                 try appendDiagnosticTypeDisplayName(allocator, buffer, field.ty);
             }
             try buffer.appendSlice(allocator, " }");
@@ -9615,8 +11724,11 @@ fn appendDiagnosticTypeDisplayName(allocator: std.mem.Allocator, buffer: *std.Ar
         .array => |array| {
             try buffer.append(allocator, '[');
             try appendDiagnosticTypeDisplayName(allocator, buffer, array.element_type.*);
-            if (array.len) |len|
-                try buffer.writer(allocator).print("; {d}", .{len});
+            if (array.len) |len| {
+                const text = try std.fmt.allocPrint(allocator, "; {d}", .{len});
+                defer allocator.free(text);
+                try buffer.appendSlice(allocator, text);
+            }
             try buffer.append(allocator, ']');
         },
         .slice => |slice| {
@@ -9655,7 +11767,7 @@ fn appendDiagnosticTypeDisplayName(allocator: std.mem.Allocator, buffer: *std.Ar
 }
 
 fn diagnosticTypeDisplayName(self: *TypeChecker, ty: Type) []const u8 {
-    var buffer: std.ArrayList(u8) = .{};
+    var buffer: std.ArrayList(u8) = .empty;
     appendDiagnosticTypeDisplayName(self.arena, &buffer, ty) catch return typeDisplayName(ty);
     return buffer.toOwnedSlice(self.arena) catch typeDisplayName(ty);
 }
@@ -9672,7 +11784,11 @@ fn typeDisplayName(ty: Type) []const u8 {
         .address => "address",
         .bytes => "bytes",
         .fixed_bytes => |fixed_bytes| fixed_bytes.spelling orelse "fixed bytes",
+        .storage_slot => "StorageSlot",
+        .storage_range => "StorageRange",
         .external_proxy => "external proxy",
+        .resource_domain => |resource| resource.name,
+        .resource_place => "resource place",
         .named => |named| named.name,
         .function => |function| function.name orelse "function",
         .contract => |named| named.name,

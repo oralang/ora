@@ -1,0 +1,1 @@
+expect_error = "return inside statement-position comptime block is not supported during HIR lowering"

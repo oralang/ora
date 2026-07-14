@@ -6,14 +6,25 @@ const types = @import("types.zig");
 
 const PROPERTY_CALLER = "0x1000000000000000000000000000000000000000";
 const PROPERTY_ADDRESS_A = "0x2000000000000000000000000000000000000000";
+const PROPERTY_ADDRESS_B = "0x3000000000000000000000000000000000000000";
+const PROPERTY_ADDRESS_C = "0x4000000000000000000000000000000000000000";
+const PROPERTY_ADDRESS_D = "0x5000000000000000000000000000000000000000";
+const PROPERTY_ADDRESS_E = "0x6000000000000000000000000000000000000000";
+const PROPERTY_ADDRESS_F = "0x7000000000000000000000000000000000000000";
+const PROPERTY_ADDRESS_G = "0x8000000000000000000000000000000000000000";
+const PROPERTY_ADDRESS_H = "0x9000000000000000000000000000000000000000";
 const U256_MAX_DEC = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
 const I256_MAX_DEC = "57896044618658097711785492504343953926634992332820282019728792003956564819967";
 const I256_MIN_DEC = "-57896044618658097711785492504343953926634992332820282019728792003956564819968";
 
 fn expectWord(actual: []const u8, expected: u256) !void {
     if (actual.len != 32) return error.PropertyMismatch;
-    const decoded = std.mem.readInt(u256, actual[0..32], .big);
-    if (decoded != expected) return error.PropertyMismatch;
+    if (decodeWord(actual) != expected) return error.PropertyMismatch;
+}
+
+fn decodeWord(actual: []const u8) u256 {
+    std.debug.assert(actual.len == 32);
+    return std.mem.readInt(u256, actual[0..32], .big);
 }
 
 fn expectSignedWord(actual: []const u8, bits: u16, expected: i256) !void {
@@ -48,13 +59,17 @@ const PropertyFault = enum {
     arithmetic,
     storage,
     error_union,
+    resource,
 };
 
 const property_source =
+    \\resource PropertyUnit = u256;
+    \\
     \\contract ConformanceProperties {
     \\    error Failed;
     \\
     \\    storage var slots: map<u256, u256>;
+    \\    storage var resource_balances: map<address, Resource<PropertyUnit>>;
     \\
     \\    pub fn id_u256(x: u256) -> u256 { return x; }
     \\    pub fn id_i16(x: i16) -> i16 { return x; }
@@ -133,6 +148,36 @@ const property_source =
     \\
     \\    pub fn put(slot: u256, value: u256) { slots[slot] = value; }
     \\    pub fn read(slot: u256) -> u256 { return slots[slot]; }
+    \\
+    \\    pub fn issue_resource(to: address, amount: PropertyUnit)
+    \\        requires @amount(resource_balances[to]) <= 1000 - amount
+    \\    {
+    \\        @create(resource_balances[to], amount);
+    \\    }
+    \\
+    \\    pub fn move_resource(from: address, to: address, amount: PropertyUnit)
+    \\        requires from != to
+    \\        requires @amount(resource_balances[from]) >= amount
+    \\        requires @amount(resource_balances[to]) <= 1000 - amount
+    \\    {
+    \\        @move(resource_balances[from], resource_balances[to], amount);
+    \\    }
+    \\
+    \\    pub fn self_move_resource(owner: address, amount: PropertyUnit)
+    \\        requires @amount(resource_balances[owner]) >= amount
+    \\    {
+    \\        @move(resource_balances[owner], resource_balances[owner], amount);
+    \\    }
+    \\
+    \\    pub fn burn_resource(from: address, amount: PropertyUnit)
+    \\        requires @amount(resource_balances[from]) >= amount
+    \\    {
+    \\        @destroy(resource_balances[from], amount);
+    \\    }
+    \\
+    \\    pub fn resource_balance(owner: address) -> PropertyUnit {
+    \\        return @amount(resource_balances[owner]);
+    \\    }
     \\
     \\    fn may_fail(x: u256) -> !u256 | Failed {
     \\        if (x == 0) {
@@ -325,6 +370,213 @@ fn checkErrorUnionProperty(runtime: *runner.PropertyRuntime, fault: PropertyFaul
     }
 }
 
+fn checkResourceProperty(runtime: *runner.PropertyRuntime, fault: PropertyFault) !void {
+    const issue_args = [_]types.ArgValue{ .{ .literal = PROPERTY_ADDRESS_A }, .{ .literal = "10" } };
+    const issue_result = try runtime.call("issue_resource(address,uint256)", &issue_args);
+    try testing.expect(issue_result.success);
+
+    const balance_a_args = [_]types.ArgValue{.{ .literal = PROPERTY_ADDRESS_A }};
+    const balance_b_args = [_]types.ArgValue{.{ .literal = PROPERTY_ADDRESS_B }};
+
+    const balance_a_after_issue = try runtime.call("resource_balance(address)", &balance_a_args);
+    try testing.expect(balance_a_after_issue.success);
+    try expectWord(balance_a_after_issue.output, if (fault == .resource) 9 else 10);
+
+    const move_args = [_]types.ArgValue{ .{ .literal = PROPERTY_ADDRESS_A }, .{ .literal = PROPERTY_ADDRESS_B }, .{ .literal = "4" } };
+    const move_result = try runtime.call("move_resource(address,address,uint256)", &move_args);
+    try testing.expect(move_result.success);
+
+    const balance_a_after_move = try runtime.call("resource_balance(address)", &balance_a_args);
+    try testing.expect(balance_a_after_move.success);
+    try expectWord(balance_a_after_move.output, if (fault == .resource) 7 else 6);
+
+    const balance_b_after_move = try runtime.call("resource_balance(address)", &balance_b_args);
+    try testing.expect(balance_b_after_move.success);
+    try expectWord(balance_b_after_move.output, if (fault == .resource) 5 else 4);
+
+    const self_move_args = [_]types.ArgValue{ .{ .literal = PROPERTY_ADDRESS_A }, .{ .literal = "3" } };
+    const self_move_result = try runtime.call("self_move_resource(address,uint256)", &self_move_args);
+    try testing.expect(self_move_result.success);
+
+    const balance_a_after_self_move = try runtime.call("resource_balance(address)", &balance_a_args);
+    try testing.expect(balance_a_after_self_move.success);
+    try expectWord(balance_a_after_self_move.output, if (fault == .resource) 3 else 6);
+
+    const overdraw_args = [_]types.ArgValue{ .{ .literal = PROPERTY_ADDRESS_A }, .{ .literal = PROPERTY_ADDRESS_B }, .{ .literal = "7" } };
+    const overdraw_result = try runtime.call("move_resource(address,address,uint256)", &overdraw_args);
+    if (overdraw_result.success) return error.PropertyMismatch;
+
+    const balance_a_after_overdraw = try runtime.call("resource_balance(address)", &balance_a_args);
+    try testing.expect(balance_a_after_overdraw.success);
+    try expectWord(balance_a_after_overdraw.output, if (fault == .resource) 0 else 6);
+
+    const burn_args = [_]types.ArgValue{ .{ .literal = PROPERTY_ADDRESS_B }, .{ .literal = "4" } };
+    const burn_result = try runtime.call("burn_resource(address,uint256)", &burn_args);
+    try testing.expect(burn_result.success);
+
+    const balance_b_after_burn = try runtime.call("resource_balance(address)", &balance_b_args);
+    try testing.expect(balance_b_after_burn.success);
+    try expectWord(balance_b_after_burn.output, if (fault == .resource) 4 else 0);
+}
+
+fn resourceAmountLiteral(buf: *[80]u8, amount: u256) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{}", .{amount});
+}
+
+fn issueResource(runtime: *runner.PropertyRuntime, owner: []const u8, amount: u256) !void {
+    var amount_buf: [80]u8 = undefined;
+    const args = [_]types.ArgValue{
+        .{ .literal = owner },
+        .{ .literal = try resourceAmountLiteral(&amount_buf, amount) },
+    };
+    const result = try runtime.call("issue_resource(address,uint256)", &args);
+    if (!result.success) return error.PropertyMismatch;
+    try testing.expectEqual(@as(usize, 0), result.output.len);
+}
+
+fn moveResource(runtime: *runner.PropertyRuntime, from: []const u8, to: []const u8, amount: u256) !void {
+    var amount_buf: [80]u8 = undefined;
+    const args = [_]types.ArgValue{
+        .{ .literal = from },
+        .{ .literal = to },
+        .{ .literal = try resourceAmountLiteral(&amount_buf, amount) },
+    };
+    const result = try runtime.call("move_resource(address,address,uint256)", &args);
+    if (!result.success) return error.PropertyMismatch;
+    try testing.expectEqual(@as(usize, 0), result.output.len);
+}
+
+fn selfMoveResource(runtime: *runner.PropertyRuntime, owner: []const u8, amount: u256) !void {
+    var amount_buf: [80]u8 = undefined;
+    const args = [_]types.ArgValue{
+        .{ .literal = owner },
+        .{ .literal = try resourceAmountLiteral(&amount_buf, amount) },
+    };
+    const result = try runtime.call("self_move_resource(address,uint256)", &args);
+    if (!result.success) return error.PropertyMismatch;
+    try testing.expectEqual(@as(usize, 0), result.output.len);
+}
+
+fn burnResource(runtime: *runner.PropertyRuntime, owner: []const u8, amount: u256) !void {
+    var amount_buf: [80]u8 = undefined;
+    const args = [_]types.ArgValue{
+        .{ .literal = owner },
+        .{ .literal = try resourceAmountLiteral(&amount_buf, amount) },
+    };
+    const result = try runtime.call("burn_resource(address,uint256)", &args);
+    if (!result.success) return error.PropertyMismatch;
+    try testing.expectEqual(@as(usize, 0), result.output.len);
+}
+
+fn resourceBalance(runtime: *runner.PropertyRuntime, owner: []const u8) !u256 {
+    const args = [_]types.ArgValue{.{ .literal = owner }};
+    const result = try runtime.call("resource_balance(address)", &args);
+    if (!result.success or result.output.len != 32) return error.PropertyMismatch;
+    return decodeWord(result.output);
+}
+
+fn expectResourceBalances(runtime: *runner.PropertyRuntime, owners: []const []const u8, expected: []const u256) !void {
+    try testing.expectEqual(owners.len, expected.len);
+    for (owners, expected) |owner, value| {
+        try testing.expectEqual(value, try resourceBalance(runtime, owner));
+    }
+}
+
+fn sumResourceModel(values: []const u256) u256 {
+    var total: u256 = 0;
+    for (values) |value| total += value;
+    return total;
+}
+
+fn checkResourceMoveSequences(runtime: *runner.PropertyRuntime) !void {
+    const owners = [_][]const u8{ PROPERTY_ADDRESS_C, PROPERTY_ADDRESS_D, PROPERTY_ADDRESS_E };
+    var model = [_]u256{ 100, 40, 0 };
+    for (owners, model) |owner, amount| try issueResource(runtime, owner, amount);
+    const initial_total = sumResourceModel(&model);
+
+    const Step = struct { from: usize, to: usize, amount: u256 };
+    const steps = [_]Step{
+        .{ .from = 0, .to = 2, .amount = 17 },
+        .{ .from = 1, .to = 0, .amount = 9 },
+        .{ .from = 2, .to = 1, .amount = 4 },
+        .{ .from = 0, .to = 0, .amount = 12 },
+        .{ .from = 1, .to = 2, .amount = 0 },
+        .{ .from = 2, .to = 0, .amount = 13 },
+        .{ .from = 1, .to = 2, .amount = 21 },
+        .{ .from = 0, .to = 1, .amount = 5 },
+        .{ .from = 2, .to = 2, .amount = 20 },
+        .{ .from = 0, .to = 2, .amount = 100 },
+        .{ .from = 2, .to = 1, .amount = 11 },
+        .{ .from = 1, .to = 0, .amount = 30 },
+        .{ .from = 2, .to = 0, .amount = 110 },
+    };
+
+    for (steps) |step| {
+        if (step.from == step.to) {
+            try selfMoveResource(runtime, owners[step.from], step.amount);
+        } else {
+            try moveResource(runtime, owners[step.from], owners[step.to], step.amount);
+            model[step.from] -= step.amount;
+            model[step.to] += step.amount;
+        }
+
+        try testing.expectEqual(initial_total, sumResourceModel(&model));
+        try expectResourceBalances(runtime, &owners, &model);
+    }
+}
+
+fn checkResourceDeltaSequences(runtime: *runner.PropertyRuntime) !void {
+    const owners = [_][]const u8{ PROPERTY_ADDRESS_F, PROPERTY_ADDRESS_G, PROPERTY_ADDRESS_H };
+    var model = [_]u256{ 0, 0, 0 };
+    var domain_delta: u256 = 0;
+
+    const Op = enum { create, move, burn };
+    const Step = struct { op: Op, from: usize, to: usize = 0, amount: u256 };
+    const steps = [_]Step{
+        .{ .op = .create, .from = 0, .amount = 50 },
+        .{ .op = .create, .from = 1, .amount = 20 },
+        .{ .op = .move, .from = 0, .to = 2, .amount = 15 },
+        .{ .op = .move, .from = 2, .to = 2, .amount = 5 },
+        .{ .op = .burn, .from = 1, .amount = 7 },
+        .{ .op = .create, .from = 2, .amount = 3 },
+        .{ .op = .move, .from = 2, .to = 1, .amount = 10 },
+        .{ .op = .burn, .from = 0, .amount = 35 },
+        .{ .op = .create, .from = 1, .amount = 12 },
+        .{ .op = .move, .from = 1, .to = 0, .amount = 30 },
+        .{ .op = .burn, .from = 2, .amount = 8 },
+        .{ .op = .create, .from = 0, .amount = 0 },
+        .{ .op = .move, .from = 0, .to = 1, .amount = 0 },
+        .{ .op = .burn, .from = 1, .amount = 5 },
+    };
+
+    for (steps) |step| {
+        switch (step.op) {
+            .create => {
+                try issueResource(runtime, owners[step.from], step.amount);
+                model[step.from] += step.amount;
+                domain_delta += step.amount;
+            },
+            .move => {
+                if (step.from == step.to) {
+                    try selfMoveResource(runtime, owners[step.from], step.amount);
+                } else {
+                    try moveResource(runtime, owners[step.from], owners[step.to], step.amount);
+                    model[step.from] -= step.amount;
+                    model[step.to] += step.amount;
+                }
+            },
+            .burn => {
+                try burnResource(runtime, owners[step.from], step.amount);
+                model[step.from] -= step.amount;
+                domain_delta -= step.amount;
+            },
+        }
+
+        try testing.expectEqual(domain_delta, sumResourceModel(&model));
+        try expectResourceBalances(runtime, &owners, &model);
+    }
+}
+
 fn runPropertyChecks(runtime: *runner.PropertyRuntime) !void {
     try checkAbiRoundtripProperty(runtime, .none);
     try testing.expectError(error.PropertyMismatch, checkAbiRoundtripProperty(runtime, .abi));
@@ -340,6 +592,11 @@ fn runPropertyChecks(runtime: *runner.PropertyRuntime) !void {
 
     try checkErrorUnionProperty(runtime, .none);
     try testing.expectError(error.PropertyMismatch, checkErrorUnionProperty(runtime, .error_union));
+
+    try checkResourceProperty(runtime, .none);
+    try checkResourceMoveSequences(runtime);
+    try checkResourceDeltaSequences(runtime);
+    try testing.expectError(error.PropertyMismatch, checkResourceProperty(runtime, .resource));
 }
 
 pub fn run(allocator: std.mem.Allocator) !void {

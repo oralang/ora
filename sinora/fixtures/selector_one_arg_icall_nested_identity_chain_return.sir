@@ -1,0 +1,132 @@
+fn init:
+    entry {
+        v0 = runtime_start_offset
+        v1 = runtime_length
+        v2 = malloc v1
+        codecopy v2 v0 v1
+        return v2 v1
+    }
+
+fn roundtrip_u256:
+    entry v0 -> v5 v1 {
+        v1 = const 0x20
+        v2 = icall @id__u256 v0
+        v3 = icall @id__u256 v2
+        v4 = icall @id__u256 v3
+        v5 = malloc v1
+        mstore256 v5 v4
+        iret
+    }
+
+fn id__u256:
+    entry v0 -> v3 {
+        v1 = const 0x20
+        v2 = malloc v1
+        mstore256 v2 v0
+        v3 = mload256 v2
+        iret
+    }
+
+fn roundtrip_u8:
+    entry v0 -> v9 v1 {
+        v1 = const 0x20
+        v2 = const 0xFF
+        v3 = and v0 v2
+        v4 = icall @id__u8 v3
+        v5 = and v4 v2
+        v6 = icall @id__u8 v5
+        v7 = and v6 v2
+        v8 = and v7 v2
+        v9 = malloc v1
+        mstore256 v9 v8
+        iret
+    }
+
+fn id__u8:
+    entry v0 -> v5 {
+        v1 = const 0x20
+        v2 = const 0xFF
+        v3 = and v0 v2
+        v4 = malloc v1
+        mstore256 v4 v3
+        v5 = mload256 v4
+        iret
+    }
+
+fn main:
+    main_entry {
+        zero = const 0x0
+        selector_offset = const 0x4
+        word_size = const 0x20
+        min_cdsize_1arg = const 0x23
+        arg1_offset = const 0x24
+        min_cdsize_2args = const 0x43
+        arg2_offset = const 0x44
+        min_cdsize_3args = const 0x63
+        selector_shift = const 0xE0
+        v0 = codesize
+        v1 = mload256 word_size
+        v2 = lt v1 v0
+        sel_zero = const 0x0
+        sel_mask = sub sel_zero v2
+        sel_t = and sel_mask v0
+        sel_inv = not sel_mask
+        sel_f = and sel_inv v1
+        v3 = or sel_t sel_f
+        mstore256 word_size v3
+        cv = callvalue
+        cv_nonzero = iszero cv
+        => cv_nonzero ? @load_selector : @revert_error
+    }
+    load_selector {
+        zero_0 = const 0x0
+        selector_shift_0 = const 0xE0
+        selector_word = calldataload zero_0
+        selector = shr selector_shift_0 selector_word
+        switch selector {
+        0x550205B3 => @roundtrip_u256_
+        0x1A8B8F67 => @roundtrip_u8_
+        default => @revert_error
+    }
+    }
+    revert_error {
+        zero_1 = const 0x0
+        revert zero_1 zero_1
+    }
+    roundtrip_u256_ {
+        cdsize_roundtrip_u256 = calldatasize
+        min_cdsize_1arg_0 = const 0x23
+        valid_roundtrip_u256 = lt min_cdsize_1arg_0 cdsize_roundtrip_u256
+        => valid_roundtrip_u256 ? @roundtrip_u256_exec : @revert_error
+    }
+    roundtrip_u256_exec {
+        selector_offset_0 = const 0x4
+        a_roundtrip_u256 = calldataload selector_offset_0
+        v4 v5 = icall @roundtrip_u256 a_roundtrip_u256
+        return v4 v5
+    }
+    roundtrip_u8_ {
+        cdsize_roundtrip_u8 = calldatasize
+        min_cdsize_1arg_1 = const 0x23
+        valid_roundtrip_u8 = lt min_cdsize_1arg_1 cdsize_roundtrip_u8
+        => valid_roundtrip_u8 ? @bb0 : @revert_error
+    }
+    bb0 {
+        selector_offset_1 = const 0x4
+        a_roundtrip_u8 = calldataload selector_offset_1
+        v6 = const 0xFF
+        v7 = and a_roundtrip_u8 v6
+        v8 = eq a_roundtrip_u8 v7
+        => v8 ? @roundtrip_u8_exec : @abi_decode_revert_3
+    }
+    roundtrip_u8_exec {
+        v9 v10 = icall @roundtrip_u8 v7
+        return v9 v10
+    }
+    abi_decode_revert_3 {
+        word_size_0 = const 0x20
+        v11 = const 0x3
+        v12 = sallocany 0x20
+        mstore256 v12 v11
+        revert v12 word_size_0
+    }

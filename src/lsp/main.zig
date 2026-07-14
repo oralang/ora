@@ -1525,7 +1525,7 @@ const DocumentStore = struct {
             return .stale_removed;
         }
 
-        const loaded = std.fs.cwd().readFileAlloc(self.allocator, record.normalized_path, max_cold_file_bytes) catch |err| switch (err) {
+        const loaded = std.Io.Dir.cwd().readFileAlloc(std.Io.Threaded.global_single_threaded.io(), record.normalized_path, self.allocator, std.Io.Limit.limited(max_cold_file_bytes)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {
                 self.removeStaleColdDocument(uri);
@@ -2075,7 +2075,7 @@ const DocumentStore = struct {
         allocator: Allocator,
         locations: []const types.Location,
     ) !?[]CachedDocumentState {
-        var states = std.ArrayList(CachedDocumentState){};
+        var states = std.ArrayList(CachedDocumentState).empty;
         errdefer states.deinit(allocator);
 
         for (locations) |location| {
@@ -2097,7 +2097,7 @@ const DocumentStore = struct {
         allocator: Allocator,
         changes: lsp.parser.Map(types.DocumentUri, []const types.TextEdit),
     ) !?[]CachedDocumentState {
-        var states = std.ArrayList(CachedDocumentState){};
+        var states = std.ArrayList(CachedDocumentState).empty;
         errdefer states.deinit(allocator);
 
         var iterator = changes.map.iterator();
@@ -2291,7 +2291,7 @@ const DocumentStore = struct {
         allocator: Allocator,
         calls: []const types.CallHierarchyIncomingCall,
     ) ![]CachedDocumentState {
-        var states = std.ArrayList(CachedDocumentState){};
+        var states = std.ArrayList(CachedDocumentState).empty;
         errdefer states.deinit(allocator);
 
         for (calls) |call| {
@@ -2355,7 +2355,7 @@ const DocumentStore = struct {
         allocator: Allocator,
         calls: []const types.CallHierarchyOutgoingCall,
     ) ![]CachedDocumentState {
-        var states = std.ArrayList(CachedDocumentState){};
+        var states = std.ArrayList(CachedDocumentState).empty;
         errdefer states.deinit(allocator);
 
         for (calls) |call| {
@@ -3195,7 +3195,7 @@ const DocumentStore = struct {
 
         const document = self.compilerDbDocumentForUri(uri) orelse return null;
         const state_allocator = state_source.state.allocator();
-        var diagnostics = std.ArrayList(diagnostics_api.Diagnostic){};
+        var diagnostics = std.ArrayList(diagnostics_api.Diagnostic).empty;
         defer diagnostics.deinit(state_allocator);
 
         if (try self.tokenCacheForUri(uri, stats)) |token_cache| {
@@ -3404,7 +3404,7 @@ const DocumentStore = struct {
         const key_copy = try self.allocator.dupe(u8, callee_name);
         errdefer self.allocator.free(key_copy);
 
-        var uris = IncomingCallTargetUris{};
+        var uris = IncomingCallTargetUris.empty;
         errdefer {
             for (uris.items) |owned_uri| self.allocator.free(owned_uri);
             uris.deinit(self.allocator);
@@ -4444,10 +4444,10 @@ fn moduleNameForPath(path: []const u8) []const u8 {
 }
 
 fn coldFileFingerprint(path: []const u8) !ColdFileFingerprint {
-    const stat = try std.fs.cwd().statFile(path);
+    const stat = try std.Io.Dir.cwd().statFile(std.Io.Threaded.global_single_threaded.io(), path, .{});
     return .{
         .size = stat.size,
-        .mtime = stat.mtime,
+        .mtime = stat.mtime.nanoseconds,
     };
 }
 
@@ -4760,7 +4760,7 @@ pub const Handler = struct {
 
         var temp_scope = self.allocationScope(.temp_analysis);
         defer temp_scope.deinit();
-        const loaded = std.fs.cwd().readFileAlloc(self.allocator, normalized_path, max_cold_file_bytes) catch |err| switch (err) {
+        const loaded = std.Io.Dir.cwd().readFileAlloc(std.Io.Threaded.global_single_threaded.io(), normalized_path, self.allocator, std.Io.Limit.limited(max_cold_file_bytes)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return,
         };
@@ -5257,8 +5257,8 @@ fn lspRangeEqual(a: types.Range, b: types.Range) bool {
         a.end.character == b.end.character;
 }
 
-pub fn main() !void {
-    var debug_allocator = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init) !void {
+    var debug_allocator = std.heap.DebugAllocator(.{}){};
     defer {
         if (builtin.mode == .Debug) _ = debug_allocator.deinit();
     }
@@ -5271,7 +5271,7 @@ pub fn main() !void {
     const allocator = counting_allocator.allocator();
 
     var read_buffer: [16 * 1024]u8 = undefined;
-    var stdio_transport: lsp.Transport.Stdio = .init(&read_buffer, .stdin(), .stdout());
+    var stdio_transport: lsp.Transport.Stdio = .init(&read_buffer, init.io, .stdin(), .stdout());
     const transport: *lsp.Transport = &stdio_transport.transport;
 
     var handler: Handler = .init(allocator, transport, &counting_allocator);

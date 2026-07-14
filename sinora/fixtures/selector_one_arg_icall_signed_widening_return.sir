@@ -1,0 +1,126 @@
+fn init:
+    entry {
+        v0 = runtime_start_offset
+        v1 = runtime_length
+        v2 = malloc v1
+        codecopy v2 v0 v1
+        return v2 v1
+    }
+
+fn widen_i8_to_i16:
+    entry v0 -> v11 v3 {
+        v1 = const 0xFFFF
+        v2 = const 0xF8
+        v3 = const 0x20
+        v4 = const 0x1
+        v5 = const 0xFF
+        v6 = and v0 v5
+        v7 = shl v2 v6
+        v8 = sar v2 v7
+        v9 = and v8 v1
+        v10 = signextend v4 v9
+        v11 = malloc v3
+        mstore256 v11 v10
+        iret
+    }
+
+fn widen_i16_to_i32:
+    entry v0 -> v11 v3 {
+        v1 = const 0xFFFFFFFF
+        v2 = const 0xF0
+        v3 = const 0x20
+        v4 = const 0x3
+        v5 = const 0xFFFF
+        v6 = and v0 v5
+        v7 = shl v2 v6
+        v8 = sar v2 v7
+        v9 = and v8 v1
+        v10 = signextend v4 v9
+        v11 = malloc v3
+        mstore256 v11 v10
+        iret
+    }
+
+fn main:
+    main_entry {
+        zero = const 0x0
+        selector_offset = const 0x4
+        word_size = const 0x20
+        min_cdsize_1arg = const 0x23
+        arg1_offset = const 0x24
+        min_cdsize_2args = const 0x43
+        arg2_offset = const 0x44
+        min_cdsize_3args = const 0x63
+        selector_shift = const 0xE0
+        v0 = codesize
+        v1 = mload256 word_size
+        v2 = lt v1 v0
+        sel_zero = const 0x0
+        sel_mask = sub sel_zero v2
+        sel_t = and sel_mask v0
+        sel_inv = not sel_mask
+        sel_f = and sel_inv v1
+        v3 = or sel_t sel_f
+        mstore256 word_size v3
+        cv = callvalue
+        cv_nonzero = iszero cv
+        => cv_nonzero ? @load_selector : @revert_error
+    }
+    load_selector {
+        zero_0 = const 0x0
+        selector_shift_0 = const 0xE0
+        selector_word = calldataload zero_0
+        selector = shr selector_shift_0 selector_word
+        switch selector {
+        0x99BB210B => @widen_i8_to_i16_
+        0xCD8C421E => @widen_i16_to_i32_
+        default => @revert_error
+    }
+    }
+    revert_error {
+        zero_1 = const 0x0
+        revert zero_1 zero_1
+    }
+    widen_i8_to_i16_ {
+        cdsize_widen_i8_to_i16 = calldatasize
+        min_cdsize_1arg_0 = const 0x23
+        valid_widen_i8_to_i16 = lt min_cdsize_1arg_0 cdsize_widen_i8_to_i16
+        => valid_widen_i8_to_i16 ? @bb0 : @revert_error
+    }
+    widen_i8_to_i16_exec {
+        v7 v8 = icall @widen_i8_to_i16 v5
+        return v7 v8
+    }
+    widen_i16_to_i32_ {
+        cdsize_widen_i16_to_i32 = calldatasize
+        min_cdsize_1arg_1 = const 0x23
+        valid_widen_i16_to_i32 = lt min_cdsize_1arg_1 cdsize_widen_i16_to_i32
+        => valid_widen_i16_to_i32 ? @bb1 : @revert_error
+    }
+    bb0 {
+        selector_offset_0 = const 0x4
+        a_widen_i8_to_i16 = calldataload selector_offset_0
+        v4 = const 0x0
+        v5 = signextend v4 a_widen_i8_to_i16
+        v6 = eq a_widen_i8_to_i16 v5
+        => v6 ? @widen_i8_to_i16_exec : @abi_decode_revert_3
+    }
+    widen_i16_to_i32_exec {
+        v14 v15 = icall @widen_i16_to_i32 v12
+        return v14 v15
+    }
+    abi_decode_revert_3 {
+        word_size_0 = const 0x20
+        v9 = const 0x3
+        v10 = sallocany 0x20
+        mstore256 v10 v9
+        revert v10 word_size_0
+    }
+    bb1 {
+        selector_offset_1 = const 0x4
+        a_widen_i16_to_i32 = calldataload selector_offset_1
+        v11 = const 0x1
+        v12 = signextend v11 a_widen_i16_to_i32
+        v13 = eq a_widen_i16_to_i32 v12
+        => v13 ? @widen_i16_to_i32_exec : @abi_decode_revert_3
+    }

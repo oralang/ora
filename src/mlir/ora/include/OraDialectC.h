@@ -18,6 +18,21 @@ extern "C"
 {
 #endif
 
+    typedef struct OraMlirPassStatisticsC
+    {
+        uint64_t ora_functions_canonicalized;
+        uint64_t ora_functions_cse_processed;
+        uint64_t ora_storage_reads_reused;
+        uint64_t ora_calls_inlined;
+        uint64_t ora_source_inline_failures;
+        uint64_t sir_constants_deduplicated;
+        uint64_t sir_unused_allocas_removed;
+        uint64_t sir_unused_loads_removed;
+        uint64_t sir_unused_pure_ops_removed;
+        uint64_t sir_framework_functions_processed;
+        uint64_t ora_symbols_dced;
+    } OraMlirPassStatisticsC;
+
     //===----------------------------------------------------------------------===//
     // Core MLIR helpers (C++ API shims)
     //===----------------------------------------------------------------------===//
@@ -55,6 +70,11 @@ extern "C"
 
     MLIR_CAPI_EXPORTED MlirContext oraContextCreate();
     MLIR_CAPI_EXPORTED void oraContextDestroy(MlirContext ctx);
+    /// Allow parsing ops of unregistered dialects in this context. Test-only
+    /// escape hatch: malformed ops (e.g. missing required properties) cannot
+    /// be constructed textually under a registered dialect, so downstream
+    /// fail-closed guards need unregistered parsing to be exercisable.
+    MLIR_CAPI_EXPORTED void oraContextSetAllowUnregisteredDialects(MlirContext ctx, bool allow);
     MLIR_CAPI_EXPORTED void oraSetDebugEnabled(bool enabled);
     MLIR_CAPI_EXPORTED MlirDialectRegistry oraDialectRegistryCreate();
     MLIR_CAPI_EXPORTED void oraDialectRegistryDestroy(MlirDialectRegistry registry);
@@ -109,8 +129,11 @@ extern "C"
     MLIR_CAPI_EXPORTED bool oraAttributeIsNull(MlirAttribute attr);
     MLIR_CAPI_EXPORTED MlirStringRef oraStringAttrGetValue(MlirAttribute attr);
     MLIR_CAPI_EXPORTED int64_t oraIntegerAttrGetValueSInt(MlirAttribute attr);
+    MLIR_CAPI_EXPORTED MlirType oraTypeAttrGetValue(MlirAttribute attr);
     MLIR_CAPI_EXPORTED size_t oraArrayAttrGetNumElements(MlirAttribute attr);
     MLIR_CAPI_EXPORTED MlirAttribute oraArrayAttrGetElement(MlirAttribute attr, size_t index);
+    MLIR_CAPI_EXPORTED size_t oraDenseI32ArrayAttrGetNumElements(MlirAttribute attr);
+    MLIR_CAPI_EXPORTED int32_t oraDenseI32ArrayAttrGetElement(MlirAttribute attr, size_t index);
     /// Returns the integer value as an unsigned decimal string preserving full APInt width.
     /// Returns a newly allocated string; caller must free with oraStringRefFree.
     MLIR_CAPI_EXPORTED MlirStringRef oraIntegerAttrGetValueString(MlirAttribute attr);
@@ -254,6 +277,39 @@ extern "C"
         MlirValue value,
         MlirStringRef globalName);
 
+    /// Create an ora.storage.derive operation.
+    MLIR_CAPI_EXPORTED MlirOperation oraStorageDeriveOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirStringRef namespaceName,
+        MlirStringRef namespaceHashDecimal,
+        const MlirValue *keys,
+        size_t numKeys,
+        MlirType resultType);
+
+    /// Create an ora.storage.word_load operation.
+    MLIR_CAPI_EXPORTED MlirOperation oraStorageWordLoadOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue slot,
+        MlirValue offset,
+        MlirType resultType);
+
+    /// Create an ora.storage.word_store operation.
+    MLIR_CAPI_EXPORTED MlirOperation oraStorageWordStoreOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue slot,
+        MlirValue offset,
+        MlirValue value);
+
+    /// Create an ora.storage.range_erase operation.
+    MLIR_CAPI_EXPORTED MlirOperation oraStorageRangeEraseOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue slot,
+        uint64_t wordCount);
+
     /// Create an ora.conditional_return operation using the registered dialect
     /// Returns null operation if the dialect is not registered or creation fails
     MLIR_CAPI_EXPORTED MlirOperation oraConditionalReturnOpCreate(
@@ -383,8 +439,8 @@ extern "C"
         MlirType structType,
         size_t index);
 
-    /// Create an Ora error union type !ora.error_union<successType>.
-    /// This legacy constructor leaves the declared error set empty.
+    /// Create an Ora error union type !ora.error_union<successType> with an
+    /// empty declared error set.
     MLIR_CAPI_EXPORTED MlirType oraErrorUnionTypeGet(
         MlirContext ctx,
         MlirType successType);
@@ -1197,23 +1253,40 @@ extern "C"
         size_t numFieldValues,
         MlirType resultType);
 
-    /// Create an ora.move operation
+    /// Create an ora.move resource operation
     MLIR_CAPI_EXPORTED MlirOperation oraMoveOpCreate(
         MlirContext ctx,
         MlirLocation loc,
+        const MlirValue *sourcePlace,
+        size_t numSourcePlace,
+        const MlirValue *destinationPlace,
+        size_t numDestinationPlace,
         MlirValue amount,
-        MlirValue source,
-        MlirValue destination);
+        MlirStringRef domain,
+        MlirType carrierType,
+        bool carrierSigned);
 
-    /// Create an ora.move operation with mapping operand and result type
-    MLIR_CAPI_EXPORTED MlirOperation oraMoveOpCreateWithMapping(
+    /// Create an ora.create resource operation
+    MLIR_CAPI_EXPORTED MlirOperation oraCreateOpCreate(
         MlirContext ctx,
         MlirLocation loc,
-        MlirValue mapping,
-        MlirValue source,
-        MlirValue destination,
+        const MlirValue *place,
+        size_t numPlace,
         MlirValue amount,
-        MlirType resultType);
+        MlirStringRef domain,
+        MlirType carrierType,
+        bool carrierSigned);
+
+    /// Create an ora.destroy resource operation
+    MLIR_CAPI_EXPORTED MlirOperation oraDestroyOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        const MlirValue *place,
+        size_t numPlace,
+        MlirValue amount,
+        MlirStringRef domain,
+        MlirType carrierType,
+        bool carrierSigned);
 
     /// Create an ora.cmp operation
     MLIR_CAPI_EXPORTED MlirOperation oraCmpOpCreate(
@@ -1404,6 +1477,8 @@ extern "C"
     MLIR_CAPI_EXPORTED MlirAttribute oraBoolAttrCreate(
         MlirContext ctx,
         bool value);
+
+    MLIR_CAPI_EXPORTED bool oraBoolAttrGetValue(MlirAttribute attr);
 
     /// Create an IntegerAttr from a 64-bit value
     MLIR_CAPI_EXPORTED MlirAttribute oraIntegerAttrCreateI64(
@@ -1819,12 +1894,21 @@ MLIR_CAPI_EXPORTED MlirOperation oraBreakOpCreate(
     // Ora Canonicalization
     //===----------------------------------------------------------------------===//
 
-    /// Run canonicalization on Ora MLIR (folds constants in ora.add, ora.mul, etc.)
+    /// Run canonicalization on Ora MLIR (folds Ora-specific constants and identities)
     /// Registers Ora dialect and runs canonicalization pass
     /// Returns true on success, false on failure
     MLIR_CAPI_EXPORTED bool oraCanonicalizeOraMLIR(
         MlirContext ctx,
         MlirModule module);
+
+    /// Run canonicalization and copy deterministic Ora-owned pass statistics
+    /// into `outStatistics` when it is non-null. `printStatistics` controls
+    /// diagnostic stderr output and is independent from collection.
+    MLIR_CAPI_EXPORTED bool oraCanonicalizeOraMLIRWithStatisticsOut(
+        MlirContext ctx,
+        MlirModule module,
+        bool printStatistics,
+        OraMlirPassStatisticsC *outStatistics);
 
     //===----------------------------------------------------------------------===//
     // Ora to SIR Conversion
@@ -1838,11 +1922,22 @@ MLIR_CAPI_EXPORTED MlirOperation oraBreakOpCreate(
         MlirModule module,
         bool debugInfo);
 
+    /// Convert Ora dialect operations to SIR dialect and copy deterministic
+    /// Ora-owned pass statistics into `outStatistics` when it is non-null.
+    /// `printStatistics` controls diagnostic stderr output and is independent
+    /// from collection.
+    MLIR_CAPI_EXPORTED bool oraConvertToSIRWithStatisticsOut(
+        MlirContext ctx,
+        MlirModule module,
+        bool debugInfo,
+        bool printStatistics,
+        OraMlirPassStatisticsC *outStatistics);
+
     //===----------------------------------------------------------------------===//
     // SIR Text Legalizer / Emitter
     //===----------------------------------------------------------------------===//
 
-    /// Validate SIR MLIR for Sensei text emission
+    /// Validate SIR MLIR for Plank text emission
     /// Returns true on success, false on failure
     MLIR_CAPI_EXPORTED bool oraLegalizeSIRText(
         MlirContext ctx,
@@ -1854,7 +1949,35 @@ MLIR_CAPI_EXPORTED MlirOperation oraBreakOpCreate(
         MlirContext ctx,
         MlirModule module);
 
-    /// Emit Sensei SIR text from a SIR MLIR module
+    /// Test hook: remove `sir.block_name` from the first selector switch's
+    /// default destination so dispatcher fact extraction can exercise the
+    /// `guarded=false` path. Returns true when a selector switch was mutated.
+    MLIR_CAPI_EXPORTED bool oraTestStripFirstSIRSelectorSwitchDefaultBlockName(
+        MlirModule module);
+
+    /// Extract selector-switch facts from a SIR module after dispatcher build.
+    /// Returns schema-v1 JSON:
+    /// {"schema_version":1,"switches":[{"ordinal":0,"block":"<block>",
+    /// "default_label":"<block>","cases":[{"selector":<u32>,
+    /// "label":"<block>","guarded":<bool>}]}]} for every `sir.switch`
+    /// marked with `sir.selector_switch`.
+    /// `guarded` records whether the selector switch has a named default
+    /// destination. Case destination names are required separately.
+    /// Returns an empty `switches` array when no selector switch exists and a
+    /// null string ref on failure.
+    /// The caller must free the returned string using oraStringRefFree.
+    MLIR_CAPI_EXPORTED MlirStringRef oraExtractSIRDispatcherSwitchFacts(
+        MlirContext ctx,
+        MlirModule module);
+
+    /// Extract the public ABI selector-to-function intent before dispatcher
+    /// construction. The returned JSON is owned by the caller and must be
+    /// released with oraStringRefFree.
+    MLIR_CAPI_EXPORTED MlirStringRef oraExtractSIRDispatcherIntentFacts(
+        MlirContext ctx,
+        MlirModule module);
+
+    /// Emit Plank SIR text from a SIR MLIR module
     /// Returns null string ref on failure
     /// The caller must free the returned string using oraStringRefFree
     MLIR_CAPI_EXPORTED MlirStringRef oraEmitSIRText(

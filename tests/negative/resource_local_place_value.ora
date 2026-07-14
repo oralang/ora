@@ -1,0 +1,9 @@
+resource TokenUnit = u256;
+
+contract LocalPlaceValue {
+    storage var balances: map<address, Resource<TokenUnit>>;
+
+    pub fn bad(owner: address) {
+        let place: Resource<TokenUnit> = balances[owner];
+    }
+}

@@ -163,6 +163,50 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertStorageDeriveOp : public OpConversionPattern<ora::StorageDeriveOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::StorageDeriveOp op,
+                typename ora::StorageDeriveOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertStorageWordLoadOp : public OpConversionPattern<ora::StorageWordLoadOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::StorageWordLoadOp op,
+                typename ora::StorageWordLoadOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertStorageWordStoreOp : public OpConversionPattern<ora::StorageWordStoreOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::StorageWordStoreOp op,
+                typename ora::StorageWordStoreOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertStorageRangeEraseOp : public OpConversionPattern<ora::StorageRangeEraseOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::StorageRangeEraseOp op,
+                typename ora::StorageRangeEraseOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertTLoadOp : public OpConversionPattern<ora::TLoadOp>
         {
         public:
@@ -257,6 +301,60 @@ namespace mlir
             LogicalResult matchAndRewrite(
                 ora::MapStoreOp op,
                 typename ora::MapStoreOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+
+        private:
+            MapHashCache *mapHashCache;
+        };
+
+        class ConvertResourceCreateOp : public OpConversionPattern<ora::CreateOp>
+        {
+        public:
+            ConvertResourceCreateOp(const TypeConverter &typeConverter, MLIRContext *context,
+                                    MapHashCache &mapHashCache,
+                                    PatternBenefit benefit = 1)
+                : OpConversionPattern(typeConverter, context, benefit),
+                  mapHashCache(&mapHashCache) {}
+
+            LogicalResult matchAndRewrite(
+                ora::CreateOp op,
+                typename ora::CreateOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+
+        private:
+            MapHashCache *mapHashCache;
+        };
+
+        class ConvertResourceDestroyOp : public OpConversionPattern<ora::DestroyOp>
+        {
+        public:
+            ConvertResourceDestroyOp(const TypeConverter &typeConverter, MLIRContext *context,
+                                     MapHashCache &mapHashCache,
+                                     PatternBenefit benefit = 1)
+                : OpConversionPattern(typeConverter, context, benefit),
+                  mapHashCache(&mapHashCache) {}
+
+            LogicalResult matchAndRewrite(
+                ora::DestroyOp op,
+                typename ora::DestroyOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+
+        private:
+            MapHashCache *mapHashCache;
+        };
+
+        class ConvertResourceMoveOp : public OpConversionPattern<ora::MoveOp>
+        {
+        public:
+            ConvertResourceMoveOp(const TypeConverter &typeConverter, MLIRContext *context,
+                                  MapHashCache &mapHashCache,
+                                  PatternBenefit benefit = 1)
+                : OpConversionPattern(typeConverter, context, benefit),
+                  mapHashCache(&mapHashCache) {}
+
+            LogicalResult matchAndRewrite(
+                ora::MoveOp op,
+                typename ora::MoveOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
 
         private:

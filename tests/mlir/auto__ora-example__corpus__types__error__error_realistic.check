@@ -1,0 +1,10 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/error/error_realistic.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @deposit
+// CHECK-LABEL: func.func @withdraw
+// CHECK-LABEL: func.func @transfer
+// CHECK-LABEL: func.func @pause
+// CHECK-LABEL: func.func @unpause
+// CHECK-LABEL: func.func @get_balance
+// CHECK-LABEL: func.func @get_total

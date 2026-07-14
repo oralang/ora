@@ -27,6 +27,64 @@ test "lsp formatting: formats and is idempotent" {
     try testing.expectEqualStrings(formatted_once, formatted_twice);
 }
 
+test "lsp formatting: preserves comments around directive statements" {
+    // Regression: the lexer attached a scan step trivia to its LAST token,
+    // so a comment before `@callHint` hung on the name token, where the
+    // formatter post-`@` spacing rule silently deleted it on save.
+    const source =
+        \\contract C {
+        \\    storage var x: u256;
+        \\
+        \\    pub fn transferFrom(v: u256) {
+        \\        // transferFrom is a hot path for ERC20 usage
+        \\        @callHint(likely);
+        \\        x = v;
+        \\    }
+        \\}
+    ;
+
+    const formatted = try formatting.formatSourceAlloc(testing.allocator, source, .{
+        .line_width = 100,
+        .indent_size = 4,
+    });
+    defer testing.allocator.free(formatted);
+
+    try testing.expect(std.mem.indexOf(u8, formatted, "// transferFrom is a hot path for ERC20 usage") != null);
+    // The comment stays on its own line, above the directive.
+    try testing.expect(std.mem.indexOf(u8, formatted, "usage\n        @callHint(likely);") != null);
+}
+
+test "lsp formatting: keeps same-line trailing comments on their line" {
+    // Regression: formatSemicolon wrote its newline eagerly, pushing
+    // `; // why` comments onto the next line.
+    const source =
+        \\contract C {
+        \\    storage var x: u256;
+        \\
+        \\    pub fn mint(v: u256) {
+        \\        @callHint(cold); // mint is not a hot-path priority
+        \\        x = v; // trailing on assign
+        \\    }
+        \\}
+    ;
+
+    const formatted = try formatting.formatSourceAlloc(testing.allocator, source, .{
+        .line_width = 100,
+        .indent_size = 4,
+    });
+    defer testing.allocator.free(formatted);
+
+    try testing.expect(std.mem.indexOf(u8, formatted, "@callHint(cold); // mint is not a hot-path priority") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted, "x = v; // trailing on assign") != null);
+
+    const twice = try formatting.formatSourceAlloc(testing.allocator, formatted, .{
+        .line_width = 100,
+        .indent_size = 4,
+    });
+    defer testing.allocator.free(twice);
+    try testing.expectEqualStrings(formatted, twice);
+}
+
 test "lsp formatting: parse errors surface as ParseError" {
     const invalid = "@import(\"std\");";
     try testing.expectError(
@@ -49,4 +107,123 @@ test "lsp formatting: preserves type alias spacing" {
     defer testing.allocator.free(formatted);
 
     try testing.expectEqualStrings(source ++ "\n", formatted);
+}
+
+test "lsp formatting: preserves keyword boundaries for inline impl and modifies" {
+    const source =
+        \\trait SettledBalance {
+        \\    fn settled(self: Settled) -> u256;
+        \\}
+        \\
+        \\struct Settled {
+        \\    value: u256;
+        \\}
+        \\
+        \\impl SettledBalance for Settled {
+        \\    fn settled(self: Settled) -> u256 {
+        \\        return self.value;
+        \\    }
+        \\}
+        \\
+        \\contract Token {
+        \\    inline fn amountDelta(amount: u256) -> u256 {
+        \\        return amount;
+        \\    }
+        \\
+        \\    pub fn approve(spender: address, amount: u256)
+        \\        modifies allowances[std.msg.sender()][spender]
+        \\    {
+        \\        return;
+        \\    }
+        \\}
+    ;
+
+    const formatted_once = try formatting.formatSourceAlloc(testing.allocator, source, .{
+        .line_width = 100,
+        .indent_size = 4,
+    });
+    defer testing.allocator.free(formatted_once);
+
+    const formatted_twice = try formatting.formatSourceAlloc(testing.allocator, formatted_once, .{
+        .line_width = 100,
+        .indent_size = 4,
+    });
+    defer testing.allocator.free(formatted_twice);
+
+    try testing.expectEqualStrings(formatted_once, formatted_twice);
+    try testing.expect(std.mem.indexOf(u8, formatted_once, "inline fn amountDelta") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted_once, "impl SettledBalance for Settled") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted_once, "modifies allowances[std.msg.sender()][spender]") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted_twice, "forfor") == null);
+    try testing.expect(std.mem.indexOf(u8, formatted_twice, "inlinefn") == null);
+    try testing.expect(std.mem.indexOf(u8, formatted_twice, "modifiesallowances") == null);
+
+    const corrupted =
+        \\contract Token {
+        \\    pub fn approve(spender: address, amount: u256)
+        \\    modifiesallowances[std.msg.sender()][spender]
+        \\    {
+        \\        return;
+        \\    }
+        \\}
+    ;
+
+    const repaired = try formatting.formatSourceAlloc(testing.allocator, corrupted, .{
+        .line_width = 100,
+        .indent_size = 4,
+    });
+    defer testing.allocator.free(repaired);
+
+    try testing.expect(std.mem.indexOf(u8, repaired, "modifies allowances[std.msg.sender()][spender]") != null);
+    try testing.expect(std.mem.indexOf(u8, repaired, "modifiesallowances") == null);
+}
+
+test "lsp formatting: preserves resource error-union and builtin syntax" {
+    const source =
+        \\comptime const std = @import("std");
+        \\
+        \\resource TokenUnit = u256;
+        \\
+        \\error InsufficientBalance(required: u256, available: u256);
+        \\
+        \\contract ERC20Token {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    inline fn requireBalance(owner: address, amount: TokenUnit) -> !bool | InsufficientBalance {
+        \\        let available: TokenUnit = @amount(balances[owner]);
+        \\        if (available < amount) {
+        \\            return InsufficientBalance(amount, available);
+        \\        }
+        \\        return true;
+        \\    }
+        \\
+        \\    pub fn transfer(recipient: NonZeroAddress, amount: TokenUnit) -> !bool | InsufficientBalance {
+        \\        try requireBalance(std.msg.sender(), amount);
+        \\        @move(balances[std.msg.sender()], balances[recipient], amount);
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    const formatted_once = try formatting.formatSourceAlloc(testing.allocator, source, .{
+        .line_width = 100,
+        .indent_size = 4,
+    });
+    defer testing.allocator.free(formatted_once);
+
+    const formatted_twice = try formatting.formatSourceAlloc(testing.allocator, formatted_once, .{
+        .line_width = 100,
+        .indent_size = 4,
+    });
+    defer testing.allocator.free(formatted_twice);
+
+    try testing.expectEqualStrings(formatted_once, formatted_twice);
+    try testing.expect(std.mem.indexOf(u8, formatted_once, "resource TokenUnit = u256;") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted_once, "@amount(balances[owner])") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted_once, "-> !bool | InsufficientBalance") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted_once, "@move(balances[std.msg.sender()], balances[recipient], amount);") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted_once, "resourceTokenUnit") == null);
+    try testing.expect(std.mem.indexOf(u8, formatted_once, "!bool|") == null);
+    try testing.expect(std.mem.indexOf(u8, formatted_once, "@ move") == null);
+    try testing.expect(std.mem.indexOf(u8, formatted_once, "@\n") == null);
 }

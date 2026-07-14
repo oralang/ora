@@ -1,0 +1,14 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/declarations/init_default_values.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @get_count
+// CHECK-LABEL: func.func @get_flag
+// CHECK-LABEL: func.func @get_enabled
+// CHECK-LABEL: func.func @get_small
+// CHECK-LABEL: func.func @increment_count
+// CHECK-LABEL: func.func @toggle_flag
+// CHECK-LABEL: func.func @remaining_supply
+// CHECK-LABEL: func.func @update_threshold
+// CHECK-LABEL: func.func @get_threshold
+// CHECK-LABEL: func.func @is_active
+// CHECK-LABEL: func.func @mint

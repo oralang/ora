@@ -2,6 +2,6 @@ contract Vault(comptime TokenType: type) {
     balances: map(address, TokenType);
 
     pub fn deposit(amount: TokenType) {
-        balances[msg.sender] = balances[msg.sender] + amount;
+        balances[std.msg.sender()] = balances[std.msg.sender()] + amount;
     }
 }

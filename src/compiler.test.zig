@@ -6,6 +6,7 @@ comptime {
     _ = @import("compiler.test.comptime.zig");
     _ = @import("compiler.test.debug_artifacts.zig");
     _ = @import("compiler.test.diagnostics.zig");
+    _ = @import("compiler.test.formal.zig");
     _ = @import("compiler.test.hir.zig");
     _ = @import("compiler.test.match.zig");
     _ = @import("compiler.test.misc.zig");
@@ -16,4 +17,25 @@ comptime {
     _ = @import("compiler.test.syntax.zig");
     _ = @import("compiler.test.traits.zig");
     _ = @import("compiler.test.verification.zig");
+
+    // Formal-lane source files carry in-file tests (pins, matrices, fixtures).
+    // Zig only collects tests from files referenced in a test/comptime block —
+    // top-level imports with call-site usage do NOT collect them. Several of
+    // these files' tests were orphaned (never built, never run) until this
+    // block was added; keep every test-bearing formal file listed here.
+    _ = @import("formal/obligation.zig");
+    _ = @import("formal/obligation_dump.zig");
+    _ = @import("formal/obligation_from_mlir.zig");
+    _ = @import("formal/obligation_from_z3.zig");
+    _ = @import("formal/obligation_to_lean.zig");
+    _ = @import("formal/obligation_to_z3.zig");
+    _ = @import("formal/canonical_types.zig");
+    _ = @import("formal/canonical_support.zig");
+    _ = @import("formal/canonical_encode.zig");
+    _ = @import("formal/canonical_z3_measure.zig");
+    _ = @import("formal/emit_obligation_totality_snapshot.zig");
+    _ = @import("formal/dispatcher_table_gate.zig");
+    _ = @import("formal/dispatcher_table_rows.zig");
+    _ = @import("formal/formal_test_fixture.zig");
+    _ = @import("formal/proof_manifest.zig");
 }

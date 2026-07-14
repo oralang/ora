@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/declarations/const_declarations.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @calculate_fee
+// CHECK-LABEL: func.func @check_supply
+// CHECK-LABEL: func.func @validate_stake
+// CHECK-LABEL: func.func @scale_amount
+// CHECK-LABEL: func.func @complex_calculation
+// CHECK-LABEL: func.func @local_const
+// CHECK-LABEL: func.func @check_feature
+// CHECK-LABEL: func.func @apply_mask

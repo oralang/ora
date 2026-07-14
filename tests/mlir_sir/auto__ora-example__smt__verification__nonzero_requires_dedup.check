@@ -1,0 +1,108 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/verification/nonzero_requires_dedup.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK: module {
+// CHECK-NEXT:   func.func @initRedundant(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":23:26), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":23:49)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["nonzero_address", "nonzero_address"], ora.abi_params = ["address", "address"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:0", "file:11:pattern:1"], ora.param_names = ["token", "adapter"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x02fd650d", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.const 0 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %3 = sir.bitcast %1 : !sir.u256 : i160 loc(unknown)
+// CHECK-NEXT:     %4 = sir.bitcast %3 : i160 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":24:27)
+// CHECK-NEXT:     %5 = sir.and %4 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":24:27)
+// CHECK-NEXT:     %6 = sir.and %arg0 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":23:26)
+// CHECK-NEXT:     %7 = sir.eq %6 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":23:26)
+// CHECK-NEXT:     %8 = sir.xor %7 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":23:26)
+// CHECK-NEXT:     %9 = sir.and %8 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":23:26)
+// CHECK-NEXT:     %10 = sir.bitcast %9 : !sir.u256 : i1 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":23:26)
+// CHECK-NEXT:     %11 = sir.bitcast %10 : i1 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":23:26)
+// CHECK-NEXT:     sir.cond_br %11 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":23:26)
+// CHECK-NEXT:   ^bb1:  // 4 preds: ^bb0, ^bb2, ^bb3, ^bb4
+// CHECK-NEXT:     %12 = sir.bitcast %1 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":23:26)
+// CHECK-NEXT:     sir.revert %12 : !sir.ptr<1>, %1 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":23:26)
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     %13 = sir.and %arg1 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":23:49)
+// CHECK-NEXT:     %14 = sir.eq %13 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":23:49)
+// CHECK-NEXT:     %15 = sir.xor %14 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":23:49)
+// CHECK-NEXT:     %16 = sir.and %15 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":23:49)
+// CHECK-NEXT:     %17 = sir.bitcast %16 : !sir.u256 : i1 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":23:49)
+// CHECK-NEXT:     %18 = sir.bitcast %17 : i1 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":23:49)
+// CHECK-NEXT:     sir.cond_br %18 : !sir.u256, ^bb3, ^bb1 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":23:49)
+// CHECK-NEXT:   ^bb3:  // pred: ^bb2
+// CHECK-NEXT:     %19 = sir.and %arg0 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":24:18)
+// CHECK-NEXT:     %20 = sir.eq %19 : !sir.u256, %5 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":24:18)
+// CHECK-NEXT:     %21 = sir.not %20 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":24:18)
+// CHECK-NEXT:     %22 = sir.iszero %21 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":24:9)
+// CHECK-NEXT:     sir.cond_br %22 : !sir.u256, ^bb1, ^bb4 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":24:9)
+// CHECK-NEXT:   ^bb4:  // pred: ^bb3
+// CHECK-NEXT:     %23 = sir.and %arg1 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":25:18)
+// CHECK-NEXT:     %24 = sir.eq %23 : !sir.u256, %5 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":25:18)
+// CHECK-NEXT:     %25 = sir.not %24 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":25:18)
+// CHECK-NEXT:     %26 = sir.iszero %25 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":25:9)
+// CHECK-NEXT:     sir.cond_br %26 : !sir.u256, ^bb1, ^bb5 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":25:9)
+// CHECK-NEXT:   ^bb5:  // pred: ^bb4
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":23:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":23:5)
+// CHECK-NEXT:   func.func @initNonZeroOnly(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":29:28), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":29:51)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["nonzero_address", "nonzero_address"], ora.abi_params = ["address", "address"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:2", "file:11:pattern:3"], ora.param_names = ["token", "adapter"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x2994c4c4", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.const 0 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %3 = sir.bitcast %1 : !sir.u256 : i160 loc(unknown)
+// CHECK-NEXT:     %4 = sir.bitcast %3 : i160 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":30:27)
+// CHECK-NEXT:     %5 = sir.and %4 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":30:27)
+// CHECK-NEXT:     %6 = sir.and %arg0 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":29:28)
+// CHECK-NEXT:     %7 = sir.eq %6 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":29:28)
+// CHECK-NEXT:     %8 = sir.xor %7 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":29:28)
+// CHECK-NEXT:     %9 = sir.and %8 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":29:28)
+// CHECK-NEXT:     %10 = sir.bitcast %9 : !sir.u256 : i1 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":29:28)
+// CHECK-NEXT:     %11 = sir.bitcast %10 : i1 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":29:28)
+// CHECK-NEXT:     sir.cond_br %11 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":29:28)
+// CHECK-NEXT:   ^bb1:  // 4 preds: ^bb0, ^bb2, ^bb3, ^bb4
+// CHECK-NEXT:     %12 = sir.bitcast %1 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":29:28)
+// CHECK-NEXT:     sir.revert %12 : !sir.ptr<1>, %1 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":29:28)
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     %13 = sir.and %arg1 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":29:51)
+// CHECK-NEXT:     %14 = sir.eq %13 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":29:51)
+// CHECK-NEXT:     %15 = sir.xor %14 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":29:51)
+// CHECK-NEXT:     %16 = sir.and %15 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":29:51)
+// CHECK-NEXT:     %17 = sir.bitcast %16 : !sir.u256 : i1 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":29:51)
+// CHECK-NEXT:     %18 = sir.bitcast %17 : i1 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":29:51)
+// CHECK-NEXT:     sir.cond_br %18 : !sir.u256, ^bb3, ^bb1 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":29:51)
+// CHECK-NEXT:   ^bb3:  // pred: ^bb2
+// CHECK-NEXT:     %19 = sir.and %arg0 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":30:18)
+// CHECK-NEXT:     %20 = sir.eq %19 : !sir.u256, %5 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":30:18)
+// CHECK-NEXT:     %21 = sir.not %20 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":30:18)
+// CHECK-NEXT:     %22 = sir.iszero %21 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":30:9)
+// CHECK-NEXT:     sir.cond_br %22 : !sir.u256, ^bb1, ^bb4 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":30:9)
+// CHECK-NEXT:   ^bb4:  // pred: ^bb3
+// CHECK-NEXT:     %23 = sir.and %arg1 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":31:18)
+// CHECK-NEXT:     %24 = sir.eq %23 : !sir.u256, %5 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":31:18)
+// CHECK-NEXT:     %25 = sir.not %24 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":31:18)
+// CHECK-NEXT:     %26 = sir.iszero %25 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":31:9)
+// CHECK-NEXT:     sir.cond_br %26 : !sir.u256, ^bb1, ^bb5 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":31:9)
+// CHECK-NEXT:   ^bb5:  // pred: ^bb4
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":29:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":29:5)
+// CHECK-NEXT:   func.func @initAddressRequires(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":35:32), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":35:48)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["address", "address"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:4", "file:11:pattern:5"], ora.param_names = ["token", "adapter"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x829fcf02", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.bitcast %0 : !sir.u256 : i160 loc(unknown)
+// CHECK-NEXT:     %3 = sir.bitcast %2 : i160 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":36:27)
+// CHECK-NEXT:     %4 = sir.and %3 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":36:27)
+// CHECK-NEXT:     %5 = sir.and %arg0 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":36:18)
+// CHECK-NEXT:     %6 = sir.eq %5 : !sir.u256, %4 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":36:18)
+// CHECK-NEXT:     %7 = sir.not %6 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":36:18)
+// CHECK-NEXT:     %8 = sir.iszero %7 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":36:9)
+// CHECK-NEXT:     sir.cond_br %8 : !sir.u256, ^bb1, ^bb2 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":36:9)
+// CHECK-NEXT:   ^bb1:  // 2 preds: ^bb0, ^bb2
+// CHECK-NEXT:     %9 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":36:9)
+// CHECK-NEXT:     sir.revert %9 : !sir.ptr<1>, %0 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":36:9)
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     %10 = sir.and %arg1 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":37:18)
+// CHECK-NEXT:     %11 = sir.eq %10 : !sir.u256, %4 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":37:18)
+// CHECK-NEXT:     %12 = sir.not %11 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":37:18)
+// CHECK-NEXT:     %13 = sir.iszero %12 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":37:9)
+// CHECK-NEXT:     sir.cond_br %13 : !sir.u256, ^bb1, ^bb3 loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":37:9)
+// CHECK-NEXT:   ^bb3:  // pred: ^bb2
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":35:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":35:5)
+// CHECK-NEXT: } loc("{{.*}}/ora-example/smt/verification/nonzero_requires_dedup.ora":22:1)

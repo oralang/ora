@@ -2,7 +2,7 @@
 // INPUT: ora-example/types/basic_types.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {address_value = 7 : ui64, bool_value = 6 : ui64, bytes_value = 9 : ui64, doublemap_value = 11 : ui64, enum_value = 14 : ui64, map_value = 10 : ui64, string_value = 8 : ui64, struct_value = 12 : ui64, u128_value = 4 : ui64, u16_value = 1 : ui64, u256_value = 5 : ui64, u32_value = 2 : ui64, u64_value = 3 : ui64, u8_value = 0 : ui64}, ora.global_slots_built, sir.enum_values = {StatusType.Active = 0 : i8, StatusType.Inactive = 1 : i8}} {
-// CHECK-NEXT:   func.func @init() attributes {ora.effect = "writes", ora.init = true, ora.visibility = "pub", ora.write_slots = ["u8_value", "u16_value", "u32_value", "u64_value", "u128_value", "u256_value", "bool_value", "address_value", "string_value", "bytes_value", "enum_value"]} {
+// CHECK-NEXT:   func.func @init() attributes {ora.dispatch_class = "mutating", ora.effect = "writes", ora.init = true, ora.visibility = "pub", ora.write_slots = ["u8_value", "u16_value", "u32_value", "u64_value", "u128_value", "u256_value", "bool_value", "address_value", "string_value", "bytes_value", "enum_value"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 103929005307130220006098923584552504982110632080 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/types/basic_types.ora":45:25)))
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/types/basic_types.ora":44:22)))
 // CHECK-NEXT:     %2 = sir.const 340282366920938463463374607431768211455 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/types/basic_types.ora":42:22)))
@@ -111,7 +111,7 @@
 // CHECK-NEXT:     sir.sstore %slot_enum_value : !sir.u256, %slot_u8_value : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/types/basic_types.ora":50:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/types/basic_types.ora":36:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/types/basic_types.ora":36:5)
-// CHECK-NEXT:   func.func @test_type_checking(%arg0: !sir.u256 loc("{{.*}}/ora-example/types/basic_types.ora":54:31)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.abi_return = "bool", ora.abi_return_layout = "bool", ora.abi_return_words = 1 : i256, ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x31c061b8", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @test_type_checking(%arg0: !sir.u256 loc("{{.*}}/ora-example/types/basic_types.ora":54:31)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.abi_return = "bool", ora.abi_return_layout = "bool", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:11"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x31c061b8", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/types/basic_types.ora":56:21)))
@@ -122,45 +122,41 @@
 // CHECK-NEXT:     %6 = sir.and %5 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/types/basic_types.ora":56:13)))
 // CHECK-NEXT:     %7 = sir.bitcast %6 : !sir.u256 : i1 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/types/basic_types.ora":56:13)))
 // CHECK-NEXT:     %8 = sir.bitcast %7 : i1 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/types/basic_types.ora":56:9)))
-// CHECK-NEXT:     %9 = sir.iszero %8 : !sir.u256 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/types/basic_types.ora":56:9)))
-// CHECK-NEXT:     %10 = sir.iszero %9 : !sir.u256 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/types/basic_types.ora":56:9)))
-// CHECK-NEXT:     sir.cond_br %10 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/types/basic_types.ora":56:9)))
+// CHECK-NEXT:     sir.cond_br %8 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/types/basic_types.ora":56:9)))
 // CHECK-NEXT:   ^bb1:  // pred: ^bb0
-// CHECK-NEXT:     %11 = sir.bitcast %3 : i1 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/types/basic_types.ora":57:13)))
-// CHECK-NEXT:     %12 = sir.iszero %11 : !sir.u256 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/types/basic_types.ora":57:13)))
-// CHECK-NEXT:     %13 = sir.iszero %12 : !sir.u256 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/types/basic_types.ora":57:13)))
-// CHECK-NEXT:     %14 = sir.and %13 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/types/basic_types.ora":57:13)))
-// CHECK-NEXT:     %15 = sir.malloc %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/types/basic_types.ora":57:13)))
-// CHECK-NEXT:     sir.store %15 : !sir.ptr<1>, %14 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/types/basic_types.ora":57:13)))
-// CHECK-NEXT:     sir.return %15 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/types/basic_types.ora":57:13)))
+// CHECK-NEXT:     %9 = sir.bitcast %3 : i1 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/types/basic_types.ora":57:13)))
+// CHECK-NEXT:     %10 = sir.iszero %9 : !sir.u256 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/types/basic_types.ora":57:13)))
+// CHECK-NEXT:     %11 = sir.iszero %10 : !sir.u256 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/types/basic_types.ora":57:13)))
+// CHECK-NEXT:     %12 = sir.and %11 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/types/basic_types.ora":57:13)))
+// CHECK-NEXT:     %13 = sir.malloc %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/types/basic_types.ora":57:13)))
+// CHECK-NEXT:     sir.store %13 : !sir.ptr<1>, %12 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/types/basic_types.ora":57:13)))
+// CHECK-NEXT:     sir.return %13 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/types/basic_types.ora":57:13)))
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.br ^bb3 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/types/basic_types.ora":56:9)))
 // CHECK-NEXT:   ^bb3:  // pred: ^bb2
-// CHECK-NEXT:     %16 = sir.bitcast %0 : !sir.u256 : i1 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/types/basic_types.ora":62:13)))
-// CHECK-NEXT:     %17 = sir.bitcast %16 : i1 : !sir.u256 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/types/basic_types.ora":62:9)))
-// CHECK-NEXT:     %18 = sir.iszero %17 : !sir.u256 : !sir.u256 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/types/basic_types.ora":62:9)))
-// CHECK-NEXT:     %19 = sir.iszero %18 : !sir.u256 : !sir.u256 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/types/basic_types.ora":62:9)))
-// CHECK-NEXT:     sir.cond_br %19 : !sir.u256, ^bb4, ^bb5 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/types/basic_types.ora":62:9)))
+// CHECK-NEXT:     %14 = sir.bitcast %0 : !sir.u256 : i1 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/types/basic_types.ora":62:13)))
+// CHECK-NEXT:     %15 = sir.bitcast %14 : i1 : !sir.u256 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/types/basic_types.ora":62:9)))
+// CHECK-NEXT:     sir.cond_br %15 : !sir.u256, ^bb4, ^bb5 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/types/basic_types.ora":62:9)))
 // CHECK-NEXT:   ^bb4:  // pred: ^bb3
-// CHECK-NEXT:     %20 = sir.bitcast %4 : i1 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/types/basic_types.ora":63:13)))
-// CHECK-NEXT:     %21 = sir.iszero %20 : !sir.u256 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/types/basic_types.ora":63:13)))
-// CHECK-NEXT:     %22 = sir.iszero %21 : !sir.u256 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/types/basic_types.ora":63:13)))
-// CHECK-NEXT:     %23 = sir.and %22 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/types/basic_types.ora":63:13)))
-// CHECK-NEXT:     %24 = sir.malloc %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/types/basic_types.ora":63:13)))
-// CHECK-NEXT:     sir.store %24 : !sir.ptr<1>, %23 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/types/basic_types.ora":63:13)))
-// CHECK-NEXT:     sir.return %24 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/types/basic_types.ora":63:13)))
+// CHECK-NEXT:     %16 = sir.bitcast %4 : i1 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/types/basic_types.ora":63:13)))
+// CHECK-NEXT:     %17 = sir.iszero %16 : !sir.u256 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/types/basic_types.ora":63:13)))
+// CHECK-NEXT:     %18 = sir.iszero %17 : !sir.u256 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/types/basic_types.ora":63:13)))
+// CHECK-NEXT:     %19 = sir.and %18 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/types/basic_types.ora":63:13)))
+// CHECK-NEXT:     %20 = sir.malloc %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/types/basic_types.ora":63:13)))
+// CHECK-NEXT:     sir.store %20 : !sir.ptr<1>, %19 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/types/basic_types.ora":63:13)))
+// CHECK-NEXT:     sir.return %20 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/types/basic_types.ora":63:13)))
 // CHECK-NEXT:   ^bb5:  // pred: ^bb3
 // CHECK-NEXT:     sir.br ^bb6 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/types/basic_types.ora":62:9)))
 // CHECK-NEXT:   ^bb6:  // pred: ^bb5
-// CHECK-NEXT:     %25 = sir.bitcast %3 : i1 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/types/basic_types.ora":66:9)))
-// CHECK-NEXT:     %26 = sir.iszero %25 : !sir.u256 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/types/basic_types.ora":66:9)))
-// CHECK-NEXT:     %27 = sir.iszero %26 : !sir.u256 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/types/basic_types.ora":66:9)))
-// CHECK-NEXT:     %28 = sir.and %27 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/types/basic_types.ora":66:9)))
-// CHECK-NEXT:     %29 = sir.malloc %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/types/basic_types.ora":66:9)))
-// CHECK-NEXT:     sir.store %29 : !sir.ptr<1>, %28 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/types/basic_types.ora":66:9)))
-// CHECK-NEXT:     sir.return %29 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/types/basic_types.ora":66:9)))
+// CHECK-NEXT:     %21 = sir.bitcast %3 : i1 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/types/basic_types.ora":66:9)))
+// CHECK-NEXT:     %22 = sir.iszero %21 : !sir.u256 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/types/basic_types.ora":66:9)))
+// CHECK-NEXT:     %23 = sir.iszero %22 : !sir.u256 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/types/basic_types.ora":66:9)))
+// CHECK-NEXT:     %24 = sir.and %23 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/types/basic_types.ora":66:9)))
+// CHECK-NEXT:     %25 = sir.malloc %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/types/basic_types.ora":66:9)))
+// CHECK-NEXT:     sir.store %25 : !sir.ptr<1>, %24 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/types/basic_types.ora":66:9)))
+// CHECK-NEXT:     sir.return %25 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/types/basic_types.ora":66:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/types/basic_types.ora":54:5)
-// CHECK-NEXT:   func.func @test_map_operations() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.effect = "readwrites", ora.read_slots = ["address_value", "map_value", "doublemap_value"], ora.selector = "0x67478d22", ora.visibility = "pub", ora.write_slots = ["map_value", "doublemap_value"]} {
+// CHECK-NEXT:   func.func @test_map_operations() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.read_slots = ["address_value", "map_value[?]", "doublemap_value[?][1]"], ora.selector = "0x67478d22", ora.visibility = "pub", ora.write_slots = ["map_value[?]", "doublemap_value[?][1]"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_map_value = sir.const 10 : !sir.u256 loc("ora.stmt.17"("ora.origin_stmt.17"("{{.*}}/ora-example/types/basic_types.ora":72:9)))
 // CHECK-NEXT:     %slot_address_value = sir.const 7 : !sir.u256 loc("ora.stmt.17"("ora.origin_stmt.17"("{{.*}}/ora-example/types/basic_types.ora":26:5)))

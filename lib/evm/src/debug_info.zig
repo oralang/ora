@@ -220,7 +220,7 @@ pub const DebugInfo = struct {
 
     pub fn collectVisibleLocals(self: *const DebugInfo, allocator: std.mem.Allocator, idx: u32) ![]VisibleLocal {
         const visibility = self.getVisibilityForIdx(idx) orelse return &.{};
-        var locals: std.ArrayList(VisibleLocal) = .{};
+        var locals: std.ArrayList(VisibleLocal) = .empty;
         defer locals.deinit(allocator);
 
         for (visibility.visible_local_ids) |local_id| {
@@ -244,7 +244,7 @@ pub const DebugInfo = struct {
 
     pub fn collectVisibleScopes(self: *const DebugInfo, allocator: std.mem.Allocator, idx: u32) ![]*const SourceScope {
         const visibility = self.getVisibilityForIdx(idx) orelse return &.{};
-        var scopes: std.ArrayList(*const SourceScope) = .{};
+        var scopes: std.ArrayList(*const SourceScope) = .empty;
         defer scopes.deinit(allocator);
 
         for (visibility.scope_ids) |scope_id| {
@@ -259,7 +259,7 @@ pub const DebugInfo = struct {
         const visible_locals = try self.collectVisibleLocals(allocator, idx);
         defer allocator.free(visible_locals);
 
-        var bindings: std.ArrayList(VisibleBinding) = .{};
+        var bindings: std.ArrayList(VisibleBinding) = .empty;
         defer bindings.deinit(allocator);
 
         for (visible_locals) |visible| {

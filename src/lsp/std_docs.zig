@@ -53,11 +53,11 @@ const synthetic_namespaces = [_]SyntheticNamespace{
     },
     .{
         .name = "transaction",
-        .documentation = "Transaction-scoped EVM environment values. `sender` is an alias of `std.msg.sender`.",
+        .documentation = "Transaction-scoped EVM environment values.",
     },
     .{
         .name = "tx",
-        .documentation = "Transaction-origin environment values.",
+        .documentation = "Transaction-scoped EVM environment values.",
     },
     .{
         .name = "block",
@@ -80,12 +80,6 @@ const synthetic_members = [_]SyntheticMember{
     },
     .{
         .namespace = "transaction",
-        .name = "sender",
-        .detail = "address",
-        .documentation = "Address of the immediate caller. Alias of `std.msg.sender`; trusted as non-zero.",
-    },
-    .{
-        .namespace = "transaction",
         .name = "gasprice",
         .detail = "u256",
         .documentation = "Gas price for the current transaction.",
@@ -94,7 +88,7 @@ const synthetic_members = [_]SyntheticMember{
         .namespace = "tx",
         .name = "origin",
         .detail = "address",
-        .documentation = "Original externally owned account that started the transaction.",
+        .documentation = "Address that started the current transaction. Prefer `std.msg.sender()` for authorization checks.",
     },
     .{
         .namespace = "block",
@@ -179,7 +173,7 @@ pub const Index = struct {
 };
 
 pub fn collectImportAliases(allocator: Allocator, tokens: []const token_cache.Token) ![]ImportAlias {
-    var aliases = std.ArrayList(ImportAlias){};
+    var aliases = std.ArrayList(ImportAlias).empty;
     errdefer {
         for (aliases.items) |alias| {
             allocator.free(alias.alias);
@@ -268,7 +262,7 @@ pub fn completionCandidatesAt(
     index: *const Index,
     aliases: []const ImportAlias,
 ) ![]semantic_index.Symbol {
-    var symbols = std.ArrayList(semantic_index.Symbol){};
+    var symbols = std.ArrayList(semantic_index.Symbol).empty;
     errdefer symbols.deinit(allocator);
 
     const chain = completionChainForPrefix(source, cursor_offset, prefix) orelse

@@ -2,7 +2,7 @@
 // INPUT: ora-example/naming_test.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {counter = 0 : ui64}, ora.global_slots_built} {
-// CHECK-NEXT:   func.func @testNaming() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.effect = "reads", ora.read_slots = ["counter"], ora.selector = "0x64f35554", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testNaming() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["counter"], ora.selector = "0x64f35554", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/naming_test.ora":15:9)))
 // CHECK-NEXT:     %slot_counter = sir.const 0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/naming_test.ora":2:5)))
 // CHECK-NEXT:     %c2 = sir.const 2 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/naming_test.ora":11:30)))

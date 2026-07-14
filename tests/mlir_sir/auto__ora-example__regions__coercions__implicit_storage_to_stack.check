@@ -2,16 +2,16 @@
 // INPUT: ora-example/regions/coercions/implicit_storage_to_stack.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {balance = 1 : ui64, balances = 2 : ui64, counter = 0 : ui64}, ora.global_slots_built} {
-// CHECK-NEXT:   func.func @testImplicitStorageToStack() attributes {ora.effect = "reads", ora.read_slots = ["counter"], ora.selector = "0xb9403e2f", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testImplicitStorageToStack() attributes {ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["counter"], ora.selector = "0xb9403e2f", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":13:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":13:5)
-// CHECK-NEXT:   func.func @testImplicitStorageInArithmetic() attributes {ora.effect = "reads", ora.read_slots = ["counter", "balance"], ora.selector = "0x1f164eb9", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testImplicitStorageInArithmetic() attributes {ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["counter", "balance"], ora.selector = "0x1f164eb9", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":18:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":18:5)
-// CHECK-NEXT:   func.func @testImplicitStorageInComparison() attributes {ora.effect = "reads", ora.read_slots = ["counter"], ora.selector = "0x7781b7d6", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testImplicitStorageInComparison() attributes {ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["counter"], ora.selector = "0x7781b7d6", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":23:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":23:5)
-// CHECK-NEXT:   func.func @testImplicitStorageInReturn() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.effect = "reads", ora.read_slots = ["counter"], ora.selector = "0xfcf6356b", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testImplicitStorageInReturn() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["counter"], ora.selector = "0xfcf6356b", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":31:9)))
 // CHECK-NEXT:     %slot_counter = sir.const 0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":8:5)))
 // CHECK-NEXT:     %value = sir.sload %slot_counter : !sir.u256 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":8:5)))
@@ -19,10 +19,10 @@
 // CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %value : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":31:9)))
 // CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":31:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":30:5)
-// CHECK-NEXT:   func.func @testImplicitStorageMap(%arg0: !sir.u256 loc("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":35:35)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["address"], ora.effect = "reads", ora.param_names = ["addr"], ora.read_slots = ["balances"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xa38fb701", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testImplicitStorageMap(%arg0: !sir.u256 loc("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":35:35)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["address"], ora.dispatch_class = "readonly", ora.effect = "reads", ora.param_binding_ids = ["file:0:pattern:2"], ora.param_names = ["addr"], ora.read_slots = ["balances[param#0]"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xa38fb701", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":35:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":35:5)
-// CHECK-NEXT:   func.func @testMultipleImplicitStorage() attributes {ora.effect = "reads", ora.read_slots = ["counter", "balance"], ora.selector = "0x4a0e7347", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testMultipleImplicitStorage() attributes {ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["counter", "balance"], ora.selector = "0x4a0e7347", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":40:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":40:5)
 // CHECK-NEXT: } loc("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":7:1)

@@ -1,0 +1,9 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/refinement/in_range_u8.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @setScore
+// CHECK-LABEL: func.func @getScore
+// CHECK-LABEL: func.func @isPassing
+// CHECK-LABEL: func.func @add
+// CHECK-LABEL: func.func @toPlain
+// CHECK-LABEL: func.func @compare

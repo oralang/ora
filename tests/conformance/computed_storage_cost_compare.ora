@@ -1,0 +1,130 @@
+comptime const std_storage = @import("std/storage");
+comptime const fixed = @import("std/storage/fixed_size_data");
+
+struct Payload4 {
+    a: u256;
+    b: u256;
+    c: u256;
+    d: u256;
+}
+
+contract ComputedStorageCostCompare {
+    storage var array_payloads: map<address, [u256; 4]>;
+    storage var struct_payloads: map<address, Payload4>;
+    storage var many0: map<address, u256>;
+    storage var many1: map<address, u256>;
+    storage var many2: map<address, u256>;
+    storage var many3: map<address, u256>;
+
+    fn computedSlot(owner: address) -> StorageSlot {
+        return std_storage.derive("ora.test.computed.cost.payload", owner);
+    }
+
+    pub fn computed_store_one(owner: address, value: u256)
+        modifies std_storage.range(std_storage.derive("ora.test.computed.cost.payload", owner), 1)
+    {
+        let data: [u256; 1] = [value];
+        fixed.store(computedSlot(owner), data);
+    }
+
+    pub fn computed_load_one(owner: address) -> u256 {
+        let data: [u256; 1] = fixed.load(computedSlot(owner), 1);
+        return data[0];
+    }
+
+    pub fn computed_erase_one(owner: address)
+        modifies std_storage.range(std_storage.derive("ora.test.computed.cost.payload", owner), 1)
+    {
+        fixed.erase(computedSlot(owner), 1);
+    }
+
+    pub fn computed_store_four(owner: address, a: u256, b: u256, c: u256, d: u256)
+        modifies std_storage.range(std_storage.derive("ora.test.computed.cost.payload", owner), 4)
+    {
+        let data: [u256; 4] = [a, b, c, d];
+        fixed.store(computedSlot(owner), data);
+    }
+
+    pub fn computed_sum_four(owner: address) -> u256 {
+        let data: [u256; 4] = fixed.load(computedSlot(owner), 4);
+        return data[0] + data[1] + data[2] + data[3];
+    }
+
+    pub fn computed_erase_four(owner: address)
+        modifies std_storage.range(std_storage.derive("ora.test.computed.cost.payload", owner), 4)
+    {
+        fixed.erase(computedSlot(owner), 4);
+    }
+
+    pub fn computed_store_sixteen(owner: address)
+        modifies std_storage.range(std_storage.derive("ora.test.computed.cost.payload", owner), 16)
+    {
+        let data: [u256; 16] = [
+            1, 2, 3, 4,
+            5, 6, 7, 8,
+            9, 10, 11, 12,
+            13, 14, 15, 16,
+        ];
+        fixed.store(computedSlot(owner), data);
+    }
+
+    pub fn computed_sum_sixteen(owner: address) -> u256 {
+        let data: [u256; 16] = fixed.load(computedSlot(owner), 16);
+        return data[0] + data[1] + data[2] + data[3]
+            + data[4] + data[5] + data[6] + data[7]
+            + data[8] + data[9] + data[10] + data[11]
+            + data[12] + data[13] + data[14] + data[15];
+    }
+
+    pub fn computed_erase_sixteen(owner: address)
+        modifies std_storage.range(std_storage.derive("ora.test.computed.cost.payload", owner), 16)
+    {
+        fixed.erase(computedSlot(owner), 16);
+    }
+
+    pub fn array_store_four(owner: address, a: u256, b: u256, c: u256, d: u256) {
+        let data: [u256; 4] = [a, b, c, d];
+        array_payloads[owner] = data;
+    }
+
+    pub fn array_sum_four(owner: address) -> u256 {
+        let data: [u256; 4] = array_payloads[owner];
+        return data[0] + data[1] + data[2] + data[3];
+    }
+
+    pub fn array_clear_four(owner: address) {
+        let data: [u256; 4] = [0, 0, 0, 0];
+        array_payloads[owner] = data;
+    }
+
+    pub fn struct_store_four(owner: address, a: u256, b: u256, c: u256, d: u256) {
+        struct_payloads[owner] = Payload4 { a: a, b: b, c: c, d: d };
+    }
+
+    pub fn struct_sum_four(owner: address) -> u256 {
+        let data: Payload4 = struct_payloads[owner];
+        return data.a + data.b + data.c + data.d;
+    }
+
+    pub fn struct_clear_four(owner: address) {
+        struct_payloads[owner] = Payload4 { a: 0, b: 0, c: 0, d: 0 };
+    }
+
+    pub fn many_store_four(owner: address, a: u256, b: u256, c: u256, d: u256) {
+        many0[owner] = a;
+        many1[owner] = b;
+        many2[owner] = c;
+        many3[owner] = d;
+    }
+
+    pub fn many_sum_four(owner: address) -> u256 {
+        return many0[owner] + many1[owner] + many2[owner] + many3[owner];
+    }
+
+    pub fn many_clear_four(owner: address) {
+        many0[owner] = 0;
+        many1[owner] = 0;
+        many2[owner] = 0;
+        many3[owner] = 0;
+    }
+}

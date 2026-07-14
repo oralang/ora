@@ -84,7 +84,7 @@ const InstalledBreakpoint = struct {
 /// replayed into the debugger once `session_active` flips true.
 const ServerState = struct {
     allocator: std.mem.Allocator,
-    pending_breakpoints: std.ArrayList(PendingBreakpoint) = .{},
+    pending_breakpoints: std.ArrayList(PendingBreakpoint) = .empty,
     session: Session = undefined,
     seed: SessionSeed = undefined,
     config: AppConfig = undefined,
@@ -102,7 +102,7 @@ const ServerState = struct {
     /// `setBreakpoints` would still hit it because the prior
     /// replay had pushed it into the debugger and never lifted
     /// it back out.
-    installed_breakpoints: std.ArrayList(InstalledBreakpoint) = .{},
+    installed_breakpoints: std.ArrayList(InstalledBreakpoint) = .empty,
     session_active: bool = false,
     seq: i64 = 0,
 
@@ -125,24 +125,23 @@ const ServerState = struct {
 };
 
 pub fn main() !void {
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa_state = std.heap.DebugAllocator(.{}){};
     defer _ = gpa_state.deinit();
     const allocator = gpa_state.allocator();
 
     var state = ServerState{ .allocator = allocator };
     defer state.deinit();
 
-    const stdin_file = std.fs.File.stdin();
-    const stdout_file = std.fs.File.stdout();
-    const stderr_file = std.fs.File.stderr();
+    const stdin_file = std.Io.File.stdin();
+    const stdout_file = std.Io.File.stdout();
+    const stderr_file = std.Io.File.stderr();
 
     // Inbound message logging is opt-in. By default we don't log
     // request bodies because they may carry user paths, calldata,
     // and other things the operator hasn't consented to write to
     // a log file. Set ORA_DAP_LOG=1 to enable for debugging.
     const verbose_logging: bool = blk: {
-        const val = std.process.getEnvVarOwned(allocator, "ORA_DAP_LOG") catch break :blk false;
-        defer allocator.free(val);
+        const val = std.posix.getenv("ORA_DAP_LOG") orelse break :blk false;
         break :blk val.len > 0 and !std.mem.eql(u8, val, "0");
     };
 
@@ -249,8 +248,8 @@ pub fn main() !void {
 /// further requests.
 fn handleLaunch(
     allocator: std.mem.Allocator,
-    stdout_file: std.fs.File,
-    stderr_file: std.fs.File,
+    stdout_file: std.Io.File,
+    stderr_file: std.Io.File,
     state: *ServerState,
     seq: i64,
     request_seq: i64,
@@ -414,7 +413,7 @@ fn replayPendingBreakpoints(state: *ServerState) !void {
 /// thread, so we always return one synthetic entry with id 1.
 fn handleThreads(
     allocator: std.mem.Allocator,
-    stdout_file: std.fs.File,
+    stdout_file: std.Io.File,
     seq: i64,
     request_seq: i64,
 ) !void {
@@ -429,7 +428,7 @@ fn handleThreads(
 /// stackFrame per frame. Innermost (top) frame is index 0.
 fn handleStackTrace(
     allocator: std.mem.Allocator,
-    stdout_file: std.fs.File,
+    stdout_file: std.Io.File,
     seq: i64,
     request_seq: i64,
     state: *ServerState,
@@ -439,7 +438,7 @@ fn handleStackTrace(
         return;
     }
 
-    var frames_body: std.ArrayList(u8) = .{};
+    var frames_body: std.ArrayList(u8) = .empty;
     defer frames_body.deinit(allocator);
     var w = frames_body.writer(allocator);
     try w.writeAll("[");
@@ -478,8 +477,8 @@ fn handleStackTrace(
 /// `stopped` event so the client refreshes its view.
 fn handleStep(
     allocator: std.mem.Allocator,
-    stdout_file: std.fs.File,
-    stderr_file: std.fs.File,
+    stdout_file: std.Io.File,
+    stderr_file: std.Io.File,
     seq: i64,
     request_seq: i64,
     state: *ServerState,
@@ -543,7 +542,7 @@ fn handleStep(
 ///   { "result": "<decimal>", "variablesReference": 0 }
 fn handleEvaluate(
     allocator: std.mem.Allocator,
-    stdout_file: std.fs.File,
+    stdout_file: std.Io.File,
     seq: i64,
     request_seq: i64,
     state: *ServerState,
@@ -583,7 +582,7 @@ fn handleEvaluate(
         return;
     };
 
-    var result_buf: std.ArrayList(u8) = .{};
+    var result_buf: std.ArrayList(u8) = .empty;
     defer result_buf.deinit(allocator);
     var w = result_buf.writer(allocator);
     switch (value) {
@@ -606,7 +605,7 @@ fn handleEvaluate(
 /// We ack and emit a `stopped` event for symmetry.
 fn handlePause(
     allocator: std.mem.Allocator,
-    stdout_file: std.fs.File,
+    stdout_file: std.Io.File,
     seq: i64,
     request_seq: i64,
     state: *ServerState,
@@ -635,7 +634,7 @@ fn dupOptionalString(allocator: std.mem.Allocator, args: std.json.Value, key: []
     return try allocator.dupe(u8, v.string);
 }
 
-fn writeError(allocator: std.mem.Allocator, file: std.fs.File, seq: i64, request_seq: i64, command: []const u8, message: []const u8) !void {
+fn writeError(allocator: std.mem.Allocator, file: std.Io.File, seq: i64, request_seq: i64, command: []const u8, message: []const u8) !void {
     const cmd_quoted = try allocJsonString(allocator, command);
     defer allocator.free(cmd_quoted);
     const msg_quoted = try allocJsonString(allocator, message);
@@ -661,8 +660,8 @@ fn writeError(allocator: std.mem.Allocator, file: std.fs.File, seq: i64, request
 /// unverified with a `no_session_yet` message.
 fn handleSetBreakpoints(
     allocator: std.mem.Allocator,
-    stdout_file: std.fs.File,
-    stderr_file: std.fs.File,
+    stdout_file: std.Io.File,
+    stderr_file: std.Io.File,
     seq: i64,
     request_seq: i64,
     root: std.json.Value,
@@ -711,7 +710,7 @@ fn handleSetBreakpoints(
     // Parse the new breakpoints and append. Keep the requested
     // lines in order so the response mirrors the request after
     // active-session replay.
-    var requested_lines: std.ArrayList(u32) = .{};
+    var requested_lines: std.ArrayList(u32) = .empty;
     defer requested_lines.deinit(allocator);
 
     if (arguments.object.get("breakpoints")) |bps| {
@@ -736,7 +735,7 @@ fn handleSetBreakpoints(
 
     if (state.session_active) try replayPendingBreakpoints(state);
 
-    var response_body: std.ArrayList(u8) = .{};
+    var response_body: std.ArrayList(u8) = .empty;
     defer response_body.deinit(allocator);
     var w = response_body.writer(allocator);
     try w.writeAll("[");
@@ -772,11 +771,11 @@ fn handleSetBreakpoints(
     try writeFramed(allocator, stdout_file, out);
 }
 
-fn writeAll(file: std.fs.File, bytes: []const u8) !void {
-    try file.writeAll(bytes);
+fn writeAll(file: std.Io.File, bytes: []const u8) !void {
+    try file.writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), bytes);
 }
 
-fn writeInitializeResponse(allocator: std.mem.Allocator, file: std.fs.File, seq: i64, request_seq: i64) !void {
+fn writeInitializeResponse(allocator: std.mem.Allocator, file: std.Io.File, seq: i64, request_seq: i64) !void {
     const body = try std.fmt.allocPrint(allocator,
         \\{{"seq":{d},"type":"response","request_seq":{d},"success":true,"command":"initialize","body":{{"supportsConfigurationDoneRequest":false,"supportsSetVariable":false,"supportsRestartRequest":false}}}}
     , .{ seq, request_seq });
@@ -784,7 +783,7 @@ fn writeInitializeResponse(allocator: std.mem.Allocator, file: std.fs.File, seq:
     try writeFramed(allocator, file, body);
 }
 
-fn writeAck(allocator: std.mem.Allocator, file: std.fs.File, seq: i64, request_seq: i64, command: []const u8) !void {
+fn writeAck(allocator: std.mem.Allocator, file: std.Io.File, seq: i64, request_seq: i64, command: []const u8) !void {
     const cmd_quoted = try allocJsonString(allocator, command);
     defer allocator.free(cmd_quoted);
     const body = try std.fmt.allocPrint(allocator,
@@ -794,7 +793,7 @@ fn writeAck(allocator: std.mem.Allocator, file: std.fs.File, seq: i64, request_s
     try writeFramed(allocator, file, body);
 }
 
-fn writeNotImplemented(allocator: std.mem.Allocator, file: std.fs.File, seq: i64, request_seq: i64, command: []const u8) !void {
+fn writeNotImplemented(allocator: std.mem.Allocator, file: std.Io.File, seq: i64, request_seq: i64, command: []const u8) !void {
     const cmd_quoted = try allocJsonString(allocator, command);
     defer allocator.free(cmd_quoted);
     const body = try std.fmt.allocPrint(allocator,

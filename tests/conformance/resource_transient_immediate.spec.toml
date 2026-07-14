@@ -1,0 +1,25 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "issueThenBalance(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [9]
+returns = { u256 = 9 }
+
+[[call]]
+fn = "issueRetireThenBalance(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [20, 6]
+returns = { u256 = 14 }
+
+[[call]]
+fn = "issueRetireThenBalance(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [5, 6]
+reverts = { any = true }

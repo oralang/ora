@@ -26,9 +26,9 @@ contract NonZeroAddressSubtyping {
     }
     
     fn testSubtypingIn() {
-        // std.transaction.sender() returns address, but EVM guarantees it's non-zero
+        // std.msg.sender() returns address, but EVM guarantees it's non-zero
         // This should work once the compiler recognizes trusted builtins
-        let non_zero: NonZeroAddress = std.transaction.sender();
+        let non_zero: NonZeroAddress = std.msg.sender();
         acceptAddress(non_zero); // Valid: NonZeroAddress <: address
     }
     
@@ -38,7 +38,7 @@ contract NonZeroAddressSubtyping {
     
     // Function returning address can return NonZeroAddress
     fn returnAddress() -> address {
-        let non_zero: NonZeroAddress = std.transaction.sender();
+        let non_zero: NonZeroAddress = std.msg.sender();
         return non_zero; // Valid: NonZeroAddress <: address
     }
     
@@ -47,7 +47,7 @@ contract NonZeroAddressSubtyping {
     // ============================================================================
     
     fn testVariableAssignment() {
-        let non_zero: NonZeroAddress = std.transaction.sender();
+        let non_zero: NonZeroAddress = std.msg.sender();
         let addr: address = non_zero; // Valid: NonZeroAddress <: address
     }
 }

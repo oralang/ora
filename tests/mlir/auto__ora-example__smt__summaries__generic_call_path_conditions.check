@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/smt/summaries/generic_call_path_conditions.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @transferDirect
+// CHECK-LABEL: func.func @transferGeneric
+// CHECK-LABEL: func.func @sub__u256
+// CHECK-LABEL: func.func @add__u256

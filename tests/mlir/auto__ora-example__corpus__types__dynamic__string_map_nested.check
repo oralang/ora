@@ -1,0 +1,7 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/dynamic/string_map_nested.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @setLabel
+// CHECK-LABEL: func.func @getLabel
+// CHECK-LABEL: func.func @setSelfLabel
+// CHECK-LABEL: func.func @getSelfLabel

@@ -9,6 +9,7 @@
 const std = @import("std");
 const mlir_c_api = @import("mlir_c_api");
 const c = mlir_c_api.c;
+const refinement_guards = @import("ora_lib").compiler.refinement_guards;
 
 pub const Mode = enum {
     ora,
@@ -85,6 +86,7 @@ pub fn generateCFG(
     if (options.proven_guard_ids) |ids| {
         var iter = ids.iterator();
         while (iter.next()) |entry| {
+            if (refinement_guards.guardIdIsDuplicated(module, entry.key_ptr.*)) continue;
             try guard_refs.append(allocator, c.oraStringRefCreate(entry.key_ptr.*.ptr, entry.key_ptr.*.len));
         }
     }
@@ -159,7 +161,7 @@ pub fn generateFunctionCFGs(
     return graphs.toOwnedSlice(allocator);
 }
 
-/// Generate SIR CFG snapshots before and after the opt-in MLIR framework
+/// Generate SIR CFG snapshots before and after the default MLIR framework
 /// canonicalizer. This is a viewer/debugging helper: it lowers cloned modules
 /// and never mutates the input module.
 ///
@@ -177,10 +179,10 @@ pub fn generateSirOptimizationDiff(
     const after_module = try cloneModuleFromText(ctx, module);
     defer c.oraModuleDestroy(after_module);
 
+    setModuleBoolAttr(ctx, before_module, "ora.phase0.skip_sir_framework_canonicalizer");
     if (!c.oraConvertToSIR(ctx, before_module, debug_info))
         return error.CFGGenerationFailed;
 
-    setModuleBoolAttr(ctx, after_module, "ora.phase0.run_sir_framework_canonicalizer");
     if (!c.oraConvertToSIR(ctx, after_module, debug_info))
         return error.CFGGenerationFailed;
 

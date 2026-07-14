@@ -1,0 +1,14 @@
+// Umbrella module for the ERC standard interfaces shipped with std.
+// Each submodule declares bare extern traits plus comptime selector and
+// interface-id constants pinned against the EIP vectors.
+
+/// ERC-20 fungible tokens (EIP-20): `IERC20`, `IERC20Metadata`.
+comptime const erc20 = @import("std/erc/erc20");
+/// ERC-165 interface detection (EIP-165): `IERC165`.
+comptime const erc165 = @import("std/erc/erc165");
+/// ERC-721 NFTs (EIP-721): `IERC721`, `IERC721Metadata`, `IERC721Receiver`.
+comptime const erc721 = @import("std/erc/erc721");
+/// ERC-1155 multi-tokens (EIP-1155): `IERC1155`, receiver + metadata.
+comptime const erc1155 = @import("std/erc/erc1155");
+/// ERC-2612 permit (EIP-2612): `IERC2612`.
+comptime const erc2612 = @import("std/erc/erc2612");

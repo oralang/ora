@@ -1,0 +1,4 @@
+// Negative: opaque storage capabilities must not cross ABI/log boundaries.
+contract BadComputedStorageEventLeak {
+    log Bad(slot: StorageSlot);
+}

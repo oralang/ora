@@ -1,0 +1,5 @@
+resource TokenUnit = u256;
+
+contract ResourceNestedResource {
+    storage var balances: map<address, Resource<Resource<TokenUnit>>>;
+}

@@ -63,6 +63,7 @@ pub const ContractMemberRole = enum {
     struct_,
     bitfield,
     enum_,
+    resource,
     type_alias,
     trait_,
     log_decl,
@@ -76,11 +77,12 @@ pub const ContractMemberRoles = packed struct(u16) {
     struct_: bool = false,
     bitfield: bool = false,
     enum_: bool = false,
+    resource: bool = false,
     type_alias: bool = false,
     trait_: bool = false,
     log_decl: bool = false,
     error_decl: bool = false,
-    _padding: u6 = 0,
+    _padding: u5 = 0,
 
     pub fn contains(self: ContractMemberRoles, role: ContractMemberRole) bool {
         return switch (role) {
@@ -90,6 +92,7 @@ pub const ContractMemberRoles = packed struct(u16) {
             .struct_ => self.struct_,
             .bitfield => self.bitfield,
             .enum_ => self.enum_,
+            .resource => self.resource,
             .type_alias => self.type_alias,
             .trait_ => self.trait_,
             .log_decl => self.log_decl,
@@ -284,6 +287,8 @@ pub const ExternalProxyType = semantic_types.ExternalProxyType;
 pub const IntegerType = semantic_types.IntegerType;
 pub const ComptimeIntegerType = semantic_types.ComptimeIntegerType;
 pub const FixedBytesType = semantic_types.FixedBytesType;
+pub const ResourceDomainType = semantic_types.ResourceDomainType;
+pub const ResourcePlaceType = semantic_types.ResourcePlaceType;
 pub const FunctionType = semantic_types.FunctionType;
 pub const ArrayType = semantic_types.ArrayType;
 pub const SliceType = semantic_types.SliceType;
@@ -426,6 +431,8 @@ pub const EffectSlot = struct {
 
 pub const KeySegment = union(enum) {
     parameter: u32,
+    comptime_parameter: u32,
+    comptime_range_parameter: u32,
     constant: []const u8,
     msg_sender,
     tx_origin,
@@ -433,10 +440,10 @@ pub const KeySegment = union(enum) {
 };
 
 pub fn formatEffectSlotPath(allocator: std.mem.Allocator, slot: EffectSlot) ![]u8 {
-    var buffer: std.ArrayList(u8) = .{};
-    errdefer buffer.deinit(allocator);
+    var buffer = std.Io.Writer.Allocating.init(allocator);
+    errdefer buffer.deinit();
 
-    const writer = buffer.writer(allocator);
+    const writer = &buffer.writer;
     try writer.writeAll(slot.name);
     if (slot.field_path) |field_path| {
         for (field_path) |field_name| {
@@ -449,6 +456,8 @@ pub fn formatEffectSlotPath(allocator: std.mem.Allocator, slot: EffectSlot) ![]u
             try writer.writeByte('[');
             switch (segment) {
                 .parameter => |index| try writer.print("param#{d}", .{index}),
+                .comptime_parameter => |index| try writer.print("comptime_param#{d}", .{index}),
+                .comptime_range_parameter => |index| try writer.print("comptime_range_param#{d}", .{index}),
                 .constant => |value| try writer.writeAll(value),
                 .msg_sender => try writer.writeAll("msg.sender"),
                 .tx_origin => try writer.writeAll("tx.origin"),
@@ -458,7 +467,7 @@ pub fn formatEffectSlotPath(allocator: std.mem.Allocator, slot: EffectSlot) ![]u
         }
     }
 
-    return try buffer.toOwnedSlice(allocator);
+    return try buffer.toOwnedSlice();
 }
 
 pub fn effectSlotPathRoot(path: []const u8) []const u8 {
@@ -773,6 +782,7 @@ fn contractMemberRole(item: ast.Item) ?ContractMemberRole {
         .Struct => .struct_,
         .Bitfield => .bitfield,
         .Enum => .enum_,
+        .Resource => .resource,
         .TypeAlias => .type_alias,
         .Trait => .trait_,
         .LogDecl => .log_decl,
@@ -784,6 +794,7 @@ fn contractMemberRole(item: ast.Item) ?ContractMemberRole {
 pub const NameResolutionResult = struct {
     arena: std.heap.ArenaAllocator,
     expr_bindings: []?ResolvedBinding,
+    pattern_bindings: []?ResolvedBinding,
     diagnostics: diagnostics.DiagnosticList,
 
     pub fn deinit(self: *NameResolutionResult) void {
@@ -799,6 +810,9 @@ pub const TypeCheckResult = struct {
     item_regions: []Region,
     item_effects: []Effect,
     item_modifies: []?[]EffectSlot,
+    /// Per-item `@callHint` value (.none when unhinted). Dispatch-layout
+    /// metadata only — consumed by HIR module lowering, never by codegen.
+    item_call_hints: []ast.nodes.CallHint,
     pattern_types: []LocatedType,
     pattern_initializers: []?ast.ExprId,
     pattern_binding_kinds: []?ast.BindingKind,

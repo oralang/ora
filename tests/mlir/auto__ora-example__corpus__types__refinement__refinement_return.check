@@ -1,0 +1,11 @@
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/corpus/types/refinement/refinement_return.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @returnMinValue
+// CHECK-LABEL: func.func @returnMaxValue
+// CHECK-LABEL: func.func @returnInRange
+// CHECK-LABEL: func.func @returnNonZero
+// CHECK-LABEL: func.func @setAndReturnMin
+// CHECK-LABEL: func.func @setAndReturnMax
+// CHECK-LABEL: func.func @setAndReturnRange
+// CHECK-LABEL: func.func @setAndReturnAddr

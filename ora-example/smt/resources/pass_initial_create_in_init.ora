@@ -1,0 +1,18 @@
+resource TokenUnit = u256;
+comptime const std = @import("std");
+
+contract ResourceSmtInitialCreateInInit {
+    storage var reserve: Resource<TokenUnit>;
+    storage var total_supply: TokenUnit;
+
+    pub fn init(initial_supply: TokenUnit)
+        modifies reserve, total_supply
+        requires @amount(reserve) <= @cast(TokenUnit, std.constants.U256_MAX) - initial_supply
+        requires total_supply <= @cast(TokenUnit, std.constants.U256_MAX) - initial_supply
+        ensures @amount(reserve) == old(@amount(reserve)) + initial_supply
+        ensures total_supply == old(total_supply) + initial_supply
+    {
+        @create(reserve, initial_supply);
+        total_supply += initial_supply;
+    }
+}
