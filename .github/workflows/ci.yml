@@ -237,6 +237,10 @@ jobs:
   formal-lean:
     name: Formal Lean Sync
     runs-on: ubuntu-latest
+    # The dispatcher-table snapshot emitter compiles fixtures through the real
+    # MLIR dispatcher pipeline, so this job consumes mlir-build's prebuilt
+    # vendor/mlir artifact instead of fetching and building vendored LLVM.
+    needs: [mlir-build]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -247,6 +251,27 @@ jobs:
         uses: goto-bus-stop/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
+
+      - name: Install system dependencies
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            libc++-dev \
+            libc++abi-dev \
+            libboost-all-dev \
+            libssl-dev \
+            pkg-config \
+            z3 \
+            libz3-dev
+
+      - name: Download MLIR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mlir-${{ runner.os }}-${{ runner.arch }}
+          path: vendor/mlir
 
       - name: Cache Zig artifacts
         uses: actions/cache@v4
@@ -279,7 +304,7 @@ jobs:
         shell: bash
         run: |
           echo "🔍 Checking compiler ↔ Lean formal sync..."
-          scripts/check-formal-sync.sh
+          scripts/check-formal-sync.sh --skip-mlir
           echo "✅ Formal Lean sync passed"
 
   sinora:

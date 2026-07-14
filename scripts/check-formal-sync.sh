@@ -18,12 +18,28 @@
 # Local: run it, and if step 3 reports drift, review + commit the new snapshot.
 # CI: a non-empty git diff means "compiler changed but snapshot not regenerated".
 #
-# Usage:  scripts/check-formal-sync.sh
+# Usage:  scripts/check-formal-sync.sh [--skip-mlir]
+#
+#   --skip-mlir  Pass -Dskip-mlir=true to `zig build` emitter steps. Requires a
+#                prebuilt vendor/mlir (e.g. CI's mlir-build artifact); the
+#                dispatcher-table emitter links the MLIR/C++ stack and this
+#                skips the vendored-LLVM CMake build it would otherwise need.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 export PATH="$HOME/.elan/bin:$PATH"
+
+BUILD_FLAGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --skip-mlir) BUILD_FLAGS+=("-Dskip-mlir=true") ;;
+    *)
+      echo "error: unknown argument '$arg' (supported: --skip-mlir)" >&2
+      exit 2
+      ;;
+  esac
+done
 
 run_emitter() {
   local label="$1"
@@ -66,7 +82,7 @@ run_build_emitter() {
   local snapshot="$3"
 
   echo "  - $label -> $snapshot"
-  zig build "$step" --summary none -- "$snapshot"
+  zig build "$step" ${BUILD_FLAGS[@]+"${BUILD_FLAGS[@]}"} --summary none -- "$snapshot"
 }
 
 lint_snapshot() {
