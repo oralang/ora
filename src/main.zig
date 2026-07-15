@@ -5228,13 +5228,13 @@ fn runMlirEmitAdvanced(
     if (needs_refinement_cleanup) {
         const refinement_guards = compiler.refinement_guards;
         if (verification_result_opt) |*vr| {
-            refinement_guards.cleanupRefinementGuardsWithOptions(ctx, final_module, &vr.proven_guard_ids, .{
+            refinement_guards.cleanupRefinementGuardsWithOptions(mlir_allocator, ctx, final_module, &vr.proven_guard_ids, .{
                 .keep_proved_checks = mlir_options.keep_proved_checks,
             });
         } else {
             var empty_guards = std.StringHashMap(void).init(mlir_allocator);
             defer empty_guards.deinit();
-            refinement_guards.cleanupRefinementGuardsWithOptions(ctx, final_module, &empty_guards, .{
+            refinement_guards.cleanupRefinementGuardsWithOptions(mlir_allocator, ctx, final_module, &empty_guards, .{
                 .keep_proved_checks = mlir_options.keep_proved_checks,
             });
         }

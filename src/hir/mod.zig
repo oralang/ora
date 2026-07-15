@@ -228,8 +228,12 @@ pub const LoweringResult = struct {
         return allocator.dupe(u8, text_ref.data[0..text_ref.length]);
     }
 
-    pub fn cleanupRefinementGuards(self: *LoweringResult, proven_guard_ids: *const std.StringHashMap(void)) void {
-        refinement_guards.cleanupRefinementGuards(self.context, self.module.raw_module, proven_guard_ids);
+    pub fn cleanupRefinementGuards(
+        self: *LoweringResult,
+        allocator: std.mem.Allocator,
+        proven_guard_ids: *const std.StringHashMap(void),
+    ) void {
+        refinement_guards.cleanupRefinementGuards(allocator, self.context, self.module.raw_module, proven_guard_ids);
     }
 };
 

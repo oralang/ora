@@ -1295,7 +1295,7 @@ test "compiler does not erase guard-clause obligations after verification cleanu
     try testing.expectEqual(@as(usize, 0), vr.proven_guard_ids.count());
 
     const mutable_hir_result = @constCast(hir_result);
-    mutable_hir_result.cleanupRefinementGuards(&vr.proven_guard_ids);
+    mutable_hir_result.cleanupRefinementGuards(testing.allocator, &vr.proven_guard_ids);
     const hir_text = try mutable_hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
 
@@ -1543,7 +1543,7 @@ test "compiler cleans refinement guards to cf.assert" {
     var empty_guards = std.StringHashMap(void).init(testing.allocator);
     defer empty_guards.deinit();
 
-    mutable_hir_result.cleanupRefinementGuards(&empty_guards);
+    mutable_hir_result.cleanupRefinementGuards(testing.allocator, &empty_guards);
     const hir_text = try mutable_hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
 

@@ -88,7 +88,7 @@ test "refinement cleanup keeps dominated requires checks without proven guard id
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     var proven_guard_ids = std.StringHashMap(void).init(testing.allocator);
     defer proven_guard_ids.deinit();
-    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
+    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(testing.allocator, hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
 
     const after_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
@@ -128,7 +128,7 @@ test "refinement cleanup erases only proven guard while keeping dominated requir
     }
     try proven_guard_ids.put(try testing.allocator.dupe(u8, guard_id), {});
 
-    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
+    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(testing.allocator, hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
 
     const after_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
@@ -164,7 +164,7 @@ test "refinement cleanup refuses duplicate guard ids even when proven" {
     }
     try proven_guard_ids.put(try testing.allocator.dupe(u8, "guard:duplicate"), {});
 
-    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
+    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(testing.allocator, hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
 
     const after_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
@@ -202,7 +202,7 @@ test "refinement cleanup erases only matching distinct guard id" {
     }
     try proven_guard_ids.put(try testing.allocator.dupe(u8, first_guard_id), {});
 
-    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
+    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(testing.allocator, hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
 
     const after_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
@@ -270,7 +270,7 @@ test "refinement cleanup keeps dominated zero-address requires checks without pr
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     var proven_guard_ids = std.StringHashMap(void).init(testing.allocator);
     defer proven_guard_ids.deinit();
-    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
+    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(testing.allocator, hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
 
     const after_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
@@ -326,7 +326,7 @@ test "refinement cleanup keeps dominated requires checks in keep-proved mode" {
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     var proven_guard_ids = std.StringHashMap(void).init(testing.allocator);
     defer proven_guard_ids.deinit();
-    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{
+    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(testing.allocator, hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{
         .keep_proved_checks = true,
     });
 
@@ -354,7 +354,7 @@ test "compiler lowers keep-proved requires checks through OraToSIR" {
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     var proven_guard_ids = std.StringHashMap(void).init(testing.allocator);
     defer proven_guard_ids.deinit();
-    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{
+    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(testing.allocator, hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{
         .keep_proved_checks = true,
     });
 
@@ -385,7 +385,7 @@ test "refinement cleanup preserves requires checks not implied by parameter refi
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     var proven_guard_ids = std.StringHashMap(void).init(testing.allocator);
     defer proven_guard_ids.deinit();
-    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
+    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(testing.allocator, hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
 
     const after_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
@@ -412,7 +412,7 @@ test "refinement cleanup preserves assert message selector on cf.assert" {
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     var proven_guard_ids = std.StringHashMap(void).init(testing.allocator);
     defer proven_guard_ids.deinit();
-    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
+    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(testing.allocator, hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
 
     const after_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
@@ -438,7 +438,7 @@ test "refinement cleanup tags kept refinement guards as clean runtime checks" {
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     var proven_guard_ids = std.StringHashMap(void).init(testing.allocator);
     defer proven_guard_ids.deinit();
-    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
+    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(testing.allocator, hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
 
     const after_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
     defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
