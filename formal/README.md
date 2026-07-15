@@ -1,101 +1,189 @@
-# `formal/` — Ora's Lean 4 mechanization
+# `formal/` — Ora's Lean 4 development
 
-This directory is Ora's machine-checked formal development. It is a **standalone
-Lean 4 proof project**: `lake build` elaborates it and the Lean kernel checks
-the proofs. The point of Lean here is the *trusted kernel* — a small, auditable
-checker — complementing the automated (but unverified) Z3/SMT discharge the
-compiler uses today. See `docs/fv/VolumeI.md` ch. 39–40 ("Why Ora Will Use
-Lean", "Z3 + Lean cooperation").
+This directory contains Ora's machine-checked Lean definitions and proofs.
+`lake build` elaborates the `Ora` library, and the Lean kernel checks every
+theorem imported by `Ora.lean`.
 
-## Status: Phase 1 — type universe (in progress)
+## Scope
 
-The toolchain scaffold is done; the type layer is now under construction,
-grounded in the compiler's `src/types/`:
+Ora is not a verified compiler. The results in this directory apply to specific
+model fragments and generated compiler facts.
 
-- `Ora/Types/Region.lean` — the 5 regions + provenance, read/write capability,
-  and the implicit-coercion relation (`Region.assignableTo`) mirroring
-  `src/sema/region.zig:regionAssignable`.
-- `Ora/Types/Prim.lean` — the surface primitive universe (the 13 sized integers,
-  `bool`, `address`, `bytesN`, `string`, `bytes`, `void`), matched by hand to
-  `src/types/builtin.zig`.
-- `Ora/Types/Ty.lean` — the recursive composite universe over `PrimTy` + region.
+The development does not contain a complete Ora operational semantics, a
+whole-language type-soundness theorem, or a proof that source-to-bytecode
+lowering preserves semantics.
 
-**Not yet present (and required before soundness proofs):**
+## Current Verification Surfaces
 
-- `Ora/Types/WF.lean` — well-formedness. `Ty` currently admits raw syntactic
-  shapes, not valid Ora types; proofs must NOT treat an arbitrary `Ty` as
-  compiler-admissible until this predicate exists.
-- the core/internal layer — `never` (⊥), `ElabTy` (`unknown`/`named`), and the
-  comptime layer. See the `Ty.lean` header.
+| Surface | Implementation | Limitation |
+|---|---|---|
+| Type model | Regions, primitive and composite types, declarations, structural equality and assignability, well-formedness, refinements, effects, and a small typing-judgment skeleton | The model is not connected bidirectionally to compiler type acceptance and has no runtime semantics |
+| Snapshot syncs | Compiler-emitted data rows are regenerated and checked against handwritten Lean specifications | Selected finite surfaces only; not arbitrary compiler behavior |
+| Obligation semantics | A supported manifest fragment has fail-closed Lean denotation and reusable bit-vector, storage, resource, and agreement theorems | Partial fragment; unsupported terms denote to `none` and cannot be proved |
+| Userland proof acceptance | Selected plain Z3-`UNKNOWN` obligations can be discharged by audited Lean proofs and unblock artifact emission | Lean proofs cannot override `SAT`, degraded, vacuous, or unsupported rows and cannot erase runtime guards |
+| Dispatcher verification | Repository snapshots check planner facts; contract builds with `--lean-proofs` check the concrete SIR dispatcher and, when bytecode is emitted, bind a validated backend report to the bytecode | Per-contract translation validation of known dispatcher shapes, not a general SIR-to-EVM correctness theorem |
+| Resource model | Abstract create, destroy, and move operations have guard, conservation, self-move, and frame theorems | The abstract model is not a complete proof of every emitted resource operation |
 
-## Dependency posture (important)
+## Established Results
 
-`formal/` is **independent of the compiler build**:
+The `Ora` library currently includes proofs or kernel-checked sync theorems for:
 
-- It is **not linked into the `ora` binary** and is **not a build/runtime
-  dependency**. `build.zig` does not reference `formal/`; nothing in `src/`
-  imports anything here.
-- Lean is a **proof-checking tool**, not part of the toolchain needed to *build
-  or run* Ora. A contributor who only touches the compiler does not need Lean.
-- Conversely, `lake build` here does not need Zig/MLIR/Z3.
-- CI wiring (a non-gating `lake build` job) is intentionally deferred — it will
-  be added later as a separate, informational check.
+- reflexivity, equality characterization, and decidable equality for the modeled
+  `Ty.beq` relation;
+- reflexivity and transitivity of the modeled structural `Ty.assignable`
+  relation;
+- selected compiler type-relation rows agreeing with the Lean relations;
+- structural `WF Γ t` and declaration-environment `DeclEnvWF Γ` predicates,
+  with projection lemmas for well-formed declarations;
+- refinement registry/coherence facts and denotational containment for the
+  implemented refinement fragment;
+- EVM-width `U256` arithmetic facts, including wrapping subtraction and
+  totalized division/remainder edge cases;
+- fail-closed denotation of unsupported obligation syntax;
+- agreement, storage-disjointness, and obligation-totality fixture rows;
+- dispatcher strategy, planner, and concrete table facts represented by the
+  generated snapshots;
+- resource conservation under the stated guards, self-move identity, and frame
+  properties for untouched places.
 
-This separation is deliberate: the formal development can move at its own pace
-and use the trusted Lean kernel without coupling the compiler's build graph to a
-Lean toolchain.
+These results apply to the definitions and generated rows imported by
+`formal/Ora.lean`. The sync checks connect selected compiler facts to those
+theorems; they do not model the complete compiler.
+
+## Limitations
+
+The following theorems or connections do not currently exist:
+
+- no theorem equating compiler type acceptance with `WF`;
+- no complete connection between compiler assignability and `Ty.assignable`;
+- no general theorem that modeled assignability preserves `WF`;
+- no operational semantics for the complete Ora language;
+- no preservation, progress, or no-stuck theorem for Ora programs;
+- no source-to-HIR, HIR-to-MLIR, MLIR-to-SIR, or SIR-to-EVM correctness proof;
+- no versioned post-state storage semantics for written roots;
+- no Lean proof lane for loop invariant step relations;
+- no canonical SMT byte-equivalence result for every verification query;
+- no proof that every compiler-generated resource goal corresponds to a
+  meaningful live proof row.
+
+## Verification Workflows
+
+The verification system has two workflows.
+
+### Repository sync gate
+
+```sh
+zig build check-formal-sync
+```
+
+This command:
+
+1. regenerates the eight committed snapshots under `Ora/Generated/`;
+2. rejects generated files containing proof code rather than data;
+3. fails if regenerated data differs from the committed snapshots;
+4. runs `lake build` over the complete `Ora` library;
+5. audits theorem dependencies and rejects disallowed axioms.
+
+The full pre-push bar includes this gate:
+
+```sh
+zig build gate
+```
+
+The gate verifies that the selected generated data agrees with the checked-in
+Lean specifications. It does not verify unmodeled compiler passes.
+
+### Contract proof workflow
+
+Contract compilation with `--lean-proofs` first runs the normal Z3 verification
+path. For eligible unresolved obligations, the userland Lean gate checks the
+exact emitted manifest target, proof-target agreement, theorem elaboration, and
+axiom policy. A successful proof may unblock artifact emission for that target.
+
+The same mode also checks the concrete dispatcher extracted from SIR. If
+bytecode is emitted, the dispatcher certificate is bound to the backend report
+and final bytecode hashes.
+
+Runtime guard erasure uses a separate authorization path. Only clean,
+identity-matched Z3 `GuardViolate` evidence can authorize erasure. A userland
+Lean proof cannot add an id to `proven_guard_ids`, erase a guard, or mark
+resource runtime checks as proved.
+
+Focused proof-checker tests are available through:
+
+```sh
+zig build test-proof-check
+```
+
+Lean is invoked as a proof checker; it is not linked into the `ora` executable.
+
+## Trust Assumptions
+
+The verification system trusts the following components outside the Lean
+kernel:
+
+- compiler extraction of manifests, identities, snapshots, and dispatcher
+  facts;
+- the correspondence between extracted facts and the compiler IR they describe;
+- Z3 and Ora's SMT encoder for obligations discharged by Z3;
+- the hand-maintained relation between Lean denotation and the live SMT encoding
+  outside the required canonical crosscheck fragment;
+- lowering and legalization not covered by dispatcher template validation;
+- cryptographic hashes used to bind proof certificates to artifacts.
+
+Unsupported or malformed proof data blocks proof acceptance and artifact
+emission. The trusted components listed above are not formally verified.
 
 ## Layout
 
-```
+```text
 formal/
-  lean-toolchain     # pinned Lean version (elan reads this)
-  lakefile.toml      # Lake package: one library, `Ora`
-  Ora.lean           # library root (re-exports modules)
+  lean-toolchain
+  lakefile.toml
+  Ora.lean
   Ora/
-    Types/
-      Region.lean    # 5 regions + provenance, read/write capability, coercion table
-      Prim.lean      # surface primitive types (ints, bool, address, bytesN, …)
-      Ty.lean        # recursive composite universe over PrimTy + Region; located types
+    Types/          # type universe, WF, equality, assignability, effects
+    Spec/           # handwritten expected compiler facts
+    Generated/      # compiler-emitted data-only snapshots
+    Obligation/     # manifest, U256 semantics, denotation, agreement theorems
+    Resource/       # abstract resource model and theorems
+    Dispatcher*.lean
+    Sinora*.lean
+    *Sync.lean      # trusted checks over generated data
 ```
 
-## Building
+The generated files are data, not proofs. Handwritten `*Sync.lean` modules
+decode that data and state the checked propositions.
+
+## Standalone Lean Build
 
 ```sh
-# One-time: install elan (the Lean toolchain manager).
-#   curl https://elan.lean-lang.org/elan-init.sh -sSf | sh
-# elan auto-installs the version pinned in `lean-toolchain`.
-
 cd formal
-lake build        # elaborates + kernel-checks everything; exit 0 == proofs hold
+lake build
 ```
 
-## Lean tooling — the `lean4` skill
+The toolchain is pinned by `lean-toolchain`. The project currently uses Lean
+core and does not depend on Mathlib.
 
-The Lean 4 proving tooling lives under the project's Claude folder:
+## Roadmap
 
-- **`.claude/skills/lean4/`** — the committed, self-contained `lean4` skill
-  (LSP-first proving, mathlib search, `sorry`/axiom analysis, plus its
-  `references/`). Claude auto-discovers and uses it when editing `.lean` files —
-  no install step.
-- **`.claude/lean4-skills/`** — the full third-party plugin (local-only,
-  gitignored): the `/lean4:*` slash commands (`draft · formalize · prove ·
-  autoprove · checkpoint · review · golf · learn · doctor`) and proof agents
-  (`axiom-eliminator · proof-golfer · proof-repair · sorry-filler-deep`).
-  Activate with `/plugin marketplace add .claude/lean4-skills` then
-  `/plugin install lean4`; for live goal inspection also install the
-  `lean-lsp-mcp` MCP server and run `lake build` in `formal/` first.
+The main semantic dependency chain is:
 
-Tooling only — no effect on the `ora` compiler build. Third-party, MIT
-(`.claude/lean4-skills/LICENSE`).
+1. **Type meta-theory bridge.** Add the missing Bool/Prop bridges and prove
+   composition results such as assignability preserving well-formedness for the
+   explicitly modeled relation.
+2. **Core operational semantics.** Define values, environments, store/world,
+   lockset, and evaluation for a precisely named core fragment.
+3. **Core soundness.** Prove preservation and progress/no-stuck for that fragment,
+   including its effect and lock rules.
+4. **Versioned storage semantics.** Model pre-state and post-state identities for
+   written roots.
+5. **Loop proof lane.** Add proof-targetable step relations only after versioned
+   storage and loop-carried identities are available.
+6. **Compiler connection.** Add translation validation or template proofs that
+   connect selected compiler IR fragments to the semantics.
+7. **Resource surface cleanup.** Bind meaningful resource goals to live rows and
+   demote accounting-only goals.
 
-## Decisions on record
-
-- **Toolchain pin:** `leanprover/lean4:v4.15.0` (in `lean-toolchain`). Bump
-  deliberately; keep it in sync with `mathlib` if/when that is added.
-- **No `mathlib` yet.** The scaffold needs only Lean core (`rfl`, `omega`,
-  `simp`, `induction`). Phase 1 may add `mathlib` via a `[[require]]` block in
-  `lakefile.toml` if the soundness proofs want its tactics/lemmas — kept out for
-  now to keep builds fast and the dependency surface minimal.
-- **Kernel-trusted, Z3-cooperating.** Lean's role is the trusted layer in the
-  "Z3 + Lean cooperation" architecture (Ch. 40), not a replacement for Z3.
+Each milestone needs a named fragment, theorem statements, negative tests, and
+gate membership before documentation may present it as a guarantee.
