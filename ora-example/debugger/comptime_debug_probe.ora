@@ -28,7 +28,7 @@ contract ComptimeDebugProbe {
         const foldedFee: u256 = FIXED_FEE;
         const foldedMask: u256 = 255;
         let base = amount - foldedFee;
-        let net = base;
+        var net = base;
 
         if (BONUS_ENABLED) {
             const foldedBoost: u256 = FIXED_BOOST;

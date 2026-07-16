@@ -21,7 +21,7 @@ contract BitfieldComplex {
     storage var user_access: map<address, AccessControl>;
 
     pub fn configure(m: u8, t: u16, p: u8) {
-        let c: PackedConfig = config;
+        var c: PackedConfig = config;
         c.enabled = true;
         c.locked = false;
         c.mode = m;
@@ -32,13 +32,13 @@ contract BitfieldComplex {
     }
 
     pub fn increment_counter() {
-        let c: PackedConfig = config;
+        var c: PackedConfig = config;
         c.counter = 1;
         config = c;
     }
 
     pub fn lock() {
-        let c: PackedConfig = config;
+        var c: PackedConfig = config;
         c.locked = true;
         config = c;
     }
@@ -59,20 +59,20 @@ contract BitfieldComplex {
     }
 
     pub fn grant_admin(user: address) {
-        let a: AccessControl = user_access[user];
+        var a: AccessControl = user_access[user];
         a.is_admin = true;
         a.role_id = 1;
         user_access[user] = a;
     }
 
     pub fn grant_minter(user: address) {
-        let a: AccessControl = user_access[user];
+        var a: AccessControl = user_access[user];
         a.is_minter = true;
         user_access[user] = a;
     }
 
     pub fn set_permissions(user: address, perms: u16) {
-        let a: AccessControl = user_access[user];
+        var a: AccessControl = user_access[user];
         a.permissions = perms;
         user_access[user] = a;
     }
@@ -88,7 +88,7 @@ contract BitfieldComplex {
     }
 
     pub fn multi_field_read() -> u8 {
-        let c: PackedConfig = config;
+        var c: PackedConfig = config;
         let mode: u8 = c.mode;
         return mode;
     }

@@ -32,19 +32,19 @@ contract BitfieldBasicTest {
     }
 
     pub fn write_version(v: u8) {
-        let f: StatusFlags = flags;
+        var f: StatusFlags = flags;
         f.version = v;
         flags = f;
     }
 
     pub fn write_paused(p: bool) {
-        let f: StatusFlags = flags;
+        var f: StatusFlags = flags;
         f.paused = p;
         flags = f;
     }
 
     pub fn initialize(v: u8, e: u16) {
-        let f: StatusFlags = flags;
+        var f: StatusFlags = flags;
         f.initialized = true;
         f.paused = false;
         f.version = v;

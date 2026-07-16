@@ -4,7 +4,7 @@ contract NestedMapArray {
     storage var permissions: map<address, map<u256, [bool; 8]>>;
 
     pub fn set_permission(account: address, role: u256, bit: u256, allowed: bool) {
-        let flags: [bool; 8] = permissions[account][role];
+        var flags: [bool; 8] = permissions[account][role];
         flags[bit] = allowed;
         permissions[account][role] = flags;
     }
@@ -26,7 +26,7 @@ contract NestedMapArray {
 
     pub fn count_granted(account: address, role: u256) -> u256 {
         let flags: [bool; 8] = permissions[account][role];
-        let count: u256 = 0;
+        var count: u256 = 0;
         if (flags[0]) { count = count + 1; }
         if (flags[1]) { count = count + 1; }
         if (flags[2]) { count = count + 1; }

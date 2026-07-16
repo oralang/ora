@@ -120,7 +120,7 @@ contract FullTypeZoo {
 
     pub fn set_entry_amount(index: u256, value: u256) {
         let e: ComplexEntry = entry;
-        let a: [u256; 4] = e.amounts;
+        var a: [u256; 4] = e.amounts;
         a[index] = value;
         entry = ComplexEntry {
             owner: e.owner,

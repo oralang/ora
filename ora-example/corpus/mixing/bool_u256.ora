@@ -12,7 +12,7 @@ contract BoolU256 {
     }
 
     pub fn conditional_add(x: u256, should_add: bool) -> u256 {
-        let res: u256 = value;
+        var res: u256 = value;
         if (should_add) {
             res = res +% x;
         }
@@ -28,7 +28,7 @@ contract BoolU256 {
     pub fn double_condition(a: u256, b: u256) -> u256 {
         let gt: bool = a > b;
         let eq: bool = a == b;
-        let res: u256 = 0;
+        var res: u256 = 0;
         if (gt) {
             res = a - b;
         }
