@@ -365,6 +365,7 @@ pub const CompilerDb = struct {
             try self.constEval(module_id),
             key,
             self.semaQueryView(),
+            self.options.measure_loop_census,
         );
         errdefer result.deinit();
         if (self.consteval_tainted_slots.items[module_id.index()]) {
@@ -751,6 +752,7 @@ pub const CompilerDb = struct {
             .expr_types = expr_types,
             .call_resolutions = call_resolutions,
             .expr_effects = expr_effects,
+            .loop_body_effects = &.{},
             .body_types = body_types,
             .instantiated_structs = &.{},
             .instantiated_struct_lookup = &.{},

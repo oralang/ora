@@ -20,7 +20,8 @@ pub const state_symbols = @import("state_symbols.zig");
 pub const goal_skolem = @import("goal_skolem.zig");
 
 const z3 = z3_c;
-const mlir = @import("mlir_c_api").c;
+const mlir_c_api = @import("mlir_c_api");
+const mlir = mlir_c_api.c;
 const Context = Z3Context;
 const Solver = Z3Solver;
 const Encoder = @import("encoder.zig").Encoder;
@@ -571,7 +572,7 @@ pub const VerificationPass = struct {
 
     fn collectRuntimeReachableFunctions(self: *VerificationPass, root: mlir.MlirOperation) anyerror!void {
         const op_name_ref = self.getMLIROperationName(root);
-        defer @import("mlir_c_api").freeStringRef(op_name_ref);
+        defer mlir_c_api.freeStringRef(op_name_ref);
         const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
             ""
         else
@@ -606,7 +607,7 @@ pub const VerificationPass = struct {
 
     fn collectRuntimeCalleesInOperation(self: *VerificationPass, op: mlir.MlirOperation) anyerror!void {
         const op_name_ref = self.getMLIROperationName(op);
-        defer @import("mlir_c_api").freeStringRef(op_name_ref);
+        defer mlir_c_api.freeStringRef(op_name_ref);
         const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
             ""
         else
@@ -640,7 +641,7 @@ pub const VerificationPass = struct {
 
     fn registerFunctionOps(self: *VerificationPass, root: mlir.MlirOperation) !void {
         const op_name_ref = self.getMLIROperationName(root);
-        defer @import("mlir_c_api").freeStringRef(op_name_ref);
+        defer mlir_c_api.freeStringRef(op_name_ref);
         const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
             ""
         else
@@ -723,7 +724,7 @@ pub const VerificationPass = struct {
 
             while (!mlir.oraOperationIsNull(current_op)) {
                 const op_name_ref = self.getMLIROperationName(current_op);
-                defer @import("mlir_c_api").freeStringRef(op_name_ref);
+                defer mlir_c_api.freeStringRef(op_name_ref);
                 const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
                     ""
                 else
@@ -823,7 +824,7 @@ pub const VerificationPass = struct {
         if (mlir.oraOperationIsNull(parent_op)) return;
 
         const parent_name_ref = mlir.oraOperationGetName(parent_op);
-        defer @import("mlir_c_api").freeStringRef(parent_name_ref);
+        defer mlir_c_api.freeStringRef(parent_name_ref);
         const parent_name = if (parent_name_ref.data == null or parent_name_ref.length == 0)
             ""
         else
@@ -1864,7 +1865,7 @@ pub const VerificationPass = struct {
 
     fn parseSwitchCaseMetadataFromPrint(self: *VerificationPass, op: mlir.MlirOperation, metadata: *SwitchCaseMetadata) !void {
         const printed = mlir.oraOperationPrintToString(op);
-        defer if (printed.data != null) @import("mlir_c_api").freeStringRef(printed);
+        defer if (printed.data != null) mlir_c_api.freeStringRef(printed);
         if (printed.data == null or printed.length == 0) return error.UnsupportedOperation;
 
         var case_index: usize = 0;
@@ -1957,7 +1958,7 @@ pub const VerificationPass = struct {
     /// Process a single MLIR operation to extract verification annotations
     fn processMLIROperation(self: *VerificationPass, op: mlir.MlirOperation) !?usize {
         const op_name_ref = self.getMLIROperationName(op);
-        defer @import("mlir_c_api").freeStringRef(op_name_ref);
+        defer mlir_c_api.freeStringRef(op_name_ref);
         const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
             ""
         else
@@ -2740,7 +2741,7 @@ pub const VerificationPass = struct {
         var op = mlir.oraBlockGetFirstOperation(before_block);
         while (!mlir.oraOperationIsNull(op)) {
             const op_name_ref = mlir.oraOperationGetName(op);
-            defer @import("mlir_c_api").freeStringRef(op_name_ref);
+            defer mlir_c_api.freeStringRef(op_name_ref);
             const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
                 ""
             else
@@ -2760,7 +2761,7 @@ pub const VerificationPass = struct {
     fn encodeLoopEntryConstraints(self: *VerificationPass, invariant_op: mlir.MlirOperation) ![]const z3.Z3_ast {
         const loop_op = self.findEnclosingLoopOp(invariant_op) orelse return &[_]z3.Z3_ast{};
         const loop_name_ref = mlir.oraOperationGetName(loop_op);
-        defer @import("mlir_c_api").freeStringRef(loop_name_ref);
+        defer mlir_c_api.freeStringRef(loop_name_ref);
         const loop_name = if (loop_name_ref.data == null or loop_name_ref.length == 0)
             ""
         else
@@ -2816,7 +2817,7 @@ pub const VerificationPass = struct {
             const parent_op = mlir.mlirBlockGetParentOperation(owner_block);
             if (mlir.oraOperationIsNull(parent_op)) continue;
             const parent_name_ref = mlir.oraOperationGetName(parent_op);
-            defer @import("mlir_c_api").freeStringRef(parent_name_ref);
+            defer mlir_c_api.freeStringRef(parent_name_ref);
             const parent_name = if (parent_name_ref.data == null or parent_name_ref.length == 0)
                 ""
             else
@@ -2828,7 +2829,7 @@ pub const VerificationPass = struct {
             const terminator = mlir.oraBlockGetTerminator(owner_block);
             if (mlir.oraOperationIsNull(terminator)) continue;
             const term_name_ref = mlir.oraOperationGetName(terminator);
-            defer @import("mlir_c_api").freeStringRef(term_name_ref);
+            defer mlir_c_api.freeStringRef(term_name_ref);
             const term_name = if (term_name_ref.data == null or term_name_ref.length == 0)
                 ""
             else
@@ -2994,7 +2995,7 @@ pub const VerificationPass = struct {
     fn encodeLoopContinueCondition(self: *VerificationPass, invariant_op: mlir.MlirOperation) !?z3.Z3_ast {
         const loop_op = self.findEnclosingLoopOp(invariant_op) orelse return null;
         const loop_name_ref = mlir.oraOperationGetName(loop_op);
-        defer @import("mlir_c_api").freeStringRef(loop_name_ref);
+        defer mlir_c_api.freeStringRef(loop_name_ref);
         const loop_name = if (loop_name_ref.data == null or loop_name_ref.length == 0)
             ""
         else
@@ -3046,7 +3047,7 @@ pub const VerificationPass = struct {
             const parent_op = mlir.mlirBlockGetParentOperation(current_block);
             if (mlir.oraOperationIsNull(parent_op)) return null;
             const parent_name_ref = mlir.oraOperationGetName(parent_op);
-            defer @import("mlir_c_api").freeStringRef(parent_name_ref);
+            defer mlir_c_api.freeStringRef(parent_name_ref);
             const parent_name = if (parent_name_ref.data == null or parent_name_ref.length == 0)
                 ""
             else
@@ -3232,6 +3233,57 @@ pub const VerificationPass = struct {
         if (self.encoder.isDegraded()) return error.VerificationEncodingDegraded;
 
         return try self.preparedQueryManifestFromQueries(queries.items, null);
+    }
+
+    /// Measurement-only view over the finalized prepared-query list. Loop
+    /// ownership is captured during query construction, including for post
+    /// queries whose visible source location is an `ensures` clause.
+    pub fn collectLoopQueryCensus(self: *VerificationPass, mlir_module: mlir.MlirModule) !LoopQueryCensus {
+        self.encoder.clearDegradation();
+        try self.extractAnnotationsFromMLIR(mlir_module);
+        if (self.encoder.isDegraded()) return LoopQueryCensus.initEmpty(self.allocator, true);
+
+        var queries = try self.buildPreparedQueries();
+        defer {
+            for (queries.items) |*query| query.deinit(self.allocator);
+            queries.deinit();
+        }
+
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        errdefer arena.deinit();
+        const arena_allocator = arena.allocator();
+        var rows: std.ArrayList(LoopQueryCensusRow) = .empty;
+        defer rows.deinit(arena_allocator);
+
+        for (queries.items) |query| {
+            switch (query.kind) {
+                .LoopInvariantStep, .LoopBodySafety, .LoopInvariantPost => {},
+                else => continue,
+            }
+            const loop_owner = query.loop_owner orelse {
+                try rows.append(arena_allocator, .{
+                    .kind = query.kind,
+                    .function_name = try arena_allocator.dupe(u8, query.function_name),
+                    .loop_file = "",
+                    .loop_statement_index = null,
+                });
+                continue;
+            };
+            const loop_op = mlir.MlirOperation{ .ptr = @ptrFromInt(loop_owner) };
+            const loop_loc = try self.getLocationInfo(loop_op);
+            try rows.append(arena_allocator, .{
+                .kind = query.kind,
+                .function_name = try arena_allocator.dupe(u8, query.function_name),
+                .loop_file = try arena_allocator.dupe(u8, loop_loc.file),
+                .loop_statement_index = loopStatementIndex(loop_op),
+            });
+        }
+
+        return .{
+            .arena = arena,
+            .rows = try rows.toOwnedSlice(arena_allocator),
+            .encoding_degraded = self.encoder.isDegraded(),
+        };
     }
 
     fn preparedQueryManifestFromQueries(
@@ -3849,7 +3901,7 @@ pub const VerificationPass = struct {
             var current_op = mlir.oraBlockGetFirstOperation(current_block);
             while (!mlir.oraOperationIsNull(current_op)) {
                 const op_name_ref = mlir.oraOperationGetName(current_op);
-                defer @import("mlir_c_api").freeStringRef(op_name_ref);
+                defer mlir_c_api.freeStringRef(op_name_ref);
                 const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
                     ""
                 else
@@ -5331,6 +5383,7 @@ pub const VerificationPass = struct {
                             );
                             try appendPreparedQueryUnique(&queries, self.allocator, .{
                                 .kind = .LoopBodySafety,
+                                .loop_owner = ann.loop_owner,
                                 .fragment = body_fragment,
                                 .solver_logic = body_solver_logic,
                                 .function_name = fn_name,
@@ -5388,6 +5441,7 @@ pub const VerificationPass = struct {
                                 );
                                 try appendPreparedQueryUnique(&queries, self.allocator, .{
                                     .kind = .LoopInvariantStep,
+                                    .loop_owner = ann.loop_owner,
                                     .fragment = exit_fragment,
                                     .solver_logic = exit_solver_logic,
                                     .function_name = fn_name,
@@ -5432,6 +5486,7 @@ pub const VerificationPass = struct {
                         );
                         try appendPreparedQueryUnique(&queries, self.allocator, .{
                             .kind = .LoopInvariantStep,
+                            .loop_owner = ann.loop_owner,
                             .fragment = step_fragment,
                             .solver_logic = step_solver_logic,
                             .function_name = fn_name,
@@ -5511,6 +5566,7 @@ pub const VerificationPass = struct {
                     );
                     try appendPreparedQueryUnique(&queries, self.allocator, .{
                         .kind = .LoopInvariantPost,
+                        .loop_owner = inv_ann.loop_owner,
                         .fragment = post_fragment,
                         .solver_logic = post_solver_logic,
                         .function_name = fn_name,
@@ -5652,7 +5708,7 @@ pub const VerificationPass = struct {
         }
 
         const loc_ref = mlir.oraLocationPrintToString(loc);
-        defer @import("mlir_c_api").freeStringRef(loc_ref);
+        defer mlir_c_api.freeStringRef(loc_ref);
         if (loc_ref.data == null or loc_ref.length == 0) {
             return .{ .file = "", .line = 0, .column = 0 };
         }
@@ -7150,6 +7206,32 @@ pub const PreparedQueryManifest = struct {
     }
 };
 
+pub const LoopQueryCensusRow = struct {
+    kind: QueryKind,
+    function_name: []const u8,
+    loop_file: []const u8,
+    loop_statement_index: ?u32,
+};
+
+pub const LoopQueryCensus = struct {
+    arena: std.heap.ArenaAllocator,
+    rows: []const LoopQueryCensusRow,
+    encoding_degraded: bool,
+
+    fn initEmpty(allocator: std.mem.Allocator, encoding_degraded: bool) LoopQueryCensus {
+        return .{
+            .arena = std.heap.ArenaAllocator.init(allocator),
+            .rows = &.{},
+            .encoding_degraded = encoding_degraded,
+        };
+    }
+
+    pub fn deinit(self: *LoopQueryCensus) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
 pub const QueryResultStatus = enum(u8) {
     sat,
     unsat,
@@ -7865,6 +7947,7 @@ fn writeCounterexampleJson(writer: anytype, allocator: std.mem.Allocator, ce: er
 
 const PreparedQuery = struct {
     kind: QueryKind,
+    loop_owner: ?u64 = null,
     fragment: QueryFragment = .unknown,
     solver_logic: QuerySolverLogic = .all,
     function_name: []const u8,
@@ -8226,7 +8309,7 @@ fn collectFunctionNamesInRegion(
         var current_op = mlir.oraBlockGetFirstOperation(current_block);
         while (!mlir.oraOperationIsNull(current_op)) {
             const op_name_ref = mlir.oraOperationGetName(current_op);
-            defer @import("mlir_c_api").freeStringRef(op_name_ref);
+            defer mlir_c_api.freeStringRef(op_name_ref);
             const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
                 ""
             else
@@ -9120,6 +9203,21 @@ fn parseLocationString(loc: []const u8) struct { file: []const u8, line: u32, co
     return .{ .file = file, .line = line, .column = column };
 }
 
+fn loopStatementIndex(op: mlir.MlirOperation) ?u32 {
+    const loc = mlir.oraOperationGetLocation(op);
+    if (mlir.oraLocationIsNull(loc)) return null;
+    const loc_ref = mlir.oraLocationPrintToString(loc);
+    defer mlir_c_api.freeStringRef(loc_ref);
+    if (loc_ref.data == null or loc_ref.length == 0) return null;
+    const text = loc_ref.data[0..loc_ref.length];
+    const marker = "ora.origin_stmt.";
+    const start = std.mem.indexOf(u8, text, marker) orelse return null;
+    const digits = text[start + marker.len ..];
+    const end = std.mem.indexOfNone(u8, digits, "0123456789") orelse digits.len;
+    if (end == 0) return null;
+    return std.fmt.parseInt(u32, digits[0..end], 10) catch null;
+}
+
 const testing = std.testing;
 
 fn testStringRef(comptime s: []const u8) mlir.MlirStringRef {
@@ -9969,7 +10067,7 @@ fn findFirstOpByNameInBlock(block: mlir.MlirBlock, name: []const u8) ?mlir.MlirO
     var op = mlir.oraBlockGetFirstOperation(block);
     while (!mlir.oraOperationIsNull(op)) : (op = mlir.oraOperationGetNextInBlock(op)) {
         const name_ref = mlir.oraOperationGetName(op);
-        defer @import("mlir_c_api").freeStringRef(name_ref);
+        defer mlir_c_api.freeStringRef(name_ref);
         if (name_ref.data != null and std.mem.eql(u8, name_ref.data[0..name_ref.length], name)) {
             return op;
         }

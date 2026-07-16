@@ -819,6 +819,10 @@ pub const TypeCheckResult = struct {
     expr_types: []Type,
     call_resolutions: []?ResolvedCall,
     expr_effects: []const ExprEffect,
+    /// Body effects for source loops, keyed by the source statement id.
+    /// This is census data derived by the same transitive collector used for
+    /// function effects; it is not consulted by compilation or verification.
+    loop_body_effects: []const LoopBodyEffect,
     body_types: []Type,
     instantiated_structs: []const InstantiatedStruct,
     instantiated_struct_lookup: []lookup_index.NamedEntry,
@@ -902,6 +906,12 @@ pub const TypeCheckResult = struct {
         const index = lookup_index.findPair(self.impl_interface_lookup, trait_name, target_name) orelse return null;
         return self.impl_interfaces[index];
     }
+};
+
+pub const LoopBodyEffect = struct {
+    statement_id: ast.StmtId,
+    effect: Effect,
+    variable_types: []const Type,
 };
 
 pub const ConstEvalResult = struct {

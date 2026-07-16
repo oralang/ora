@@ -463,6 +463,26 @@ pub fn build(b: *std.Build) void {
     const z3_step = buildZ3Libraries(b, target, optimize);
     linkZ3Libraries(b, exe, z3_step, target);
 
+    const loop_census_mod = b.createModule(.{
+        .root_source_file = b.path("src/loop_census_main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    loop_census_mod.addImport("ora_root", lib_mod);
+    loop_census_mod.addImport("ora_lib", lib_mod);
+    loop_census_mod.addImport("ora_types", ora_types_mod);
+    loop_census_mod.addImport("mlir_c_api", mlir_c_mod);
+    loop_census_mod.addImport("ora_z3_verification", z3_verification_mod);
+    const loop_census_exe = b.addExecutable(.{
+        .name = "ora-loop-census",
+        .root_module = loop_census_mod,
+    });
+    linkMlirLibraries(b, loop_census_exe, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
+    linkZ3Libraries(b, loop_census_exe, z3_step, target);
+    const loop_census_install = b.addInstallArtifact(loop_census_exe, .{});
+    const loop_census_tool_step = b.step("loop-census-tool", "Build the measurement-only loop census emitter");
+    loop_census_tool_step.dependOn(&loop_census_install.step);
+
     // this declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).
@@ -1563,6 +1583,24 @@ pub fn build(b: *std.Build) void {
         });
     const check_formal_sync_step = b.step("check-formal-sync", "Regenerate formal snapshots and run Lean verification checks");
     check_formal_sync_step.dependOn(&formal_sync_cmd.step);
+
+    // zig build measure-loop-census
+    const loop_census_report_path = "zig-out/loop-census/report.json";
+    const loop_census_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/measure-loop-census.py",
+        "--tool",
+    });
+    loop_census_cmd.addArtifactArg(loop_census_exe);
+    loop_census_cmd.addArgs(&.{
+        "--corpus-root",
+        "ora-example",
+        "--json-out",
+        loop_census_report_path,
+        "ora-example",
+    });
+    const loop_census_step = b.step("measure-loop-census", "Measure all source loops and prepared loop queries");
+    loop_census_step.dependOn(&loop_census_cmd.step);
 
     // zig build check-canonical-z3-required
     const canonical_z3_required_out_dir = b.fmt("/tmp/ora-canonical-z3-required-gate-{d}", .{std.posix.system.getpid()});

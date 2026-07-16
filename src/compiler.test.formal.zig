@@ -1972,6 +1972,78 @@ test "B3 lean proofs unblock source-level unknown without erasing runtime guard"
     try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "sorry/b3_lean_gate.lean.proof.json", .{}));
 }
 
+test "automatic Lean proofs unblock unknown without runtime-check authority" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const source =
+        \\contract AutomaticLeanBoundary {
+        \\    pub fn bounded(x: u256) -> bool
+        \\        requires x == x
+        \\        ensures (forall i: u256 where i < x => i <= x)
+        \\    {
+        \\        return true;
+        \\    }
+        \\
+        \\    pub fn guarded(y: u256) -> bool
+        \\        guard y > 0
+        \\    {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "automatic_lean_boundary.ora", .data = source });
+    const source_path = try pathFromTmpAlloc(allocator, tmp, "automatic_lean_boundary.ora");
+    defer allocator.free(source_path);
+    const out_dir = try pathFromTmpAlloc(allocator, tmp, "out");
+    defer allocator.free(out_dir);
+
+    const result = try runOraWithForcedUnknown(allocator, "obligation:2", &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=smt-report,sir-text,bytecode",
+        "--out-dir",
+        out_dir,
+        "--lean-proofs",
+        source_path,
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try expectExited(result, 0);
+
+    const certificate_path = try pathFromTmpAlloc(allocator, tmp, "out/automatic_lean_boundary.lean.proof.json");
+    defer allocator.free(certificate_path);
+    const certificate = try readFileAllocForTest(allocator, certificate_path);
+    defer allocator.free(certificate);
+    try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"schema_version\": 1"));
+    var certificate_digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(certificate, &certificate_digest, .{});
+    const certificate_hash = try std.fmt.allocPrint(allocator, "{x}", .{certificate_digest});
+    defer allocator.free(certificate_hash);
+    const index_path = try pathFromTmpAlloc(allocator, tmp, "out/automatic_lean_boundary.formal.artifacts.json");
+    defer allocator.free(index_path);
+    const artifact_index = try readFileAllocForTest(allocator, index_path);
+    defer allocator.free(artifact_index);
+    try testing.expect(std.mem.containsAtLeast(u8, artifact_index, 1, "\"final_artifact_authorization\": \"allowed\""));
+    try testing.expect(std.mem.containsAtLeast(u8, artifact_index, 1, "\"status\": \"rejected\""));
+    try testing.expect(std.mem.containsAtLeast(u8, artifact_index, 2, "\"status\": \"accepted\""));
+    try testing.expect(std.mem.containsAtLeast(u8, artifact_index, 1, "\"path\": \"automatic_lean_boundary.lean.proof.json\""));
+    try testing.expect(std.mem.containsAtLeast(u8, artifact_index, 1, certificate_hash));
+
+    const sir_path = try pathFromTmpAlloc(allocator, tmp, "out/automatic_lean_boundary.sir");
+    defer allocator.free(sir_path);
+    const sir = try readFileAllocForTest(allocator, sir_path);
+    defer allocator.free(sir);
+    try testing.expect(std.mem.containsAtLeast(u8, sir, 1, "fn guarded:"));
+    try testing.expect(std.mem.containsAtLeast(u8, sir, 1, "gt v0 c0"));
+    try testing.expect(std.mem.containsAtLeast(u8, sir, 1, "revert 0x0 0x0"));
+}
+
 test "B6 storage Lean proof fixture proves read-only old collapse without erasing guard" {
     std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
