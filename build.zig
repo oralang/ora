@@ -674,8 +674,28 @@ pub fn build(b: *std.Build) void {
     const conformance_tests_run = b.addRunArtifact(conformance_tests);
     conformance_tests_run.step.dependOn(b.getInstallStep());
 
+    // Pinned verified-build lane: classify the full corpus by verifier outcome
+    // and bytecode equality, then execute every verifier-rewritten contract.
+    const verified_conformance_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/conformance/verified_build.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    verified_conformance_test_mod.addImport("ora_evm", ora_evm_mod);
+    const verified_conformance_tests = b.addTest(.{
+        .name = "ora-verified-conformance-tests",
+        .root_module = verified_conformance_test_mod,
+    });
+    verified_conformance_tests.step.dependOn(&bootstrap_ora_evm_crypto.step);
+    const verified_conformance_tests_run = b.addRunArtifact(verified_conformance_tests);
+    verified_conformance_tests_run.step.dependOn(b.getInstallStep());
+
+    const test_conformance_verified_step = b.step("test-conformance-verified", "Run the verified-build Ora bytecode conformance lane");
+    test_conformance_verified_step.dependOn(&verified_conformance_tests_run.step);
+
     const test_conformance_step = b.step("test-conformance", "Run Ora bytecode conformance tests on lib/evm");
     test_conformance_step.dependOn(&conformance_tests_run.step);
+    test_conformance_step.dependOn(&verified_conformance_tests_run.step);
 
     // Single-spec lib/evm runner — runs ONE .ora+.spec.toml outside the harness
     // (used by the Anvil differential proof to observe lib/evm on one call).

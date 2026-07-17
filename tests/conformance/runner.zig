@@ -64,6 +64,18 @@ pub fn runOraEmitWithExtraArgs(
     output_dir: []const u8,
     extra_args: []const []const u8,
 ) !void {
+    if (!try tryRunOraEmitWithExtraArgs(allocator, source_path, output_dir, extra_args, true)) {
+        return error.OraEmitFailed;
+    }
+}
+
+fn tryRunOraEmitWithExtraArgs(
+    allocator: std.mem.Allocator,
+    source_path: []const u8,
+    output_dir: []const u8,
+    extra_args: []const []const u8,
+    report_failure: bool,
+) !bool {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
     try argv.appendSlice(allocator, &.{
@@ -90,16 +102,22 @@ pub fn runOraEmitWithExtraArgs(
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
-    switch (result.term) {
-        .exited => |code| if (code != 0) {
-            std.debug.print("ora emit failed with code {d}\nstdout:\n{s}\nstderr:\n{s}\n", .{ code, result.stdout, result.stderr });
-            return error.OraEmitFailed;
+    return switch (result.term) {
+        .exited => |code| if (code == 0)
+            true
+        else blk: {
+            if (report_failure) {
+                std.debug.print("ora emit failed with code {d}\nstdout:\n{s}\nstderr:\n{s}\n", .{ code, result.stdout, result.stderr });
+            }
+            break :blk false;
         },
-        else => {
-            std.debug.print("ora emit terminated abnormally: {}\n", .{result.term});
-            return error.OraEmitFailed;
+        else => blk: {
+            if (report_failure) {
+                std.debug.print("ora emit terminated abnormally: {}\n", .{result.term});
+            }
+            break :blk false;
         },
-    }
+    };
 }
 
 pub fn pathFromTmpAlloc(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, rel_path: []const u8) ![]u8 {
@@ -344,6 +362,69 @@ fn sourceStem(source_path: []const u8) ?[]const u8 {
     const base = std.fs.path.basename(source_path);
     if (!std.mem.endsWith(u8, base, ".ora")) return null;
     return base[0 .. base.len - ".ora".len];
+}
+
+pub const VerifiedBuildClass = enum {
+    same_bytecode,
+    rewritten,
+    unverifiable,
+};
+
+/// Classify every contract compiled by one conformance spec. The no-verify
+/// build is the baseline. A verifier rejection dominates bytecode differences;
+/// otherwise any differing contract places the whole spec in `rewritten`.
+pub fn classifyVerifiedBuild(
+    allocator: std.mem.Allocator,
+    source_path: []const u8,
+    spec_path: []const u8,
+) !VerifiedBuildClass {
+    var run_arena = std.heap.ArenaAllocator.init(allocator);
+    defer run_arena.deinit();
+    const arena = run_arena.allocator();
+
+    const spec_text = try std.Io.Dir.cwd().readFileAlloc(std.Io.Threaded.global_single_threaded.io(), spec_path, arena, std.Io.Limit.limited(1024 * 1024));
+    var parsed = try spec_mod.parse(arena, spec_text);
+    defer parsed.deinit();
+
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const tmp_path = try std.fmt.allocPrint(arena, ".zig-cache/tmp/verified-conformance-{x}-{d}", .{ std.hash.Wyhash.hash(0, spec_path), std.c.getpid() });
+    std.Io.Dir.cwd().deleteTree(io, tmp_path) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, tmp_path) catch {};
+
+    const baseline_path = try std.fmt.allocPrint(arena, "{s}/no-verify", .{tmp_path});
+    const verified_path = try std.fmt.allocPrint(arena, "{s}/verified", .{tmp_path});
+    try std.Io.Dir.cwd().createDirPath(io, baseline_path);
+    try std.Io.Dir.cwd().createDirPath(io, verified_path);
+
+    var class: VerifiedBuildClass = .same_bytecode;
+    const primary_source = parsed.value.deploy.source orelse source_path;
+    class = try classifyVerifiedContract(arena, primary_source, baseline_path, verified_path, class);
+    if (class == .unverifiable) return class;
+
+    for (parsed.value.secondary) |contract| {
+        class = try classifyVerifiedContract(arena, contract.source, baseline_path, verified_path, class);
+        if (class == .unverifiable) return class;
+    }
+    return class;
+}
+
+fn classifyVerifiedContract(
+    allocator: std.mem.Allocator,
+    source_path: []const u8,
+    baseline_path: []const u8,
+    verified_path: []const u8,
+    current: VerifiedBuildClass,
+) !VerifiedBuildClass {
+    try runOraEmitWithExtraArgs(allocator, source_path, baseline_path, &.{"--no-verify"});
+    if (!try tryRunOraEmitWithExtraArgs(allocator, source_path, verified_path, &.{}, false)) {
+        return .unverifiable;
+    }
+
+    const stem = sourceStem(source_path) orelse return error.InvalidSourcePath;
+    const baseline = try readArtifacts(allocator, baseline_path, stem);
+    const verified = try readArtifacts(allocator, verified_path, stem);
+    if (!std.mem.eql(u8, baseline.bytecode, verified.bytecode)) return .rewritten;
+    return current;
 }
 
 pub fn collectSpecNames(allocator: std.mem.Allocator, corpus_dir_path: []const u8) ![][]const u8 {
