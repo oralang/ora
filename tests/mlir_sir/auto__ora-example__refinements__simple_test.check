@@ -2,7 +2,7 @@
 // INPUT: ora-example/refinements/simple_test.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @test() attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @test() attributes {ora.source_module_path = "{{.*}}/ora-example/refinements/simple_test.ora", ora.source_owner_key = "module/contract:SimpleTest/function:test", ora.source_owner_start = 62 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/simple_test.ora":4:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/simple_test.ora":4:5)
 // CHECK-NEXT: } loc("{{.*}}/ora-example/refinements/simple_test.ora":3:1)

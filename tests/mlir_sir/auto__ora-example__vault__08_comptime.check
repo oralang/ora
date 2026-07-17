@@ -2,21 +2,21 @@
 // INPUT: ora-example/vault/08_comptime.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {ora.global_slots = {balances = 1 : ui64, totalDeposits = 0 : ui64}, ora.global_slots_built} {
-// CHECK-NEXT:   func.func @maxAllowed() -> !sir.u256 attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @maxAllowed() -> !sir.u256 attributes {ora.source_module_path = "{{.*}}/ora-example/vault/08_comptime.ora", ora.source_owner_key = "module/contract:Vault/function:maxAllowed", ora.source_owner_start = 376 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/vault/08_comptime.ora":14:9)))
 // CHECK-NEXT:     %1 = sir.const 1000000 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/vault/08_comptime.ora":14:16)))
 // CHECK-NEXT:     %2 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/vault/08_comptime.ora":14:9)))
 // CHECK-NEXT:     sir.store %2 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/vault/08_comptime.ora":14:9)))
 // CHECK-NEXT:     sir.return %2 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/vault/08_comptime.ora":14:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/vault/08_comptime.ora":13:5)
-// CHECK-NEXT:   func.func @minAllowed() -> !sir.u256 attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @minAllowed() -> !sir.u256 attributes {ora.source_module_path = "{{.*}}/ora-example/vault/08_comptime.ora", ora.source_owner_key = "module/contract:Vault/function:minAllowed", ora.source_owner_start = 441 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/vault/08_comptime.ora":18:9)))
 // CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/vault/08_comptime.ora":18:16)))
 // CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/vault/08_comptime.ora":18:9)))
 // CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %c1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/vault/08_comptime.ora":18:9)))
 // CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/vault/08_comptime.ora":18:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/vault/08_comptime.ora":17:5)
-// CHECK-NEXT:   func.func @deposit(%arg0: !sir.u256 loc("{{.*}}/ora-example/vault/08_comptime.ora":21:20)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:0"], ora.param_names = ["amount"], ora.read_slots = ["balances[msg.sender]", "totalDeposits"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xb6b55f25", ora.visibility = "pub", ora.write_slots = ["balances[msg.sender]", "totalDeposits"], ora.write_slots_complete = true} {
+// CHECK-NEXT:   func.func @deposit(%arg0: !sir.u256 loc("{{.*}}/ora-example/vault/08_comptime.ora":21:20)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "mutating", ora.effect = "readwrites", ora.param_binding_ids = ["file:11:pattern:0"], ora.param_names = ["amount"], ora.read_slots = ["balances[msg.sender]", "totalDeposits"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xb6b55f25", ora.source_module_path = "{{.*}}/ora-example/vault/08_comptime.ora", ora.source_owner_key = "module/contract:Vault/function:deposit", ora.source_owner_start = 506 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub", ora.write_slots = ["balances[msg.sender]", "totalDeposits"], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 6988570666312495752839002421695666563898142680323167511053911032881624383488 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
@@ -118,14 +118,14 @@
 // CHECK-NEXT:     sir.sstore %slot_totalDeposits : !sir.u256, %49 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/vault/08_comptime.ora":27:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/vault/08_comptime.ora":21:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/vault/08_comptime.ora":21:5)
-// CHECK-NEXT:   func.func @getVersion() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x0d8e6e2c", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @getVersion() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x0d8e6e2c", ora.source_module_path = "{{.*}}/ora-example/vault/08_comptime.ora", ora.source_owner_key = "module/contract:Vault/function:getVersion", ora.source_owner_start = 816 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/vault/08_comptime.ora":31:9)))
 // CHECK-NEXT:     %c3 = sir.const 3 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/vault/08_comptime.ora":31:16)))
 // CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/vault/08_comptime.ora":31:9)))
 // CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %c3 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/vault/08_comptime.ora":31:9)))
 // CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/vault/08_comptime.ora":31:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/vault/08_comptime.ora":30:5)
-// CHECK-NEXT:   func.func @balanceOf(%arg0: !sir.u256 loc("{{.*}}/ora-example/vault/08_comptime.ora":34:22)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["address"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.param_binding_ids = ["file:11:pattern:5"], ora.param_names = ["account"], ora.read_slots = ["balances[param#0]"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x70a08231", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
+// CHECK-NEXT:   func.func @balanceOf(%arg0: !sir.u256 loc("{{.*}}/ora-example/vault/08_comptime.ora":34:22)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["address"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.param_binding_ids = ["file:11:pattern:5"], ora.param_names = ["account"], ora.read_slots = ["balances[param#0]"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x70a08231", ora.source_module_path = "{{.*}}/ora-example/vault/08_comptime.ora", ora.source_owner_key = "module/contract:Vault/function:balanceOf", ora.source_owner_start = 881 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_balances = sir.const 1 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/vault/08_comptime.ora":11:5)))
 // CHECK-NEXT:     %1 = sir.const 64 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/vault/08_comptime.ora":35:16)))
@@ -139,7 +139,7 @@
 // CHECK-NEXT:     sir.store %3 : !sir.ptr<1>, %value : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/vault/08_comptime.ora":35:9)))
 // CHECK-NEXT:     sir.return %3 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/vault/08_comptime.ora":35:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/vault/08_comptime.ora":34:5)
-// CHECK-NEXT:   func.func @getTotalDeposits() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["totalDeposits"], ora.selector = "0x168a4822", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
+// CHECK-NEXT:   func.func @getTotalDeposits() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["totalDeposits"], ora.selector = "0x168a4822", ora.source_module_path = "{{.*}}/ora-example/vault/08_comptime.ora", ora.source_owner_key = "module/contract:Vault/function:getTotalDeposits", ora.source_owner_start = 971 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/vault/08_comptime.ora":39:9)))
 // CHECK-NEXT:     %slot_totalDeposits = sir.const 0 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/vault/08_comptime.ora":10:5)))
 // CHECK-NEXT:     %value = sir.sload %slot_totalDeposits : !sir.u256 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/vault/08_comptime.ora":10:5)))

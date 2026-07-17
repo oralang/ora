@@ -2,7 +2,7 @@
 // INPUT: ora-example/errors/try_catch.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @test_try_catch() attributes {ora.dispatch_class = "readonly", ora.selector = "0x22354daa", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @test_try_catch() attributes {ora.dispatch_class = "readonly", ora.selector = "0x22354daa", ora.source_module_path = "{{.*}}/ora-example/errors/try_catch.ora", ora.source_owner_key = "module/contract:TryCatchTest/function:test_try_catch", ora.source_owner_start = 182 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.br ^bb1 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/errors/try_catch.ora":9:9)))
 // CHECK-NEXT:   ^bb1:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/errors/try_catch.ora":7:5)

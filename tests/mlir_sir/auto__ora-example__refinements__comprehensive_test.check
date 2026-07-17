@@ -2,31 +2,31 @@
 // INPUT: ora-example/refinements/comprehensive_test.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @testMinValue() attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testMinValue() attributes {ora.source_module_path = "{{.*}}/ora-example/refinements/comprehensive_test.ora", ora.source_owner_key = "module/contract:ComprehensiveRefinements/function:testMinValue", ora.source_owner_start = 291 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":7:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":7:5)
-// CHECK-NEXT:   func.func @testMaxValue() attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testMaxValue() attributes {ora.source_module_path = "{{.*}}/ora-example/refinements/comprehensive_test.ora", ora.source_owner_key = "module/contract:ComprehensiveRefinements/function:testMaxValue", ora.source_owner_start = 721 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":16:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":16:5)
-// CHECK-NEXT:   func.func @testInRange() attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testInRange() attributes {ora.source_module_path = "{{.*}}/ora-example/refinements/comprehensive_test.ora", ora.source_owner_key = "module/contract:ComprehensiveRefinements/function:testInRange", ora.source_owner_start = 1170 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":25:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":25:5)
-// CHECK-NEXT:   func.func @testScaled(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":36:19), %arg1: !sir.u256 loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":36:40)) attributes {ora.param_binding_ids = ["file:0:pattern:7", "file:0:pattern:8"], ora.param_names = ["x", "y"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testScaled(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":36:19), %arg1: !sir.u256 loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":36:40)) attributes {ora.param_binding_ids = ["file:0:pattern:7", "file:0:pattern:8"], ora.param_names = ["x", "y"], ora.source_module_path = "{{.*}}/ora-example/refinements/comprehensive_test.ora", ora.source_owner_key = "module/contract:ComprehensiveRefinements/function:testScaled", ora.source_owner_start = 1761 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":36:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":36:5)
-// CHECK-NEXT:   func.func @testExact(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":44:18), %arg1: !sir.u256 loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":44:34)) attributes {ora.param_binding_ids = ["file:0:pattern:11", "file:0:pattern:12"], ora.param_names = ["x", "y"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testExact(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":44:18), %arg1: !sir.u256 loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":44:34)) attributes {ora.param_binding_ids = ["file:0:pattern:11", "file:0:pattern:12"], ora.param_names = ["x", "y"], ora.source_module_path = "{{.*}}/ora-example/refinements/comprehensive_test.ora", ora.source_owner_key = "module/contract:ComprehensiveRefinements/function:testExact", ora.source_owner_start = 2155 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":44:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":44:5)
-// CHECK-NEXT:   func.func @testNonZero() attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testNonZero() attributes {ora.source_module_path = "{{.*}}/ora-example/refinements/comprehensive_test.ora", ora.source_owner_key = "module/contract:ComprehensiveRefinements/function:testNonZero", ora.source_owner_start = 2512 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":52:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":52:5)
-// CHECK-NEXT:   func.func @testBasisPoints() attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testBasisPoints() attributes {ora.source_module_path = "{{.*}}/ora-example/refinements/comprehensive_test.ora", ora.source_owner_key = "module/contract:ComprehensiveRefinements/function:testBasisPoints", ora.source_owner_start = 2972 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":61:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":61:5)
-// CHECK-NEXT:   func.func @testSubtyping(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":71:22)) attributes {ora.param_binding_ids = ["file:0:pattern:20"], ora.param_names = ["e"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testSubtyping(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":71:22)) attributes {ora.param_binding_ids = ["file:0:pattern:20"], ora.param_names = ["e"], ora.source_module_path = "{{.*}}/ora-example/refinements/comprehensive_test.ora", ora.source_owner_key = "module/contract:ComprehensiveRefinements/function:testSubtyping", ora.source_owner_start = 3452 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":71:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":71:5)
-// CHECK-NEXT:   func.func @testFunctionParams(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":92:9), %arg1: !sir.u256 loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":93:9), %arg2: !sir.u256 loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":94:9)) attributes {ora.param_binding_ids = ["file:0:pattern:28", "file:0:pattern:29", "file:0:pattern:30"], ora.param_names = ["amount", "limit", "rate"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testFunctionParams(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":92:9), %arg1: !sir.u256 loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":93:9), %arg2: !sir.u256 loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":94:9)) attributes {ora.param_binding_ids = ["file:0:pattern:28", "file:0:pattern:29", "file:0:pattern:30"], ora.param_names = ["amount", "limit", "rate"], ora.source_module_path = "{{.*}}/ora-example/refinements/comprehensive_test.ora", ora.source_owner_key = "module/contract:ComprehensiveRefinements/function:testFunctionParams", ora.source_owner_start = 4368 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c1000 = sir.const 1000 : !sir.u256 loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":1:1)
 // CHECK-NEXT:     %c10000 = sir.const 10000 : !sir.u256 loc(unknown)
@@ -64,17 +64,17 @@
 // CHECK-NEXT:   ^bb4:  // pred: ^bb3
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":91:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":91:5)
-// CHECK-NEXT:   func.func @testFunctionReturns() -> !sir.u256 attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testFunctionReturns() -> !sir.u256 attributes {ora.source_module_path = "{{.*}}/ora-example/refinements/comprehensive_test.ora", ora.source_owner_key = "module/contract:ComprehensiveRefinements/function:testFunctionReturns", ora.source_owner_start = 4567 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.23"("ora.origin_stmt.23"("{{.*}}/ora-example/refinements/comprehensive_test.ora":100:9)))
 // CHECK-NEXT:     %c2000 = sir.const 2000 : !sir.u256 loc("ora.stmt.23"("ora.origin_stmt.23"("{{.*}}/ora-example/refinements/comprehensive_test.ora":100:16)))
 // CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.23"("ora.origin_stmt.23"("{{.*}}/ora-example/refinements/comprehensive_test.ora":100:9)))
 // CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %c2000 : !sir.u256 loc("ora.stmt.23"("ora.origin_stmt.23"("{{.*}}/ora-example/refinements/comprehensive_test.ora":100:9)))
 // CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.23"("ora.origin_stmt.23"("{{.*}}/ora-example/refinements/comprehensive_test.ora":100:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":99:5)
-// CHECK-NEXT:   func.func @testAssignments() attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testAssignments() attributes {ora.source_module_path = "{{.*}}/ora-example/refinements/comprehensive_test.ora", ora.source_owner_key = "module/contract:ComprehensiveRefinements/function:testAssignments", ora.source_owner_start = 4906 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":107:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/comprehensive_test.ora":107:5)
-// CHECK-NEXT:   func.func @testArithmetic() attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testArithmetic() attributes {ora.source_module_path = "{{.*}}/ora-example/refinements/comprehensive_test.ora", ora.source_owner_key = "module/contract:ComprehensiveRefinements/function:testArithmetic", ora.source_owner_start = 5307 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 4 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 1 : !sir.u256 loc("ora.stmt.28"("ora.origin_stmt.28"("{{.*}}/ora-example/refinements/comprehensive_test.ora":121:19)))

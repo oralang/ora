@@ -2,7 +2,7 @@
 // INPUT: ora-example/break_continue_test.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @testUnlabeledBreak() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0xd03fbc74", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testUnlabeledBreak() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0xd03fbc74", ora.source_module_path = "{{.*}}/ora-example/break_continue_test.ora", ora.source_owner_key = "module/contract:BreakContinueTest/function:testUnlabeledBreak", ora.source_owner_start = 75 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %c0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
@@ -55,7 +55,7 @@
 // CHECK-NEXT:     sir.store %25 : !sir.ptr<1>, %24 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/break_continue_test.ora":13:9)))
 // CHECK-NEXT:     sir.return %25 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/break_continue_test.ora":13:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/break_continue_test.ora":3:5)
-// CHECK-NEXT:   func.func @testUnlabeledContinue() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0xe5a17091", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testUnlabeledContinue() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0xe5a17091", ora.source_module_path = "{{.*}}/ora-example/break_continue_test.ora", ora.source_owner_key = "module/contract:BreakContinueTest/function:testUnlabeledContinue", ora.source_owner_start = 629 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %c0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c10 = sir.const 10 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
@@ -134,7 +134,7 @@
 // CHECK-NEXT:     sir.store %47 : !sir.ptr<1>, %46 : !sir.u256 loc("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/break_continue_test.ora":40:9)))
 // CHECK-NEXT:     sir.return %47 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/break_continue_test.ora":40:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/break_continue_test.ora":17:5)
-// CHECK-NEXT:   func.func @testLabeledBreak() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x232fe938", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testLabeledBreak() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x232fe938", ora.source_module_path = "{{.*}}/ora-example/break_continue_test.ora", ora.source_owner_key = "module/contract:BreakContinueTest/function:testLabeledBreak", ora.source_owner_start = 1704 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
@@ -228,7 +228,7 @@
 // CHECK-NEXT:     sir.store %46 : !sir.ptr<1>, %45 : !sir.u256 loc("ora.stmt.22"("ora.origin_stmt.22"("{{.*}}/ora-example/break_continue_test.ora":56:9)))
 // CHECK-NEXT:     sir.return %46 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.22"("ora.origin_stmt.22"("{{.*}}/ora-example/break_continue_test.ora":56:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/break_continue_test.ora":44:5)
-// CHECK-NEXT:   func.func @testLabeledContinue() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x30db5fe2", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testLabeledContinue() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x30db5fe2", ora.source_module_path = "{{.*}}/ora-example/break_continue_test.ora", ora.source_owner_key = "module/contract:BreakContinueTest/function:testLabeledContinue", ora.source_owner_start = 2169 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
@@ -302,7 +302,7 @@
 // CHECK-NEXT:     sir.store %35 : !sir.ptr<1>, %34 : !sir.u256 loc("ora.stmt.29"("ora.origin_stmt.29"("{{.*}}/ora-example/break_continue_test.ora":70:9)))
 // CHECK-NEXT:     sir.return %35 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.29"("ora.origin_stmt.29"("{{.*}}/ora-example/break_continue_test.ora":70:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/break_continue_test.ora":60:5)
-// CHECK-NEXT:   func.func @testLabeledSwitchContinue() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x4c31227a", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testLabeledSwitchContinue() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x4c31227a", ora.source_module_path = "{{.*}}/ora-example/break_continue_test.ora", ora.source_owner_key = "module/contract:BreakContinueTest/function:testLabeledSwitchContinue", ora.source_owner_start = 2556 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 5 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c7 = sir.const 7 : !sir.u256 loc("ora.stmt.30"("ora.origin_stmt.30"("{{.*}}/ora-example/break_continue_test.ora":75:23)))
 // CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
@@ -377,7 +377,7 @@
 // CHECK-NEXT:   ^bb12:  // pred: ^bb10
 // CHECK-NEXT:     sir.br ^bb11 loc("ora.stmt.34"("ora.origin_stmt.34"("{{.*}}/ora-example/break_continue_test.ora":76:16)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/break_continue_test.ora":74:5)
-// CHECK-NEXT:   func.func @testLabeledSwitchContinueValue() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x876c0c70", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testLabeledSwitchContinueValue() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x876c0c70", ora.source_module_path = "{{.*}}/ora-example/break_continue_test.ora", ora.source_owner_key = "module/contract:BreakContinueTest/function:testLabeledSwitchContinueValue", ora.source_owner_start = 2975 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 20 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 11 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 10 : !sir.u256 loc(unknown)
@@ -443,7 +443,7 @@
 // CHECK-NEXT:   ^bb10:  // pred: ^bb8
 // CHECK-NEXT:     sir.br ^bb9 loc("ora.stmt.40"("ora.origin_stmt.40"("{{.*}}/ora-example/break_continue_test.ora":89:16)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/break_continue_test.ora":87:5)
-// CHECK-NEXT:   func.func @testBreakInSwitch() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x8a0c700c", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testBreakInSwitch() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x8a0c700c", ora.source_module_path = "{{.*}}/ora-example/break_continue_test.ora", ora.source_owner_key = "module/contract:BreakContinueTest/function:testBreakInSwitch", ora.source_owner_start = 3398 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %c2 = sir.const 2 : !sir.u256 loc("ora.stmt.42"("ora.origin_stmt.42"("{{.*}}/ora-example/break_continue_test.ora":101:27)))
 // CHECK-NEXT:     %c10 = sir.const 10 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
@@ -476,7 +476,7 @@
 // CHECK-NEXT:   ^bb6:  // pred: ^bb4
 // CHECK-NEXT:     sir.br ^bb5 loc("ora.stmt.46"("ora.origin_stmt.46"("{{.*}}/ora-example/break_continue_test.ora":102:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/break_continue_test.ora":100:5)
-// CHECK-NEXT:   func.func @testLabeledBlockBreak() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x44732bb7", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @testLabeledBlockBreak() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x44732bb7", ora.source_module_path = "{{.*}}/ora-example/break_continue_test.ora", ora.source_owner_key = "module/contract:BreakContinueTest/function:testLabeledBlockBreak", ora.source_owner_start = 3689 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c10 = sir.const 10 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c0 = sir.const 0 : !sir.u256 loc(unknown)

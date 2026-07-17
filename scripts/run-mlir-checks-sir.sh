@@ -4,6 +4,15 @@ set -euo pipefail
 FILECHECK_BIN=${FILECHECK:-./vendor/llvm-project/build-mlir/bin/FileCheck}
 ORA_BIN=${ORA_BIN:-./zig-out/bin/ora}
 ORA_VERIFY_FLAG=${ORA_VERIFY_FLAG:---no-verify}
+REPO_ROOT=$(pwd)
+ARTIFACT_DIR=${ORA_FORMAL_ARTIFACT_DIR:-$REPO_ROOT/artifacts/sir-checks}
+
+case "$ORA_BIN" in
+  /*) ;;
+  *) ORA_BIN="$REPO_ROOT/${ORA_BIN#./}" ;;
+esac
+
+mkdir -p "$ARTIFACT_DIR"
 
 if ! command -v "$FILECHECK_BIN" >/dev/null 2>&1; then
   echo "error: FileCheck not found. Set FILECHECK=/path/to/FileCheck" >&2
@@ -51,7 +60,12 @@ while IFS= read -r -d '' check; do
   tmp_stdout=$(mktemp)
   tmp_stderr=$(mktemp)
   tmp_filtered=$(mktemp)
-  if ! "$ORA_BIN" "$ORA_VERIFY_FLAG" --emit=mlir:sir "$input" >"$tmp_stdout" 2>"$tmp_stderr"; then
+  input_abs="$input"
+  case "$input_abs" in
+    /*) ;;
+    *) input_abs="$REPO_ROOT/$input_abs" ;;
+  esac
+  if ! (cd "$ARTIFACT_DIR" && "$ORA_BIN" "$ORA_VERIFY_FLAG" --emit=mlir:sir "$input_abs") >"$tmp_stdout" 2>"$tmp_stderr"; then
     echo "error: ora failed for $input (check: $check)" >&2
     sed -n '1,80p' "$tmp_stderr" >&2 || true
     rm -f "$tmp_stdout" "$tmp_stderr" "$tmp_filtered"

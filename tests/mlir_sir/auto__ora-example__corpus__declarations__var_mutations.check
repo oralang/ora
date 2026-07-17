@@ -2,7 +2,7 @@
 // INPUT: ora-example/corpus/declarations/var_mutations.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @increment_decrement() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x7794189a", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @increment_decrement() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x7794189a", ora.source_module_path = "{{.*}}/ora-example/corpus/declarations/var_mutations.ora", ora.source_owner_key = "module/contract:VarMutations/function:increment_decrement", ora.source_owner_start = 254 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 6988570666312495752839002421695666563898142680323167511053911032881624383488 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
@@ -36,14 +36,14 @@
 // CHECK-NEXT:     sir.store %13 : !sir.ptr<1>, %c106 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":13:9)))
 // CHECK-NEXT:     sir.return %13 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":13:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":8:5)
-// CHECK-NEXT:   func.func @reassign() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0xd1332e12", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @reassign() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0xd1332e12", ora.source_module_path = "{{.*}}/ora-example/corpus/declarations/var_mutations.ora", ora.source_owner_key = "module/contract:VarMutations/function:reassign", ora.source_owner_start = 427 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":22:9)))
 // CHECK-NEXT:     %c999 = sir.const 999 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":21:13)))
 // CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":22:9)))
 // CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %c999 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":22:9)))
 // CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":22:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":17:5)
-// CHECK-NEXT:   func.func @compound_assign() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x292914c7", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @compound_assign() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x292914c7", ora.source_module_path = "{{.*}}/ora-example/corpus/declarations/var_mutations.ora", ora.source_owner_key = "module/contract:VarMutations/function:compound_assign", ora.source_owner_start = 596 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 56016217287220138543383237988819299768112786790290310538187226855197252780032 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 6988570666312495752839002421695666563898142680323167511053911032881624383488 : !sir.u256 loc(unknown)
@@ -77,14 +77,14 @@
 // CHECK-NEXT:     sir.store %13 : !sir.ptr<1>, %c1 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":33:9)))
 // CHECK-NEXT:     sir.return %13 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":33:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":26:5)
-// CHECK-NEXT:   func.func @bitwise_compound() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x4a23c99e", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @bitwise_compound() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x4a23c99e", ora.source_module_path = "{{.*}}/ora-example/corpus/declarations/var_mutations.ora", ora.source_owner_key = "module/contract:VarMutations/function:bitwise_compound", ora.source_owner_start = 804 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.23"("ora.origin_stmt.23"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":44:9)))
 // CHECK-NEXT:     %c340 = sir.const 340 : !sir.u256 loc("ora.stmt.22"("ora.origin_stmt.22"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":43:9)))
 // CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.23"("ora.origin_stmt.23"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":44:9)))
 // CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %c340 : !sir.u256 loc("ora.stmt.23"("ora.origin_stmt.23"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":44:9)))
 // CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.23"("ora.origin_stmt.23"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":44:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":37:5)
-// CHECK-NEXT:   func.func @bool_mutation() -> !sir.u256 attributes {ora.abi_return = "bool", ora.abi_return_layout = "bool", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x06bd00df", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @bool_mutation() -> !sir.u256 attributes {ora.abi_return = "bool", ora.abi_return_layout = "bool", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x06bd00df", ora.source_module_path = "{{.*}}/ora-example/corpus/declarations/var_mutations.ora", ora.source_owner_key = "module/contract:VarMutations/function:bool_mutation", ora.source_owner_start = 1030 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.28"("ora.origin_stmt.28"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":53:9)))
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.bitcast %1 : !sir.u256 : i1 loc(unknown)
@@ -96,7 +96,7 @@
 // CHECK-NEXT:     sir.store %7 : !sir.ptr<1>, %6 : !sir.u256 loc("ora.stmt.28"("ora.origin_stmt.28"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":53:9)))
 // CHECK-NEXT:     sir.return %7 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.28"("ora.origin_stmt.28"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":53:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":48:5)
-// CHECK-NEXT:   func.func @address_mutation() -> !sir.u256 attributes {ora.abi_return = "address", ora.abi_return_layout = "address", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x71410319", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @address_mutation() -> !sir.u256 attributes {ora.abi_return = "address", ora.abi_return_layout = "address", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x71410319", ora.source_module_path = "{{.*}}/ora-example/corpus/declarations/var_mutations.ora", ora.source_owner_key = "module/contract:VarMutations/function:address_mutation", ora.source_owner_start = 1215 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.31"("ora.origin_stmt.31"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":60:9)))
 // CHECK-NEXT:     %1 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc("ora.stmt.31"("ora.origin_stmt.31"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":60:9)))
 // CHECK-NEXT:     %2 = sir.caller : !sir.u256 loc("ora.stmt.30"("ora.origin_stmt.30"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":59:16)))
@@ -105,7 +105,7 @@
 // CHECK-NEXT:     sir.store %4 : !sir.ptr<1>, %3 : !sir.u256 loc("ora.stmt.31"("ora.origin_stmt.31"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":60:9)))
 // CHECK-NEXT:     sir.return %4 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.31"("ora.origin_stmt.31"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":60:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":57:5)
-// CHECK-NEXT:   func.func @multi_var_mutation() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x446399cf", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @multi_var_mutation() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x446399cf", ora.source_module_path = "{{.*}}/ora-example/corpus/declarations/var_mutations.ora", ora.source_owner_key = "module/contract:VarMutations/function:multi_var_mutation", ora.source_owner_start = 1413 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 56016217287220138543383237988819299768112786790290310538187226855197252780032 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
@@ -160,7 +160,7 @@
 // CHECK-NEXT:     sir.store %19 : !sir.ptr<1>, %c140 : !sir.u256 loc("ora.stmt.40"("ora.origin_stmt.40"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":75:9)))
 // CHECK-NEXT:     sir.return %19 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.40"("ora.origin_stmt.40"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":75:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":64:5)
-// CHECK-NEXT:   func.func @var_in_loop() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x9594373d", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @var_in_loop() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x9594373d", ora.source_module_path = "{{.*}}/ora-example/corpus/declarations/var_mutations.ora", ora.source_owner_key = "module/contract:VarMutations/function:var_in_loop", ora.source_owner_start = 1675 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.46"("ora.origin_stmt.46"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":86:9)))
 // CHECK-NEXT:     %c0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.46"("ora.origin_stmt.46"("{{.*}}/ora-example/corpus/declarations/var_mutations.ora":86:9)))

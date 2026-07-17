@@ -2,7 +2,7 @@
 // INPUT: ora-example/logs/log_smoke.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @emitTransfer(%arg0: !sir.u256 loc("{{.*}}/ora-example/logs/log_smoke.ora":8:25), %arg1: !sir.u256 loc("{{.*}}/ora-example/logs/log_smoke.ora":8:38)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["address", "uint256"], ora.dispatch_class = "mutating", ora.param_binding_ids = ["file:11:pattern:0", "file:11:pattern:1"], ora.param_names = ["to", "amount"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0xb8be6222", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @emitTransfer(%arg0: !sir.u256 loc("{{.*}}/ora-example/logs/log_smoke.ora":8:25), %arg1: !sir.u256 loc("{{.*}}/ora-example/logs/log_smoke.ora":8:38)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["address", "uint256"], ora.dispatch_class = "mutating", ora.param_binding_ids = ["file:11:pattern:0", "file:11:pattern:1"], ora.param_names = ["to", "amount"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0xb8be6222", ora.source_module_path = "{{.*}}/ora-example/logs/log_smoke.ora", ora.source_owner_key = "module/contract:LogSmoke/function:emitTransfer", ora.source_owner_start = 173 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 100389287136786176327247604509743168900146139575972864366142685224231313322991 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/logs/log_smoke.ora":9:9)))
 // CHECK-NEXT:     %1 = sir.const 64 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/logs/log_smoke.ora":9:9)))
 // CHECK-NEXT:     %2 = sir.const 32 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/logs/log_smoke.ora":9:9)))
@@ -19,7 +19,7 @@
 // CHECK-NEXT:     sir.log1 %6 : !sir.ptr<1>, %4 : !sir.u256, %0 : !sir.u256 {ora.event_name = "Transfer"} loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/logs/log_smoke.ora":9:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/logs/log_smoke.ora":8:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/logs/log_smoke.ora":8:5)
-// CHECK-NEXT:   func.func @emitPing() attributes {ora.dispatch_class = "mutating", ora.selector = "0x5bf03663", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @emitPing() attributes {ora.dispatch_class = "mutating", ora.selector = "0x5bf03663", ora.source_module_path = "{{.*}}/ora-example/logs/log_smoke.ora", ora.source_owner_key = "module/contract:LogSmoke/function:emitPing", ora.source_owner_start = 285 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 91562447057405671640282945446290641806549385168621581491857088437350338627247 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/logs/log_smoke.ora":13:9)))
 // CHECK-NEXT:     %1 = sir.const 0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/logs/log_smoke.ora":13:9)))
 // CHECK-NEXT:     %2 = sir.bitcast %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/logs/log_smoke.ora":13:9)))

@@ -2,7 +2,7 @@
 // INPUT: ora-example/constant_folding.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @constantFolding() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x5884738e", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @constantFolding() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x5884738e", ora.source_module_path = "{{.*}}/ora-example/constant_folding.ora", ora.source_owner_key = "module/contract:ConstantFolding/function:constantFolding", ora.source_owner_start = 60 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c23 = sir.const 23 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/constant_folding.ora":4:23)))
 // CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)

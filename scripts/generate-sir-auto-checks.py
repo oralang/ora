@@ -74,7 +74,17 @@ def main() -> int:
         metavar="ORA_FILE",
         help="generate or refresh a specific repository-relative .ora input; may be repeated",
     )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=120,
+        metavar="SECONDS",
+        help="per-input compiler timeout (default: 120)",
+    )
     args = parser.parse_args()
+
+    if args.timeout <= 0:
+        parser.error("--timeout must be positive")
 
     if not ORA_BIN.exists():
         print(f"error: ora binary not found at {ORA_BIN}. Run 'zig build' first.")
@@ -108,6 +118,8 @@ def main() -> int:
     written = 0
     failed = []
     ora_verify_flag = os.environ.get("ORA_VERIFY_FLAG", "--no-verify")
+    artifact_dir = REPO / "artifacts" / "sir-checks"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
 
     for path in ora_files:
         rel = path.relative_to(REPO).as_posix()
@@ -123,11 +135,11 @@ def main() -> int:
             command.extend(["--emit=mlir:sir", str(path)])
             proc = subprocess.run(
                 command,
-                cwd=REPO,
+                cwd=artifact_dir,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=30,
+                timeout=args.timeout,
             )
         except Exception as e:
             failed.append((rel, f"exception {e}"))
@@ -160,6 +172,7 @@ def main() -> int:
         print("failed:")
         for rel, reason in failed:
             print(f"  {rel}: {reason}")
+        return 1
     return 0
 
 

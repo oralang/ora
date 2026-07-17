@@ -2,32 +2,32 @@
 // INPUT: ora-example/refinements/validation_test.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @testValidMinValue() attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testValidMinValue() attributes {ora.source_module_path = "{{.*}}/ora-example/refinements/validation_test.ora", ora.source_owner_key = "module/contract:TestValidation/function:testValidMinValue", ora.source_owner_start = 106 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/validation_test.ora":4:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/validation_test.ora":4:5)
-// CHECK-NEXT:   func.func @testInvalidMinValue() attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testInvalidMinValue() attributes {ora.source_module_path = "{{.*}}/ora-example/refinements/validation_test.ora", ora.source_owner_key = "module/contract:TestValidation/function:testInvalidMinValue", ora.source_owner_start = 346 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/validation_test.ora":10:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/validation_test.ora":10:5)
-// CHECK-NEXT:   func.func @testValidInRange() attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testValidInRange() attributes {ora.source_module_path = "{{.*}}/ora-example/refinements/validation_test.ora", ora.source_owner_key = "module/contract:TestValidation/function:testValidInRange", ora.source_owner_start = 522 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/validation_test.ora":15:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/validation_test.ora":15:5)
-// CHECK-NEXT:   func.func @testInvalidInRange() attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testInvalidInRange() attributes {ora.source_module_path = "{{.*}}/ora-example/refinements/validation_test.ora", ora.source_owner_key = "module/contract:TestValidation/function:testInvalidInRange", ora.source_owner_start = 731 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/validation_test.ora":21:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/validation_test.ora":21:5)
-// CHECK-NEXT:   func.func @testValidMaxValue() attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testValidMaxValue() attributes {ora.source_module_path = "{{.*}}/ora-example/refinements/validation_test.ora", ora.source_owner_key = "module/contract:TestValidation/function:testValidMaxValue", ora.source_owner_start = 964 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/validation_test.ora":27:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/validation_test.ora":27:5)
-// CHECK-NEXT:   func.func @testInvalidMaxValue() attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testInvalidMaxValue() attributes {ora.source_module_path = "{{.*}}/ora-example/refinements/validation_test.ora", ora.source_owner_key = "module/contract:TestValidation/function:testInvalidMaxValue", ora.source_owner_start = 1175 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/validation_test.ora":33:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/validation_test.ora":33:5)
-// CHECK-NEXT:   func.func @testValidReturn() -> !sir.u256 attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testValidReturn() -> !sir.u256 attributes {ora.source_module_path = "{{.*}}/ora-example/refinements/validation_test.ora", ora.source_owner_key = "module/contract:TestValidation/function:testValidReturn", ora.source_owner_start = 1336 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/validation_test.ora":39:9)))
 // CHECK-NEXT:     %c2000 = sir.const 2000 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/validation_test.ora":39:16)))
 // CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/validation_test.ora":39:9)))
 // CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %c2000 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/validation_test.ora":39:9)))
 // CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/validation_test.ora":39:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/validation_test.ora":38:5)
-// CHECK-NEXT:   func.func @testInvalidReturn() -> !sir.u256 attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testInvalidReturn() -> !sir.u256 attributes {ora.source_module_path = "{{.*}}/ora-example/refinements/validation_test.ora", ora.source_owner_key = "module/contract:TestValidation/function:testInvalidReturn", ora.source_owner_start = 1436 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/validation_test.ora":45:9)))
 // CHECK-NEXT:     %c2000 = sir.const 2000 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/validation_test.ora":45:16)))
 // CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/validation_test.ora":45:9)))
