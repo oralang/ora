@@ -28,6 +28,7 @@ const Encoder = @import("encoder.zig").Encoder;
 const errors = @import("errors.zig");
 const mlir_helpers = @import("mlir_helpers.zig");
 const refinements = @import("ora_types").refinement_semantics;
+const prepared_query = @import("ora_prepared_query_row");
 const ManagedArrayList = std.array_list.Managed;
 
 pub const VerificationResult = errors.VerificationResult;
@@ -99,6 +100,7 @@ const AssumptionTag = struct {
 
 const ImportedObligationSource = struct {
     callee_name: []const u8,
+    source_fact_id: ?u32 = null,
     kind: Encoder.PendingObligationSourceKind,
 };
 
@@ -2101,7 +2103,11 @@ pub const VerificationPass = struct {
                 obligation.ast;
             const annotation_kind = pendingObligationAnnotationKind(obligation);
             const imported_source = if (obligation.imported_callee_name) |callee_name|
-                ImportedObligationSource{ .callee_name = callee_name, .kind = obligation.source_kind }
+                ImportedObligationSource{
+                    .callee_name = callee_name,
+                    .source_fact_id = obligation.imported_source_fact_id,
+                    .kind = obligation.source_kind,
+                }
             else
                 null;
             const obligation_label = if (imported_source) |source|
@@ -2188,7 +2194,11 @@ pub const VerificationPass = struct {
                     obligation.ast;
                 const annotation_kind = pendingObligationAnnotationKind(obligation);
                 const imported_source = if (obligation.imported_callee_name) |callee_name|
-                    ImportedObligationSource{ .callee_name = callee_name, .kind = obligation.source_kind }
+                    ImportedObligationSource{
+                        .callee_name = callee_name,
+                        .source_fact_id = obligation.imported_source_fact_id,
+                        .kind = obligation.source_kind,
+                    }
                 else
                     null;
                 const obligation_label = if (imported_source) |source|
@@ -2494,7 +2504,11 @@ pub const VerificationPass = struct {
                 obligation.ast;
             const annotation_kind = pendingObligationAnnotationKind(obligation);
             const imported_source = if (obligation.imported_callee_name) |callee_name|
-                ImportedObligationSource{ .callee_name = callee_name, .kind = obligation.source_kind }
+                ImportedObligationSource{
+                    .callee_name = callee_name,
+                    .source_fact_id = obligation.imported_source_fact_id,
+                    .kind = obligation.source_kind,
+                }
             else
                 null;
             const obligation_label = if (imported_source) |source|
@@ -3296,7 +3310,8 @@ pub const VerificationPass = struct {
         const arena_allocator = arena.allocator();
 
         const rows = try arena_allocator.alloc(PreparedQueryManifestRow, queries.len);
-        for (queries, rows, 0..) |query, *row, index| {
+        const source_accounting_rows = try arena_allocator.alloc(prepared_query.Row, queries.len);
+        for (queries, rows, source_accounting_rows, 0..) |query, *row, *source_row, index| {
             row.* = .{
                 .kind = query.kind,
                 .fragment = query.fragment,
@@ -3316,6 +3331,24 @@ pub const VerificationPass = struct {
                 .formal_obligation_ids = try cloneU32SliceArena(arena_allocator, query.formal_obligation_ids),
                 .formal_match_status = query.formal_match_status,
                 .formal_match_key = if (query.formal_match_key) |key| try arena_allocator.dupe(u8, key) else null,
+                .accounting_query_id = query.accounting_query_id,
+                .accounting_match_status = query.accounting_match_status,
+                .accounting_match_key = if (query.accounting_match_key) |key| try arena_allocator.dupe(u8, key) else null,
+                .accounting_boundary_role = query.accounting_boundary_role,
+                .accounting_boundary_callee_name = if (query.accounting_boundary_callee_name) |name| try arena_allocator.dupe(u8, name) else null,
+                .accounting_boundary_source_fact_id = query.accounting_boundary_source_fact_id,
+            };
+            source_row.* = .{
+                .kind = sourceAccountingQueryKind(row.kind),
+                .function_name = row.function_name,
+                .file = row.file,
+                .line = row.line,
+                .column = row.column,
+                .match_status = sourceAccountingMatchStatus(row.accounting_match_status),
+                .query_id = row.accounting_query_id,
+                .boundary_role = sourceAccountingBoundaryRole(row.accounting_boundary_role),
+                .boundary_callee_name = row.accounting_boundary_callee_name,
+                .boundary_source_fact_id = row.accounting_boundary_source_fact_id,
             };
             if (runs) |run_items| {
                 const run = run_items[index];
@@ -3329,6 +3362,7 @@ pub const VerificationPass = struct {
         return .{
             .arena = arena,
             .rows = rows,
+            .source_accounting_rows = source_accounting_rows,
         };
     }
 
@@ -5242,6 +5276,8 @@ pub const VerificationPass = struct {
                     .{ fn_name, obligationKindLabel(ann.kind), obligation_log_suffix, obligation_tag },
                 );
                 const formal_identity = try formalIdentityForAnnotation(self, ann, .Obligation);
+                const accounting_identity = try accountingIdentityForAnnotation(self, ann, .Obligation);
+                const accounting_boundary = accountingBoundaryIdentityForAnnotation(ann);
                 const annotation_pure = preparedObligationAnnotationPure(
                     ann,
                     assumption_annotations.items,
@@ -5273,6 +5309,12 @@ pub const VerificationPass = struct {
                     .formal_obligation_ids = formal_identity.formal_obligation_ids,
                     .formal_match_status = formal_identity.formal_match_status,
                     .formal_match_key = formal_identity.formal_match_key,
+                    .accounting_query_id = accounting_identity.query_id,
+                    .accounting_match_status = accounting_identity.match_status,
+                    .accounting_match_key = accounting_identity.match_key,
+                    .accounting_boundary_role = if (accounting_boundary) |boundary| boundary.role else null,
+                    .accounting_boundary_callee_name = if (accounting_boundary) |boundary| boundary.callee_name else null,
+                    .accounting_boundary_source_fact_id = if (accounting_boundary) |boundary| boundary.source_fact_id else null,
                 });
 
                 if (isImportedCalleeObligationAnnotation(ann)) {
@@ -5439,6 +5481,7 @@ pub const VerificationPass = struct {
                                     "{s} [invariant-exit]{s}",
                                     .{ fn_name, exit_tag },
                                 );
+                                const exit_accounting_identity = try accountingIdentityForAnnotation(self, ann, .LoopInvariantStep);
                                 try appendPreparedQueryUnique(&queries, self.allocator, .{
                                     .kind = .LoopInvariantStep,
                                     .loop_owner = ann.loop_owner,
@@ -5456,6 +5499,9 @@ pub const VerificationPass = struct {
                                     .smtlib_bytes = exit_smtlib.len,
                                     .smtlib_hash = exit_hash,
                                     .log_prefix = exit_log_prefix,
+                                    .accounting_query_id = exit_accounting_identity.query_id,
+                                    .accounting_match_status = exit_accounting_identity.match_status,
+                                    .accounting_match_key = exit_accounting_identity.match_key,
                                 });
                             }
                         }
@@ -5484,6 +5530,7 @@ pub const VerificationPass = struct {
                             "{s} [invariant-step]{s}",
                             .{ fn_name, step_tag },
                         );
+                        const step_accounting_identity = try accountingIdentityForAnnotation(self, ann, .LoopInvariantStep);
                         try appendPreparedQueryUnique(&queries, self.allocator, .{
                             .kind = .LoopInvariantStep,
                             .loop_owner = ann.loop_owner,
@@ -5501,6 +5548,9 @@ pub const VerificationPass = struct {
                             .smtlib_bytes = step_smtlib.len,
                             .smtlib_hash = step_hash,
                             .log_prefix = step_log_prefix,
+                            .accounting_query_id = step_accounting_identity.query_id,
+                            .accounting_match_status = step_accounting_identity.match_status,
+                            .accounting_match_key = step_accounting_identity.match_key,
                         });
                     }
                 }
@@ -5670,6 +5720,7 @@ pub const VerificationPass = struct {
                     .{ fn_name, ann.guard_id.?, violate_tag },
                 );
                 const violate_formal_identity = try formalIdentityForAnnotation(self, ann, .GuardViolate);
+                const violate_accounting_identity = try accountingIdentityForAnnotation(self, ann, .GuardViolate);
                 try appendPreparedQueryUnique(&queries, self.allocator, .{
                     .kind = .GuardViolate,
                     .fragment = violate_fragment,
@@ -5690,6 +5741,9 @@ pub const VerificationPass = struct {
                     .formal_obligation_ids = violate_formal_identity.formal_obligation_ids,
                     .formal_match_status = violate_formal_identity.formal_match_status,
                     .formal_match_key = violate_formal_identity.formal_match_key,
+                    .accounting_query_id = violate_accounting_identity.query_id,
+                    .accounting_match_status = violate_accounting_identity.match_status,
+                    .accounting_match_key = violate_accounting_identity.match_key,
                 });
 
                 try previous_guards.append(ann);
@@ -6455,6 +6509,26 @@ fn bindingMatchesPreparedQuery(
     return true;
 }
 
+/// Source accounting joins verifier rows to the query emitted for the source
+/// operation. The verifier may classify safety obligations needed to evaluate
+/// a source predicate as `ContractInvariant` even when the source query's
+/// logical role is `assert` or `invariant`. Those rows are still part of that
+/// source predicate's verification, so the accounting join deliberately does
+/// not reinterpret the verifier annotation's logical role. Formal proof
+/// authority continues to use `bindingMatchesPreparedQuery`, including its
+/// exact role check.
+fn accountingBindingMatchesPreparedQuery(
+    binding: FormalQueryBinding,
+    source_op_id: usize,
+    kind: []const u8,
+    guard_id: ?[]const u8,
+) bool {
+    if (binding.source_op_id != source_op_id) return false;
+    if (!std.mem.eql(u8, binding.kind, kind)) return false;
+    if (!optionalStringEqual(binding.guard_id, guard_id)) return false;
+    return true;
+}
+
 fn optionalStringEqual(lhs: ?[]const u8, rhs: ?[]const u8) bool {
     if (lhs == null or rhs == null) return lhs == null and rhs == null;
     return std.mem.eql(u8, lhs.?, rhs.?);
@@ -6517,6 +6591,79 @@ fn formalIdentityForAnnotation(
         .formal_assumption_ids = try cloneU32SliceArena(self.allocator, binding.assumption_ids),
         .formal_obligation_ids = try cloneU32SliceArena(self.allocator, binding.obligation_ids),
         .formal_match_status = .matched,
+    };
+}
+
+const AccountingPreparedQueryIdentity = struct {
+    query_id: ?u32 = null,
+    match_status: FormalMatchStatus = .not_applicable,
+    match_key: ?[]const u8 = null,
+};
+
+fn accountingIdentityForAnnotation(
+    self: *VerificationPass,
+    ann: EncodedAnnotation,
+    prepared_kind: QueryKind,
+) !AccountingPreparedQueryIdentity {
+    const MatchShape = struct { kind: []const u8 };
+    const match_shape: MatchShape = switch (prepared_kind) {
+        .Obligation => switch (ann.kind) {
+            // Source `guard` clauses are encoded by Z3 as an obligation over
+            // the violation path, while the formal manifest names that same
+            // source operation `guard_violate`. This accounting-only join must
+            // not grant the query runtime-check erasure authority.
+            .Guard => .{ .kind = "guard_violate" },
+            .Ensures, .LoopInvariant, .ContractInvariant => .{ .kind = "obligation" },
+            else => return .{},
+        },
+        .LoopInvariantStep => switch (ann.kind) {
+            .LoopInvariant => .{ .kind = "obligation" },
+            else => return .{},
+        },
+        .GuardViolate => switch (ann.kind) {
+            .RefinementGuard => .{ .kind = "guard_violate" },
+            else => return .{},
+        },
+        else => return .{},
+    };
+    const formal_kind = match_shape.kind;
+    if (self.formal_query_bindings.len == 0) return .{};
+    const source_op_id = sourceOpId(ann.source_op) orelse return .{};
+    const key_text = try formatFormalMatchKey(self.allocator, source_op_id, formal_kind, null, ann.guard_id);
+
+    var match: ?FormalQueryBinding = null;
+    var duplicate = false;
+    for (self.formal_query_bindings) |binding| {
+        if (!accountingBindingMatchesPreparedQuery(binding, source_op_id, formal_kind, ann.guard_id)) continue;
+        if (match != null) {
+            duplicate = true;
+            break;
+        }
+        match = binding;
+    }
+    if (duplicate) return .{ .match_status = .ambiguous, .match_key = key_text };
+    const binding = match orelse return .{ .match_status = .missing, .match_key = key_text };
+    self.allocator.free(key_text);
+    return .{ .query_id = binding.query_id, .match_status = .matched };
+}
+
+const AccountingBoundaryIdentity = struct {
+    role: SourceAccountingBoundaryRole,
+    callee_name: []const u8,
+    source_fact_id: ?u32,
+};
+
+fn accountingBoundaryIdentityForAnnotation(ann: EncodedAnnotation) ?AccountingBoundaryIdentity {
+    const imported = ann.imported_obligation_source orelse return null;
+    const role: SourceAccountingBoundaryRole = switch (imported.kind) {
+        .callee_precondition => .proof_target,
+        .imported_callee_ensures => .assumption_context,
+        .imported_callee_obligation, .local => return null,
+    };
+    return .{
+        .role = role,
+        .callee_name = imported.callee_name,
+        .source_fact_id = imported.source_fact_id,
     };
 }
 
@@ -6773,6 +6920,7 @@ fn encodedAnnotationEquivalent(self: *VerificationPass, lhs: EncodedAnnotation, 
     if ((lhs.imported_obligation_source == null) != (rhs.imported_obligation_source == null)) return false;
     if (lhs.imported_obligation_source) |lhs_source| {
         if (!std.mem.eql(u8, lhs_source.callee_name, rhs.imported_obligation_source.?.callee_name)) return false;
+        if (lhs_source.source_fact_id != rhs.imported_obligation_source.?.source_fact_id) return false;
         if (lhs_source.kind != rhs.imported_obligation_source.?.kind) return false;
     }
     if ((lhs.old_condition == null) != (rhs.old_condition == null)) return false;
@@ -7177,6 +7325,12 @@ pub const PreparedQueryManifestRow = struct {
     formal_obligation_ids: []const u32 = &.{},
     formal_match_status: FormalMatchStatus = .not_applicable,
     formal_match_key: ?[]const u8 = null,
+    accounting_query_id: ?u32 = null,
+    accounting_match_status: FormalMatchStatus = .not_applicable,
+    accounting_match_key: ?[]const u8 = null,
+    accounting_boundary_role: ?SourceAccountingBoundaryRole = null,
+    accounting_boundary_callee_name: ?[]const u8 = null,
+    accounting_boundary_source_fact_id: ?u32 = null,
 };
 
 pub const FormalMatchStatus = enum(u8) {
@@ -7184,6 +7338,14 @@ pub const FormalMatchStatus = enum(u8) {
     matched,
     missing,
     ambiguous,
+};
+
+/// Proof-only source use represented by a verifier query at a call site.
+/// This identity is consumed exclusively by source accounting and grants no
+/// Lean proof or runtime-check-erasure authority.
+pub const SourceAccountingBoundaryRole = enum(u8) {
+    proof_target,
+    assumption_context,
 };
 
 pub const FormalQueryBinding = struct {
@@ -7199,12 +7361,41 @@ pub const FormalQueryBinding = struct {
 pub const PreparedQueryManifest = struct {
     arena: std.heap.ArenaAllocator,
     rows: []const PreparedQueryManifestRow,
+    source_accounting_rows: []const prepared_query.Row,
 
     pub fn deinit(self: *PreparedQueryManifest) void {
         self.arena.deinit();
         self.* = undefined;
     }
 };
+
+fn sourceAccountingQueryKind(kind: QueryKind) prepared_query.QueryKind {
+    return switch (kind) {
+        .Base, .Obligation => .obligation,
+        .LoopInvariantStep => .loop_invariant_step,
+        .LoopBodySafety => .loop_body_safety,
+        .LoopInvariantPost => .loop_invariant_post,
+        .GuardSatisfy => .guard_satisfy,
+        .GuardViolate => .guard_violate,
+    };
+}
+
+fn sourceAccountingMatchStatus(status: FormalMatchStatus) prepared_query.MatchStatus {
+    return switch (status) {
+        .not_applicable => .not_applicable,
+        .matched => .matched,
+        .missing => .missing,
+        .ambiguous => .ambiguous,
+    };
+}
+
+fn sourceAccountingBoundaryRole(role: ?SourceAccountingBoundaryRole) ?prepared_query.BoundaryRole {
+    const value = role orelse return null;
+    return switch (value) {
+        .proof_target => .proof_target,
+        .assumption_context => .assumption_context,
+    };
+}
 
 pub const LoopQueryCensusRow = struct {
     kind: QueryKind,
@@ -7970,6 +8161,12 @@ const PreparedQuery = struct {
     formal_obligation_ids: []const u32 = &.{},
     formal_match_status: FormalMatchStatus = .not_applicable,
     formal_match_key: ?[]const u8 = null,
+    accounting_query_id: ?u32 = null,
+    accounting_match_status: FormalMatchStatus = .not_applicable,
+    accounting_match_key: ?[]const u8 = null,
+    accounting_boundary_role: ?SourceAccountingBoundaryRole = null,
+    accounting_boundary_callee_name: ?[]const u8 = null,
+    accounting_boundary_source_fact_id: ?u32 = null,
 
     fn deinit(self: *PreparedQuery, allocator: std.mem.Allocator) void {
         if (self.constraints.len > 0) allocator.free(self.constraints);
@@ -7977,6 +8174,7 @@ const PreparedQuery = struct {
         if (self.formal_assumption_ids.len > 0) allocator.free(self.formal_assumption_ids);
         if (self.formal_obligation_ids.len > 0) allocator.free(self.formal_obligation_ids);
         if (self.formal_match_key) |key| allocator.free(key);
+        if (self.accounting_match_key) |key| allocator.free(key);
         allocator.free(self.smtlib_z);
         allocator.free(self.log_prefix);
     }
@@ -7999,6 +8197,11 @@ fn preparedQueryEquivalent(lhs: PreparedQuery, rhs: PreparedQuery) bool {
     if (lhs.annotation_pure != rhs.annotation_pure) return false;
     if (lhs.formal_query_id != rhs.formal_query_id) return false;
     if (lhs.formal_match_status != rhs.formal_match_status) return false;
+    if (lhs.accounting_query_id != rhs.accounting_query_id) return false;
+    if (lhs.accounting_match_status != rhs.accounting_match_status) return false;
+    if (lhs.accounting_boundary_role != rhs.accounting_boundary_role) return false;
+    if (!optionalStringEqual(lhs.accounting_boundary_callee_name, rhs.accounting_boundary_callee_name)) return false;
+    if (lhs.accounting_boundary_source_fact_id != rhs.accounting_boundary_source_fact_id) return false;
     if (!std.mem.eql(u32, lhs.formal_assumption_ids, rhs.formal_assumption_ids)) return false;
     if (!std.mem.eql(u32, lhs.formal_obligation_ids, rhs.formal_obligation_ids)) return false;
     if (lhs.tracked_assumptions.len != rhs.tracked_assumptions.len) return false;
@@ -11192,6 +11395,61 @@ test "prepared queries include invariant-step for scf.for" {
     try testing.expectEqual(@as(usize, 1), step_count);
 }
 
+test "loop invariant accounting identity does not grant Lean proof identity" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildForInvariantModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var invariant: ?EncodedAnnotation = null;
+    for (pass.encoded_annotations.items) |ann| {
+        if (ann.kind == .LoopInvariant) {
+            invariant = ann;
+            break;
+        }
+    }
+    const ann = invariant orelse return error.TestUnexpectedResult;
+    const source_op_id = sourceOpId(ann.source_op) orelse return error.TestUnexpectedResult;
+    const bindings = [_]FormalQueryBinding{.{
+        .source_op_id = source_op_id,
+        .kind = "obligation",
+        .logical_role = "invariant",
+        .query_id = 77,
+        .obligation_ids = &.{88},
+    }};
+    pass.setFormalQueryBindings(&bindings);
+
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*query| query.deinit(testing.allocator);
+        queries.deinit();
+    }
+
+    var saw_obligation = false;
+    var saw_step = false;
+    for (queries.items) |query| {
+        if (query.obligation_kind != .LoopInvariant) continue;
+        switch (query.kind) {
+            .Obligation => saw_obligation = true,
+            .LoopInvariantStep => saw_step = true,
+            else => continue,
+        }
+        try testing.expectEqual(FormalMatchStatus.not_applicable, query.formal_match_status);
+        try testing.expect(query.formal_query_id == null);
+        try testing.expectEqual(FormalMatchStatus.matched, query.accounting_match_status);
+        try testing.expectEqual(@as(?u32, 77), query.accounting_query_id);
+    }
+    try testing.expect(saw_obligation);
+    try testing.expect(saw_step);
+}
+
 test "annotation extraction failure is reported as unknown verification error" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
@@ -11482,6 +11740,23 @@ test "full verify mode treats untagged ora.assert as obligation" {
     defer mlir.oraModuleDestroy(module);
 
     try pass.extractAnnotationsFromMLIR(module);
+    var assert_ann: ?EncodedAnnotation = null;
+    for (pass.encoded_annotations.items) |ann| {
+        if (ann.kind == .ContractInvariant) {
+            assert_ann = ann;
+            break;
+        }
+    }
+    const ann = assert_ann orelse return error.TestUnexpectedResult;
+    const source_op_id = sourceOpId(ann.source_op) orelse return error.TestUnexpectedResult;
+    const bindings = [_]FormalQueryBinding{.{
+        .source_op_id = source_op_id,
+        .kind = "obligation",
+        .logical_role = "assert",
+        .query_id = 73,
+    }};
+    pass.setFormalQueryBindings(&bindings);
+
     var queries = try pass.buildPreparedQueries();
     defer {
         for (queries.items) |*q| {
@@ -11494,6 +11769,10 @@ test "full verify mode treats untagged ora.assert as obligation" {
     for (queries.items) |q| {
         if (q.kind == .Obligation and q.obligation_kind == .ContractInvariant) {
             saw_contract_obligation = true;
+            try testing.expectEqual(FormalMatchStatus.missing, q.formal_match_status);
+            try testing.expect(q.formal_query_id == null);
+            try testing.expectEqual(FormalMatchStatus.matched, q.accounting_match_status);
+            try testing.expectEqual(@as(?u32, 73), q.accounting_query_id);
             break;
         }
     }
@@ -11701,6 +11980,8 @@ test "private callee ensures is preserved as imported caller-side provenance" {
         if (q.kind == .Obligation and q.obligation_kind == .ContractInvariant) {
             if (std.mem.indexOf(u8, q.log_prefix, "imported callee ensures (private_helper_ensures)") != null) {
                 saw_public_imported_ensures = true;
+                try testing.expectEqual(@as(?SourceAccountingBoundaryRole, .assumption_context), q.accounting_boundary_role);
+                try testing.expectEqualStrings("private_helper_ensures", q.accounting_boundary_callee_name orelse return error.TestUnexpectedResult);
                 break;
             }
         }
@@ -11929,6 +12210,8 @@ test "private callee requires are caller-side precondition obligations" {
         if (q.kind != .Obligation) continue;
         if (q.obligation_kind == .CalleePrecondition) {
             saw_callee_precondition = true;
+            try testing.expectEqual(@as(?SourceAccountingBoundaryRole, .proof_target), q.accounting_boundary_role);
+            try testing.expectEqualStrings("private_helper", q.accounting_boundary_callee_name orelse return error.TestUnexpectedResult);
         }
     }
     try testing.expect(saw_callee_precondition);
@@ -12743,6 +13026,8 @@ test "guard-tagged obligations do not carry erasure authority identity" {
         try testing.expectEqual(FormalMatchStatus.not_applicable, q.formal_match_status);
         try testing.expect(q.formal_query_id == null);
         try testing.expect(q.formal_match_key == null);
+        try testing.expectEqual(FormalMatchStatus.matched, q.accounting_match_status);
+        try testing.expectEqual(@as(?u32, 8), q.accounting_query_id);
     }
     try testing.expect(saw_guard_obligation);
 }

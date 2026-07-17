@@ -37,6 +37,10 @@ comptime {
     _ = @import("formal/dispatcher_table_gate.zig");
     _ = @import("formal/dispatcher_table_rows.zig");
     _ = @import("formal/kernel/registry.zig");
+    _ = @import("formal/source_accounting_from_mlir.zig");
+    _ = @import("formal/source_accounting_from_z3.zig");
+    _ = @import("formal/source_accounting_pipeline.zig");
+    _ = @import("formal/source_accounting_from_package.zig");
     _ = @import("formal/loop_census.zig");
     _ = @import("formal/shared/artifact_catalog.zig");
     _ = @import("formal/userland/coordinator.zig");

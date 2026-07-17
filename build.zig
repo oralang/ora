@@ -221,6 +221,11 @@ pub fn build(b: *std.Build) void {
     });
     mlir_helpers_mod.addImport("mlir_c_api", mlir_c_mod);
     mlir_helpers_mod.addImport("ora_types", ora_types_mod);
+    const prepared_query_row_mod = b.createModule(.{
+        .root_source_file = b.path("src/formal/shared/prepared_query_row.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const z3_verification_mod = b.createModule(.{
         .root_source_file = b.path("src/z3/verification.zig"),
         .target = target,
@@ -229,6 +234,7 @@ pub fn build(b: *std.Build) void {
     z3_verification_mod.addImport("mlir_c_api", mlir_c_mod);
     z3_verification_mod.addImport("ora_lib", lib_mod);
     z3_verification_mod.addImport("ora_types", ora_types_mod);
+    z3_verification_mod.addImport("ora_prepared_query_row", prepared_query_row_mod);
 
     const evm_blst_lib = createEvmBlstLibrary(b, target, optimize);
     const evm_c_kzg_lib = createEvmCKzgLibrary(b, target, optimize, evm_blst_lib);
@@ -275,6 +281,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("ora_types", ora_types_mod);
     exe_mod.addImport("ora_refinements", ora_refinements_mod);
     exe_mod.addImport("ora_z3_verification", z3_verification_mod);
+    exe_mod.addImport("ora_prepared_query_row", prepared_query_row_mod);
     exe_mod.addImport("ora_root", lib_mod);
     lib_mod.addImport("mlir_c_api", mlir_c_mod);
     lib_mod.addImport("mlir_helpers", mlir_helpers_mod);
@@ -1419,7 +1426,9 @@ pub fn build(b: *std.Build) void {
     compiler_test_mod.addImport("ora_lib", lib_mod);
     compiler_test_mod.addImport("mlir_c_api", mlir_c_mod);
     compiler_test_mod.addImport("ora_z3_verification", z3_verification_mod);
+    compiler_test_mod.addImport("ora_prepared_query_row", prepared_query_row_mod);
     compiler_test_mod.addImport("ora_types", ora_types_mod);
+    compiler_test_mod.addImport("ora_lexer", ora_lexer_mod);
     compiler_test_mod.addImport("sinora", sinora_mod);
     const compiler_tests = b.addTest(.{
         .root_module = compiler_test_mod,
@@ -1444,6 +1453,50 @@ pub fn build(b: *std.Build) void {
 
     const test_compiler_step = b.step("test-compiler", "Run compiler core tests");
     test_compiler_step.dependOn(&compiler_tests_run.step);
+
+    // zig build test-source-accounting
+    // Pure kernel/adapters plus the real compiler concrete-discharge case.
+    const source_accounting_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/source_accounting_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    source_accounting_test_mod.addImport("ora_lexer", ora_lexer_mod);
+    source_accounting_test_mod.addImport("ora_types", ora_types_mod);
+    source_accounting_test_mod.addImport("ora_refinements", ora_refinements_mod);
+    source_accounting_test_mod.addImport("ora_prepared_query_row", prepared_query_row_mod);
+    const source_accounting_tests = b.addTest(.{ .root_module = source_accounting_test_mod });
+    const source_accounting_tests_run = b.addRunArtifact(source_accounting_tests);
+
+    const source_accounting_repro_tests = b.addTest(.{
+        .root_module = compiler_test_mod,
+        .filters = &.{
+            "source accounting accepts concretely checked folded countThree invariants",
+            "production source-accounting pipeline accepts a runtime loop with actual verifier queries",
+            "production source-accounting pipeline binds abandoned-fold call-boundary queries",
+            "production source-accounting pipeline preserves guard and modifies evidence",
+            "production source-accounting pipeline preserves impl contract and collapsed switch identities",
+            "source-accounting syntax and spec-clause vocabularies are totality pins",
+            "source-accounting templates distinguish contract and error exit uses",
+            "source-accounting lifecycle",
+            "verification-disabled binding is exclusive",
+            "kernel registry describes the blocking source-accounting phases",
+            "every executable kernel gate has an explicit audit-catalog identity",
+        },
+    });
+    linkMlirLibraries(b, source_accounting_repro_tests, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
+    linkZ3Libraries(b, source_accounting_repro_tests, z3_step, target);
+    const source_accounting_repro_run = b.addRunArtifact(source_accounting_repro_tests);
+    source_accounting_repro_run.step.dependOn(b.getInstallStep());
+    source_accounting_repro_run.step.dependOn(&evm_debug_probe_install_cmd.step);
+
+    const test_source_accounting_step = b.step("test-source-accounting", "Run source-formal accounting kernel, adapter, and reproduction tests");
+    test_source_accounting_step.dependOn(&source_accounting_tests_run.step);
+    test_source_accounting_step.dependOn(&source_accounting_repro_run.step);
+    test_compiler_step.dependOn(&source_accounting_tests_run.step);
+    test_compiler_step.dependOn(&source_accounting_repro_run.step);
+    test_step.dependOn(&source_accounting_tests_run.step);
+    test_step.dependOn(&source_accounting_repro_run.step);
 
     // ========================================================================
     // Per-module test targets (no MLIR/Z3 required)

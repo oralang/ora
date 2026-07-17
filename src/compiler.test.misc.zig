@@ -248,7 +248,7 @@ test "compiler parses control flow and verification statements" {
     try testing.expect(try_stmt.catch_clause.?.error_pattern != null);
 
     const resolution = try compilation.db.resolveNames(compilation.root_module_id);
-    const invariant_expr = ast_file.expression(for_stmt.invariants[0]).Binary;
+    const invariant_expr = ast_file.expression(for_stmt.invariants[0].predicate).Binary;
     try testing.expect(resolution.expr_bindings[invariant_expr.lhs.index()] != null);
     try testing.expect(resolution.expr_bindings[invariant_expr.rhs.index()] != null);
     const assert_stmt = ast_file.statement(for_body.statements[0]).Assert;

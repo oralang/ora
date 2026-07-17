@@ -154,14 +154,17 @@ pub fn mixin(Builder: type) type {
             else
                 &.{};
             var members: InlineList(ItemId, 10) = .{};
-            var invariants: InlineList(ExprId, 4) = .{};
+            var invariants: InlineList(nodes.InvariantClause, 4) = .{};
 
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
                     .token => {},
                     .node => |child_node| switch (child_node.kind()) {
-                        .ContractInvariantItem => try invariants.append(self.allocator, try Lowering.lowerContractInvariantNode(self, child_node)),
+                        .ContractInvariantItem => try invariants.append(
+                            self.allocator,
+                            try Lowering.lowerInvariantClauseNode(self, child_node, @intCast(invariants.items.len)),
+                        ),
                         .FunctionItem,
                         .StructItem,
                         .BitfieldItem,
@@ -1082,15 +1085,18 @@ pub fn mixin(Builder: type) type {
             } });
         }
 
-        fn lowerInvariantClauses(self: *Builder, node: SyntaxNode) ![]ExprId {
-            var invariants: InlineList(ExprId, 4) = .{};
+        fn lowerInvariantClauses(self: *Builder, node: SyntaxNode) ![]nodes.InvariantClause {
+            var invariants: InlineList(nodes.InvariantClause, 4) = .{};
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
                     .token => {},
                     .node => |child_node| {
                         if (child_node.kind() != .InvariantClause) continue;
-                        try invariants.append(self.allocator, try Lowering.lowerInvariantExprNode(self, child_node));
+                        try invariants.append(
+                            self.allocator,
+                            try Lowering.lowerInvariantClauseNode(self, child_node, @intCast(invariants.items.len)),
+                        );
                     },
                 }
             }
@@ -1425,6 +1431,7 @@ pub fn mixin(Builder: type) type {
                 null;
             return Support.pushStmt(self, .{ .Assert = .{
                 .range = node.range(),
+                .source_fact_id = node.range().start,
                 .condition = try Lowering.lowerExpressionNode(self, condition_node),
                 .message = message,
             } });
@@ -1434,6 +1441,7 @@ pub fn mixin(Builder: type) type {
             const condition_node = firstDirectExprChild(node) orelse return Lowering.malformedStmt(self, node, "missing assume condition");
             return Support.pushStmt(self, .{ .Assume = .{
                 .range = node.range(),
+                .source_fact_id = node.range().start,
                 .condition = try Lowering.lowerExpressionNode(self, condition_node),
             } });
         }
@@ -1442,6 +1450,7 @@ pub fn mixin(Builder: type) type {
             const name_token = nthDirectIdentifierLikeToken(node, 0) orelse return Lowering.malformedStmt(self, node, "missing havoc target");
             return Support.pushStmt(self, .{ .Havoc = .{
                 .range = node.range(),
+                .source_fact_id = node.range().start,
                 .name = tokenText(name_token),
             } });
         }
@@ -2373,12 +2382,13 @@ pub fn mixin(Builder: type) type {
             };
         }
 
-        fn lowerContractInvariantNode(self: *Builder, node: SyntaxNode) !ExprId {
-            return Lowering.lowerInvariantExprNode(self, node);
-        }
-
-        fn lowerInvariantExprNode(self: *Builder, node: SyntaxNode) !ExprId {
-            const expr0 = nthDirectExprChild(node, 0) orelse return Lowering.malformedExpr(self, node, "missing invariant expression");
+        fn lowerInvariantClauseNode(self: *Builder, node: SyntaxNode, ordinal: u32) !nodes.InvariantClause {
+            const expr0 = nthDirectExprChild(node, 0) orelse return .{
+                .predicate = try Lowering.malformedExpr(self, node, "missing invariant expression"),
+                .range = node.range(),
+                .source_fact_id = node.range().start,
+                .ordinal = ordinal,
+            };
             const expr1 = nthDirectExprChild(node, 1);
             const expr2 = nthDirectExprChild(node, 2);
 
@@ -2387,15 +2397,34 @@ pub fn mixin(Builder: type) type {
                 const arg0 = nthDirectNode(expr0, 1);
                 const arg1 = nthDirectNode(expr0, 2);
                 if (callee_node != null and callee_node.?.kind() == .NameExpr and arg0 != null and arg1 == null) {
-                    return Lowering.lowerExpressionNode(self, arg0.?);
+                    const label_token = firstDirectTokenOfKind(callee_node.?, .Identifier);
+                    return .{
+                        .predicate = try Lowering.lowerExpressionNode(self, arg0.?),
+                        .range = node.range(),
+                        .source_fact_id = node.range().start,
+                        .label = if (label_token) |token| tokenText(token) else null,
+                        .ordinal = ordinal,
+                    };
                 }
             }
 
             if (expr0.kind() == .NameExpr and expr1 != null and expr2 == null) {
-                return Lowering.lowerExpressionNode(self, expr1.?);
+                const label_token = firstDirectTokenOfKind(expr0, .Identifier);
+                return .{
+                    .predicate = try Lowering.lowerExpressionNode(self, expr1.?),
+                    .range = node.range(),
+                    .source_fact_id = node.range().start,
+                    .label = if (label_token) |token| tokenText(token) else null,
+                    .ordinal = ordinal,
+                };
             }
 
-            return Lowering.lowerExpressionNode(self, expr0);
+            return .{
+                .predicate = try Lowering.lowerExpressionNode(self, expr0),
+                .range = node.range(),
+                .source_fact_id = node.range().start,
+                .ordinal = ordinal,
+            };
         }
 
         fn lowerSpecClauseNode(self: *Builder, node: SyntaxNode) !nodes.SpecClause {
@@ -2434,6 +2463,7 @@ pub fn mixin(Builder: type) type {
             };
             return .{
                 .range = node.range(),
+                .source_fact_id = node.range().start,
                 .kind = kind,
                 .expr = expr,
             };

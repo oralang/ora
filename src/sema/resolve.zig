@@ -126,8 +126,8 @@ const Resolver = struct {
                     };
                     try contract_env.bindings.put(name, .{ .item = member_id });
                 }
-                for (contract.invariants) |expr_id| {
-                    try self.resolveExpr(expr_id, &contract_env);
+                for (contract.invariants) |invariant| {
+                    try self.resolveExpr(invariant.predicate, &contract_env);
                 }
                 for (contract.members) |member_id| {
                     try self.resolveItem(member_id, &contract_env);
@@ -246,7 +246,7 @@ const Resolver = struct {
             },
             .While => |while_stmt| {
                 try self.resolveExpr(while_stmt.condition, env);
-                for (while_stmt.invariants) |expr_id| try self.resolveExpr(expr_id, env);
+                for (while_stmt.invariants) |invariant| try self.resolveExpr(invariant.predicate, env);
                 try self.resolveBody(while_stmt.body, env);
             },
             .For => |for_stmt| {
@@ -254,12 +254,12 @@ const Resolver = struct {
                 var loop_env = try Env.init(self.arena, env);
                 try self.bindPatternIfName(&loop_env, for_stmt.item_pattern);
                 if (for_stmt.index_pattern) |index_pattern| try self.bindPatternIfName(&loop_env, index_pattern);
-                for (for_stmt.invariants) |expr_id| try self.resolveExpr(expr_id, &loop_env);
+                for (for_stmt.invariants) |invariant| try self.resolveExpr(invariant.predicate, &loop_env);
                 try self.resolveBody(for_stmt.body, &loop_env);
             },
             .Switch => |switch_stmt| {
                 try self.resolveExpr(switch_stmt.condition, env);
-                for (switch_stmt.invariants) |expr_id| try self.resolveExpr(expr_id, env);
+                for (switch_stmt.invariants) |invariant| try self.resolveExpr(invariant.predicate, env);
                 for (switch_stmt.arms) |arm| {
                     var arm_env = try Env.init(self.arena, env);
                     switch (arm.pattern) {
@@ -350,8 +350,11 @@ const Resolver = struct {
     fn resolveExprWithOptions(self: *Resolver, expr_id: ast.ExprId, env: *const Env, options: ResolveExprOptions) anyerror!void {
         switch (self.file.expression(expr_id).*) {
             .Name => |name| {
-                self.bindings[expr_id.index()] = env.lookup(name.name);
                 const is_allowed_result = options.allow_result_name and std.mem.eql(u8, name.name, "result");
+                // `result` is contextual: it denotes the function result in a
+                // postcondition, but remains an ordinary bindable name in
+                // runtime code and every other expression context.
+                self.bindings[expr_id.index()] = if (is_allowed_result) null else env.lookup(name.name);
                 if (self.bindings[expr_id.index()] == null and !is_allowed_result and !self.isRecognizedTypeValueName(name.name)) {
                     var buffer: [256]u8 = undefined;
                     const message = try std.fmt.bufPrint(&buffer, "undefined name '{s}'", .{name.name});

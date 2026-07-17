@@ -1996,8 +1996,8 @@ test "compiler treats result as an ensures-only reserved pseudo variable" {
         \\    return value;
         \\}
     ,
-        .resolution,
-        "undefined name 'result'",
+        .typecheck,
+        "`result` is only available in ensures clauses",
     );
 
     {

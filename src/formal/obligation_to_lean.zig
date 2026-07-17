@@ -284,6 +284,13 @@ fn writeAssumptionRowsByIds(writer: anytype, set: obligation.ObligationSet, ids:
 }
 
 pub fn querySemanticSupport(set: obligation.ObligationSet, query: obligation.VerificationQuery) SemanticSupport {
+    switch (query.kind) {
+        .loop_invariant_step,
+        .loop_body_safety,
+        .loop_invariant_post,
+        => return .{ .unsupported = .unsupported_obligation_kind },
+        else => {},
+    }
     if (query.obligation_ids.len == 0) return .{ .unsupported = .empty_query };
 
     for (query.assumption_ids) |assumption_id| {

@@ -2,6 +2,8 @@ const std = @import("std");
 const testing = std.testing;
 const mlir = @import("mlir_c_api").c;
 const z3_verification = @import("ora_z3_verification");
+const ora_root = @import("ora_root");
+const compiler = ora_root.compiler;
 
 const obligation = @import("formal/obligation.zig");
 const obligation_crosscheck = @import("formal/obligation_crosscheck.zig");
@@ -10,6 +12,16 @@ const obligation_from_mlir = @import("formal/obligation_from_mlir.zig");
 const obligation_from_z3 = @import("formal/obligation_from_z3.zig");
 const obligation_to_lean = @import("formal/obligation_to_lean.zig");
 const obligation_to_z3 = @import("formal/obligation_to_z3.zig");
+const source_accounting = @import("formal/shared/source_accounting.zig");
+const source_accounting_gate = @import("formal/kernel/source_accounting_gate.zig");
+const source_accounting_from_syntax = @import("formal/source_accounting_from_syntax.zig");
+const source_accounting_from_sema = @import("formal/source_accounting_from_sema.zig");
+const source_accounting_from_comptime = @import("formal/source_accounting_from_comptime.zig");
+const source_accounting_from_mlir = @import("formal/source_accounting_from_mlir.zig");
+const source_accounting_from_z3 = @import("formal/source_accounting_from_z3.zig");
+const source_accounting_from_package = @import("formal/source_accounting_from_package.zig");
+const source_accounting_from_runtime = @import("formal/source_accounting_from_runtime.zig");
+const source_accounting_pipeline = @import("formal/source_accounting_pipeline.zig");
 const type_builtin = @import("ora_types").builtin;
 
 const test_helpers = @import("compiler.test.helpers.zig");
@@ -92,6 +104,14 @@ fn countRuntimeGuards(set: obligation.ObligationSet) usize {
         if (item.kind == .runtime_guard) count += 1;
     }
     return count;
+}
+
+fn loopSummaryHasReason(
+    row: obligation.LoopSummaryRow,
+    expected: obligation.LoopUnsupportedReason,
+) bool {
+    for (row.unsupported_reasons) |reason| if (reason == expected) return true;
+    return false;
 }
 
 fn countAssumption(set: obligation.ObligationSet, kind: obligation.AssumptionKind) usize {
@@ -1750,6 +1770,49 @@ fn divRemProofModuleFromGeneratedObligations(
     try writer.writeAll(module_namespace);
     try writer.writeByte('\n');
     return try out.toOwnedSlice();
+}
+
+test "L1 Lean support classifier rejects loop query kinds" {
+    const obligation_ids = [_]obligation.Id{1};
+    const terms = [_]obligation.Term{.{ .bool_lit = true }};
+    const obligations = [_]obligation.Obligation{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "loop" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .kind = .{ .logical = .{
+            .role = .loop_invariant,
+            .formula = .{ .term = 0 },
+        } },
+    }};
+    const set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .terms = &terms,
+    };
+
+    inline for (.{
+        obligation.VerificationQueryKind.loop_invariant_step,
+        obligation.VerificationQueryKind.loop_body_safety,
+        obligation.VerificationQueryKind.loop_invariant_post,
+    }) |kind| {
+        const query: obligation.VerificationQuery = .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "loop" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .kind = kind,
+            .obligation_ids = &obligation_ids,
+        };
+        switch (obligation_to_lean.querySemanticSupport(set, query)) {
+            .supported => return error.TestUnexpectedResult,
+            .unsupported => |reason| try testing.expectEqual(
+                obligation_to_lean.SemanticUnsupportedReason.unsupported_obligation_kind,
+                reason,
+            ),
+        }
+    }
 }
 
 test "B3 lean proofs unblock source-level unknown without erasing runtime guard" {
@@ -6922,7 +6985,7 @@ test "formal obligation MLIR adapter emits evidence-backed frame for parameter d
 
     const dump = try dumpManifestToOwnedString(testing.allocator, result.set);
     defer testing.allocator.free(dump);
-    try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"schema_version\":4"));
+    try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"schema_version\":5"));
     try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"relation\":\"read_preserved_by_key_evidence\""));
     try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"evidence\":[{\"kind\":\"free_var_disequality\""));
     try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"key_index\":0"));
@@ -7848,13 +7911,13 @@ test "formal report coverage summarizes representative MLIR obligation classes" 
     const report = try dumpManifestToOwnedString(testing.allocator, result.set);
     defer testing.allocator.free(report);
 
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"artifact_decision\",\"schema_version\":4,\"status\":\"blocked\",\"reason\":\"missing_proof\"}"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":4,\"assumptions\":1,\"obligations\":12,\"queries\":13"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"artifact_decision\",\"schema_version\":5,\"status\":\"blocked\",\"reason\":\"missing_proof\"}"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":5,\"assumptions\":1,\"obligations\":12,\"queries\":13"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_obligation_links\":12"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"obligation_kinds\":{\"logical\":4,\"runtime_guard\":1,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":1,\"resource\":5,\"quantifier\":1,\"filtered_input\":0,\"backend_fact\":0}"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_backends\":{\"unspecified\":13,\"z3\":0,\"lean\":0}"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_results\":{\"missing\":13,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":4"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":5"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"logical\",\"role\":\"ensures\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"arithmetic_safety\":\"addition_overflow\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"arithmetic_safety\":\"division_by_zero\""));
@@ -7863,7 +7926,966 @@ test "formal report coverage summarizes representative MLIR obligation classes" 
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"resource\",\"op\":\"move\",\"domain\":\"TokenUnit\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"property\":\"conservation\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"quantifier\",\"quantifier\":\"forall\""));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"query\",\"schema_version\":4"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"query\",\"schema_version\":5"));
+}
+
+test "formal loop summary rows are source-owner scoped and remain proof-ineligible" {
+    var result = try collectPackageObligations(testing.allocator, "ora-example/smt/verification/loop_invariants.ora");
+    defer result.deinit();
+
+    var matched: ?obligation.LoopSummaryRow = null;
+    for (result.set.loop_summaries) |row| {
+        if (row.owner != .statement) continue;
+        if (!std.mem.eql(u8, row.owner.statement.function_name, "sumToN")) continue;
+        if (row.owner.statement.ordinal != 4) continue;
+        matched = row;
+        break;
+    }
+    const row = matched orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(obligation.LoopKind.scf_while, row.loop_kind);
+    try testing.expectEqual(@as(?u32, 4), row.loop_source_op_id);
+    try testing.expectEqual(@as(u32, 16), row.source.line);
+    try testing.expectEqual(@as(usize, 2), row.variables.len);
+    try testing.expectEqual(@as(usize, 2), row.init_formulas.len);
+    try testing.expect(row.guard_formula != null);
+    try testing.expectEqual(@as(usize, 3), row.invariant_formulas.len);
+    try testing.expectEqual(@as(usize, 2), row.step_assignments.len);
+    try testing.expect(!row.projectionSupported());
+    try testing.expect(loopSummaryHasReason(row, .loop_identity_missing));
+    try testing.expect(loopSummaryHasReason(row, .loop_formula_unsupported));
+    try testing.expect(loopSummaryHasReason(row, .loop_query_not_owner_scoped));
+
+    const report = try dumpManifestToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(report);
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"loop_summary_coverage\",\"schema_version\":5"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"loop_summary\",\"schema_version\":5"));
+}
+
+test "source accounting accepts concretely checked folded countThree invariants" {
+    const path = "ora-example/corpus/declarations/inline_functions.ora";
+    var compilation = try compilePackage(path);
+    defer compilation.deinit();
+
+    const const_eval = try compilation.db.constEval(compilation.root_module_id);
+
+    var package_inventory = try source_accounting_from_package.collect(
+        testing.allocator,
+        &compilation.db,
+        compilation.package_id,
+        compilation.root_module_id,
+    );
+    defer package_inventory.deinit();
+    const module_inventory = package_inventory.module(compilation.root_module_id) orelse
+        return error.TestUnexpectedResult;
+    const comptime_template_id = module_inventory.templateForOwner(
+        "module/contract:InlineFunctions/function:countThree",
+        .comptime_body,
+    ) orelse return error.TestUnexpectedResult;
+    const comptime_template = package_inventory.template(comptime_template_id) orelse
+        return error.TestUnexpectedResult;
+    var comptime_inventory = try source_accounting_from_comptime.collectPackageFoldExpansions(
+        testing.allocator,
+        &package_inventory,
+        const_eval,
+        .{},
+    );
+    defer comptime_inventory.deinit();
+
+    try testing.expectEqual(@as(usize, 1), package_inventory.inventory.declared_sites.len);
+    try testing.expectEqual(source_accounting.SourceFactKind.loop_invariant, package_inventory.inventory.declared_sites[0].key.kind);
+    try testing.expect(std.mem.indexOf(u8, package_inventory.inventory.declared_sites[0].key.owner, "function:countThree") != null);
+    try testing.expectEqual(@as(usize, 1), package_inventory.inventory.typed_sites.len);
+    try testing.expect(comptime_template.control_nodes.len > 3);
+    try testing.expect(comptime_template.control_edges.len > 1);
+    try testing.expectEqual(@as(?u32, 0), comptime_template.entry_slot);
+    var saw_invariant_checkpoint = false;
+    for (comptime_template.control_nodes) |node| {
+        if (node.kind == .loop_head and node.attached_use_ordinals.len == 2) saw_invariant_checkpoint = true;
+    }
+    try testing.expect(saw_invariant_checkpoint);
+    try testing.expectEqual(@as(usize, 1), comptime_inventory.expansions.len);
+    try testing.expectEqual(source_accounting.ExpansionDisposition.fold_committed, comptime_inventory.expansions[0].disposition);
+    try testing.expectEqual(@as(usize, 2), comptime_inventory.uses.len);
+    try testing.expectEqual(comptime_template.control_nodes.len, comptime_inventory.control_nodes.len);
+    try testing.expectEqual(comptime_template.control_edges.len, comptime_inventory.control_edges.len);
+    try testing.expectEqual(@as(usize, 1), comptime_inventory.evidence.folds.len);
+    try testing.expectEqual(@as(usize, 8), comptime_inventory.evidence.predicate_events.len);
+    try testing.expectEqual(@as(usize, 2), comptime_inventory.evidence.handlings.len);
+
+    // Consume the real downstream obligation/query surface. It is empty for
+    // this invariant because the current fold erased it before formal MLIR.
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    var formal = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+    defer formal.deinit();
+    const no_bindings: []const source_accounting_from_mlir.Binding = &.{};
+    var mlir_evidence = try source_accounting_from_mlir.collect(
+        testing.allocator,
+        formal.set,
+        no_bindings,
+        .{},
+    );
+    defer mlir_evidence.deinit();
+    var prepared_evidence = try source_accounting_from_z3.bindPreparedQueries(
+        testing.allocator,
+        formal.set,
+        no_bindings,
+        mlir_evidence.evidence,
+        &.{},
+    );
+    defer prepared_evidence.deinit();
+
+    const manifest: source_accounting.Manifest = .{
+        .inventory = .{
+            .declared_sites = package_inventory.inventory.declared_sites,
+            .typed_sites = package_inventory.inventory.typed_sites,
+            .owner_templates = package_inventory.inventory.owner_templates,
+            .expansions = comptime_inventory.expansions,
+            .uses = comptime_inventory.uses,
+            .control_nodes = comptime_inventory.control_nodes,
+            .control_edges = comptime_inventory.control_edges,
+        },
+        .comptime_evidence = comptime_inventory.evidence,
+        .symbolic = prepared_evidence.evidence,
+    };
+    var decision = try source_accounting_gate.decide(testing.allocator, .verified_full, manifest);
+    defer decision.deinit();
+    try testing.expectEqual(source_accounting_gate.Decision.accepted, decision.decision);
+    try testing.expectEqual(@as(?source_accounting_gate.FailureCode, null), decision.primary_failure);
+
+    // The folded loop is discharged concretely, so no symbolic loop row or
+    // query should survive into the downstream obligation manifest.
+    try testing.expectEqual(@as(usize, 0), formal.set.loop_summaries.len);
+    for (formal.set.queries) |query| switch (query.kind) {
+        .loop_invariant_step, .loop_body_safety, .loop_invariant_post => return error.TestUnexpectedResult,
+        else => {},
+    };
+}
+
+test "source accounting globalizes imported module sites deterministically" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "dep.ora",
+        .data =
+        \\pub fn helper(value: u256) -> u256
+        \\    requires value < 10
+        \\    ensures result == value
+        \\{
+        \\    return value;
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "main.ora",
+        .data =
+        \\comptime const dep = @import("./dep.ora");
+        \\
+        \\contract Main {
+        \\    invariant true;
+        \\
+        \\    pub fn run(value: u256) -> u256 {
+        \\        return dep.helper(value);
+        \\    }
+        \\}
+        ,
+    });
+
+    const root_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/main.ora", .{tmp.sub_path});
+    defer testing.allocator.free(root_path);
+    var compilation = try compilePackage(root_path);
+    defer compilation.deinit();
+
+    var first = try source_accounting_from_package.collect(
+        testing.allocator,
+        &compilation.db,
+        compilation.package_id,
+        compilation.root_module_id,
+    );
+    defer first.deinit();
+    var second = try source_accounting_from_package.collect(
+        testing.allocator,
+        &compilation.db,
+        compilation.package_id,
+        compilation.root_module_id,
+    );
+    defer second.deinit();
+
+    try testing.expectEqual(@as(usize, 2), first.modules.len);
+    try testing.expectEqual(@as(usize, 3), first.inventory.declared_sites.len);
+    try testing.expectEqual(first.inventory.declared_sites.len, first.inventory.typed_sites.len);
+    try testing.expectEqual(first.inventory.owner_templates.len, second.inventory.owner_templates.len);
+    for (first.inventory.declared_sites, second.inventory.declared_sites) |lhs, rhs| {
+        try testing.expectEqual(lhs.id, rhs.id);
+        try testing.expectEqualStrings(lhs.key.path, rhs.key.path);
+        try testing.expectEqualStrings(lhs.key.owner, rhs.key.owner);
+        try testing.expectEqual(lhs.key.range_start, rhs.key.range_start);
+        try testing.expectEqual(lhs.key.range_end, rhs.key.range_end);
+        try testing.expectEqual(lhs.key.kind, rhs.key.kind);
+    }
+
+    try testing.expectEqualStrings("dep.ora", first.modules[0].canonical_path);
+    try testing.expectEqualStrings("main.ora", first.modules[1].canonical_path);
+    try testing.expectEqual(source_accounting.SourceFactKind.requires, first.inventory.declared_sites[0].key.kind);
+    try testing.expectEqual(source_accounting.SourceFactKind.ensures, first.inventory.declared_sites[1].key.kind);
+    try testing.expectEqual(source_accounting.SourceFactKind.contract_invariant, first.inventory.declared_sites[2].key.kind);
+    for (first.modules) |module_inventory| for (module_inventory.site_bindings) |binding| {
+        const source_fact_id = binding.source_fact_id orelse return error.TestUnexpectedResult;
+        try testing.expectEqual(binding.site_id, module_inventory.siteForSourceFact(source_fact_id, binding.kind).?);
+    };
+    for (first.inventory.owner_templates) |template| {
+        try testing.expect(std.mem.indexOf(u8, template.owner_key, ".ora::module/") != null);
+    }
+}
+
+test "source accounting gives imported comptime folds deterministic package identities" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "dep.ora",
+        .data =
+        \\pub inline fn count(limit: u256) -> u256 {
+        \\    var i: u256 = 0;
+        \\    while (i < limit)
+        \\        invariant i <= limit
+        \\    {
+        \\        i = i + 1;
+        \\    }
+        \\    return i;
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "main.ora",
+        .data =
+        \\comptime const dep = @import("./dep.ora");
+        \\
+        \\contract Main {
+        \\    pub fn run() -> u256 { return dep.count(2); }
+        \\}
+        ,
+    });
+
+    const root_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/main.ora", .{tmp.sub_path});
+    defer testing.allocator.free(root_path);
+    var compilation = try compilePackage(root_path);
+    defer compilation.deinit();
+    const const_eval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(const_eval.diagnostics.isEmpty());
+
+    var package_inventory = try source_accounting_from_package.collect(
+        testing.allocator,
+        &compilation.db,
+        compilation.package_id,
+        compilation.root_module_id,
+    );
+    defer package_inventory.deinit();
+    var first = try source_accounting_from_comptime.collectPackageFoldExpansions(
+        testing.allocator,
+        &package_inventory,
+        const_eval,
+        .{},
+    );
+    defer first.deinit();
+    var second = try source_accounting_from_comptime.collectPackageFoldExpansions(
+        testing.allocator,
+        &package_inventory,
+        const_eval,
+        .{},
+    );
+    defer second.deinit();
+
+    try testing.expectEqual(@as(usize, 1), first.expansions.len);
+    const expansion = first.expansions[0];
+    try testing.expectEqual(source_accounting.ExpansionDisposition.fold_committed, expansion.disposition);
+    try testing.expectEqualStrings("dep.ora", expansion.imported_module orelse return error.TestUnexpectedResult);
+    try testing.expectEqualStrings("main.ora::module/contract:Main/function:run", expansion.root_runtime_owner);
+    try testing.expectEqual(@as(usize, 1), expansion.folded_call_site_chain.len);
+    try testing.expectEqualStrings("main.ora", expansion.folded_call_site_chain[0].file);
+    try testing.expectEqual(@as(usize, 1), expansion.generic_bindings.len);
+    try testing.expect(std.mem.indexOf(u8, expansion.generic_bindings[0], "limit") != null);
+    try testing.expect(std.mem.indexOf(u8, expansion.generic_bindings[0], "integer:2") != null);
+    try testing.expectEqualStrings(expansion.identity, second.expansions[0].identity);
+    try testing.expectEqualStrings(expansion.root_runtime_owner, second.expansions[0].root_runtime_owner);
+}
+
+test "source accounting transfers an abandoned fold only to its symbolic boundary" {
+    const source_text =
+        \\contract SpeculativeHavoc {
+        \\    inline fn unknown() -> u256 {
+        \\        var value: u256 = 0;
+        \\        havoc value;
+        \\        return value;
+        \\    }
+        \\    pub fn run() -> u256 { return unknown(); }
+        \\}
+    ;
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const const_eval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(const_eval.diagnostics.isEmpty());
+    try testing.expectEqual(@as(usize, 1), const_eval.formal_folds.len);
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.abandoned, const_eval.formal_folds[0].disposition);
+
+    var package_inventory = try source_accounting_from_package.collect(
+        testing.allocator,
+        &compilation.db,
+        compilation.package_id,
+        compilation.root_module_id,
+    );
+    defer package_inventory.deinit();
+    var comptime_inventory = try source_accounting_from_comptime.collectPackageFoldExpansions(
+        testing.allocator,
+        &package_inventory,
+        const_eval,
+        .{},
+    );
+    defer comptime_inventory.deinit();
+
+    try testing.expectEqual(@as(usize, 2), comptime_inventory.expansions.len);
+    const abandoned = comptime_inventory.expansions[0];
+    const replacement = comptime_inventory.expansions[1];
+    try testing.expectEqual(source_accounting.ExpansionDisposition.fold_abandoned_to_symbolic, abandoned.disposition);
+    try testing.expectEqual(@as(?source_accounting.ExpansionId, replacement.id), abandoned.replacement_expansion_id);
+    try testing.expectEqual(source_accounting.ActivationReason.symbolic_call, replacement.activation);
+    try testing.expectEqual(source_accounting.ExpansionDisposition.symbolic, replacement.disposition);
+    try testing.expectEqualStrings(abandoned.identity, replacement.identity);
+    try testing.expectEqualStrings(abandoned.root_runtime_owner, replacement.root_runtime_owner);
+    try testing.expectEqual(@as(usize, 0), comptime_inventory.uses.len);
+    try testing.expectEqual(@as(usize, 0), comptime_inventory.control_nodes.len);
+    try testing.expectEqual(@as(usize, 0), comptime_inventory.control_edges.len);
+    try testing.expectEqual(@as(usize, 0), comptime_inventory.evidence.folds.len);
+    try testing.expectEqual(@as(usize, 0), comptime_inventory.evidence.predicate_events.len);
+    try testing.expectEqual(@as(usize, 0), comptime_inventory.evidence.handlings.len);
+}
+
+test "source-accounting syntax and spec-clause vocabularies are totality pins" {
+    try testing.expectEqual(@as(usize, 93), std.meta.fields(compiler.syntax.SyntaxKind).len);
+    try testing.expectEqual(@as(usize, 7), std.meta.fields(compiler.ast.SpecClauseKind).len);
+    inline for (std.meta.fields(compiler.ast.SpecClauseKind)) |field| {
+        const clause: compiler.ast.SpecClauseKind = @enumFromInt(field.value);
+        const classification: ?source_accounting.SourceFactKind = switch (clause) {
+            .requires => .requires,
+            .guard => .guard,
+            .ensures => .ensures,
+            .ensures_ok => .ensures_ok,
+            .ensures_err => .ensures_err,
+            .modifies => .modifies,
+            // The AST tag is also used for owner invariants, whose concrete
+            // source node is inventoried separately as ContractInvariantItem
+            // or InvariantClause.
+            .invariant => null,
+        };
+        _ = classification;
+    }
+}
+
+test "source-accounting templates distinguish contract and error exit uses" {
+    const source =
+        \\error Rejected;
+        \\
+        \\contract ExitAccounting {
+        \\    invariant stable(true);
+        \\
+        \\    pub fn choose(flag: bool, value: u256) -> !u256 | Rejected
+        \\        ensures_err(value == value)
+        \\    {
+        \\        if (!flag) {
+        \\            return Rejected;
+        \\        }
+        \\        return value;
+        \\    }
+        \\}
+    ;
+    var compilation = try compileText(source);
+    defer compilation.deinit();
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const tree = try compilation.db.syntaxTree(module.file_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    var syntax_inventory = try source_accounting_from_syntax.collect(
+        testing.allocator,
+        compiler.syntax.rootNode(tree),
+        "test.ora",
+    );
+    defer syntax_inventory.deinit();
+    var sema_inventory = try source_accounting_from_sema.collect(
+        testing.allocator,
+        ast_file,
+        "test.ora",
+        syntax_inventory.declared_sites,
+    );
+    defer sema_inventory.deinit();
+
+    var contract_site_id: ?source_accounting.SiteId = null;
+    var ensures_err_site_id: ?source_accounting.SiteId = null;
+    for (sema_inventory.typed_sites) |site| switch (site.kind) {
+        .contract_invariant => contract_site_id = site.id,
+        .ensures_err => ensures_err_site_id = site.id,
+        else => {},
+    };
+    const contract_id = contract_site_id orelse return error.TestUnexpectedResult;
+    const ensures_err_id = ensures_err_site_id orelse return error.TestUnexpectedResult;
+    var runtime_template: ?source_accounting.OwnerTemplate = null;
+    var call_template: ?source_accounting.OwnerTemplate = null;
+    var comptime_template: ?source_accounting.OwnerTemplate = null;
+    for (sema_inventory.owner_templates) |template| {
+        if (!std.mem.endsWith(u8, template.owner_key, "/function:choose")) continue;
+        switch (template.activation) {
+            .runtime_body => runtime_template = template,
+            .symbolic_call_boundary => call_template = template,
+            .comptime_body => comptime_template = template,
+        }
+    }
+    const template = runtime_template orelse return error.TestUnexpectedResult;
+    var contract_success_targets: usize = 0;
+    var contract_error_targets: usize = 0;
+    var contract_entry_contexts: usize = 0;
+    var ensures_err_error_uses: usize = 0;
+    for (template.uses) |use| {
+        if (use.site_id == contract_id and use.role == .proof_target and use.control_node_slot == 1) contract_success_targets += 1;
+        if (use.site_id == contract_id and use.role == .proof_target and use.control_node_slot == 2) contract_error_targets += 1;
+        if (use.site_id == contract_id and use.role == .assumption_context and use.control_node_slot == 0) contract_entry_contexts += 1;
+        if (use.site_id == ensures_err_id and use.control_node_slot == 2) ensures_err_error_uses += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), contract_success_targets);
+    try testing.expectEqual(@as(usize, 1), contract_error_targets);
+    try testing.expectEqual(@as(usize, 1), contract_entry_contexts);
+    try testing.expectEqual(@as(usize, 1), ensures_err_error_uses);
+
+    const boundary = call_template orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), countTemplateUses(boundary, ensures_err_id, .assumption_context));
+    try testing.expectEqual(@as(usize, 0), countTemplateUses(boundary, contract_id, .proof_target));
+
+    const concrete = comptime_template orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), countTemplateUses(concrete, ensures_err_id, .proof_target));
+    try testing.expectEqual(@as(usize, 1), countTemplateUses(concrete, ensures_err_id, .assumption_context));
+}
+
+fn countTemplateUses(
+    template: source_accounting.OwnerTemplate,
+    site_id: source_accounting.SiteId,
+    role: source_accounting.UseRole,
+) usize {
+    var count: usize = 0;
+    for (template.uses) |use| count += @intFromBool(use.site_id == site_id and use.role == role);
+    return count;
+}
+
+test "HIR formal operations retain structural source-fact and runtime-owner identities" {
+    const source =
+        \\pub fn checked(limit: u256) -> u256
+        \\    requires limit > 0
+        \\    ensures result > 0
+        \\{
+        \\    var i: u256 = 0;
+        \\    while (i < limit)
+        \\        invariant i <= limit
+        \\    {
+        \\        i = i + 1;
+        \\    }
+        \\    return limit;
+        \\}
+    ;
+    var compilation = try compileText(source);
+    defer compilation.deinit();
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.source_module_path"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.source_owner_key = \"module/function:checked\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.source_template_activation = \"runtime_body\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 3, "ora.source_fact_id"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.source_fact_kind = \"requires\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.source_fact_kind = \"ensures\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.source_fact_kind = \"loop_invariant\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"proof_target\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"assumption_context\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"runtime_condition\""));
+
+    var formal = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+    defer formal.deinit();
+    try testing.expectEqual(@as(usize, 1), formal.runtime_owner_bindings.len);
+    try testing.expectEqual(@as(usize, 1), formal.runtime_check_producers.len);
+    const runtime_owner = formal.runtime_owner_bindings[0];
+    try testing.expectEqualStrings("test.ora", runtime_owner.module_path);
+    try testing.expectEqualStrings("module/function:checked", runtime_owner.owner_key);
+    try testing.expectEqualStrings("runtime_body", runtime_owner.template_activation);
+    try testing.expectEqual(@as(usize, 0), runtime_owner.specialization_bindings.len);
+    try testing.expect(runtime_owner.trait_implementation == null);
+    try testing.expect(runtime_owner.trait_method == null);
+    try testing.expectEqual(@as(usize, 4), formal.source_fact_bindings.len);
+    var requires_fact_id: ?u32 = null;
+    var requires_binding_count: usize = 0;
+    var saw_runtime_requires = false;
+    var runtime_requires_id: ?u32 = null;
+    for (formal.source_fact_bindings) |binding| {
+        try testing.expectEqualStrings("module/function:checked", binding.owner_key orelse return error.TestUnexpectedResult);
+        try testing.expectEqualStrings("runtime_body", binding.template_activation orelse return error.TestUnexpectedResult);
+        if (std.mem.eql(u8, binding.kind, "requires")) {
+            requires_binding_count += 1;
+            if (requires_fact_id) |expected| {
+                try testing.expectEqual(expected, binding.source_fact_id);
+            } else requires_fact_id = binding.source_fact_id;
+            saw_runtime_requires = saw_runtime_requires or binding.runtime_check_present;
+            if (binding.runtime_check_ids.len != 0) {
+                try testing.expectEqual(@as(usize, 1), binding.runtime_check_ids.len);
+                runtime_requires_id = binding.runtime_check_ids[0];
+            }
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), requires_binding_count);
+    try testing.expect(saw_runtime_requires);
+    try testing.expectEqual(formal.runtime_check_producers[0].id, runtime_requires_id.?);
+
+    var package_inventory = try source_accounting_from_package.collect(
+        testing.allocator,
+        &compilation.db,
+        compilation.package_id,
+        compilation.root_module_id,
+    );
+    defer package_inventory.deinit();
+    var runtime_inventory = try source_accounting_from_runtime.collect(
+        testing.allocator,
+        &package_inventory,
+        formal.runtime_owner_bindings,
+        .{},
+    );
+    defer runtime_inventory.deinit();
+    try testing.expectEqual(@as(usize, 1), runtime_inventory.expansions.len);
+    try testing.expectEqual(@as(usize, 5), runtime_inventory.uses.len);
+    try testing.expectEqual(@as(usize, 1), runtime_inventory.bindings.len);
+    try testing.expectEqual(
+        runtime_inventory.expansions[0].id,
+        runtime_inventory.expansionForOwner(
+            "test.ora",
+            "module/function:checked",
+            .runtime_body,
+            "checked",
+            &.{},
+            null,
+            null,
+        ).?,
+    );
+    try testing.expectEqual(
+        package_inventory.inventory.owner_templates[0].control_nodes.len,
+        runtime_inventory.control_nodes.len,
+    );
+    try testing.expectEqual(
+        package_inventory.inventory.owner_templates[0].control_edges.len,
+        runtime_inventory.control_edges.len,
+    );
+
+    var symbolic_bindings = try source_accounting_from_runtime.collectSymbolicBindings(
+        testing.allocator,
+        &package_inventory,
+        &runtime_inventory,
+        &formal,
+    );
+    defer symbolic_bindings.deinit();
+    try testing.expectEqual(@as(usize, 5), symbolic_bindings.bindings.len);
+    var mlir_evidence = try source_accounting_from_mlir.collect(
+        testing.allocator,
+        formal.set,
+        symbolic_bindings.bindings,
+        symbolic_bindings.producers,
+    );
+    defer mlir_evidence.deinit();
+    const prepared_queries = try testing.allocator.alloc(
+        source_accounting_from_z3.PreparedQueryIdentity,
+        formal.set.queries.len,
+    );
+    defer testing.allocator.free(prepared_queries);
+    for (formal.set.queries, prepared_queries, 0..) |query, *prepared, index| {
+        prepared.* = .{
+            .producer_id = @intCast(index + 1),
+            .formal_query_id = query.id,
+            .kind = switch (query.kind) {
+                .base, .obligation => .obligation,
+                .loop_invariant_step => .loop_invariant_step,
+                .loop_body_safety => .loop_body_safety,
+                .loop_invariant_post => .loop_invariant_post,
+                .guard_satisfy => .guard_satisfy,
+                .guard_violate => .guard_violate,
+            },
+        };
+    }
+    var prepared_evidence = try source_accounting_from_z3.bindPreparedQueries(
+        testing.allocator,
+        formal.set,
+        symbolic_bindings.bindings,
+        mlir_evidence.evidence,
+        prepared_queries,
+    );
+    defer prepared_evidence.deinit();
+    const manifest: source_accounting.Manifest = .{
+        .inventory = .{
+            .declared_sites = package_inventory.inventory.declared_sites,
+            .typed_sites = package_inventory.inventory.typed_sites,
+            .owner_templates = package_inventory.inventory.owner_templates,
+            .expansions = runtime_inventory.expansions,
+            .uses = runtime_inventory.uses,
+            .control_nodes = runtime_inventory.control_nodes,
+            .control_edges = runtime_inventory.control_edges,
+        },
+        .symbolic = prepared_evidence.evidence,
+    };
+    var decision = try source_accounting_gate.decide(testing.allocator, .verified_full, manifest);
+    defer decision.deinit();
+    try testing.expectEqual(source_accounting_gate.Decision.rejected, decision.decision);
+    try testing.expectEqual(
+        @as(?source_accounting_gate.FailureCode, .missing_symbolic_query),
+        decision.primary_failure,
+    );
+}
+
+test "production source-accounting pipeline accepts a runtime loop with actual verifier queries" {
+    const source =
+        \\pub fn slice(limit: u256) -> u256 {
+        \\    var i: u256 = 0;
+        \\    while (i < limit)
+        \\        invariant i <= limit
+        \\    {
+        \\        i = i + 1;
+        \\    }
+        \\    return i;
+        \\}
+    ;
+    var compilation = try compileText(source);
+    defer compilation.deinit();
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+
+    var formal = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+    defer formal.deinit();
+    var pass = try z3_verification.VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    const z3_bindings = try test_helpers.z3FormalQueryBindingsFromFormalForTest(
+        testing.allocator,
+        formal.query_bindings,
+    );
+    defer testing.allocator.free(z3_bindings);
+    pass.setFormalQueryBindings(z3_bindings);
+    var manifest = try pass.collectPreparedQueryManifest(hir_result.module.raw_module);
+    defer manifest.deinit();
+    var prepared = try source_accounting_from_z3.collectPreparedIdentity(testing.allocator, manifest.source_accounting_rows);
+    defer prepared.deinit(testing.allocator);
+
+    var saw_obligation = false;
+    var saw_step = false;
+    for (prepared.queries) |query| {
+        if (query.kind == .obligation) saw_obligation = true;
+        if (query.kind == .loop_invariant_step) saw_step = true;
+    }
+    try testing.expect(saw_obligation);
+    try testing.expect(saw_step);
+
+    const const_eval = try compilation.db.constEval(compilation.root_module_id);
+    var result = try source_accounting_pipeline.run(
+        testing.allocator,
+        &compilation.db,
+        compilation.package_id,
+        compilation.root_module_id,
+        const_eval,
+        &formal,
+        .verified_full,
+        prepared.view(),
+    );
+    defer result.deinit();
+    try testing.expectEqual(source_accounting_gate.Decision.accepted, result.finished.decision);
+    try testing.expectEqual(@as(usize, 0), result.finished.failures.len);
+    try testing.expect(std.mem.containsAtLeast(u8, result.finished.report, 1, "\"kind\":\"loop_invariant_step\""));
+}
+
+test "production source-accounting pipeline binds abandoned-fold call-boundary queries" {
+    const source =
+        \\contract BoundaryAccounting {
+        \\    storage var saved: u256;
+        \\
+        \\    fn checked() -> u256
+        \\        requires saved < 100
+        \\        requires saved != 50
+        \\        ensures result == 7
+        \\        ensures result > 0
+        \\    {
+        \\        saved = saved + 1;
+        \\        return 7;
+        \\    }
+        \\
+        \\    pub fn run() -> u256 {
+        \\        return checked();
+        \\    }
+        \\}
+    ;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "main.ora", .data = source });
+    const root_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/main.ora", .{tmp.sub_path});
+    defer testing.allocator.free(root_path);
+    var compilation = try compilePackage(root_path);
+    defer compilation.deinit();
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+
+    var formal = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+    defer formal.deinit();
+    var pass = try z3_verification.VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    const z3_bindings = try test_helpers.z3FormalQueryBindingsFromFormalForTest(
+        testing.allocator,
+        formal.query_bindings,
+    );
+    defer testing.allocator.free(z3_bindings);
+    pass.setFormalQueryBindings(z3_bindings);
+    var manifest = try pass.collectPreparedQueryManifest(hir_result.module.raw_module);
+    defer manifest.deinit();
+    var prepared = try source_accounting_from_z3.collectPreparedIdentity(testing.allocator, manifest.source_accounting_rows);
+    defer prepared.deinit(testing.allocator);
+
+    var saw_target = false;
+    var saw_context = false;
+    var boundary_source_fact_ids = std.AutoHashMap(u32, void).init(testing.allocator);
+    defer boundary_source_fact_ids.deinit();
+    for (prepared.boundary_queries) |query| {
+        try testing.expectEqualStrings("checked", query.callee_name);
+        try testing.expect(!boundary_source_fact_ids.contains(query.source_fact_id));
+        try boundary_source_fact_ids.put(query.source_fact_id, {});
+        switch (query.role) {
+            .proof_target => saw_target = true,
+            .assumption_context => saw_context = true,
+            else => return error.TestUnexpectedResult,
+        }
+    }
+    try testing.expect(saw_target);
+    try testing.expect(saw_context);
+    try testing.expectEqual(@as(usize, 4), prepared.boundary_queries.len);
+
+    const const_eval = try compilation.db.constEval(compilation.root_module_id);
+    var missing = try source_accounting_pipeline.run(
+        testing.allocator,
+        &compilation.db,
+        compilation.package_id,
+        compilation.root_module_id,
+        const_eval,
+        &formal,
+        .verified_full,
+        .{
+            .queries = prepared.queries,
+            .boundary_queries = &.{},
+            .runtime_function_names = prepared.runtime_function_names,
+        },
+    );
+    defer missing.deinit();
+    try testing.expectEqual(source_accounting_gate.Decision.rejected, missing.finished.decision);
+    try testing.expectEqual(
+        @as(?source_accounting_gate.FailureCode, .missing_symbolic_obligation),
+        missing.finished.primary_failure,
+    );
+
+    var verified = try source_accounting_pipeline.run(
+        testing.allocator,
+        &compilation.db,
+        compilation.package_id,
+        compilation.root_module_id,
+        const_eval,
+        &formal,
+        .verified_full,
+        prepared.view(),
+    );
+    defer verified.deinit();
+    try testing.expectEqual(source_accounting_gate.Decision.accepted, verified.finished.decision);
+    try testing.expect(std.mem.containsAtLeast(u8, verified.finished.report, 1, "\"activation\":\"symbolic_call\""));
+    try testing.expect(std.mem.containsAtLeast(u8, verified.finished.report, 1, "\"kind\":\"assumption_incorporated\""));
+    var report = try std.json.parseFromSlice(std.json.Value, testing.allocator, verified.finished.report, .{});
+    defer report.deinit();
+    const report_object = report.value.object;
+    const expansions = (report_object.get("expansions") orelse return error.TestUnexpectedResult).array.items;
+    var boundary_expansion_ids = std.AutoHashMap(i64, void).init(testing.allocator);
+    defer boundary_expansion_ids.deinit();
+    for (expansions) |expansion| {
+        const object = expansion.object;
+        const activation = (object.get("activation") orelse return error.TestUnexpectedResult).string;
+        if (!std.mem.eql(u8, activation, "symbolic_call")) continue;
+        const id = (object.get("id") orelse return error.TestUnexpectedResult).integer;
+        try boundary_expansion_ids.put(id, {});
+    }
+    const uses = (report_object.get("uses") orelse return error.TestUnexpectedResult).array.items;
+    var boundary_use_ids = std.AutoHashMap(i64, void).init(testing.allocator);
+    defer boundary_use_ids.deinit();
+    for (uses) |use| {
+        const object = use.object;
+        const expansion_id = (object.get("expansion_id") orelse return error.TestUnexpectedResult).integer;
+        if (!boundary_expansion_ids.contains(expansion_id)) continue;
+        const id = (object.get("id") orelse return error.TestUnexpectedResult).integer;
+        try boundary_use_ids.put(id, {});
+    }
+    var accounted_boundary_uses: usize = 0;
+    const handlings = (report_object.get("handlings") orelse return error.TestUnexpectedResult).array.items;
+    for (handlings) |handling| {
+        const object = handling.object;
+        const use_id = (object.get("use_id") orelse return error.TestUnexpectedResult).integer;
+        if (!boundary_use_ids.contains(use_id)) continue;
+        const query_ids = (object.get("query_ids") orelse return error.TestUnexpectedResult).array.items;
+        try testing.expectEqual(@as(usize, 1), query_ids.len);
+        accounted_boundary_uses += 1;
+    }
+    try testing.expectEqual(@as(usize, 4), accounted_boundary_uses);
+
+    var unverified = try source_accounting_pipeline.run(
+        testing.allocator,
+        &compilation.db,
+        compilation.package_id,
+        compilation.root_module_id,
+        const_eval,
+        &formal,
+        .unverified_emit,
+        null,
+    );
+    defer unverified.deinit();
+    try testing.expectEqual(source_accounting_gate.Decision.accepted, unverified.finished.decision);
+    try testing.expect(std.mem.containsAtLeast(u8, unverified.finished.report, 1, "\"kind\":\"verification_disabled\""));
+}
+
+test "production source-accounting pipeline preserves guard and modifies evidence" {
+    const source =
+        \\contract AccountingSurface {
+        \\    storage var balances: map<u256, u256>;
+        \\
+        \\    pub fn guarded(y: u256) -> bool
+        \\        guard y > 0
+        \\    {
+        \\        return true;
+        \\    }
+        \\
+        \\    pub fn copy(user: u256, other: u256)
+        \\        modifies balances[user]
+        \\        modifies balances[other]
+        \\        requires user != other
+        \\    {
+        \\        balances[user] = balances[other];
+        \\    }
+        \\}
+    ;
+    var compilation = try compileText(source);
+    defer compilation.deinit();
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+
+    var formal = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+    defer formal.deinit();
+    var modifies_binding_count: usize = 0;
+    for (formal.source_fact_bindings) |binding| {
+        if (!std.mem.eql(u8, binding.kind, "modifies")) continue;
+        modifies_binding_count += 1;
+        try testing.expect(binding.obligation_ids.len > 0);
+    }
+    try testing.expectEqual(@as(usize, 2), modifies_binding_count);
+
+    var pass = try z3_verification.VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    const z3_bindings = try test_helpers.z3FormalQueryBindingsFromFormalForTest(
+        testing.allocator,
+        formal.query_bindings,
+    );
+    defer testing.allocator.free(z3_bindings);
+    pass.setFormalQueryBindings(z3_bindings);
+    var manifest = try pass.collectPreparedQueryManifest(hir_result.module.raw_module);
+    defer manifest.deinit();
+    var saw_guard_accounting_query = false;
+    for (manifest.rows) |row| {
+        if (row.obligation_kind != .Guard) continue;
+        saw_guard_accounting_query = true;
+        try testing.expectEqual(z3_verification.FormalMatchStatus.not_applicable, row.formal_match_status);
+        try testing.expect(row.formal_query_id == null);
+        try testing.expectEqual(z3_verification.FormalMatchStatus.matched, row.accounting_match_status);
+        try testing.expect(row.accounting_query_id != null);
+    }
+    try testing.expect(saw_guard_accounting_query);
+
+    var prepared = try source_accounting_from_z3.collectPreparedIdentity(testing.allocator, manifest.source_accounting_rows);
+    defer prepared.deinit(testing.allocator);
+    const const_eval = try compilation.db.constEval(compilation.root_module_id);
+    var result = try source_accounting_pipeline.run(
+        testing.allocator,
+        &compilation.db,
+        compilation.package_id,
+        compilation.root_module_id,
+        const_eval,
+        &formal,
+        .verified_full,
+        prepared.view(),
+    );
+    defer result.deinit();
+    try testing.expectEqual(source_accounting_gate.Decision.accepted, result.finished.decision);
+    try testing.expect(std.mem.containsAtLeast(u8, result.finished.report, 1, "\"frame_directive\":2"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.finished.report, 1, "\"frame_validated\":2"));
+}
+
+test "production source-accounting pipeline preserves impl contract and collapsed switch identities" {
+    const source =
+        \\trait Priced { fn price(self) -> u256; }
+        \\struct Quote { amount: u256, }
+        \\impl Priced for Quote {
+        \\    fn price(self) -> u256
+        \\        requires(self.amount > 0)
+        \\    { return self.amount; }
+        \\}
+        \\contract AccountingIdentity {
+        \\    storage var state: u256 = 0;
+        \\    invariant bounded(state <= 100);
+        \\    pub fn run(value: u256)
+        \\        modifies()
+        \\    {
+        \\        var scratch: u256 = 0;
+        \\        havoc scratch;
+        \\        switch (value) {
+        \\            0 => { },
+        \\            1 => { },
+        \\            2 => { },
+        \\            else => { }
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source);
+    defer compilation.deinit();
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+
+    var formal = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+    defer formal.deinit();
+    var saw_contract_invariant_scope = false;
+    var saw_empty_modifies_result = false;
+    for (formal.source_fact_bindings) |binding| {
+        if (std.mem.eql(u8, binding.kind, "contract_invariant")) {
+            saw_contract_invariant_scope = binding.runtime_symbol == null and
+                std.mem.eql(u8, binding.owner_key orelse "", "module/contract:AccountingIdentity");
+        }
+        if (std.mem.eql(u8, binding.kind, "modifies")) {
+            saw_empty_modifies_result = binding.obligation_ids.len == 1;
+        }
+    }
+    try testing.expect(saw_contract_invariant_scope);
+    try testing.expect(saw_empty_modifies_result);
+    try testing.expectEqual(@as(usize, 1), formal.state_effect_producers.len);
+    const const_eval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(const_eval.diagnostics.isEmpty());
+    var result = try source_accounting_pipeline.run(
+        testing.allocator,
+        &compilation.db,
+        compilation.package_id,
+        compilation.root_module_id,
+        const_eval,
+        &formal,
+        .unverified_emit,
+        null,
+    );
+    defer result.deinit();
+    try testing.expectEqual(source_accounting_gate.Decision.accepted, result.finished.decision);
 }
 
 test "formal report coverage includes representative source contracts" {
@@ -7876,8 +8898,8 @@ test "formal report coverage includes representative source contracts" {
     {
         const report = try dumpManifestToOwnedString(testing.allocator, logical.set);
         defer testing.allocator.free(report);
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":4"));
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":4"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":5"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":5"));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"role\":\"ensures\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"role\":\"assert\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"arithmetic_safety\":\"subtraction_overflow\""));
@@ -7892,7 +8914,7 @@ test "formal report coverage includes representative source contracts" {
     {
         const report = try dumpManifestToOwnedString(testing.allocator, resource.set);
         defer testing.allocator.free(report);
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":4"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":5"));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"effect_frame\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"resource\",\"op\":\"move\",\"domain\":\"TokenUnit\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"property\":\"conservation\""));
@@ -7904,7 +8926,7 @@ test "formal report coverage includes representative source contracts" {
     {
         const report = try dumpManifestToOwnedString(testing.allocator, quantifier.set);
         defer testing.allocator.free(report);
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":4"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":5"));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"quantifier\",\"quantifier\":\"forall\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"binder_type\":{\"tag\":\"spelling\",\"value\":\"u256\"}"));
     }

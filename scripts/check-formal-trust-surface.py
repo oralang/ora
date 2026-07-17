@@ -9,6 +9,7 @@ import re
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 FORMAL_ROOT = ROOT / "formal" / "Ora"
+TRANSIENT_TEST_MODULE_DIRS = frozenset({"B6StorageFixture", "ProofCheckScratch"})
 
 LEAN_IDENT = r"[A-Za-z_][A-Za-z0-9_'?!]*"
 LEAN_DOTTED_IDENT = rf"{LEAN_IDENT}(?:\.{LEAN_IDENT})*"
@@ -62,6 +63,9 @@ def discover_targets() -> list[str]:
     targets: list[str] = []
     seen: set[str] = set()
     for path in sorted(FORMAL_ROOT.rglob("*.lean")):
+        relative_parts = path.relative_to(FORMAL_ROOT).parts
+        if relative_parts and relative_parts[0] in TRANSIENT_TEST_MODULE_DIRS:
+            continue
         namespace_stack: list[str] = []
         in_block_comment = False
         for raw_line in path.read_text(encoding="utf-8").splitlines():

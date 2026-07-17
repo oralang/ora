@@ -12,13 +12,16 @@ const std = @import("std");
 pub const Id = u32;
 pub const TermId = u32;
 
-pub const obligation_dump_schema_version: u32 = 4;
+pub const obligation_dump_schema_version: u32 = 5;
 pub const proof_certificate_schema_version: u32 = 1;
 
 pub const ObligationSet = struct {
     obligations: []const Obligation = &.{},
     assumptions: []const Assumption = &.{},
     queries: []const VerificationQuery = &.{},
+    /// Information-only loop summaries. L1 deliberately does not make these
+    /// proof targets or include them in artifact authorization decisions.
+    loop_summaries: []const LoopSummaryRow = &.{},
     proof_artifacts: []const ProofArtifact = &.{},
     diagnostics: []const ObligationDiagnostic = &.{},
     terms: []const Term = &.{},
@@ -437,6 +440,7 @@ pub const ArtifactBlockReason = enum(u8) {
     failed_query,
     missing_proof,
     lean_required_failure,
+    source_accounting_failure,
 };
 
 fn containsId(ids: []const Id, needle: Id) bool {
@@ -577,6 +581,77 @@ pub const BackendComponent = enum(u8) {
     oratosir,
     sinora,
     artifact_policy,
+};
+
+/// Backend-neutral data required to denote a loop proof in a later lane.
+/// Rows are emitted before proof eligibility exists, so unresolved identities
+/// and unsupported shapes remain explicit in `unsupported_reasons`.
+pub const LoopSummaryRow = struct {
+    id: Id,
+    owner: Owner,
+    source: SourceRef,
+    phase: Phase,
+    origin: Origin,
+    loop_source_op_id: ?u32,
+    loop_kind: LoopKind,
+    variables: []const LoopVariable = &.{},
+    init_formulas: []const FormulaRef = &.{},
+    guard_formula: ?FormulaRef = null,
+    invariant_formulas: []const FormulaRef = &.{},
+    step_assignments: []const LoopStepAssignment = &.{},
+    post_formulas: []const FormulaRef = &.{},
+    query_ids: LoopQueryIds = .{},
+    unsupported_reasons: []const LoopUnsupportedReason = &.{},
+
+    pub fn projectionSupported(self: LoopSummaryRow) bool {
+        return self.unsupported_reasons.len == 0;
+    }
+};
+
+pub const LoopKind = enum(u8) {
+    scf_while,
+    scf_for,
+    other,
+};
+
+pub const LoopVariable = struct {
+    index: u32,
+    id: ?FreeVarId = null,
+    name: ?[]const u8 = null,
+    ty: TypeRef,
+};
+
+pub const LoopStepAssignment = struct {
+    variable_index: u32,
+    target: ?FreeVarId = null,
+    value: FormulaRef,
+};
+
+pub const LoopQueryIds = struct {
+    base: []const Id = &.{},
+    step: []const Id = &.{},
+    body_safety: []const Id = &.{},
+    post: []const Id = &.{},
+};
+
+pub const LoopUnsupportedReason = enum(u8) {
+    loop_has_storage_write,
+    loop_has_external_call,
+    loop_has_resource_operation,
+    loop_has_break_or_continue,
+    loop_has_error_control_flow,
+    loop_has_nested_loop,
+    loop_has_branching_body,
+    loop_variable_not_u256,
+    loop_update_not_scalar_assignment,
+    loop_formula_unsupported,
+    loop_identity_missing,
+    loop_query_not_owner_scoped,
+    loop_guard_missing,
+    loop_invariant_missing,
+    loop_kind_unsupported,
+    loop_duplicate_update,
+    loop_update_target_not_loop_variable,
 };
 
 pub const SourceRef = struct {
@@ -1273,6 +1348,8 @@ test "manifest enum tags stay byte-sized" {
         ArtifactBlockReason,
         OwnerTag,
         BackendComponent,
+        LoopKind,
+        LoopUnsupportedReason,
         OriginTag,
         EffectAccess,
         KindTag,

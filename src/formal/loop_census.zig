@@ -39,7 +39,7 @@ const LoopRecord = struct {
     column: u32,
     function_name: []const u8,
     loop_form: []const u8,
-    invariants: []const ast.ExprId,
+    invariants: []const ast.InvariantClause,
     is_nested: bool,
     effect_found: bool,
     writes_storage: bool,
@@ -271,7 +271,7 @@ fn buildLoopRecord(
     const LoopData = struct {
         range: source.TextRange,
         form: []const u8,
-        invariants: []const ast.ExprId,
+        invariants: []const ast.InvariantClause,
         condition: ?ast.ExprId,
         for_stmt: ?ast.ForStmt,
     };
@@ -334,8 +334,8 @@ fn buildLoopRecord(
     defer invariant_support.deinit(arena);
     var all_invariants_denotable = true;
     var first_unsupported_reason: ?[]const u8 = null;
-    for (loop_data.invariants) |expr_id| {
-        const expr_range = source.rangeOf(ast_file.expression(expr_id).*);
+    for (loop_data.invariants) |invariant| {
+        const expr_range = invariant.range;
         const expr_loc = sources.lineColumn(.{ .file_id = file_id, .range = expr_range });
         const support = classifyInvariantSupport(
             formal_set,

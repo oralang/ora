@@ -1620,6 +1620,7 @@ const FunctionLowerer = struct {
         kind: ast.SpecClauseKind,
         expr: ast.ExprId,
         range: source.TextRange,
+        source_fact_id: ?ast.SourceFactId = null,
         verification_context: ?[]const u8 = null,
         pattern_aliases: []const PatternAlias = &.{},
     };

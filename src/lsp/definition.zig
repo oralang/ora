@@ -136,8 +136,8 @@ const Resolver = struct {
 
         switch (item) {
             .Contract => |contract_decl| {
-                for (contract_decl.invariants) |expr_id| {
-                    if (try self.visitExpr(expr_id)) return true;
+                for (contract_decl.invariants) |invariant| {
+                    if (try self.visitExpr(invariant.predicate)) return true;
                 }
                 for (contract_decl.members) |member_id| {
                     if (try self.visitItem(member_id)) return true;
@@ -242,8 +242,8 @@ const Resolver = struct {
             },
             .While => |while_stmt| {
                 if (try self.visitExpr(while_stmt.condition)) return true;
-                for (while_stmt.invariants) |expr_id| {
-                    if (try self.visitExpr(expr_id)) return true;
+                for (while_stmt.invariants) |invariant| {
+                    if (try self.visitExpr(invariant.predicate)) return true;
                 }
                 if (try self.visitBody(while_stmt.body)) return true;
             },
@@ -253,13 +253,16 @@ const Resolver = struct {
                 if (for_stmt.index_pattern) |index_pattern| {
                     if (self.matchPatternDeclaration(index_pattern)) return true;
                 }
-                for (for_stmt.invariants) |expr_id| {
-                    if (try self.visitExpr(expr_id)) return true;
+                for (for_stmt.invariants) |invariant| {
+                    if (try self.visitExpr(invariant.predicate)) return true;
                 }
                 if (try self.visitBody(for_stmt.body)) return true;
             },
             .Switch => |switch_stmt| {
                 if (try self.visitExpr(switch_stmt.condition)) return true;
+                for (switch_stmt.invariants) |invariant| {
+                    if (try self.visitExpr(invariant.predicate)) return true;
+                }
                 for (switch_stmt.arms) |arm| {
                     if (try self.visitSwitchPattern(arm.pattern)) return true;
                     if (try self.visitBody(arm.body)) return true;
@@ -591,7 +594,7 @@ const DefinitionCollector = struct {
 
         switch (item) {
             .Contract => |contract_decl| {
-                for (contract_decl.invariants) |expr_id| try self.visitExpr(expr_id);
+                for (contract_decl.invariants) |invariant| try self.visitExpr(invariant.predicate);
                 for (contract_decl.members) |member_id| try self.visitItem(member_id);
             },
             .Function => |function_decl| {
@@ -653,18 +656,19 @@ const DefinitionCollector = struct {
             },
             .While => |while_stmt| {
                 try self.visitExpr(while_stmt.condition);
-                for (while_stmt.invariants) |expr_id| try self.visitExpr(expr_id);
+                for (while_stmt.invariants) |invariant| try self.visitExpr(invariant.predicate);
                 try self.visitBody(while_stmt.body);
             },
             .For => |for_stmt| {
                 try self.visitExpr(for_stmt.iterable);
                 try self.appendPatternDeclaration(for_stmt.item_pattern);
                 if (for_stmt.index_pattern) |index_pattern| try self.appendPatternDeclaration(index_pattern);
-                for (for_stmt.invariants) |expr_id| try self.visitExpr(expr_id);
+                for (for_stmt.invariants) |invariant| try self.visitExpr(invariant.predicate);
                 try self.visitBody(for_stmt.body);
             },
             .Switch => |switch_stmt| {
                 try self.visitExpr(switch_stmt.condition);
+                for (switch_stmt.invariants) |invariant| try self.visitExpr(invariant.predicate);
                 for (switch_stmt.arms) |arm| {
                     try self.visitSwitchPattern(arm.pattern);
                     try self.visitBody(arm.body);

@@ -4878,3 +4878,528 @@ test "compiler corpus covers compileError builtin diagnostics" {
     const consteval = try compilation.db.constEval(compilation.root_module_id);
     try testing.expect(diagnosticMessagesContain(&consteval.diagnostics, "corpus intentional failure"));
 }
+
+test "compiler rejects non-boolean loop invariants during semantic analysis" {
+    const source_text =
+        \\contract InvariantTypeRepro {
+        \\    pub fn run() -> u256 {
+        \\        var i: u256 = 0;
+        \\        while (i < 1)
+        \\            invariant 7
+        \\        {
+        \\            i = i + 1;
+        \\        }
+        \\        return i;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "loop invariant condition must be 'bool', found 'integer'"));
+}
+
+test "compiler commits a fold only after every loop invariant checkpoint is true" {
+    const source_text =
+        \\contract CheckedFold {
+        \\    inline fn count() -> u256 {
+        \\        var i: u256 = 0;
+        \\        while (i < 3)
+        \\            invariant i <= 3
+        \\        {
+        \\            i = i + 1;
+        \\        }
+        \\        return i;
+        \\    }
+        \\    pub fn run() -> u256 { return count(); }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(consteval.diagnostics.isEmpty());
+    try testing.expectEqual(@as(usize, 1), consteval.formal_folds.len);
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.committed, consteval.formal_folds[0].disposition);
+    try testing.expectEqualStrings("module/contract:CheckedFold/function:count", consteval.formal_folds[0].callee_owner_key);
+    try testing.expectEqualStrings("module/contract:CheckedFold/function:run", consteval.formal_folds[0].root_runtime_owner_key);
+    try testing.expectEqual(@as(usize, 0), consteval.formal_folds[0].generic_bindings.len);
+    var predicate_checks: usize = 0;
+    for (consteval.formal_folds[0].events) |event| if (event.kind == .predicate_check) {
+        predicate_checks += 1;
+        try testing.expect(event.predicate_value != null);
+        try testing.expect(event.predicate_value.?);
+        try testing.expect(event.source_fact_id != null);
+    };
+    try testing.expectEqual(@as(usize, 4), predicate_checks);
+}
+
+test "compiler checks loop invariants in a heap-backed CtValue fold" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\contract CtValueInvariant {
+        \\    inline fn checked() -> !u256 | Failure {
+        \\        var i: u256 = 0;
+        \\        while (i < 1)
+        \\            invariant i <= 1
+        \\        { i = i + 1; }
+        \\        return Failure(7);
+        \\    }
+        \\    pub fn run() -> !u256 | Failure { return checked(); }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(consteval.diagnostics.isEmpty());
+    try testing.expectEqual(@as(usize, 1), consteval.formal_folds.len);
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.committed, consteval.formal_folds[0].disposition);
+    var invariant_checks: usize = 0;
+    for (consteval.formal_folds[0].events) |event| {
+        if (event.kind != .predicate_check) continue;
+        invariant_checks += 1;
+        try testing.expect(event.predicate_value != null);
+        try testing.expect(event.predicate_value.?);
+        try testing.expect(event.source_fact_id != null);
+    }
+    try testing.expectEqual(@as(usize, 2), invariant_checks);
+}
+
+test "compiler rejects a false invariant at the initial concrete loop head" {
+    const source_text =
+        \\contract FalseInitialInvariant {
+        \\    inline fn broken() -> u256 {
+        \\        var i: u256 = 0;
+        \\        while (i < 0)
+        \\            invariant i == 1
+        \\        { i = i + 1; }
+        \\        return i;
+        \\    }
+        \\    pub fn run() -> u256 { return broken(); }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&consteval.diagnostics, "compile-time formal predicate is false: loop invariant"));
+    try testing.expectEqual(@as(usize, 1), consteval.formal_folds.len);
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.rejected, consteval.formal_folds[0].disposition);
+    try testing.expectEqual(@as(usize, 0), consteval.formal_folds[0].events.len);
+}
+
+test "compiler rejects a false invariant on a concrete continue backedge" {
+    const source_text =
+        \\contract FalseContinueInvariant {
+        \\    inline fn broken() -> u256 {
+        \\        var i: u256 = 0;
+        \\        while (i < 1)
+        \\            invariant i == 0
+        \\        {
+        \\            i = i + 1;
+        \\            continue;
+        \\        }
+        \\        return i;
+        \\    }
+        \\    pub fn run() -> u256 { return broken(); }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&consteval.diagnostics, "compile-time formal predicate is false: loop invariant"));
+    try testing.expectEqual(@as(usize, 1), consteval.formal_folds.len);
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.rejected, consteval.formal_folds[0].disposition);
+    try testing.expectEqual(@as(usize, 0), consteval.formal_folds[0].events.len);
+}
+
+test "compiler does not require a loop invariant after a concrete break exit" {
+    const source_text =
+        \\contract BreakInvariant {
+        \\    inline fn checked() -> u256 {
+        \\        var i: u256 = 0;
+        \\        while (i < 1)
+        \\            invariant i == 0
+        \\        {
+        \\            i = 1;
+        \\            break;
+        \\        }
+        \\        return i;
+        \\    }
+        \\    pub fn run() -> u256 { return checked(); }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(consteval.diagnostics.isEmpty());
+    try testing.expectEqual(@as(usize, 1), consteval.formal_folds.len);
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.committed, consteval.formal_folds[0].disposition);
+}
+
+test "compiler rejects false reached assertions in folded calls" {
+    const assertion_source =
+        \\contract FalseAssertion {
+        \\    inline fn broken() -> u256 {
+        \\        assert(false);
+        \\        return 1;
+        \\    }
+        \\    pub fn run() -> u256 { return broken(); }
+        \\}
+    ;
+    var assertion_compilation = try compileText(assertion_source);
+    defer assertion_compilation.deinit();
+    const assertion_eval = try assertion_compilation.db.constEval(assertion_compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&assertion_eval.diagnostics, "compile-time formal predicate is false: assertion"));
+    try testing.expectEqual(@as(usize, 1), assertion_eval.formal_folds.len);
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.rejected, assertion_eval.formal_folds[0].disposition);
+}
+
+test "compiler checks assumptions preconditions guards and postconditions in concrete calls" {
+    const passing_source =
+        \\contract ConcreteClauses {
+        \\    inline fn checked(value: u256) -> u256
+        \\        requires value > 0
+        \\        guard value < 3
+        \\        ensures result == 2
+        \\    {
+        \\        assume(value == 2);
+        \\        return value;
+        \\    }
+        \\    pub fn run() -> u256 { return checked(2); }
+        \\}
+    ;
+    var passing = try compileText(passing_source);
+    defer passing.deinit();
+    const passing_eval = try passing.db.constEval(passing.root_module_id);
+    try testing.expect(passing_eval.diagnostics.isEmpty());
+    try testing.expectEqual(@as(usize, 1), passing_eval.formal_folds.len);
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.committed, passing_eval.formal_folds[0].disposition);
+    var passing_checks: usize = 0;
+    for (passing_eval.formal_folds[0].events) |event| {
+        if (event.kind == .predicate_check) passing_checks += 1;
+    }
+    try testing.expectEqual(@as(usize, 4), passing_checks);
+
+    const false_assume_source =
+        \\contract FalseAssume {
+        \\    inline fn broken() -> u256 { assume(false); return 1; }
+        \\    pub fn run() -> u256 { return broken(); }
+        \\}
+    ;
+    var false_assume = try compileText(false_assume_source);
+    defer false_assume.deinit();
+    const false_assume_eval = try false_assume.db.constEval(false_assume.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&false_assume_eval.diagnostics, "compile-time formal predicate is false: assumption"));
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.rejected, false_assume_eval.formal_folds[0].disposition);
+
+    const false_requires_source =
+        \\contract FalseRequires {
+        \\    inline fn broken(value: u256) -> u256 requires value > 0 { return value; }
+        \\    pub fn run() -> u256 { return broken(0); }
+        \\}
+    ;
+    var false_requires = try compileText(false_requires_source);
+    defer false_requires.deinit();
+    const false_requires_eval = try false_requires.db.constEval(false_requires.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&false_requires_eval.diagnostics, "compile-time formal predicate is false: requires"));
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.rejected, false_requires_eval.formal_folds[0].disposition);
+
+    const false_ensures_source =
+        \\inline fn broken() -> u256 ensures result == 2 { return 1; }
+        \\comptime const VALUE: u256 = broken();
+        \\pub fn run() -> u256 { return VALUE; }
+    ;
+    var false_ensures = try compileText(false_ensures_source);
+    defer false_ensures.deinit();
+    const false_ensures_eval = try false_ensures.db.constEval(false_ensures.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&false_ensures_eval.diagnostics, "compile-time formal predicate is false: ensures"));
+    try testing.expectEqual(compiler.sema.ComptimeFoldActivation.required, false_ensures_eval.formal_folds[0].activation);
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.rejected, false_ensures_eval.formal_folds[0].disposition);
+
+    const selected_success_source =
+        \\error Failure(code: u256);
+        \\contract SelectedSuccessClause {
+        \\    inline fn checked() -> !u256 | Failure
+        \\        ensures_ok true
+        \\        ensures_err false
+        \\    { return 1; }
+        \\    pub fn run() -> !u256 | Failure { return checked(); }
+        \\}
+    ;
+    var selected_success = try compileText(selected_success_source);
+    defer selected_success.deinit();
+    const selected_success_eval = try selected_success.db.constEval(selected_success.root_module_id);
+    try testing.expect(selected_success_eval.diagnostics.isEmpty());
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.committed, selected_success_eval.formal_folds[0].disposition);
+
+    const false_selected_success_source =
+        \\error Failure(code: u256);
+        \\contract FalseSelectedSuccessClause {
+        \\    inline fn broken() -> !u256 | Failure ensures_ok false { return 1; }
+        \\    pub fn run() -> !u256 | Failure { return broken(); }
+        \\}
+    ;
+    var false_selected_success = try compileText(false_selected_success_source);
+    defer false_selected_success.deinit();
+    const false_selected_success_eval = try false_selected_success.db.constEval(false_selected_success.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&false_selected_success_eval.diagnostics, "compile-time formal predicate is false: ensures_ok"));
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.rejected, false_selected_success_eval.formal_folds[0].disposition);
+
+    const selected_error_source =
+        \\error Failure(code: u256);
+        \\contract SelectedErrorClause {
+        \\    inline fn checked() -> !u256 | Failure
+        \\        ensures_ok false
+        \\        ensures_err true
+        \\    { return Failure(7); }
+        \\    pub fn run() -> !u256 | Failure { return checked(); }
+        \\}
+    ;
+    var selected_error = try compileText(selected_error_source);
+    defer selected_error.deinit();
+    const selected_error_eval = try selected_error.db.constEval(selected_error.root_module_id);
+    try testing.expect(selected_error_eval.diagnostics.isEmpty());
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.committed, selected_error_eval.formal_folds[0].disposition);
+
+    const false_selected_error_source =
+        \\error Failure(code: u256);
+        \\contract FalseSelectedErrorClause {
+        \\    inline fn broken() -> !u256 | Failure ensures_err false { return Failure(7); }
+        \\    pub fn run() -> !u256 | Failure { return broken(); }
+        \\}
+    ;
+    var false_selected_error = try compileText(false_selected_error_source);
+    defer false_selected_error.deinit();
+    const false_selected_error_eval = try false_selected_error.db.constEval(false_selected_error.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&false_selected_error_eval.diagnostics, "compile-time formal predicate is false: ensures_err"));
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.rejected, false_selected_error_eval.formal_folds[0].disposition);
+}
+
+test "compiler checks normal while and all concrete for invariant checkpoints" {
+    const passing_for_source =
+        \\contract CheckedFor {
+        \\    inline fn count() -> u256 {
+        \\        var total: u256 = 0;
+        \\        for (0..3) |_, _|
+        \\            invariant total <= 3
+        \\        { total = total + 1; }
+        \\        return total;
+        \\    }
+        \\    pub fn run() -> u256 { return count(); }
+        \\}
+    ;
+    var passing_for = try compileText(passing_for_source);
+    defer passing_for.deinit();
+    const passing_for_eval = try passing_for.db.constEval(passing_for.root_module_id);
+    try testing.expect(passing_for_eval.diagnostics.isEmpty());
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.committed, passing_for_eval.formal_folds[0].disposition);
+    var for_checks: usize = 0;
+    for (passing_for_eval.formal_folds[0].events) |event| {
+        if (event.kind == .predicate_check) for_checks += 1;
+    }
+    try testing.expectEqual(@as(usize, 4), for_checks);
+
+    const false_while_source =
+        \\contract FalseNormalBackedge {
+        \\    inline fn broken() -> u256 {
+        \\        var i: u256 = 0;
+        \\        while (i < 1) invariant i == 0 { i = i + 1; }
+        \\        return i;
+        \\    }
+        \\    pub fn run() -> u256 { return broken(); }
+        \\}
+    ;
+    var false_while = try compileText(false_while_source);
+    defer false_while.deinit();
+    const false_while_eval = try false_while.db.constEval(false_while.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&false_while_eval.diagnostics, "compile-time formal predicate is false: loop invariant"));
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.rejected, false_while_eval.formal_folds[0].disposition);
+
+    const false_for_source =
+        \\contract FalseForBackedge {
+        \\    inline fn broken() -> u256 {
+        \\        var total: u256 = 0;
+        \\        for (0..1) |_, _| invariant total == 0 { total = 1; continue; }
+        \\        return total;
+        \\    }
+        \\    pub fn run() -> u256 { return broken(); }
+        \\}
+    ;
+    var false_for = try compileText(false_for_source);
+    defer false_for.deinit();
+    const false_for_eval = try false_for.db.constEval(false_for.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&false_for_eval.diagnostics, "compile-time formal predicate is false: loop invariant"));
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.rejected, false_for_eval.formal_folds[0].disposition);
+
+    const break_for_source =
+        \\contract BreakFor {
+        \\    inline fn checked() -> u256 {
+        \\        var total: u256 = 0;
+        \\        for (0..2) |_, _| invariant total == 0 { total = 1; break; }
+        \\        return total;
+        \\    }
+        \\    pub fn run() -> u256 { return checked(); }
+        \\}
+    ;
+    var break_for = try compileText(break_for_source);
+    defer break_for.deinit();
+    const break_for_eval = try break_for.db.constEval(break_for.root_module_id);
+    try testing.expect(break_for_eval.diagnostics.isEmpty());
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.committed, break_for_eval.formal_folds[0].disposition);
+}
+
+test "compiler checks labeled switch reentry and nested labeled loop exits" {
+    const switch_source =
+        \\contract CheckedSwitch {
+        \\    inline fn dispatch() -> u256 {
+        \\        var visits: u256 = 0;
+        \\        state: switch (0) invariant visits <= 1 {
+        \\            0 => { visits = visits + 1; continue :state (1); }
+        \\            1 => {}
+        \\            else => {}
+        \\        }
+        \\        return visits;
+        \\    }
+        \\    pub fn run() -> u256 { return dispatch(); }
+        \\}
+    ;
+    var checked_switch = try compileText(switch_source);
+    defer checked_switch.deinit();
+    const switch_eval = try checked_switch.db.constEval(checked_switch.root_module_id);
+    try testing.expect(switch_eval.diagnostics.isEmpty());
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.committed, switch_eval.formal_folds[0].disposition);
+    var switch_checks: usize = 0;
+    for (switch_eval.formal_folds[0].events) |event| {
+        if (event.kind == .predicate_check) switch_checks += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), switch_checks);
+
+    const false_switch_source =
+        \\contract FalseSwitchReentry {
+        \\    inline fn broken() -> u256 {
+        \\        var visits: u256 = 0;
+        \\        state: switch (0) invariant visits == 0 {
+        \\            0 => { visits = 1; continue :state (1); }
+        \\            1 => {}
+        \\            else => {}
+        \\        }
+        \\        return visits;
+        \\    }
+        \\    pub fn run() -> u256 { return broken(); }
+        \\}
+    ;
+    var false_switch = try compileText(false_switch_source);
+    defer false_switch.deinit();
+    const false_switch_eval = try false_switch.db.constEval(false_switch.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&false_switch_eval.diagnostics, "compile-time formal predicate is false: loop invariant"));
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.rejected, false_switch_eval.formal_folds[0].disposition);
+
+    const nested_source =
+        \\contract NestedLabels {
+        \\    inline fn checked() -> u256 {
+        \\        var count: u256 = 0;
+        \\        outer: for (0..2) |_, _| invariant count == 0 {
+        \\            inner: while (true) invariant count == 0 {
+        \\                count = 1;
+        \\                break :outer;
+        \\            }
+        \\        }
+        \\        return count;
+        \\    }
+        \\    pub fn run() -> u256 { return checked(); }
+        \\}
+    ;
+    var nested = try compileText(nested_source);
+    defer nested.deinit();
+    const nested_eval = try nested.db.constEval(nested.root_module_id);
+    try testing.expect(nested_eval.diagnostics.isEmpty());
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.committed, nested_eval.formal_folds[0].disposition);
+}
+
+test "compiler records contract invariants void folds and havoc abandonment" {
+    const contract_source =
+        \\contract CheckedContractInvariant {
+        \\    invariant always(true);
+        \\    inline fn checked() -> u256 { return 1; }
+        \\    pub fn run() -> u256 { return checked(); }
+        \\}
+    ;
+    var checked_contract = try compileText(contract_source);
+    defer checked_contract.deinit();
+    const contract_eval = try checked_contract.db.constEval(checked_contract.root_module_id);
+    try testing.expect(contract_eval.diagnostics.isEmpty());
+    var contract_checks: usize = 0;
+    for (contract_eval.formal_folds[0].events) |event| {
+        if (event.kind == .predicate_check) contract_checks += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), contract_checks);
+
+    const void_source =
+        \\contract VoidFold {
+        \\    inline fn checked() { assert(true); }
+        \\    pub fn run() -> bytes { return @abiEncode(checked()); }
+        \\}
+    ;
+    var void_fold = try compileText(void_source);
+    defer void_fold.deinit();
+    const void_eval = try void_fold.db.constEval(void_fold.root_module_id);
+    try testing.expect(void_eval.diagnostics.isEmpty());
+    try testing.expectEqual(@as(usize, 1), void_eval.formal_folds.len);
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.committed, void_eval.formal_folds[0].disposition);
+
+    const speculative_havoc_source =
+        \\contract SpeculativeHavoc {
+        \\    inline fn unknown() -> u256 { var value: u256 = 0; havoc value; return value; }
+        \\    pub fn run() -> u256 { return unknown(); }
+        \\}
+    ;
+    var speculative_havoc = try compileText(speculative_havoc_source);
+    defer speculative_havoc.deinit();
+    const speculative_eval = try speculative_havoc.db.constEval(speculative_havoc.root_module_id);
+    try testing.expect(speculative_eval.diagnostics.isEmpty());
+    try testing.expectEqual(@as(usize, 1), speculative_eval.formal_folds.len);
+    try testing.expectEqual(compiler.sema.ComptimeFoldActivation.speculative, speculative_eval.formal_folds[0].activation);
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.abandoned, speculative_eval.formal_folds[0].disposition);
+
+    const required_havoc_source =
+        \\inline fn unknown() -> u256 { var value: u256 = 0; havoc value; return value; }
+        \\comptime const VALUE: u256 = unknown();
+        \\pub fn run() -> u256 { return VALUE; }
+    ;
+    var required_havoc = try compileText(required_havoc_source);
+    defer required_havoc.deinit();
+    const required_eval = try required_havoc.db.constEval(required_havoc.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&required_eval.diagnostics, "formal state effect cannot be evaluated at compile time: havoc"));
+    try testing.expectEqual(compiler.sema.ComptimeFoldActivation.required, required_eval.formal_folds[0].activation);
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.rejected, required_eval.formal_folds[0].disposition);
+}
+
+test "compiler abandons speculative folds before checking storage-dependent predicates" {
+    const source_text =
+        \\contract StorageDependentCall {
+        \\    storage var balance: u256 = 0;
+        \\    fn readBalance() -> u256
+        \\        requires(balance > 0)
+        \\    {
+        \\        return balance;
+        \\    }
+        \\    pub fn run() -> u256 { return readBalance(); }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(consteval.diagnostics.isEmpty());
+    try testing.expectEqual(@as(usize, 1), consteval.formal_folds.len);
+    try testing.expectEqual(compiler.sema.ComptimeFoldActivation.speculative, consteval.formal_folds[0].activation);
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.abandoned, consteval.formal_folds[0].disposition);
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+}

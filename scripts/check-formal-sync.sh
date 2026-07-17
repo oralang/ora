@@ -119,6 +119,7 @@ SNAPSHOTS=(
   "formal/Ora/Generated/SinoraBackendSnapshot.lean"
   "formal/Ora/Generated/StorageDisjointnessSnapshot.lean"
   "formal/Ora/Generated/ObligationTotalitySnapshot.lean"
+  "formal/Ora/Generated/SourceAccountingSnapshot.lean"
 )
 
 echo "==> [1/4] regenerating formal snapshots from the compiler"
@@ -130,6 +131,7 @@ run_build_emitter "dispatcher tables" "emit-dispatcher-table-snapshot" "${SNAPSH
 run_sinora_emitter "sinora backend" "src/formal/emit_sinora_backend_snapshot.zig" "${SNAPSHOTS[5]}"
 run_emitter "storage disjointness" "src/formal/emit_storage_disjointness_snapshot.zig" "${SNAPSHOTS[6]}"
 run_emitter "obligation totality" "src/formal/emit_obligation_totality_snapshot.zig" "${SNAPSHOTS[7]}"
+run_emitter "source accounting" "src/formal/emit_source_accounting_snapshot.zig" "${SNAPSHOTS[8]}"
 
 echo "==> [2/4] data-only lint"
 for snapshot in "${SNAPSHOTS[@]}"; do

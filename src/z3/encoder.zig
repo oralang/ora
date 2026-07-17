@@ -112,6 +112,7 @@ pub const Encoder = struct {
     pub const PendingObligation = struct {
         ast: z3.Z3_ast,
         imported_callee_name: ?[]const u8 = null,
+        imported_source_fact_id: ?u32 = null,
         source_kind: PendingObligationSourceKind = .local,
     };
 
@@ -3359,6 +3360,7 @@ pub const Encoder = struct {
         self: *Encoder,
         obligation: z3.Z3_ast,
         imported_callee_name: ?[]const u8,
+        imported_source_fact_id: ?u32,
         source_kind: PendingObligationSourceKind,
     ) void {
         const guarded_obligation = if (self.return_path_assumptions.items.len == 0)
@@ -3375,6 +3377,7 @@ pub const Encoder = struct {
         self.pending_obligations.append(self.allocator, .{
             .ast = guarded_obligation,
             .imported_callee_name = stored_callee_name,
+            .imported_source_fact_id = imported_source_fact_id,
             .source_kind = source_kind,
         }) catch {
             self.recordSoundnessLoss(.internal_encoding_failure, "failed to record SMT obligation");
@@ -3385,26 +3388,46 @@ pub const Encoder = struct {
         self.addObligationWithSource(
             obligation,
             imported_callee_name,
+            null,
             if (imported_callee_name != null) .imported_callee_obligation else .local,
         );
     }
 
-    fn addImportedCalleeEnsures(self: *Encoder, obligation: z3.Z3_ast, imported_callee_name: []const u8) void {
-        self.addObligationWithSource(obligation, imported_callee_name, .imported_callee_ensures);
+    fn addImportedCalleeEnsures(
+        self: *Encoder,
+        obligation: z3.Z3_ast,
+        imported_callee_name: []const u8,
+        imported_source_fact_id: ?u32,
+    ) void {
+        self.addObligationWithSource(obligation, imported_callee_name, imported_source_fact_id, .imported_callee_ensures);
     }
 
-    fn addCalleePrecondition(self: *Encoder, obligation: z3.Z3_ast, callee_name: []const u8) void {
-        self.addObligationWithSource(obligation, callee_name, .callee_precondition);
+    fn addCalleePrecondition(
+        self: *Encoder,
+        obligation: z3.Z3_ast,
+        callee_name: []const u8,
+        imported_source_fact_id: ?u32,
+    ) void {
+        self.addObligationWithSource(obligation, callee_name, imported_source_fact_id, .callee_precondition);
     }
 
-    fn addCalleePreconditions(self: *Encoder, obligations: []const z3.Z3_ast, callee_name: []const u8) void {
-        for (obligations) |obligation| {
-            self.addCalleePrecondition(obligation, callee_name);
+    fn addCalleePreconditions(
+        self: *Encoder,
+        obligations: []const z3.Z3_ast,
+        source_fact_ids: []const ?u32,
+        callee_name: []const u8,
+    ) void {
+        if (obligations.len != source_fact_ids.len) {
+            self.recordSoundnessLoss(.internal_encoding_failure, "callee precondition source identities are incomplete");
+            return;
+        }
+        for (obligations, source_fact_ids) |obligation, source_fact_id| {
+            self.addCalleePrecondition(obligation, callee_name, source_fact_id);
         }
     }
 
     fn addObligation(self: *Encoder, obligation: z3.Z3_ast) void {
-        self.addObligationWithSource(obligation, null, .local);
+        self.addObligationWithSource(obligation, null, null, .local);
     }
 
     pub fn takeConstraints(self: *Encoder, allocator: std.mem.Allocator) ![]z3.Z3_ast {
@@ -9451,8 +9474,10 @@ pub const Encoder = struct {
 
         var callee_requires = std.ArrayList(z3.Z3_ast).empty;
         defer callee_requires.deinit(self.allocator);
-        try summary_encoder.collectRequiresForSummary(func_op, &callee_requires);
-        self.addCalleePreconditions(callee_requires.items, callee);
+        var callee_require_source_fact_ids = std.ArrayList(?u32).empty;
+        defer callee_require_source_fact_ids.deinit(self.allocator);
+        try summary_encoder.collectRequiresForSummary(func_op, &callee_requires, &callee_require_source_fact_ids);
+        self.addCalleePreconditions(callee_requires.items, callee_require_source_fact_ids.items, callee);
         if (should_fallback) {
             try self.replayCalleeSummarySideEffects(&summary_encoder, func_op, callee, callee_requires.items, true);
             try self.copyComputedStorageModelsFrom(&summary_encoder);
@@ -13578,6 +13603,8 @@ pub const Encoder = struct {
 
         var callee_requires = std.ArrayList(z3.Z3_ast).empty;
         defer callee_requires.deinit(self.allocator);
+        var callee_require_source_fact_ids = std.ArrayList(?u32).empty;
+        defer callee_require_source_fact_ids.deinit(self.allocator);
         var any_result = false;
         const will_run_summary_encoder = slots.len > 0 or result_exprs.len == 0;
         {
@@ -13619,8 +13646,8 @@ pub const Encoder = struct {
                 );
             }
 
-            try result_encoder.collectRequiresForSummary(func_op, &callee_requires);
-            self.addCalleePreconditions(callee_requires.items, callee);
+            try result_encoder.collectRequiresForSummary(func_op, &callee_requires, &callee_require_source_fact_ids);
+            self.addCalleePreconditions(callee_requires.items, callee_require_source_fact_ids.items, callee);
 
             if (!should_fallback) {
                 for (0..result_exprs.len) |i| {
@@ -13744,6 +13771,7 @@ pub const Encoder = struct {
         self: *Encoder,
         op: mlir.MlirOperation,
         out: *std.ArrayList(z3.Z3_ast),
+        source_fact_ids: *std.ArrayList(?u32),
     ) EncodeError!void {
         const name_ref = mlir.oraOperationGetName(op);
         defer @import("mlir_c_api").freeStringRef(name_ref);
@@ -13759,6 +13787,7 @@ pub const Encoder = struct {
                     };
                     if (encoded) |cond| {
                         try out.append(self.allocator, self.coerceToBool(cond));
+                        try source_fact_ids.append(self.allocator, sourceFactIdForSummaryOp(op));
                     }
                 }
             } else if (std.mem.eql(u8, op_name, "ora.requires")) {
@@ -13770,6 +13799,7 @@ pub const Encoder = struct {
                     };
                     if (encoded) |cond| {
                         try out.append(self.allocator, self.coerceToBool(cond));
+                        try source_fact_ids.append(self.allocator, sourceFactIdForSummaryOp(op));
                     }
                 }
             }
@@ -13783,7 +13813,7 @@ pub const Encoder = struct {
             while (!mlir.oraBlockIsNull(block)) {
                 var nested = mlir.oraBlockGetFirstOperation(block);
                 while (!mlir.oraOperationIsNull(nested)) {
-                    try self.collectRequiresForSummary(nested, out);
+                    try self.collectRequiresForSummary(nested, out, source_fact_ids);
                     nested = mlir.oraOperationGetNextInBlock(nested);
                 }
                 block = mlir.oraBlockGetNextInRegion(block);
@@ -13812,7 +13842,11 @@ pub const Encoder = struct {
                             return;
                         };
                     };
-                    self.addImportedCalleeEnsures(self.coerceToBool(encoded), callee_name);
+                    self.addImportedCalleeEnsures(
+                        self.coerceToBool(encoded),
+                        callee_name,
+                        sourceFactIdForSummaryOp(op),
+                    );
                 }
             } else if (std.mem.eql(u8, op_name, "ora.ensures")) {
                 if (mlir.oraOperationGetNumOperands(op) >= 1) {
@@ -13824,7 +13858,11 @@ pub const Encoder = struct {
                             self.recordSoundnessLoss(.inexact_call_summary, "failed to encode summary ensures");
                             return;
                         };
-                    self.addImportedCalleeEnsures(self.coerceToBool(encoded), callee_name);
+                    self.addImportedCalleeEnsures(
+                        self.coerceToBool(encoded),
+                        callee_name,
+                        sourceFactIdForSummaryOp(op),
+                    );
                 }
             }
         }
@@ -13920,8 +13958,10 @@ pub const Encoder = struct {
 
         var callee_requires = std.ArrayList(z3.Z3_ast).empty;
         defer callee_requires.deinit(self.allocator);
-        try self.collectRequiresForSummary(func_op, &callee_requires);
-        self.addCalleePreconditions(callee_requires.items, callee);
+        var callee_require_source_fact_ids = std.ArrayList(?u32).empty;
+        defer callee_require_source_fact_ids.deinit(self.allocator);
+        try self.collectRequiresForSummary(func_op, &callee_requires, &callee_require_source_fact_ids);
+        self.addCalleePreconditions(callee_requires.items, callee_require_source_fact_ids.items, callee);
 
         self.encodeStateEffectsInRegion(body_region);
         if (!self.functionIsExternallyVerified(func_op)) {
@@ -13972,7 +14012,12 @@ pub const Encoder = struct {
             for (obligations) |obl| {
                 if (!callerVisible.include(self.separate_function_body_verification, obl)) continue;
                 const imported = importedSourceKind.resolve(obl, callee_name);
-                self.addObligationWithSource(obl.ast, imported.callee_name, imported.source_kind);
+                self.addObligationWithSource(
+                    obl.ast,
+                    imported.callee_name,
+                    obl.imported_source_fact_id,
+                    imported.source_kind,
+                );
             }
             return;
         }
@@ -13984,7 +14029,12 @@ pub const Encoder = struct {
             for (obligations) |obl| {
                 if (!callerVisible.include(self.separate_function_body_verification, obl)) continue;
                 const imported = importedSourceKind.resolve(obl, callee_name);
-                self.addObligationWithSource(obl.ast, imported.callee_name, imported.source_kind);
+                self.addObligationWithSource(
+                    obl.ast,
+                    imported.callee_name,
+                    obl.imported_source_fact_id,
+                    imported.source_kind,
+                );
             }
             return;
         };
@@ -13993,7 +14043,12 @@ pub const Encoder = struct {
             for (obligations) |obl| {
                 if (!callerVisible.include(self.separate_function_body_verification, obl)) continue;
                 const imported = importedSourceKind.resolve(obl, callee_name);
-                self.addObligationWithSource(obl.ast, imported.callee_name, imported.source_kind);
+                self.addObligationWithSource(
+                    obl.ast,
+                    imported.callee_name,
+                    obl.imported_source_fact_id,
+                    imported.source_kind,
+                );
             }
             return;
         };
@@ -14005,6 +14060,7 @@ pub const Encoder = struct {
             self.addObligationWithSource(
                 self.encodeImplies(precondition_guard, obl.ast),
                 imported.callee_name,
+                obl.imported_source_fact_id,
                 imported.source_kind,
             );
         }
@@ -15640,6 +15696,15 @@ pub const Encoder = struct {
         const value = mlir.oraStringAttrGetValue(attr);
         if (value.data == null or value.length == 0) return null;
         return value.data[0..value.length];
+    }
+
+    fn sourceFactIdForSummaryOp(op: mlir.MlirOperation) ?u32 {
+        const name = "ora.source_fact_id";
+        const attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate(name.ptr, name.len));
+        if (mlir.oraAttributeIsNull(attr)) return null;
+        const value = mlir.oraIntegerAttrGetValueSInt(attr);
+        if (value < 0) return null;
+        return std.math.cast(u32, value);
     }
 
     const MlirPrintCollector = struct {

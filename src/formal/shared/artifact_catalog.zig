@@ -6,7 +6,7 @@
 
 const std = @import("std");
 
-pub const index_schema_version: u32 = 1;
+pub const index_schema_version: u32 = 2;
 
 pub const ArtifactId = enum {
     smt_report_markdown,
@@ -16,6 +16,7 @@ pub const ArtifactId = enum {
     lean_proof_certificate,
     dispatcher_proof_certificate,
     canonical_z3_measurement,
+    source_accounting_report,
     formal_artifact_index,
 };
 
@@ -32,6 +33,7 @@ pub const ArtifactOwner = enum {
     z3_userland,
     lean_userland,
     dispatcher_kernel,
+    source_accounting_kernel,
     compiler,
 };
 
@@ -61,6 +63,7 @@ pub const artifacts = [_]ArtifactDefinition{
     .{ .id = .lean_proof_certificate, .suffix = ".lean.proof.json", .kind = .certificate, .owner = .lean_userland, .schema_version = 1, .retain_on_failure = false, .integrity_bound = true },
     .{ .id = .dispatcher_proof_certificate, .suffix = ".lean.dispatcher.proof.json", .kind = .certificate, .owner = .dispatcher_kernel, .schema_version = 1, .retain_on_failure = false, .integrity_bound = true },
     .{ .id = .canonical_z3_measurement, .suffix = ".canonical-z3.measure.json", .kind = .measurement, .owner = .z3_userland, .schema_version = 1, .retain_on_failure = true },
+    .{ .id = .source_accounting_report, .suffix = ".formal.accounting.json", .kind = .report, .owner = .source_accounting_kernel, .schema_version = 1, .retain_on_failure = true, .integrity_bound = true },
     .{ .id = .formal_artifact_index, .suffix = ".formal.artifacts.json", .kind = .index, .owner = .compiler, .schema_version = index_schema_version, .optional = false, .retain_on_failure = true, .include_in_index = false },
 };
 
@@ -79,7 +82,8 @@ pub fn definition(id: ArtifactId) *const ArtifactDefinition {
         .lean_proof_certificate => &artifacts[4],
         .dispatcher_proof_certificate => &artifacts[5],
         .canonical_z3_measurement => &artifacts[6],
-        .formal_artifact_index => &artifacts[7],
+        .source_accounting_report => &artifacts[7],
+        .formal_artifact_index => &artifacts[8],
     };
 }
 
@@ -91,6 +95,7 @@ pub const GateId = enum {
     z3_userland,
     lean_userland,
     dispatcher_kernel,
+    source_accounting_kernel,
 };
 
 pub const GateDomain = enum {
@@ -102,11 +107,13 @@ pub const GatePhase = enum {
     smt_verification,
     proof_artifact,
     sir_backend_binding,
+    source_accounting,
 };
 
 pub const BlockingPolicy = enum {
     fallback_allowed,
     blocking_when_requested,
+    always_blocking,
 };
 
 pub const GateDefinition = struct {
@@ -121,6 +128,7 @@ pub const gates = [_]GateDefinition{
     .{ .id = .z3_userland, .domain = .userland, .phase = .smt_verification, .blocking_policy = .fallback_allowed },
     .{ .id = .lean_userland, .domain = .userland, .phase = .proof_artifact, .blocking_policy = .blocking_when_requested },
     .{ .id = .dispatcher_kernel, .domain = .compiler_kernel, .phase = .sir_backend_binding, .blocking_policy = .blocking_when_requested },
+    .{ .id = .source_accounting_kernel, .domain = .compiler_kernel, .phase = .source_accounting, .blocking_policy = .always_blocking },
 };
 
 pub const GateStatus = enum {
@@ -135,15 +143,23 @@ pub const GateStatuses = struct {
     z3_userland: GateStatus = .not_requested,
     lean_userland: GateStatus = .not_requested,
     dispatcher_kernel: GateStatus = .not_requested,
+    source_accounting_kernel: GateStatus = .not_run,
 
     pub fn get(self: GateStatuses, id: GateId) GateStatus {
         return switch (id) {
             .z3_userland => self.z3_userland,
             .lean_userland => self.lean_userland,
             .dispatcher_kernel => self.dispatcher_kernel,
+            .source_accounting_kernel => self.source_accounting_kernel,
         };
     }
 };
+
+pub fn validateSourceAccountingArming(statuses: GateStatuses, authorization: FinalAuthorization) !void {
+    if (authorization == .allowed and statuses.source_accounting_kernel != .accepted) {
+        return error.SourceAccountingGateNotAccepted;
+    }
+}
 
 pub const FinalAuthorization = enum {
     allowed,
@@ -185,15 +201,25 @@ pub fn writeIndex(allocator: std.mem.Allocator, options: IndexOptions) !void {
 }
 
 pub fn renderIndex(allocator: std.mem.Allocator, options: IndexOptions) ![]u8 {
+    try validateSourceAccountingArming(options.gate_statuses, options.final_authorization);
+    return renderIndexForSchema(allocator, options, index_schema_version, &gates);
+}
+
+fn renderIndexForSchema(
+    allocator: std.mem.Allocator,
+    options: IndexOptions,
+    schema_version: u32,
+    gate_definitions: []const GateDefinition,
+) ![]u8 {
     var out = std.Io.Writer.Allocating.init(allocator);
     errdefer out.deinit();
     const writer = &out.writer;
-    try writer.print("{{\n  \"schema_version\": {d},\n  \"source\": ", .{index_schema_version});
+    try writer.print("{{\n  \"schema_version\": {d},\n  \"source\": ", .{schema_version});
     try writeJsonString(writer, options.source);
     try writer.writeAll(",\n  \"final_artifact_authorization\": ");
     try writeJsonString(writer, @tagName(options.final_authorization));
     try writer.writeAll(",\n  \"gates\": [\n");
-    for (gates, 0..) |gate, index| {
+    for (gate_definitions, 0..) |gate, index| {
         if (index != 0) try writer.writeAll(",\n");
         try writer.writeAll("    {\"id\": ");
         try writeJsonString(writer, @tagName(gate.id));
@@ -267,6 +293,7 @@ fn artifactOwnedByGate(artifact: ArtifactDefinition, gate: GateId) bool {
         .z3_userland => artifact.owner == .z3_userland,
         .lean_userland => artifact.owner == .lean_userland,
         .dispatcher_kernel => artifact.owner == .dispatcher_kernel,
+        .source_accounting_kernel => artifact.owner == .source_accounting_kernel,
     };
 }
 
@@ -343,14 +370,15 @@ test "formal artifact index has deterministic gate and artifact order" {
         .scan_dir = scan_dir,
         .artifact_root = scan_dir,
         .artifact_dir = scan_dir,
-        .gate_statuses = .{ .z3_userland = .accepted },
+        .gate_statuses = .{ .z3_userland = .accepted, .source_accounting_kernel = .accepted },
         .final_authorization = .allowed,
     });
     defer std.testing.allocator.free(json);
     const z3_at = std.mem.indexOf(u8, json, "\"z3_userland\"").?;
     const lean_at = std.mem.indexOf(u8, json, "\"lean_userland\"").?;
     const dispatcher_at = std.mem.indexOf(u8, json, "\"dispatcher_kernel\"").?;
-    try std.testing.expect(z3_at < lean_at and lean_at < dispatcher_at);
+    const source_accounting_at = std.mem.indexOf(u8, json, "\"source_accounting_kernel\"").?;
+    try std.testing.expect(z3_at < lean_at and lean_at < dispatcher_at and dispatcher_at < source_accounting_at);
     const report_at = std.mem.indexOf(u8, json, "\"smt_report_json\"").?;
     const certificate_at = std.mem.indexOf(u8, json, "\"lean_proof_certificate\"").?;
     try std.testing.expect(report_at < certificate_at);
@@ -395,7 +423,7 @@ test "artifact paths follow direct and build layouts" {
         .scan_dir = staging,
         .artifact_root = root,
         .artifact_dir = root,
-        .gate_statuses = .{},
+        .gate_statuses = .{ .source_accounting_kernel = .accepted },
         .final_authorization = .allowed,
     });
     defer std.testing.allocator.free(direct);
@@ -406,9 +434,81 @@ test "artifact paths follow direct and build layouts" {
         .scan_dir = staging,
         .artifact_root = root,
         .artifact_dir = verify,
-        .gate_statuses = .{},
+        .gate_statuses = .{ .source_accounting_kernel = .accepted },
         .final_authorization = .allowed,
     });
     defer std.testing.allocator.free(build);
     try std.testing.expect(std.mem.indexOf(u8, build, "\"path\": \"verify/layout.smt.report.json\"") != null);
+}
+
+test "source-accounting report descriptor is failure-retained and integrity-bound" {
+    const descriptor = definition(.source_accounting_report);
+    try std.testing.expectEqualStrings(".formal.accounting.json", descriptor.suffix);
+    try std.testing.expectEqual(ArtifactOwner.source_accounting_kernel, descriptor.owner);
+    try std.testing.expectEqual(@as(?u32, 1), descriptor.schema_version);
+    try std.testing.expect(descriptor.retain_on_failure);
+    try std.testing.expect(descriptor.integrity_bound);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "failed.formal.accounting.json", .data = "{\"decision\":\"rejected\"}\n" });
+    const scan_dir = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer std.testing.allocator.free(scan_dir);
+    const json = try renderIndex(std.testing.allocator, .{
+        .source = "failed.ora",
+        .stem = "failed",
+        .scan_dir = scan_dir,
+        .artifact_root = scan_dir,
+        .artifact_dir = scan_dir,
+        .gate_statuses = .{},
+        .final_authorization = .blocked,
+    });
+    defer std.testing.allocator.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\": \"source_accounting_report\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"sha256\":") != null);
+}
+
+test "source-accounting schema migration is armed" {
+    try std.testing.expectEqual(@as(u32, 2), index_schema_version);
+    try std.testing.expectEqual(@as(usize, 4), gates.len);
+    try std.testing.expectEqual(GateId.source_accounting_kernel, gates[3].id);
+    try std.testing.expectEqual(BlockingPolicy.always_blocking, gates[3].blocking_policy);
+    try std.testing.expectError(
+        error.SourceAccountingGateNotAccepted,
+        validateSourceAccountingArming(.{}, .allowed),
+    );
+    try validateSourceAccountingArming(.{ .source_accounting_kernel = .accepted }, .allowed);
+    try validateSourceAccountingArming(.{ .source_accounting_kernel = .rejected }, .blocked);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const scan_dir = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer std.testing.allocator.free(scan_dir);
+    const migrated = try renderIndex(std.testing.allocator, .{
+        .source = "migration.ora",
+        .stem = "migration",
+        .scan_dir = scan_dir,
+        .artifact_root = scan_dir,
+        .artifact_dir = scan_dir,
+        .gate_statuses = .{ .source_accounting_kernel = .accepted },
+        .final_authorization = .allowed,
+    });
+    defer std.testing.allocator.free(migrated);
+    try std.testing.expectEqualStrings(
+        \\{
+        \\  "schema_version": 2,
+        \\  "source": "migration.ora",
+        \\  "final_artifact_authorization": "allowed",
+        \\  "gates": [
+        \\    {"id": "z3_userland", "domain": "userland", "phase": "smt_verification", "status": "not_requested", "blocking_policy": "fallback_allowed", "produced_artifacts": []},
+        \\    {"id": "lean_userland", "domain": "userland", "phase": "proof_artifact", "status": "not_requested", "blocking_policy": "blocking_when_requested", "produced_artifacts": []},
+        \\    {"id": "dispatcher_kernel", "domain": "compiler_kernel", "phase": "sir_backend_binding", "status": "not_requested", "blocking_policy": "blocking_when_requested", "produced_artifacts": []},
+        \\    {"id": "source_accounting_kernel", "domain": "compiler_kernel", "phase": "source_accounting", "status": "accepted", "blocking_policy": "always_blocking", "produced_artifacts": []}
+        \\  ],
+        \\  "artifacts": [  ]
+        \\}
+        \\
+    ,
+        migrated,
+    );
 }
