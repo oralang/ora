@@ -693,6 +693,27 @@ pub fn build(b: *std.Build) void {
     const test_conformance_verified_step = b.step("test-conformance-verified", "Run the verified-build Ora bytecode conformance lane");
     test_conformance_verified_step.dependOn(&verified_conformance_tests_run.step);
 
+    const verified_conformance_rail_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/conformance/verified_build.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    verified_conformance_rail_test_mod.addImport("ora_evm", ora_evm_mod);
+    const verified_conformance_rail_tests = b.addTest(.{
+        .name = "ora-verified-conformance-rail-tests",
+        .root_module = verified_conformance_rail_test_mod,
+        .filters = &.{
+            "verified emit classification rejects abnormal termination",
+            "verified emit classification names normal verifier rejections",
+            "verified conformance manifest parser rejects unordered membership",
+            "verified conformance manifest requires class-C reasons",
+        },
+    });
+    verified_conformance_rail_tests.step.dependOn(&bootstrap_ora_evm_crypto.step);
+    const verified_conformance_rail_tests_run = b.addRunArtifact(verified_conformance_rail_tests);
+    const test_conformance_verified_rail_step = b.step("test-conformance-verified-rail", "Run verified-build classification rail tests");
+    test_conformance_verified_rail_step.dependOn(&verified_conformance_rail_tests_run.step);
+
     const test_conformance_step = b.step("test-conformance", "Run Ora bytecode conformance tests on lib/evm");
     test_conformance_step.dependOn(&conformance_tests_run.step);
     test_conformance_step.dependOn(&verified_conformance_tests_run.step);
@@ -725,6 +746,15 @@ pub fn build(b: *std.Build) void {
     conformance_anvil_cmd.step.dependOn(b.getInstallStep());
     const test_conformance_anvil_step = b.step("test-conformance-anvil", "Run Ora conformance differential tests on Anvil/revm");
     test_conformance_anvil_step.dependOn(&conformance_anvil_cmd.step);
+
+    const conformance_anvil_parser_check = b.addSystemCommand(&.{
+        "python3",
+        "scripts/conformance-anvil-diff.py",
+        "--self-test",
+    });
+    const check_conformance_anvil_parser_step = b.step("check-conformance-anvil-parser", "Check Anvil RPC revert-data parsing");
+    check_conformance_anvil_parser_step.dependOn(&conformance_anvil_parser_check.step);
+    test_step.dependOn(&conformance_anvil_parser_check.step);
 
     // Metrics snapshot harness — prints gas + bytecode-size metrics per corpus
     // entry for the change-quality benchmark.
@@ -936,10 +966,14 @@ pub fn build(b: *std.Build) void {
     z3_verification_test_mod.addImport("mlir_c_api", mlir_c_mod);
     z3_verification_test_mod.addImport("ora_lib", lib_mod);
     z3_verification_test_mod.addImport("ora_types", ora_types_mod);
+    z3_verification_test_mod.addImport("ora_prepared_query_row", prepared_query_row_mod);
     const z3_verification_tests = b.addTest(.{ .root_module = z3_verification_test_mod });
     linkMlirLibraries(b, z3_verification_tests, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
     linkZ3Libraries(b, z3_verification_tests, z3_step, target);
-    test_step.dependOn(&b.addRunArtifact(z3_verification_tests).step);
+    const z3_verification_tests_run = b.addRunArtifact(z3_verification_tests);
+    const test_z3_verification_step = b.step("test-z3-verification", "Run Z3 verification tests");
+    test_z3_verification_step.dependOn(&z3_verification_tests_run.step);
+    test_step.dependOn(&z3_verification_tests_run.step);
 
     // Formal proof-checker tests. This target keeps the userland Lean proof
     // acceptance code in the normal build graph even before B3 wires it to CLI

@@ -5086,7 +5086,14 @@ fn runMlirEmitAdvanced(
         // Capture the verifier's actual matched prepared-query identities for
         // the source-accounting gate. Formal pre-verifier rows alone carry no
         // authority here.
-        source_prepared_query_manifest = try verifier.collectPreparedQueryManifest(final_module);
+        source_prepared_query_manifest = verifier.collectPreparedQueryManifest(final_module) catch |err| switch (err) {
+            // The verification pass owns the public degradation diagnostic.
+            // A preflight manifest has no authority when query construction
+            // degraded, so leave it unavailable and let verification report
+            // the named failure instead of leaking an internal error trace.
+            error.VerificationEncodingDegraded => null,
+            else => return err,
+        };
 
         const verification_result = try verifier.runVerificationPass(final_module);
         formal_gate_statuses.z3_userland = if (verification_result.success) .accepted else .rejected;
@@ -5136,60 +5143,74 @@ fn runMlirEmitAdvanced(
     if (source_prepared_query_manifest) |manifest| {
         prepared_source_identity = try formal_source_accounting_from_z3.collectPreparedIdentity(allocator, manifest.source_accounting_rows);
     }
-    const accounting_mode = try sourceAccountingMode(mlir_options);
-    const const_eval = try compilation.db.constEval(compilation.root_module_id);
-    var source_accounting_result = formal_source_accounting_pipeline.run(
-        allocator,
-        &compilation.db,
-        compilation.package_id,
-        compilation.root_module_id,
-        const_eval,
-        &formal_result_for_smt_report.?,
-        accounting_mode,
-        if (prepared_source_identity) |*identity| identity.view() else null,
-    ) catch |err| {
-        try stdout.print("error: source-accounting kernel could not finish: {s}\n", .{@errorName(err)});
-        formal_gate_statuses.source_accounting_kernel = .rejected;
-        markUnrunFormalGatesSkipped(&formal_gate_statuses);
-        try writeFormalArtifactIndex(allocator, file_path, mlir_options, formal_gate_statuses, .blocked);
-        try stdout.flush();
-        return error.VerificationFailed;
-    };
-    defer source_accounting_result.deinit();
-    try writeSourceAccountingReport(
-        allocator,
-        file_path,
-        mlir_options.output_dir,
-        source_accounting_result.finished.report,
-    );
-    formal_gate_statuses.source_accounting_kernel = switch (source_accounting_result.finished.decision) {
-        .accepted => .accepted,
-        .rejected => .rejected,
-    };
-    if (source_accounting_result.finished.decision == .rejected) {
-        try printSourceAccountingFailure(allocator, stdout, source_accounting_result.finished);
-        if (pending_smt_report) |*report| {
-            if (mlir_options.measure_canonical_z3) {
-                try writeCanonicalZ3MeasurementArtifact(
-                    allocator,
-                    file_path,
-                    mlir_options.output_dir,
-                    &formal_result_for_smt_report.?,
-                    report.*,
-                    stdout,
-                    mlir_options.suppress_artifact_logs,
-                );
+    if (!mlir_options.verify_z3 or prepared_source_identity != null) {
+        const accounting_mode = try sourceAccountingMode(mlir_options);
+        const const_eval = try compilation.db.constEval(compilation.root_module_id);
+        var source_accounting_result = formal_source_accounting_pipeline.run(
+            allocator,
+            &compilation.db,
+            compilation.package_id,
+            compilation.root_module_id,
+            const_eval,
+            &formal_result_for_smt_report.?,
+            accounting_mode,
+            if (prepared_source_identity) |*identity| identity.view() else null,
+        ) catch |err| {
+            try stdout.print("error: source-accounting kernel could not finish: {s}\n", .{@errorName(err)});
+            formal_gate_statuses.source_accounting_kernel = .rejected;
+            markUnrunFormalGatesSkipped(&formal_gate_statuses);
+            try writeFormalArtifactIndex(allocator, file_path, mlir_options, formal_gate_statuses, .blocked);
+            try stdout.flush();
+            return error.VerificationFailed;
+        };
+        defer source_accounting_result.deinit();
+        try writeSourceAccountingReport(
+            allocator,
+            file_path,
+            mlir_options.output_dir,
+            source_accounting_result.finished.report,
+        );
+        formal_gate_statuses.source_accounting_kernel = switch (source_accounting_result.finished.decision) {
+            .accepted => .accepted,
+            .rejected => .rejected,
+        };
+        if (source_accounting_result.finished.decision == .rejected) {
+            try printSourceAccountingFailure(allocator, stdout, source_accounting_result.finished);
+            if (pending_smt_report) |*report| {
+                if (mlir_options.measure_canonical_z3) {
+                    try writeCanonicalZ3MeasurementArtifact(
+                        allocator,
+                        file_path,
+                        mlir_options.output_dir,
+                        &formal_result_for_smt_report.?,
+                        report.*,
+                        stdout,
+                        mlir_options.suppress_artifact_logs,
+                    );
+                }
+                if (pending_smt_report_write_artifacts) {
+                    try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
+                }
+                report.deinit(mlir_allocator);
+                pending_smt_report = null;
             }
-            if (pending_smt_report_write_artifacts) {
-                try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
-            }
-            report.deinit(mlir_allocator);
-            pending_smt_report = null;
+            markUnrunFormalGatesSkipped(&formal_gate_statuses);
+            try writeFormalArtifactIndex(allocator, file_path, mlir_options, formal_gate_statuses, .blocked);
+            try stdout.flush();
+            return error.VerificationFailed;
         }
-        markUnrunFormalGatesSkipped(&formal_gate_statuses);
-        try writeFormalArtifactIndex(allocator, file_path, mlir_options, formal_gate_statuses, .blocked);
-        try stdout.flush();
-        return error.VerificationFailed;
+    } else if (verification_result_opt) |*verification_result| {
+        // A successful verified build must always have a prepared-query
+        // identity for the compiler-kernel source gate. Degradation is the
+        // only supported unavailable case and is reported by Z3 below.
+        if (verification_result.success) {
+            try stdout.writeAll("error: verified compilation produced no prepared-query identity\n");
+            formal_gate_statuses.source_accounting_kernel = .rejected;
+            markUnrunFormalGatesSkipped(&formal_gate_statuses);
+            try writeFormalArtifactIndex(allocator, file_path, mlir_options, formal_gate_statuses, .blocked);
+            try stdout.flush();
+            return error.VerificationFailed;
+        }
     }
 
     // Userland proof orchestration is deliberately downstream of the

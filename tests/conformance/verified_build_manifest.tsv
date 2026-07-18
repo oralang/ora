@@ -1,94 +1,94 @@
-verified-conformance-manifest-v1
-same-bytecode	adt_payload_match.spec.toml
-unverifiable	adversarial_calldata.spec.toml
-same-bytecode	app_amm_pool.spec.toml
-rewritten	app_erc20_resource.spec.toml
-same-bytecode	app_full_token.spec.toml
-rewritten	app_resource_points.spec.toml
-same-bytecode	app_staking.spec.toml
-same-bytecode	app_vault_errors.spec.toml
-unverifiable	arithmetic_checked_revert.spec.toml
-same-bytecode	comptime_observable.spec.toml
-unverifiable	computed_storage_cost_array.spec.toml
-unverifiable	computed_storage_cost_compare.spec.toml
-unverifiable	computed_storage_cost_computed.spec.toml
-unverifiable	computed_storage_cost_many.spec.toml
-unverifiable	computed_storage_cost_struct.spec.toml
-same-bytecode	computed_storage_domain_separation.spec.toml
-unverifiable	computed_storage_fixed_size_data.spec.toml
-same-bytecode	computed_storage_offset_wrap.spec.toml
-same-bytecode	computed_storage_range_boundaries.spec.toml
-same-bytecode	computed_storage_words.spec.toml
-same-bytecode	counter.spec.toml
-unverifiable	dispatcher_call_hint.spec.toml
-unverifiable	dispatcher_case_ordering.spec.toml
-same-bytecode	dispatcher_dense_routing.spec.toml
-unverifiable	dispatcher_dynamic_array_arg.spec.toml
-same-bytecode	dispatcher_dynamic_return_aggregates.spec.toml
-unverifiable	dispatcher_dynamic_tuple_arg.spec.toml
-same-bytecode	dispatcher_error_union_revert.spec.toml
-unverifiable	dispatcher_hot_prefix.spec.toml
-unverifiable	dispatcher_narrow_error_union_return.spec.toml
-same-bytecode	dispatcher_string_arg.spec.toml
-same-bytecode	enum_storage_roundtrip.spec.toml
-same-bytecode	environment_log.spec.toml
-same-bytecode	error_union_local_aggregate.spec.toml
-same-bytecode	error_union_wide_carrier.spec.toml
-same-bytecode	events_multifield.spec.toml
-same-bytecode	external_return_decode.spec.toml
-same-bytecode	falsification_arith.spec.toml
-same-bytecode	falsification_error_union_ok.spec.toml
-same-bytecode	falsification_loop_invariant.spec.toml
-same-bytecode	falsification_map_effect.spec.toml
-same-bytecode	falsification_map_frame.spec.toml
-same-bytecode	falsification_storage_branch.spec.toml
-same-bytecode	generic_instantiation.spec.toml
-same-bytecode	lock_guard_revert.spec.toml
-unverifiable	reentrancy_lock_guard.spec.toml
-same-bytecode	refinement_guard_revert.spec.toml
-unverifiable	resource_app_token.spec.toml
-unverifiable	resource_app_vault_shares.spec.toml
-rewritten	resource_basic_transfer.spec.toml
-rewritten	resource_create_destroy.spec.toml
-rewritten	resource_dynamic_alias.spec.toml
-unverifiable	resource_failure_atomicity.spec.toml
-rewritten	resource_initial_create_in_init.spec.toml
-rewritten	resource_layout_equivalence.spec.toml
-rewritten	resource_many_places_same_domain.spec.toml
-unverifiable	resource_modifies_lock.spec.toml
-unverifiable	resource_self_transfer.spec.toml
-rewritten	resource_signed_amount.spec.toml
-rewritten	resource_signed_negative_balance.spec.toml
-rewritten	resource_static_asset_domains.spec.toml
-unverifiable	resource_transient_immediate.spec.toml
-same-bytecode	result_memref_opaque.spec.toml
-same-bytecode	result_memref_scalar.spec.toml
-unverifiable	runtime_assert_message.spec.toml
-unverifiable	short_calldata_dispatch.spec.toml
-same-bytecode	source_inline.spec.toml
-same-bytecode	storage_bitfield.spec.toml
-same-bytecode	storage_custom_bitfield.spec.toml
-same-bytecode	storage_dynamic_array.spec.toml
-same-bytecode	storage_fixed_bytes_mapping.spec.toml
-same-bytecode	storage_map_bitfield.spec.toml
-same-bytecode	storage_map_struct.spec.toml
-same-bytecode	storage_map_struct_array.spec.toml
-same-bytecode	storage_mapping.spec.toml
-same-bytecode	storage_narrow_integer_mapping.spec.toml
-same-bytecode	storage_nested_map_struct.spec.toml
-same-bytecode	storage_nested_mapping.spec.toml
-same-bytecode	storage_result_dynamic_bytes.spec.toml
-unverifiable	storage_result_dynamic_slice.spec.toml
-same-bytecode	storage_result_dynamic_string.spec.toml
-same-bytecode	storage_result_scalar.spec.toml
-same-bytecode	storage_slice_dynamic_struct.spec.toml
-same-bytecode	storage_slice_struct.spec.toml
-same-bytecode	storage_string_key_mapping.spec.toml
-same-bytecode	storage_struct.spec.toml
-same-bytecode	storage_struct_static_array.spec.toml
-same-bytecode	storage_triple_nested_mapping.spec.toml
-same-bytecode	storage_u256_mapping.spec.toml
-same-bytecode	switch_execution.spec.toml
-same-bytecode	trait_impl_contract_call.spec.toml
-same-bytecode	tuple_static_return.spec.toml
-same-bytecode	value_transfer.spec.toml
+verified-conformance-manifest-v2
+same-bytecode	adt_payload_match.spec.toml	-
+unverifiable	adversarial_calldata.spec.toml	verification_encoding_degraded
+same-bytecode	app_amm_pool.spec.toml	-
+rewritten	app_erc20_resource.spec.toml	-
+same-bytecode	app_full_token.spec.toml	-
+rewritten	app_resource_points.spec.toml	-
+same-bytecode	app_staking.spec.toml	-
+same-bytecode	app_vault_errors.spec.toml	-
+unverifiable	arithmetic_checked_revert.spec.toml	callee_precondition_unproved
+same-bytecode	comptime_observable.spec.toml	-
+unverifiable	computed_storage_cost_array.spec.toml	contract_invariant_unproved
+unverifiable	computed_storage_cost_compare.spec.toml	contract_invariant_unproved
+unverifiable	computed_storage_cost_computed.spec.toml	contract_invariant_unproved
+unverifiable	computed_storage_cost_many.spec.toml	contract_invariant_unproved
+unverifiable	computed_storage_cost_struct.spec.toml	contract_invariant_unproved
+same-bytecode	computed_storage_domain_separation.spec.toml	-
+unverifiable	computed_storage_fixed_size_data.spec.toml	contract_invariant_unproved
+same-bytecode	computed_storage_offset_wrap.spec.toml	-
+same-bytecode	computed_storage_range_boundaries.spec.toml	-
+same-bytecode	computed_storage_words.spec.toml	-
+same-bytecode	counter.spec.toml	-
+unverifiable	dispatcher_call_hint.spec.toml	contract_invariant_unproved
+unverifiable	dispatcher_case_ordering.spec.toml	contract_invariant_unproved
+same-bytecode	dispatcher_dense_routing.spec.toml	-
+unverifiable	dispatcher_dynamic_array_arg.spec.toml	contract_invariant_unproved
+same-bytecode	dispatcher_dynamic_return_aggregates.spec.toml	-
+unverifiable	dispatcher_dynamic_tuple_arg.spec.toml	contract_invariant_unproved
+same-bytecode	dispatcher_error_union_revert.spec.toml	-
+unverifiable	dispatcher_hot_prefix.spec.toml	contract_invariant_unproved
+unverifiable	dispatcher_narrow_error_union_return.spec.toml	verification_encoding_degraded
+same-bytecode	dispatcher_string_arg.spec.toml	-
+same-bytecode	enum_storage_roundtrip.spec.toml	-
+same-bytecode	environment_log.spec.toml	-
+same-bytecode	error_union_local_aggregate.spec.toml	-
+same-bytecode	error_union_wide_carrier.spec.toml	-
+same-bytecode	events_multifield.spec.toml	-
+same-bytecode	external_return_decode.spec.toml	-
+same-bytecode	falsification_arith.spec.toml	-
+same-bytecode	falsification_error_union_ok.spec.toml	-
+same-bytecode	falsification_loop_invariant.spec.toml	-
+same-bytecode	falsification_map_effect.spec.toml	-
+same-bytecode	falsification_map_frame.spec.toml	-
+same-bytecode	falsification_storage_branch.spec.toml	-
+same-bytecode	generic_instantiation.spec.toml	-
+same-bytecode	lock_guard_revert.spec.toml	-
+unverifiable	reentrancy_lock_guard.spec.toml	contract_invariant_unproved
+same-bytecode	refinement_guard_revert.spec.toml	-
+unverifiable	resource_app_token.spec.toml	contract_invariant_unproved
+unverifiable	resource_app_vault_shares.spec.toml	contract_invariant_unproved
+rewritten	resource_basic_transfer.spec.toml	-
+rewritten	resource_create_destroy.spec.toml	-
+rewritten	resource_dynamic_alias.spec.toml	-
+unverifiable	resource_failure_atomicity.spec.toml	contract_invariant_unproved
+rewritten	resource_initial_create_in_init.spec.toml	-
+rewritten	resource_layout_equivalence.spec.toml	-
+rewritten	resource_many_places_same_domain.spec.toml	-
+unverifiable	resource_modifies_lock.spec.toml	contract_invariant_unproved
+unverifiable	resource_self_transfer.spec.toml	contract_invariant_unproved
+rewritten	resource_signed_amount.spec.toml	-
+rewritten	resource_signed_negative_balance.spec.toml	-
+rewritten	resource_static_asset_domains.spec.toml	-
+unverifiable	resource_transient_immediate.spec.toml	contract_invariant_unproved
+same-bytecode	result_memref_opaque.spec.toml	-
+same-bytecode	result_memref_scalar.spec.toml	-
+unverifiable	runtime_assert_message.spec.toml	contract_invariant_unproved
+unverifiable	short_calldata_dispatch.spec.toml	contract_invariant_unproved
+same-bytecode	source_inline.spec.toml	-
+same-bytecode	storage_bitfield.spec.toml	-
+same-bytecode	storage_custom_bitfield.spec.toml	-
+same-bytecode	storage_dynamic_array.spec.toml	-
+same-bytecode	storage_fixed_bytes_mapping.spec.toml	-
+same-bytecode	storage_map_bitfield.spec.toml	-
+same-bytecode	storage_map_struct.spec.toml	-
+same-bytecode	storage_map_struct_array.spec.toml	-
+same-bytecode	storage_mapping.spec.toml	-
+same-bytecode	storage_narrow_integer_mapping.spec.toml	-
+same-bytecode	storage_nested_map_struct.spec.toml	-
+same-bytecode	storage_nested_mapping.spec.toml	-
+same-bytecode	storage_result_dynamic_bytes.spec.toml	-
+unverifiable	storage_result_dynamic_slice.spec.toml	contract_invariant_unproved
+same-bytecode	storage_result_dynamic_string.spec.toml	-
+same-bytecode	storage_result_scalar.spec.toml	-
+same-bytecode	storage_slice_dynamic_struct.spec.toml	-
+same-bytecode	storage_slice_struct.spec.toml	-
+same-bytecode	storage_string_key_mapping.spec.toml	-
+same-bytecode	storage_struct.spec.toml	-
+same-bytecode	storage_struct_static_array.spec.toml	-
+same-bytecode	storage_triple_nested_mapping.spec.toml	-
+same-bytecode	storage_u256_mapping.spec.toml	-
+same-bytecode	switch_execution.spec.toml	-
+same-bytecode	trait_impl_contract_call.spec.toml	-
+same-bytecode	tuple_static_return.spec.toml	-
+same-bytecode	value_transfer.spec.toml	-

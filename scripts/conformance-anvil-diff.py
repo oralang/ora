@@ -674,10 +674,28 @@ def extract_rpc_revert_data(error: object) -> bytes | None:
         value = error.strip()
         if re.fullmatch(r"0[xX][0-9a-fA-F]*", value):
             return bytes_from_hex(value)
-        match = re.search(r"(?:data|reverted)[^\n]*(0[xX][0-9a-fA-F]*)", value, re.IGNORECASE)
-        if match:
-            return bytes_from_hex(match.group(1))
+        for pattern in (
+            r"\bdata\b\s*[:=]?\s*[\"']?(0[xX][0-9a-fA-F]*)",
+            r"\breverted\b(?:\s+with)?\s*[:=]?\s*[\"']?(0[xX][0-9a-fA-F]*)",
+        ):
+            match = re.search(pattern, value, re.IGNORECASE)
+            if match:
+                return bytes_from_hex(match.group(1))
     return None
+
+
+def self_test_revert_data_extraction() -> None:
+    cases = (
+        ("0x0102", b"\x01\x02"),
+        ("execution reverted: data 0xdeadbeef, transaction 0xabcdef", bytes.fromhex("deadbeef")),
+        ("execution reverted: 0x0102, transaction 0xaabb", bytes.fromhex("0102")),
+        ({"message": "transaction 0xaabb", "data": "0x1234"}, bytes.fromhex("1234")),
+        ("transaction 0xaabb failed without revert data", None),
+    )
+    for rpc_error, expected in cases:
+        actual = extract_rpc_revert_data(rpc_error)
+        if actual != expected:
+            raise AssertionError(f"revert-data extraction mismatch: input={rpc_error!r} expected={expected!r} actual={actual!r}")
 
 
 def compare_revert_expectation(expectation: str, rpc_error: object) -> tuple[bool, str]:
@@ -817,6 +835,10 @@ def parse_cli(argv: list[str]) -> tuple[Path, list[str]]:
 
 
 def main() -> int:
+    if sys.argv[1:] == ["--self-test"]:
+        self_test_revert_data_extraction()
+        print("conformance-anvil-diff: revert-data extraction self-test ok")
+        return 0
     try:
         spec_path, compiler_args = parse_cli(sys.argv[1:])
     except Unsupported as err:

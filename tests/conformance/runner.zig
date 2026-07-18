@@ -64,10 +64,16 @@ pub fn runOraEmitWithExtraArgs(
     output_dir: []const u8,
     extra_args: []const []const u8,
 ) !void {
-    if (!try tryRunOraEmitWithExtraArgs(allocator, source_path, output_dir, extra_args, true)) {
-        return error.OraEmitFailed;
+    switch (try tryRunOraEmitWithExtraArgs(allocator, source_path, output_dir, extra_args, true)) {
+        .success => {},
+        .rejected => return error.OraEmitFailed,
     }
 }
+
+const OraEmitOutcome = union(enum) {
+    success,
+    rejected: ?VerifiedRejectionReason,
+};
 
 fn tryRunOraEmitWithExtraArgs(
     allocator: std.mem.Allocator,
@@ -75,7 +81,7 @@ fn tryRunOraEmitWithExtraArgs(
     output_dir: []const u8,
     extra_args: []const []const u8,
     report_failure: bool,
-) !bool {
+) !OraEmitOutcome {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
     try argv.appendSlice(allocator, &.{
@@ -102,22 +108,98 @@ fn tryRunOraEmitWithExtraArgs(
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
 
-    return switch (result.term) {
-        .exited => |code| if (code == 0)
-            true
-        else blk: {
+    const outcome = classifyOraEmitTermination(result.term, result.stdout, result.stderr, report_failure) catch |err| {
+        switch (err) {
+            error.OraEmitTerminatedAbnormally => std.debug.print("ora emit terminated abnormally: {}\nstdout:\n{s}\nstderr:\n{s}\n", .{ result.term, result.stdout, result.stderr }),
+            error.UnclassifiedVerifiedCompilerRejection => std.debug.print("ora emit rejection has no verified-build reason\nstdout:\n{s}\nstderr:\n{s}\n", .{ result.stdout, result.stderr }),
+        }
+        return err;
+    };
+    return switch (outcome) {
+        .rejected => |reason| blk: {
             if (report_failure) {
+                const code = switch (result.term) {
+                    .exited => |exit_code| exit_code,
+                    else => unreachable,
+                };
                 std.debug.print("ora emit failed with code {d}\nstdout:\n{s}\nstderr:\n{s}\n", .{ code, result.stdout, result.stderr });
             }
-            break :blk false;
+            break :blk .{ .rejected = reason };
         },
-        else => blk: {
-            if (report_failure) {
-                std.debug.print("ora emit terminated abnormally: {}\n", .{result.term});
-            }
-            break :blk false;
-        },
+        .success => .success,
     };
+}
+
+fn classifyOraEmitTermination(
+    term: std.process.Child.Term,
+    stdout: []const u8,
+    stderr: []const u8,
+    report_failure: bool,
+) !OraEmitOutcome {
+    return switch (term) {
+        .exited => |code| if (code == 0)
+            .success
+        else
+            .{ .rejected = if (report_failure) null else try classifyVerifiedRejection(stdout, stderr) },
+        else => error.OraEmitTerminatedAbnormally,
+    };
+}
+
+fn classifyVerifiedRejection(stdout: []const u8, stderr: []const u8) !VerifiedRejectionReason {
+    if (std.mem.indexOf(u8, stdout, "SMT encoding degraded") != null or
+        std.mem.indexOf(u8, stderr, "SMT encoding degraded") != null)
+    {
+        return .verification_encoding_degraded;
+    }
+    if (std.mem.indexOf(u8, stdout, "failed to prove callee precondition") != null or
+        std.mem.indexOf(u8, stderr, "failed to prove callee precondition") != null)
+    {
+        return .callee_precondition_unproved;
+    }
+    if (std.mem.indexOf(u8, stdout, "failed to prove contract invariant") != null or
+        std.mem.indexOf(u8, stderr, "failed to prove contract invariant") != null)
+    {
+        return .contract_invariant_unproved;
+    }
+    return error.UnclassifiedVerifiedCompilerRejection;
+}
+
+test "verified emit classification rejects abnormal termination" {
+    try std.testing.expectError(
+        error.OraEmitTerminatedAbnormally,
+        classifyOraEmitTermination(.{ .signal = .KILL }, "", "", false),
+    );
+}
+
+test "verified emit classification names normal verifier rejections" {
+    const outcome = try classifyOraEmitTermination(
+        .{ .exited = 1 },
+        "failed to prove contract invariant in transfer",
+        "",
+        false,
+    );
+    try std.testing.expectEqual(
+        VerifiedRejectionReason.contract_invariant_unproved,
+        outcome.rejected.?,
+    );
+    const degraded = try classifyOraEmitTermination(
+        .{ .exited = 1 },
+        "verification aborted: SMT encoding degraded (unsupported call)",
+        "",
+        false,
+    );
+    try std.testing.expectEqual(
+        VerifiedRejectionReason.verification_encoding_degraded,
+        degraded.rejected.?,
+    );
+    try std.testing.expectError(
+        error.UnclassifiedVerifiedCompilerRejection,
+        classifyOraEmitTermination(.{ .exited = 1 }, "unknown failure", "", false),
+    );
+    try std.testing.expectError(
+        error.UnclassifiedVerifiedCompilerRejection,
+        classifyOraEmitTermination(.{ .exited = 1 }, "error: VerificationEncodingDegraded", "", false),
+    );
 }
 
 pub fn pathFromTmpAlloc(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, rel_path: []const u8) ![]u8 {
@@ -370,6 +452,17 @@ pub const VerifiedBuildClass = enum {
     unverifiable,
 };
 
+pub const VerifiedRejectionReason = enum {
+    verification_encoding_degraded,
+    callee_precondition_unproved,
+    contract_invariant_unproved,
+};
+
+pub const VerifiedBuildObservation = struct {
+    class: VerifiedBuildClass,
+    rejection_reason: ?VerifiedRejectionReason = null,
+};
+
 /// Classify every contract compiled by one conformance spec. The no-verify
 /// build is the baseline. A verifier rejection dominates bytecode differences;
 /// otherwise any differing contract places the whole spec in `rewritten`.
@@ -377,7 +470,7 @@ pub fn classifyVerifiedBuild(
     allocator: std.mem.Allocator,
     source_path: []const u8,
     spec_path: []const u8,
-) !VerifiedBuildClass {
+) !VerifiedBuildObservation {
     var run_arena = std.heap.ArenaAllocator.init(allocator);
     defer run_arena.deinit();
     const arena = run_arena.allocator();
@@ -396,16 +489,16 @@ pub fn classifyVerifiedBuild(
     try std.Io.Dir.cwd().createDirPath(io, baseline_path);
     try std.Io.Dir.cwd().createDirPath(io, verified_path);
 
-    var class: VerifiedBuildClass = .same_bytecode;
+    var observation: VerifiedBuildObservation = .{ .class = .same_bytecode };
     const primary_source = parsed.value.deploy.source orelse source_path;
-    class = try classifyVerifiedContract(arena, primary_source, baseline_path, verified_path, class);
-    if (class == .unverifiable) return class;
+    observation = try classifyVerifiedContract(arena, primary_source, baseline_path, verified_path, observation);
+    if (observation.class == .unverifiable) return observation;
 
     for (parsed.value.secondary) |contract| {
-        class = try classifyVerifiedContract(arena, contract.source, baseline_path, verified_path, class);
-        if (class == .unverifiable) return class;
+        observation = try classifyVerifiedContract(arena, contract.source, baseline_path, verified_path, observation);
+        if (observation.class == .unverifiable) return observation;
     }
-    return class;
+    return observation;
 }
 
 fn classifyVerifiedContract(
@@ -413,17 +506,21 @@ fn classifyVerifiedContract(
     source_path: []const u8,
     baseline_path: []const u8,
     verified_path: []const u8,
-    current: VerifiedBuildClass,
-) !VerifiedBuildClass {
+    current: VerifiedBuildObservation,
+) !VerifiedBuildObservation {
     try runOraEmitWithExtraArgs(allocator, source_path, baseline_path, &.{"--no-verify"});
-    if (!try tryRunOraEmitWithExtraArgs(allocator, source_path, verified_path, &.{}, false)) {
-        return .unverifiable;
+    switch (try tryRunOraEmitWithExtraArgs(allocator, source_path, verified_path, &.{}, false)) {
+        .success => {},
+        .rejected => |reason| return .{
+            .class = .unverifiable,
+            .rejection_reason = reason orelse return error.MissingVerifiedRejectionReason,
+        },
     }
 
     const stem = sourceStem(source_path) orelse return error.InvalidSourcePath;
     const baseline = try readArtifacts(allocator, baseline_path, stem);
     const verified = try readArtifacts(allocator, verified_path, stem);
-    if (!std.mem.eql(u8, baseline.bytecode, verified.bytecode)) return .rewritten;
+    if (!std.mem.eql(u8, baseline.bytecode, verified.bytecode)) return .{ .class = .rewritten };
     return current;
 }
 

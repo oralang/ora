@@ -395,44 +395,7 @@ pub const VerificationPass = struct {
         self.report_resource_events.deinit();
         self.semantic_constraint_tags.deinit();
         self.runtime_reachable_function_names.deinit();
-        for (self.encoded_annotations.items) |ann| {
-            if (ann.extra_constraints.len > 0) {
-                self.allocator.free(ann.extra_constraints);
-            }
-            if (ann.old_extra_constraints.len > 0) {
-                self.allocator.free(ann.old_extra_constraints);
-            }
-            if (ann.loop_entry_extra_constraints.len > 0) {
-                self.allocator.free(ann.loop_entry_extra_constraints);
-            }
-            if (ann.loop_step_extra_constraints.len > 0) {
-                self.allocator.free(ann.loop_step_extra_constraints);
-            }
-            if (ann.loop_step_head_extra_constraints.len > 0) {
-                self.allocator.free(ann.loop_step_head_extra_constraints);
-            }
-            if (ann.loop_step_body_extra_constraints.len > 0) {
-                self.allocator.free(ann.loop_step_body_extra_constraints);
-            }
-            if (ann.loop_step_backedge_extra_constraints.len > 0) {
-                self.allocator.free(ann.loop_step_backedge_extra_constraints);
-            }
-            if (ann.loop_step_body_obligations.len > 0) {
-                self.allocator.free(ann.loop_step_body_obligations);
-            }
-            if (ann.loop_post_extra_constraints.len > 0) {
-                self.allocator.free(ann.loop_post_extra_constraints);
-            }
-            if (ann.loop_exit_extra_constraints.len > 0) {
-                self.allocator.free(ann.loop_exit_extra_constraints);
-            }
-            if (ann.loop_snapshot_value_bindings.len > 0) {
-                self.allocator.free(ann.loop_snapshot_value_bindings);
-            }
-            if (ann.path_constraints.len > 0) {
-                self.allocator.free(ann.path_constraints);
-            }
-        }
+        self.clearEncodedAnnotations();
         self.encoded_annotations.deinit();
         self.releaseActivePathAssumptionsFrom(0);
         self.active_path_assumptions.deinit();
@@ -441,6 +404,13 @@ pub const VerificationPass = struct {
         self.solver.deinit();
         self.context.deinit();
         self.allocator.destroy(self.context);
+    }
+
+    fn clearEncodedAnnotations(self: *VerificationPass) void {
+        for (self.encoded_annotations.items) |ann| {
+            freeEncodedAnnotationOwnedSlices(self, ann);
+        }
+        self.encoded_annotations.clearRetainingCapacity();
     }
 
     fn releaseActivePathAssumptionsFrom(self: *VerificationPass, start_len: usize) void {
@@ -501,6 +471,14 @@ pub const VerificationPass = struct {
     /// Extract verification annotations from MLIR module
     /// This walks MLIR operations looking for ora.requires, ora.ensures, ora.invariant
     pub fn extractAnnotationsFromMLIR(self: *VerificationPass, mlir_module: mlir.MlirModule) !void {
+        // Manifest preflight and proving may run on the same pass. Each
+        // extraction is a fresh snapshot: retaining either annotations or the
+        // encoder's post-function storage state can promote a post-state
+        // invariant obligation into the next run's assumptions and prove that
+        // obligation with itself.
+        self.clearEncodedAnnotations();
+        self.releaseActivePathAssumptionsFrom(0);
+        self.encoder.resetFunctionState();
         self.semantic_constraint_tags.clearRetainingCapacity();
         // Unfiltered full-contract verification checks every function body in
         // the artifact once. Targeted verification intentionally narrows that
@@ -11232,6 +11210,70 @@ fn buildGlobalContractInvariantModule(mlir_ctx: mlir.MlirContext, invariant_valu
     return module;
 }
 
+fn buildGlobalContractInvariantStoreModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const module = mlir.oraModuleCreateEmpty(loc);
+    const module_body = mlir.oraModuleGetBody(module);
+    const contract = mlir.oraContractOpCreate(mlir_ctx, loc, testStringRef("MutationStateInvariant"));
+    const contract_body = mlir.oraContractOpGetBodyBlock(contract);
+
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const load_x = mlir.oraSLoadOpCreate(mlir_ctx, loc, testStringRef("x"), i256_ty);
+    const limit = mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 100),
+    );
+    const bounded = mlir.oraArithCmpIOpCreate(
+        mlir_ctx,
+        loc,
+        7,
+        mlir.oraOperationGetResult(load_x, 0),
+        mlir.oraOperationGetResult(limit, 0),
+    ); // ule
+    const invariant = mlir.oraInvariantOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(bounded, 0));
+    const global = mlir.oraGlobalOpCreate(
+        mlir_ctx,
+        loc,
+        testStringRef("x"),
+        i256_ty,
+        mlir.MlirAttribute{ .ptr = null },
+    );
+    mlir.oraBlockAppendOwnedOperation(contract_body, load_x);
+    mlir.oraBlockAppendOwnedOperation(contract_body, limit);
+    mlir.oraBlockAppendOwnedOperation(contract_body, bounded);
+    mlir.oraBlockAppendOwnedOperation(contract_body, invariant);
+    mlir.oraBlockAppendOwnedOperation(contract_body, global);
+
+    const func_attrs = [_]mlir.MlirNamedAttribute{
+        testNamedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("set"))),
+        testNamedAttr(mlir_ctx, "ora.visibility", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("pub"))),
+    };
+    const param_types = [_]mlir.MlirType{i256_ty};
+    const param_locs = [_]mlir.MlirLocation{loc};
+    const func_op = mlir.oraFuncFuncOpCreate(
+        mlir_ctx,
+        loc,
+        &func_attrs,
+        func_attrs.len,
+        &param_types,
+        &param_locs,
+        param_types.len,
+    );
+    const func_body = mlir.oraFuncOpGetBodyBlock(func_op);
+    const value = mlir.oraBlockGetArgument(func_body, 0);
+    const store = mlir.oraSStoreOpCreate(mlir_ctx, loc, value, testStringRef("x"));
+    const empty_return_vals = [_]mlir.MlirValue{};
+    const ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_return_vals, empty_return_vals.len);
+    mlir.oraBlockAppendOwnedOperation(func_body, store);
+    mlir.oraBlockAppendOwnedOperation(func_body, ret);
+    mlir.oraBlockAppendOwnedOperation(contract_body, func_op);
+    mlir.oraBlockAppendOwnedOperation(module_body, contract);
+
+    return module;
+}
+
 fn buildBranchPathGuardsModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
     const module = mlir.oraModuleCreateEmpty(loc);
@@ -11663,6 +11705,34 @@ test "global contract invariants attach to real functions instead of unknown" {
         }
     }
     try testing.expect(found_target_contract_invariant);
+}
+
+test "prepared manifest preflight cannot make a post-state contract invariant self-proving" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildGlobalContractInvariantStoreModule(mlir_ctx);
+    defer mlir.oraModuleDestroy(module);
+
+    var manifest = try pass.collectPreparedQueryManifest(module);
+    defer manifest.deinit();
+
+    var result = try pass.runVerificationPass(module);
+    defer result.deinit();
+
+    try testing.expect(!result.success);
+    var found_contract_invariant_failure = false;
+    for (result.errors.items) |verification_error| {
+        if (std.mem.indexOf(u8, verification_error.message, "contract invariant") != null) {
+            found_contract_invariant_failure = true;
+        }
+    }
+    try testing.expect(found_contract_invariant_failure);
 }
 
 test "full verify mode treats untagged cf.assert as obligation" {
