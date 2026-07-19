@@ -39,6 +39,36 @@ const Instantiation = struct {
     node_ids: []const accounting.ControlNodeId,
 };
 
+const TypedSiteIndex = struct {
+    rows: []const accounting.TypedSite,
+
+    fn init(rows: []const accounting.TypedSite) !TypedSiteIndex {
+        if (rows.len < 2) return .{ .rows = rows };
+        for (rows[1..], rows[0..rows.len -| 1]) |current, previous| {
+            if (current.id == previous.id) return error.DuplicateComptimeTypedSiteIdentity;
+            if (current.id < previous.id) return error.NonCanonicalComptimeTypedSiteOrder;
+        }
+        return .{ .rows = rows };
+    }
+
+    fn get(self: TypedSiteIndex, id: accounting.SiteId) ?accounting.TypedSite {
+        var low: usize = 0;
+        var high: usize = self.rows.len;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            const row = self.rows[middle];
+            if (row.id < id) {
+                low = middle + 1;
+            } else if (row.id > id) {
+                high = middle;
+            } else {
+                return row;
+            }
+        }
+        return null;
+    }
+};
+
 /// Compile-time checked adapter contract:
 ///
 /// - `package` exposes `inventory.typed_sites` plus `module`, `moduleForFile`,
@@ -68,6 +98,10 @@ pub fn collectPackageFoldExpansions(
     };
     errdefer result.deinit();
     const arena = result.arena.allocator();
+    // The package adapter emits typed sites in strict global-ID order. Check
+    // that contract once so binary lookup cannot turn malformed input into a
+    // silent missing-site result.
+    const typed_site_index = try TypedSiteIndex.init(package.inventory.typed_sites);
 
     const order = try arena.alloc(usize, const_eval.formal_folds.len);
     for (order, 0..) |*index, value| index.* = value;
@@ -100,7 +134,7 @@ pub fn collectPackageFoldExpansions(
         }
 
         const parent_expansion_id = if (formal_fold.parent_invocation_id) |parent_invocation_id| blk: {
-            const parent = findInvocationExpansion(invocation_expansions.items, parent_invocation_id) orelse
+            const parent = invocationExpansionById(invocation_expansions.items, parent_invocation_id) orelse
                 return error.UnknownComptimeFoldParentInvocation;
             break :blk parent.nearest_expansion_id;
         } else null;
@@ -196,7 +230,7 @@ pub fn collectPackageFoldExpansions(
                 try appendCommittedEvidence(
                     arena,
                     comptime_template,
-                    package.inventory.typed_sites,
+                    typed_site_index,
                     expansion_id,
                     instantiated,
                     nodes.items,
@@ -361,7 +395,7 @@ fn instantiateTemplate(
 fn appendCommittedEvidence(
     allocator: std.mem.Allocator,
     template: accounting.OwnerTemplate,
-    typed_sites: []const accounting.TypedSite,
+    typed_site_index: TypedSiteIndex,
     expansion_id: accounting.ExpansionId,
     instantiated: Instantiation,
     nodes: []const accounting.ControlNode,
@@ -419,7 +453,7 @@ fn appendCommittedEvidence(
                 const use_node_id = nodeIdForSlot(template, instantiated.node_ids, slot) orelse
                     return error.UnknownComptimeControlNodeSlot;
                 if (use_node_id != node_id) continue;
-                const site = typedSiteById(typed_sites, use_template.site_id) orelse
+                const site = typed_site_index.get(use_template.site_id) orelse
                     return error.UnknownComptimeTypedSite;
                 if (site.source_fact_id != source_fact_id) continue;
                 matched_use = true;
@@ -559,17 +593,33 @@ fn nodeIdForSlot(
 }
 
 fn nodeById(nodes: []const accounting.ControlNode, id: accounting.ControlNodeId) ?accounting.ControlNode {
-    for (nodes) |node| if (node.id == id) return node;
-    return null;
+    if (nodes.len == 0 or id < nodes[0].id) return null;
+    const index: usize = @intCast(id - nodes[0].id);
+    if (index >= nodes.len) return null;
+    const node = nodes[index];
+    // instantiateTemplate appends nodes in the same dense order in which it
+    // allocates IDs. Keep this equality check fail-closed if that invariant is
+    // ever weakened by a later reorder.
+    return if (node.id == id) node else null;
 }
 
-fn typedSiteById(sites: []const accounting.TypedSite, id: accounting.SiteId) ?accounting.TypedSite {
-    for (sites) |site| if (site.id == id) return site;
-    return null;
-}
-
-fn findInvocationExpansion(rows: []const InvocationExpansion, invocation_id: u32) ?InvocationExpansion {
-    for (rows) |row| if (row.invocation_id == invocation_id) return row;
+fn invocationExpansionById(rows: []const InvocationExpansion, invocation_id: u32) ?InvocationExpansion {
+    // Rows are appended exactly once while walking the invocation-ID-sorted
+    // fold order. Binary lookup depends on that canonical order; the duplicate
+    // check in the caller must remain ahead of all row construction.
+    var low: usize = 0;
+    var high: usize = rows.len;
+    while (low < high) {
+        const middle = low + (high - low) / 2;
+        const row = rows[middle];
+        if (row.invocation_id < invocation_id) {
+            low = middle + 1;
+        } else if (row.invocation_id > invocation_id) {
+            high = middle;
+        } else {
+            return row;
+        }
+    }
     return null;
 }
 
@@ -650,4 +700,91 @@ fn cloneRange(allocator: std.mem.Allocator, range: accounting.SourceRange) !acco
 
 fn addId(comptime T: type, id: T) !T {
     return std.math.add(T, id, 1);
+}
+
+fn testTypedSite(id: accounting.SiteId) accounting.TypedSite {
+    return .{
+        .id = id,
+        .origin = .source_syntax,
+        .kind = .requires,
+        .key = .{
+            .path = "contract.ora",
+            .owner = "module/contract:Contract/function:run",
+            .range_start = id,
+            .range_end = id + 1,
+            .kind = .requires,
+            .ordinal = id,
+        },
+    };
+}
+
+test "comptime typed-site index supports sparse canonical IDs" {
+    const empty = try TypedSiteIndex.init(&.{});
+    try std.testing.expect(empty.get(1) == null);
+
+    const rows = [_]accounting.TypedSite{
+        testTypedSite(2),
+        testTypedSite(17),
+        testTypedSite(41),
+    };
+    const index = try TypedSiteIndex.init(&rows);
+    try std.testing.expectEqual(@as(accounting.SiteId, 2), index.get(2).?.id);
+    try std.testing.expectEqual(@as(accounting.SiteId, 17), index.get(17).?.id);
+    try std.testing.expectEqual(@as(accounting.SiteId, 41), index.get(41).?.id);
+    try std.testing.expect(index.get(1) == null);
+    try std.testing.expect(index.get(18) == null);
+    try std.testing.expect(index.get(42) == null);
+}
+
+test "comptime typed-site index rejects duplicate and noncanonical IDs" {
+    const duplicate = [_]accounting.TypedSite{
+        testTypedSite(2),
+        testTypedSite(2),
+    };
+    try std.testing.expectError(
+        error.DuplicateComptimeTypedSiteIdentity,
+        TypedSiteIndex.init(&duplicate),
+    );
+
+    const unordered = [_]accounting.TypedSite{
+        testTypedSite(3),
+        testTypedSite(2),
+    };
+    try std.testing.expectError(
+        error.NonCanonicalComptimeTypedSiteOrder,
+        TypedSiteIndex.init(&unordered),
+    );
+}
+
+test "comptime invocation expansion lookup supports sparse canonical IDs" {
+    const rows = [_]InvocationExpansion{
+        .{ .invocation_id = 3, .nearest_expansion_id = 11 },
+        .{ .invocation_id = 19, .nearest_expansion_id = null },
+        .{ .invocation_id = 52, .nearest_expansion_id = 27 },
+    };
+    try std.testing.expectEqual(@as(?accounting.ExpansionId, 11), invocationExpansionById(&rows, 3).?.nearest_expansion_id);
+    try std.testing.expectEqual(@as(?accounting.ExpansionId, null), invocationExpansionById(&rows, 19).?.nearest_expansion_id);
+    try std.testing.expectEqual(@as(?accounting.ExpansionId, 27), invocationExpansionById(&rows, 52).?.nearest_expansion_id);
+    try std.testing.expect(invocationExpansionById(&rows, 2) == null);
+    try std.testing.expect(invocationExpansionById(&rows, 20) == null);
+    try std.testing.expect(invocationExpansionById(&rows, 53) == null);
+}
+
+test "comptime control-node lookup uses dense canonical IDs fail closed" {
+    const canonical = [_]accounting.ControlNode{
+        .{ .id = 40, .expansion_id = 7, .slot = 0, .kind = .entry, .range = .{ .file = "contract.ora", .start = 1, .end = 2 } },
+        .{ .id = 41, .expansion_id = 7, .slot = 1, .kind = .statement, .range = .{ .file = "contract.ora", .start = 3, .end = 4 } },
+        .{ .id = 42, .expansion_id = 7, .slot = 2, .kind = .success_exit, .range = .{ .file = "contract.ora", .start = 5, .end = 6 } },
+    };
+    try std.testing.expectEqual(accounting.ControlNodeKind.entry, nodeById(&canonical, 40).?.kind);
+    try std.testing.expectEqual(accounting.ControlNodeKind.statement, nodeById(&canonical, 41).?.kind);
+    try std.testing.expectEqual(accounting.ControlNodeKind.success_exit, nodeById(&canonical, 42).?.kind);
+    try std.testing.expect(nodeById(&canonical, 39) == null);
+    try std.testing.expect(nodeById(&canonical, 43) == null);
+
+    const noncanonical = [_]accounting.ControlNode{
+        canonical[0],
+        canonical[2],
+    };
+    try std.testing.expect(nodeById(&noncanonical, 41) == null);
 }
