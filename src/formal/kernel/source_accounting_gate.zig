@@ -2056,6 +2056,7 @@ fn validateQueryKinds(ctx: *Context, fact_kind: accounting.SourceFactKind, row: 
         const valid = switch (fact_kind) {
             .loop_invariant => kind == .obligation or kind == .loop_invariant_step or kind == .loop_body_safety or kind == .loop_invariant_post,
             .guard, .refinement_guard => kind == .guard_satisfy or kind == .guard_violate or kind == .obligation,
+            .ensures => kind == .obligation or kind == .loop_invariant_post or kind == .other,
             else => kind == .obligation or kind == .other,
         };
         if (!valid) try ctx.fail(.{ .code = .invalid_symbolic_query_kind, .site_id = ctx.use(row.use_id).?.site_id, .use_id = row.use_id, .handling_id = row.id, .evidence_id = id });

@@ -39,13 +39,16 @@ pub const SemanticUnsupportedReason = union(enum) {
     key_disjoint_evidence_type_unsupported,
     key_disjoint_evidence_owner_mismatch,
     key_disjoint_evidence_path_mismatch,
+    loop_summary_missing,
+    loop_summary_query_mismatch,
+    unsupported_loop_summary: obligation.LoopUnsupportedReason,
 };
 
 pub fn writeDataModule(writer: anytype, set: obligation.ObligationSet, options: Options) !void {
     try set.validateTermReferences();
     try set.validateIdReferences();
 
-    try writeModulePreamble(writer, "Ora.Obligation.Manifest", options.namespace);
+    try writeModulePreamble(writer, "Ora.Obligation.Manifest", options.namespace, false);
     try writeManifestRows(writer, set, false);
     try writeManifestDefinition(writer);
     try writeRowDefinitions(writer, set, false);
@@ -56,20 +59,111 @@ pub fn writeModule(writer: anytype, set: obligation.ObligationSet, options: Opti
     try set.validateTermReferences();
     try set.validateIdReferences();
 
-    try writeModulePreamble(writer, "Ora.Obligation.Theorems", options.namespace);
+    try writeModulePreamble(writer, "Ora.Obligation.Theorems", options.namespace, true);
     try writeManifestRows(writer, set, options.proof_surface);
     try writeManifestDefinition(writer);
     try writer.writeAll("theorem emitted_manifest_wf : emittedManifest.wf = true := by decide\n\n");
+    try writeLoopSummaryDefinitions(writer, set);
     try writeSemanticDefinitions(writer, set, options.proof_surface);
     try writeNamespaceEnd(writer, options.namespace);
 }
 
-fn writeModulePreamble(writer: anytype, import_name: []const u8, namespace: []const u8) !void {
+fn writeModulePreamble(
+    writer: anytype,
+    import_name: []const u8,
+    namespace: []const u8,
+    include_loops: bool,
+) !void {
     try writer.writeAll("import ");
     try writer.writeAll(import_name);
-    try writer.writeAll("\n\nnamespace ");
+    try writer.writeByte('\n');
+    if (include_loops) try writer.writeAll("import Ora.Loop.Denotation\n");
+    try writer.writeAll("\nnamespace ");
     try writer.writeAll(namespace);
     try writer.writeAll("\n\nopen Ora.Obligation\n\n");
+}
+
+fn writeLoopSummaryDefinitions(writer: anytype, set: obligation.ObligationSet) !void {
+    for (set.loop_summaries) |row| {
+        if (!row.projectionSupported()) continue;
+        try writer.print("def emittedLoopSummary_{d} : Ora.Loop.SummaryRow :=\n  ", .{row.id});
+        try writeLoopSummaryRow(writer, row);
+        try writer.writeAll("\n\n");
+    }
+}
+
+fn writeLoopSummaryRow(writer: anytype, row: obligation.LoopSummaryRow) !void {
+    try writer.writeAll("{ id := ");
+    try writer.print("{d}, owner := ", .{row.id});
+    try writeLeanString(writer, ownerName(row.owner));
+    try writer.writeAll(", kind := .");
+    try writer.writeAll(switch (row.loop_kind) {
+        .scf_while => "scfWhile",
+        .scf_for => "scfFor",
+        .other => "other",
+    });
+    try writer.writeAll(", contextVariables := ");
+    try writeLoopVariables(writer, row.context_variables);
+    try writer.writeAll(", variables := ");
+    try writeLoopVariables(writer, row.variables);
+    try writer.writeAll(", init := ");
+    try writeFormulaList(writer, row.init_formulas);
+    try writer.writeAll(", guard := ");
+    if (row.guard_formula) |formula| {
+        try writer.writeAll("some (");
+        try writeFormula(writer, formula);
+        try writer.writeByte(')');
+    } else try writer.writeAll("none");
+    try writer.writeAll(", invariants := ");
+    try writeFormulaList(writer, row.invariant_formulas);
+    try writer.writeAll(", step := ");
+    try writeLoopStepAssignments(writer, row.step_assignments);
+    try writer.writeAll(", post := ");
+    try writeFormulaList(writer, row.post_formulas);
+    try writer.writeAll(", unsupportedReasons := []");
+    try writer.writeAll(" }");
+}
+
+fn writeLoopVariables(writer: anytype, variables: []const obligation.LoopVariable) !void {
+    try writer.writeByte('[');
+    for (variables, 0..) |variable, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writer.writeAll("{ index := ");
+        try writer.print("{d}, id := ", .{variable.index});
+        try writeFreeVarId(writer, variable.id orelse return error.UnsupportedLoopIdentity);
+        try writer.writeAll(", name := ");
+        try writeLeanString(writer, variable.name orelse "");
+        try writer.writeAll(", ty := ");
+        try writeTypeRef(writer, variable.ty);
+        try writer.writeAll(" }");
+    }
+    try writer.writeByte(']');
+}
+
+fn writeFormulaList(writer: anytype, formulas: []const obligation.FormulaRef) !void {
+    try writer.writeByte('[');
+    for (formulas, 0..) |formula, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writeFormula(writer, formula);
+    }
+    try writer.writeByte(']');
+}
+
+fn writeLoopStepAssignments(
+    writer: anytype,
+    assignments: []const obligation.LoopStepAssignment,
+) !void {
+    try writer.writeByte('[');
+    for (assignments, 0..) |assignment, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writer.writeAll("{ variableIndex := ");
+        try writer.print("{d}, target := ", .{assignment.variable_index});
+        try writeFreeVarId(writer, assignment.target orelse return error.UnsupportedLoopIdentity);
+        try writer.writeAll(", value := ");
+        try writeFormula(writer, assignment.value);
+        try writer.writeAll(" }");
+    }
+    try writer.writeByte(']');
 }
 
 fn writeManifestRows(writer: anytype, set: obligation.ObligationSet, proof_surface: bool) !void {
@@ -240,6 +334,13 @@ fn writeSemanticDefinitions(writer: anytype, set: obligation.ObligationSet, proo
         try writer.writeAll("def emittedQuery_");
         try writer.print("{d}", .{query.id});
         try writer.writeAll(" : Prop :=\n");
+        if (query.kind == .loop_invariant_post) {
+            const summary_id = query.loop_summary_id orelse return error.InvalidDependency;
+            try writer.writeAll("  Ora.Loop.loopPostFollowsFromAssumptions emittedManifest\n    ");
+            try writeAssumptionRowsByIds(writer, set, query.assumption_ids);
+            try writer.print("\n    emittedLoopSummary_{d}\n\n", .{summary_id});
+            continue;
+        }
         for (query.obligation_ids, 0..) |obligation_id, index| {
             const row = obligation.findById(set.obligations, obligation_id) orelse return error.InvalidDependency;
             if (index != 0) try writer.writeAll(" /\\\n");
@@ -287,8 +388,8 @@ pub fn querySemanticSupport(set: obligation.ObligationSet, query: obligation.Ver
     switch (query.kind) {
         .loop_invariant_step,
         .loop_body_safety,
-        .loop_invariant_post,
         => return .{ .unsupported = .unsupported_obligation_kind },
+        .loop_invariant_post => return loopPostQuerySemanticSupport(set, query),
         else => {},
     }
     if (query.obligation_ids.len == 0) return .{ .unsupported = .empty_query };
@@ -314,6 +415,100 @@ pub fn querySemanticSupport(set: obligation.ObligationSet, query: obligation.Ver
     }
 
     return .supported;
+}
+
+fn loopPostQuerySemanticSupport(
+    set: obligation.ObligationSet,
+    query: obligation.VerificationQuery,
+) SemanticSupport {
+    const summary_id = query.loop_summary_id orelse
+        return .{ .unsupported = .loop_summary_missing };
+    const summary = obligation.findById(set.loop_summaries, summary_id) orelse
+        return .{ .unsupported = .loop_summary_missing };
+    if (!loopSummaryOwnsQuery(summary, query)) {
+        return .{ .unsupported = .loop_summary_query_mismatch };
+    }
+    if (summary.unsupported_reasons.len != 0) {
+        return .{ .unsupported = .{ .unsupported_loop_summary = summary.unsupported_reasons[0] } };
+    }
+    if (summary.variables.len == 0 or
+        summary.init_formulas.len != summary.variables.len or
+        summary.guard_formula == null or
+        summary.invariant_formulas.len == 0 or
+        summary.post_formulas.len == 0 or
+        summary.step_assignments.len != summary.variables.len)
+    {
+        return .{ .unsupported = .{ .unsupported_loop_summary = .loop_update_not_scalar_assignment } };
+    }
+
+    for (summary.context_variables) |variable| {
+        if (variable.id == null) return .{ .unsupported = .{ .unsupported_loop_summary = .loop_identity_missing } };
+        switch (optionalTypeSupportsU256(variable.ty)) {
+            .supported => {},
+            .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_variable_not_u256 } },
+        }
+        for (summary.variables) |loop_variable| {
+            if (loop_variable.id != null and obligation.freeVarIdEql(variable.id.?, loop_variable.id.?)) {
+                return .{ .unsupported = .{ .unsupported_loop_summary = .loop_identity_missing } };
+            }
+        }
+    }
+    for (summary.variables, 0..) |variable, index| {
+        if (variable.index != index or variable.id == null) {
+            return .{ .unsupported = .{ .unsupported_loop_summary = .loop_identity_missing } };
+        }
+        switch (optionalTypeSupportsU256(variable.ty)) {
+            .supported => {},
+            .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_variable_not_u256 } },
+        }
+        const assignment = summary.step_assignments[index];
+        if (assignment.variable_index != index or assignment.target == null or
+            !obligation.freeVarIdEql(assignment.target.?, variable.id.?))
+        {
+            return .{ .unsupported = .{ .unsupported_loop_summary = .loop_update_target_not_loop_variable } };
+        }
+    }
+
+    for (summary.init_formulas) |formula| switch (valueFormulaSemanticSupport(set, formula)) {
+        .supported => {},
+        .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
+    };
+    switch (formulaSemanticSupport(set, summary.guard_formula.?)) {
+        .supported => {},
+        .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
+    }
+    for (summary.invariant_formulas) |formula| switch (formulaSemanticSupport(set, formula)) {
+        .supported => {},
+        .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
+    };
+    for (summary.step_assignments) |assignment| switch (valueFormulaSemanticSupport(set, assignment.value)) {
+        .supported => {},
+        .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
+    };
+    for (summary.post_formulas) |formula| switch (formulaSemanticSupport(set, formula)) {
+        .supported => {},
+        .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
+    };
+    return .supported;
+}
+
+fn valueFormulaSemanticSupport(set: obligation.ObligationSet, formula: obligation.FormulaRef) SemanticSupport {
+    return switch (formula) {
+        .term => |id| u256ValueTermSemanticSupport(set, id, set.terms.len + 1),
+        .origin_value => .{ .unsupported = .unsupported_origin_value },
+    };
+}
+
+fn loopSummaryOwnsQuery(
+    summary: obligation.LoopSummaryRow,
+    query: obligation.VerificationQuery,
+) bool {
+    var has_query = false;
+    for (summary.query_ids.post) |id| {
+        if (id == query.id) has_query = true;
+    }
+    if (!has_query or query.owner != .function or summary.owner != .statement) return false;
+    return std.mem.eql(u8, query.owner.function.name, summary.owner.statement.function_name);
 }
 
 fn querySupportsSemantics(set: obligation.ObligationSet, query: obligation.VerificationQuery) !bool {

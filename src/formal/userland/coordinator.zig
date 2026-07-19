@@ -366,6 +366,7 @@ fn generatedNamespace(allocator: std.mem.Allocator, file_path: []const u8) ![]co
 }
 
 fn isPlainUnknownTarget(query: obligation.VerificationQuery) bool {
+    if (query.artifact_policy == .diagnostic_only) return false;
     if (query.backend != .z3 or query.obligation_ids.len == 0) return false;
     const result = query.result orelse return false;
     return result.status == .unknown and
@@ -775,6 +776,16 @@ fn projectionForQuery(set: obligation.ObligationSet, query: obligation.Verificat
         const assumption = findAssumption(set, id) orelse continue;
         if (assumption.formula) |formula| summary.addFormula(formula);
     }
+    if (query.kind == .loop_invariant_post) {
+        const summary_id = query.loop_summary_id orelse return summary;
+        const loop_summary = obligation.findById(set.loop_summaries, summary_id) orelse return summary;
+        for (loop_summary.init_formulas) |formula| summary.addFormula(formula);
+        if (loop_summary.guard_formula) |formula| summary.addFormula(formula);
+        for (loop_summary.invariant_formulas) |formula| summary.addFormula(formula);
+        for (loop_summary.step_assignments) |assignment| summary.addFormula(assignment.value);
+        for (loop_summary.post_formulas) |formula| summary.addFormula(formula);
+        return summary;
+    }
     for (query.obligation_ids) |id| {
         const item = findObligation(set, id) orelse continue;
         summary.addKind(item.kind);
@@ -832,6 +843,9 @@ fn printUnsupportedReason(writer: anytype, reason: obligation_to_lean.SemanticUn
         .key_disjoint_evidence_type_unsupported => try writer.writeAll("    reason: key-disjointness evidence currently supports only 256-bit carrier free variables\n"),
         .key_disjoint_evidence_owner_mismatch => try writer.writeAll("    reason: key-disjointness evidence references an assumption from a different owner\n"),
         .key_disjoint_evidence_path_mismatch => try writer.writeAll("    reason: key-disjointness evidence does not match the first differing parameter keys of the read/write paths\n"),
+        .loop_summary_missing => try writer.writeAll("    reason: loop proof target has no owner-scoped loop summary\n"),
+        .loop_summary_query_mismatch => try writer.writeAll("    reason: loop proof query identity does not match its owner-scoped loop summary\n"),
+        .unsupported_loop_summary => |loop_reason| try writer.print("    reason: loop summary is outside the Lean scalar fragment: {s}\n", .{@tagName(loop_reason)}),
     }
 }
 

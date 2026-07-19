@@ -165,6 +165,7 @@ pub fn overlayPreparedQueryResults(
 }
 
 fn queryRequiresPreparedRow(set: obligation.ObligationSet, query: obligation.VerificationQuery) bool {
+    if (query.artifact_policy == .diagnostic_only) return false;
     if (query.backend == .lean) return false;
     if (query.obligation_ids.len == 0) return true;
 

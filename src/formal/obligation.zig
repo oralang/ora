@@ -12,15 +12,15 @@ const std = @import("std");
 pub const Id = u32;
 pub const TermId = u32;
 
-pub const obligation_dump_schema_version: u32 = 5;
+pub const obligation_dump_schema_version: u32 = 6;
 pub const proof_certificate_schema_version: u32 = 1;
 
 pub const ObligationSet = struct {
     obligations: []const Obligation = &.{},
     assumptions: []const Assumption = &.{},
     queries: []const VerificationQuery = &.{},
-    /// Information-only loop summaries. L1 deliberately does not make these
-    /// proof targets or include them in artifact authorization decisions.
+    /// Backend-neutral loop summaries. Only a supported, owner-bound
+    /// `loop_invariant_post` query may make one a userland proof target.
     loop_summaries: []const LoopSummaryRow = &.{},
     proof_artifacts: []const ProofArtifact = &.{},
     diagnostics: []const ObligationDiagnostic = &.{},
@@ -41,6 +41,7 @@ pub const ObligationSet = struct {
         self.validateIdReferences() catch return .{ .blocked = .invalid_dependency };
 
         for (self.queries) |query| {
+            if (query.artifact_policy == .diagnostic_only) continue;
             if (query.result) |result| {
                 if (result.degraded) return .{ .blocked = .degraded_query };
                 if (result.vacuous) return .{ .blocked = .vacuous_query };
@@ -77,6 +78,13 @@ pub const ObligationSet = struct {
         }
         for (self.terms) |term| {
             try self.validateTerm(term);
+        }
+        for (self.loop_summaries) |summary| {
+            for (summary.init_formulas) |formula| try self.validateFormulaRef(formula);
+            if (summary.guard_formula) |formula| try self.validateFormulaRef(formula);
+            for (summary.invariant_formulas) |formula| try self.validateFormulaRef(formula);
+            for (summary.step_assignments) |assignment| try self.validateFormulaRef(assignment.value);
+            for (summary.post_formulas) |formula| try self.validateFormulaRef(formula);
         }
     }
 
@@ -171,6 +179,10 @@ pub const ObligationSet = struct {
                     if (!containsId(artifact.obligation_ids, id)) return error.InvalidDependency;
                 }
             }
+            if (query.loop_summary_id) |loop_summary_id| {
+                if (query.kind != .loop_invariant_post) return error.InvalidDependency;
+                if (!self.loopSummaryIdExists(loop_summary_id)) return error.InvalidDependency;
+            }
         }
     }
 
@@ -193,6 +205,13 @@ pub const ObligationSet = struct {
             if (item.id == id) return item;
         }
         return null;
+    }
+
+    fn loopSummaryIdExists(self: ObligationSet, id: Id) bool {
+        for (self.loop_summaries) |item| {
+            if (item.id == id) return true;
+        }
+        return false;
     }
 
     fn hasSuccessfulProofFor(self: ObligationSet, item: Obligation) bool {
@@ -258,6 +277,9 @@ pub const VerificationQuery = struct {
     source: SourceRef,
     phase: Phase,
     origin: Origin,
+    /// Diagnostic-only queries may carry verifier/source-accounting identity,
+    /// but can neither block nor authorize artifact emission.
+    artifact_policy: ArtifactPolicy = .blocks_verified_artifacts,
     backend: VerificationBackend = .unspecified,
     kind: VerificationQueryKind,
     logical_role: ?LogicalRole = null,
@@ -272,11 +294,13 @@ pub const VerificationQuery = struct {
     canonical_smt_annotation_pure: bool = false,
     proof_artifact_id: ?Id = null,
     discharges_query_id: ?Id = null,
+    loop_summary_id: ?Id = null,
     result: ?VerificationQueryResult = null,
 };
 
 pub const FormalQueryBinding = struct {
     source_op_id: usize,
+    loop_source_op_id: ?usize = null,
     kind: VerificationQueryKind,
     logical_role: ?LogicalRole = null,
     guard_id: ?[]const u8 = null,
@@ -583,9 +607,9 @@ pub const BackendComponent = enum(u8) {
     artifact_policy,
 };
 
-/// Backend-neutral data required to denote a loop proof in a later lane.
-/// Rows are emitted before proof eligibility exists, so unresolved identities
-/// and unsupported shapes remain explicit in `unsupported_reasons`.
+/// Backend-neutral data required to denote a loop proof. Unresolved identities
+/// and unsupported shapes remain explicit in `unsupported_reasons`; they can
+/// never become proof targets.
 pub const LoopSummaryRow = struct {
     id: Id,
     owner: Owner,
@@ -594,6 +618,7 @@ pub const LoopSummaryRow = struct {
     origin: Origin,
     loop_source_op_id: ?u32,
     loop_kind: LoopKind,
+    context_variables: []const LoopVariable = &.{},
     variables: []const LoopVariable = &.{},
     init_formulas: []const FormulaRef = &.{},
     guard_formula: ?FormulaRef = null,
@@ -2272,6 +2297,41 @@ test "obligation can point at MLIR origin without proof term" {
     };
 
     try std.testing.expect(obligation.blocksArtifacts());
+}
+
+test "diagnostic-only query carries accounting identity without artifact authority" {
+    const obligation_ids = [_]Id{1};
+    const obligations = [_]Obligation{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "loop" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .kind = .{ .logical = .{
+            .role = .loop_invariant,
+            .formula = .{ .term = 0 },
+        } },
+        .artifact_policy = .diagnostic_only,
+    }};
+    const queries = [_]VerificationQuery{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "loop" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .artifact_policy = .diagnostic_only,
+        .backend = .z3,
+        .kind = .obligation,
+        .obligation_ids = &obligation_ids,
+        .result = .{ .status = .unknown },
+    }};
+    const set: ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &.{.{ .bool_lit = true }},
+    };
+
+    try std.testing.expect(set.artifactDecision().isAllowed());
 }
 
 test "derived obligations keep provenance instead of rewriting originals" {

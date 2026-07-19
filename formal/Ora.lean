@@ -61,6 +61,10 @@ import Ora.Obligation.BitVec
 import Ora.Obligation.Semantics
 import Ora.Obligation.Theorems
 import Ora.Obligation.Agreement
+import Ora.Loop.Core
+import Ora.Loop.Denotation
+import Ora.Generated.LoopTotalitySnapshot
+import Ora.LoopTotalitySync
 import Ora.Resource.Model
 import Ora.Resource.Theorems
 import Ora.Resource.Sync

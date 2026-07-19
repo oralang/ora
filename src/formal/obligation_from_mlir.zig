@@ -252,6 +252,7 @@ const Collector = struct {
     assumptions: std.ArrayList(obligation.Assumption) = .empty,
     queries: std.ArrayList(obligation.VerificationQuery) = .empty,
     loop_summaries: std.ArrayList(obligation.LoopSummaryRow) = .empty,
+    loop_operation_bindings: std.ArrayList(LoopOperationBinding) = .empty,
     query_bindings: std.ArrayList(obligation.FormalQueryBinding) = .empty,
     source_fact_bindings: std.ArrayList(SourceFactOpBinding) = .empty,
     runtime_owner_bindings: std.ArrayList(RuntimeOwnerBinding) = .empty,
@@ -260,8 +261,12 @@ const Collector = struct {
     diagnostics: std.ArrayList(obligation.ObligationDiagnostic) = .empty,
     resource_sites: std.ArrayList(ResourceCompletenessSite) = .empty,
     active_binders: std.ArrayList(BinderFrame) = .empty,
+    loop_value_bindings: std.ArrayList(LoopValueBinding) = .empty,
     next_id: obligation.Id = 1,
     next_loop_summary_id: obligation.Id = 1,
+    next_loop_variable_pattern_id: u32 = 0,
+    use_loop_value_bindings: bool = false,
+    active_loop_depth: u32 = 0,
     next_ordinal: u32 = 0,
     function_param_names: []const []const u8 = &.{},
     function_param_binding_ids: []const obligation.FreeVarId = &.{},
@@ -285,6 +290,16 @@ const Collector = struct {
         name: []const u8,
         ty: obligation.TypeRef,
         region: ?obligation.RegionRef = null,
+    };
+
+    const LoopValueBinding = struct {
+        value_id: usize,
+        variable: obligation.LoopVariable,
+    };
+
+    const LoopOperationBinding = struct {
+        summary_id: obligation.Id,
+        source_op_id: usize,
     };
 
     const ResourcePlaces = struct {
@@ -327,6 +342,8 @@ const Collector = struct {
         const previous_source_trait_method = self.function_source_trait_method;
         const previous_contract_source_owner_key = self.contract_source_owner_key;
         const previous_binder_len = self.active_binders.items.len;
+        const previous_loop_value_binding_len = self.loop_value_bindings.items.len;
+        const previous_loop_operation_binding_len = self.loop_operation_bindings.items.len;
         const is_function = std.mem.eql(u8, op_name, "func.func");
         const is_contract = std.mem.eql(u8, op_name, "ora.contract");
         if (is_contract) {
@@ -388,10 +405,14 @@ const Collector = struct {
                 );
             }
             self.active_binders.shrinkRetainingCapacity(previous_binder_len);
+            self.loop_value_bindings.shrinkRetainingCapacity(previous_loop_value_binding_len);
+            self.loop_operation_bindings.shrinkRetainingCapacity(previous_loop_operation_binding_len);
         }
         defer {
             if (is_function) {
                 self.active_binders.shrinkRetainingCapacity(previous_binder_len);
+                self.loop_value_bindings.shrinkRetainingCapacity(previous_loop_value_binding_len);
+                self.loop_operation_bindings.shrinkRetainingCapacity(previous_loop_operation_binding_len);
                 self.function_param_types = previous_param_types;
                 self.function_param_binding_ids = previous_param_binding_ids;
                 self.function_param_names = previous_param_names;
@@ -433,6 +454,12 @@ const Collector = struct {
             query_start,
         );
 
+        const is_loop_operation = std.mem.eql(u8, op_name, "scf.while") or std.mem.eql(u8, op_name, "scf.for");
+        if (is_loop_operation) self.active_loop_depth += 1;
+        defer {
+            if (is_loop_operation) self.active_loop_depth -= 1;
+        }
+
         const num_regions = mlir.oraOperationGetNumRegions(op);
         var region_index: usize = 0;
         while (region_index < num_regions) : (region_index += 1) {
@@ -461,6 +488,10 @@ const Collector = struct {
         symbol: ?[]const u8,
         ordinal: u32,
     ) !void {
+        const previous_loop_projection = self.use_loop_value_bindings;
+        self.use_loop_value_bindings = true;
+        defer self.use_loop_value_bindings = previous_loop_projection;
+
         const loop_kind: obligation.LoopKind = if (std.mem.eql(u8, op_name, "scf.while"))
             .scf_while
         else if (std.mem.eql(u8, op_name, "scf.for"))
@@ -478,6 +509,8 @@ const Collector = struct {
         defer reasons.deinit(self.allocator);
 
         const variables = try self.collectLoopVariables(op, loop_kind);
+        try self.bindLoopValues(op, loop_kind, variables);
+        const context_variables = try self.collectLoopContextVariables();
         const init_formulas = try self.collectLoopInitFormulas(op, loop_kind, symbol, ordinal);
         const guard_formula = try self.collectLoopGuardFormula(op, loop_kind, symbol, ordinal);
         const invariant_formulas = try self.collectLoopInvariantFormulas(op, loop_kind, symbol, ordinal);
@@ -514,12 +547,14 @@ const Collector = struct {
         if (body_facts.has_nested_loop) try appendLoopReason(&reasons, self.allocator, .loop_has_nested_loop);
         if (body_facts.has_branching_body) try appendLoopReason(&reasons, self.allocator, .loop_has_branching_body);
 
-        // L1 records the manifest shape but intentionally does not bind live
-        // verifier queries. The named reason keeps every row proof-ineligible.
-        try appendLoopReason(&reasons, self.allocator, .loop_query_not_owner_scoped);
-
         const id = self.next_loop_summary_id;
         self.next_loop_summary_id += 1;
+        if (sourceOpId(op)) |source_op_id| {
+            try self.loop_operation_bindings.append(self.allocator, .{
+                .summary_id = id,
+                .source_op_id = source_op_id,
+            });
+        }
         try self.loop_summaries.append(self.allocator, .{
             .id = id,
             .owner = owner,
@@ -528,6 +563,7 @@ const Collector = struct {
             .origin = mlirOrigin(op_name, symbol, ordinal),
             .loop_source_op_id = loop_source_op_id,
             .loop_kind = loop_kind,
+            .context_variables = context_variables,
             .variables = variables,
             .init_formulas = init_formulas,
             .guard_formula = guard_formula,
@@ -548,16 +584,80 @@ const Collector = struct {
         const variables = try self.allocator.alloc(obligation.LoopVariable, count);
         for (variables, 0..) |*variable, index| {
             const value = loopVariableValue(op, loop_kind, @intCast(index));
+            const pattern_id = self.next_loop_variable_pattern_id;
+            self.next_loop_variable_pattern_id = std.math.add(u32, pattern_id, 1) catch
+                return error.TooManyLoopVariables;
             variable.* = .{
                 .index = @intCast(index),
-                // Loop-carried source bindings do not have stable FreeVarIds
-                // in canonical MLIR yet. Never synthesize a colliding identity.
-                .id = null,
+                // A reserved file-id namespace makes loop-carried identities
+                // globally disjoint from source bindings and from the existing
+                // synthetic function-parameter fallback namespace.
+                .id = .{
+                    .file_id = synthetic_file_id - 1,
+                    .pattern_id = pattern_id,
+                },
                 .name = try self.loopVariableName(op, loop_kind, index),
                 .ty = try self.typeRefFromValue(value),
             };
         }
         return variables;
+    }
+
+    fn collectLoopContextVariables(self: *Collector) ![]const obligation.LoopVariable {
+        if (self.function_param_names.len == 0) return &.{};
+        const variables = try self.allocator.alloc(obligation.LoopVariable, self.function_param_names.len);
+        for (variables, 0..) |*variable, index| {
+            variable.* = .{
+                .index = @intCast(index),
+                .id = self.freeVarIdForFunctionParam(index),
+                .name = self.function_param_names[index],
+                .ty = if (index < self.function_param_types.len)
+                    self.function_param_types[index]
+                else
+                    try self.unknownTypeRef(),
+            };
+        }
+        return variables;
+    }
+
+    fn bindLoopValues(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        loop_kind: obligation.LoopKind,
+        variables: []const obligation.LoopVariable,
+    ) !void {
+        for (variables) |variable| {
+            const body_value = loopVariableValue(op, loop_kind, variable.index);
+            try self.appendLoopValueBinding(body_value, variable);
+            if (loop_kind == .scf_while) {
+                const before = mlir.oraScfWhileOpGetBeforeBlock(op);
+                if (!mlir.oraBlockIsNull(before) and variable.index < mlir.oraBlockGetNumArguments(before)) {
+                    try self.appendLoopValueBinding(mlir.oraBlockGetArgument(before, variable.index), variable);
+                }
+            }
+        }
+        const result_count: usize = @intCast(mlir.oraOperationGetNumResults(op));
+        for (0..result_count) |result_index| {
+            const variable_index = result_index + @intFromBool(loop_kind == .scf_for);
+            if (variable_index >= variables.len) continue;
+            try self.appendLoopValueBinding(mlir.oraOperationGetResult(op, result_index), variables[variable_index]);
+        }
+    }
+
+    fn appendLoopValueBinding(
+        self: *Collector,
+        value: mlir.MlirValue,
+        variable: obligation.LoopVariable,
+    ) !void {
+        if (mlir.oraValueIsNull(value)) return;
+        const value_id = @intFromPtr(value.ptr);
+        for (self.loop_value_bindings.items) |existing| {
+            if (existing.value_id == value_id) return;
+        }
+        try self.loop_value_bindings.append(self.allocator, .{
+            .value_id = value_id,
+            .variable = variable,
+        });
     }
 
     fn loopVariableName(
@@ -602,6 +702,18 @@ const Collector = struct {
         symbol: ?[]const u8,
         ordinal: u32,
     ) !?obligation.FormulaRef {
+        if (loop_kind == .scf_for) {
+            if (mlir.oraOperationGetNumOperands(op) < 2) return null;
+            const induction = loopVariableValue(op, loop_kind, 0);
+            const induction_term = (try self.termFromValue(induction)) orelse return null;
+            const upper_term = (try self.termFromValue(mlir.oraOperationGetOperand(op, 1))) orelse return null;
+            return .{ .term = try self.addTerm(.{ .binary = .{
+                .op = .lt,
+                .lhs = induction_term,
+                .rhs = upper_term,
+                .ty = try self.typeRefFromValue(induction),
+            } }) };
+        }
         if (loop_kind != .scf_while) return null;
         const before = mlir.oraScfWhileOpGetBeforeBlock(op);
         if (mlir.oraBlockIsNull(before)) return null;
@@ -662,14 +774,33 @@ const Collector = struct {
         if (mlir.oraBlockIsNull(body)) return &.{};
         const terminator = mlir.oraBlockGetTerminator(body);
         if (mlir.oraOperationIsNull(terminator) or !std.mem.eql(u8, operationName(terminator), "scf.yield")) return &.{};
-        const count: usize = @intCast(mlir.oraOperationGetNumOperands(terminator));
-        if (count == 0) return &.{};
-        const assignments = try self.allocator.alloc(obligation.LoopStepAssignment, count);
-        for (assignments, 0..) |*assignment, index| {
-            const variable_index = index + @intFromBool(loop_kind == .scf_for);
+        const yielded_count: usize = @intCast(mlir.oraOperationGetNumOperands(terminator));
+        const induction_count: usize = @intFromBool(loop_kind == .scf_for);
+        const assignments = try self.allocator.alloc(obligation.LoopStepAssignment, yielded_count + induction_count);
+        if (loop_kind == .scf_for) {
+            if (mlir.oraOperationGetNumOperands(op) < 3) return &.{};
+            const induction = loopVariableValue(op, loop_kind, 0);
+            const step = mlir.oraOperationGetOperand(op, 2);
+            const induction_term = (try self.termFromValue(induction)) orelse return &.{};
+            const step_term = (try self.termFromValue(step)) orelse return &.{};
+            const value = try self.addTerm(.{ .binary = .{
+                .op = .add,
+                .lhs = induction_term,
+                .rhs = step_term,
+                .ty = try self.typeRefFromValue(induction),
+            } });
+            assignments[0] = .{
+                .variable_index = 0,
+                .target = self.loopVariableForValue(induction).?.id,
+                .value = .{ .term = value },
+            };
+        }
+        for (assignments[induction_count..], 0..) |*assignment, index| {
+            const variable_index = index + induction_count;
+            const target_variable = self.loopVariableForValue(loopVariableValue(op, loop_kind, @intCast(variable_index)));
             assignment.* = .{
                 .variable_index = @intCast(variable_index),
-                .target = null,
+                .target = if (target_variable) |variable| variable.id else null,
                 .value = try self.loopFormulaFromValue(
                     mlir.oraOperationGetOperand(terminator, index),
                     "scf.yield",
@@ -690,11 +821,7 @@ const Collector = struct {
         ordinal: u32,
         index: u32,
     ) !obligation.FormulaRef {
-        _ = self;
-        _ = value;
-        // L1 snapshots stable MLIR ownership only. Projecting these values into
-        // the shared term table would renumber later obligation terms and make
-        // an information-only row affect proof artifacts.
+        if (try self.termFromValue(value)) |term| return .{ .term = term };
         return .{ .origin_value = .{
             .origin = mlirOrigin(op_name, symbol, ordinal),
             .kind = .operand,
@@ -1143,6 +1270,13 @@ const Collector = struct {
             try self.addMissingFormulaDiagnostic(op_name, symbol, ordinal);
             return;
         };
+        const loop_post_formula = if (role == .ensures and self.functionHasLoopSummary(symbol)) blk: {
+            const previous_loop_projection = self.use_loop_value_bindings;
+            self.use_loop_value_bindings = true;
+            defer self.use_loop_value_bindings = previous_loop_projection;
+            break :blk (try self.valueOperand(op, op_name, symbol, ordinal, 0)) orelse
+                return error.MissingLoopPostFormula;
+        } else null;
         const origin = mlirOrigin(op_name, symbol, ordinal);
         const owner = self.ownerFor(symbol);
         const id = self.nextId();
@@ -1158,8 +1292,88 @@ const Collector = struct {
                 .role = role,
                 .formula = formula,
             } },
+            // Loop invariant and body-safety authorization is owned by the
+            // verifier's first-class loop queries. A generic source query for
+            // the nested annotation has different premises and must not claim
+            // one-to-one proof authority.
+            .artifact_policy = if (self.active_loop_depth != 0 and role == .invariant)
+                .diagnostic_only
+            else
+                .blocks_verified_artifacts,
         });
         try self.addQueryForOperation(.obligation, role, null, id, owner, origin, source, op);
+        if (loop_post_formula) |post_formula| {
+            try self.attachLoopPostQueries(
+                op,
+                id,
+                owner,
+                origin,
+                source,
+                post_formula,
+            );
+        }
+    }
+
+    fn functionHasLoopSummary(self: *const Collector, symbol: ?[]const u8) bool {
+        const function_name = symbol orelse return false;
+        for (self.loop_summaries.items) |summary| {
+            if (summary.owner == .statement and
+                std.mem.eql(u8, summary.owner.statement.function_name, function_name)) return true;
+        }
+        return false;
+    }
+
+    fn attachLoopPostQueries(
+        self: *Collector,
+        ensures_op: mlir.MlirOperation,
+        obligation_id: obligation.Id,
+        owner: obligation.Owner,
+        origin: obligation.Origin,
+        source: obligation.SourceRef,
+        post_formula: obligation.FormulaRef,
+    ) !void {
+        if (owner != .function) return;
+        const ensures_source_op_id = sourceOpId(ensures_op) orelse return;
+        for (self.loop_summaries.items) |*summary| {
+            if (summary.owner != .statement or
+                !std.mem.eql(u8, summary.owner.statement.function_name, owner.function.name)) continue;
+            const loop_source_op_id = self.loopOperationSourceId(summary.id) orelse continue;
+            summary.post_formulas = try appendFormula(self.allocator, summary.post_formulas, post_formula);
+
+            const assumption_ids = try self.assumptionIdsForOwner(owner);
+            const obligation_ids = try self.allocator.alloc(obligation.Id, 1);
+            obligation_ids[0] = obligation_id;
+            const query_id = self.nextId();
+            try self.queries.append(self.allocator, .{
+                .id = query_id,
+                .owner = owner,
+                .source = source,
+                .phase = .report,
+                .origin = origin,
+                .kind = .loop_invariant_post,
+                .logical_role = .ensures,
+                .obligation_ids = obligation_ids,
+                .assumption_ids = assumption_ids,
+                .loop_summary_id = summary.id,
+            });
+            summary.query_ids.post = try appendId(self.allocator, summary.query_ids.post, query_id);
+            try self.query_bindings.append(self.allocator, .{
+                .source_op_id = ensures_source_op_id,
+                .loop_source_op_id = loop_source_op_id,
+                .kind = .loop_invariant_post,
+                .logical_role = .ensures,
+                .query_id = query_id,
+                .assumption_ids = assumption_ids,
+                .obligation_ids = obligation_ids,
+            });
+        }
+    }
+
+    fn loopOperationSourceId(self: *Collector, summary_id: obligation.Id) ?usize {
+        for (self.loop_operation_bindings.items) |binding| {
+            if (binding.summary_id == summary_id) return binding.source_op_id;
+        }
+        return null;
     }
 
     fn addAssumptionOp(
@@ -1570,6 +1784,10 @@ const Collector = struct {
                 .formula = formula_override orelse derivedFormula(op_name, symbol, ordinal),
                 .arithmetic_safety = safety,
             } },
+            .artifact_policy = if (self.active_loop_depth != 0)
+                .diagnostic_only
+            else
+                .blocks_verified_artifacts,
         });
         try self.addQuery(.obligation, .arithmetic_safety, null, id, owner, origin, source);
     }
@@ -1647,6 +1865,10 @@ const Collector = struct {
             .source = source,
             .phase = .report,
             .origin = origin,
+            .artifact_policy = if (self.active_loop_depth != 0)
+                .diagnostic_only
+            else
+                .blocks_verified_artifacts,
             .kind = kind,
             .logical_role = logical_role,
             .guard_id = guard_id,
@@ -1659,6 +1881,7 @@ const Collector = struct {
             .source = query.source,
             .phase = query.phase,
             .origin = query.origin,
+            .artifact_policy = query.artifact_policy,
             .kind = query.kind,
             .logical_role = query.logical_role,
             .guard_id = query.guard_id,
@@ -1783,6 +2006,14 @@ const Collector = struct {
     ) anyerror!?obligation.TermId {
         if (mlir.oraValueIsNull(value)) return null;
 
+        if (self.use_loop_value_bindings) if (self.loopVariableForValue(value)) |variable| {
+            return try self.addTerm(.{ .variable = .{ .free = .{
+                .id = variable.id orelse return null,
+                .name = variable.name orelse "loop_var",
+                .ty = try self.typeRefFromValueWithIntegerSignedness(value, signed_override),
+            } } });
+        };
+
         if (mlir.mlirValueIsABlockArgument(value)) {
             const arg_number: usize = self.functionEntryBlockArgumentNumber(value) orelse return null;
             const name = if (arg_number < self.function_param_names.len)
@@ -1822,6 +2053,20 @@ const Collector = struct {
         if (std.mem.eql(u8, owner_name, "arith.cmpi")) return try self.cmpiTerm(owner);
         if (std.mem.eql(u8, owner_name, "ora.cmp")) return try self.oraCmpTerm(owner);
         if (std.mem.eql(u8, owner_name, "ora.quantified")) return try self.quantifiedTerm(owner);
+        return null;
+    }
+
+    fn loopVariableForValue(
+        self: *Collector,
+        value: mlir.MlirValue,
+    ) ?obligation.LoopVariable {
+        const value_id = @intFromPtr(value.ptr);
+        var index = self.loop_value_bindings.items.len;
+        while (index != 0) {
+            index -= 1;
+            const binding = self.loop_value_bindings.items[index];
+            if (binding.value_id == value_id) return binding.variable;
+        }
         return null;
     }
 
@@ -3197,6 +3442,28 @@ fn appendLoopReason(
 ) !void {
     for (reasons.items) |existing| if (existing == reason) return;
     try reasons.append(allocator, reason);
+}
+
+fn appendFormula(
+    allocator: std.mem.Allocator,
+    existing: []const obligation.FormulaRef,
+    value: obligation.FormulaRef,
+) ![]const obligation.FormulaRef {
+    const result = try allocator.alloc(obligation.FormulaRef, existing.len + 1);
+    @memcpy(result[0..existing.len], existing);
+    result[existing.len] = value;
+    return result;
+}
+
+fn appendId(
+    allocator: std.mem.Allocator,
+    existing: []const obligation.Id,
+    value: obligation.Id,
+) ![]const obligation.Id {
+    const result = try allocator.alloc(obligation.Id, existing.len + 1);
+    @memcpy(result[0..existing.len], existing);
+    result[existing.len] = value;
+    return result;
 }
 
 fn formulasContainOriginValue(formulas: []const obligation.FormulaRef) bool {

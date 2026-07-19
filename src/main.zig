@@ -6184,6 +6184,7 @@ fn z3FormalQueryBindingsFromFormal(
     for (bindings, converted) |binding, *out| {
         out.* = .{
             .source_op_id = binding.source_op_id,
+            .loop_source_op_id = binding.loop_source_op_id,
             .kind = @tagName(binding.kind),
             .logical_role = if (binding.logical_role) |role| @tagName(role) else null,
             .guard_id = binding.guard_id,

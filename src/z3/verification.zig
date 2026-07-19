@@ -5592,6 +5592,7 @@ pub const VerificationPass = struct {
                         "{s} [invariant-post]{s}",
                         .{ fn_name, post_tag },
                     );
+                    const formal_identity = try formalIdentityForLoopPost(self, ensure_ann, inv_ann.loop_owner);
                     try appendPreparedQueryUnique(&queries, self.allocator, .{
                         .kind = .LoopInvariantPost,
                         .loop_owner = inv_ann.loop_owner,
@@ -5609,6 +5610,11 @@ pub const VerificationPass = struct {
                         .smtlib_bytes = post_smtlib.len,
                         .smtlib_hash = post_hash,
                         .log_prefix = post_log_prefix,
+                        .formal_query_id = formal_identity.formal_query_id,
+                        .formal_assumption_ids = formal_identity.formal_assumption_ids,
+                        .formal_obligation_ids = formal_identity.formal_obligation_ids,
+                        .formal_match_status = formal_identity.formal_match_status,
+                        .formal_match_key = formal_identity.formal_match_key,
                     });
                 }
             }
@@ -6447,11 +6453,11 @@ fn formalLogicalRoleForAnnotation(kind: AnnotationKind) ?[]const u8 {
 fn formalQueryKindForPrepared(kind: QueryKind) ?[]const u8 {
     return switch (kind) {
         .Obligation => "obligation",
+        .LoopInvariantPost => "loop_invariant_post",
         .GuardViolate => "guard_violate",
         .Base,
         .LoopInvariantStep,
         .LoopBodySafety,
-        .LoopInvariantPost,
         .GuardSatisfy,
         => null,
     };
@@ -6476,11 +6482,13 @@ fn formatFormalMatchKey(
 fn bindingMatchesPreparedQuery(
     binding: FormalQueryBinding,
     source_op_id: usize,
+    loop_source_op_id: ?usize,
     kind: []const u8,
     role: ?[]const u8,
     guard_id: ?[]const u8,
 ) bool {
     if (binding.source_op_id != source_op_id) return false;
+    if (binding.loop_source_op_id != loop_source_op_id) return false;
     if (!std.mem.eql(u8, binding.kind, kind)) return false;
     if (!optionalStringEqual(binding.logical_role, role)) return false;
     if (!optionalStringEqual(binding.guard_id, guard_id)) return false;
@@ -6543,7 +6551,7 @@ fn formalIdentityForAnnotation(
     var match: ?FormalQueryBinding = null;
     var duplicate = false;
     for (self.formal_query_bindings) |binding| {
-        if (!bindingMatchesPreparedQuery(binding, source_op_id, formal_kind, role, ann.guard_id)) continue;
+        if (!bindingMatchesPreparedQuery(binding, source_op_id, null, formal_kind, role, ann.guard_id)) continue;
         if (match != null) {
             duplicate = true;
             break;
@@ -6563,6 +6571,50 @@ fn formalIdentityForAnnotation(
         .formal_match_key = key_text,
     };
 
+    self.allocator.free(key_text);
+    return .{
+        .formal_query_id = binding.query_id,
+        .formal_assumption_ids = try cloneU32SliceArena(self.allocator, binding.assumption_ids),
+        .formal_obligation_ids = try cloneU32SliceArena(self.allocator, binding.obligation_ids),
+        .formal_match_status = .matched,
+    };
+}
+
+fn formalIdentityForLoopPost(
+    self: *VerificationPass,
+    ensure_ann: EncodedAnnotation,
+    loop_owner: ?u64,
+) !FormalPreparedQueryIdentity {
+    if (self.formal_query_bindings.len == 0) return .{};
+    const source_op_id = sourceOpId(ensure_ann.source_op) orelse return .{};
+    const loop_source_op_id: usize = @intCast(loop_owner orelse return .{});
+    const formal_kind = "loop_invariant_post";
+    const role = "ensures";
+    const key_text = try std.fmt.allocPrint(
+        self.allocator,
+        "source_op=0x{x} loop_source_op=0x{x} kind={s} role={s} guard=none",
+        .{ source_op_id, loop_source_op_id, formal_kind, role },
+    );
+
+    var match: ?FormalQueryBinding = null;
+    var duplicate = false;
+    for (self.formal_query_bindings) |binding| {
+        if (!bindingMatchesPreparedQuery(
+            binding,
+            source_op_id,
+            loop_source_op_id,
+            formal_kind,
+            role,
+            null,
+        )) continue;
+        if (match != null) {
+            duplicate = true;
+            break;
+        }
+        match = binding;
+    }
+    if (duplicate) return .{ .formal_match_status = .ambiguous, .formal_match_key = key_text };
+    const binding = match orelse return .{ .formal_match_status = .missing, .formal_match_key = key_text };
     self.allocator.free(key_text);
     return .{
         .formal_query_id = binding.query_id,
@@ -7328,6 +7380,7 @@ pub const SourceAccountingBoundaryRole = enum(u8) {
 
 pub const FormalQueryBinding = struct {
     source_op_id: usize,
+    loop_source_op_id: ?usize = null,
     kind: []const u8,
     logical_role: ?[]const u8 = null,
     guard_id: ?[]const u8 = null,

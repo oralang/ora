@@ -111,6 +111,7 @@ fn applyRows(
             .assumption_ids = proof_assumption_ids,
             .proof_artifact_id = artifact_id,
             .discharges_query_id = row.query_id,
+            .loop_summary_id = target_query.loop_summary_id,
             .result = .{ .status = .proved },
         });
         try checker_rows.append(arena_allocator, .{
@@ -126,6 +127,7 @@ fn applyRows(
                 .supported => true,
                 .unsupported => false,
             },
+            .loop_summary_id = target_query.loop_summary_id,
             .target_smtlib_hash = target_query.smtlib_hash,
             .target_constraint_count = target_query.constraint_count,
         });
@@ -165,7 +167,14 @@ fn applyRows(
 }
 
 fn validateProofTarget(target_query: obligation.VerificationQuery) !void {
+    if (target_query.artifact_policy == .diagnostic_only) return error.ProofRowTargetNotEligible;
     if (target_query.obligation_ids.len == 0) return error.ProofRowMissingObligations;
+    switch (target_query.kind) {
+        .loop_invariant_post => if (target_query.loop_summary_id == null)
+            return error.ProofRowLoopSummaryMissing,
+        .loop_invariant_step, .loop_body_safety => return error.ProofRowTargetNotEligible,
+        else => {},
+    }
 
     if (target_query.result) |target_result| {
         if (target_query.backend != .z3) return error.ProofRowTargetNotZ3;
@@ -208,6 +217,7 @@ const CheckedProofRow = struct {
     z3_row_matched: bool = false,
     z3_plain_unknown: bool = false,
     zig_semantic_supported: bool = false,
+    loop_summary_id: ?obligation.Id = null,
     target_smtlib_hash: ?u64 = null,
     target_constraint_count: u32 = 0,
 };
@@ -525,7 +535,7 @@ fn buildLeanAgreementSource(
     try writer.writeAll("\n\n");
 
     try writer.writeAll("def agreementRows : List Ora.Obligation.Agreement.Row := ");
-    try writeAgreementRows(writer, rows, options);
+    try writeAgreementRows(writer, generated_namespace, rows, options);
     try writer.writeAll("\n\n");
 
     try writer.print(
@@ -564,7 +574,12 @@ fn writeLeanAcceptedProofTargetIds(writer: anytype, rows: []const CheckedProofRo
     try writer.writeByte(']');
 }
 
-fn writeAgreementRows(writer: anytype, rows: []const CheckedProofRow, options: AgreementSourceOptions) !void {
+fn writeAgreementRows(
+    writer: anytype,
+    generated_namespace: []const u8,
+    rows: []const CheckedProofRow,
+    options: AgreementSourceOptions,
+) !void {
     if (options.omit_agreement_rows_for_testing) return writer.writeAll("[]");
     try writer.writeByte('[');
     var emitted_any = false;
@@ -573,13 +588,13 @@ fn writeAgreementRows(writer: anytype, rows: []const CheckedProofRow, options: A
             if (!row.requires_agreement) continue;
             if (emitted_any) try writer.writeAll(", ");
             emitted_any = true;
-            try writeAgreementRow(writer, row);
+            try writeAgreementRow(writer, generated_namespace, row);
         }
     }
     try writer.writeByte(']');
 }
 
-fn writeAgreementRow(writer: anytype, row: CheckedProofRow) !void {
+fn writeAgreementRow(writer: anytype, generated_namespace: []const u8, row: CheckedProofRow) !void {
     try writer.writeAll("{ queryId := ");
     try writer.print("{d}", .{row.query_id});
     try writer.writeAll(", assumptionIds := ");
@@ -602,6 +617,17 @@ fn writeAgreementRow(writer: anytype, row: CheckedProofRow) !void {
     }
     try writer.writeAll(", zigSemanticSupported := ");
     try writer.writeAll(if (row.zig_semantic_supported) "true" else "false");
+    try writer.writeAll(", usesLoopSummary := ");
+    try writer.writeAll(if (row.loop_summary_id != null) "true" else "false");
+    try writer.writeAll(", loopSummarySupported := ");
+    if (row.loop_summary_id) |summary_id| {
+        try writer.print(
+            "{s}.emittedLoopSummary_{d}.supported {s}.emittedManifest",
+            .{ generated_namespace, summary_id, generated_namespace },
+        );
+    } else {
+        try writer.writeAll("false");
+    }
     try writer.writeAll(" }");
 }
 

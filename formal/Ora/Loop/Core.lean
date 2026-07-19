@@ -1,0 +1,104 @@
+/-
+Generic partial-correctness model for scalar loops.
+
+The model deliberately says nothing about termination. `Reaches` describes a
+finite number of loop steps, and the main theorem only characterizes a state
+that is known to be an exit reached from an initial state.
+-/
+
+import Ora.Obligation.BitVec
+
+namespace Ora.Loop
+
+abbrev ScalarLoopState := List Ora.Obligation.U256
+
+structure ScalarLoopSummary where
+  initial : ScalarLoopState → Prop
+  guard : ScalarLoopState → Prop
+  invariant : ScalarLoopState → Prop
+  step : ScalarLoopState → ScalarLoopState → Prop
+  post : ScalarLoopState → Prop
+
+inductive Reaches (summary : ScalarLoopSummary) :
+    ScalarLoopState → ScalarLoopState → Prop where
+  | refl (state) : Reaches summary state state
+  | next {initial current following} :
+      Reaches summary initial current →
+      summary.guard current →
+      summary.step current following →
+      Reaches summary initial following
+
+def ScalarLoopSummary.BaseObligation (summary : ScalarLoopSummary) : Prop :=
+  ∀ state, summary.initial state → summary.invariant state
+
+def ScalarLoopSummary.StepObligation (summary : ScalarLoopSummary) : Prop :=
+  ∀ current following,
+    summary.invariant current →
+    summary.guard current →
+    summary.step current following →
+    summary.invariant following
+
+def ScalarLoopSummary.ExitObligation (summary : ScalarLoopSummary) : Prop :=
+  ∀ state, summary.invariant state → ¬summary.guard state → summary.post state
+
+def ScalarLoopSummary.PartialCorrect (summary : ScalarLoopSummary) : Prop :=
+  ∀ initial exit,
+    summary.initial initial →
+    Reaches summary initial exit →
+    ¬summary.guard exit →
+    summary.post exit
+
+theorem invariant_holds_on_reached_state
+    (summary : ScalarLoopSummary)
+    (hBase : summary.BaseObligation)
+    (hStep : summary.StepObligation)
+    {initial current : ScalarLoopState}
+    (hInitial : summary.initial initial)
+    (hReaches : Reaches summary initial current) :
+    summary.invariant current := by
+  induction hReaches with
+  | refl => exact hBase initial hInitial
+  | next hPrefix hGuard hBody ih =>
+      exact hStep _ _ ih hGuard hBody
+
+theorem invariant_preserved_to_exit
+    (summary : ScalarLoopSummary)
+    (hBase : summary.BaseObligation)
+    (hStep : summary.StepObligation)
+    (hExit : summary.ExitObligation) :
+    summary.PartialCorrect := by
+  intro initial exit hInitial hReaches hNotGuard
+  exact hExit exit
+    (invariant_holds_on_reached_state summary hBase hStep hInitial hReaches)
+    hNotGuard
+
+/-! A tiny one-step scalar-loop instantiation. -/
+
+private def zero : Ora.Obligation.U256 := BitVec.ofNat 256 0
+private def one : Ora.Obligation.U256 := BitVec.ofNat 256 1
+
+private def tinyLoop : ScalarLoopSummary where
+  initial := fun state => state = [zero]
+  guard := fun state => state = [zero]
+  invariant := fun state => state = [zero] ∨ state = [one]
+  step := fun current following => current = [zero] ∧ following = [one]
+  post := fun state => state = [one]
+
+private theorem tinyLoop_base : tinyLoop.BaseObligation := by
+  intro state hInitial
+  exact Or.inl hInitial
+
+private theorem tinyLoop_step : tinyLoop.StepObligation := by
+  intro current following _ _ hBody
+  exact Or.inr hBody.2
+
+private theorem tinyLoop_exit : tinyLoop.ExitObligation := by
+  intro state hInvariant hNotGuard
+  cases hInvariant with
+  | inl hZero => exact False.elim (hNotGuard hZero)
+  | inr hOne => exact hOne
+
+example : tinyLoop.PartialCorrect :=
+  invariant_preserved_to_exit tinyLoop tinyLoop_base tinyLoop_step tinyLoop_exit
+
+end Ora.Loop
