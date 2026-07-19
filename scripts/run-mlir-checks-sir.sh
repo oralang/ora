@@ -4,8 +4,9 @@ set -euo pipefail
 FILECHECK_BIN=${FILECHECK:-./vendor/llvm-project/build-mlir/bin/FileCheck}
 ORA_BIN=${ORA_BIN:-./zig-out/bin/ora}
 ORA_VERIFY_FLAG=${ORA_VERIFY_FLAG:---no-verify}
-REPO_ROOT=$(pwd)
-ARTIFACT_DIR=${ORA_FORMAL_ARTIFACT_DIR:-$REPO_ROOT/artifacts/sir-checks}
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+ARTIFACT_DIR=${ORA_FORMAL_ARTIFACT_DIR:-$REPO_ROOT/artifacts/formal-gate/mlir-sir}
 
 case "$ORA_BIN" in
   /*) ;;
