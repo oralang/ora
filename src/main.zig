@@ -54,10 +54,6 @@ const MlirOptions = struct {
     /// Root used to make formal artifact index paths relative. This differs
     /// from artifact_display_dir for the build layout's verify/ directory.
     formal_artifact_root: ?[]const u8 = null,
-    /// Repository harnesses may isolate the always-emitted formal catalog
-    /// pair without redirecting the primary emit stream or changing source
-    /// identity through a different working directory.
-    formal_catalog_dir: ?[]const u8 = null,
     debug_enabled: bool = false,
     debug_info: bool = false,
     canonicalize: bool = true,
@@ -865,10 +861,6 @@ pub fn main(init: std.process.Init) !void {
         .optimize = cli_optimize,
         .output_dir = output_dir,
         .output_file = output_file,
-        .formal_catalog_dir = if (command_kind == .Emit)
-            init.environ_map.get("ORA_FORMAL_CATALOG_DIR")
-        else
-            null,
         .debug_enabled = debug_enabled,
         .debug_info = debug_info,
         .canonicalize = canonicalize_mlir,
@@ -1088,7 +1080,7 @@ pub fn main(init: std.process.Init) !void {
     emit_mlir_options.output_dir = emit_output_dir;
     emit_mlir_options.output_file = emit_output_file;
     emit_mlir_options.artifact_display_dir = output_dir;
-    emit_mlir_options.formal_artifact_root = emit_mlir_options.formal_catalog_dir orelse output_dir;
+    emit_mlir_options.formal_artifact_root = output_dir;
     if (direct_emit_staging_root != null) {
         emit_mlir_options.suppress_artifact_logs = true;
     }
@@ -4742,7 +4734,7 @@ fn runCompilerMlirEmit(
     try writeSourceAccountingReport(
         allocator,
         file_path,
-        formalCatalogDir(mlir_options),
+        mlir_options.output_dir,
         source_accounting_result.finished.report,
     );
     var formal_gate_statuses: formal_artifact_catalog.GateStatuses = .{
@@ -5175,7 +5167,7 @@ fn runMlirEmitAdvanced(
         try writeSourceAccountingReport(
             allocator,
             file_path,
-            formalCatalogDir(mlir_options),
+            mlir_options.output_dir,
             source_accounting_result.finished.report,
         );
         formal_gate_statuses.source_accounting_kernel = switch (source_accounting_result.finished.decision) {
@@ -6307,8 +6299,8 @@ fn writeFormalArtifactIndex(
     statuses: formal_artifact_catalog.GateStatuses,
     authorization: formal_artifact_catalog.FinalAuthorization,
 ) !void {
-    const scan_dir = formalCatalogDir(options) orelse ".";
-    const artifact_dir = options.formal_catalog_dir orelse options.artifact_display_dir orelse scan_dir;
+    const scan_dir = options.output_dir orelse ".";
+    const artifact_dir = options.artifact_display_dir orelse scan_dir;
     const artifact_root = options.formal_artifact_root orelse artifact_dir;
     try formal_artifact_catalog.writeIndex(allocator, .{
         .source = file_path,
@@ -6319,10 +6311,6 @@ fn writeFormalArtifactIndex(
         .gate_statuses = statuses,
         .final_authorization = authorization,
     });
-}
-
-fn formalCatalogDir(options: MlirOptions) ?[]const u8 {
-    return options.formal_catalog_dir orelse options.output_dir;
 }
 
 // ============================================================================
