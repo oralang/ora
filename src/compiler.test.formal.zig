@@ -4780,7 +4780,8 @@ test "formal query vocabulary matches Z3 prepared query vocabulary" {
     }
 
     inline for (std.meta.fields(obligation.VerificationQueryKind)) |field| {
-        if (std.mem.eql(u8, field.name, @tagName(obligation.VerificationQueryKind.loop_induction))) continue;
+        const formal_kind: obligation.VerificationQueryKind = @enumFromInt(field.value);
+        if (comptime formal_kind == .loop_induction) continue;
         var found = false;
         inline for (std.meta.fields(z3_verification.QueryKind)) |z3_field| {
             const z3_kind: z3_verification.QueryKind = @enumFromInt(z3_field.value);
