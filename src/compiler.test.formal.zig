@@ -4731,7 +4731,7 @@ test "B4 unknown diagnostic rejects Lean recipe for unsupported semantic type" {
     defer allocator.free(result.stderr);
 
     try expectExited(result, 1);
-    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean proof recipe unavailable for some Z3 UNKNOWN obligations"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean proof recipe unavailable for some required userland obligations"));
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "unsupported Lean semantic type `u32`"));
     try testing.expect(!std.mem.containsAtLeast(u8, result.stdout, 1, "Lean proof recipe for required userland obligations"));
     try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "b4-out/b4_unsupported_lean_type.lean.obligations.lean", .{}));
@@ -4762,7 +4762,7 @@ test "B5 unknown diagnostic reports Lean projection coverage when no recipe is a
     defer allocator.free(result.stderr);
 
     try expectExited(result, 1);
-    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean proof recipe unavailable for some Z3 UNKNOWN obligations"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean proof recipe unavailable for some required userland obligations"));
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "unmatched UNKNOWN prepared rows: 1"));
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "formula projection: term="));
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "origin_value="));
