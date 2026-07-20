@@ -41,6 +41,7 @@ structure SummaryRow where
   guard : Option FormulaRef := none
   invariants : List FormulaRef := []
   step : List StepAssignmentRow := []
+  bodySafety : List FormulaRef := []
   post : List FormulaRef := []
   unsupportedReasons : List String := []
   deriving Repr, BEq, DecidableEq
@@ -93,7 +94,6 @@ def SummaryRow.shapeSupported (row : SummaryRow) : Bool :=
     row.init.length == row.variables.length &&
     row.guard.isSome &&
     row.invariants.length > 0 &&
-    row.post.length > 0 &&
     variablesIndexedFrom 0 row.variables &&
     idsUnique row.variables &&
     idsUnique row.contextVariables &&
@@ -107,6 +107,7 @@ def SummaryRow.formulasDenotable (manifest : Manifest) (row : SummaryRow) : Bool
     row.guard.all (formulaDenotable manifest) &&
     row.invariants.all (formulaDenotable manifest) &&
     row.step.all (fun assignment => valueDenotable manifest assignment.value) &&
+    row.bodySafety.all (formulaDenotable manifest) &&
     row.post.all (formulaDenotable manifest)
 
 def SummaryRow.supported (manifest : Manifest) (row : SummaryRow) : Bool :=
@@ -176,48 +177,83 @@ def denoteLoopSummary? (manifest : Manifest) (base : Env) (row : SummaryRow) :
           formulasHoldInState manifest base row.variables state row.invariants
         step := fun current following =>
           assignmentsProduceState manifest base row.variables current row.step following
+        safe := fun state =>
+          formulasHoldInState manifest base row.variables state row.bodySafety
         post := fun state => formulasHoldInState manifest base row.variables state row.post
       }
     | none => none
   else
     none
 
-def loopExitHolds (manifest : Manifest) (base : Env) (row : SummaryRow)
+def loopInitialPremises (manifest : Manifest) (base : Env) (row : SummaryRow)
     (state : ScalarLoopState) : Prop :=
   match denoteLoopSummary? manifest base row with
-  | some summary =>
-      summary.invariant state ∧ ¬summary.guard state ∧ summary.post state
+  | some summary => summary.initial state
   | none => False
 
-def loopExitPremises (manifest : Manifest) (base : Env) (row : SummaryRow)
-    (state : ScalarLoopState) : Prop :=
+def loopInductionObligationsAtEnv
+    (manifest : Manifest)
+    (base : Env)
+    (row : SummaryRow) : Prop :=
   match denoteLoopSummary? manifest base row with
-  | some summary => summary.invariant state ∧ ¬summary.guard state
+  | some summary => summary.InductionObligations
   | none => False
 
-def loopPostFollowsFromAssumptions
+def loopVerifiedAtEnv
+    (manifest : Manifest)
+    (base : Env)
+    (row : SummaryRow) : Prop :=
+  match denoteLoopSummary? manifest base row with
+  | some summary => summary.Verified
+  | none => False
+
+def loopInductionProofFromAssumptions
     (manifest : Manifest)
     (assumptions : List AssumptionRow)
     (row : SummaryRow) : Prop :=
   (∃ env state,
       assumptionsDenoteInEnv manifest env assumptions ∧
       contextReady env row.contextVariables ∧
-      loopExitPremises manifest env row state) ∧
-    ∀ env state,
+      loopInitialPremises manifest env row state) ∧
+    ∀ env,
       assumptionsDenoteInEnv manifest env assumptions →
       contextReady env row.contextVariables →
-      loopExitPremises manifest env row state →
-      loopExitHolds manifest env row state
+      loopInductionObligationsAtEnv manifest env row
 
-theorem loop_post_proof_has_nonvacuous_witness
+def loopVerifiedFromAssumptions
+    (manifest : Manifest)
+    (assumptions : List AssumptionRow)
+    (row : SummaryRow) : Prop :=
+  ∀ env,
+    assumptionsDenoteInEnv manifest env assumptions →
+    contextReady env row.contextVariables →
+    loopVerifiedAtEnv manifest env row
+
+theorem loop_induction_proof_sound
     (manifest : Manifest)
     (assumptions : List AssumptionRow)
     (row : SummaryRow)
-    (proof : loopPostFollowsFromAssumptions manifest assumptions row) :
+    (proof : loopInductionProofFromAssumptions manifest assumptions row) :
+    loopVerifiedFromAssumptions manifest assumptions row := by
+  intro env hAssumptions hContext
+  have hObligations := proof.2 env hAssumptions hContext
+  unfold loopInductionObligationsAtEnv at hObligations
+  unfold loopVerifiedAtEnv
+  cases hSummary : denoteLoopSummary? manifest env row with
+  | none => simp [hSummary] at hObligations
+  | some summary =>
+      simp only [hSummary] at hObligations ⊢
+      exact verified_of_induction summary hObligations
+
+theorem loop_induction_proof_has_nonvacuous_initial_state
+    (manifest : Manifest)
+    (assumptions : List AssumptionRow)
+    (row : SummaryRow)
+    (proof : loopInductionProofFromAssumptions manifest assumptions row) :
     ∃ env state,
       assumptionsDenoteInEnv manifest env assumptions ∧
       contextReady env row.contextVariables ∧
-      loopExitPremises manifest env row state :=
+      loopInitialPremises manifest env row state :=
   proof.1
 
 theorem unsupported_kind_fails_closed

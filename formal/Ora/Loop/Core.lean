@@ -17,6 +17,7 @@ structure ScalarLoopSummary where
   guard : ScalarLoopState → Prop
   invariant : ScalarLoopState → Prop
   step : ScalarLoopState → ScalarLoopState → Prop
+  safe : ScalarLoopState → Prop
   post : ScalarLoopState → Prop
 
 inductive Reaches (summary : ScalarLoopSummary) :
@@ -41,12 +42,32 @@ def ScalarLoopSummary.StepObligation (summary : ScalarLoopSummary) : Prop :=
 def ScalarLoopSummary.ExitObligation (summary : ScalarLoopSummary) : Prop :=
   ∀ state, summary.invariant state → ¬summary.guard state → summary.post state
 
+def ScalarLoopSummary.SafetyObligation (summary : ScalarLoopSummary) : Prop :=
+  ∀ state, summary.invariant state → summary.guard state → summary.safe state
+
 def ScalarLoopSummary.PartialCorrect (summary : ScalarLoopSummary) : Prop :=
   ∀ initial exit,
     summary.initial initial →
     Reaches summary initial exit →
     ¬summary.guard exit →
     summary.post exit
+
+def ScalarLoopSummary.SafeOnReachableStates (summary : ScalarLoopSummary) : Prop :=
+  ∀ initial current,
+    summary.initial initial →
+    Reaches summary initial current →
+    summary.guard current →
+    summary.safe current
+
+def ScalarLoopSummary.Verified (summary : ScalarLoopSummary) : Prop :=
+  summary.PartialCorrect ∧ summary.SafeOnReachableStates
+
+structure ScalarLoopSummary.InductionObligations
+    (summary : ScalarLoopSummary) : Prop where
+  base : summary.BaseObligation
+  step : summary.StepObligation
+  safety : summary.SafetyObligation
+  exit : summary.ExitObligation
 
 theorem invariant_holds_on_reached_state
     (summary : ScalarLoopSummary)
@@ -72,6 +93,26 @@ theorem invariant_preserved_to_exit
     (invariant_holds_on_reached_state summary hBase hStep hInitial hReaches)
     hNotGuard
 
+theorem safety_holds_on_reached_state
+    (summary : ScalarLoopSummary)
+    (hBase : summary.BaseObligation)
+    (hStep : summary.StepObligation)
+    (hSafety : summary.SafetyObligation) :
+    summary.SafeOnReachableStates := by
+  intro initial current hInitial hReaches hGuard
+  exact hSafety current
+    (invariant_holds_on_reached_state summary hBase hStep hInitial hReaches)
+    hGuard
+
+theorem verified_of_induction
+    (summary : ScalarLoopSummary)
+    (proof : summary.InductionObligations) :
+    summary.Verified := by
+  exact ⟨
+    invariant_preserved_to_exit summary proof.base proof.step proof.exit,
+    safety_holds_on_reached_state summary proof.base proof.step proof.safety
+  ⟩
+
 /-! A tiny one-step scalar-loop instantiation. -/
 
 private def zero : Ora.Obligation.U256 := BitVec.ofNat 256 0
@@ -82,6 +123,7 @@ private def tinyLoop : ScalarLoopSummary where
   guard := fun state => state = [zero]
   invariant := fun state => state = [zero] ∨ state = [one]
   step := fun current following => current = [zero] ∧ following = [one]
+  safe := fun _ => True
   post := fun state => state = [one]
 
 private theorem tinyLoop_base : tinyLoop.BaseObligation := by
@@ -98,7 +140,16 @@ private theorem tinyLoop_exit : tinyLoop.ExitObligation := by
   | inl hZero => exact False.elim (hNotGuard hZero)
   | inr hOne => exact hOne
 
-example : tinyLoop.PartialCorrect :=
-  invariant_preserved_to_exit tinyLoop tinyLoop_base tinyLoop_step tinyLoop_exit
+private theorem tinyLoop_safety : tinyLoop.SafetyObligation := by
+  simp [ScalarLoopSummary.SafetyObligation, tinyLoop]
+
+private def tinyLoop_induction : tinyLoop.InductionObligations where
+  base := tinyLoop_base
+  step := tinyLoop_step
+  safety := tinyLoop_safety
+  exit := tinyLoop_exit
+
+example : tinyLoop.Verified :=
+  verified_of_induction tinyLoop tinyLoop_induction
 
 end Ora.Loop

@@ -159,6 +159,39 @@ def VarRef.isU256 : VarRef → Bool
   | VarRef.free var => FreeVarRef.isU256 var
   | VarRef.bound var => BoundVarRef.isU256 var
 
+/-
+Compiler manifests carry integer literals as normalized ASCII decimal text.
+Keep their interpretation kernel-reducible: Lean 4.15's `String.toNat?` has an
+opaque runtime implementation, which would make otherwise concrete proof
+obligations depend on `native_decide`. Any non-decimal spelling fails closed.
+-/
+def decimalDigit? : Char → Option Nat
+  | '0' => some 0
+  | '1' => some 1
+  | '2' => some 2
+  | '3' => some 3
+  | '4' => some 4
+  | '5' => some 5
+  | '6' => some 6
+  | '7' => some 7
+  | '8' => some 8
+  | '9' => some 9
+  | _ => none
+
+def parseDecimalNatAux : List Char → Nat → Bool → Option Nat
+  | [], value, seen => if seen then some value else none
+  | digit :: rest, value, _ => do
+      let parsed ← decimalDigit? digit
+      parseDecimalNatAux rest (value * 10 + parsed) true
+
+def parseDecimalNat? (text : String) : Option Nat :=
+  parseDecimalNatAux text.data 0 false
+
+example : parseDecimalNat? "3" = some 3 := by rfl
+example : parseDecimalNat? "123" = some 123 := by rfl
+example : parseDecimalNat? "" = none := by rfl
+example : parseDecimalNat? "1_0" = none := by rfl
+
 def IntegerLiteralTerm.asU256? (lit : IntegerLiteralTerm) : Option U256 :=
   match lit.ty with
   | some ty =>
@@ -166,7 +199,7 @@ def IntegerLiteralTerm.asU256? (lit : IntegerLiteralTerm) : Option U256 :=
         match lit.value with
         | "0" => some (BitVec.ofNat 256 0)
         | "1" => some (BitVec.ofNat 256 1)
-        | _ => lit.value.toNat?.map (BitVec.ofNat 256)
+        | _ => parseDecimalNat? lit.value |>.map (BitVec.ofNat 256)
       else
         none
   | none => none
@@ -447,19 +480,6 @@ def RegionRef.isConcrete : RegionRef → Bool
   | .calldata => true
 
 def computedStorageRoot : String := "$computed_storage"
-
-def decimalDigit? (c : Char) : Option Nat :=
-  if '0' ≤ c ∧ c ≤ '9' then some (c.toNat - '0'.toNat) else none
-
-def parseDecimalNatAux : List Char → Nat → Bool → Option Nat
-  | [], acc, seen => if seen then some acc else none
-  | c :: rest, acc, _ =>
-      match decimalDigit? c with
-      | some digit => parseDecimalNatAux rest (acc * 10 + digit) true
-      | none => none
-
-def parseDecimalNat? (value : String) : Option Nat :=
-  parseDecimalNatAux value.toList 0 false
 
 def placeKeyConstantNat? (value : String) : Option Nat :=
   match parseDecimalNat? value with

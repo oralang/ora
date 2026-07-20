@@ -45,12 +45,15 @@ def baseSummary : SummaryRow := {
   guard := some (.term 1)
   invariants := [.term 1]
   step := [baseAssignment]
+  bodySafety := [.term 1]
   post := [.term 1]
 }
 
 def summaryForMutation : String → SummaryRow
   | "supported_for" => { baseSummary with kind := .scfFor }
   | "storage_write" => { baseSummary with unsupportedReasons := ["loop_has_storage_write"] }
+  | "storage_read" => { baseSummary with unsupportedReasons := ["loop_has_storage_read"] }
+  | "call" => { baseSummary with unsupportedReasons := ["loop_has_call"] }
   | "external_call" => { baseSummary with unsupportedReasons := ["loop_has_external_call"] }
   | "resource_operation" => { baseSummary with unsupportedReasons := ["loop_has_resource_operation"] }
   | "break_or_continue" => { baseSummary with unsupportedReasons := ["loop_has_break_or_continue"] }
@@ -59,6 +62,7 @@ def summaryForMutation : String → SummaryRow
   | "branching_body" => { baseSummary with unsupportedReasons := ["loop_has_branching_body"] }
   | "missing_guard" => { baseSummary with guard := none, unsupportedReasons := ["loop_guard_missing"] }
   | "missing_invariant" => { baseSummary with invariants := [], unsupportedReasons := ["loop_invariant_missing"] }
+  | "missing_body_safety" => { baseSummary with bodySafety := [], unsupportedReasons := ["loop_body_safety_missing"] }
   | "unsupported_kind" => { baseSummary with kind := .other, unsupportedReasons := ["loop_kind_unsupported"] }
   | "non_u256_variable" =>
       { baseSummary with variables := [{ baseVariable with ty := .compilerTypeId 5 }] }
@@ -75,6 +79,8 @@ def expectedCompilerSupport : String → Bool
 def expectedReason : String → String
   | "supported_while" | "supported_for" => ""
   | "storage_write" => "loop_has_storage_write"
+  | "storage_read" => "loop_has_storage_read"
+  | "call" => "loop_has_call"
   | "external_call" => "loop_has_external_call"
   | "resource_operation" => "loop_has_resource_operation"
   | "break_or_continue" => "loop_has_break_or_continue"
@@ -83,6 +89,7 @@ def expectedReason : String → String
   | "branching_body" => "loop_has_branching_body"
   | "missing_guard" => "loop_guard_missing"
   | "missing_invariant" => "loop_invariant_missing"
+  | "missing_body_safety" => "loop_body_safety_missing"
   | "unsupported_kind" => "loop_kind_unsupported"
   | "non_u256_variable" => "loop_variable_not_u256"
   | "bad_update_target" => "loop_update_target_not_loop_variable"

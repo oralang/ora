@@ -12,6 +12,8 @@ const Mutation = enum {
     supported_while,
     supported_for,
     storage_write,
+    storage_read,
+    call,
     external_call,
     resource_operation,
     break_or_continue,
@@ -20,6 +22,7 @@ const Mutation = enum {
     branching_body,
     missing_guard,
     missing_invariant,
+    missing_body_safety,
     unsupported_kind,
     non_u256_variable,
     bad_update_target,
@@ -33,6 +36,8 @@ const cases = [_]Mutation{
     .supported_while,
     .supported_for,
     .storage_write,
+    .storage_read,
+    .call,
     .external_call,
     .resource_operation,
     .break_or_continue,
@@ -41,6 +46,7 @@ const cases = [_]Mutation{
     .branching_body,
     .missing_guard,
     .missing_invariant,
+    .missing_body_safety,
     .unsupported_kind,
     .non_u256_variable,
     .bad_update_target,
@@ -67,8 +73,9 @@ const terms = [_]obligation.Term{
 };
 const init_formulas = [_]obligation.FormulaRef{.{ .term = 0 }};
 const invariant_formulas = [_]obligation.FormulaRef{.{ .term = 1 }};
+const body_safety_formulas = [_]obligation.FormulaRef{.{ .term = 1 }};
 const post_formulas = [_]obligation.FormulaRef{.{ .term = 1 }};
-const post_query_ids = [_]obligation.Id{query_id};
+const induction_query_ids = [_]obligation.Id{query_id};
 
 fn writeLeanString(writer: anytype, value: []const u8) !void {
     try writer.writeByte('"');
@@ -96,6 +103,8 @@ fn reasonName(support: obligation_to_lean.SemanticSupport) []const u8 {
 fn unsupportedReason(mutation: Mutation) ?obligation.LoopUnsupportedReason {
     return switch (mutation) {
         .storage_write => .loop_has_storage_write,
+        .storage_read => .loop_has_storage_read,
+        .call => .loop_has_call,
         .external_call => .loop_has_external_call,
         .resource_operation => .loop_has_resource_operation,
         .break_or_continue => .loop_has_break_or_continue,
@@ -104,6 +113,7 @@ fn unsupportedReason(mutation: Mutation) ?obligation.LoopUnsupportedReason {
         .branching_body => .loop_has_branching_body,
         .missing_guard => .loop_guard_missing,
         .missing_invariant => .loop_invariant_missing,
+        .missing_body_safety => .loop_body_safety_missing,
         .unsupported_kind => .loop_kind_unsupported,
         else => null,
     };
@@ -154,8 +164,9 @@ fn supportFor(mutation: Mutation) obligation_to_lean.SemanticSupport {
         .guard_formula = if (mutation == .missing_guard) null else if (mutation == .unsupported_formula) .{ .term = 0 } else .{ .term = 1 },
         .invariant_formulas = if (mutation == .missing_invariant) &.{} else &invariant_formulas,
         .step_assignments = assignments[0..],
+        .body_safety_formulas = &body_safety_formulas,
         .post_formulas = &post_formulas,
-        .query_ids = .{ .post = if (mutation == .query_id_mismatch) &.{} else &post_query_ids },
+        .query_ids = .{ .induction = if (mutation == .query_id_mismatch) &.{} else &induction_query_ids },
         .unsupported_reasons = reason_slice,
     };
     const query: obligation.VerificationQuery = .{
@@ -167,7 +178,7 @@ fn supportFor(mutation: Mutation) obligation_to_lean.SemanticSupport {
         .source = .generated(),
         .phase = .report,
         .origin = .source,
-        .kind = .loop_invariant_post,
+        .kind = .loop_induction,
         .loop_summary_id = summary_id,
     };
     const summaries = [_]obligation.LoopSummaryRow{summary};

@@ -68,8 +68,9 @@ pub fn coordinate(
     };
 }
 
-/// Emits a user-facing Lean proof recipe for plain Z3 UNKNOWN rows. This is a
-/// diagnostic path only and returns no artifact or runtime-check authority.
+/// Emits a user-facing Lean proof recipe for targets that require a Lean
+/// certificate. This is a diagnostic path only and returns no artifact or
+/// runtime-check authority.
 pub fn emitUnknownRecipe(
     allocator: std.mem.Allocator,
     file_path: []const u8,
@@ -84,7 +85,7 @@ pub fn emitUnknownRecipe(
     var recipe_count: usize = 0;
     var unavailable_count: usize = 0;
     for (context.merged_result.set.queries) |query| {
-        if (!isPlainUnknownTarget(query)) continue;
+        if (!isLeanProofTarget(query)) continue;
         const projection = projectionForQuery(context.merged_result.set, query);
         const semantic_support = obligation_to_lean.querySemanticSupport(context.merged_result.set, query);
         if (projection.hasOpaqueFormula() or !semanticSupportAvailable(semantic_support)) {
@@ -98,9 +99,9 @@ pub fn emitUnknownRecipe(
     const classified = recipe_count + unavailable_count;
     const unmatched = if (unknown_rows > classified) unknown_rows - classified else 0;
     if (unavailable_count != 0 or unmatched != 0) {
-        try stdout.writeAll("Lean proof recipe unavailable for some Z3 UNKNOWN obligations:\n");
+        try stdout.writeAll("Lean proof recipe unavailable for some required userland obligations:\n");
         for (context.merged_result.set.queries) |query| {
-            if (!isPlainUnknownTarget(query)) continue;
+            if (!isLeanProofTarget(query)) continue;
             const projection = projectionForQuery(context.merged_result.set, query);
             const semantic_support = obligation_to_lean.querySemanticSupport(context.merged_result.set, query);
             if (!projection.hasOpaqueFormula() and semanticSupportAvailable(semantic_support)) continue;
@@ -144,10 +145,10 @@ pub fn emitUnknownRecipe(
     const module_path = try writeObligationsArtifact(allocator, file_path, options, source);
     defer allocator.free(module_path);
 
-    try stdout.writeAll("Lean proof recipe for Z3 UNKNOWN obligations:\n");
+    try stdout.writeAll("Lean proof recipe for required userland obligations:\n");
     try stdout.print("  obligation module: {s}\n  generated namespace: {s}\n", .{ module_path, context.generated_namespace });
     for (context.merged_result.set.queries) |query| {
-        if (!isPlainUnknownTarget(query)) continue;
+        if (!isLeanProofTarget(query)) continue;
         const projection = projectionForQuery(context.merged_result.set, query);
         if (projection.hasOpaqueFormula() or
             !semanticSupportAvailable(obligation_to_lean.querySemanticSupport(context.merged_result.set, query))) continue;
@@ -375,6 +376,19 @@ fn isPlainUnknownTarget(query: obligation.VerificationQuery) bool {
         !result.vacuity_unknown;
 }
 
+fn isLeanProofTarget(query: obligation.VerificationQuery) bool {
+    if (query.kind == .loop_induction) {
+        return query.artifact_policy == .blocks_verified_artifacts and
+            query.proof_requirement == .lean_certificate and
+            query.backend == .unspecified and
+            query.result == null and
+            query.loop_summary_id != null and
+            query.obligation_ids.len == 0;
+    }
+    if (isPlainUnknownTarget(query)) return true;
+    return false;
+}
+
 fn coordinateAutomatic(
     allocator: std.mem.Allocator,
     file_path: []const u8,
@@ -390,7 +404,7 @@ fn coordinateAutomatic(
     defer targets.deinit(allocator);
     var unavailable_count: usize = 0;
     for (context.merged_result.set.queries) |query| {
-        if (!isPlainUnknownTarget(query)) continue;
+        if (!isLeanProofTarget(query)) continue;
         if (!semanticSupportAvailable(obligation_to_lean.querySemanticSupport(context.merged_result.set, query))) {
             unavailable_count += 1;
             continue;
@@ -402,9 +416,9 @@ fn coordinateAutomatic(
     const classified_targets = plainUnknownTargetCount(context.merged_result.set);
     const unmatched = if (unknown_rows > classified_targets) unknown_rows - classified_targets else 0;
     if (unavailable_count != 0 or unmatched != 0) {
-        try stdout.writeAll("Automatic Lean proof gate cannot cover all Z3 UNKNOWN userland obligations.\n");
+        try stdout.writeAll("Automatic Lean proof gate cannot cover all required userland obligations.\n");
         if (unavailable_count != 0) {
-            try stdout.print("  unsupported Lean-fragment UNKNOWN queries: {d}\n", .{unavailable_count});
+            try stdout.print("  unsupported Lean-fragment proof targets: {d}\n", .{unavailable_count});
         }
         if (unmatched != 0) {
             try stdout.print("  unmatched UNKNOWN prepared rows: {d}\n", .{unmatched});
@@ -464,7 +478,7 @@ fn coordinateAutomatic(
         };
     }
 
-    var applied = try proof_check.applyProofRows(
+    var applied = proof_check.applyProofRows(
         allocator,
         context.merged_result.set,
         rows,
@@ -472,10 +486,16 @@ fn coordinateAutomatic(
         context.obligations_source.?,
         options.process_environ,
         stdout,
-    );
+    ) catch |err| switch (err) {
+        error.LeanProofCheckFailed => {
+            try printAutomaticProofFailure(stdout);
+            return .{ .artifact_emission_authorized = false, .certificate_emitted = false };
+        },
+        else => return err,
+    };
     defer if (applied) |*result| result.deinit();
     if (applied == null) {
-        try stdout.writeAll("Automatic Lean proof gate failed: the generated proof checker did not accept every targeted Z3 UNKNOWN obligation.\n");
+        try printAutomaticProofFailure(stdout);
         return .{ .artifact_emission_authorized = false, .certificate_emitted = false };
     }
 
@@ -488,6 +508,13 @@ fn coordinateAutomatic(
         ),
         .certificate_emitted = true,
     };
+}
+
+fn printAutomaticProofFailure(stdout: anytype) !void {
+    try stdout.writeAll(
+        "Automatic Lean proof gate failed: generated tactics did not discharge every certificate-required obligation.\n" ++
+            "  Use the emitted obligation module and theorem shape from the following recipe, then pass the proof manifest with `--lean-proofs <proofs.json>`.\n",
+    );
 }
 
 fn semanticSupportAvailable(support: obligation_to_lean.SemanticSupport) bool {
@@ -614,6 +641,17 @@ fn collectQueryFreeVars(
         const item = findObligation(set, id) orelse return error.InvalidDependency;
         if (obligation.kindFormula(item.kind)) |formula| try collectFormulaFreeVars(allocator, set, formula, &ids);
     }
+    if (query.kind == .loop_induction) {
+        const summary_id = query.loop_summary_id orelse return error.InvalidDependency;
+        const loop_summary = obligation.findById(set.loop_summaries, summary_id) orelse
+            return error.InvalidDependency;
+        for (loop_summary.init_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, &ids);
+        if (loop_summary.guard_formula) |formula| try collectFormulaFreeVars(allocator, set, formula, &ids);
+        for (loop_summary.invariant_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, &ids);
+        for (loop_summary.step_assignments) |assignment| try collectFormulaFreeVars(allocator, set, assignment.value, &ids);
+        for (loop_summary.body_safety_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, &ids);
+        for (loop_summary.post_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, &ids);
+    }
     return try ids.toOwnedSlice(allocator);
 }
 
@@ -699,6 +737,605 @@ fn writeAutomaticSimpSet(writer: anytype, free_var_count: usize) !void {
     );
 }
 
+const AutomaticCounterBound = union(enum) {
+    literal: []const u8,
+    context: obligation.FreeVarId,
+};
+
+const AutomaticCounterLoop = struct {
+    summary_id: obligation.Id,
+    loop_variable: obligation.FreeVarId,
+    guard_term: obligation.TermId,
+    invariant_term: obligation.TermId,
+    post_term: ?obligation.TermId,
+    has_body_safety: bool,
+    bound: AutomaticCounterBound,
+};
+
+fn formulaTermId(formula: obligation.FormulaRef) ?obligation.TermId {
+    return switch (formula) {
+        .term => |id| id,
+        .origin_value => null,
+    };
+}
+
+fn termAt(set: obligation.ObligationSet, id: obligation.TermId) ?obligation.Term {
+    if (id >= set.terms.len) return null;
+    return set.terms[id];
+}
+
+fn termIsFreeVariable(
+    set: obligation.ObligationSet,
+    id: obligation.TermId,
+    expected: obligation.FreeVarId,
+) bool {
+    const term = termAt(set, id) orelse return false;
+    return switch (term) {
+        .variable => |variable| switch (variable) {
+            .free => |free| obligation.freeVarIdEql(free.id, expected),
+            .bound => false,
+        },
+        else => false,
+    };
+}
+
+fn termIsIntegerLiteral(
+    set: obligation.ObligationSet,
+    id: obligation.TermId,
+    expected: []const u8,
+) bool {
+    const term = termAt(set, id) orelse return false;
+    return switch (term) {
+        .int_lit => |literal| std.mem.eql(u8, literal.value, expected),
+        else => false,
+    };
+}
+
+fn scalarTermsEquivalent(
+    set: obligation.ObligationSet,
+    lhs_id: obligation.TermId,
+    rhs_id: obligation.TermId,
+    fuel: u32,
+) bool {
+    if (fuel == 0) return false;
+    const lhs = termAt(set, lhs_id) orelse return false;
+    const rhs = termAt(set, rhs_id) orelse return false;
+    if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
+    return switch (lhs) {
+        .bool_lit => |value| value == rhs.bool_lit,
+        .int_lit => |literal| std.mem.eql(u8, literal.value, rhs.int_lit.value),
+        .variable => |variable| switch (variable) {
+            .free => |free| switch (rhs.variable) {
+                .free => |other| obligation.freeVarIdEql(free.id, other.id),
+                .bound => false,
+            },
+            .bound => |bound| switch (rhs.variable) {
+                .free => false,
+                .bound => |other| bound.index == other.index,
+            },
+        },
+        .unary => |unary| unary.op == rhs.unary.op and
+            scalarTermsEquivalent(set, unary.operand, rhs.unary.operand, fuel - 1),
+        .binary => |binary| binary.op == rhs.binary.op and
+            scalarTermsEquivalent(set, binary.lhs, rhs.binary.lhs, fuel - 1) and
+            scalarTermsEquivalent(set, binary.rhs, rhs.binary.rhs, fuel - 1),
+        else => false,
+    };
+}
+
+fn decimalLiteralCanBeEmitted(value: []const u8) bool {
+    if (value.len == 0) return false;
+    for (value) |byte| if (!std.ascii.isDigit(byte)) return false;
+    return true;
+}
+
+fn classifyAutomaticCounterLoop(
+    set: obligation.ObligationSet,
+    query: obligation.VerificationQuery,
+) ?AutomaticCounterLoop {
+    if (query.kind != .loop_induction or query.assumption_ids.len != 0) return null;
+    const summary_id = query.loop_summary_id orelse return null;
+    const summary = obligation.findById(set.loop_summaries, summary_id) orelse return null;
+    if (!summary.projectionSupported() or
+        summary.variables.len != 1 or
+        summary.init_formulas.len != 1 or
+        summary.invariant_formulas.len != 1 or
+        summary.step_assignments.len != 1 or
+        summary.body_safety_formulas.len > 1 or
+        summary.post_formulas.len > 1) return null;
+
+    const loop_variable = summary.variables[0].id orelse return null;
+    const init_id = formulaTermId(summary.init_formulas[0]) orelse return null;
+    if (!termIsIntegerLiteral(set, init_id, "0")) return null;
+
+    const guard_term = formulaTermId(summary.guard_formula orelse return null) orelse return null;
+    const guard = switch (termAt(set, guard_term) orelse return null) {
+        .binary => |binary| binary,
+        else => return null,
+    };
+    if (guard.op != .lt or !termIsFreeVariable(set, guard.lhs, loop_variable)) return null;
+
+    const bound: AutomaticCounterBound = switch (termAt(set, guard.rhs) orelse return null) {
+        .int_lit => |literal| blk: {
+            if (summary.context_variables.len != 0 or !decimalLiteralCanBeEmitted(literal.value)) return null;
+            break :blk .{ .literal = literal.value };
+        },
+        .variable => |variable| blk: {
+            const free = switch (variable) {
+                .free => |value| value,
+                .bound => return null,
+            };
+            if (summary.context_variables.len != 1) return null;
+            const context_id = summary.context_variables[0].id orelse return null;
+            if (!obligation.freeVarIdEql(context_id, free.id)) return null;
+            break :blk .{ .context = context_id };
+        },
+        else => return null,
+    };
+
+    const invariant_term = formulaTermId(summary.invariant_formulas[0]) orelse return null;
+    const invariant = switch (termAt(set, invariant_term) orelse return null) {
+        .binary => |binary| binary,
+        else => return null,
+    };
+    if (invariant.op != .le or
+        !termIsFreeVariable(set, invariant.lhs, loop_variable) or
+        !scalarTermsEquivalent(set, invariant.rhs, guard.rhs, 64)) return null;
+
+    const assignment = summary.step_assignments[0];
+    if (assignment.variable_index != 0 or
+        assignment.target == null or
+        !obligation.freeVarIdEql(assignment.target.?, loop_variable)) return null;
+    const step_term = formulaTermId(assignment.value) orelse return null;
+    const step = switch (termAt(set, step_term) orelse return null) {
+        .binary => |binary| binary,
+        else => return null,
+    };
+    if (step.op != .add or
+        !termIsFreeVariable(set, step.lhs, loop_variable) or
+        !termIsIntegerLiteral(set, step.rhs, "1")) return null;
+
+    if (summary.body_safety_formulas.len == 1) {
+        const safety_term = formulaTermId(summary.body_safety_formulas[0]) orelse return null;
+        const safety_not = switch (termAt(set, safety_term) orelse return null) {
+            .unary => |unary| unary,
+            else => return null,
+        };
+        if (safety_not.op != .not) return null;
+        const safety_lt = switch (termAt(set, safety_not.operand) orelse return null) {
+            .binary => |binary| binary,
+            else => return null,
+        };
+        if (safety_lt.op != .lt or
+            !scalarTermsEquivalent(set, safety_lt.lhs, step_term, 64) or
+            !termIsFreeVariable(set, safety_lt.rhs, loop_variable)) return null;
+    }
+
+    const post_term = if (summary.post_formulas.len == 1)
+        formulaTermId(summary.post_formulas[0]) orelse return null
+    else
+        null;
+    if (post_term) |id| if (!scalarTermsEquivalent(set, id, invariant_term, 64)) return null;
+
+    return .{
+        .summary_id = summary_id,
+        .loop_variable = loop_variable,
+        .guard_term = guard_term,
+        .invariant_term = invariant_term,
+        .post_term = post_term,
+        .has_body_safety = summary.body_safety_formulas.len == 1,
+        .bound = bound,
+    };
+}
+
+fn writeAutomaticCounterNotations(
+    writer: anytype,
+    query: obligation.VerificationQuery,
+    counter: AutomaticCounterLoop,
+) !void {
+    try writer.writeAll("section\n");
+    try writer.print(
+        "private abbrev autoSummary_q{d} : Ora.Loop.SummaryRow := emittedLoopSummary_{d}\n" ++
+            "local notation \"autoSummary\" => autoSummary_q{d}\n" ++
+            "attribute [local simp] autoSummary_q{d} emittedLoopSummary_{d}\n",
+        .{ query.id, counter.summary_id, query.id, query.id, counter.summary_id },
+    );
+    try writer.print(
+        "private abbrev autoLoopId_q{d} : FreeVarId := {{ file_id := {d}, pattern_id := {d} }}\n" ++
+            "local notation \"autoLoopId\" => autoLoopId_q{d}\n" ++
+            "attribute [local simp] autoLoopId_q{d}\n",
+        .{ query.id, counter.loop_variable.file_id, counter.loop_variable.pattern_id, query.id, query.id },
+    );
+    try writer.print(
+        "private abbrev autoGuard_q{d} : FormulaRef := .term {d}\n" ++
+            "local notation \"autoGuard\" => autoGuard_q{d}\n" ++
+            "attribute [local simp] autoGuard_q{d}\n",
+        .{ query.id, counter.guard_term, query.id, query.id },
+    );
+    try writer.print(
+        "private abbrev autoInvariant_q{d} : FormulaRef := .term {d}\n" ++
+            "local notation \"autoInvariant\" => autoInvariant_q{d}\n" ++
+            "attribute [local simp] autoInvariant_q{d}\n",
+        .{ query.id, counter.invariant_term, query.id, query.id },
+    );
+    if (counter.post_term) |post_term| {
+        try writer.print(
+            "private abbrev autoPost_q{d} : FormulaRef := .term {d}\n" ++
+                "local notation \"autoPost\" => autoPost_q{d}\n" ++
+                "attribute [local simp] autoPost_q{d}\n",
+            .{ query.id, post_term, query.id, query.id },
+        );
+    }
+    switch (counter.bound) {
+        .literal => |literal| try writer.print(
+            "private abbrev autoBound_q{d} : U256 := BitVec.ofNat 256 {s}\n" ++
+                "local notation \"autoBound\" => autoBound_q{d}\n" ++
+                "attribute [local simp] autoBound_q{d}\n",
+            .{ query.id, literal, query.id, query.id },
+        ),
+        .context => |context| try writer.print(
+            "private abbrev autoContextId_q{d} : FreeVarId := {{ file_id := {d}, pattern_id := {d} }}\n" ++
+                "local notation \"autoContextId\" => autoContextId_q{d}\n" ++
+                "attribute [local simp] autoContextId_q{d}\n",
+            .{ query.id, context.file_id, context.pattern_id, query.id, query.id },
+        ),
+    }
+    try writer.print("theorem discharge_q{d} : emittedQuery_{d} := by\n", .{ query.id, query.id });
+    try writer.print(
+        "  unfold emittedQuery_{d} Ora.Loop.loopInductionProofFromAssumptions\n",
+        .{query.id},
+    );
+    try writer.writeAll(
+        \\  have hSupported : (autoSummary).supported emittedManifest = true := by decide
+        \\  have hGuard : (autoSummary).guard = some autoGuard := rfl
+        \\
+    );
+}
+
+fn writeAutomaticLoopFormulaEquality(writer: anytype) !void {
+    try writer.writeAll(
+        \\  have hFormulaEquality : ∀ env,
+        \\      formulaDenotes? emittedManifest env autoInvariant =
+        \\        formulaDenotes? emittedManifest env autoPost := by
+        \\    intro env
+        \\    simp [formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
+        \\      emittedTerms]
+        \\
+    );
+}
+
+fn writeAutomaticCounterBase(
+    writer: anytype,
+    witness_env: []const u8,
+) !void {
+    try writer.writeAll("  constructor\n  · refine ⟨");
+    try writer.writeAll(witness_env);
+    try writer.writeAll(
+        \\, [BitVec.ofNat 256 0], ?_⟩
+        \\    constructor
+        \\    · simp [assumptionsDenoteInEnv, assumptionsDenoteInEnv?]
+        \\    constructor
+        \\
+    );
+}
+
+fn writeAutomaticCounterInitialProof(
+    writer: anytype,
+    witness_env: []const u8,
+    has_context: bool,
+) !void {
+    try writer.writeAll(
+        \\    ·
+        \\
+    );
+    if (has_context) {
+        try writer.writeAll(
+            \\      intro loopVar hLoopVar
+            \\      simp at hLoopVar
+            \\      subst loopVar
+            \\      exact ⟨BitVec.ofNat 256 0, rfl⟩
+            \\
+        );
+    } else {
+        try writer.writeAll("      simp [Ora.Loop.contextReady]\n");
+    }
+    try writer.writeAll(
+        \\    · simp only [Ora.Loop.loopInitialPremises,
+        \\        Ora.Loop.denoteLoopSummary?, hSupported, hGuard]
+        \\      change Ora.Loop.valuesInitializeState emittedManifest
+        \\
+    );
+    try writer.writeAll("        ");
+    try writer.writeAll(witness_env);
+    try writer.writeAll(
+        \\ (autoSummary).init [BitVec.ofNat 256 0]
+        \\      simp [Ora.Loop.valuesInitializeState,
+        \\        formulaValue?, denoteValue?, IntegerLiteralTerm.asU256?,
+        \\        TyRef.isU256Carrier, TyRef.isU256, TyRef.isI256,
+        \\        compilerTypeIdU256, compilerTypeIdI256,
+        \\        Ora.Spec.expectedCompilerTypeIdU256,
+        \\        Ora.Spec.expectedCompilerTypeIdI256, emittedManifest, emittedTerms]
+        \\
+    );
+}
+
+fn writeAutomaticCounterInductionStart(writer: anytype) !void {
+    try writer.writeAll(
+        \\    constructor
+        \\    · intro state hInitial
+        \\      change Ora.Loop.valuesInitializeState emittedManifest env
+        \\        (autoSummary).init state at hInitial
+        \\      have hState : state = [BitVec.ofNat 256 0] := by
+        \\        rcases state with _ | ⟨value, state⟩
+        \\        · simp [Ora.Loop.valuesInitializeState] at hInitial
+        \\        · rcases state with _ | ⟨extra, state⟩
+        \\          · have hValue : BitVec.ofNat 256 0 = value := by
+        \\              simpa [Ora.Loop.valuesInitializeState, formulaValue?, denoteValue?,
+        \\                IntegerLiteralTerm.asU256?, TyRef.isU256Carrier, TyRef.isU256,
+        \\                TyRef.isI256, compilerTypeIdU256, compilerTypeIdI256,
+        \\                Ora.Spec.expectedCompilerTypeIdU256,
+        \\                Ora.Spec.expectedCompilerTypeIdI256,
+        \\                emittedManifest, emittedTerms] using hInitial
+        \\            subst value
+        \\            rfl
+        \\          · simp [Ora.Loop.valuesInitializeState] at hInitial
+        \\      subst state
+        \\      intro formula hFormula
+        \\      simp [] at hFormula
+        \\      subst formula
+        \\      simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
+        \\        formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
+        \\        emittedTerms, hAutoBound, U256.ule, Env.setFree, Env.lookupVar,
+        \\        Env.lookupFree, lookupFreeBinding, hAutoIdentityA, hAutoIdentityB,
+        \\        IntegerLiteralTerm.asU256?, TyRef.isU256Carrier,
+        \\        TyRef.isU256, TyRef.isI256, compilerTypeIdU256,
+        \\        compilerTypeIdI256, Ora.Spec.expectedCompilerTypeIdU256,
+        \\        Ora.Spec.expectedCompilerTypeIdI256]
+        \\    · intro current following hInvariant hLoopGuard hStep
+        \\      change Ora.Loop.formulasHoldInState emittedManifest env
+        \\        (autoSummary).variables current (autoSummary).invariants at hInvariant
+        \\      change Ora.Loop.formulaHoldsInState emittedManifest env
+        \\        (autoSummary).variables current autoGuard at hLoopGuard
+        \\      change Ora.Loop.assignmentsProduceState emittedManifest env
+        \\        (autoSummary).variables current (autoSummary).step following at hStep
+        \\      change Ora.Loop.formulasHoldInState emittedManifest env
+        \\        (autoSummary).variables following (autoSummary).invariants
+        \\      have hCurrentShape : ∃ i, current = [i] := by
+        \\        rcases current with _ | ⟨i, current⟩
+        \\        · simp [Ora.Loop.formulasHoldInState, Ora.Loop.formulaHoldsInState,
+        \\            Ora.Loop.bindState] at hInvariant
+        \\        · rcases current with _ | ⟨extra, current⟩
+        \\          · exact ⟨i, rfl⟩
+        \\          · simp [Ora.Loop.formulasHoldInState, Ora.Loop.formulaHoldsInState,
+        \\              Ora.Loop.bindState] at hInvariant
+        \\      rcases hCurrentShape with ⟨i, rfl⟩
+        \\      have hFollowingShape : ∃ next, following = [next] := by
+        \\        rcases following with _ | ⟨next, following⟩
+        \\        · simp [Ora.Loop.assignmentsProduceState, Ora.Loop.bindState,
+        \\            ] at hStep
+        \\        · rcases following with _ | ⟨extra, following⟩
+        \\          · exact ⟨next, rfl⟩
+        \\          · simp [Ora.Loop.assignmentsProduceState, Ora.Loop.bindState,
+        \\              ] at hStep
+        \\      rcases hFollowingShape with ⟨next, rfl⟩
+        \\      simp [Ora.Loop.assignmentsProduceState, Ora.Loop.bindState,
+        \\        formulaValue?, denoteValue?, emittedManifest, emittedTerms,
+        \\        Env.setFree, Env.lookupVar, Env.lookupFree,
+        \\        lookupFreeBinding, hAutoIdentityA, hAutoIdentityB,
+        \\        IntegerLiteralTerm.asU256?, Value.binaryU256?, TyRef.isU256Carrier,
+        \\        TyRef.isU256, TyRef.isI256, compilerTypeIdU256,
+        \\        compilerTypeIdI256, Ora.Spec.expectedCompilerTypeIdU256,
+        \\        Ora.Spec.expectedCompilerTypeIdI256] at hStep
+        \\      subst next
+        \\      intro formula hFormula
+        \\      simp [] at hFormula
+        \\      subst formula
+        \\      have hGuardDecoded : U256.ult i n := by
+        \\        simpa [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
+        \\          formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
+        \\          emittedTerms, hAutoBound, Env.setFree, Env.lookupVar, Env.lookupFree,
+        \\          lookupFreeBinding, TyRef.isU256, TyRef.isI256,
+        \\          TyRef.isU256Carrier, compilerTypeIdU256, compilerTypeIdI256,
+        \\          Ora.Spec.expectedCompilerTypeIdU256,
+        \\          Ora.Spec.expectedCompilerTypeIdI256, hAutoIdentityA,
+        \\          hAutoIdentityB, IntegerLiteralTerm.asU256?,
+        \\          Value.binaryU256?] using hLoopGuard
+        \\      have hNextInvariant := U256.lt_add_one_ule_bound i n hGuardDecoded
+        \\      simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
+        \\        formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
+        \\        emittedTerms, hAutoBound, Env.setFree, Env.lookupVar, Env.lookupFree,
+        \\        lookupFreeBinding, TyRef.isU256, TyRef.isI256,
+        \\        TyRef.isU256Carrier, compilerTypeIdU256, compilerTypeIdI256,
+        \\        Ora.Spec.expectedCompilerTypeIdU256,
+        \\        Ora.Spec.expectedCompilerTypeIdI256, hAutoIdentityA, hAutoIdentityB,
+        \\        IntegerLiteralTerm.asU256?, Value.binaryU256?,
+        \\        hNextInvariant]
+        \\
+    );
+}
+
+fn writeAutomaticCounterSafety(writer: anytype, has_body_safety: bool) !void {
+    try writer.writeAll(
+        \\    · intro state hInvariant hLoopGuard
+        \\      change Ora.Loop.formulasHoldInState emittedManifest env
+        \\        (autoSummary).variables state (autoSummary).bodySafety
+        \\
+    );
+    if (!has_body_safety) {
+        try writer.writeAll("      simp []\n");
+        return;
+    }
+    try writer.writeAll(
+        \\      change Ora.Loop.formulasHoldInState emittedManifest env
+        \\        (autoSummary).variables state (autoSummary).invariants at hInvariant
+        \\      change Ora.Loop.formulaHoldsInState emittedManifest env
+        \\        (autoSummary).variables state autoGuard at hLoopGuard
+        \\      have hStateShape : ∃ i, state = [i] := by
+        \\        rcases state with _ | ⟨i, state⟩
+        \\        · simp [Ora.Loop.formulasHoldInState, Ora.Loop.formulaHoldsInState,
+        \\            Ora.Loop.bindState] at hInvariant
+        \\        · rcases state with _ | ⟨extra, state⟩
+        \\          · exact ⟨i, rfl⟩
+        \\          · simp [Ora.Loop.formulasHoldInState, Ora.Loop.formulaHoldsInState,
+        \\              Ora.Loop.bindState] at hInvariant
+        \\      rcases hStateShape with ⟨i, rfl⟩
+        \\      intro formula hFormula
+        \\      simp [] at hFormula
+        \\      subst formula
+        \\      have hGuardDecoded : U256.ult i n := by
+        \\        simpa [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
+        \\          formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
+        \\          emittedTerms, hAutoBound, Env.setFree, Env.lookupVar, Env.lookupFree,
+        \\          lookupFreeBinding, TyRef.isU256, TyRef.isI256,
+        \\          TyRef.isU256Carrier, compilerTypeIdU256, compilerTypeIdI256,
+        \\          Ora.Spec.expectedCompilerTypeIdU256,
+        \\          Ora.Spec.expectedCompilerTypeIdI256, hAutoIdentityA,
+        \\          hAutoIdentityB, IntegerLiteralTerm.asU256?,
+        \\          Value.binaryU256?] using hLoopGuard
+        \\      have hSafe := U256.lt_bound_add_one_not_lt_self i n hGuardDecoded
+        \\      simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
+        \\        formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
+        \\        emittedTerms, hAutoBound, Env.setFree, Env.lookupVar, Env.lookupFree,
+        \\        lookupFreeBinding, TyRef.isU256, TyRef.isI256,
+        \\        TyRef.isU256Carrier, compilerTypeIdU256, compilerTypeIdI256,
+        \\        Ora.Spec.expectedCompilerTypeIdU256,
+        \\        Ora.Spec.expectedCompilerTypeIdI256, hAutoIdentityA, hAutoIdentityB,
+        \\        IntegerLiteralTerm.asU256?, Value.binaryU256?, hSafe]
+        \\
+    );
+}
+
+fn writeAutomaticCounterExit(
+    writer: anytype,
+    query_id: obligation.Id,
+    has_post: bool,
+) !void {
+    try writer.writeAll("    · intro state hInvariant _\n");
+    if (!has_post) {
+        try writer.writeAll(
+            \\      change Ora.Loop.formulasHoldInState emittedManifest env
+            \\        (autoSummary).variables state (autoSummary).post
+            \\      simp [Ora.Loop.formulasHoldInState]
+            \\
+        );
+        return;
+    }
+    try writer.writeAll(
+        \\      change Ora.Loop.formulasHoldInState emittedManifest env
+        \\        (autoSummary).variables state (autoSummary).invariants at hInvariant
+        \\      change Ora.Loop.formulasHoldInState emittedManifest env
+        \\        (autoSummary).variables state (autoSummary).post
+        \\      intro formula hFormula
+        \\      simp [] at hFormula
+        \\      subst formula
+        \\      have hInvariantFormula := hInvariant autoInvariant (by simp [])
+        \\      unfold Ora.Loop.formulaHoldsInState at hInvariantFormula ⊢
+        \\      cases hBind : Ora.Loop.bindState env (autoSummary).variables state with
+        \\      | none =>
+        \\
+    );
+    try writer.print(
+        "          dsimp [autoSummary_q{d}] at hBind hInvariantFormula ⊢\n",
+        .{query_id},
+    );
+    try writer.writeAll(
+        \\          simp [hBind] at hInvariantFormula
+        \\      | some bound =>
+        \\
+    );
+    try writer.print(
+        "          dsimp [autoSummary_q{d}] at hBind hInvariantFormula ⊢\n",
+        .{query_id},
+    );
+    try writer.writeAll(
+        \\          simp only [hBind] at hInvariantFormula ⊢
+        \\          rw [← hFormulaEquality]
+        \\          exact hInvariantFormula
+        \\
+    );
+}
+
+fn writeAutomaticLiteralCounterProof(
+    writer: anytype,
+    query: obligation.VerificationQuery,
+    counter: AutomaticCounterLoop,
+    literal: []const u8,
+) !void {
+    try writeAutomaticCounterNotations(writer, query, counter);
+    try writer.print(
+        "  have hBoundLiteral : parseDecimalNat? \"{s}\" = some {s} := by rfl\n",
+        .{ literal, literal },
+    );
+    if (counter.post_term != null) try writeAutomaticLoopFormulaEquality(writer);
+    try writeAutomaticCounterBase(writer, "Env.empty");
+    try writeAutomaticCounterInitialProof(writer, "Env.empty", false);
+    try writer.writeAll(
+        \\  · intro env _ _
+        \\    simp only [Ora.Loop.loopInductionObligationsAtEnv,
+        \\      Ora.Loop.denoteLoopSummary?, hSupported, hGuard]
+        \\    let n : U256 := autoBound
+        \\    have hAutoBound := hBoundLiteral
+        \\    have hAutoIdentityA : (autoLoopId == autoLoopId) = true := by rfl
+        \\    have hAutoIdentityB := hAutoIdentityA
+        \\
+    );
+    try writeAutomaticCounterInductionStart(writer);
+    try writeAutomaticCounterSafety(writer, counter.has_body_safety);
+    try writeAutomaticCounterExit(writer, query.id, counter.post_term != null);
+    try writer.writeAll("end\n");
+}
+
+fn writeAutomaticContextCounterProof(
+    writer: anytype,
+    query: obligation.VerificationQuery,
+    counter: AutomaticCounterLoop,
+    context: obligation.FreeVarId,
+) !void {
+    _ = context;
+    try writeAutomaticCounterNotations(writer, query, counter);
+    if (counter.post_term != null) try writeAutomaticLoopFormulaEquality(writer);
+    try writeAutomaticCounterBase(
+        writer,
+        "Env.empty.setFree autoContextId (.u256 (BitVec.ofNat 256 0))",
+    );
+    try writeAutomaticCounterInitialProof(
+        writer,
+        "(Env.empty.setFree autoContextId (.u256 (BitVec.ofNat 256 0)))",
+        true,
+    );
+    try writer.writeAll(
+        \\  · intro env _ hContext
+        \\    simp only [Ora.Loop.loopInductionObligationsAtEnv,
+        \\      Ora.Loop.denoteLoopSummary?, hSupported, hGuard]
+        \\    rcases hContext (autoSummary).contextVariables[0]
+        \\        (by simp []) with ⟨n, hn⟩
+        \\    change lookupFreeBinding env.freeBindings autoContextId = some (.u256 n) at hn
+        \\
+    );
+    try writer.print("    dsimp [autoContextId_q{d}] at hn\n", .{query.id});
+    try writer.writeAll(
+        \\    have hAutoBound := hn
+        \\    have hAutoIdentityA : (autoLoopId == autoLoopId) = true := by rfl
+        \\    have hAutoIdentityB : (autoLoopId == autoContextId) = false := by rfl
+        \\
+    );
+    try writeAutomaticCounterInductionStart(writer);
+    try writeAutomaticCounterSafety(writer, counter.has_body_safety);
+    try writeAutomaticCounterExit(writer, query.id, counter.post_term != null);
+    try writer.writeAll("end\n");
+}
+
+fn writeAutomaticCounterLoopProof(
+    writer: anytype,
+    query: obligation.VerificationQuery,
+    counter: AutomaticCounterLoop,
+) !void {
+    return switch (counter.bound) {
+        .literal => |literal| writeAutomaticLiteralCounterProof(writer, query, counter, literal),
+        .context => |context| writeAutomaticContextCounterProof(writer, query, counter, context),
+    };
+}
+
 fn buildAutomaticProofSource(
     allocator: std.mem.Allocator,
     obligations_source: []const u8,
@@ -719,6 +1356,18 @@ fn buildAutomaticProofSource(
     for (queries) |query| {
         const free_vars = try collectQueryFreeVars(allocator, set, query);
         defer allocator.free(free_vars);
+        if (query.kind == .loop_induction) {
+            const counter = classifyAutomaticCounterLoop(set, query) orelse {
+                try writer.print("theorem discharge_q{d} : emittedQuery_{d} := by\n", .{ query.id, query.id });
+                try writer.writeAll(
+                    "  fail \"automatic scalar-loop synthesis does not support this induction shape; use the emitted proof manifest workflow\"\n\n",
+                );
+                continue;
+            };
+            try writeAutomaticCounterLoopProof(writer, query, counter);
+            try writer.writeByte('\n');
+            continue;
+        }
         try writer.print("theorem discharge_q{d} : emittedQuery_{d} := by\n", .{ query.id, query.id });
         try writeFreeVarEqualityFacts(writer, free_vars);
         try writer.print("  unfold emittedQuery_{d} obligationFollowsFromAssumptions\n", .{query.id});
@@ -776,13 +1425,14 @@ fn projectionForQuery(set: obligation.ObligationSet, query: obligation.Verificat
         const assumption = findAssumption(set, id) orelse continue;
         if (assumption.formula) |formula| summary.addFormula(formula);
     }
-    if (query.kind == .loop_invariant_post) {
+    if (query.kind == .loop_induction) {
         const summary_id = query.loop_summary_id orelse return summary;
         const loop_summary = obligation.findById(set.loop_summaries, summary_id) orelse return summary;
         for (loop_summary.init_formulas) |formula| summary.addFormula(formula);
         if (loop_summary.guard_formula) |formula| summary.addFormula(formula);
         for (loop_summary.invariant_formulas) |formula| summary.addFormula(formula);
         for (loop_summary.step_assignments) |assignment| summary.addFormula(assignment.value);
+        for (loop_summary.body_safety_formulas) |formula| summary.addFormula(formula);
         for (loop_summary.post_formulas) |formula| summary.addFormula(formula);
         return summary;
     }

@@ -18,6 +18,7 @@ pub const ArtifactId = enum {
     canonical_z3_measurement,
     source_accounting_report,
     formal_artifact_index,
+    loop_induction_report,
 };
 
 pub const ArtifactKind = enum {
@@ -65,6 +66,7 @@ pub const artifacts = [_]ArtifactDefinition{
     .{ .id = .canonical_z3_measurement, .suffix = ".canonical-z3.measure.json", .kind = .measurement, .owner = .z3_userland, .schema_version = 1, .retain_on_failure = true },
     .{ .id = .source_accounting_report, .suffix = ".formal.accounting.json", .kind = .report, .owner = .source_accounting_kernel, .schema_version = 1, .retain_on_failure = true, .integrity_bound = true },
     .{ .id = .formal_artifact_index, .suffix = ".formal.artifacts.json", .kind = .index, .owner = .compiler, .schema_version = index_schema_version, .optional = false, .retain_on_failure = true, .include_in_index = false },
+    .{ .id = .loop_induction_report, .suffix = ".formal.loops.json", .kind = .report, .owner = .compiler, .schema_version = 1, .retain_on_failure = true },
 };
 
 pub const suffixes: [artifacts.len][]const u8 = blk: {
@@ -84,6 +86,7 @@ pub fn definition(id: ArtifactId) *const ArtifactDefinition {
         .canonical_z3_measurement => &artifacts[6],
         .source_accounting_report => &artifacts[7],
         .formal_artifact_index => &artifacts[8],
+        .loop_induction_report => &artifacts[9],
     };
 }
 

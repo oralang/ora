@@ -18,7 +18,10 @@ structure Row where
   assumptionIds : List Nat := []
   obligationIds : List Nat := []
   z3RowMatched : Bool := false
-  z3PlainUnknown : Bool := false
+  /-- True only when the compiler matched this proof target to a clean Z3
+  UNKNOWN or UNSAT row whose result is eligible for Lean agreement. Independent
+  compiler-owned proof targets are deliberately omitted from agreement rows. -/
+  z3ProofCompatible : Bool := false
   constraintCount : Nat := 0
   smtlibHash : String := ""
   zigSemanticSupported : Bool := false
@@ -86,7 +89,7 @@ def rowMatches (manifest : Manifest) (row : Row) : Bool :=
   match collectAssumptionsByIds manifest row.assumptionIds with
   | some assumptions =>
       row.z3RowMatched &&
-        row.z3PlainUnknown &&
+        row.z3ProofCompatible &&
         row.zigSemanticSupported &&
         manifest.wf &&
         assumptionsFullyDenotable? manifest assumptions &&

@@ -118,6 +118,8 @@ fn writeLoopSummaryRow(writer: anytype, row: obligation.LoopSummaryRow) !void {
     try writeFormulaList(writer, row.invariant_formulas);
     try writer.writeAll(", step := ");
     try writeLoopStepAssignments(writer, row.step_assignments);
+    try writer.writeAll(", bodySafety := ");
+    try writeFormulaList(writer, row.body_safety_formulas);
     try writer.writeAll(", post := ");
     try writeFormulaList(writer, row.post_formulas);
     try writer.writeAll(", unsupportedReasons := []");
@@ -334,11 +336,21 @@ fn writeSemanticDefinitions(writer: anytype, set: obligation.ObligationSet, proo
         try writer.writeAll("def emittedQuery_");
         try writer.print("{d}", .{query.id});
         try writer.writeAll(" : Prop :=\n");
-        if (query.kind == .loop_invariant_post) {
+        if (query.kind == .loop_induction) {
             const summary_id = query.loop_summary_id orelse return error.InvalidDependency;
-            try writer.writeAll("  Ora.Loop.loopPostFollowsFromAssumptions emittedManifest\n    ");
+            try writer.writeAll("  Ora.Loop.loopInductionProofFromAssumptions emittedManifest\n    ");
             try writeAssumptionRowsByIds(writer, set, query.assumption_ids);
             try writer.print("\n    emittedLoopSummary_{d}\n\n", .{summary_id});
+            try writer.print("def emittedVerifiedQuery_{d} : Prop :=\n", .{query.id});
+            try writer.writeAll("  Ora.Loop.loopVerifiedFromAssumptions emittedManifest\n    ");
+            try writeAssumptionRowsByIds(writer, set, query.assumption_ids);
+            try writer.print("\n    emittedLoopSummary_{d}\n\n", .{summary_id});
+            try writer.print(
+                "theorem emittedQuery_{d}_sound : emittedQuery_{d} -> emittedVerifiedQuery_{d} :=\n  Ora.Loop.loop_induction_proof_sound emittedManifest ",
+                .{ query.id, query.id, query.id },
+            );
+            try writeAssumptionRowsByIds(writer, set, query.assumption_ids);
+            try writer.print(" emittedLoopSummary_{d}\n\n", .{summary_id});
             continue;
         }
         for (query.obligation_ids, 0..) |obligation_id, index| {
@@ -386,10 +398,11 @@ fn writeAssumptionRowsByIds(writer: anytype, set: obligation.ObligationSet, ids:
 
 pub fn querySemanticSupport(set: obligation.ObligationSet, query: obligation.VerificationQuery) SemanticSupport {
     switch (query.kind) {
+        .loop_induction => return loopInductionQuerySemanticSupport(set, query),
         .loop_invariant_step,
         .loop_body_safety,
+        .loop_invariant_post,
         => return .{ .unsupported = .unsupported_obligation_kind },
-        .loop_invariant_post => return loopPostQuerySemanticSupport(set, query),
         else => {},
     }
     if (query.obligation_ids.len == 0) return .{ .unsupported = .empty_query };
@@ -417,7 +430,7 @@ pub fn querySemanticSupport(set: obligation.ObligationSet, query: obligation.Ver
     return .supported;
 }
 
-fn loopPostQuerySemanticSupport(
+fn loopInductionQuerySemanticSupport(
     set: obligation.ObligationSet,
     query: obligation.VerificationQuery,
 ) SemanticSupport {
@@ -435,7 +448,6 @@ fn loopPostQuerySemanticSupport(
         summary.init_formulas.len != summary.variables.len or
         summary.guard_formula == null or
         summary.invariant_formulas.len == 0 or
-        summary.post_formulas.len == 0 or
         summary.step_assignments.len != summary.variables.len)
     {
         return .{ .unsupported = .{ .unsupported_loop_summary = .loop_update_not_scalar_assignment } };
@@ -485,6 +497,10 @@ fn loopPostQuerySemanticSupport(
         .supported => {},
         .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
     };
+    for (summary.body_safety_formulas) |formula| switch (formulaSemanticSupport(set, formula)) {
+        .supported => {},
+        .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
+    };
     for (summary.post_formulas) |formula| switch (formulaSemanticSupport(set, formula)) {
         .supported => {},
         .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
@@ -504,7 +520,7 @@ fn loopSummaryOwnsQuery(
     query: obligation.VerificationQuery,
 ) bool {
     var has_query = false;
-    for (summary.query_ids.post) |id| {
+    for (summary.query_ids.induction) |id| {
         if (id == query.id) has_query = true;
     }
     if (!has_query or query.owner != .function or summary.owner != .statement) return false;

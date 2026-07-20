@@ -23,6 +23,7 @@ const import_graph = @import("ora_imports");
 const log = @import("log");
 const runtime_checks = @import("mlir/runtime_checks.zig");
 const formal_obligation = @import("formal/obligation.zig");
+const formal_obligation_dump = @import("formal/obligation_dump.zig");
 const formal_obligation_from_mlir = @import("formal/obligation_from_mlir.zig");
 const formal_obligation_from_z3 = @import("formal/obligation_from_z3.zig");
 const formal_canonical_z3_measure = @import("formal/canonical_z3_measure.zig");
@@ -37,6 +38,7 @@ const allocation_stats = lib.lsp.allocation_stats;
 const ManagedArrayList = std.array_list.Managed;
 
 const proof_sidecar_schema_version: u32 = 1;
+const default_formal_artifact_dir = "artifacts/formal-gate";
 
 /// MLIR-related command line options
 const MlirOptions = struct {
@@ -4712,6 +4714,9 @@ fn runCompilerMlirEmit(
 
     var formal = try formal_obligation_from_mlir.collect(allocator, lowering.module.raw_module, .{});
     defer formal.deinit();
+    const formal_output_dir = formalArtifactOutputDir(mlir_options);
+    try writeLoopInductionReport(allocator, file_path, formal_output_dir, formal.set);
+    try printLoopInductionSummary(stdout, formal.set);
     const const_eval = try compilation.db.constEval(compilation.root_module_id);
     var source_accounting_result = formal_source_accounting_pipeline.run(
         allocator,
@@ -4734,7 +4739,7 @@ fn runCompilerMlirEmit(
     try writeSourceAccountingReport(
         allocator,
         file_path,
-        mlir_options.output_dir,
+        formal_output_dir,
         source_accounting_result.finished.report,
     );
     var formal_gate_statuses: formal_artifact_catalog.GateStatuses = .{
@@ -5014,10 +5019,9 @@ fn runMlirEmitAdvanced(
         return error.VerificationFailed;
     }
     const needs_lean_dispatcher_gate = needs_userland_lean_gate;
-    const needs_lean_proof_gate = mlir_options.lean_proofs_path != null or needs_userland_lean_gate;
     const needs_external_lean_proof_gate = mlir_options.lean_proofs_path != null;
-    const needs_automatic_lean_proof_gate = needs_userland_lean_gate and mlir_options.lean_proofs_path == null;
-    std.debug.assert(needs_lean_proof_gate == (needs_external_lean_proof_gate or needs_automatic_lean_proof_gate));
+    var needs_lean_proof_gate = needs_external_lean_proof_gate or needs_userland_lean_gate;
+    var needs_automatic_lean_proof_gate = needs_userland_lean_gate and !needs_external_lean_proof_gate;
     var formal_gate_statuses: formal_artifact_catalog.GateStatuses = .{
         .z3_userland = if (mlir_options.verify_z3) .not_run else .not_requested,
         .lean_userland = if (needs_lean_proof_gate) .not_run else .not_requested,
@@ -5059,6 +5063,23 @@ fn runMlirEmitAdvanced(
     // Source accounting consumes this pre-optimization manifest in every
     // compilation mode, even when verification is explicitly disabled.
     formal_result_for_smt_report = try formal_obligation_from_mlir.collect(allocator, final_module, .{});
+    const formal_output_dir = formalArtifactOutputDir(mlir_options);
+    const formal_display_dir = mlir_options.artifact_display_dir orelse formal_output_dir;
+    try writeLoopInductionReport(
+        allocator,
+        file_path,
+        formal_output_dir,
+        formal_result_for_smt_report.?.set,
+    );
+    try printLoopInductionSummary(stdout, formal_result_for_smt_report.?.set);
+    const has_mandatory_loop_lean_gate = mlir_options.verify_z3 and
+        formal_result_for_smt_report.?.set.hasLeanCertificateRequirements();
+    if (has_mandatory_loop_lean_gate) {
+        needs_lean_proof_gate = true;
+        needs_automatic_lean_proof_gate = !needs_external_lean_proof_gate;
+        formal_gate_statuses.lean_userland = .not_run;
+    }
+    std.debug.assert(needs_lean_proof_gate == (needs_external_lean_proof_gate or needs_automatic_lean_proof_gate));
 
     if (mlir_options.verify_z3) {
         var verifier = try z3_verification.VerificationPass.initWithProofs(mlir_allocator, mlir_options.z3_proofs);
@@ -5167,7 +5188,7 @@ fn runMlirEmitAdvanced(
         try writeSourceAccountingReport(
             allocator,
             file_path,
-            mlir_options.output_dir,
+            formal_output_dir,
             source_accounting_result.finished.report,
         );
         formal_gate_statuses.source_accounting_kernel = switch (source_accounting_result.finished.decision) {
@@ -5181,7 +5202,7 @@ fn runMlirEmitAdvanced(
                     try writeCanonicalZ3MeasurementArtifact(
                         allocator,
                         file_path,
-                        mlir_options.output_dir,
+                        formal_output_dir,
                         &formal_result_for_smt_report.?,
                         report.*,
                         stdout,
@@ -5189,7 +5210,7 @@ fn runMlirEmitAdvanced(
                     );
                 }
                 if (pending_smt_report_write_artifacts) {
-                    try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
+                    try writeSmtReportArtifacts(allocator, file_path, formal_output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
                 }
                 report.deinit(mlir_allocator);
                 pending_smt_report = null;
@@ -5234,8 +5255,8 @@ fn runMlirEmitAdvanced(
             pending_smt_report.?,
             proof_mode,
             .{
-                .output_dir = mlir_options.output_dir,
-                .artifact_display_dir = mlir_options.artifact_display_dir,
+                .output_dir = formal_output_dir,
+                .artifact_display_dir = formal_display_dir,
                 .process_environ = mlir_options.process_environ,
                 .suppress_artifact_logs = mlir_options.suppress_artifact_logs,
             },
@@ -5257,11 +5278,30 @@ fn runMlirEmitAdvanced(
         try stdout.writeAll("error: Lean userland obligation proof gate rejected the contract\n");
         verification_failed = true;
     }
+    if (needs_automatic_lean_proof_gate and !lean_artifact_gate_allowed) {
+        if (pending_smt_report) |*report| {
+            formal_userland_coordinator.emitUnknownRecipe(
+                allocator,
+                file_path,
+                &formal_result_for_smt_report.?,
+                report.*,
+                .{
+                    .output_dir = formal_output_dir,
+                    .artifact_display_dir = formal_display_dir,
+                    .process_environ = mlir_options.process_environ,
+                    .suppress_artifact_logs = mlir_options.suppress_artifact_logs,
+                },
+                stdout,
+            ) catch |err| {
+                try stdout.print("note: could not emit Lean proof recipe: {s}\n", .{@errorName(err)});
+            };
+        }
+    }
     if (verification_result_opt) |*verification_result| {
         const needs_unknown_recipe = !verification_result.success and hasUnknownVerificationError(verification_result);
         if (!verification_result.success and !lean_artifact_gate_allowed) {
             try printVerificationErrors(stdout, verification_result.errors.items);
-            if (needs_unknown_recipe and !needs_userland_lean_gate) {
+            if (needs_unknown_recipe and !needs_lean_proof_gate) {
                 if (pending_smt_report) |*report| {
                     formal_userland_coordinator.emitUnknownRecipe(
                         allocator,
@@ -5269,8 +5309,8 @@ fn runMlirEmitAdvanced(
                         &formal_result_for_smt_report.?,
                         report.*,
                         .{
-                            .output_dir = mlir_options.output_dir,
-                            .artifact_display_dir = mlir_options.artifact_display_dir,
+                            .output_dir = formal_output_dir,
+                            .artifact_display_dir = formal_display_dir,
                             .process_environ = mlir_options.process_environ,
                             .suppress_artifact_logs = mlir_options.suppress_artifact_logs,
                         },
@@ -5295,7 +5335,7 @@ fn runMlirEmitAdvanced(
             if (result.success) "accepted" else "rejected"
         else
             "not-run";
-        const lean_status: []const u8 = if (needs_userland_lean_gate)
+        const lean_status: []const u8 = if (needs_lean_proof_gate)
             "rejected"
         else
             "not-requested";
@@ -5309,7 +5349,7 @@ fn runMlirEmitAdvanced(
                     try writeCanonicalZ3MeasurementArtifact(
                         allocator,
                         file_path,
-                        mlir_options.output_dir,
+                        formal_output_dir,
                         formal_result,
                         report.*,
                         stdout,
@@ -5318,7 +5358,7 @@ fn runMlirEmitAdvanced(
                 }
             }
             if (pending_smt_report_write_artifacts) {
-                try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
+                try writeSmtReportArtifacts(allocator, file_path, formal_output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
             }
             report.deinit(mlir_allocator);
             pending_smt_report = null;
@@ -5336,10 +5376,8 @@ fn runMlirEmitAdvanced(
     // status strings as lib/evm/src/debug_info.zig:OpMeta.proof_status.
     if (verification_result_opt) |*vr| {
         if (vr.proven_guard_positions.items.len > 0) {
-            if (mlir_options.output_dir) |out_dir| {
-                const stem = std.fs.path.stem(file_path);
-                try writeProofSidecar(allocator, out_dir, stem, vr.proven_guard_positions.items);
-            }
+            const stem = std.fs.path.stem(file_path);
+            try writeProofSidecar(allocator, formal_output_dir, stem, vr.proven_guard_positions.items);
         }
     }
 
@@ -5671,7 +5709,7 @@ fn runMlirEmitAdvanced(
         }
         if (mlir_options.emit_bytecode) {
             if (mlir_options.emit_sir_text and mlir_options.output_dir == null) try stdout.print("\n", .{});
-            emitBytecodeFromSirText(allocator, &compilation.db, compilation.root_module_id, &compilation.db.sources, sir_text, file_path, mlir_options.output_dir, mlir_options.output_file, sir_locations, sir_line_map, sir_debug_info, source_scopes, stdout, mlir_options.suppress_artifact_logs, mlir_options.optimize, if (dispatcher_session) |*session| session else null) catch |err| {
+            emitBytecodeFromSirText(allocator, &compilation.db, compilation.root_module_id, &compilation.db.sources, sir_text, file_path, mlir_options.output_dir, formal_output_dir, mlir_options.output_file, sir_locations, sir_line_map, sir_debug_info, source_scopes, stdout, mlir_options.suppress_artifact_logs, mlir_options.optimize, if (dispatcher_session) |*session| session else null) catch |err| {
                 if (needs_lean_dispatcher_gate) {
                     formal_gate_statuses.dispatcher_kernel = .rejected;
                     try writeFormalArtifactIndex(allocator, file_path, mlir_options, formal_gate_statuses, .blocked);
@@ -5684,7 +5722,7 @@ fn runMlirEmitAdvanced(
             try writeLeanDispatcherProofCertificate(
                 allocator,
                 file_path,
-                mlir_options.output_dir,
+                formal_output_dir,
                 certificate_json,
                 stdout,
                 mlir_options.suppress_artifact_logs,
@@ -5701,7 +5739,7 @@ fn runMlirEmitAdvanced(
                 try writeCanonicalZ3MeasurementArtifact(
                     allocator,
                     file_path,
-                    mlir_options.output_dir,
+                    formal_output_dir,
                     formal_result,
                     report.*,
                     stdout,
@@ -5710,7 +5748,7 @@ fn runMlirEmitAdvanced(
             }
         }
         if (pending_smt_report_write_artifacts) {
-            try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
+            try writeSmtReportArtifacts(allocator, file_path, formal_output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
         }
         report.deinit(mlir_allocator);
         pending_smt_report = null;
@@ -6293,6 +6331,94 @@ fn writeSourceAccountingReport(
     });
 }
 
+fn formalArtifactOutputDir(options: MlirOptions) []const u8 {
+    return options.output_dir orelse default_formal_artifact_dir;
+}
+
+fn writeLoopInductionReport(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    output_dir: []const u8,
+    set: formal_obligation.ObligationSet,
+) !void {
+    if (set.loop_summaries.len == 0) return;
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+    try formal_obligation_dump.writeLoopInductionReport(&out.writer, set);
+
+    const filename = try formal_artifact_catalog.filename(
+        allocator,
+        std.fs.path.stem(file_path),
+        .loop_induction_report,
+    );
+    defer allocator.free(filename);
+    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), output_dir);
+    const path = try std.fs.path.join(allocator, &.{ output_dir, filename });
+    defer allocator.free(path);
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = path,
+        .data = out.written(),
+    });
+}
+
+fn printLoopInductionSummary(
+    writer: anytype,
+    set: formal_obligation.ObligationSet,
+) !void {
+    if (set.loop_summaries.len == 0) return;
+    var required: usize = 0;
+    var excluded: usize = 0;
+    for (set.loop_summaries) |summary| {
+        const query = loopInductionQuery(set, summary.id);
+        if (query != null and
+            query.?.artifact_policy == .blocks_verified_artifacts and
+            query.?.proof_requirement == .lean_certificate)
+        {
+            required += 1;
+        } else {
+            if (summary.unsupported_reasons.len == 0) return error.LoopClassificationMissingReason;
+            excluded += 1;
+        }
+    }
+    try writer.print(
+        "Lean scalar-loop induction: total={d}, certificate-required={d}, excluded={d}\n",
+        .{ set.loop_summaries.len, required, excluded },
+    );
+    for (set.loop_summaries) |summary| {
+        const query = loopInductionQuery(set, summary.id);
+        const certificate_required = query != null and
+            query.?.artifact_policy == .blocks_verified_artifacts and
+            query.?.proof_requirement == .lean_certificate;
+        try writer.writeAll("  - ");
+        if (summary.source.file) |file| try writer.writeAll(file) else try writer.writeAll("<generated>");
+        if (summary.source.line != 0) try writer.print(":{d}", .{summary.source.line});
+        if (summary.owner == .statement) {
+            try writer.print(" ({s})", .{summary.owner.statement.function_name});
+        }
+        if (certificate_required) {
+            try writer.print(" lean_certificate query={d}\n", .{query.?.id});
+            continue;
+        }
+        try writer.writeAll(" excluded_by=");
+        for (summary.unsupported_reasons, 0..) |reason, index| {
+            if (index != 0) try writer.writeByte(',');
+            try writer.writeAll(@tagName(reason));
+        }
+        try writer.writeByte('\n');
+    }
+}
+
+fn loopInductionQuery(
+    set: formal_obligation.ObligationSet,
+    summary_id: formal_obligation.Id,
+) ?formal_obligation.VerificationQuery {
+    for (set.queries) |query| {
+        if (query.kind == .loop_induction and query.loop_summary_id == summary_id) return query;
+    }
+    return null;
+}
+
 fn writeFormalArtifactIndex(
     allocator: std.mem.Allocator,
     file_path: []const u8,
@@ -6300,7 +6426,7 @@ fn writeFormalArtifactIndex(
     statuses: formal_artifact_catalog.GateStatuses,
     authorization: formal_artifact_catalog.FinalAuthorization,
 ) !void {
-    const scan_dir = options.output_dir orelse ".";
+    const scan_dir = formalArtifactOutputDir(options);
     const artifact_dir = options.artifact_display_dir orelse scan_dir;
     const artifact_root = options.formal_artifact_root orelse artifact_dir;
     try formal_artifact_catalog.writeIndex(allocator, .{
@@ -6411,6 +6537,7 @@ fn emitBytecodeFromSirText(
     sir_text: []const u8,
     file_path: []const u8,
     output_dir: ?[]const u8,
+    formal_output_dir: []const u8,
     output_file: ?[]const u8,
     sir_locations_json: ?[]const u8,
     sir_line_map_json: ?[]const u8,
@@ -6503,7 +6630,7 @@ fn emitBytecodeFromSirText(
         try writeLeanDispatcherProofCertificate(
             allocator,
             file_path,
-            output_dir,
+            formal_output_dir,
             certificate_json,
             stdout,
             suppress_log,

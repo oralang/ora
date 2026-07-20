@@ -1699,11 +1699,15 @@ pub fn build(b: *std.Build) void {
         "--tool",
     });
     loop_census_cmd.addArtifactArg(loop_census_exe);
+    loop_census_cmd.addArg("--compiler");
+    loop_census_cmd.addArtifactArg(exe);
     loop_census_cmd.addArgs(&.{
         "--corpus-root",
         "ora-example",
         "--json-out",
         loop_census_report_path,
+        "--activation-out-dir",
+        "zig-out/loop-census/formal-activation",
         "ora-example",
     });
     const loop_census_step = b.step("measure-loop-census", "Measure all source loops and prepared loop queries");
