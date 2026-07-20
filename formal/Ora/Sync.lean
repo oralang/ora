@@ -23,23 +23,49 @@ theorem builtin_types_match : compilerBuiltinTypeIds = expectedBuiltinTypeIds :=
 theorem builtin_type_comptime_ids_match :
     compilerBuiltinTypeComptimeIds = expectedBuiltinTypeComptimeIds := by decide
 
+theorem integer_type_registrations_match :
+    compilerIntegerTypeRegistrations = expectedIntegerTypeRegistrations := by decide
+
 theorem obligation_semantics_u256_type_id_pinned :
-    ("u256", expectedCompilerTypeIdU256) ∈ compilerBuiltinTypeComptimeIds := by decide
+    ("u256", false, 256, expectedCompilerTypeIdU256) ∈
+      compilerIntegerTypeRegistrations := by
+  rw [integer_type_registrations_match]
+  decide
 
 theorem obligation_semantics_i256_type_id_pinned :
-    ("i256", expectedCompilerTypeIdI256) ∈ compilerBuiltinTypeComptimeIds := by decide
+    ("i256", true, 256, expectedCompilerTypeIdI256) ∈
+      compilerIntegerTypeRegistrations := by
+  rw [integer_type_registrations_match]
+  decide
 
 theorem obligation_semantics_bool_type_id_pinned :
     ("bool", expectedCompilerTypeIdBool) ∈ compilerBuiltinTypeComptimeIds := by decide
 
-/-! ## 2. Integer widths — no missing, no extra -/
+/-! ## 2. Integer widths — derived from the authoritative registrations -/
 
-theorem uint_widths_match : compilerUIntWidths = expectedUIntWidths := by decide
-theorem sint_widths_match : compilerSIntWidths = expectedSIntWidths := by decide
+theorem uint_widths_match :
+    unsignedWidthsFromIntegerRegistrations compilerIntegerTypeRegistrations =
+      expectedUIntWidths := by
+  simpa [expectedUIntWidths] using
+    congrArg unsignedWidthsFromIntegerRegistrations integer_type_registrations_match
+
+theorem sint_widths_match :
+    signedWidthsFromIntegerRegistrations compilerIntegerTypeRegistrations =
+      expectedSIntWidths := by
+  simpa [expectedSIntWidths] using
+    congrArg signedWidthsFromIntegerRegistrations integer_type_registrations_match
 
 /-! ## 3. `i160` is absent from the signed widths -/
 
-theorem i160_absent : 160 ∉ compilerSIntWidths := by decide
+theorem u160_registration_pinned :
+    ("u160", false, 160, 18) ∈ compilerIntegerTypeRegistrations := by
+  rw [integer_type_registrations_match]
+  decide
+
+theorem i160_absent :
+    160 ∉ signedWidthsFromIntegerRegistrations compilerIntegerTypeRegistrations := by
+  rw [integer_type_registrations_match]
+  decide
 
 /-! ## 4. `address` is a distinct primitive from `u160`
 

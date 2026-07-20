@@ -18,8 +18,8 @@ def compilerBuiltinTypeIds : List String :=
 def compilerBuiltinTypeComptimeIds : List (String × Nat) :=
   [("u8", 1), ("u16", 2), ("u32", 3), ("u64", 4), ("u128", 5), ("u160", 18), ("u256", 6), ("i8", 7), ("i16", 8), ("i32", 9), ("i64", 10), ("i128", 11), ("i256", 12), ("bool", 13), ("address", 14), ("string", 15), ("bytes", 16), ("void", 17)]
 
-def compilerUIntWidths : List Nat := [8, 16, 32, 64, 128, 160, 256]
-def compilerSIntWidths : List Nat := [8, 16, 32, 64, 128, 256]
+def compilerIntegerTypeRegistrations : List (String × Bool × Nat × Nat) :=
+  [("u8", false, 8, 1), ("u16", false, 16, 2), ("u32", false, 32, 3), ("u64", false, 64, 4), ("u128", false, 128, 5), ("u160", false, 160, 18), ("u256", false, 256, 6), ("i8", true, 8, 7), ("i16", true, 16, 8), ("i32", true, 32, 9), ("i64", true, 64, 10), ("i128", true, 128, 11), ("i256", true, 256, 12)]
 
 def compilerFixedBytesMin : Nat := 1
 def compilerFixedBytesMax : Nat := 32

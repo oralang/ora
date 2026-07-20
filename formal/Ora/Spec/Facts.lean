@@ -28,17 +28,7 @@ namespace Ora.Spec
 
 open Ora.Types
 
-/-! ## Integer widths -/
-
-structure UIntWidthFact where
-  width : UIntWidth
-  bits  : Nat
-  deriving Repr, DecidableEq
-
-structure SIntWidthFact where
-  width : SIntWidth
-  bits  : Nat
-  deriving Repr, DecidableEq
+/-! ## Integer registrations -/
 
 def uintBits : UIntWidth → Nat
   | .w8 => 8
@@ -57,19 +47,22 @@ def sintBits : SIntWidth → Nat
   | .w128 => 128
   | .w256 => 256
 
-def allUIntWidths : List UIntWidth :=
-  [.w8, .w16, .w32, .w64, .w128, .w160, .w256]
+inductive IntegerShape where
+  | unsigned : UIntWidth → IntegerShape
+  | signed : SIntWidth → IntegerShape
+  deriving Repr, DecidableEq
 
-def allSIntWidths : List SIntWidth :=
-  [.w8, .w16, .w32, .w64, .w128, .w256]
+def IntegerShape.bits : IntegerShape → Nat
+  | .unsigned width => uintBits width
+  | .signed width => sintBits width
 
-def expectedUIntWidthFacts : List UIntWidthFact :=
-  allUIntWidths.map fun w =>
-    { width := w, bits := uintBits w }
+def IntegerShape.isSigned : IntegerShape → Bool
+  | .unsigned _ => false
+  | .signed _ => true
 
-def expectedSIntWidthFacts : List SIntWidthFact :=
-  allSIntWidths.map fun w =>
-    { width := w, bits := sintBits w }
+def IntegerShape.primTy : IntegerShape → PrimTy
+  | .unsigned width => .int (.uint width)
+  | .signed width => .int (.sint width)
 
 /-! ## Builtin primitive spellings -/
 
@@ -89,22 +82,38 @@ def expectedCompilerTypeIdU256 : Nat := 6
 def expectedCompilerTypeIdI256 : Nat := 12
 def expectedCompilerTypeIdBool : Nat := 13
 
+structure IntegerRegistrationFact where
+  name : String
+  shape : IntegerShape
+  compilerTypeId : Nat
+  deriving Repr, DecidableEq
+
+def expectedIntegerRegistrationFacts : List IntegerRegistrationFact :=
+  [ { name := "u8", shape := .unsigned .w8, compilerTypeId := 1 },
+    { name := "u16", shape := .unsigned .w16, compilerTypeId := 2 },
+    { name := "u32", shape := .unsigned .w32, compilerTypeId := 3 },
+    { name := "u64", shape := .unsigned .w64, compilerTypeId := 4 },
+    { name := "u128", shape := .unsigned .w128, compilerTypeId := 5 },
+    { name := "u160", shape := .unsigned .w160, compilerTypeId := 18 },
+    { name := "u256", shape := .unsigned .w256,
+      compilerTypeId := expectedCompilerTypeIdU256 },
+    { name := "i8", shape := .signed .w8, compilerTypeId := 7 },
+    { name := "i16", shape := .signed .w16, compilerTypeId := 8 },
+    { name := "i32", shape := .signed .w32, compilerTypeId := 9 },
+    { name := "i64", shape := .signed .w64, compilerTypeId := 10 },
+    { name := "i128", shape := .signed .w128, compilerTypeId := 11 },
+    { name := "i256", shape := .signed .w256,
+      compilerTypeId := expectedCompilerTypeIdI256 } ]
+
+def IntegerRegistrationFact.toBuiltinTypeFact
+    (fact : IntegerRegistrationFact) : BuiltinTypeFact :=
+  { name := fact.name,
+    ty := fact.shape.primTy,
+    compilerTypeId := fact.compilerTypeId }
+
 def expectedBuiltinTypeFacts : List BuiltinTypeFact :=
-  [ { name := "u8",      ty := u8,       compilerTypeId := 1 },
-    { name := "u16",     ty := u16,      compilerTypeId := 2 },
-    { name := "u32",     ty := u32,      compilerTypeId := 3 },
-    { name := "u64",     ty := u64,      compilerTypeId := 4 },
-    { name := "u128",    ty := u128,     compilerTypeId := 5 },
-    { name := "u160",    ty := u160,     compilerTypeId := 18 },
-    { name := "u256",    ty := u256,     compilerTypeId := expectedCompilerTypeIdU256 },
-
-    { name := "i8",      ty := i8,       compilerTypeId := 7 },
-    { name := "i16",     ty := i16,      compilerTypeId := 8 },
-    { name := "i32",     ty := i32,      compilerTypeId := 9 },
-    { name := "i64",     ty := i64,      compilerTypeId := 10 },
-    { name := "i128",    ty := i128,     compilerTypeId := 11 },
-    { name := "i256",    ty := i256,     compilerTypeId := expectedCompilerTypeIdI256 },
-
+  expectedIntegerRegistrationFacts.map IntegerRegistrationFact.toBuiltinTypeFact ++
+  [
     { name := "bool",    ty := .bool,    compilerTypeId := expectedCompilerTypeIdBool },
     { name := "address", ty := .address, compilerTypeId := 14 },
     { name := "string",  ty := .string,  compilerTypeId := 15 },
@@ -248,11 +257,32 @@ The generated compiler snapshot intentionally contains only primitive data
 typed facts above projected into that same wire shape for `Ora.Sync`.
 -/
 
+abbrev IntegerRegistrationRow := String × Bool × Nat × Nat
+
+def IntegerRegistrationFact.toRow
+    (fact : IntegerRegistrationFact) : IntegerRegistrationRow :=
+  (fact.name, fact.shape.isSigned, fact.shape.bits, fact.compilerTypeId)
+
+def expectedIntegerTypeRegistrations : List IntegerRegistrationRow :=
+  expectedIntegerRegistrationFacts.map IntegerRegistrationFact.toRow
+
+def unsignedWidthsFromIntegerRegistrations
+    (rows : List IntegerRegistrationRow) : List Nat :=
+  rows.filterMap fun
+    | (_, false, bits, _) => some bits
+    | _ => none
+
+def signedWidthsFromIntegerRegistrations
+    (rows : List IntegerRegistrationRow) : List Nat :=
+  rows.filterMap fun
+    | (_, true, bits, _) => some bits
+    | _ => none
+
 def expectedUIntWidths : List Nat :=
-  expectedUIntWidthFacts.map fun f => f.bits
+  unsignedWidthsFromIntegerRegistrations expectedIntegerTypeRegistrations
 
 def expectedSIntWidths : List Nat :=
-  expectedSIntWidthFacts.map fun f => f.bits
+  signedWidthsFromIntegerRegistrations expectedIntegerTypeRegistrations
 
 def expectedBuiltinTypeIds : List String :=
   expectedBuiltinTypeFacts.map fun f => f.name

@@ -54,6 +54,8 @@ inductive UIntWidth where
   | w32
   | w64
   | w128
+  -- Deliberate unsigned 20-byte width for EVM address-sized arithmetic.
+  -- `address` remains distinct, and the signed width universe has no peer.
   | w160
   | w256
   deriving Repr, DecidableEq
