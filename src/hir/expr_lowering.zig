@@ -1103,6 +1103,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 else => false,
             };
 
+            switch (binary.op) {
+                .shl, .shr => try FunctionLowerer.emitCheckedShiftAmountAssert(self, lhs, rhs, binary.range),
+                else => {},
+            }
+
             const op = switch (binary.op) {
                 .add => mlir.oraArithAddIOpCreate(self.parent.context, loc, lhs, rhs),
                 .wrapping_add => mlir.oraAddWrappingOpCreate(self.parent.context, loc, lhs, rhs, result_type),

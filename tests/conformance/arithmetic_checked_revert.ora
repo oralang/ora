@@ -40,4 +40,38 @@ contract ArithmeticCheckedRevert {
     {
         return a / b;
     }
+
+    pub fn checked_shl(value: u256, amount: u256) -> u256 {
+        return value << amount;
+    }
+
+    pub fn checked_shr(value: u256, amount: u256) -> u256 {
+        return value >> amount;
+    }
+
+    pub fn checked_shr_i8(value: i8, amount: i8) -> i8 {
+        return value >> amount;
+    }
+
+    pub fn wrapping_shl(value: u256, amount: u256) -> u256 {
+        return value <<% amount;
+    }
+
+    pub fn wrapping_shr(value: u256, amount: u256) -> u256 {
+        return value >>% amount;
+    }
+
+    pub fn wrapping_shr_i8(value: i8, amount: i8) -> i8 {
+        return value >>% amount;
+    }
+
+    pub fn wrapping_shl_constant_u8() -> u8 {
+        const value: u8 = 1 <<% 8;
+        return value;
+    }
+
+    pub fn wrapping_shr_constant_u8() -> u8 {
+        const value: u8 = 255 >>% 9;
+        return value;
+    }
 }

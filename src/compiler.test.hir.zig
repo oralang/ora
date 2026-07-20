@@ -2039,6 +2039,29 @@ test "compiler lowers remaining wrapping ops through real wrapping ops" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.mul_wrapping"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.shl_wrapping"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.shr_wrapping"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "checked shift amount out of range"));
+}
+
+test "compiler lowers checked shifts with source-owned range asserts" {
+    const source_text =
+        \\pub fn checked_shifts(value: u8, amount: u8) -> u8 {
+        \\    let left = value << amount;
+        \\    return left >> amount;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, hir_text, "checked shift amount out of range"));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, hir_text, "ora.assert %"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shli"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shrui"));
 }
 
 test "compiler lowers wrapping power through ora.power" {
@@ -2154,6 +2177,8 @@ test "compiler lowers shift compound assignment" {
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shli"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shrui"));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, hir_text, "checked shift amount out of range"));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, hir_text, "ora.assert %"));
 }
 
 test "compiler resolves generic compound shift signedness before lowering" {

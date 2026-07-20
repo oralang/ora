@@ -6048,8 +6048,11 @@ test "formal obligation MLIR adapter classifies arithmetic safety producers" {
         \\    "ora.assert"(%flag) <{message = "checked multiplication overflow"}> : (i1) -> ()
         \\    "ora.assert"(%flag) <{message = "checked power overflow"}> : (i1) -> ()
         \\    "ora.assert"(%flag) <{message = "checked negation overflow"}> : (i1) -> ()
+        \\    "ora.assert"(%flag) <{message = "checked shift amount out of range"}> : (i1) -> ()
         \\    %q = arith.divui %x, %y : i256
-        \\    %s = arith.shli %x, %y : i256
+        \\    %sl = arith.shli %x, %y : i256
+        \\    %sr = arith.shrui %x, %y : i256
+        \\    %ssr = arith.shrsi %x, %y : i256
         \\    func.return
         \\  }
         \\}

@@ -1688,6 +1688,7 @@ const FunctionLowerer = struct {
     pub const appendScfYieldFromLocals = FunctionCore.appendScfYieldFromLocals;
     pub const writeBackCarriedLocals = FunctionCore.writeBackCarriedLocals;
     pub const annotateCarriedLocalResults = FunctionCore.annotateCarriedLocalResults;
+    pub const emitCheckedShiftAmountAssert = FunctionCore.emitCheckedShiftAmountAssert;
     pub const emitOverflowAssert = FunctionCore.emitOverflowAssert;
 
     pub const lowerIfStmt = ControlFlow.lowerIfStmt;

@@ -4207,15 +4207,9 @@ pub const Encoder = struct {
         op_id: usize,
     ) !z3.Z3_ast {
         const coerced_rhs = try self.coerceShiftAmount(lhs, rhs, rhs_type, op_id);
-        // Obligation: shift amount must be < bit_width (undefined behavior otherwise)
-        const sort = z3.Z3_get_sort(self.context.ctx, lhs);
-        const sort_kind = z3.Z3_get_sort_kind(self.context.ctx, sort);
-        if (sort_kind == z3.Z3_BV_SORT) {
-            const width = z3.Z3_get_bv_sort_size(self.context.ctx, sort);
-            const max_shift = z3.Z3_mk_unsigned_int64(self.context.ctx, width, sort);
-            const in_range = z3.Z3_mk_bvult(self.context.ctx, coerced_rhs, max_shift);
-            self.addObligation(in_range);
-        }
+        // Checked-shift safety is represented by the source-anchored ora.assert
+        // emitted by HIR. A raw shift operation has total bitvector semantics and
+        // must not independently invent a source-level verification obligation.
         return switch (op) {
             .Shl => z3.Z3_mk_bvshl(self.context.ctx, lhs, coerced_rhs),
             .ShrSigned => z3.Z3_mk_bvashr(self.context.ctx, lhs, coerced_rhs),

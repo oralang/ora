@@ -124,9 +124,6 @@ const arithmetic_op_map = std.StaticStringMap(obligation.ArithmeticSafetyKind).i
     .{ "arith.divsi", .division_by_zero },
     .{ "arith.remui", .division_by_zero },
     .{ "arith.remsi", .division_by_zero },
-    .{ "arith.shli", .shift_amount_bounds },
-    .{ "arith.shrsi", .shift_amount_bounds },
-    .{ "arith.shrui", .shift_amount_bounds },
 });
 
 const assert_safety_map = std.StaticStringMap(obligation.ArithmeticSafetyKind).initComptime(.{
@@ -135,6 +132,7 @@ const assert_safety_map = std.StaticStringMap(obligation.ArithmeticSafetyKind).i
     .{ "checked multiplication overflow", .multiplication_overflow },
     .{ "checked power overflow", .power_overflow },
     .{ "checked negation overflow", .negation_overflow },
+    .{ "checked shift amount out of range", .shift_amount_bounds },
 });
 
 const transparent_value_ops = std.StaticStringMap(void).initComptime(.{

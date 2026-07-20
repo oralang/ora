@@ -18,19 +18,20 @@ fn exitCli(code: u8) noreturn {
     std.process.exit(code);
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
+    defer args.deinit();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-    if (args.len != 3) {
+    _ = args.next();
+    const source_path = args.next();
+    const spec_path = args.next();
+    if (source_path == null or spec_path == null or args.next() != null) {
         std.debug.print("usage: conformance-one <source.ora> <spec.toml>\n", .{});
         exitCli(2);
     }
 
-    runner.runConformanceSpec(allocator, args[1], args[2]) catch |err| {
+    runner.runConformanceSpec(allocator, source_path.?, spec_path.?) catch |err| {
         std.debug.print("conformance-one: spec failed: {s}\n", .{@errorName(err)});
         exitCli(1);
     };

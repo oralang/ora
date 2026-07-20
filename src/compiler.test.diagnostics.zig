@@ -2556,6 +2556,33 @@ test "compiler reports invalid constant shift amounts" {
     try testing.expectEqual(compiler.sema.TypeKind.unknown, typecheck.pattern_types[bad_pattern.index()].kind());
 }
 
+test "compiler accepts out of range constant wrapping shift amounts" {
+    const source_text =
+        \\pub fn shift(v: u8) -> u8 {
+        \\    const folded_left: u8 = 1 <<% 8;
+        \\    const folded_right: u8 = 255 >>% 9;
+        \\    let left = v <<% 8;
+        \\    let right = v >>% 9;
+        \\    return left +% right +% folded_left +% folded_right;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const type_diags = try compilation.db.typeCheckDiagnostics(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    try testing.expect(type_diags.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.shl_wrapping"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.shr_wrapping"));
+}
+
 test "compiler reports integer constant overflow against declared widths" {
     const source_text =
         \\storage var total: u8 = 256;
