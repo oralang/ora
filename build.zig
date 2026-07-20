@@ -221,6 +221,11 @@ pub fn build(b: *std.Build) void {
     });
     mlir_helpers_mod.addImport("mlir_c_api", mlir_c_mod);
     mlir_helpers_mod.addImport("ora_types", ora_types_mod);
+    const prepared_query_row_mod = b.createModule(.{
+        .root_source_file = b.path("src/formal/shared/prepared_query_row.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const z3_verification_mod = b.createModule(.{
         .root_source_file = b.path("src/z3/verification.zig"),
         .target = target,
@@ -229,6 +234,7 @@ pub fn build(b: *std.Build) void {
     z3_verification_mod.addImport("mlir_c_api", mlir_c_mod);
     z3_verification_mod.addImport("ora_lib", lib_mod);
     z3_verification_mod.addImport("ora_types", ora_types_mod);
+    z3_verification_mod.addImport("ora_prepared_query_row", prepared_query_row_mod);
 
     const evm_blst_lib = createEvmBlstLibrary(b, target, optimize);
     const evm_c_kzg_lib = createEvmCKzgLibrary(b, target, optimize, evm_blst_lib);
@@ -275,6 +281,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("ora_types", ora_types_mod);
     exe_mod.addImport("ora_refinements", ora_refinements_mod);
     exe_mod.addImport("ora_z3_verification", z3_verification_mod);
+    exe_mod.addImport("ora_prepared_query_row", prepared_query_row_mod);
     exe_mod.addImport("ora_root", lib_mod);
     lib_mod.addImport("mlir_c_api", mlir_c_mod);
     lib_mod.addImport("mlir_helpers", mlir_helpers_mod);
@@ -463,6 +470,26 @@ pub fn build(b: *std.Build) void {
     const z3_step = buildZ3Libraries(b, target, optimize);
     linkZ3Libraries(b, exe, z3_step, target);
 
+    const loop_census_mod = b.createModule(.{
+        .root_source_file = b.path("src/loop_census_main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    loop_census_mod.addImport("ora_root", lib_mod);
+    loop_census_mod.addImport("ora_lib", lib_mod);
+    loop_census_mod.addImport("ora_types", ora_types_mod);
+    loop_census_mod.addImport("mlir_c_api", mlir_c_mod);
+    loop_census_mod.addImport("ora_z3_verification", z3_verification_mod);
+    const loop_census_exe = b.addExecutable(.{
+        .name = "ora-loop-census",
+        .root_module = loop_census_mod,
+    });
+    linkMlirLibraries(b, loop_census_exe, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
+    linkZ3Libraries(b, loop_census_exe, z3_step, target);
+    const loop_census_install = b.addInstallArtifact(loop_census_exe, .{});
+    const loop_census_tool_step = b.step("loop-census-tool", "Build the measurement-only loop census emitter");
+    loop_census_tool_step.dependOn(&loop_census_install.step);
+
     // this declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).
@@ -647,8 +674,49 @@ pub fn build(b: *std.Build) void {
     const conformance_tests_run = b.addRunArtifact(conformance_tests);
     conformance_tests_run.step.dependOn(b.getInstallStep());
 
+    // Pinned verified-build lane: classify the full corpus by verifier outcome
+    // and bytecode equality, then execute every verifier-rewritten contract.
+    const verified_conformance_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/conformance/verified_build.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    verified_conformance_test_mod.addImport("ora_evm", ora_evm_mod);
+    const verified_conformance_tests = b.addTest(.{
+        .name = "ora-verified-conformance-tests",
+        .root_module = verified_conformance_test_mod,
+    });
+    verified_conformance_tests.step.dependOn(&bootstrap_ora_evm_crypto.step);
+    const verified_conformance_tests_run = b.addRunArtifact(verified_conformance_tests);
+    verified_conformance_tests_run.step.dependOn(b.getInstallStep());
+
+    const test_conformance_verified_step = b.step("test-conformance-verified", "Run the verified-build Ora bytecode conformance lane");
+    test_conformance_verified_step.dependOn(&verified_conformance_tests_run.step);
+
+    const verified_conformance_rail_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/conformance/verified_build.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    verified_conformance_rail_test_mod.addImport("ora_evm", ora_evm_mod);
+    const verified_conformance_rail_tests = b.addTest(.{
+        .name = "ora-verified-conformance-rail-tests",
+        .root_module = verified_conformance_rail_test_mod,
+        .filters = &.{
+            "verified emit classification rejects abnormal termination",
+            "verified emit classification names normal verifier rejections",
+            "verified conformance manifest parser rejects unordered membership",
+            "verified conformance manifest requires class-C reasons",
+        },
+    });
+    verified_conformance_rail_tests.step.dependOn(&bootstrap_ora_evm_crypto.step);
+    const verified_conformance_rail_tests_run = b.addRunArtifact(verified_conformance_rail_tests);
+    const test_conformance_verified_rail_step = b.step("test-conformance-verified-rail", "Run verified-build classification rail tests");
+    test_conformance_verified_rail_step.dependOn(&verified_conformance_rail_tests_run.step);
+
     const test_conformance_step = b.step("test-conformance", "Run Ora bytecode conformance tests on lib/evm");
     test_conformance_step.dependOn(&conformance_tests_run.step);
+    test_conformance_step.dependOn(&verified_conformance_tests_run.step);
 
     // Single-spec lib/evm runner — runs ONE .ora+.spec.toml outside the harness
     // (used by the Anvil differential proof to observe lib/evm on one call).
@@ -678,6 +746,15 @@ pub fn build(b: *std.Build) void {
     conformance_anvil_cmd.step.dependOn(b.getInstallStep());
     const test_conformance_anvil_step = b.step("test-conformance-anvil", "Run Ora conformance differential tests on Anvil/revm");
     test_conformance_anvil_step.dependOn(&conformance_anvil_cmd.step);
+
+    const conformance_anvil_parser_check = b.addSystemCommand(&.{
+        "python3",
+        "scripts/conformance-anvil-diff.py",
+        "--self-test",
+    });
+    const check_conformance_anvil_parser_step = b.step("check-conformance-anvil-parser", "Check Anvil RPC revert-data parsing");
+    check_conformance_anvil_parser_step.dependOn(&conformance_anvil_parser_check.step);
+    test_step.dependOn(&conformance_anvil_parser_check.step);
 
     // Metrics snapshot harness — prints gas + bytecode-size metrics per corpus
     // entry for the change-quality benchmark.
@@ -889,10 +966,14 @@ pub fn build(b: *std.Build) void {
     z3_verification_test_mod.addImport("mlir_c_api", mlir_c_mod);
     z3_verification_test_mod.addImport("ora_lib", lib_mod);
     z3_verification_test_mod.addImport("ora_types", ora_types_mod);
+    z3_verification_test_mod.addImport("ora_prepared_query_row", prepared_query_row_mod);
     const z3_verification_tests = b.addTest(.{ .root_module = z3_verification_test_mod });
     linkMlirLibraries(b, z3_verification_tests, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
     linkZ3Libraries(b, z3_verification_tests, z3_step, target);
-    test_step.dependOn(&b.addRunArtifact(z3_verification_tests).step);
+    const z3_verification_tests_run = b.addRunArtifact(z3_verification_tests);
+    const test_z3_verification_step = b.step("test-z3-verification", "Run Z3 verification tests");
+    test_z3_verification_step.dependOn(&z3_verification_tests_run.step);
+    test_step.dependOn(&z3_verification_tests_run.step);
 
     // Formal proof-checker tests. This target keeps the userland Lean proof
     // acceptance code in the normal build graph even before B3 wires it to CLI
@@ -1399,7 +1480,9 @@ pub fn build(b: *std.Build) void {
     compiler_test_mod.addImport("ora_lib", lib_mod);
     compiler_test_mod.addImport("mlir_c_api", mlir_c_mod);
     compiler_test_mod.addImport("ora_z3_verification", z3_verification_mod);
+    compiler_test_mod.addImport("ora_prepared_query_row", prepared_query_row_mod);
     compiler_test_mod.addImport("ora_types", ora_types_mod);
+    compiler_test_mod.addImport("ora_lexer", ora_lexer_mod);
     compiler_test_mod.addImport("sinora", sinora_mod);
     const compiler_tests = b.addTest(.{
         .root_module = compiler_test_mod,
@@ -1424,6 +1507,50 @@ pub fn build(b: *std.Build) void {
 
     const test_compiler_step = b.step("test-compiler", "Run compiler core tests");
     test_compiler_step.dependOn(&compiler_tests_run.step);
+
+    // zig build test-source-accounting
+    // Pure kernel/adapters plus the real compiler concrete-discharge case.
+    const source_accounting_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/source_accounting_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    source_accounting_test_mod.addImport("ora_lexer", ora_lexer_mod);
+    source_accounting_test_mod.addImport("ora_types", ora_types_mod);
+    source_accounting_test_mod.addImport("ora_refinements", ora_refinements_mod);
+    source_accounting_test_mod.addImport("ora_prepared_query_row", prepared_query_row_mod);
+    const source_accounting_tests = b.addTest(.{ .root_module = source_accounting_test_mod });
+    const source_accounting_tests_run = b.addRunArtifact(source_accounting_tests);
+
+    const source_accounting_repro_tests = b.addTest(.{
+        .root_module = compiler_test_mod,
+        .filters = &.{
+            "source accounting accepts concretely checked folded countThree invariants",
+            "production source-accounting pipeline accepts a runtime loop with actual verifier queries",
+            "production source-accounting pipeline binds abandoned-fold call-boundary queries",
+            "production source-accounting pipeline preserves guard and modifies evidence",
+            "production source-accounting pipeline preserves impl contract and collapsed switch identities",
+            "source-accounting syntax and spec-clause vocabularies are totality pins",
+            "source-accounting templates distinguish contract and error exit uses",
+            "source-accounting lifecycle",
+            "verification-disabled binding is exclusive",
+            "kernel registry describes the blocking source-accounting phases",
+            "every executable kernel gate has an explicit audit-catalog identity",
+        },
+    });
+    linkMlirLibraries(b, source_accounting_repro_tests, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
+    linkZ3Libraries(b, source_accounting_repro_tests, z3_step, target);
+    const source_accounting_repro_run = b.addRunArtifact(source_accounting_repro_tests);
+    source_accounting_repro_run.step.dependOn(b.getInstallStep());
+    source_accounting_repro_run.step.dependOn(&evm_debug_probe_install_cmd.step);
+
+    const test_source_accounting_step = b.step("test-source-accounting", "Run source-formal accounting kernel, adapter, and reproduction tests");
+    test_source_accounting_step.dependOn(&source_accounting_tests_run.step);
+    test_source_accounting_step.dependOn(&source_accounting_repro_run.step);
+    test_compiler_step.dependOn(&source_accounting_tests_run.step);
+    test_compiler_step.dependOn(&source_accounting_repro_run.step);
+    test_step.dependOn(&source_accounting_tests_run.step);
+    test_step.dependOn(&source_accounting_repro_run.step);
 
     // ========================================================================
     // Per-module test targets (no MLIR/Z3 required)
@@ -1563,6 +1690,28 @@ pub fn build(b: *std.Build) void {
         });
     const check_formal_sync_step = b.step("check-formal-sync", "Regenerate formal snapshots and run Lean verification checks");
     check_formal_sync_step.dependOn(&formal_sync_cmd.step);
+
+    // zig build measure-loop-census
+    const loop_census_report_path = "zig-out/loop-census/report.json";
+    const loop_census_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/measure-loop-census.py",
+        "--tool",
+    });
+    loop_census_cmd.addArtifactArg(loop_census_exe);
+    loop_census_cmd.addArg("--compiler");
+    loop_census_cmd.addArtifactArg(exe);
+    loop_census_cmd.addArgs(&.{
+        "--corpus-root",
+        "ora-example",
+        "--json-out",
+        loop_census_report_path,
+        "--activation-out-dir",
+        "zig-out/loop-census/formal-activation",
+        "ora-example",
+    });
+    const loop_census_step = b.step("measure-loop-census", "Measure all source loops and prepared loop queries");
+    loop_census_step.dependOn(&loop_census_cmd.step);
 
     // zig build check-canonical-z3-required
     const canonical_z3_required_out_dir = b.fmt("/tmp/ora-canonical-z3-required-gate-{d}", .{std.posix.system.getpid()});

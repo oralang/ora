@@ -581,6 +581,7 @@ pub fn typeCheck(
     const_eval: *const ConstEvalResult,
     key: TypeCheckKey,
     import_query: ?compiler_query.SemaView,
+    measure_loop_census: bool,
 ) !TypeCheckResult {
     var result = TypeCheckResult{
         .arena = std.heap.ArenaAllocator.init(allocator),
@@ -596,6 +597,7 @@ pub fn typeCheck(
         .expr_types = &.{},
         .call_resolutions = &.{},
         .expr_effects = &.{},
+        .loop_body_effects = &.{},
         .body_types = &.{},
         .instantiated_structs = &.{},
         .instantiated_struct_lookup = &.{},
@@ -714,6 +716,7 @@ pub fn typeCheck(
         .expr_types = expr_types,
         .call_resolutions = call_resolutions,
         .expr_effects = expr_effects,
+        .loop_body_effects = .empty,
         .effect_states = effect_states,
         .instantiated_structs = .empty,
         .instantiated_struct_lookup = std.StringHashMap(usize).init(arena),
@@ -818,6 +821,28 @@ pub fn typeCheck(
     for (file.root_items) |item_id| {
         try typechecker.visitItem(item_id);
     }
+    if (measure_loop_census) {
+        // Record loop-local effects only after every function summary has reached
+        // its fixed point. The collector is the same one used for item effects;
+        // these rows are observational and are never read by semantic checks.
+        for (file.items, 0..) |item, index| {
+            const function = switch (item) {
+                .Function => |function| function,
+                else => continue,
+            };
+            const previous_contract = typechecker.current_contract;
+            const previous_function = typechecker.current_function_item;
+            typechecker.current_contract = function.parent_contract;
+            typechecker.current_function_item = ast.ItemId.fromIndex(index);
+            defer typechecker.current_contract = previous_contract;
+            defer typechecker.current_function_item = previous_function;
+            var loop_effect_collector = TypeChecker.LoopEffectCollector{ .checker = &typechecker };
+            try ast.walk.walkBody(TypeChecker.LoopEffectCollector, &loop_effect_collector, file, function.body, .{
+                .enter_comptime_bodies = true,
+                .enter_quantified_bodies = true,
+            });
+        }
+    }
     try typechecker.checkDuplicateImplsAcrossVisibleModules();
     // Debug/test-only by-construction invariant. The real fail-closed behavior is
     // the `undefined type 'X'` diagnostic emitted during resolution; this guard only
@@ -840,6 +865,7 @@ pub fn typeCheck(
     result.expr_types = expr_types;
     result.call_resolutions = typechecker.call_resolutions;
     result.expr_effects = try typechecker.expr_effects.toOwnedSlice(arena);
+    result.loop_body_effects = try typechecker.loop_body_effects.toOwnedSlice(arena);
     result.body_types = body_types;
     result.instantiated_structs = typechecker.instantiated_structs.items;
     result.instantiated_struct_lookup = try lookup_index.buildNamed(InstantiatedStruct, arena, result.instantiated_structs, "mangled_name");
@@ -906,6 +932,7 @@ const TypeChecker = struct {
     expr_types: []Type,
     call_resolutions: []?ResolvedCall,
     expr_effects: ExprEffectList,
+    loop_body_effects: std.ArrayList(model.LoopBodyEffect),
     effect_states: []EffectSummaryState,
     instantiated_structs: std.ArrayList(InstantiatedStruct),
     instantiated_struct_lookup: std.StringHashMap(usize),
@@ -932,6 +959,92 @@ const TypeChecker = struct {
     allow_resource_boundary_builtin_statement: bool = false,
     allow_resource_place_operand: bool = false,
     diagnostics: *diagnostics.DiagnosticList,
+
+    const LoopEffectCollector = struct {
+        checker: *TypeChecker,
+
+        pub fn enterStmt(self: *@This(), file: *const ast.AstFile, statement_id: ast.StmtId) anyerror!ast.walk.WalkControl {
+            var bodies: std.ArrayList(ast.BodyId) = .empty;
+            defer bodies.deinit(self.checker.arena);
+            var item_pattern: ?ast.PatternId = null;
+            var index_pattern: ?ast.PatternId = null;
+            var condition_expr: ?ast.ExprId = null;
+            switch (file.statement(statement_id).*) {
+                .While => |loop| try bodies.append(self.checker.arena, loop.body),
+                .For => |loop| {
+                    try bodies.append(self.checker.arena, loop.body);
+                    item_pattern = loop.item_pattern;
+                    index_pattern = loop.index_pattern;
+                },
+                .Switch => |loop| {
+                    if (loop.label == null) return .descend;
+                    for (loop.arms) |arm| try bodies.append(self.checker.arena, arm.body);
+                    if (loop.else_body) |else_body| try bodies.append(self.checker.arena, else_body);
+                    condition_expr = loop.condition;
+                },
+                else => return .descend,
+            }
+            var state = EffectCollectorState.init();
+            for (bodies.items) |body| try self.checker.collectBodyEffects(body, &state);
+
+            var patterns: std.ArrayList(ast.PatternId) = .empty;
+            defer patterns.deinit(self.checker.arena);
+            if (item_pattern) |pattern| try patterns.append(self.checker.arena, pattern);
+            if (index_pattern) |pattern| try appendUniquePattern(&patterns, self.checker.arena, pattern);
+            if (condition_expr) |expr_id| try self.appendConditionPattern(file, &patterns, expr_id);
+            var variable_collector = LoopVariableCollector{ .allocator = self.checker.arena, .patterns = &patterns };
+            for (bodies.items) |body| {
+                try ast.walk.walkBody(LoopVariableCollector, &variable_collector, file, body, .{
+                    .enter_comptime_bodies = true,
+                    .enter_quantified_bodies = true,
+                });
+            }
+            const variable_types = try self.checker.arena.alloc(Type, patterns.items.len);
+            for (patterns.items, variable_types) |pattern, *ty| {
+                ty.* = (try self.checker.patternLocatedType(pattern)).type;
+            }
+            try self.checker.loop_body_effects.append(self.checker.arena, .{
+                .statement_id = statement_id,
+                .effect = try self.checker.ownedEffectFromState(&state),
+                .variable_types = variable_types,
+            });
+            return .descend;
+        }
+
+        fn appendConditionPattern(
+            self: *@This(),
+            file: *const ast.AstFile,
+            patterns: *std.ArrayList(ast.PatternId),
+            expr_id: ast.ExprId,
+        ) !void {
+            switch (file.expression(expr_id).*) {
+                .Group => |group| try self.appendConditionPattern(file, patterns, group.expr),
+                .Name => if (self.checker.resolution.expr_bindings[expr_id.index()]) |binding| switch (binding) {
+                    .pattern => |pattern| try appendUniquePattern(patterns, self.checker.arena, pattern),
+                    .item => {},
+                },
+                else => {},
+            }
+        }
+
+        const LoopVariableCollector = struct {
+            allocator: std.mem.Allocator,
+            patterns: *std.ArrayList(ast.PatternId),
+
+            pub fn enterStmt(self: *@This(), file: *const ast.AstFile, statement_id: ast.StmtId) !ast.walk.WalkControl {
+                switch (file.statement(statement_id).*) {
+                    .Assign => |assign| try appendUniquePattern(self.patterns, self.allocator, assign.target),
+                    else => {},
+                }
+                return .descend;
+            }
+        };
+
+        fn appendUniquePattern(patterns: *std.ArrayList(ast.PatternId), allocator: std.mem.Allocator, pattern: ast.PatternId) !void {
+            for (patterns.items) |existing| if (existing == pattern) return;
+            try patterns.append(allocator, pattern);
+        }
+    };
 
     fn setCallResolution(self: *TypeChecker, expr_id: ast.ExprId, resolved: ResolvedCall) !void {
         if (self.call_resolutions.len == 0) {
@@ -1304,7 +1417,10 @@ const TypeChecker = struct {
                 const previous_contract = self.current_contract;
                 self.current_contract = item_id;
                 defer self.current_contract = previous_contract;
-                for (contract.invariants) |expr_id| try self.visitExpr(expr_id);
+                for (contract.invariants) |invariant| {
+                    try self.visitExpr(invariant.predicate);
+                    try self.checkBoolCondition(invariant.predicate, "contract invariant condition");
+                }
                 for (contract.members) |member_id| try self.visitItem(member_id);
             },
             .LogDecl => |log_decl| {
@@ -3058,7 +3174,10 @@ const TypeChecker = struct {
             .While => |while_stmt| {
                 try self.visitExpr(while_stmt.condition);
                 try self.checkBoolCondition(while_stmt.condition, "while condition");
-                for (while_stmt.invariants) |expr_id| try self.visitExpr(expr_id);
+                for (while_stmt.invariants) |invariant| {
+                    try self.visitExpr(invariant.predicate);
+                    try self.checkBoolCondition(invariant.predicate, "loop invariant condition");
+                }
                 try self.visitBody(while_stmt.body);
             },
             .For => |for_stmt| {
@@ -3071,7 +3190,10 @@ const TypeChecker = struct {
                     try self.visitExpr(end_expr);
                     try self.contextualizeLiteral(end_expr, forRangeIndexType());
                 }
-                for (for_stmt.invariants) |expr_id| try self.visitExpr(expr_id);
+                for (for_stmt.invariants) |invariant| {
+                    try self.visitExpr(invariant.predicate);
+                    try self.checkBoolCondition(invariant.predicate, "loop invariant condition");
+                }
                 try self.visitBody(for_stmt.body);
             },
             .Switch => |switch_stmt| {
@@ -3079,7 +3201,10 @@ const TypeChecker = struct {
                 if (switch_stmt.invariants.len != 0 and switch_stmt.label == null) {
                     try self.emitRangeMessage(switch_stmt.range, "switch invariants require a labeled switch");
                 }
-                for (switch_stmt.invariants) |expr_id| try self.visitExpr(expr_id);
+                for (switch_stmt.invariants) |invariant| {
+                    try self.visitExpr(invariant.predicate);
+                    try self.checkBoolCondition(invariant.predicate, "loop invariant condition");
+                }
                 const condition_type = self.expr_types[switch_stmt.condition.index()];
                 try self.validateMatchPatternFamily(condition_type, switch_stmt.arms, switch_stmt.range);
                 for (switch_stmt.arms) |arm| {
@@ -3986,18 +4111,18 @@ const TypeChecker = struct {
             },
             .While => |while_stmt| {
                 try self.validateGenericExprInstantiation(while_stmt.condition, bindings);
-                for (while_stmt.invariants) |expr_id| try self.validateGenericExprInstantiation(expr_id, bindings);
+                for (while_stmt.invariants) |invariant| try self.validateGenericExprInstantiation(invariant.predicate, bindings);
                 try self.validateGenericBodyInstantiation(while_stmt.body, bindings);
             },
             .For => |for_stmt| {
                 try self.validateGenericExprInstantiation(for_stmt.iterable, bindings);
                 if (for_stmt.range_end) |end_expr| try self.validateGenericExprInstantiation(end_expr, bindings);
-                for (for_stmt.invariants) |expr_id| try self.validateGenericExprInstantiation(expr_id, bindings);
+                for (for_stmt.invariants) |invariant| try self.validateGenericExprInstantiation(invariant.predicate, bindings);
                 try self.validateGenericBodyInstantiation(for_stmt.body, bindings);
             },
             .Switch => |switch_stmt| {
                 try self.validateGenericExprInstantiation(switch_stmt.condition, bindings);
-                for (switch_stmt.invariants) |expr_id| try self.validateGenericExprInstantiation(expr_id, bindings);
+                for (switch_stmt.invariants) |invariant| try self.validateGenericExprInstantiation(invariant.predicate, bindings);
                 for (switch_stmt.arms) |arm| {
                     try self.validateGenericSwitchPatternInstantiation(arm.pattern, bindings);
                     try self.validateGenericBodyInstantiation(arm.body, bindings);
@@ -7509,7 +7634,7 @@ const TypeChecker = struct {
             },
             .While => |while_stmt| {
                 try self.validateExprExternalCalls(while_stmt.condition, state);
-                for (while_stmt.invariants) |expr_id| try self.validateExprExternalCalls(expr_id, state);
+                for (while_stmt.invariants) |invariant| try self.validateExprExternalCalls(invariant.predicate, state);
                 var loop_state = try self.cloneExternalCallValidationState(state.*);
                 defer loop_state.deinit(self.arena);
                 try self.validateBodyExternalCalls(while_stmt.body, &loop_state);
@@ -7518,7 +7643,7 @@ const TypeChecker = struct {
             .For => |for_stmt| {
                 try self.validateExprExternalCalls(for_stmt.iterable, state);
                 if (for_stmt.range_end) |end_expr| try self.validateExprExternalCalls(end_expr, state);
-                for (for_stmt.invariants) |expr_id| try self.validateExprExternalCalls(expr_id, state);
+                for (for_stmt.invariants) |invariant| try self.validateExprExternalCalls(invariant.predicate, state);
                 var loop_state = try self.cloneExternalCallValidationState(state.*);
                 defer loop_state.deinit(self.arena);
                 try self.validateBodyExternalCalls(for_stmt.body, &loop_state);
@@ -7526,7 +7651,7 @@ const TypeChecker = struct {
             },
             .Switch => |switch_stmt| {
                 try self.validateExprExternalCalls(switch_stmt.condition, state);
-                for (switch_stmt.invariants) |expr_id| try self.validateExprExternalCalls(expr_id, state);
+                for (switch_stmt.invariants) |invariant| try self.validateExprExternalCalls(invariant.predicate, state);
                 var merged_state = try self.cloneExternalCallValidationState(state.*);
                 for (switch_stmt.arms) |arm| {
                     try self.validateSwitchPatternExternalCalls(arm.pattern, state);
@@ -7679,7 +7804,7 @@ const TypeChecker = struct {
             },
             .While => |while_stmt| {
                 try self.validateExprLocks(while_stmt.condition, locked_slots);
-                for (while_stmt.invariants) |expr_id| try self.validateExprLocks(expr_id, locked_slots);
+                for (while_stmt.invariants) |invariant| try self.validateExprLocks(invariant.predicate, locked_slots);
                 var loop_locked = try self.cloneEffectSlots(locked_slots.items());
                 defer loop_locked.deinit(self.arena);
                 try self.validateBodyLocks(while_stmt.body, &loop_locked);
@@ -7688,7 +7813,7 @@ const TypeChecker = struct {
             .For => |for_stmt| {
                 try self.validateExprLocks(for_stmt.iterable, locked_slots);
                 if (for_stmt.range_end) |end_expr| try self.validateExprLocks(end_expr, locked_slots);
-                for (for_stmt.invariants) |expr_id| try self.validateExprLocks(expr_id, locked_slots);
+                for (for_stmt.invariants) |invariant| try self.validateExprLocks(invariant.predicate, locked_slots);
                 var loop_locked = try self.cloneEffectSlots(locked_slots.items());
                 defer loop_locked.deinit(self.arena);
                 try self.validateBodyLocks(for_stmt.body, &loop_locked);
@@ -7696,7 +7821,7 @@ const TypeChecker = struct {
             },
             .Switch => |switch_stmt| {
                 try self.validateExprLocks(switch_stmt.condition, locked_slots);
-                for (switch_stmt.invariants) |expr_id| try self.validateExprLocks(expr_id, locked_slots);
+                for (switch_stmt.invariants) |invariant| try self.validateExprLocks(invariant.predicate, locked_slots);
                 var merged_locked = try self.cloneEffectSlots(locked_slots.items());
                 for (switch_stmt.arms) |arm| {
                     try self.validateSwitchPatternLocks(arm.pattern, locked_slots);

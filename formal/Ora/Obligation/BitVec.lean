@@ -165,6 +165,8 @@ theorem srem_min_neg_one_is_zero :
     sremTotal minSigned negOne = zero := by
   decide
 
+-- Reducing the two concrete 256-bit signed-remainder examples expands their
+-- `2^256` data representation; no additional tactic search is authorized.
 set_option maxRecDepth 100000 in
 theorem srem_dividend_sign_examples :
     sremTotal (BitVec.ofNat 256 (2^256 - 10)) (BitVec.ofNat 256 3) =
@@ -177,6 +179,21 @@ theorem ult_implies_ule (lhs rhs : U256) :
     lhs.ult rhs → lhs.ule rhs := by
   intro h
   exact Nat.le_of_lt h
+
+theorem lt_add_one_ule_bound (value bound : U256) :
+    value.ult bound → (value.add (BitVec.ofNat 256 1)).ule bound := by
+  intro hBound
+  unfold ult ule add at *
+  have hAddLt : value.toNat + 1 < 2^256 := by omega
+  simp [Nat.mod_eq_of_lt hAddLt]
+  omega
+
+theorem lt_bound_add_one_not_lt_self (value bound : U256) :
+    value.ult bound → ¬(value.add (BitVec.ofNat 256 1)).ult value := by
+  intro hBound
+  unfold ult add at *
+  have hAddLt : value.toNat + 1 < 2^256 := by omega
+  simp [Nat.mod_eq_of_lt hAddLt]
 
 theorem lt_max_succ_ule (i x : U256) :
     x.ult max → i.ult x → i.ule (x.add (BitVec.ofNat 256 1)) := by

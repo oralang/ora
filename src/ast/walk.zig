@@ -107,18 +107,18 @@ pub fn walkStmt(
         },
         .While => |while_stmt| {
             try walkExpr(Visitor, visitor, ast_file, while_stmt.condition, options);
-            for (while_stmt.invariants) |expr_id| try walkExpr(Visitor, visitor, ast_file, expr_id, options);
+            for (while_stmt.invariants) |invariant| try walkExpr(Visitor, visitor, ast_file, invariant.predicate, options);
             try walkBody(Visitor, visitor, ast_file, while_stmt.body, options);
         },
         .For => |for_stmt| {
             try walkExpr(Visitor, visitor, ast_file, for_stmt.iterable, options);
             if (for_stmt.range_end) |end_expr| try walkExpr(Visitor, visitor, ast_file, end_expr, options);
-            for (for_stmt.invariants) |expr_id| try walkExpr(Visitor, visitor, ast_file, expr_id, options);
+            for (for_stmt.invariants) |invariant| try walkExpr(Visitor, visitor, ast_file, invariant.predicate, options);
             try walkBody(Visitor, visitor, ast_file, for_stmt.body, options);
         },
         .Switch => |switch_stmt| {
             try walkExpr(Visitor, visitor, ast_file, switch_stmt.condition, options);
-            for (switch_stmt.invariants) |expr_id| try walkExpr(Visitor, visitor, ast_file, expr_id, options);
+            for (switch_stmt.invariants) |invariant| try walkExpr(Visitor, visitor, ast_file, invariant.predicate, options);
             for (switch_stmt.arms) |arm| {
                 if (options.walk_switch_patterns) try walkSwitchPattern(Visitor, visitor, ast_file, arm.pattern, options);
                 try walkBody(Visitor, visitor, ast_file, arm.body, options);
@@ -585,8 +585,8 @@ test "walkBody visits statements and nested bodies in source order" {
         .{ .Index = .{ .range = r, .base = pid(0), .index = eid(31) } },
     };
 
-    var while_invariants = [_]ExprId{eid(4)};
-    var for_invariants = [_]ExprId{eid(7)};
+    var while_invariants = [_]nodes.InvariantClause{.{ .predicate = eid(4), .range = r, .ordinal = 0 }};
+    var for_invariants = [_]nodes.InvariantClause{.{ .predicate = eid(7), .range = r, .ordinal = 0 }};
     var switch_arms = [_]nodes.SwitchArm{.{
         .range = r,
         .pattern = .{ .Range = .{ .range = r, .start = eid(9), .end = eid(10), .inclusive = true } },

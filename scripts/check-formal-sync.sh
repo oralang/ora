@@ -87,16 +87,7 @@ run_build_emitter() {
 
 lint_snapshot() {
   local snapshot="$1"
-
-  # Strip the /- … -/ header comment, then reject any non-data construct.
-  violations="$(sed '\#^/-#,\#^-/#d' "$snapshot" \
-    | grep -nE '\b(theorem|lemma|example|axiom|sorry|instance|macro|syntax|deriving|native_decide)\b|^[[:space:]]*import|@\[' \
-    || true)"
-  if [ -n "$violations" ]; then
-    echo "  DATA-ONLY LINT FAILED in $snapshot — generated snapshots must contain only data:" >&2
-    echo "$violations" >&2
-    exit 1
-  fi
+  python3 scripts/formal_snapshot_lint.py "$snapshot"
 }
 
 check_drift() {
@@ -119,6 +110,8 @@ SNAPSHOTS=(
   "formal/Ora/Generated/SinoraBackendSnapshot.lean"
   "formal/Ora/Generated/StorageDisjointnessSnapshot.lean"
   "formal/Ora/Generated/ObligationTotalitySnapshot.lean"
+  "formal/Ora/Generated/LoopTotalitySnapshot.lean"
+  "formal/Ora/Generated/SourceAccountingSnapshot.lean"
 )
 
 echo "==> [1/4] regenerating formal snapshots from the compiler"
@@ -130,8 +123,11 @@ run_build_emitter "dispatcher tables" "emit-dispatcher-table-snapshot" "${SNAPSH
 run_sinora_emitter "sinora backend" "src/formal/emit_sinora_backend_snapshot.zig" "${SNAPSHOTS[5]}"
 run_emitter "storage disjointness" "src/formal/emit_storage_disjointness_snapshot.zig" "${SNAPSHOTS[6]}"
 run_emitter "obligation totality" "src/formal/emit_obligation_totality_snapshot.zig" "${SNAPSHOTS[7]}"
+run_emitter "loop totality" "src/formal/emit_loop_totality_snapshot.zig" "${SNAPSHOTS[8]}"
+run_emitter "source accounting" "src/formal/emit_source_accounting_snapshot.zig" "${SNAPSHOTS[9]}"
 
 echo "==> [2/4] data-only lint"
+python3 scripts/test_formal_snapshot_lint.py
 for snapshot in "${SNAPSHOTS[@]}"; do
   lint_snapshot "$snapshot"
 done

@@ -11,11 +11,12 @@ const c = @import("mlir_c_api").c;
 const h = @import("mlir_helpers");
 
 pub fn cleanupRefinementGuards(
+    allocator: std.mem.Allocator,
     ctx: c.MlirContext,
     module: c.MlirModule,
     proven_guard_ids: *const std.StringHashMap(void),
 ) void {
-    cleanupRefinementGuardsWithOptions(ctx, module, proven_guard_ids, .{});
+    cleanupRefinementGuardsWithOptions(allocator, ctx, module, proven_guard_ids, .{});
 }
 
 pub const CleanupOptions = struct {
@@ -23,6 +24,7 @@ pub const CleanupOptions = struct {
 };
 
 pub fn cleanupRefinementGuardsWithOptions(
+    allocator: std.mem.Allocator,
     ctx: c.MlirContext,
     module: c.MlirModule,
     proven_guard_ids: *const std.StringHashMap(void),
@@ -30,7 +32,6 @@ pub fn cleanupRefinementGuardsWithOptions(
 ) void {
     const module_op = c.oraModuleGetOperation(module);
     const debug_enabled = if (@import("builtin").link_libc) std.c.getenv("ORA_GUARD_DEBUG") != null else false;
-    const allocator = std.heap.page_allocator;
     var seen_guard_ids = std.StringHashMap(void).init(allocator);
     defer deinitStringSet(allocator, &seen_guard_ids);
     var duplicate_guard_ids = std.StringHashMap(void).init(allocator);

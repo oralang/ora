@@ -2,7 +2,7 @@
 // INPUT: ora-example/corpus/declarations/multiple_declarations.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @multiple_lets() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0xd33cee2b", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @multiple_lets() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0xd33cee2b", ora.source_module_path = "{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora", ora.source_owner_key = "module/contract:MultipleDeclarations/function:multiple_lets", ora.source_owner_start = 276 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
@@ -30,7 +30,7 @@
 // CHECK-NEXT:     sir.store %11 : !sir.ptr<1>, %c15 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":14:9)))
 // CHECK-NEXT:     sir.return %11 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":14:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":8:5)
-// CHECK-NEXT:   func.func @multiple_vars() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x16e7bf03", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @multiple_vars() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x16e7bf03", ora.source_module_path = "{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora", ora.source_owner_key = "module/contract:MultipleDeclarations/function:multiple_vars", ora.source_owner_start = 516 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
@@ -52,7 +52,7 @@
 // CHECK-NEXT:     sir.store %9 : !sir.ptr<1>, %c60 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":25:9)))
 // CHECK-NEXT:     sir.return %9 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":25:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":18:5)
-// CHECK-NEXT:   func.func @mixed_let_var() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0xf5ce123c", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @mixed_let_var() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0xf5ce123c", ora.source_module_path = "{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora", ora.source_owner_key = "module/contract:MultipleDeclarations/function:mixed_let_var", ora.source_owner_start = 734 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
@@ -71,7 +71,7 @@
 // CHECK-NEXT:     sir.store %8 : !sir.ptr<1>, %c150 : !sir.u256 loc("ora.stmt.17"("ora.origin_stmt.17"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":34:9)))
 // CHECK-NEXT:     sir.return %8 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.17"("ora.origin_stmt.17"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":34:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":29:5)
-// CHECK-NEXT:   func.func @sequential_declarations() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x8f93ea89", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @sequential_declarations() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x8f93ea89", ora.source_module_path = "{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora", ora.source_owner_key = "module/contract:MultipleDeclarations/function:sequential_declarations", ora.source_owner_start = 998 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 56016217287220138543383237988819299768112786790290310538187226855197252780032 : !sir.u256 loc(unknown)
@@ -112,7 +112,7 @@
 // CHECK-NEXT:     sir.store %15 : !sir.ptr<1>, %c60 : !sir.u256 loc("ora.stmt.23"("ora.origin_stmt.23"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":44:9)))
 // CHECK-NEXT:     sir.return %15 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.23"("ora.origin_stmt.23"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":44:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":38:5)
-// CHECK-NEXT:   func.func @shadowing_in_scope() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x35644398", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @shadowing_in_scope() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x35644398", ora.source_module_path = "{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora", ora.source_owner_key = "module/contract:MultipleDeclarations/function:shadowing_in_scope", ora.source_owner_start = 1300 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %c10 = sir.const 10 : !sir.u256 loc("ora.stmt.24"("ora.origin_stmt.24"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":49:23)))
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c20 = sir.const 20 : !sir.u256 loc(unknown)
@@ -129,14 +129,14 @@
 // CHECK-NEXT:     sir.store %5 : !sir.ptr<1>, %4 : !sir.u256 loc("ora.stmt.29"("ora.origin_stmt.29"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":55:9)))
 // CHECK-NEXT:     sir.return %5 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.29"("ora.origin_stmt.29"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":55:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":48:5)
-// CHECK-NEXT:   func.func @many_types() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0xb004c15b", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @many_types() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0xb004c15b", ora.source_module_path = "{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora", ora.source_owner_key = "module/contract:MultipleDeclarations/function:many_types", ora.source_owner_start = 1548 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.36"("ora.origin_stmt.36"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":66:9)))
 // CHECK-NEXT:     %c42 = sir.const 42 : !sir.u256 loc("ora.stmt.30"("ora.origin_stmt.30"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":60:27)))
 // CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.36"("ora.origin_stmt.36"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":66:9)))
 // CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %c42 : !sir.u256 loc("ora.stmt.36"("ora.origin_stmt.36"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":66:9)))
 // CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.36"("ora.origin_stmt.36"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":66:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":59:5)
-// CHECK-NEXT:   func.func @var_chain() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x6964a2c2", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @var_chain() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x6964a2c2", ora.source_module_path = "{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora", ora.source_owner_key = "module/contract:MultipleDeclarations/function:var_chain", ora.source_owner_start = 1856 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
@@ -164,7 +164,7 @@
 // CHECK-NEXT:     sir.store %11 : !sir.ptr<1>, %c9 : !sir.u256 loc("ora.stmt.43"("ora.origin_stmt.43"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":77:9)))
 // CHECK-NEXT:     sir.return %11 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.43"("ora.origin_stmt.43"("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":77:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora":70:5)
-// CHECK-NEXT:   func.func @expression_lets() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x1eaff4b2", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @expression_lets() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x1eaff4b2", ora.source_module_path = "{{.*}}/ora-example/corpus/declarations/multiple_declarations.ora", ora.source_owner_key = "module/contract:MultipleDeclarations/function:expression_lets", ora.source_owner_start = 2088 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 6988570666312495752839002421695666563898142680323167511053911032881624383488 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 56016217287220138543383237988819299768112786790290310538187226855197252780032 : !sir.u256 loc(unknown)

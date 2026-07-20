@@ -4,7 +4,7 @@ contract MapOfArrays {
     storage var slots: map<address, [u256; 4]>;
 
     pub fn set_slot(account: address, index: u256, val: u256) {
-        let arr: [u256; 4] = slots[account];
+        var arr: [u256; 4] = slots[account];
         arr[index] = val;
         slots[account] = arr;
     }

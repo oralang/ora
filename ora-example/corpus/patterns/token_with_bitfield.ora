@@ -56,7 +56,7 @@ contract TokenWithBitfield {
     pub fn setPaused(nextPaused: bool) {
         let caller: address = std.msg.sender();
         if (caller == owner) {
-            let cfg: TokenConfig = config;
+            var cfg: TokenConfig = config;
             cfg.paused = nextPaused;
             config = cfg;
         }

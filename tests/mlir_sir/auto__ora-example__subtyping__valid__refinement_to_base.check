@@ -2,7 +2,7 @@
 // INPUT: ora-example/subtyping/valid/refinement_to_base.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @testMinValueToBase(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":15:27)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:11:pattern:0"], ora.param_names = ["amount"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testMinValueToBase(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":15:27)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:11:pattern:0"], ora.param_names = ["amount"], ora.source_module_path = "{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora", ora.source_owner_key = "module/contract:RefinementToBase/function:testMinValueToBase", ora.source_owner_start = 723 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":1:1)
@@ -22,7 +22,7 @@
 // CHECK-NEXT:     sir.store %10 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":16:9)))
 // CHECK-NEXT:     sir.return %10 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":16:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":15:5)
-// CHECK-NEXT:   func.func @testMaxValueToBase(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":24:27)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:11:pattern:1"], ora.param_names = ["limit"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testMaxValueToBase(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":24:27)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:11:pattern:1"], ora.param_names = ["limit"], ora.source_module_path = "{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora", ora.source_owner_key = "module/contract:RefinementToBase/function:testMaxValueToBase", ora.source_owner_start = 1107 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c1000 = sir.const 1000 : !sir.u256 loc("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":1:1)
@@ -42,7 +42,7 @@
 // CHECK-NEXT:     sir.store %10 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":25:9)))
 // CHECK-NEXT:     sir.return %10 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":25:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":24:5)
-// CHECK-NEXT:   func.func @testInRangeToBase(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":33:26)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:11:pattern:2"], ora.param_names = ["rate"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testInRangeToBase(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":33:26)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:11:pattern:2"], ora.param_names = ["rate"], ora.source_module_path = "{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora", ora.source_owner_key = "module/contract:RefinementToBase/function:testInRangeToBase", ora.source_owner_start = 1488 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c10000 = sir.const 10000 : !sir.u256 loc("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":1:1)
@@ -66,7 +66,7 @@
 // CHECK-NEXT:     sir.store %14 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":34:9)))
 // CHECK-NEXT:     sir.return %14 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":34:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":33:5)
-// CHECK-NEXT:   func.func @testNonZeroAddressToBase(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":42:33)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:11:pattern:3"], ora.param_names = ["addr"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testNonZeroAddressToBase(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":42:33)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:11:pattern:3"], ora.param_names = ["addr"], ora.source_module_path = "{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora", ora.source_owner_key = "module/contract:RefinementToBase/function:testNonZeroAddressToBase", ora.source_owner_start = 1878 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 0 : !sir.u256 loc(unknown)
@@ -86,7 +86,7 @@
 // CHECK-NEXT:     sir.store %11 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":43:9)))
 // CHECK-NEXT:     sir.return %11 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":43:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":42:5)
-// CHECK-NEXT:   func.func @testBasisPointsToBase(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":51:30)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:11:pattern:4"], ora.param_names = ["fee"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testBasisPointsToBase(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":51:30)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:11:pattern:4"], ora.param_names = ["fee"], ora.source_module_path = "{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora", ora.source_owner_key = "module/contract:RefinementToBase/function:testBasisPointsToBase", ora.source_owner_start = 2277 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c10000 = sir.const 10000 : !sir.u256 loc("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":1:1)
@@ -110,7 +110,7 @@
 // CHECK-NEXT:     sir.store %14 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":52:9)))
 // CHECK-NEXT:     sir.return %14 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":52:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":51:5)
-// CHECK-NEXT:   func.func @testVariableAssignments() attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testVariableAssignments() attributes {ora.source_module_path = "{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora", ora.source_owner_key = "module/contract:RefinementToBase/function:testVariableAssignments", ora.source_owner_start = 2602 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":59:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":59:5)
 // CHECK-NEXT: } loc("{{.*}}/ora-example/subtyping/valid/refinement_to_base.ora":9:1)

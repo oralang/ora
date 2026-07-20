@@ -1355,8 +1355,8 @@ test "compiler lowers builtin, quantified, and verification expressions" {
     const ensures_binary = ast_file.expression(ensures_expr).Binary;
     try testing.expect(ast_file.expression(ensures_binary.lhs).* == .Old);
     const old_result = ast_file.expression(ensures_binary.lhs).Old;
-    try testing.expect(ast_file.expression(old_result.expr).* == .Name);
-    try testing.expectEqualStrings("result", ast_file.expression(old_result.expr).Name.name);
+    const result_name = ast_file.expression(old_result.expr).Name;
+    try testing.expectEqualStrings("result", result_name.name);
 
     const body = ast_file.body(function.body);
     try testing.expectEqual(@as(usize, 7), body.statements.len);
@@ -1419,6 +1419,32 @@ test "compiler lowers builtin, quantified, and verification expressions" {
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.bound_variable = \"i\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.quantified \"forall\", \"i\", \"u256\""));
+}
+
+test "compiler treats result as contextual while preserving runtime bindings" {
+    const source_text =
+        \\contract ContextualResult {
+        \\    storage var result: u256 = 0;
+        \\    pub fn set(value: u256) { result = value; }
+        \\    pub fn get() -> u256 { return result; }
+        \\    pub fn one() -> u256
+        \\        ensures(result == 1)
+        \\    { return 1; }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, ", \"result\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.sload \"result\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.ensures"));
 }
 
 test "compiler lowers divExact and divmod through Ora and SIR" {

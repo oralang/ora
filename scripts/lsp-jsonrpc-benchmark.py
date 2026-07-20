@@ -317,17 +317,20 @@ ALLOCATION_ATTRIBUTION_ROWS = (
     ("bench", "formatting.cache_hit"),
 )
 
+# 2026-07-17: definition.cache_hit measured a stable shared JSON-RPC request
+# allocation floor of about 145 KB (144,877 bytes). Pin 192 KiB in both
+# profiles so the common floor fits while definition-specific growth stays bounded.
 PROFILE_ALLOCATION_ATTRIBUTION_BUDGET_BYTES = {
     "quick": {
         "default": 768 * 1024,
-        ("bench", "definition.cache_hit"): 128 * 1024,
+        ("bench", "definition.cache_hit"): 192 * 1024,
         ("bench", "documentSymbol.cache_hit"): 1 * 1024 * 1024,
         ("bench", "formatting.cache_hit"): 256 * 1024,
         ("bench", "inlayHint.cache_hit"): 256 * 1024,
     },
     "release": {
         "default": 1024 * 1024,
-        ("bench", "definition.cache_hit"): 128 * 1024,
+        ("bench", "definition.cache_hit"): 192 * 1024,
         ("bench", "documentSymbol.cache_hit"): 2 * 1024 * 1024,
         ("bench", "formatting.cache_hit"): 512 * 1024,
         ("bench", "inlayHint.cache_hit"): 512 * 1024,

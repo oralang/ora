@@ -114,8 +114,8 @@ const Validator = struct {
                 for (contract.members) |member_id| {
                     _ = try self.expectItem(member_id, item_range, "contract references invalid member item id");
                 }
-                for (contract.invariants) |expr_id| {
-                    _ = try self.expectExpr(expr_id, item_range, "contract references invalid invariant expression id");
+                for (contract.invariants) |invariant| {
+                    _ = try self.expectExpr(invariant.predicate, invariant.range, "contract references invalid invariant expression id");
                 }
                 try self.validateItemScope(contract.members, "contract scope");
             },
@@ -240,19 +240,19 @@ const Validator = struct {
             },
             .While => |while_stmt| {
                 _ = try self.expectExpr(while_stmt.condition, stmt_range, "while statement references invalid condition expression id");
-                for (while_stmt.invariants) |expr_id| _ = try self.expectExpr(expr_id, stmt_range, "while statement references invalid invariant expression id");
+                for (while_stmt.invariants) |invariant| _ = try self.expectExpr(invariant.predicate, invariant.range, "while statement references invalid invariant expression id");
                 _ = try self.expectBody(while_stmt.body, stmt_range, "while statement references invalid body id");
             },
             .For => |for_stmt| {
                 _ = try self.expectExpr(for_stmt.iterable, stmt_range, "for statement references invalid iterable expression id");
                 _ = try self.expectPattern(for_stmt.item_pattern, stmt_range, "for statement references invalid item pattern id");
                 if (for_stmt.index_pattern) |pattern_id| _ = try self.expectPattern(pattern_id, stmt_range, "for statement references invalid index pattern id");
-                for (for_stmt.invariants) |expr_id| _ = try self.expectExpr(expr_id, stmt_range, "for statement references invalid invariant expression id");
+                for (for_stmt.invariants) |invariant| _ = try self.expectExpr(invariant.predicate, invariant.range, "for statement references invalid invariant expression id");
                 _ = try self.expectBody(for_stmt.body, stmt_range, "for statement references invalid body id");
             },
             .Switch => |switch_stmt| {
                 _ = try self.expectExpr(switch_stmt.condition, stmt_range, "switch statement references invalid condition expression id");
-                for (switch_stmt.invariants) |expr_id| _ = try self.expectExpr(expr_id, stmt_range, "switch statement references invalid invariant expression id");
+                for (switch_stmt.invariants) |invariant| _ = try self.expectExpr(invariant.predicate, invariant.range, "switch statement references invalid invariant expression id");
                 for (switch_stmt.arms) |arm| {
                     try self.validateSwitchPattern(arm.pattern, arm.range);
                     _ = try self.expectBody(arm.body, arm.range, "switch arm references invalid body id");

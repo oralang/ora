@@ -4,6 +4,16 @@ set -euo pipefail
 FILECHECK_BIN=${FILECHECK:-./vendor/llvm-project/build-mlir/bin/FileCheck}
 ORA_BIN=${ORA_BIN:-./zig-out/bin/ora}
  #ORA_VERIFY_FLAG=${ORA_VERIFY_FLAG:---no-verify}
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+ARTIFACT_DIR=${ORA_FORMAL_ARTIFACT_DIR:-$REPO_ROOT/artifacts/formal-gate/mlir-ora}
+
+case "$ORA_BIN" in
+  /*) ;;
+  *) ORA_BIN="$REPO_ROOT/${ORA_BIN#./}" ;;
+esac
+
+mkdir -p "$ARTIFACT_DIR"
 
 if ! command -v "$FILECHECK_BIN" >/dev/null 2>&1; then
   echo "error: FileCheck not found. Set FILECHECK=/path/to/FileCheck" >&2
@@ -51,10 +61,19 @@ while IFS= read -r -d '' check; do
   tmp_stdout=$(mktemp)
   tmp_stderr=$(mktemp)
   tmp_filtered=$(mktemp)
+  artifact_file="$ARTIFACT_DIR/$(basename "${input%.ora}").ora.mlir"
   #if ! "$ORA_BIN" "$ORA_VERIFY_FLAG" --emit=mlir:ora "$input" >"$tmp_stdout" 2>"$tmp_stderr"; then
-  if ! "$ORA_BIN" --emit=mlir:ora "$input" >"$tmp_stdout" 2>"$tmp_stderr"; then
+  if ! "$ORA_BIN" --emit=mlir:ora -o "$ARTIFACT_DIR" "$input" >"$tmp_stdout" 2>"$tmp_stderr"; then
     echo "error: ora failed for $input (check: $check)" >&2
     sed -n '1,80p' "$tmp_stderr" >&2 || true
+    rm -f "$tmp_stdout" "$tmp_stderr" "$tmp_filtered"
+    if [ -n "$tmp_check" ]; then rm -f "$tmp_check"; fi
+    fail=1
+    continue
+  fi
+
+  if [ ! -s "$artifact_file" ]; then
+    echo "error: missing Ora MLIR artifact for $input (check: $check)" >&2
     rm -f "$tmp_stdout" "$tmp_stderr" "$tmp_filtered"
     if [ -n "$tmp_check" ]; then rm -f "$tmp_check"; fi
     fail=1
@@ -65,7 +84,7 @@ while IFS= read -r -d '' check; do
     /Ora MLIR \(before conversion\)/ {f=1; print; next}
     /^module / {if (!f) f=1}
     f {print}
-  ' "$tmp_stdout" > "$tmp_filtered"
+  ' "$artifact_file" > "$tmp_filtered"
 
   if [ ! -s "$tmp_filtered" ]; then
     echo "error: empty MLIR output for $input (check: $check)" >&2

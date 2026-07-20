@@ -8,6 +8,7 @@
 const std = @import("std");
 const mlir = @import("mlir_c_api").c;
 const obligation = @import("obligation.zig");
+const obligation_to_lean = @import("obligation_to_lean.zig");
 const type_builtin = @import("ora_types").builtin;
 
 pub const CollectOptions = struct {
@@ -19,11 +20,75 @@ pub const CollectResult = struct {
     arena: std.heap.ArenaAllocator,
     set: obligation.ObligationSet,
     query_bindings: []const obligation.FormalQueryBinding = &.{},
+    source_fact_bindings: []const SourceFactOpBinding = &.{},
+    runtime_owner_bindings: []const RuntimeOwnerBinding = &.{},
+    runtime_check_producers: []const RuntimeCheckProducer = &.{},
+    state_effect_producers: []const StateEffectProducer = &.{},
 
     pub fn deinit(self: *CollectResult) void {
         self.arena.deinit();
         self.* = undefined;
     }
+};
+
+pub const RuntimeOwnerBinding = struct {
+    source_op_id: usize,
+    op_ordinal: u32,
+    source: obligation.SourceRef,
+    symbol: ?[]const u8 = null,
+    module_path: []const u8,
+    owner_key: []const u8,
+    template_activation: []const u8,
+    specialization_bindings: []const []const u8 = &.{},
+    trait_implementation: ?[]const u8 = null,
+    trait_method: ?[]const u8 = null,
+};
+
+/// One concrete runtime-enforcement operation present in canonical HIR. The
+/// producer id is deterministic within the collected module and enters the
+/// dedicated runtime-check evidence namespace; it is not an obligation id.
+pub const RuntimeCheckProducer = struct {
+    id: u32,
+    source_op_id: usize,
+    op_ordinal: u32,
+    source: obligation.SourceRef,
+};
+
+/// One concrete state mutation directive present in canonical HIR. Havoc is
+/// not a proof obligation, but its presence is authoritative evidence that
+/// the symbolic state was invalidated at the source-directed point.
+pub const StateEffectProducer = struct {
+    id: u32,
+    source_op_id: usize,
+    op_ordinal: u32,
+    source: obligation.SourceRef,
+};
+
+/// Structural join between one source-formal MLIR operation and the manifest
+/// rows produced while visiting it. `source_op_id` is process-local and used
+/// only to join the live Z3 query builder; every reportable identity is carried
+/// separately in deterministic fields.
+pub const SourceFactOpBinding = struct {
+    source_op_id: usize,
+    op_ordinal: u32,
+    source: obligation.SourceRef,
+    source_fact_id: u32,
+    kind: []const u8,
+    roles: []const []const u8,
+    module_path: ?[]const u8 = null,
+    owner_key: ?[]const u8 = null,
+    template_activation: ?[]const u8 = null,
+    runtime_symbol: ?[]const u8 = null,
+    specialization_bindings: []const []const u8 = &.{},
+    trait_implementation: ?[]const u8 = null,
+    trait_method: ?[]const u8 = null,
+    obligation_ids: []const obligation.Id = &.{},
+    assumption_ids: []const obligation.Id = &.{},
+    query_ids: []const obligation.Id = &.{},
+    runtime_check_ids: []const u32 = &.{},
+    runtime_check_present: bool = false,
+    state_effect_ids: []const u32 = &.{},
+    state_effect_present: bool = false,
 };
 
 const OpKind = enum(u8) {
@@ -159,12 +224,14 @@ pub fn collect(
     try collector.walkOperation(mlir.oraModuleGetOperation(module), null);
     try collector.addBaseQueriesForFunctionOwners();
     try collector.verifyResourceGoalCompleteness();
+    try armLeanLoopCertificateRequirements(&collector);
 
     const set: obligation.ObligationSet = .{
         .terms = try collector.terms.toOwnedSlice(collector.allocator),
         .obligations = try collector.obligations.toOwnedSlice(collector.allocator),
         .assumptions = try collector.assumptions.toOwnedSlice(collector.allocator),
         .queries = try collector.queries.toOwnedSlice(collector.allocator),
+        .loop_summaries = try collector.loop_summaries.toOwnedSlice(collector.allocator),
         .diagnostics = try collector.diagnostics.toOwnedSlice(collector.allocator),
     };
 
@@ -172,6 +239,58 @@ pub fn collect(
         .arena = arena,
         .set = set,
         .query_bindings = try collector.query_bindings.toOwnedSlice(collector.allocator),
+        .source_fact_bindings = try collector.source_fact_bindings.toOwnedSlice(collector.allocator),
+        .runtime_owner_bindings = try collector.runtime_owner_bindings.toOwnedSlice(collector.allocator),
+        .runtime_check_producers = try collector.runtime_check_producers.toOwnedSlice(collector.allocator),
+        .state_effect_producers = try collector.state_effect_producers.toOwnedSlice(collector.allocator),
+    };
+}
+
+fn armLeanLoopCertificateRequirements(collector: *Collector) !void {
+    const view: obligation.ObligationSet = .{
+        .terms = collector.terms.items,
+        .obligations = collector.obligations.items,
+        .assumptions = collector.assumptions.items,
+        .queries = collector.queries.items,
+        .loop_summaries = collector.loop_summaries.items,
+        .diagnostics = collector.diagnostics.items,
+    };
+    for (collector.queries.items) |*query| {
+        if (query.kind != .loop_induction) continue;
+        switch (obligation_to_lean.querySemanticSupport(view, query.*)) {
+            .supported => {
+                query.artifact_policy = .blocks_verified_artifacts;
+                query.proof_requirement = .lean_certificate;
+            },
+            .unsupported => |reason| {
+                query.artifact_policy = .diagnostic_only;
+                query.proof_requirement = .backend_result;
+                const summary_id = query.loop_summary_id orelse continue;
+                const summary = loopSummaryByIdMut(collector.loop_summaries.items, summary_id) orelse continue;
+                if (summary.unsupported_reasons.len == 0) {
+                    try collector.appendLoopSummaryReason(summary, loopUnsupportedReasonForSemantic(reason));
+                }
+            },
+        }
+    }
+}
+
+fn loopSummaryByIdMut(
+    rows: []obligation.LoopSummaryRow,
+    id: obligation.Id,
+) ?*obligation.LoopSummaryRow {
+    for (rows) |*row| if (row.id == id) return row;
+    return null;
+}
+
+fn loopUnsupportedReasonForSemantic(
+    reason: obligation_to_lean.SemanticUnsupportedReason,
+) obligation.LoopUnsupportedReason {
+    return switch (reason) {
+        .loop_summary_missing => .loop_identity_missing,
+        .loop_summary_query_mismatch => .loop_query_not_owner_scoped,
+        .unsupported_loop_summary => |loop_reason| loop_reason,
+        else => .loop_formula_unsupported,
     };
 }
 
@@ -182,11 +301,23 @@ const Collector = struct {
     obligations: std.ArrayList(obligation.Obligation) = .empty,
     assumptions: std.ArrayList(obligation.Assumption) = .empty,
     queries: std.ArrayList(obligation.VerificationQuery) = .empty,
+    loop_summaries: std.ArrayList(obligation.LoopSummaryRow) = .empty,
+    loop_operation_bindings: std.ArrayList(LoopOperationBinding) = .empty,
+    active_loop_summary_indices: std.ArrayList(usize) = .empty,
     query_bindings: std.ArrayList(obligation.FormalQueryBinding) = .empty,
+    source_fact_bindings: std.ArrayList(SourceFactOpBinding) = .empty,
+    runtime_owner_bindings: std.ArrayList(RuntimeOwnerBinding) = .empty,
+    runtime_check_producers: std.ArrayList(RuntimeCheckProducer) = .empty,
+    state_effect_producers: std.ArrayList(StateEffectProducer) = .empty,
     diagnostics: std.ArrayList(obligation.ObligationDiagnostic) = .empty,
     resource_sites: std.ArrayList(ResourceCompletenessSite) = .empty,
     active_binders: std.ArrayList(BinderFrame) = .empty,
+    loop_value_bindings: std.ArrayList(LoopValueBinding) = .empty,
     next_id: obligation.Id = 1,
+    next_loop_summary_id: obligation.Id = 1,
+    next_loop_variable_pattern_id: u32 = 0,
+    use_loop_value_bindings: bool = false,
+    active_loop_depth: u32 = 0,
     next_ordinal: u32 = 0,
     function_param_names: []const []const u8 = &.{},
     function_param_binding_ids: []const obligation.FreeVarId = &.{},
@@ -195,6 +326,14 @@ const Collector = struct {
     function_write_slots: ?[]const obligation.PlaceRef = null,
     function_write_slots_complete: bool = false,
     function_has_external_call: bool = false,
+    function_source_module_path: ?[]const u8 = null,
+    function_source_owner_key: ?[]const u8 = null,
+    function_source_activation: ?[]const u8 = null,
+    function_runtime_symbol: ?[]const u8 = null,
+    function_source_specialization_bindings: []const []const u8 = &.{},
+    function_source_trait_implementation: ?[]const u8 = null,
+    function_source_trait_method: ?[]const u8 = null,
+    contract_source_owner_key: ?[]const u8 = null,
 
     const synthetic_file_id = std.math.maxInt(u32);
 
@@ -202,6 +341,16 @@ const Collector = struct {
         name: []const u8,
         ty: obligation.TypeRef,
         region: ?obligation.RegionRef = null,
+    };
+
+    const LoopValueBinding = struct {
+        value_id: usize,
+        variable: obligation.LoopVariable,
+    };
+
+    const LoopOperationBinding = struct {
+        summary_id: obligation.Id,
+        source_op_id: usize,
     };
 
     const ResourcePlaces = struct {
@@ -235,8 +384,26 @@ const Collector = struct {
         const previous_write_slots = self.function_write_slots;
         const previous_write_slots_complete = self.function_write_slots_complete;
         const previous_has_external_call = self.function_has_external_call;
+        const previous_source_module_path = self.function_source_module_path;
+        const previous_source_owner_key = self.function_source_owner_key;
+        const previous_source_activation = self.function_source_activation;
+        const previous_runtime_symbol = self.function_runtime_symbol;
+        const previous_source_specialization_bindings = self.function_source_specialization_bindings;
+        const previous_source_trait_implementation = self.function_source_trait_implementation;
+        const previous_source_trait_method = self.function_source_trait_method;
+        const previous_contract_source_owner_key = self.contract_source_owner_key;
         const previous_binder_len = self.active_binders.items.len;
+        const previous_loop_value_binding_len = self.loop_value_bindings.items.len;
+        const previous_loop_operation_binding_len = self.loop_operation_bindings.items.len;
+        const previous_active_loop_summary_len = self.active_loop_summary_indices.items.len;
         const is_function = std.mem.eql(u8, op_name, "func.func");
+        const is_contract = std.mem.eql(u8, op_name, "ora.contract");
+        if (is_contract) {
+            self.contract_source_owner_key = if (try self.stringAttr(op, "sym_name")) |name|
+                try std.fmt.allocPrint(self.allocator, "module/contract:{s}", .{name})
+            else
+                null;
+        }
         if (is_function) {
             self.function_param_names = (try self.stringArrayAttr(op, "ora.param_names")) orelse &.{};
             self.function_param_binding_ids = (try self.freeVarIdArrayAttr(op, "ora.param_binding_ids")) orelse &.{};
@@ -245,6 +412,35 @@ const Collector = struct {
             self.function_write_slots = try self.placeArrayAttr(op, "ora.write_slots");
             self.function_write_slots_complete = (try self.boolAttr(op, "ora.write_slots_complete")) orelse false;
             self.function_has_external_call = operationBodyHasExternalCall(op);
+            self.function_source_module_path = try self.stringAttr(op, "ora.source_module_path");
+            self.function_source_owner_key = try self.stringAttr(op, "ora.source_owner_key");
+            self.function_source_activation = try self.stringAttr(op, "ora.source_template_activation");
+            self.function_runtime_symbol = if (symbol) |name| try self.allocator.dupe(u8, name) else null;
+            self.function_source_specialization_bindings = (try self.stringArrayAttr(op, "ora.source_specialization_bindings")) orelse &.{};
+            self.function_source_trait_implementation = try self.stringAttr(op, "ora.source_trait_implementation");
+            self.function_source_trait_method = try self.stringAttr(op, "ora.source_trait_method");
+            if (self.function_source_owner_key) |owner_key| {
+                if (self.function_source_module_path) |module_path| {
+                    if (self.function_source_activation) |activation| {
+                        if (sourceOpId(op)) |source_op_id| try self.runtime_owner_bindings.append(self.allocator, .{
+                            .source_op_id = source_op_id,
+                            .op_ordinal = ordinal,
+                            .source = try self.sourceForOperation(op),
+                            .symbol = if (symbol) |name| try self.allocator.dupe(u8, name) else null,
+                            .module_path = module_path,
+                            .owner_key = owner_key,
+                            .template_activation = activation,
+                            .specialization_bindings = self.function_source_specialization_bindings,
+                            .trait_implementation = self.function_source_trait_implementation,
+                            .trait_method = self.function_source_trait_method,
+                        });
+                    } else {
+                        try self.addBlockingDiagnostic(.missing_type, "source-owned func.func is missing ora.source_template_activation");
+                    }
+                } else {
+                    try self.addBlockingDiagnostic(.missing_type, "source-owned func.func is missing ora.source_module_path");
+                }
+            }
             if (self.function_param_names.len != 0 and self.function_param_binding_ids.len == 0) {
                 try self.addBlockingDiagnostic(
                     .missing_type,
@@ -261,10 +457,16 @@ const Collector = struct {
                 );
             }
             self.active_binders.shrinkRetainingCapacity(previous_binder_len);
+            self.loop_value_bindings.shrinkRetainingCapacity(previous_loop_value_binding_len);
+            self.loop_operation_bindings.shrinkRetainingCapacity(previous_loop_operation_binding_len);
+            self.active_loop_summary_indices.shrinkRetainingCapacity(previous_active_loop_summary_len);
         }
         defer {
             if (is_function) {
                 self.active_binders.shrinkRetainingCapacity(previous_binder_len);
+                self.loop_value_bindings.shrinkRetainingCapacity(previous_loop_value_binding_len);
+                self.loop_operation_bindings.shrinkRetainingCapacity(previous_loop_operation_binding_len);
+                self.active_loop_summary_indices.shrinkRetainingCapacity(previous_active_loop_summary_len);
                 self.function_param_types = previous_param_types;
                 self.function_param_binding_ids = previous_param_binding_ids;
                 self.function_param_names = previous_param_names;
@@ -272,16 +474,53 @@ const Collector = struct {
                 self.function_has_external_call = previous_has_external_call;
                 self.function_write_slots_complete = previous_write_slots_complete;
                 self.function_write_slots = previous_write_slots;
+                self.function_source_module_path = previous_source_module_path;
+                self.function_source_owner_key = previous_source_owner_key;
+                self.function_source_activation = previous_source_activation;
+                self.function_runtime_symbol = previous_runtime_symbol;
+                self.function_source_specialization_bindings = previous_source_specialization_bindings;
+                self.function_source_trait_implementation = previous_source_trait_implementation;
+                self.function_source_trait_method = previous_source_trait_method;
             }
+            if (is_contract) self.contract_source_owner_key = previous_contract_source_owner_key;
         }
 
+        const obligation_start = self.obligations.items.len;
+        const assumption_start = self.assumptions.items.len;
+        const query_start = self.queries.items.len;
         try self.collectEffectFrameAttrs(op, op_name, symbol, ordinal);
+        const is_loop_operation = std.mem.eql(u8, op_name, "scf.while") or std.mem.eql(u8, op_name, "scf.for");
+        if (is_loop_operation) {
+            try self.collectLoopSummary(op, op_name, symbol, ordinal);
+        }
         if (op_kind_map.get(op_name)) |kind| {
             try self.collectOperation(op, kind, op_name, symbol, ordinal);
         } else if (arithmetic_op_map.get(op_name)) |safety| {
             if (!self.operationFeedsOnlyFormalFormula(op)) {
                 try self.addArithmeticSafetyOp(op_name, symbol, ordinal, safety, null, try self.sourceForOperation(op));
             }
+        }
+        try self.recordSourceFactBinding(
+            op,
+            op_name,
+            ordinal,
+            obligation_start,
+            assumption_start,
+            query_start,
+        );
+
+        const previous_loop_projection = self.use_loop_value_bindings;
+        if (is_loop_operation) {
+            self.active_loop_depth += 1;
+            self.use_loop_value_bindings = true;
+            try self.active_loop_summary_indices.append(self.allocator, self.loop_summaries.items.len - 1);
+        }
+        defer {
+            if (is_loop_operation) {
+                self.active_loop_depth -= 1;
+                self.active_loop_summary_indices.shrinkRetainingCapacity(previous_active_loop_summary_len);
+            }
+            self.use_loop_value_bindings = previous_loop_projection;
         }
 
         const num_regions = mlir.oraOperationGetNumRegions(op);
@@ -299,9 +538,463 @@ const Collector = struct {
             }
         }
 
+        if (is_loop_operation) try self.finalizeActiveLoopSummary();
+
         if (is_function) {
             try self.collectEvidenceBackedEffectFrameAttrs(op, op_name, symbol, ordinal);
+            try self.recordFunctionModifiesBindings(op, op_name, symbol, ordinal, obligation_start);
         }
+    }
+
+    fn collectLoopSummary(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        op_name: []const u8,
+        symbol: ?[]const u8,
+        ordinal: u32,
+    ) !void {
+        const previous_loop_projection = self.use_loop_value_bindings;
+        self.use_loop_value_bindings = true;
+        defer self.use_loop_value_bindings = previous_loop_projection;
+
+        const loop_kind: obligation.LoopKind = if (std.mem.eql(u8, op_name, "scf.while"))
+            .scf_while
+        else if (std.mem.eql(u8, op_name, "scf.for"))
+            .scf_for
+        else
+            .other;
+        const loop_source_op_id = sourceStatementIndex(op);
+        const statement_ordinal = loop_source_op_id orelse ordinal;
+        const owner: obligation.Owner = .{ .statement = .{
+            .function_name = symbol orelse "<module>",
+            .ordinal = statement_ordinal,
+        } };
+
+        var reasons: std.ArrayList(obligation.LoopUnsupportedReason) = .empty;
+        defer reasons.deinit(self.allocator);
+
+        const variables = try self.collectLoopVariables(op, loop_kind);
+        try self.bindLoopValues(op, loop_kind, variables);
+        const context_variables = try self.collectLoopContextVariables();
+        const init_formulas = try self.collectLoopInitFormulas(op, loop_kind, symbol, ordinal);
+        const guard_formula = try self.collectLoopGuardFormula(op, loop_kind, symbol, ordinal);
+        const invariant_formulas = try self.collectLoopInvariantFormulas(op, loop_kind, symbol, ordinal);
+        const step_assignments = try self.collectLoopStepAssignments(op, loop_kind, symbol, ordinal);
+        const body = loopBodyBlock(op, loop_kind);
+        const body_facts = collectLoopBodyFacts(body);
+
+        if (loop_source_op_id == null) try appendLoopReason(&reasons, self.allocator, .loop_identity_missing);
+        for (variables) |variable| {
+            if (variable.id == null) try appendLoopReason(&reasons, self.allocator, .loop_identity_missing);
+            const value = loopVariableValue(op, loop_kind, variable.index);
+            if (mlir.oraValueIsNull(value) or !mlirTypeIsSupportedU256Carrier(mlir.oraValueGetType(value))) {
+                try appendLoopReason(&reasons, self.allocator, .loop_variable_not_u256);
+            }
+        }
+        if (guard_formula == null) try appendLoopReason(&reasons, self.allocator, .loop_guard_missing);
+        if (invariant_formulas.len == 0) try appendLoopReason(&reasons, self.allocator, .loop_invariant_missing);
+        if (loop_kind == .other) try appendLoopReason(&reasons, self.allocator, .loop_kind_unsupported);
+        if (!loopStepAssignmentsAreScalar(variables, step_assignments)) {
+            try appendLoopReason(&reasons, self.allocator, .loop_update_not_scalar_assignment);
+        }
+        if (formulasContainOriginValue(init_formulas) or
+            optionalFormulaIsOriginValue(guard_formula) or
+            formulasContainOriginValue(invariant_formulas) or
+            stepAssignmentsContainOriginValue(step_assignments))
+        {
+            try appendLoopReason(&reasons, self.allocator, .loop_formula_unsupported);
+        }
+        if (body_facts.has_storage_write) try appendLoopReason(&reasons, self.allocator, .loop_has_storage_write);
+        if (body_facts.has_storage_read) try appendLoopReason(&reasons, self.allocator, .loop_has_storage_read);
+        if (body_facts.has_call) try appendLoopReason(&reasons, self.allocator, .loop_has_call);
+        if (body_facts.has_external_call) try appendLoopReason(&reasons, self.allocator, .loop_has_external_call);
+        if (body_facts.has_resource_operation) try appendLoopReason(&reasons, self.allocator, .loop_has_resource_operation);
+        if (body_facts.has_break_or_continue) try appendLoopReason(&reasons, self.allocator, .loop_has_break_or_continue);
+        if (body_facts.has_error_control_flow) try appendLoopReason(&reasons, self.allocator, .loop_has_error_control_flow);
+        if (body_facts.has_nested_loop) try appendLoopReason(&reasons, self.allocator, .loop_has_nested_loop);
+        if (body_facts.has_branching_body) try appendLoopReason(&reasons, self.allocator, .loop_has_branching_body);
+
+        const id = self.next_loop_summary_id;
+        self.next_loop_summary_id += 1;
+        if (sourceOpId(op)) |source_op_id| {
+            try self.loop_operation_bindings.append(self.allocator, .{
+                .summary_id = id,
+                .source_op_id = source_op_id,
+            });
+        }
+        try self.loop_summaries.append(self.allocator, .{
+            .id = id,
+            .owner = owner,
+            .source = try self.sourceForOperation(op),
+            .phase = .report,
+            .origin = mlirOrigin(op_name, symbol, ordinal),
+            .loop_source_op_id = loop_source_op_id,
+            .loop_kind = loop_kind,
+            .context_variables = context_variables,
+            .variables = variables,
+            .init_formulas = init_formulas,
+            .guard_formula = guard_formula,
+            .invariant_formulas = invariant_formulas,
+            .step_assignments = step_assignments,
+            .body_safety_formulas = &.{},
+            .query_ids = .{},
+            .unsupported_reasons = try reasons.toOwnedSlice(self.allocator),
+        });
+    }
+
+    fn appendActiveLoopBodySafetyFormula(
+        self: *Collector,
+        formula: obligation.FormulaRef,
+    ) !void {
+        if (self.active_loop_summary_indices.items.len == 0) return;
+        const summary_index = self.active_loop_summary_indices.items[self.active_loop_summary_indices.items.len - 1];
+        const summary = &self.loop_summaries.items[summary_index];
+        summary.body_safety_formulas = try appendFormula(self.allocator, summary.body_safety_formulas, formula);
+        if (formula == .origin_value) try self.appendLoopSummaryReason(summary, .loop_formula_unsupported);
+    }
+
+    fn appendLoopSummaryReason(
+        self: *Collector,
+        summary: *obligation.LoopSummaryRow,
+        reason: obligation.LoopUnsupportedReason,
+    ) !void {
+        for (summary.unsupported_reasons) |existing| if (existing == reason) return;
+        const reasons = try self.allocator.alloc(obligation.LoopUnsupportedReason, summary.unsupported_reasons.len + 1);
+        @memcpy(reasons[0..summary.unsupported_reasons.len], summary.unsupported_reasons);
+        reasons[reasons.len - 1] = reason;
+        summary.unsupported_reasons = reasons;
+    }
+
+    fn finalizeActiveLoopSummary(self: *Collector) !void {
+        if (self.active_loop_summary_indices.items.len == 0) return error.MissingActiveLoopSummary;
+        const summary_index = self.active_loop_summary_indices.items[self.active_loop_summary_indices.items.len - 1];
+        const summary = &self.loop_summaries.items[summary_index];
+        if (self.stepAssignmentsRequireSafety(summary.step_assignments) and summary.body_safety_formulas.len == 0) {
+            try self.appendLoopSummaryReason(summary, .loop_body_safety_missing);
+        }
+        try self.addLoopInductionQuery(summary);
+    }
+
+    fn addLoopInductionQuery(
+        self: *Collector,
+        summary: *obligation.LoopSummaryRow,
+    ) !void {
+        if (summary.owner != .statement) return error.InvalidLoopSummaryOwner;
+        const owner: obligation.Owner = .{ .function = .{
+            .name = summary.owner.statement.function_name,
+        } };
+        const query_id = self.nextId();
+        try self.queries.append(self.allocator, .{
+            .id = query_id,
+            .owner = owner,
+            .source = summary.source,
+            .phase = .report,
+            .origin = summary.origin,
+            // Arming occurs only after the whole function has been collected,
+            // including any postconditions. Until semantic classification
+            // succeeds this row carries no artifact authority.
+            .artifact_policy = .diagnostic_only,
+            .kind = .loop_induction,
+            .logical_role = .invariant,
+            .assumption_ids = try self.assumptionIdsForOwner(owner),
+            .loop_summary_id = summary.id,
+        });
+        summary.query_ids.induction = try appendId(
+            self.allocator,
+            summary.query_ids.induction,
+            query_id,
+        );
+    }
+
+    fn stepAssignmentsRequireSafety(
+        self: *const Collector,
+        assignments: []const obligation.LoopStepAssignment,
+    ) bool {
+        for (assignments) |assignment| {
+            if (self.termRequiresArithmeticSafety(assignment.value, self.terms.items.len + 1)) return true;
+        }
+        return false;
+    }
+
+    fn termRequiresArithmeticSafety(
+        self: *const Collector,
+        formula: obligation.FormulaRef,
+        fuel: usize,
+    ) bool {
+        if (formula != .term or formula.term >= self.terms.items.len or fuel == 0) return false;
+        return switch (self.terms.items[formula.term]) {
+            .binary => |binary| switch (binary.op) {
+                .add, .sub, .mul, .div, .mod => true,
+                else => self.termRequiresArithmeticSafety(.{ .term = binary.lhs }, fuel - 1) or
+                    self.termRequiresArithmeticSafety(.{ .term = binary.rhs }, fuel - 1),
+            },
+            .unary => |unary| self.termRequiresArithmeticSafety(.{ .term = unary.operand }, fuel - 1),
+            .old => |operand| self.termRequiresArithmeticSafety(.{ .term = operand }, fuel - 1),
+            .refinement_predicate => |predicate| blk: {
+                if (self.termRequiresArithmeticSafety(.{ .term = predicate.value }, fuel - 1)) break :blk true;
+                for (predicate.args) |arg| {
+                    if (self.termRequiresArithmeticSafety(.{ .term = arg }, fuel - 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .quantified => |quantified| self.termRequiresArithmeticSafety(.{ .term = quantified.body }, fuel - 1),
+            else => false,
+        };
+    }
+
+    fn collectLoopVariables(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        loop_kind: obligation.LoopKind,
+    ) ![]const obligation.LoopVariable {
+        const count = loopVariableCount(op, loop_kind);
+        if (count == 0) return &.{};
+        const variables = try self.allocator.alloc(obligation.LoopVariable, count);
+        for (variables, 0..) |*variable, index| {
+            const value = loopVariableValue(op, loop_kind, @intCast(index));
+            const pattern_id = self.next_loop_variable_pattern_id;
+            self.next_loop_variable_pattern_id = std.math.add(u32, pattern_id, 1) catch
+                return error.TooManyLoopVariables;
+            variable.* = .{
+                .index = @intCast(index),
+                // A reserved file-id namespace makes loop-carried identities
+                // globally disjoint from source bindings and from the existing
+                // synthetic function-parameter fallback namespace.
+                .id = .{
+                    .file_id = synthetic_file_id - 1,
+                    .pattern_id = pattern_id,
+                },
+                .name = try self.loopVariableName(op, loop_kind, index),
+                .ty = try self.typeRefFromValue(value),
+            };
+        }
+        return variables;
+    }
+
+    fn collectLoopContextVariables(self: *Collector) ![]const obligation.LoopVariable {
+        if (self.function_param_names.len == 0) return &.{};
+        const variables = try self.allocator.alloc(obligation.LoopVariable, self.function_param_names.len);
+        for (variables, 0..) |*variable, index| {
+            variable.* = .{
+                .index = @intCast(index),
+                .id = self.freeVarIdForFunctionParam(index),
+                .name = self.function_param_names[index],
+                .ty = if (index < self.function_param_types.len)
+                    self.function_param_types[index]
+                else
+                    try self.unknownTypeRef(),
+            };
+        }
+        return variables;
+    }
+
+    fn bindLoopValues(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        loop_kind: obligation.LoopKind,
+        variables: []const obligation.LoopVariable,
+    ) !void {
+        for (variables) |variable| {
+            const body_value = loopVariableValue(op, loop_kind, variable.index);
+            try self.appendLoopValueBinding(body_value, variable);
+            if (loop_kind == .scf_while) {
+                const before = mlir.oraScfWhileOpGetBeforeBlock(op);
+                if (!mlir.oraBlockIsNull(before) and variable.index < mlir.oraBlockGetNumArguments(before)) {
+                    try self.appendLoopValueBinding(mlir.oraBlockGetArgument(before, variable.index), variable);
+                }
+            }
+        }
+        const result_count: usize = @intCast(mlir.oraOperationGetNumResults(op));
+        for (0..result_count) |result_index| {
+            const variable_index = result_index + @intFromBool(loop_kind == .scf_for);
+            if (variable_index >= variables.len) continue;
+            try self.appendLoopValueBinding(mlir.oraOperationGetResult(op, result_index), variables[variable_index]);
+        }
+    }
+
+    fn appendLoopValueBinding(
+        self: *Collector,
+        value: mlir.MlirValue,
+        variable: obligation.LoopVariable,
+    ) !void {
+        if (mlir.oraValueIsNull(value)) return;
+        const value_id = @intFromPtr(value.ptr);
+        for (self.loop_value_bindings.items) |existing| {
+            if (existing.value_id == value_id) return;
+        }
+        try self.loop_value_bindings.append(self.allocator, .{
+            .value_id = value_id,
+            .variable = variable,
+        });
+    }
+
+    fn loopVariableName(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        loop_kind: obligation.LoopKind,
+        index: usize,
+    ) !?[]const u8 {
+        if (loop_kind == .scf_for and index == 0) return try self.allocator.dupe(u8, "induction");
+        const result_index = if (loop_kind == .scf_for) index -| 1 else index;
+        const attr_name = try std.fmt.allocPrint(self.allocator, "ora.result_name_{d}", .{result_index});
+        return try self.stringAttr(op, attr_name);
+    }
+
+    fn collectLoopInitFormulas(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        loop_kind: obligation.LoopKind,
+        symbol: ?[]const u8,
+        ordinal: u32,
+    ) ![]const obligation.FormulaRef {
+        const operand_count: usize = @intCast(mlir.oraOperationGetNumOperands(op));
+        const count = switch (loop_kind) {
+            .scf_while => operand_count,
+            .scf_for => if (operand_count >= 3) operand_count - 2 else operand_count,
+            .other => 0,
+        };
+        if (count == 0) return &.{};
+        const formulas = try self.allocator.alloc(obligation.FormulaRef, count);
+        for (formulas, 0..) |*formula, index| {
+            const operand_index = if (loop_kind == .scf_for and index > 0) index + 2 else index;
+            const value = mlir.oraOperationGetOperand(op, operand_index);
+            formula.* = try self.loopFormulaFromValue(value, operationName(op), symbol, ordinal, @intCast(operand_index));
+        }
+        return formulas;
+    }
+
+    fn collectLoopGuardFormula(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        loop_kind: obligation.LoopKind,
+        symbol: ?[]const u8,
+        ordinal: u32,
+    ) !?obligation.FormulaRef {
+        if (loop_kind == .scf_for) {
+            if (mlir.oraOperationGetNumOperands(op) < 2) return null;
+            const induction = loopVariableValue(op, loop_kind, 0);
+            const induction_term = (try self.termFromValue(induction)) orelse return null;
+            const upper_term = (try self.termFromValue(mlir.oraOperationGetOperand(op, 1))) orelse return null;
+            return .{ .term = try self.addTerm(.{ .binary = .{
+                .op = .lt,
+                .lhs = induction_term,
+                .rhs = upper_term,
+                .ty = try self.typeRefFromValue(induction),
+            } }) };
+        }
+        if (loop_kind != .scf_while) return null;
+        const before = mlir.oraScfWhileOpGetBeforeBlock(op);
+        if (mlir.oraBlockIsNull(before)) return null;
+        const condition = findOperationInBlock(before, "scf.condition") orelse return null;
+        if (mlir.oraOperationGetNumOperands(condition) == 0) return null;
+        return try self.loopFormulaFromValue(
+            mlir.oraOperationGetOperand(condition, 0),
+            "scf.condition",
+            symbol,
+            ordinal,
+            0,
+        );
+    }
+
+    fn collectLoopInvariantFormulas(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        loop_kind: obligation.LoopKind,
+        symbol: ?[]const u8,
+        ordinal: u32,
+    ) ![]const obligation.FormulaRef {
+        const body = loopBodyBlock(op, loop_kind);
+        if (mlir.oraBlockIsNull(body)) return &.{};
+        var invariant_ops: std.ArrayList(mlir.MlirOperation) = .empty;
+        defer invariant_ops.deinit(self.allocator);
+        try collectNamedOperationsInBlock(self.allocator, &invariant_ops, body, "ora.invariant");
+        if (invariant_ops.items.len == 0) return &.{};
+
+        const formulas = try self.allocator.alloc(obligation.FormulaRef, invariant_ops.items.len);
+        for (invariant_ops.items, formulas) |invariant_op, *formula| {
+            if (mlir.oraOperationGetNumOperands(invariant_op) == 0) {
+                formula.* = .{ .origin_value = .{
+                    .origin = mlirOrigin("ora.invariant", symbol, ordinal),
+                    .kind = .operand,
+                    .index = 0,
+                } };
+                continue;
+            }
+            formula.* = try self.loopFormulaFromValue(
+                mlir.oraOperationGetOperand(invariant_op, 0),
+                "ora.invariant",
+                symbol,
+                ordinal,
+                0,
+            );
+        }
+        return formulas;
+    }
+
+    fn collectLoopStepAssignments(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        loop_kind: obligation.LoopKind,
+        symbol: ?[]const u8,
+        ordinal: u32,
+    ) ![]const obligation.LoopStepAssignment {
+        const body = loopBodyBlock(op, loop_kind);
+        if (mlir.oraBlockIsNull(body)) return &.{};
+        const terminator = mlir.oraBlockGetTerminator(body);
+        if (mlir.oraOperationIsNull(terminator) or !std.mem.eql(u8, operationName(terminator), "scf.yield")) return &.{};
+        const yielded_count: usize = @intCast(mlir.oraOperationGetNumOperands(terminator));
+        const induction_count: usize = @intFromBool(loop_kind == .scf_for);
+        const assignments = try self.allocator.alloc(obligation.LoopStepAssignment, yielded_count + induction_count);
+        if (loop_kind == .scf_for) {
+            if (mlir.oraOperationGetNumOperands(op) < 3) return &.{};
+            const induction = loopVariableValue(op, loop_kind, 0);
+            const step = mlir.oraOperationGetOperand(op, 2);
+            const induction_term = (try self.termFromValue(induction)) orelse return &.{};
+            const step_term = (try self.termFromValue(step)) orelse return &.{};
+            const value = try self.addTerm(.{ .binary = .{
+                .op = .add,
+                .lhs = induction_term,
+                .rhs = step_term,
+                .ty = try self.typeRefFromValue(induction),
+            } });
+            assignments[0] = .{
+                .variable_index = 0,
+                .target = self.loopVariableForValue(induction).?.id,
+                .value = .{ .term = value },
+            };
+        }
+        for (assignments[induction_count..], 0..) |*assignment, index| {
+            const variable_index = index + induction_count;
+            const target_variable = self.loopVariableForValue(loopVariableValue(op, loop_kind, @intCast(variable_index)));
+            assignment.* = .{
+                .variable_index = @intCast(variable_index),
+                .target = if (target_variable) |variable| variable.id else null,
+                .value = try self.loopFormulaFromValue(
+                    mlir.oraOperationGetOperand(terminator, index),
+                    "scf.yield",
+                    symbol,
+                    ordinal,
+                    @intCast(index),
+                ),
+            };
+        }
+        return assignments;
+    }
+
+    fn loopFormulaFromValue(
+        self: *Collector,
+        value: mlir.MlirValue,
+        op_name: []const u8,
+        symbol: ?[]const u8,
+        ordinal: u32,
+        index: u32,
+    ) !obligation.FormulaRef {
+        if (try self.termFromValue(value)) |term| return .{ .term = term };
+        return .{ .origin_value = .{
+            .origin = mlirOrigin(op_name, symbol, ordinal),
+            .kind = .operand,
+            .index = index,
+        } };
     }
 
     fn collectEffectFrameAttrs(
@@ -313,11 +1006,12 @@ const Collector = struct {
     ) !void {
         const write_slots = (try self.placeArrayAttr(op, "ora.write_slots")) orelse &.{};
         const read_slots = (try self.placeArrayAttr(op, "ora.read_slots")) orelse &.{};
-        const modifies_slots = (try self.placeArrayAttr(op, "ora.modifies_slots")) orelse &.{};
+        const modifies_slots_attr = try self.placeArrayAttr(op, "ora.modifies_slots");
+        const modifies_slots = modifies_slots_attr orelse &.{};
         const write_slots_complete = (try self.boolAttr(op, "ora.write_slots_complete")) orelse false;
         const source = try self.sourceForOperation(op);
 
-        if (write_slots.len != 0 or modifies_slots.len != 0) {
+        if (write_slots.len != 0 or modifies_slots_attr != null) {
             try self.addEffectFrameGoal(.write_covered_by_modifies, modifies_slots, write_slots, op_name, symbol, ordinal, source);
         }
         if (read_slots.len != 0 and write_slots.len != 0 and write_slots_complete) {
@@ -652,6 +1346,13 @@ const Collector = struct {
                     try self.addMissingFormulaDiagnostic(op_name, symbol, ordinal);
                     return;
                 };
+                if (self.active_loop_summary_indices.items.len != 0) {
+                    const body_formula = (try self.valueOperand(op, op_name, symbol, ordinal, 0)) orelse {
+                        try self.addMissingFormulaDiagnostic(op_name, symbol, ordinal);
+                        return;
+                    };
+                    try self.appendActiveLoopBodySafetyFormula(body_formula);
+                }
                 try self.addArithmeticSafetyOp(op_name, symbol, ordinal, safety, formula, try self.sourceForOperation(op));
                 return;
             }
@@ -678,6 +1379,13 @@ const Collector = struct {
         const origin = mlirOrigin(op_name, symbol, ordinal);
         const owner = self.ownerFor(symbol);
         const source = try self.sourceForOperation(op);
+        if (self.active_loop_summary_indices.items.len != 0) {
+            const body_formula = (try self.valueOperand(op, op_name, symbol, ordinal, 0)) orelse {
+                try self.addMissingFormulaDiagnostic(op_name, symbol, ordinal);
+                return;
+            };
+            try self.appendActiveLoopBodySafetyFormula(body_formula);
+        }
         if (try self.stringAttr(op, "ora.guard_id")) |guard_id| {
             const id = self.nextId();
             try self.obligations.append(self.allocator, .{
@@ -744,10 +1452,24 @@ const Collector = struct {
             try self.addMissingFormulaDiagnostic(op_name, symbol, ordinal);
             return;
         };
+        const loop_post_formula = if (role == .ensures and self.functionHasLoopSummary(symbol)) blk: {
+            const previous_loop_projection = self.use_loop_value_bindings;
+            self.use_loop_value_bindings = true;
+            defer self.use_loop_value_bindings = previous_loop_projection;
+            break :blk (try self.valueOperand(op, op_name, symbol, ordinal, 0)) orelse
+                return error.MissingLoopPostFormula;
+        } else null;
         const origin = mlirOrigin(op_name, symbol, ordinal);
         const owner = self.ownerFor(symbol);
         const id = self.nextId();
         const source = try self.sourceForOperation(op);
+        if (role != .invariant and self.active_loop_summary_indices.items.len != 0) {
+            const body_formula = (try self.valueOperand(op, op_name, symbol, ordinal, 0)) orelse {
+                try self.addMissingFormulaDiagnostic(op_name, symbol, ordinal);
+                return;
+            };
+            try self.appendActiveLoopBodySafetyFormula(body_formula);
+        }
 
         try self.obligations.append(self.allocator, .{
             .id = id,
@@ -759,8 +1481,89 @@ const Collector = struct {
                 .role = role,
                 .formula = formula,
             } },
+            // Loop invariant and body-safety authorization is owned by the
+            // verifier's first-class loop queries. A generic source query for
+            // the nested annotation has different premises and must not claim
+            // one-to-one proof authority.
+            .artifact_policy = if (self.active_loop_depth != 0 and role == .invariant)
+                .diagnostic_only
+            else
+                .blocks_verified_artifacts,
         });
         try self.addQueryForOperation(.obligation, role, null, id, owner, origin, source, op);
+        if (loop_post_formula) |post_formula| {
+            try self.attachLoopPostQueries(
+                op,
+                id,
+                owner,
+                origin,
+                source,
+                post_formula,
+            );
+        }
+    }
+
+    fn functionHasLoopSummary(self: *const Collector, symbol: ?[]const u8) bool {
+        const function_name = symbol orelse return false;
+        for (self.loop_summaries.items) |summary| {
+            if (summary.owner == .statement and
+                std.mem.eql(u8, summary.owner.statement.function_name, function_name)) return true;
+        }
+        return false;
+    }
+
+    fn attachLoopPostQueries(
+        self: *Collector,
+        ensures_op: mlir.MlirOperation,
+        obligation_id: obligation.Id,
+        owner: obligation.Owner,
+        origin: obligation.Origin,
+        source: obligation.SourceRef,
+        post_formula: obligation.FormulaRef,
+    ) !void {
+        if (owner != .function) return;
+        const ensures_source_op_id = sourceOpId(ensures_op) orelse return;
+        for (self.loop_summaries.items) |*summary| {
+            if (summary.owner != .statement or
+                !std.mem.eql(u8, summary.owner.statement.function_name, owner.function.name)) continue;
+            const loop_source_op_id = self.loopOperationSourceId(summary.id) orelse continue;
+            summary.post_formulas = try appendFormula(self.allocator, summary.post_formulas, post_formula);
+            if (post_formula == .origin_value) try self.appendLoopSummaryReason(summary, .loop_formula_unsupported);
+
+            const assumption_ids = try self.assumptionIdsForOwner(owner);
+            const obligation_ids = try self.allocator.alloc(obligation.Id, 1);
+            obligation_ids[0] = obligation_id;
+            const query_id = self.nextId();
+            try self.queries.append(self.allocator, .{
+                .id = query_id,
+                .owner = owner,
+                .source = source,
+                .phase = .report,
+                .origin = origin,
+                .kind = .loop_invariant_post,
+                .logical_role = .ensures,
+                .obligation_ids = obligation_ids,
+                .assumption_ids = assumption_ids,
+                .loop_summary_id = summary.id,
+            });
+            summary.query_ids.post = try appendId(self.allocator, summary.query_ids.post, query_id);
+            try self.query_bindings.append(self.allocator, .{
+                .source_op_id = ensures_source_op_id,
+                .loop_source_op_id = loop_source_op_id,
+                .kind = .loop_invariant_post,
+                .logical_role = .ensures,
+                .query_id = query_id,
+                .assumption_ids = assumption_ids,
+                .obligation_ids = obligation_ids,
+            });
+        }
+    }
+
+    fn loopOperationSourceId(self: *Collector, summary_id: obligation.Id) ?usize {
+        for (self.loop_operation_bindings.items) |binding| {
+            if (binding.summary_id == summary_id) return binding.source_op_id;
+        }
+        return null;
     }
 
     fn addAssumptionOp(
@@ -806,6 +1609,13 @@ const Collector = struct {
         const owner = self.ownerFor(symbol);
         const id = self.nextId();
         const source = try self.sourceForOperation(op);
+        if (self.active_loop_summary_indices.items.len != 0) {
+            const body_formula = (try self.valueOperand(op, op_name, symbol, ordinal, 0)) orelse {
+                try self.addMissingFormulaDiagnostic(op_name, symbol, ordinal);
+                return;
+            };
+            try self.appendActiveLoopBodySafetyFormula(body_formula);
+        }
 
         try self.obligations.append(self.allocator, .{
             .id = id,
@@ -1171,6 +1981,10 @@ const Collector = struct {
                 .formula = formula_override orelse derivedFormula(op_name, symbol, ordinal),
                 .arithmetic_safety = safety,
             } },
+            .artifact_policy = if (self.active_loop_depth != 0)
+                .diagnostic_only
+            else
+                .blocks_verified_artifacts,
         });
         try self.addQuery(.obligation, .arithmetic_safety, null, id, owner, origin, source);
     }
@@ -1248,6 +2062,10 @@ const Collector = struct {
             .source = source,
             .phase = .report,
             .origin = origin,
+            .artifact_policy = if (self.active_loop_depth != 0)
+                .diagnostic_only
+            else
+                .blocks_verified_artifacts,
             .kind = kind,
             .logical_role = logical_role,
             .guard_id = guard_id,
@@ -1260,6 +2078,7 @@ const Collector = struct {
             .source = query.source,
             .phase = query.phase,
             .origin = query.origin,
+            .artifact_policy = query.artifact_policy,
             .kind = query.kind,
             .logical_role = query.logical_role,
             .guard_id = query.guard_id,
@@ -1384,6 +2203,14 @@ const Collector = struct {
     ) anyerror!?obligation.TermId {
         if (mlir.oraValueIsNull(value)) return null;
 
+        if (self.use_loop_value_bindings) if (self.loopVariableForValue(value)) |variable| {
+            return try self.addTerm(.{ .variable = .{ .free = .{
+                .id = variable.id orelse return null,
+                .name = variable.name orelse "loop_var",
+                .ty = try self.typeRefFromValueWithIntegerSignedness(value, signed_override),
+            } } });
+        };
+
         if (mlir.mlirValueIsABlockArgument(value)) {
             const arg_number: usize = self.functionEntryBlockArgumentNumber(value) orelse return null;
             const name = if (arg_number < self.function_param_names.len)
@@ -1423,6 +2250,20 @@ const Collector = struct {
         if (std.mem.eql(u8, owner_name, "arith.cmpi")) return try self.cmpiTerm(owner);
         if (std.mem.eql(u8, owner_name, "ora.cmp")) return try self.oraCmpTerm(owner);
         if (std.mem.eql(u8, owner_name, "ora.quantified")) return try self.quantifiedTerm(owner);
+        return null;
+    }
+
+    fn loopVariableForValue(
+        self: *Collector,
+        value: mlir.MlirValue,
+    ) ?obligation.LoopVariable {
+        const value_id = @intFromPtr(value.ptr);
+        var index = self.loop_value_bindings.items.len;
+        while (index != 0) {
+            index -= 1;
+            const binding = self.loop_value_bindings.items[index];
+            if (binding.value_id == value_id) return binding.variable;
+        }
         return null;
     }
 
@@ -2074,6 +2915,191 @@ const Collector = struct {
         try self.addBlockingDiagnostic(kind, try std.fmt.allocPrint(self.allocator, fmt, args));
     }
 
+    fn recordSourceFactBinding(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        op_name: []const u8,
+        ordinal: u32,
+        obligation_start: usize,
+        assumption_start: usize,
+        query_start: usize,
+    ) !void {
+        const source_fact_id = (try self.u32Attr(op, "ora.source_fact_id")) orelse return;
+        const kind = try self.stringAttr(op, "ora.source_fact_kind") orelse {
+            try self.addBlockingDiagnostic(.missing_type, "source-formal operation is missing ora.source_fact_kind");
+            return;
+        };
+        const roles = try self.stringArrayAttr(op, "ora.source_fact_roles") orelse {
+            try self.addBlockingDiagnostic(.missing_type, "source-formal operation is missing ora.source_fact_roles");
+            return;
+        };
+        if (roles.len == 0) {
+            try self.addBlockingDiagnostic(.missing_type, "source-formal operation has an empty ora.source_fact_roles");
+            return;
+        }
+
+        const obligation_ids = try self.allocator.alloc(obligation.Id, self.obligations.items.len - obligation_start);
+        for (self.obligations.items[obligation_start..], obligation_ids) |row, *id| id.* = row.id;
+        const assumption_ids = try self.allocator.alloc(obligation.Id, self.assumptions.items.len - assumption_start);
+        for (self.assumptions.items[assumption_start..], assumption_ids) |row, *id| id.* = row.id;
+        const query_ids = try self.allocator.alloc(obligation.Id, self.queries.items.len - query_start);
+        for (self.queries.items[query_start..], query_ids) |row, *id| id.* = row.id;
+
+        var runtime_check_present = false;
+        for (roles) |role| {
+            if (!std.mem.eql(u8, role, "runtime_condition")) continue;
+            runtime_check_present = std.mem.eql(u8, op_name, "ora.assert") or
+                std.mem.eql(u8, op_name, "cf.assert") or
+                std.mem.eql(u8, op_name, "ora.refinement_guard");
+        }
+        const runtime_check_ids = if (runtime_check_present) blk: {
+            const source_op_id = sourceOpId(op) orelse {
+                try self.addBlockingDiagnostic(.missing_type, "runtime source-formal operation has no live operation identity");
+                break :blk &.{};
+            };
+            const producer_id = std.math.add(u32, ordinal, 1) catch
+                return error.SourceAccountingRuntimeCheckIdOverflow;
+            try self.runtime_check_producers.append(self.allocator, .{
+                .id = producer_id,
+                .source_op_id = source_op_id,
+                .op_ordinal = ordinal,
+                .source = try self.sourceForOperation(op),
+            });
+            const ids = try self.allocator.alloc(u32, 1);
+            ids[0] = producer_id;
+            break :blk ids;
+        } else &.{};
+        var state_effect_present = false;
+        for (roles) |role| {
+            if (!std.mem.eql(u8, role, "state_directive")) continue;
+            state_effect_present = std.mem.eql(u8, op_name, "ora.havoc");
+        }
+        const state_effect_ids = if (state_effect_present) blk: {
+            const source_op_id = sourceOpId(op) orelse {
+                try self.addBlockingDiagnostic(.missing_type, "state-effect source-formal operation has no live operation identity");
+                break :blk &.{};
+            };
+            const producer_id = std.math.add(u32, ordinal, 1) catch
+                return error.SourceAccountingStateEffectIdOverflow;
+            try self.state_effect_producers.append(self.allocator, .{
+                .id = producer_id,
+                .source_op_id = source_op_id,
+                .op_ordinal = ordinal,
+                .source = try self.sourceForOperation(op),
+            });
+            const ids = try self.allocator.alloc(u32, 1);
+            ids[0] = producer_id;
+            break :blk ids;
+        } else &.{};
+        const source = try self.sourceForOperation(op);
+        const is_contract_invariant = std.mem.eql(u8, kind, "contract_invariant");
+        const module_path = self.function_source_module_path orelse
+            if (is_contract_invariant) source.file else null;
+        const owner_key = self.function_source_owner_key orelse
+            if (is_contract_invariant) self.contract_source_owner_key else null;
+        const activation = self.function_source_activation orelse
+            if (is_contract_invariant and owner_key != null) @as(?[]const u8, "runtime_body") else null;
+        try self.source_fact_bindings.append(self.allocator, .{
+            .source_op_id = sourceOpId(op) orelse return,
+            .op_ordinal = ordinal,
+            .source = source,
+            .source_fact_id = source_fact_id,
+            .kind = kind,
+            .roles = roles,
+            .module_path = module_path,
+            .owner_key = owner_key,
+            .template_activation = activation,
+            .runtime_symbol = self.function_runtime_symbol,
+            .specialization_bindings = self.function_source_specialization_bindings,
+            .trait_implementation = self.function_source_trait_implementation,
+            .trait_method = self.function_source_trait_method,
+            .obligation_ids = obligation_ids,
+            .assumption_ids = assumption_ids,
+            .query_ids = query_ids,
+            .runtime_check_ids = runtime_check_ids,
+            .runtime_check_present = runtime_check_present,
+            .state_effect_ids = state_effect_ids,
+            .state_effect_present = state_effect_present,
+        });
+    }
+
+    fn recordFunctionModifiesBindings(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        op_name: []const u8,
+        symbol: ?[]const u8,
+        ordinal: u32,
+        obligation_start: usize,
+    ) !void {
+        const source_fact_ids = (try self.u32ArrayAttr(op, "ora.modifies_source_fact_ids")) orelse return;
+        if (source_fact_ids.len == 0) {
+            try self.addBlockingDiagnostic(.missing_type, "ora.modifies_source_fact_ids is empty");
+            return;
+        }
+
+        var frame_ids: std.ArrayList(obligation.Id) = .empty;
+        for (self.obligations.items[obligation_start..]) |item| {
+            if (item.kind != .effect_frame) continue;
+            const origin = switch (item.origin) {
+                .mlir_op => |origin| origin,
+                else => continue,
+            };
+            if (!std.mem.eql(u8, origin.op_name, op_name)) continue;
+            if (origin.ordinal != ordinal) continue;
+            if (!optionalStringEqual(origin.symbol, symbol)) continue;
+            try frame_ids.append(self.allocator, item.id);
+        }
+        if (frame_ids.items.len == 0) {
+            try self.addBlockingDiagnostic(.missing_effect_path, "modifies source facts have no function frame result");
+            return;
+        }
+        const owned_frame_ids = try frame_ids.toOwnedSlice(self.allocator);
+        for (source_fact_ids) |source_fact_id| {
+            try self.source_fact_bindings.append(self.allocator, .{
+                .source_op_id = sourceOpId(op) orelse return,
+                .op_ordinal = ordinal,
+                .source = try self.sourceForOperation(op),
+                .source_fact_id = source_fact_id,
+                .kind = "modifies",
+                .roles = &.{"frame_directive"},
+                .module_path = self.function_source_module_path,
+                .owner_key = self.function_source_owner_key,
+                .template_activation = self.function_source_activation,
+                .runtime_symbol = self.function_runtime_symbol,
+                .specialization_bindings = self.function_source_specialization_bindings,
+                .trait_implementation = self.function_source_trait_implementation,
+                .trait_method = self.function_source_trait_method,
+                .obligation_ids = owned_frame_ids,
+            });
+        }
+    }
+
+    fn u32Attr(_: *Collector, op: mlir.MlirOperation, name: []const u8) !?u32 {
+        const attr = mlir.oraOperationGetAttributeByName(op, strRef(name));
+        if (mlir.oraAttributeIsNull(attr)) return null;
+        const text = mlir.oraIntegerAttrGetValueString(attr);
+        defer if (text.data != null) mlir.oraStringRefFree(text);
+        if (text.data == null) return error.InvalidSourceFactIdAttribute;
+        return std.fmt.parseInt(u32, text.data[0..text.length], 10) catch
+            return error.InvalidSourceFactIdAttribute;
+    }
+
+    fn u32ArrayAttr(self: *Collector, op: mlir.MlirOperation, name: []const u8) !?[]const u32 {
+        const attr = mlir.oraOperationGetAttributeByName(op, strRef(name));
+        if (mlir.oraAttributeIsNull(attr)) return null;
+        const count: usize = @intCast(mlir.oraArrayAttrGetNumElements(attr));
+        const values = try self.allocator.alloc(u32, count);
+        for (values, 0..) |*slot, index| {
+            const element = mlir.oraArrayAttrGetElement(attr, @intCast(index));
+            const text = mlir.oraIntegerAttrGetValueString(element);
+            defer if (text.data != null) mlir.oraStringRefFree(text);
+            if (text.data == null) return error.InvalidSourceFactIdAttribute;
+            slot.* = std.fmt.parseInt(u32, text.data[0..text.length], 10) catch
+                return error.InvalidSourceFactIdAttribute;
+        }
+        return values;
+    }
+
     fn sourceForOperation(self: *Collector, op: mlir.MlirOperation) !obligation.SourceRef {
         if (mlir.oraOperationIsNull(op)) return .generated();
         const loc = mlir.oraOperationGetLocation(op);
@@ -2478,6 +3504,197 @@ fn functionEntryBlock(op: mlir.MlirOperation) mlir.MlirBlock {
     const region = mlir.oraOperationGetRegion(op, 0);
     if (mlir.oraRegionIsNull(region)) return std.mem.zeroes(mlir.MlirBlock);
     return mlir.oraRegionGetFirstBlock(region);
+}
+
+fn sourceStatementIndex(op: mlir.MlirOperation) ?u32 {
+    if (mlir.oraOperationIsNull(op)) return null;
+    const location = mlir.oraOperationGetLocation(op);
+    if (mlir.oraLocationIsNull(location)) return null;
+    const location_ref = mlir.oraLocationPrintToString(location);
+    defer if (location_ref.data != null) mlir.oraStringRefFree(location_ref);
+    if (location_ref.data == null or location_ref.length == 0) return null;
+
+    const text = location_ref.data[0..location_ref.length];
+    const marker = "ora.origin_stmt.";
+    const marker_start = std.mem.indexOf(u8, text, marker) orelse return null;
+    const digits = text[marker_start + marker.len ..];
+    const end = std.mem.indexOfNone(u8, digits, "0123456789") orelse digits.len;
+    if (end == 0) return null;
+    return std.fmt.parseInt(u32, digits[0..end], 10) catch null;
+}
+
+fn loopBodyBlock(op: mlir.MlirOperation, loop_kind: obligation.LoopKind) mlir.MlirBlock {
+    return switch (loop_kind) {
+        .scf_while => mlir.oraScfWhileOpGetAfterBlock(op),
+        .scf_for => mlir.oraScfForOpGetBodyBlock(op),
+        .other => std.mem.zeroes(mlir.MlirBlock),
+    };
+}
+
+fn loopVariableCount(op: mlir.MlirOperation, loop_kind: obligation.LoopKind) usize {
+    const body = loopBodyBlock(op, loop_kind);
+    if (mlir.oraBlockIsNull(body)) return 0;
+    return @intCast(mlir.oraBlockGetNumArguments(body));
+}
+
+fn loopVariableValue(
+    op: mlir.MlirOperation,
+    loop_kind: obligation.LoopKind,
+    index: u32,
+) mlir.MlirValue {
+    const body = loopBodyBlock(op, loop_kind);
+    if (mlir.oraBlockIsNull(body) or index >= mlir.oraBlockGetNumArguments(body)) {
+        return std.mem.zeroes(mlir.MlirValue);
+    }
+    return mlir.oraBlockGetArgument(body, index);
+}
+
+fn findOperationInBlock(block: mlir.MlirBlock, expected_name: []const u8) ?mlir.MlirOperation {
+    if (mlir.oraBlockIsNull(block)) return null;
+    var child = mlir.oraBlockGetFirstOperation(block);
+    while (!mlir.oraOperationIsNull(child)) : (child = mlir.oraOperationGetNextInBlock(child)) {
+        if (std.mem.eql(u8, operationName(child), expected_name)) return child;
+    }
+    return null;
+}
+
+fn collectNamedOperationsInBlock(
+    allocator: std.mem.Allocator,
+    operations: *std.ArrayList(mlir.MlirOperation),
+    block: mlir.MlirBlock,
+    expected_name: []const u8,
+) !void {
+    var child = mlir.oraBlockGetFirstOperation(block);
+    while (!mlir.oraOperationIsNull(child)) : (child = mlir.oraOperationGetNextInBlock(child)) {
+        const child_name = operationName(child);
+        if (std.mem.eql(u8, child_name, expected_name)) try operations.append(allocator, child);
+        if (std.mem.eql(u8, child_name, "scf.while") or std.mem.eql(u8, child_name, "scf.for")) continue;
+
+        const region_count = mlir.oraOperationGetNumRegions(child);
+        for (0..region_count) |region_index| {
+            const region = mlir.oraOperationGetRegion(child, region_index);
+            var nested_block = mlir.oraRegionGetFirstBlock(region);
+            while (!mlir.oraBlockIsNull(nested_block)) : (nested_block = mlir.oraBlockGetNextInRegion(nested_block)) {
+                try collectNamedOperationsInBlock(allocator, operations, nested_block, expected_name);
+            }
+        }
+    }
+}
+
+const LoopBodyFacts = struct {
+    has_storage_write: bool = false,
+    has_storage_read: bool = false,
+    has_call: bool = false,
+    has_external_call: bool = false,
+    has_resource_operation: bool = false,
+    has_break_or_continue: bool = false,
+    has_error_control_flow: bool = false,
+    has_nested_loop: bool = false,
+    has_branching_body: bool = false,
+};
+
+fn collectLoopBodyFacts(block: mlir.MlirBlock) LoopBodyFacts {
+    var facts: LoopBodyFacts = .{};
+    if (!mlir.oraBlockIsNull(block)) collectLoopBodyFactsInBlock(block, &facts);
+    return facts;
+}
+
+fn collectLoopBodyFactsInBlock(block: mlir.MlirBlock, facts: *LoopBodyFacts) void {
+    var child = mlir.oraBlockGetFirstOperation(block);
+    while (!mlir.oraOperationIsNull(child)) : (child = mlir.oraOperationGetNextInBlock(child)) {
+        const name = operationName(child);
+        if (std.mem.eql(u8, name, "ora.sstore") or std.mem.eql(u8, name, "ora.tstore")) facts.has_storage_write = true;
+        if (std.mem.eql(u8, name, "ora.sload") or std.mem.eql(u8, name, "ora.tload")) facts.has_storage_read = true;
+        if (std.mem.eql(u8, name, "func.call") or std.mem.eql(u8, name, "ora.external_call")) facts.has_call = true;
+        if (std.mem.eql(u8, name, "ora.external_call") or hasAttr(child, "ora.trusted_extern_frame")) facts.has_external_call = true;
+        if (std.mem.eql(u8, name, "ora.move") or std.mem.eql(u8, name, "ora.create") or std.mem.eql(u8, name, "ora.destroy")) {
+            facts.has_resource_operation = true;
+        }
+        if (std.mem.eql(u8, name, "ora.break") or std.mem.eql(u8, name, "ora.continue")) facts.has_break_or_continue = true;
+        if (std.mem.eql(u8, name, "ora.try_stmt")) facts.has_error_control_flow = true;
+        if (std.mem.eql(u8, name, "scf.while") or std.mem.eql(u8, name, "scf.for")) {
+            facts.has_nested_loop = true;
+            continue;
+        }
+        if (mlir.mlirOperationGetNumSuccessors(child) > 1 or
+            std.mem.eql(u8, name, "scf.if") or
+            std.mem.eql(u8, name, "cf.cond_br") or
+            std.mem.eql(u8, name, "ora.switch") or
+            std.mem.eql(u8, name, "ora.conditional_return"))
+        {
+            facts.has_branching_body = true;
+        }
+
+        const region_count = mlir.oraOperationGetNumRegions(child);
+        for (0..region_count) |region_index| {
+            const region = mlir.oraOperationGetRegion(child, region_index);
+            var nested_block = mlir.oraRegionGetFirstBlock(region);
+            while (!mlir.oraBlockIsNull(nested_block)) : (nested_block = mlir.oraBlockGetNextInRegion(nested_block)) {
+                collectLoopBodyFactsInBlock(nested_block, facts);
+            }
+        }
+    }
+}
+
+fn appendLoopReason(
+    reasons: *std.ArrayList(obligation.LoopUnsupportedReason),
+    allocator: std.mem.Allocator,
+    reason: obligation.LoopUnsupportedReason,
+) !void {
+    for (reasons.items) |existing| if (existing == reason) return;
+    try reasons.append(allocator, reason);
+}
+
+fn appendFormula(
+    allocator: std.mem.Allocator,
+    existing: []const obligation.FormulaRef,
+    value: obligation.FormulaRef,
+) ![]const obligation.FormulaRef {
+    const result = try allocator.alloc(obligation.FormulaRef, existing.len + 1);
+    @memcpy(result[0..existing.len], existing);
+    result[existing.len] = value;
+    return result;
+}
+
+fn appendId(
+    allocator: std.mem.Allocator,
+    existing: []const obligation.Id,
+    value: obligation.Id,
+) ![]const obligation.Id {
+    const result = try allocator.alloc(obligation.Id, existing.len + 1);
+    @memcpy(result[0..existing.len], existing);
+    result[existing.len] = value;
+    return result;
+}
+
+fn formulasContainOriginValue(formulas: []const obligation.FormulaRef) bool {
+    for (formulas) |formula| if (formula == .origin_value) return true;
+    return false;
+}
+
+fn optionalFormulaIsOriginValue(formula: ?obligation.FormulaRef) bool {
+    const value = formula orelse return false;
+    return value == .origin_value;
+}
+
+fn stepAssignmentsContainOriginValue(assignments: []const obligation.LoopStepAssignment) bool {
+    for (assignments) |assignment| if (assignment.value == .origin_value) return true;
+    return false;
+}
+
+fn loopStepAssignmentsAreScalar(
+    variables: []const obligation.LoopVariable,
+    assignments: []const obligation.LoopStepAssignment,
+) bool {
+    if (variables.len == 0) return assignments.len == 0;
+    if (assignments.len != variables.len and assignments.len + 1 != variables.len) return false;
+    var previous_index: ?u32 = null;
+    for (assignments) |assignment| {
+        if (assignment.variable_index >= variables.len) return false;
+        if (previous_index != null and previous_index.? == assignment.variable_index) return false;
+        previous_index = assignment.variable_index;
+    }
+    return true;
 }
 
 fn operationBodyHasExternalCall(op: mlir.MlirOperation) bool {

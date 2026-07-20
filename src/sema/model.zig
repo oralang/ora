@@ -415,6 +415,7 @@ pub const VerificationFactOwner = union(enum) {
 pub const VerificationFact = struct {
     kind: VerificationFactKind,
     owner: VerificationFactOwner = .none,
+    source_fact_id: ?ast.SourceFactId = null,
     expr: ?ast.ExprId = null,
     label: ?[]const u8 = null,
     target_name: ?[]const u8 = null,
@@ -819,6 +820,10 @@ pub const TypeCheckResult = struct {
     expr_types: []Type,
     call_resolutions: []?ResolvedCall,
     expr_effects: []const ExprEffect,
+    /// Body effects for source loops, keyed by the source statement id.
+    /// This is census data derived by the same transitive collector used for
+    /// function effects; it is not consulted by compilation or verification.
+    loop_body_effects: []const LoopBodyEffect,
     body_types: []Type,
     instantiated_structs: []const InstantiatedStruct,
     instantiated_struct_lookup: []lookup_index.NamedEntry,
@@ -904,10 +909,79 @@ pub const TypeCheckResult = struct {
     }
 };
 
+pub const LoopBodyEffect = struct {
+    statement_id: ast.StmtId,
+    effect: Effect,
+    variable_types: []const Type,
+};
+
+/// Evaluator-owned structural evidence.  These rows intentionally use only
+/// source identities and evaluator facts; the formal adapter maps them onto
+/// source-accounting IDs after the independent semantic inventory exists.
+pub const ComptimeFormalNodeKind = enum(u8) {
+    owner_entry,
+    statement,
+    success_exit,
+    error_exit,
+};
+
+pub const ComptimeFormalEventKind = enum(u8) {
+    enter_node,
+    predicate_check,
+};
+
+pub const ComptimeFormalEvent = struct {
+    kind: ComptimeFormalEventKind,
+    node_kind: ComptimeFormalNodeKind,
+    node_range: source.TextRange,
+    source_fact_id: ?ast.SourceFactId = null,
+    fact_range: ?source.TextRange = null,
+    predicate_value: ?bool = null,
+};
+
+pub const ComptimeFoldCallSite = struct {
+    file_id: source.FileId,
+    range: source.TextRange,
+};
+
+pub const ComptimeFoldActivation = enum(u8) {
+    speculative,
+    required,
+};
+
+pub const ComptimeFoldDisposition = enum(u8) {
+    committed,
+    abandoned,
+    rejected,
+};
+
+pub const ComptimeFoldEvidence = struct {
+    invocation_id: u32,
+    parent_invocation_id: ?u32,
+    activation: ComptimeFoldActivation,
+    disposition: ComptimeFoldDisposition,
+    call_site_file_id: source.FileId,
+    call_range: source.TextRange,
+    call_site_chain: []const ComptimeFoldCallSite,
+    root_runtime_module_id: source.ModuleId,
+    root_runtime_owner_key: []const u8,
+    callee_module_id: source.ModuleId,
+    callee_file_id: source.FileId,
+    callee_item_id: ast.ItemId,
+    callee_range: source.TextRange,
+    callee_name: []const u8,
+    callee_owner_key: []const u8,
+    generic_bindings: []const []const u8 = &.{},
+    trait_implementation: ?[]const u8 = null,
+    trait_method: ?[]const u8 = null,
+    events: []const ComptimeFormalEvent,
+};
+
 pub const ConstEvalResult = struct {
     arena: std.heap.ArenaAllocator,
     values: []?ConstValue,
     diagnostics: diagnostics.DiagnosticList,
+    formal_folds: []const ComptimeFoldEvidence = &.{},
 
     pub fn deinit(self: *ConstEvalResult) void {
         self.diagnostics.deinit();

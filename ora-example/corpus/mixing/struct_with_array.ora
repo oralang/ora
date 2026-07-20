@@ -21,7 +21,7 @@ contract StructWithArray {
         requires(vault.amounts[slot] <= std.constants.U256_MAX - amount)
     {
         let v: Vault = vault;
-        let a: [u256; 4] = v.amounts;
+        var a: [u256; 4] = v.amounts;
         a[slot] = a[slot] + amount;
         vault = Vault { owner: v.owner, amounts: a, locked: v.locked };
     }

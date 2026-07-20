@@ -18,10 +18,15 @@ structure Row where
   assumptionIds : List Nat := []
   obligationIds : List Nat := []
   z3RowMatched : Bool := false
-  z3PlainUnknown : Bool := false
+  /-- True only when the compiler matched this proof target to a clean Z3
+  UNKNOWN or UNSAT row whose result is eligible for Lean agreement. Independent
+  compiler-owned proof targets are deliberately omitted from agreement rows. -/
+  z3ProofCompatible : Bool := false
   constraintCount : Nat := 0
   smtlibHash : String := ""
   zigSemanticSupported : Bool := false
+  usesLoopSummary : Bool := false
+  loopSummarySupported : Bool := false
   deriving Repr
 
 def valueForTy? : Option TyRef → Value
@@ -81,16 +86,20 @@ def obligationsFullyDenotable? (manifest : Manifest) (rows : List ObligationRow)
   rows.all (obligationFullyDenotable? manifest)
 
 def rowMatches (manifest : Manifest) (row : Row) : Bool :=
-  match collectAssumptionsByIds manifest row.assumptionIds,
-        collectObligationsByIds manifest row.obligationIds with
-  | some assumptions, some obligations =>
+  match collectAssumptionsByIds manifest row.assumptionIds with
+  | some assumptions =>
       row.z3RowMatched &&
-        row.z3PlainUnknown &&
+        row.z3ProofCompatible &&
         row.zigSemanticSupported &&
         manifest.wf &&
         assumptionsFullyDenotable? manifest assumptions &&
-        obligationsFullyDenotable? manifest obligations
-  | _, _ => false
+        if row.usesLoopSummary then
+          row.loopSummarySupported
+        else
+          match collectObligationsByIds manifest row.obligationIds with
+          | some obligations => obligationsFullyDenotable? manifest obligations
+          | none => false
+  | none => false
 
 def countRowsFor (id : Nat) : List Row → Nat
   | [] => 0

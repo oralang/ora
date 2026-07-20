@@ -715,6 +715,14 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     }
                 }
             }
+            try @This().attachFormalSourceExpansionAttrs(
+                self,
+                &attrs,
+                item_id,
+                function,
+                type_bindings,
+                inline_known_args,
+            );
             try @This().attachEffectSummaryAttrs(self, &attrs, item_id);
             try @This().attachModifiesSummaryAttrs(self, &attrs, item_id);
 
@@ -830,6 +838,96 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             try function_lowerer.lower();
         }
 
+        fn attachFormalSourceExpansionAttrs(
+            self: *Lowerer,
+            attrs: *std.ArrayList(mlir.MlirNamedAttribute),
+            item_id: ast.ItemId,
+            function: ast.FunctionItem,
+            type_bindings: []const Lowerer.GenericTypeBinding,
+            inline_known_args: []const Lowerer.InlineKnownArgBinding,
+        ) anyerror!void {
+            const owner_key = try @This().formalSourceOwnerKey(self, item_id, function);
+            try attrs.append(self.allocator, namedStringAttr(
+                self.context,
+                "ora.source_module_path",
+                self.sources.file(self.file.file_id).path,
+            ));
+            try attrs.append(self.allocator, namedStringAttr(self.context, "ora.source_owner_key", owner_key));
+            try attrs.append(self.allocator, namedStringAttr(self.context, "ora.source_template_activation", "runtime_body"));
+            try attrs.append(self.allocator, .{
+                .name = identifier(self.context, "ora.source_owner_start"),
+                .attribute = mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.context), function.range.start),
+            });
+
+            var bindings: std.ArrayList([]const u8) = .empty;
+            for (type_bindings) |binding| {
+                try bindings.append(self.allocator, try std.fmt.allocPrint(
+                    self.allocator,
+                    "generic:{s}={s}",
+                    .{ binding.name, binding.mangle_name },
+                ));
+            }
+            for (inline_known_args) |binding| {
+                const value = switch (binding.value) {
+                    .integer => |integer| try std.fmt.allocPrint(self.allocator, "integer:{s}", .{integer}),
+                    .boolean => |boolean| try std.fmt.allocPrint(self.allocator, "boolean:{s}", .{if (boolean) "true" else "false"}),
+                    .refinement => |refinement| try std.fmt.allocPrint(
+                        self.allocator,
+                        "refinement:{s}",
+                        .{try self.typeMangleName(refinement)},
+                    ),
+                };
+                try bindings.append(self.allocator, try std.fmt.allocPrint(
+                    self.allocator,
+                    "inline:{s}={s}",
+                    .{ binding.parameter_name, value },
+                ));
+            }
+            std.mem.sort([]const u8, bindings.items, {}, struct {
+                fn less(_: void, lhs: []const u8, rhs: []const u8) bool {
+                    return std.mem.order(u8, lhs, rhs) == .lt;
+                }
+            }.less);
+            if (bindings.items.len != 0) {
+                const values = try self.allocator.alloc(mlir.MlirAttribute, bindings.items.len);
+                for (bindings.items, values) |binding, *value| {
+                    value.* = mlir.oraStringAttrCreate(self.context, strRef(binding));
+                }
+                try attrs.append(self.allocator, .{
+                    .name = identifier(self.context, "ora.source_specialization_bindings"),
+                    .attribute = mlir.oraArrayAttrCreate(self.context, @intCast(values.len), values.ptr),
+                });
+            }
+
+            if (@This().enclosingImplForMethod(self, item_id)) |impl_item| {
+                try attrs.append(self.allocator, namedStringAttr(
+                    self.context,
+                    "ora.source_trait_implementation",
+                    try std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ impl_item.trait_name, impl_item.target_name }),
+                ));
+                try attrs.append(self.allocator, namedStringAttr(self.context, "ora.source_trait_method", function.name));
+            }
+        }
+
+        fn formalSourceOwnerKey(self: *Lowerer, item_id: ast.ItemId, function: ast.FunctionItem) ![]const u8 {
+            if (@This().enclosingImplForMethod(self, item_id)) |impl_item| {
+                return std.fmt.allocPrint(
+                    self.allocator,
+                    "module/impl:{s}:{s}/function:{s}",
+                    .{ impl_item.trait_name, impl_item.target_name, function.name },
+                );
+            }
+            if (function.parent_contract) |contract_id| {
+                const contract = self.file.item(contract_id).Contract;
+                return std.fmt.allocPrint(
+                    self.allocator,
+                    "module/contract:{s}/function:{s}",
+                    .{ contract.name, function.name },
+                );
+            }
+            return std.fmt.allocPrint(self.allocator, "module/function:{s}", .{function.name});
+        }
+
         fn attachEffectSummaryAttrs(
             self: *Lowerer,
             attrs: *std.ArrayList(mlir.MlirNamedAttribute),
@@ -932,6 +1030,27 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     if (slot_attrs.items.len == 0) null else slot_attrs.items.ptr,
                 ),
             });
+
+            var fact_id_attrs: std.ArrayList(mlir.MlirAttribute) = .empty;
+            defer fact_id_attrs.deinit(self.allocator);
+            for (self.itemVerificationFactEntries(item_id)) |entry| {
+                const fact = self.verificationFact(entry);
+                if (fact.kind != .modifies) continue;
+                const source_fact_id = fact.source_fact_id orelse return error.MissingModifiesSourceFactId;
+                try fact_id_attrs.append(
+                    self.allocator,
+                    mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.context), @intCast(source_fact_id)),
+                );
+            }
+            if (fact_id_attrs.items.len == 0) return error.MissingModifiesSourceFactId;
+            try attrs.append(self.allocator, .{
+                .name = identifier(self.context, "ora.modifies_source_fact_ids"),
+                .attribute = mlir.oraArrayAttrCreate(
+                    self.context,
+                    @intCast(fact_id_attrs.items.len),
+                    fact_id_attrs.items.ptr,
+                ),
+            });
         }
 
         fn appendEffectSlotAttrs(
@@ -1018,6 +1137,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 .kind = kind,
                 .expr = expr,
                 .range = fact.range,
+                .source_fact_id = fact.source_fact_id,
                 .verification_context = verification_context,
                 .pattern_aliases = pattern_aliases,
             });
@@ -1049,6 +1169,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     .kind = kind,
                     .expr = expr,
                     .range = fact.range,
+                    .source_fact_id = fact.source_fact_id,
                     .verification_context = "ghost_axiom",
                 });
             }

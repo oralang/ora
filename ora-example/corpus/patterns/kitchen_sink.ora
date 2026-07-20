@@ -234,7 +234,7 @@ contract KitchenSink {
         recentDeposits[0] = amount;
 
         // Update account status nonce
-        let status: AccountStatus = accountStatus[sender];
+        var status: AccountStatus = accountStatus[sender];
         status.nonce = status.nonce +% 1;
         status.active = true;
         accountStatus[sender] = status;
@@ -409,7 +409,7 @@ contract KitchenSink {
             return;
         }
 
-        let f: VaultFlags = flags;
+        var f: VaultFlags = flags;
         switch (field) {
             0 => {
                 if (value == 0) {

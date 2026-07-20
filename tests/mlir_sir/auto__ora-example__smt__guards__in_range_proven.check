@@ -2,7 +2,7 @@
 // INPUT: ora-example/smt/guards/in_range_proven.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @provenInRange0to100(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/in_range_proven.ora":13:32)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:0;max:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:0"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x3c92b23f", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @provenInRange0to100(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/in_range_proven.ora":13:32)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:0;max:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:0"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x3c92b23f", ora.source_module_path = "{{.*}}/ora-example/smt/guards/in_range_proven.ora", ora.source_owner_key = "module/contract:InRangeProven/function:provenInRange0to100", ora.source_owner_start = 626 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
@@ -41,7 +41,7 @@
 // CHECK-NEXT:   ^bb4:  // pred: ^bb3
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/guards/in_range_proven.ora":13:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/in_range_proven.ora":13:5)
-// CHECK-NEXT:   func.func @provenInRangeSingle(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/in_range_proven.ora":22:32)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:10;max:u:0:0:0:1000"], ora.abi_params = ["uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:2"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xaaafeddb", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @provenInRangeSingle(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/in_range_proven.ora":22:32)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:10;max:u:0:0:0:1000"], ora.abi_params = ["uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:2"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xaaafeddb", ora.source_module_path = "{{.*}}/ora-example/smt/guards/in_range_proven.ora", ora.source_owner_key = "module/contract:InRangeProven/function:provenInRangeSingle", ora.source_owner_start = 937 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c1000 = sir.const 1000 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c10 = sir.const 10 : !sir.u256 loc(unknown)
@@ -81,7 +81,7 @@
 // CHECK-NEXT:   ^bb4:  // pred: ^bb3
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/guards/in_range_proven.ora":22:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/in_range_proven.ora":22:5)
-// CHECK-NEXT:   func.func @provenInRangeArithmetic(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/in_range_proven.ora":31:36)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:4"], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x2c1e0512", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @provenInRangeArithmetic(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/in_range_proven.ora":31:36)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:4"], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x2c1e0512", ora.source_module_path = "{{.*}}/ora-example/smt/guards/in_range_proven.ora", ora.source_owner_key = "module/contract:InRangeProven/function:provenInRangeArithmetic", ora.source_owner_start = 1201 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c50 = sir.const 50 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/in_range_proven.ora":32:23)
 // CHECK-NEXT:     %c200 = sir.const 200 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/in_range_proven.ora":33:23)
@@ -109,7 +109,7 @@
 // CHECK-NEXT:   ^bb3:  // pred: ^bb2
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/guards/in_range_proven.ora":31:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/in_range_proven.ora":31:5)
-// CHECK-NEXT:   func.func @provenInRangeFromRefinement(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/in_range_proven.ora":40:40)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:100;max:u:0:0:0:500"], ora.abi_params = ["uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:6"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x442bcba8", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @provenInRangeFromRefinement(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/in_range_proven.ora":40:40)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:100;max:u:0:0:0:500"], ora.abi_params = ["uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:6"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x442bcba8", ora.source_module_path = "{{.*}}/ora-example/smt/guards/in_range_proven.ora", ora.source_owner_key = "module/contract:InRangeProven/function:provenInRangeFromRefinement", ora.source_owner_start = 1491 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c500 = sir.const 500 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc(unknown)
@@ -149,7 +149,7 @@
 // CHECK-NEXT:   ^bb4:  // pred: ^bb3
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/guards/in_range_proven.ora":40:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/in_range_proven.ora":40:5)
-// CHECK-NEXT:   func.func @provenInRangeReturn(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/in_range_proven.ora":49:32)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:0;max:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:8"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xabde2f2c", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @provenInRangeReturn(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/in_range_proven.ora":49:32)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:0;max:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:8"], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xabde2f2c", ora.source_module_path = "{{.*}}/ora-example/smt/guards/in_range_proven.ora", ora.source_owner_key = "module/contract:InRangeProven/function:provenInRangeReturn", ora.source_owner_start = 1805 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 0 : !sir.u256 loc(unknown)
@@ -191,7 +191,7 @@
 // CHECK-NEXT:     sir.store %28 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/smt/guards/in_range_proven.ora":54:9)))
 // CHECK-NEXT:     sir.return %28 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/smt/guards/in_range_proven.ora":54:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/in_range_proven.ora":49:5)
-// CHECK-NEXT:   func.func @provenBasisPoints(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/in_range_proven.ora":58:30)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:0;max:u:0:0:0:10000"], ora.abi_params = ["uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:9"], ora.param_names = ["fee"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x334bf6c2", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @provenBasisPoints(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/in_range_proven.ora":58:30)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:0;max:u:0:0:0:10000"], ora.abi_params = ["uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:0:pattern:9"], ora.param_names = ["fee"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x334bf6c2", ora.source_module_path = "{{.*}}/ora-example/smt/guards/in_range_proven.ora", ora.source_owner_key = "module/contract:InRangeProven/function:provenBasisPoints", ora.source_owner_start = 2099 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c10000 = sir.const 10000 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)

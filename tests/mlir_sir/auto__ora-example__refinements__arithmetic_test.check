@@ -2,7 +2,7 @@
 // INPUT: ora-example/refinements/arithmetic_test.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @testAddition() attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testAddition() attributes {ora.source_module_path = "{{.*}}/ora-example/refinements/arithmetic_test.ora", ora.source_owner_key = "module/contract:ArithmeticRefinements/function:testAddition", ora.source_owner_start = 659 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 4 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 1 : !sir.u256 loc(unknown)
@@ -26,7 +26,7 @@
 // CHECK-NEXT:   ^bb5:  // pred: ^bb4
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/arithmetic_test.ora":13:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/arithmetic_test.ora":13:5)
-// CHECK-NEXT:   func.func @testSubtraction() attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testSubtraction() attributes {ora.source_module_path = "{{.*}}/ora-example/refinements/arithmetic_test.ora", ora.source_owner_key = "module/contract:ArithmeticRefinements/function:testSubtraction", ora.source_owner_start = 1710 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 6988570666312495752839002421695666563898142680323167511053911032881624383488 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 4 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 1 : !sir.u256 loc(unknown)
@@ -53,7 +53,7 @@
 // CHECK-NEXT:   ^bb6:  // pred: ^bb5
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/arithmetic_test.ora":39:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/arithmetic_test.ora":39:5)
-// CHECK-NEXT:   func.func @testMultiplication() attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testMultiplication() attributes {ora.source_module_path = "{{.*}}/ora-example/refinements/arithmetic_test.ora", ora.source_owner_key = "module/contract:ArithmeticRefinements/function:testMultiplication", ora.source_owner_start = 3016 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 56016217287220138543383237988819299768112786790290310538187226855197252780032 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 4 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 1 : !sir.u256 loc(unknown)
@@ -80,7 +80,7 @@
 // CHECK-NEXT:   ^bb6:  // pred: ^bb5
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/arithmetic_test.ora":70:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/arithmetic_test.ora":70:5)
-// CHECK-NEXT:   func.func @testRealWorldExamples() attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testRealWorldExamples() attributes {ora.source_module_path = "{{.*}}/ora-example/refinements/arithmetic_test.ora", ora.source_owner_key = "module/contract:ArithmeticRefinements/function:testRealWorldExamples", ora.source_owner_start = 4366 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 56016217287220138543383237988819299768112786790290310538187226855197252780032 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
@@ -110,7 +110,7 @@
 // CHECK-NEXT:   ^bb6:  // pred: ^bb4
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/arithmetic_test.ora":101:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/arithmetic_test.ora":101:5)
-// CHECK-NEXT:   func.func @testChainedOperations() attributes {ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testChainedOperations() attributes {ora.source_module_path = "{{.*}}/ora-example/refinements/arithmetic_test.ora", ora.source_owner_key = "module/contract:ArithmeticRefinements/function:testChainedOperations", ora.source_owner_start = 5790 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 6988570666312495752839002421695666563898142680323167511053911032881624383488 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)

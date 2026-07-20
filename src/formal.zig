@@ -17,6 +17,8 @@ pub const obligation_dump = @import("formal/obligation_dump.zig");
 pub const proof_check = @import("formal/proof_check.zig");
 pub const proof_manifest = @import("formal/proof_manifest.zig");
 pub const obligation_to_lean = @import("formal/obligation_to_lean.zig");
+pub const source_accounting = @import("formal/shared/source_accounting.zig");
+pub const source_accounting_gate = @import("formal/kernel/source_accounting_gate.zig");
 
 pub const builtin = ora_types.builtin;
 pub const region_assign = ora_types.region_assign;

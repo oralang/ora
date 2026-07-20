@@ -12,13 +12,18 @@ const std = @import("std");
 pub const Id = u32;
 pub const TermId = u32;
 
-pub const obligation_dump_schema_version: u32 = 4;
-pub const proof_certificate_schema_version: u32 = 1;
+pub const obligation_dump_schema_version: u32 = 8;
+pub const proof_certificate_schema_version: u32 = 2;
 
 pub const ObligationSet = struct {
     obligations: []const Obligation = &.{},
     assumptions: []const Assumption = &.{},
     queries: []const VerificationQuery = &.{},
+    /// Backend-neutral loop summaries. Every supported, owner-bound summary
+    /// has one `loop_induction` query requiring a kernel-checked Lean
+    /// certificate before verified artifacts may be emitted. Function
+    /// postconditions enrich the induction theorem but do not arm the gate.
+    loop_summaries: []const LoopSummaryRow = &.{},
     proof_artifacts: []const ProofArtifact = &.{},
     diagnostics: []const ObligationDiagnostic = &.{},
     terms: []const Term = &.{},
@@ -38,20 +43,34 @@ pub const ObligationSet = struct {
         self.validateIdReferences() catch return .{ .blocked = .invalid_dependency };
 
         for (self.queries) |query| {
+            if (query.artifact_policy == .diagnostic_only) continue;
             if (query.result) |result| {
                 if (result.degraded) return .{ .blocked = .degraded_query };
                 if (result.vacuous) return .{ .blocked = .vacuous_query };
                 if (result.vacuity_unknown) return .{ .blocked = .unknown_query };
                 if (result.status == .unknown) {
                     if (self.queryUnknownDischargedByLean(query)) continue;
-                    return .{ .blocked = .unknown_query };
+                    return .{ .blocked = if (query.proof_requirement == .lean_certificate)
+                        .lean_required_failure
+                    else
+                        .unknown_query };
                 }
                 if (!querySucceeded(query, result)) {
                     return .{ .blocked = if (query.backend == .lean) .lean_required_failure else .failed_query };
                 }
-            } else if (query.obligation_ids.len > 0) {
+                if (query.proof_requirement == .lean_certificate and
+                    !self.hasSuccessfulLeanProofForQuery(query))
+                {
+                    return .{ .blocked = .lean_required_failure };
+                }
+            } else if (query.obligation_ids.len > 0 or
+                query.proof_requirement == .lean_certificate)
+            {
                 if (self.hasSuccessfulLeanProofForQuery(query)) continue;
-                return .{ .blocked = if (query.backend == .lean) .lean_required_failure else .missing_proof };
+                return .{ .blocked = if (query.backend == .lean or query.proof_requirement == .lean_certificate)
+                    .lean_required_failure
+                else
+                    .missing_proof };
             }
         }
 
@@ -65,6 +84,14 @@ pub const ObligationSet = struct {
         return .allowed;
     }
 
+    pub fn hasLeanCertificateRequirements(self: ObligationSet) bool {
+        for (self.queries) |query| {
+            if (query.artifact_policy == .blocks_verified_artifacts and
+                query.proof_requirement == .lean_certificate) return true;
+        }
+        return false;
+    }
+
     pub fn validateTermReferences(self: ObligationSet) !void {
         for (self.assumptions) |assumption| {
             if (assumption.formula) |formula| try self.validateFormulaRef(formula);
@@ -74,6 +101,14 @@ pub const ObligationSet = struct {
         }
         for (self.terms) |term| {
             try self.validateTerm(term);
+        }
+        for (self.loop_summaries) |summary| {
+            for (summary.init_formulas) |formula| try self.validateFormulaRef(formula);
+            if (summary.guard_formula) |formula| try self.validateFormulaRef(formula);
+            for (summary.invariant_formulas) |formula| try self.validateFormulaRef(formula);
+            for (summary.step_assignments) |assignment| try self.validateFormulaRef(assignment.value);
+            for (summary.body_safety_formulas) |formula| try self.validateFormulaRef(formula);
+            for (summary.post_formulas) |formula| try self.validateFormulaRef(formula);
         }
     }
 
@@ -168,6 +203,12 @@ pub const ObligationSet = struct {
                     if (!containsId(artifact.obligation_ids, id)) return error.InvalidDependency;
                 }
             }
+            if (query.loop_summary_id) |loop_summary_id| {
+                if (query.kind != .loop_induction and query.kind != .loop_invariant_post) {
+                    return error.InvalidDependency;
+                }
+                if (!self.loopSummaryIdExists(loop_summary_id)) return error.InvalidDependency;
+            }
         }
     }
 
@@ -190,6 +231,13 @@ pub const ObligationSet = struct {
             if (item.id == id) return item;
         }
         return null;
+    }
+
+    fn loopSummaryIdExists(self: ObligationSet, id: Id) bool {
+        for (self.loop_summaries) |item| {
+            if (item.id == id) return true;
+        }
+        return false;
     }
 
     fn hasSuccessfulProofFor(self: ObligationSet, item: Obligation) bool {
@@ -215,6 +263,7 @@ pub const ObligationSet = struct {
         for (self.queries) |candidate| {
             if (candidate.backend != .lean) continue;
             if (candidate.discharges_query_id != target.id) continue;
+            if (candidate.loop_summary_id != target.loop_summary_id) continue;
             if (!equalIdSlices(candidate.obligation_ids, target.obligation_ids)) continue;
             if (!equalIdSlices(candidate.assumption_ids, target.assumption_ids)) continue;
             if (!self.queryHasValidProofArtifact(candidate)) continue;
@@ -255,6 +304,10 @@ pub const VerificationQuery = struct {
     source: SourceRef,
     phase: Phase,
     origin: Origin,
+    /// Diagnostic-only queries may carry verifier/source-accounting identity,
+    /// but can neither block nor authorize artifact emission.
+    artifact_policy: ArtifactPolicy = .blocks_verified_artifacts,
+    proof_requirement: ProofRequirement = .backend_result,
     backend: VerificationBackend = .unspecified,
     kind: VerificationQueryKind,
     logical_role: ?LogicalRole = null,
@@ -269,11 +322,13 @@ pub const VerificationQuery = struct {
     canonical_smt_annotation_pure: bool = false,
     proof_artifact_id: ?Id = null,
     discharges_query_id: ?Id = null,
+    loop_summary_id: ?Id = null,
     result: ?VerificationQueryResult = null,
 };
 
 pub const FormalQueryBinding = struct {
     source_op_id: usize,
+    loop_source_op_id: ?usize = null,
     kind: VerificationQueryKind,
     logical_role: ?LogicalRole = null,
     guard_id: ?[]const u8 = null,
@@ -291,6 +346,9 @@ pub const VerificationBackend = enum(u8) {
 pub const VerificationQueryKind = enum(u8) {
     base,
     obligation,
+    /// Compiler-owned proof target for the whole Base/Step/Safety/Exit
+    /// induction bundle. It is independent of any one Z3 query row.
+    loop_induction,
     loop_invariant_step,
     loop_body_safety,
     loop_invariant_post,
@@ -330,6 +388,7 @@ pub const VerificationQueryStatus = enum(u8) {
 pub const VerificationQuerySummary = struct {
     base: u32 = 0,
     obligation: u32 = 0,
+    loop_induction: u32 = 0,
     loop_invariant_step: u32 = 0,
     loop_body_safety: u32 = 0,
     loop_invariant_post: u32 = 0,
@@ -340,6 +399,7 @@ pub const VerificationQuerySummary = struct {
         switch (kind) {
             .base => self.base += 1,
             .obligation => self.obligation += 1,
+            .loop_induction => self.loop_induction += 1,
             .loop_invariant_step => self.loop_invariant_step += 1,
             .loop_body_safety => self.loop_body_safety += 1,
             .loop_invariant_post => self.loop_invariant_post += 1,
@@ -416,6 +476,11 @@ pub const ArtifactPolicy = enum(u8) {
     diagnostic_only,
 };
 
+pub const ProofRequirement = enum(u8) {
+    backend_result,
+    lean_certificate,
+};
+
 pub const ArtifactDecision = union(enum) {
     allowed,
     blocked: ArtifactBlockReason,
@@ -437,6 +502,7 @@ pub const ArtifactBlockReason = enum(u8) {
     failed_query,
     missing_proof,
     lean_required_failure,
+    source_accounting_failure,
 };
 
 fn containsId(ids: []const Id, needle: Id) bool {
@@ -503,6 +569,7 @@ fn querySucceeded(query: VerificationQuery, result: VerificationQueryResult) boo
             else => switch (query.kind) {
                 .base, .guard_satisfy => true,
                 .obligation,
+                .loop_induction,
                 .loop_invariant_step,
                 .loop_body_safety,
                 .loop_invariant_post,
@@ -519,7 +586,7 @@ fn querySucceeded(query: VerificationQuery, result: VerificationQueryResult) boo
                 .loop_invariant_post,
                 .guard_violate,
                 => true,
-                .base, .guard_satisfy => false,
+                .base, .loop_induction, .guard_satisfy => false,
             },
         },
     };
@@ -577,6 +644,83 @@ pub const BackendComponent = enum(u8) {
     oratosir,
     sinora,
     artifact_policy,
+};
+
+/// Backend-neutral data required to denote a loop proof. Unresolved identities
+/// and unsupported shapes remain explicit in `unsupported_reasons`; they can
+/// never become proof targets.
+pub const LoopSummaryRow = struct {
+    id: Id,
+    owner: Owner,
+    source: SourceRef,
+    phase: Phase,
+    origin: Origin,
+    loop_source_op_id: ?u32,
+    loop_kind: LoopKind,
+    context_variables: []const LoopVariable = &.{},
+    variables: []const LoopVariable = &.{},
+    init_formulas: []const FormulaRef = &.{},
+    guard_formula: ?FormulaRef = null,
+    invariant_formulas: []const FormulaRef = &.{},
+    step_assignments: []const LoopStepAssignment = &.{},
+    body_safety_formulas: []const FormulaRef = &.{},
+    post_formulas: []const FormulaRef = &.{},
+    query_ids: LoopQueryIds = .{},
+    unsupported_reasons: []const LoopUnsupportedReason = &.{},
+
+    pub fn projectionSupported(self: LoopSummaryRow) bool {
+        return self.unsupported_reasons.len == 0;
+    }
+};
+
+pub const LoopKind = enum(u8) {
+    scf_while,
+    scf_for,
+    other,
+};
+
+pub const LoopVariable = struct {
+    index: u32,
+    id: ?FreeVarId = null,
+    name: ?[]const u8 = null,
+    ty: TypeRef,
+};
+
+pub const LoopStepAssignment = struct {
+    variable_index: u32,
+    target: ?FreeVarId = null,
+    value: FormulaRef,
+};
+
+pub const LoopQueryIds = struct {
+    induction: []const Id = &.{},
+    base: []const Id = &.{},
+    step: []const Id = &.{},
+    body_safety: []const Id = &.{},
+    post: []const Id = &.{},
+};
+
+pub const LoopUnsupportedReason = enum(u8) {
+    loop_has_storage_write,
+    loop_has_storage_read,
+    loop_has_call,
+    loop_has_external_call,
+    loop_has_resource_operation,
+    loop_has_break_or_continue,
+    loop_has_error_control_flow,
+    loop_has_nested_loop,
+    loop_has_branching_body,
+    loop_variable_not_u256,
+    loop_update_not_scalar_assignment,
+    loop_formula_unsupported,
+    loop_identity_missing,
+    loop_query_not_owner_scoped,
+    loop_guard_missing,
+    loop_invariant_missing,
+    loop_kind_unsupported,
+    loop_duplicate_update,
+    loop_update_target_not_loop_variable,
+    loop_body_safety_missing,
 };
 
 pub const SourceRef = struct {
@@ -1270,9 +1414,12 @@ test "manifest enum tags stay byte-sized" {
         DiagnosticKind,
         Phase,
         ArtifactPolicy,
+        ProofRequirement,
         ArtifactBlockReason,
         OwnerTag,
         BackendComponent,
+        LoopKind,
+        LoopUnsupportedReason,
         OriginTag,
         EffectAccess,
         KindTag,
@@ -1652,6 +1799,97 @@ test "artifact policy treats Lean-required proof gaps as hard failures" {
         .proof_artifacts = &artifacts,
         .terms = &.{.{ .bool_lit = true }},
     }).artifactDecision().isAllowed());
+}
+
+test "loop induction certificate is independent and cannot override a failed Z3 query" {
+    const obligation_ids = [_]Id{1};
+    const induction_query_ids = [_]Id{2};
+    const post_query_ids = [_]Id{3};
+    const obligations = [_]Obligation{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "count" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = 0 } } },
+    }};
+    const summaries = [_]LoopSummaryRow{.{
+        .id = 7,
+        .owner = .{ .statement = .{ .function_name = "count", .ordinal = 0 } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .loop_source_op_id = 0,
+        .loop_kind = .scf_while,
+        .query_ids = .{ .induction = &induction_query_ids, .post = &post_query_ids },
+    }};
+    const induction_target: VerificationQuery = .{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "count" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .proof_requirement = .lean_certificate,
+        .kind = .loop_induction,
+        .loop_summary_id = 7,
+    };
+    const z3_query: VerificationQuery = .{
+        .id = 3,
+        .owner = induction_target.owner,
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .backend = .z3,
+        .kind = .loop_invariant_post,
+        .obligation_ids = &obligation_ids,
+        .loop_summary_id = 7,
+        .result = .{ .status = .unsat },
+    };
+
+    try expectArtifactBlocked(.lean_required_failure, (ObligationSet{
+        .terms = &.{.{ .bool_lit = true }},
+        .obligations = &obligations,
+        .loop_summaries = &summaries,
+        .queries = &.{ induction_target, z3_query },
+    }).artifactDecision());
+
+    const artifacts = [_]ProofArtifact{.{
+        .id = 10,
+        .owner = z3_query.owner,
+        .source = .generated(),
+        .module_name = "Ora.Proofs.Count",
+        .theorem_name = "count_induction",
+    }};
+    const lean_query: VerificationQuery = .{
+        .id = 4,
+        .owner = z3_query.owner,
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .backend = .lean,
+        .kind = .loop_induction,
+        .proof_artifact_id = 10,
+        .discharges_query_id = 2,
+        .loop_summary_id = 7,
+        .result = .{ .status = .proved },
+    };
+    try std.testing.expect((ObligationSet{
+        .terms = &.{.{ .bool_lit = true }},
+        .obligations = &obligations,
+        .loop_summaries = &summaries,
+        .proof_artifacts = &artifacts,
+        .queries = &.{ induction_target, z3_query, lean_query },
+    }).artifactDecision().isAllowed());
+
+    var failed_z3_query = z3_query;
+    failed_z3_query.result = .{ .status = .sat };
+    try expectArtifactBlocked(.failed_query, (ObligationSet{
+        .terms = &.{.{ .bool_lit = true }},
+        .obligations = &obligations,
+        .loop_summaries = &summaries,
+        .proof_artifacts = &artifacts,
+        .queries = &.{ induction_target, failed_z3_query, lean_query },
+    }).artifactDecision());
 }
 
 test "userland Lean proof artifact attaches to a required obligation" {
@@ -2195,6 +2433,41 @@ test "obligation can point at MLIR origin without proof term" {
     };
 
     try std.testing.expect(obligation.blocksArtifacts());
+}
+
+test "diagnostic-only query carries accounting identity without artifact authority" {
+    const obligation_ids = [_]Id{1};
+    const obligations = [_]Obligation{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "loop" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .kind = .{ .logical = .{
+            .role = .loop_invariant,
+            .formula = .{ .term = 0 },
+        } },
+        .artifact_policy = .diagnostic_only,
+    }};
+    const queries = [_]VerificationQuery{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "loop" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .artifact_policy = .diagnostic_only,
+        .backend = .z3,
+        .kind = .obligation,
+        .obligation_ids = &obligation_ids,
+        .result = .{ .status = .unknown },
+    }};
+    const set: ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &.{.{ .bool_lit = true }},
+    };
+
+    try std.testing.expect(set.artifactDecision().isAllowed());
 }
 
 test "derived obligations keep provenance instead of rewriting originals" {

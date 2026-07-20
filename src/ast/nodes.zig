@@ -48,6 +48,12 @@ pub const BinaryOp = enum {
 pub const AssignmentOp = enum { assign, add_assign, sub_assign, mul_assign, div_assign, mod_assign, bit_and_assign, bit_or_assign, bit_xor_assign, shl_assign, shr_assign, pow_assign, wrapping_add_assign, wrapping_sub_assign, wrapping_mul_assign };
 pub const Quantifier = enum { forall, exists };
 
+/// File-local identity of a source formal syntax node. The syntax node's byte
+/// start is unique within a parsed file and remains stable through AST/sema
+/// lowering. Package accounting later maps this structural identity to its
+/// canonical package-global `SiteId`.
+pub const SourceFactId = u32;
+
 pub const NodeError = struct {
     range: source.TextRange,
 };
@@ -386,7 +392,7 @@ pub const WhileStmt = struct {
     range: source.TextRange,
     label: ?[]const u8 = null,
     condition: ExprId,
-    invariants: []ExprId,
+    invariants: []InvariantClause,
     body: BodyId,
 };
 
@@ -398,7 +404,7 @@ pub const ForStmt = struct {
     range_inclusive: bool = true,
     item_pattern: PatternId,
     index_pattern: ?PatternId,
-    invariants: []ExprId,
+    invariants: []InvariantClause,
     body: BodyId,
 };
 
@@ -440,7 +446,7 @@ pub const SwitchStmt = struct {
     range: source.TextRange,
     label: ?[]const u8,
     condition: ExprId,
-    invariants: []ExprId = &.{},
+    invariants: []InvariantClause = &.{},
     arms: []SwitchArm,
     else_body: ?BodyId,
 };
@@ -492,17 +498,20 @@ pub const UnlockStmt = struct {
 
 pub const AssertStmt = struct {
     range: source.TextRange,
+    source_fact_id: ?SourceFactId = null,
     condition: ExprId,
     message: ?[]const u8,
 };
 
 pub const AssumeStmt = struct {
     range: source.TextRange,
+    source_fact_id: ?SourceFactId = null,
     condition: ExprId,
 };
 
 pub const HavocStmt = struct {
     range: source.TextRange,
+    source_fact_id: ?SourceFactId = null,
     name: []const u8,
 };
 
@@ -549,8 +558,20 @@ pub const Parameter = struct {
 
 pub const SpecClause = struct {
     range: source.TextRange,
+    source_fact_id: ?SourceFactId = null,
     kind: SpecClauseKind,
     expr: ExprId,
+};
+
+/// First-class invariant source fact.  Keeping the predicate, complete clause
+/// range, optional presentation label, and owner-local ordinal together makes
+/// invariant identity survive syntax lowering without source-text recovery.
+pub const InvariantClause = struct {
+    predicate: ExprId,
+    range: source.TextRange,
+    source_fact_id: ?SourceFactId = null,
+    label: ?[]const u8 = null,
+    ordinal: u32,
 };
 
 pub const TraitBound = struct {
@@ -646,7 +667,7 @@ pub const ContractItem = struct {
     is_generic: bool = false,
     template_parameters: []const Parameter,
     members: []ItemId,
-    invariants: []ExprId,
+    invariants: []InvariantClause,
 };
 
 pub const FunctionItem = struct {

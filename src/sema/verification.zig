@@ -48,13 +48,13 @@ pub fn appendVerificationFacts(
 fn collectFactsForItem(allocator: std.mem.Allocator, file: *const ast.AstFile, item_id: ast.ItemId, facts: *std.ArrayList(VerificationFact)) !void {
     switch (file.item(item_id).*) {
         .Contract => |contract| {
-            for (contract.invariants) |expr_id| {
+            for (contract.invariants) |invariant| {
                 try appendInvariantFact(allocator, file, facts, .{
                     .kind = .contract_invariant,
                     .owner = .{ .item = item_id },
                     .range = source.TextRange.empty(0),
                     .context = .contract,
-                }, expr_id);
+                }, invariant);
             }
             for (contract.members) |member_id| {
                 try collectGhostFactsForItem(allocator, file, member_id, facts);
@@ -95,6 +95,7 @@ fn collectFactsForItem(allocator: std.mem.Allocator, file: *const ast.AstFile, i
                 try facts.append(allocator, .{
                     .kind = fact_kind,
                     .owner = .{ .item = item_id },
+                    .source_fact_id = clause.source_fact_id,
                     .expr = clause.expr,
                     .range = clause.range,
                 });
@@ -149,39 +150,19 @@ fn collectGhostFactsForItem(allocator: std.mem.Allocator, file: *const ast.AstFi
     }
 }
 
-const InvariantPayload = struct {
-    expr_id: ast.ExprId,
-    label: ?[]const u8,
-};
-
-fn invariantPayload(file: *const ast.AstFile, expr_id: ast.ExprId) InvariantPayload {
-    return switch (file.expression(expr_id).*) {
-        .Call => |call| blk: {
-            if (call.args.len == 1) {
-                const label = switch (file.expression(call.callee).*) {
-                    .Name => |name| name.name,
-                    else => null,
-                };
-                break :blk .{ .expr_id = call.args[0], .label = label };
-            }
-            break :blk .{ .expr_id = expr_id, .label = null };
-        },
-        else => .{ .expr_id = expr_id, .label = null },
-    };
-}
-
 fn appendInvariantFact(
     allocator: std.mem.Allocator,
     file: *const ast.AstFile,
     facts: *std.ArrayList(VerificationFact),
     base: VerificationFact,
-    expr_id: ast.ExprId,
+    invariant: ast.InvariantClause,
 ) !void {
-    const payload = invariantPayload(file, expr_id);
+    _ = file;
     var fact = base;
-    fact.expr = payload.expr_id;
-    fact.label = payload.label;
-    fact.range = source.rangeOf(file.expression(expr_id).*);
+    fact.source_fact_id = invariant.source_fact_id;
+    fact.expr = invariant.predicate;
+    fact.label = invariant.label;
+    fact.range = invariant.range;
     try facts.append(allocator, fact);
 }
 
@@ -244,39 +225,40 @@ fn collectDirectFactsForStatement(
 ) !void {
     switch (file.statement(owner.stmt).*) {
         .While => |while_stmt| {
-            for (while_stmt.invariants) |expr_id| {
+            for (while_stmt.invariants) |invariant| {
                 try appendInvariantFact(allocator, file, facts, .{
                     .kind = .loop_invariant,
                     .owner = .{ .statement = owner },
                     .range = source.TextRange.empty(0),
                     .context = .loop,
-                }, expr_id);
+                }, invariant);
             }
         },
         .For => |for_stmt| {
-            for (for_stmt.invariants) |expr_id| {
+            for (for_stmt.invariants) |invariant| {
                 try appendInvariantFact(allocator, file, facts, .{
                     .kind = .loop_invariant,
                     .owner = .{ .statement = owner },
                     .range = source.TextRange.empty(0),
                     .context = .loop,
-                }, expr_id);
+                }, invariant);
             }
         },
         .Switch => |switch_stmt| {
-            for (switch_stmt.invariants) |expr_id| {
+            for (switch_stmt.invariants) |invariant| {
                 try appendInvariantFact(allocator, file, facts, .{
                     .kind = .loop_invariant,
                     .owner = .{ .statement = owner },
                     .range = source.TextRange.empty(0),
                     .context = .loop,
-                }, expr_id);
+                }, invariant);
             }
         },
         .Havoc => |havoc_stmt| {
             try facts.append(allocator, .{
                 .kind = .havoc,
                 .owner = .{ .statement = owner },
+                .source_fact_id = havoc_stmt.source_fact_id,
                 .target_name = havoc_stmt.name,
                 .range = havoc_stmt.range,
             });
@@ -304,6 +286,7 @@ fn collectFactsForTraitMethod(
         try facts.append(allocator, .{
             .kind = fact_kind,
             .owner = .{ .trait_method = owner },
+            .source_fact_id = clause.source_fact_id,
             .expr = clause.expr,
             .range = clause.range,
             .context = .trait_method_contract,
@@ -338,6 +321,7 @@ fn collectGhostStatementFacts(
             try facts.append(allocator, .{
                 .kind = .assert,
                 .owner = .{ .item = owner_id },
+                .source_fact_id = assert_stmt.source_fact_id,
                 .expr = assert_stmt.condition,
                 .range = assert_stmt.range,
                 .context = context,
@@ -347,6 +331,7 @@ fn collectGhostStatementFacts(
             try facts.append(allocator, .{
                 .kind = .assume,
                 .owner = .{ .item = owner_id },
+                .source_fact_id = assume_stmt.source_fact_id,
                 .expr = assume_stmt.condition,
                 .range = assume_stmt.range,
                 .context = context,

@@ -14,6 +14,7 @@ must visibly fail, with the expected message.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -21,6 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ORA_BIN = ROOT / "zig-out" / "bin" / "ora"
 NEG_DIR = ROOT / "tests" / "negative"
+ARTIFACT_DIR = ROOT / "artifacts" / "negative-corpus"
 
 
 def fail(msg: str) -> None:
@@ -61,6 +63,9 @@ def main() -> None:
     if not ora_files:
         fail("no .ora files in tests/negative")
 
+    shutil.rmtree(ARTIFACT_DIR, ignore_errors=True)
+    ARTIFACT_DIR.mkdir(parents=True)
+
     checked = 0
     for ora in ora_files:
         sidecar = ora.with_suffix(".expect.toml")
@@ -69,7 +74,7 @@ def main() -> None:
         expect = parse_expect(sidecar)
 
         proc = subprocess.run(
-            [str(ORA_BIN), "emit", "--emit=bytecode", str(ora)],
+            [str(ORA_BIN), "emit", "--emit=bytecode", "-o", str(ARTIFACT_DIR), str(ora)],
             cwd=ROOT,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

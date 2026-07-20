@@ -1,0 +1,11 @@
+contract ScalarLoopInduction {
+    pub fn countThree() -> u256 {
+        var i: u256 = 0;
+        while (i < 3)
+            invariant i <= 3
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+}

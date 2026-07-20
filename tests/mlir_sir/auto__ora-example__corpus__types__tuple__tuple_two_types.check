@@ -2,7 +2,7 @@
 // INPUT: ora-example/corpus/types/tuple/tuple_two_types.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @u256_bool() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x3ff07c4d", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @u256_bool() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x3ff07c4d", ora.source_module_path = "{{.*}}/ora-example/corpus/types/tuple/tuple_two_types.ora", ora.source_owner_key = "module/contract:TupleTwoTypes/function:u256_bool", ora.source_owner_start = 112 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/corpus/types/tuple/tuple_two_types.ora":7:31)))
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c0 = sir.const 0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/corpus/types/tuple/tuple_two_types.ora":11:16)))
@@ -21,14 +21,14 @@
 // CHECK-NEXT:     sir.store %5 : !sir.ptr<1>, %c0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/corpus/types/tuple/tuple_two_types.ora":11:9)))
 // CHECK-NEXT:     sir.return %5 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/corpus/types/tuple/tuple_two_types.ora":11:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/types/tuple/tuple_two_types.ora":6:5)
-// CHECK-NEXT:   func.func @address_u256() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x0fa8637c", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @address_u256() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x0fa8637c", ora.source_module_path = "{{.*}}/ora-example/corpus/types/tuple/tuple_two_types.ora", ora.source_owner_key = "module/contract:TupleTwoTypes/function:address_u256", ora.source_owner_start = 266 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/types/tuple/tuple_two_types.ora":16:9)))
 // CHECK-NEXT:     %c500 = sir.const 500 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/corpus/types/tuple/tuple_two_types.ora":15:53)))
 // CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/types/tuple/tuple_two_types.ora":16:9)))
 // CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %c500 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/types/tuple/tuple_two_types.ora":16:9)))
 // CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/corpus/types/tuple/tuple_two_types.ora":16:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/types/tuple/tuple_two_types.ora":14:5)
-// CHECK-NEXT:   func.func @bool_bool() -> !sir.u256 attributes {ora.abi_return = "bool", ora.abi_return_layout = "bool", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x868af867", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @bool_bool() -> !sir.u256 attributes {ora.abi_return = "bool", ora.abi_return_layout = "bool", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x868af867", ora.source_module_path = "{{.*}}/ora-example/corpus/types/tuple/tuple_two_types.ora", ora.source_owner_key = "module/contract:TupleTwoTypes/function:bool_bool", ora.source_owner_start = 387 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/corpus/types/tuple/tuple_two_types.ora":21:9)))
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.bitcast %1 : !sir.u256 : i1 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/corpus/types/tuple/tuple_two_types.ora":20:31)))
@@ -40,7 +40,7 @@
 // CHECK-NEXT:     sir.store %7 : !sir.ptr<1>, %6 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/corpus/types/tuple/tuple_two_types.ora":21:9)))
 // CHECK-NEXT:     sir.return %7 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/corpus/types/tuple/tuple_two_types.ora":21:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/corpus/types/tuple/tuple_two_types.ora":19:5)
-// CHECK-NEXT:   func.func @u256_address() -> !sir.u256 attributes {ora.abi_return = "address", ora.abi_return_layout = "address", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0xd9b8e404", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @u256_address() -> !sir.u256 attributes {ora.abi_return = "address", ora.abi_return_layout = "address", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0xd9b8e404", ora.source_module_path = "{{.*}}/ora-example/corpus/types/tuple/tuple_two_types.ora", ora.source_owner_key = "module/contract:TupleTwoTypes/function:u256_address", ora.source_owner_start = 492 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/corpus/types/tuple/tuple_two_types.ora":26:9)))
 // CHECK-NEXT:     %1 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/corpus/types/tuple/tuple_two_types.ora":26:9)))
 // CHECK-NEXT:     %2 = sir.caller : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/corpus/types/tuple/tuple_two_types.ora":25:38)))

@@ -186,8 +186,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     if (clause.verification_context) |context| {
                         mlir.oraOperationSetAttributeByName(op, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", context).attribute);
                     }
+                    try @This().attachFormalSourceFact(
+                        self,
+                        op,
+                        clause.source_fact_id,
+                        "requires",
+                        &.{"assumption_context"},
+                    );
                     appendOp(self.block, op);
-                    try @This().emitRuntimeRequiresAssert(self, clause.range, condition, clause.verification_context, null);
+                    try @This().emitRuntimeRequiresAssert(self, clause.range, condition, clause.source_fact_id, clause.verification_context, null);
                 }
                 try @This().emitExtraGuardClauses(self, &self.locals);
 
@@ -246,8 +253,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const condition = try self.lowerExpr(expr, locals);
                 const op = mlir.oraRequiresOpCreate(self.parent.context, self.parent.location(fact.range), condition);
                 if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                try @This().attachFormalSourceFact(
+                    self,
+                    op,
+                    fact.source_fact_id,
+                    "requires",
+                    &.{"assumption_context"},
+                );
                 appendOp(self.block, op);
-                try @This().emitRuntimeRequiresAssert(self, fact.range, condition, null, runtime_check_key);
+                try @This().emitRuntimeRequiresAssert(self, fact.range, condition, fact.source_fact_id, null, runtime_check_key);
             }
         }
 
@@ -255,6 +269,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             self: *FunctionLowerer,
             range: source.TextRange,
             condition: mlir.MlirValue,
+            source_fact_id: ?ast.SourceFactId,
             verification_context: ?[]const u8,
             runtime_check_key: ?[]const u8,
         ) anyerror!void {
@@ -273,6 +288,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (runtime_check_key) |key| {
                 mlir.oraOperationSetAttributeByName(assert_op, strRef("ora.runtime_check_key"), namedStringAttr(self.parent.context, "ora.runtime_check_key", key).attribute);
             }
+            try @This().attachFormalSourceFact(self, assert_op, source_fact_id, "requires", &.{"runtime_condition"});
             appendOp(self.block, assert_op);
         }
 
@@ -404,6 +420,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const condition = try @This().lowerEnsureCondition(self, fact.kind == .ensures_ok, expr, locals, ok_result_value);
                     const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(fact.range), condition);
                     if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
+                    try @This().attachFormalSourceFact(
+                        self,
+                        ensure,
+                        fact.source_fact_id,
+                        @tagName(fact.kind),
+                        &.{"proof_target"},
+                    );
                     appendOp(self.block, ensure);
                 }
             }
@@ -418,6 +441,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (clause.verification_context) |context| {
                     mlir.oraOperationSetAttributeByName(ensure, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", context).attribute);
                 }
+                try @This().attachFormalSourceFact(
+                    self,
+                    ensure,
+                    clause.source_fact_id,
+                    @tagName(clause.kind),
+                    &.{"proof_target"},
+                );
                 appendOp(self.block, ensure);
             }
         }
@@ -460,7 +490,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             for (self.parent.itemVerificationFactEntries(item_id)) |entry| {
                 const fact = self.parent.verificationFact(entry);
                 if (fact.kind != .guard) continue;
-                try @This().emitRuntimeGuard(self, fact.range, try @This().factExpr(fact.*), locals);
+                try @This().emitRuntimeGuard(self, fact.range, fact.source_fact_id, try @This().factExpr(fact.*), locals);
             }
         }
 
@@ -468,7 +498,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             for (self.extra_verification_clauses) |clause| {
                 if (clause.kind != .guard) continue;
                 var clause_locals = try @This().localsWithExtraVerificationAliases(self, locals, clause);
-                try @This().emitRuntimeGuard(self, clause.range, clause.expr, &clause_locals);
+                try @This().emitRuntimeGuard(self, clause.range, clause.source_fact_id, clause.expr, &clause_locals);
             }
         }
 
@@ -489,6 +519,49 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return fact.expr orelse error.InvalidVerificationFact;
         }
 
+        fn attachFormalSourceFact(
+            self: *FunctionLowerer,
+            op: mlir.MlirOperation,
+            source_fact_id: ?ast.SourceFactId,
+            kind: []const u8,
+            roles: []const []const u8,
+        ) !void {
+            mlir.oraOperationSetAttributeByName(
+                op,
+                strRef("ora.source_fact_origin"),
+                namedStringAttr(
+                    self.parent.context,
+                    "ora.source_fact_origin",
+                    if (source_fact_id == null) "semantic_generated" else "source_syntax",
+                ).attribute,
+            );
+            if (source_fact_id) |id| {
+                mlir.oraOperationSetAttributeByName(
+                    op,
+                    strRef("ora.source_fact_id"),
+                    mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.parent.context), @intCast(id)),
+                );
+            }
+            mlir.oraOperationSetAttributeByName(
+                op,
+                strRef("ora.source_fact_kind"),
+                namedStringAttr(self.parent.context, "ora.source_fact_kind", kind).attribute,
+            );
+            const role_attrs = try self.parent.allocator.alloc(mlir.MlirAttribute, roles.len);
+            for (roles, role_attrs) |role, *attr| {
+                attr.* = mlir.oraStringAttrCreate(self.parent.context, strRef(role));
+            }
+            mlir.oraOperationSetAttributeByName(
+                op,
+                strRef("ora.source_fact_roles"),
+                mlir.oraArrayAttrCreate(
+                    self.parent.context,
+                    @intCast(role_attrs.len),
+                    if (role_attrs.len == 0) null else role_attrs.ptr,
+                ),
+            );
+        }
+
         fn statementFactOwner(self: *FunctionLowerer, statement_id: ast.StmtId) !sema.VerificationStatementOwner {
             return .{
                 .item = self.item_id orelse return error.InvalidVerificationFact,
@@ -507,6 +580,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (fact.label) |label| {
                 mlir.oraOperationSetAttributeByName(op, strRef("ora.label"), namedStringAttr(self.parent.context, "ora.label", label).attribute);
             }
+            try @This().attachFormalSourceFact(
+                self,
+                op,
+                fact.source_fact_id,
+                @tagName(fact.kind),
+                &.{ "proof_target", "assumption_context" },
+            );
             appendOp(self.block, op);
         }
 
@@ -527,13 +607,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const target_name = fact.target_name orelse return error.InvalidVerificationFact;
                 const op = mlir.oraHavocOpCreate(self.parent.context, self.parent.location(fact.range), strRef(target_name));
                 if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                try @This().attachFormalSourceFact(self, op, fact.source_fact_id, "havoc", &.{"state_directive"});
                 appendOp(self.block, op);
                 return;
             }
             return error.InvalidVerificationFact;
         }
 
-        fn emitRuntimeGuard(self: *FunctionLowerer, range: source.TextRange, expr: ast.ExprId, locals: *LocalEnv) anyerror!void {
+        fn emitRuntimeGuard(
+            self: *FunctionLowerer,
+            range: source.TextRange,
+            source_fact_id: ?ast.SourceFactId,
+            expr: ast.ExprId,
+            locals: *LocalEnv,
+        ) anyerror!void {
             const condition = try self.lowerExpr(expr, locals);
             const loc = self.parent.location(range);
             const message = try @This().guardMessage(self, expr);
@@ -554,6 +641,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             mlir.oraOperationSetAttributeByName(assert_op, strRef("ora.verification_type"), namedStringAttr(self.parent.context, "ora.verification_type", "guard").attribute);
             mlir.oraOperationSetAttributeByName(assert_op, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", "guard_clause").attribute);
             mlir.oraOperationSetAttributeByName(assert_op, strRef("ora.guard_id"), namedStringAttr(self.parent.context, "ora.guard_id", guard_id).attribute);
+            try @This().attachFormalSourceFact(
+                self,
+                assert_op,
+                source_fact_id,
+                "guard",
+                &.{ "proof_target", "runtime_condition" },
+            );
             appendOp(self.block, assert_op);
 
             const assume_op = mlir.oraAssumeOpCreate(self.parent.context, loc, condition);
@@ -1724,6 +1818,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         mlir.oraOperationSetAttributeByName(op, strRef("ora.verification_type"), namedStringAttr(self.parent.context, "ora.verification_type", "assert").attribute);
                         mlir.oraOperationSetAttributeByName(op, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", "ghost_assertion").attribute);
                     }
+                    try @This().attachFormalSourceFact(
+                        self,
+                        op,
+                        assert_stmt.source_fact_id,
+                        "assert",
+                        &.{ "proof_target", "runtime_condition" },
+                    );
                     appendOp(self.block, op);
                     return false;
                 },
@@ -1731,6 +1832,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const condition = try self.lowerExpr(assume_stmt.condition, locals);
                     const op = mlir.oraAssumeOpCreate(self.parent.context, self.parent.location(assume_stmt.range), condition);
                     if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                    try @This().attachFormalSourceFact(
+                        self,
+                        op,
+                        assume_stmt.source_fact_id,
+                        "assume",
+                        &.{"assumption_context"},
+                    );
                     appendOp(self.block, op);
                     return false;
                 },

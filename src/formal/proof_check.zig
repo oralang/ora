@@ -111,6 +111,7 @@ fn applyRows(
             .assumption_ids = proof_assumption_ids,
             .proof_artifact_id = artifact_id,
             .discharges_query_id = row.query_id,
+            .loop_summary_id = target_query.loop_summary_id,
             .result = .{ .status = .proved },
         });
         try checker_rows.append(arena_allocator, .{
@@ -121,11 +122,12 @@ fn applyRows(
             .assumption_ids = proof_assumption_ids,
             .requires_agreement = proofTargetRequiresAgreement(target_query),
             .z3_row_matched = target_query.smtlib_hash != null,
-            .z3_plain_unknown = proofTargetIsPlainUnknown(target_query),
+            .z3_proof_compatible = proofTargetIsCompatible(target_query),
             .zig_semantic_supported = switch (obligation_to_lean.querySemanticSupport(set, target_query)) {
                 .supported => true,
                 .unsupported => false,
             },
+            .loop_summary_id = target_query.loop_summary_id,
             .target_smtlib_hash = target_query.smtlib_hash,
             .target_constraint_count = target_query.constraint_count,
         });
@@ -140,6 +142,7 @@ fn applyRows(
             .content_sha256 = content_sha256,
             .target_smtlib_hash = target_query.smtlib_hash,
             .target_constraint_count = target_query.constraint_count,
+            .loop_summary_id = target_query.loop_summary_id,
         });
     }
 
@@ -165,13 +168,30 @@ fn applyRows(
 }
 
 fn validateProofTarget(target_query: obligation.VerificationQuery) !void {
+    if (target_query.artifact_policy == .diagnostic_only) return error.ProofRowTargetNotEligible;
+    if (target_query.kind == .loop_induction) {
+        if (target_query.loop_summary_id == null) return error.ProofRowLoopSummaryMissing;
+        if (target_query.obligation_ids.len != 0 or
+            target_query.backend != .unspecified or
+            target_query.result != null or
+            target_query.proof_requirement != .lean_certificate)
+        {
+            return error.ProofRowTargetNotEligible;
+        }
+        return;
+    }
     if (target_query.obligation_ids.len == 0) return error.ProofRowMissingObligations;
+    switch (target_query.kind) {
+        .loop_invariant_step, .loop_body_safety, .loop_invariant_post => return error.ProofRowTargetNotEligible,
+        else => {},
+    }
 
     if (target_query.result) |target_result| {
         if (target_query.backend != .z3) return error.ProofRowTargetNotZ3;
-        if (target_result.status != .unknown or target_result.degraded or target_result.vacuity_unknown) {
+        if (target_result.degraded or target_result.vacuous or target_result.vacuity_unknown) {
             return error.ProofRowTargetNotPlainUnknown;
         }
+        if (target_result.status != .unknown) return error.ProofRowTargetNotPlainUnknown;
         return;
     }
 
@@ -188,6 +208,10 @@ fn proofTargetIsPlainUnknown(target_query: obligation.VerificationQuery) bool {
 }
 
 fn proofTargetRequiresAgreement(target_query: obligation.VerificationQuery) bool {
+    return proofTargetIsCompatible(target_query);
+}
+
+fn proofTargetIsCompatible(target_query: obligation.VerificationQuery) bool {
     return proofTargetIsPlainUnknown(target_query);
 }
 
@@ -206,8 +230,9 @@ const CheckedProofRow = struct {
     assumption_ids: []const obligation.Id = &.{},
     requires_agreement: bool = false,
     z3_row_matched: bool = false,
-    z3_plain_unknown: bool = false,
+    z3_proof_compatible: bool = false,
     zig_semantic_supported: bool = false,
+    loop_summary_id: ?obligation.Id = null,
     target_smtlib_hash: ?u64 = null,
     target_constraint_count: u32 = 0,
 };
@@ -235,6 +260,7 @@ const CertificateRow = struct {
     axioms: []const []const u8 = &.{},
     target_smtlib_hash: ?u64,
     target_constraint_count: u32,
+    loop_summary_id: ?obligation.Id = null,
 };
 
 fn buildCertificateJson(
@@ -313,6 +339,12 @@ fn buildCertificateJsonWithLeanVersion(
         }
         try writer.writeAll(",\n      \"target_constraint_count\": ");
         try writer.print("{d}", .{row.target_constraint_count});
+        try writer.writeAll(",\n      \"loop_summary_id\": ");
+        if (row.loop_summary_id) |summary_id| {
+            try writer.print("{d}", .{summary_id});
+        } else {
+            try writer.writeAll("null");
+        }
         try writer.writeAll(",\n      \"module_name\": ");
         try writeJsonString(writer, row.module_name);
         try writer.writeAll(",\n      \"theorem_name\": ");
@@ -525,7 +557,7 @@ fn buildLeanAgreementSource(
     try writer.writeAll("\n\n");
 
     try writer.writeAll("def agreementRows : List Ora.Obligation.Agreement.Row := ");
-    try writeAgreementRows(writer, rows, options);
+    try writeAgreementRows(writer, generated_namespace, rows, options);
     try writer.writeAll("\n\n");
 
     try writer.print(
@@ -564,7 +596,12 @@ fn writeLeanAcceptedProofTargetIds(writer: anytype, rows: []const CheckedProofRo
     try writer.writeByte(']');
 }
 
-fn writeAgreementRows(writer: anytype, rows: []const CheckedProofRow, options: AgreementSourceOptions) !void {
+fn writeAgreementRows(
+    writer: anytype,
+    generated_namespace: []const u8,
+    rows: []const CheckedProofRow,
+    options: AgreementSourceOptions,
+) !void {
     if (options.omit_agreement_rows_for_testing) return writer.writeAll("[]");
     try writer.writeByte('[');
     var emitted_any = false;
@@ -573,13 +610,13 @@ fn writeAgreementRows(writer: anytype, rows: []const CheckedProofRow, options: A
             if (!row.requires_agreement) continue;
             if (emitted_any) try writer.writeAll(", ");
             emitted_any = true;
-            try writeAgreementRow(writer, row);
+            try writeAgreementRow(writer, generated_namespace, row);
         }
     }
     try writer.writeByte(']');
 }
 
-fn writeAgreementRow(writer: anytype, row: CheckedProofRow) !void {
+fn writeAgreementRow(writer: anytype, generated_namespace: []const u8, row: CheckedProofRow) !void {
     try writer.writeAll("{ queryId := ");
     try writer.print("{d}", .{row.query_id});
     try writer.writeAll(", assumptionIds := ");
@@ -588,8 +625,8 @@ fn writeAgreementRow(writer: anytype, row: CheckedProofRow) !void {
     try obligation.writeNatList(writer, row.obligation_ids);
     try writer.writeAll(", z3RowMatched := ");
     try writer.writeAll(if (row.z3_row_matched) "true" else "false");
-    try writer.writeAll(", z3PlainUnknown := ");
-    try writer.writeAll(if (row.z3_plain_unknown) "true" else "false");
+    try writer.writeAll(", z3ProofCompatible := ");
+    try writer.writeAll(if (row.z3_proof_compatible) "true" else "false");
     try writer.writeAll(", constraintCount := ");
     try writer.print("{d}", .{row.target_constraint_count});
     try writer.writeAll(", smtlibHash := ");
@@ -602,6 +639,17 @@ fn writeAgreementRow(writer: anytype, row: CheckedProofRow) !void {
     }
     try writer.writeAll(", zigSemanticSupported := ");
     try writer.writeAll(if (row.zig_semantic_supported) "true" else "false");
+    try writer.writeAll(", usesLoopSummary := ");
+    try writer.writeAll(if (row.loop_summary_id != null) "true" else "false");
+    try writer.writeAll(", loopSummarySupported := ");
+    if (row.loop_summary_id) |summary_id| {
+        try writer.print(
+            "{s}.emittedLoopSummary_{d}.supported {s}.emittedManifest",
+            .{ generated_namespace, summary_id, generated_namespace },
+        );
+    } else {
+        try writer.writeAll("false");
+    }
     try writer.writeAll(" }");
 }
 
@@ -634,13 +682,23 @@ fn buildLeanCheckerSource(
     try writeLeanAxiomAuditPrelude(writer);
     try writer.writeByte('\n');
     for (rows, 0..) |row, index| {
-        try writer.print(
-            \\theorem check_query_{d}_{d} :
-            \\    {s}.emittedQuery_{d} := by
-            \\  exact {s}
-            \\
-            \\
-        , .{ row.query_id, index, generated_namespace, row.query_id, row.theorem_name });
+        if (row.loop_summary_id != null) {
+            try writer.print(
+                \\theorem check_query_{d}_{d} :
+                \\    {s}.emittedVerifiedQuery_{d} := by
+                \\  exact {s}.emittedQuery_{d}_sound {s}
+                \\
+                \\
+            , .{ row.query_id, index, generated_namespace, row.query_id, generated_namespace, row.query_id, row.theorem_name });
+        } else {
+            try writer.print(
+                \\theorem check_query_{d}_{d} :
+                \\    {s}.emittedQuery_{d} := by
+                \\  exact {s}
+                \\
+                \\
+            , .{ row.query_id, index, generated_namespace, row.query_id, row.theorem_name });
+        }
     }
     try writer.writeAll("#ora_audit_axioms [\n");
     for (rows, 0..) |row, index| {
@@ -977,6 +1035,32 @@ test "Lean proof row syntax accepts only strict dotted identifiers" {
     }));
 }
 
+test "mandatory loop induction target is independent of Z3 agreement rows" {
+    const base: obligation.VerificationQuery = .{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "count" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .proof_requirement = .lean_certificate,
+        .kind = .loop_induction,
+        .loop_summary_id = 7,
+    };
+
+    try validateProofTarget(base);
+    try std.testing.expect(!proofTargetIsCompatible(base));
+    try std.testing.expect(!proofTargetRequiresAgreement(base));
+
+    var spoofed_z3_target = base;
+    spoofed_z3_target.backend = .z3;
+    spoofed_z3_target.result = .{ .status = .unsat };
+    try std.testing.expectError(error.ProofRowTargetNotEligible, validateProofTarget(spoofed_z3_target));
+
+    var missing_summary = base;
+    missing_summary.loop_summary_id = null;
+    try std.testing.expectError(error.ProofRowLoopSummaryMissing, validateProofTarget(missing_summary));
+}
+
 test "proof content digest validation uses sha256" {
     const allocator = std.testing.allocator;
     const source = "theorem transfer_preserves_supply : True := by trivial\n";
@@ -1048,6 +1132,7 @@ test "proof certificate JSON exposes stable schema fields" {
         .axioms = &.{ "propext", "Quot.sound" },
         .target_smtlib_hash = 99,
         .target_constraint_count = 5,
+        .loop_summary_id = 4,
     }};
 
     const certificate = try buildCertificateJsonWithLeanVersion(
@@ -1061,7 +1146,7 @@ test "proof certificate JSON exposes stable schema fields" {
     );
     defer allocator.free(certificate);
 
-    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"schema_version\": 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"schema_version\": 2") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"version\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"hash_algorithm\": \"sha256\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"lean_version\": \"Lean test version\"") != null);
@@ -1069,6 +1154,7 @@ test "proof certificate JSON exposes stable schema fields" {
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"proof_count\": 1") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"target_query_id\": 11") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"lean_query_id\": 12") != null);
+    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"loop_summary_id\": 4") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"content_sha256\": \"0000000000000000000000000000000000000000000000000000000000000000\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"axioms\": [\"propext\", \"Quot.sound\"]") != null);
 }
@@ -1095,6 +1181,37 @@ test "Lean checker source audits proof-row theorem axiom dependencies" {
     try std.testing.expect(std.mem.indexOf(u8, checker, "ORA_AXIOM_AUDIT\\t{decl}\\t{formatAxioms normalized}") != null);
     try std.testing.expect(std.mem.indexOf(u8, checker, "theorem check_query_17_0") != null);
     try std.testing.expect(std.mem.indexOf(u8, checker, "#ora_audit_axioms [\n  check_query_17_0\n]") != null);
+}
+
+test "loop checker audits the kernel-derived verified theorem" {
+    const allocator = std.testing.allocator;
+    const rows = [_]CheckedProofRow{.{
+        .query_id = 17,
+        .module_name = "Ora.Proofs.Count",
+        .theorem_name = "Ora.Proofs.Count.induction",
+        .loop_summary_id = 4,
+    }};
+    const checker = try buildLeanCheckerSource(
+        allocator,
+        "Ora.Generated.Obligations.Count",
+        "Ora.ProofCheckScratch.Run_loop.Obligations",
+        "Ora.ProofCheckScratch.Run_loop.Agreement",
+        &rows,
+    );
+    defer allocator.free(checker);
+
+    try std.testing.expect(std.mem.containsAtLeast(
+        u8,
+        checker,
+        1,
+        "Ora.Generated.Obligations.Count.emittedVerifiedQuery_17",
+    ));
+    try std.testing.expect(std.mem.containsAtLeast(
+        u8,
+        checker,
+        1,
+        "Ora.Generated.Obligations.Count.emittedQuery_17_sound Ora.Proofs.Count.induction",
+    ));
 }
 
 test "agreement checker rejects empty rows for accepted proof targets" {
@@ -1157,9 +1274,24 @@ test "agreement checker rejects mutated Z3 row attestation" {
     );
 }
 
+test "agreement checker rejects a proof-incompatible Z3 target" {
+    const allocator = std.testing.allocator;
+    const process_environ = try leanTestProcessEnviron(allocator);
+    defer process_environ.block.deinit(allocator);
+
+    try expectBoolAgreementFixture(
+        allocator,
+        process_environ,
+        "RunAgreementIncompatibleFixture",
+        .{ .z3_proof_compatible = false },
+        .{},
+        .fails,
+    );
+}
+
 const AgreementRowFlags = struct {
     z3_row_matched: bool = true,
-    z3_plain_unknown: bool = true,
+    z3_proof_compatible: bool = true,
     zig_semantic_supported: bool = true,
 };
 
@@ -1216,7 +1348,7 @@ fn expectBoolAgreementFixture(
         .obligation_ids = &obligation_ids,
         .requires_agreement = true,
         .z3_row_matched = flags.z3_row_matched,
-        .z3_plain_unknown = flags.z3_plain_unknown,
+        .z3_proof_compatible = flags.z3_proof_compatible,
         .zig_semantic_supported = flags.zig_semantic_supported,
         .target_smtlib_hash = 99,
         .target_constraint_count = 3,
@@ -1285,7 +1417,7 @@ test "agreement checker rejects unsupported semantic proof target row" {
         .obligation_ids = &obligation_ids,
         .requires_agreement = true,
         .z3_row_matched = true,
-        .z3_plain_unknown = true,
+        .z3_proof_compatible = true,
         .zig_semantic_supported = false,
         .target_smtlib_hash = 99,
         .target_constraint_count = 3,

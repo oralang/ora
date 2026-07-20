@@ -9,6 +9,7 @@ import re
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 FORMAL_ROOT = ROOT / "formal" / "Ora"
+TRANSIENT_TEST_MODULE_DIRS = frozenset({"B6StorageFixture", "ProofCheckScratch"})
 
 LEAN_IDENT = r"[A-Za-z_][A-Za-z0-9_'?!]*"
 LEAN_DOTTED_IDENT = rf"{LEAN_IDENT}(?:\.{LEAN_IDENT})*"
@@ -62,6 +63,9 @@ def discover_targets() -> list[str]:
     targets: list[str] = []
     seen: set[str] = set()
     for path in sorted(FORMAL_ROOT.rglob("*.lean")):
+        relative_parts = path.relative_to(FORMAL_ROOT).parts
+        if relative_parts and relative_parts[0] in TRANSIENT_TEST_MODULE_DIRS:
+            continue
         namespace_stack: list[str] = []
         in_block_comment = False
         for raw_line in path.read_text(encoding="utf-8").splitlines():
@@ -114,6 +118,34 @@ def emit(targets: list[str]) -> str:
         "def allowedAxiom (name : Name) : Bool :=",
         "  name == `propext || name == `Quot.sound",
         "",
+        "/-- Return every public proof carried by a `def` or `opaque` declaration",
+        "under `namespacePrefix`. The environment query closes the source-scanner gap where",
+        "Prop-valued definitions were invisible to the theorem/lemma target list. -/",
+        "def publicProofDefinitions (env : Environment) (namespacePrefix : Name) : MetaM (Array Name) := do",
+        "  let mut out := #[]",
+        "  for (name, info) in env.constants.toList do",
+        "    unless namespacePrefix.isPrefixOf name do continue",
+        "    -- Lean reserves underscore-prefixed name components for compiler",
+        "    -- auxiliaries; they are not source-level public declarations.",
+        "    if isPrivateName name || name.isInternal then continue",
+        "    match info with",
+        "    | .defnInfo _ | .opaqueInfo _ =>",
+        "        try",
+        "          if <- Meta.isProp info.type then",
+        "            out := out.push name",
+        "        catch error =>",
+        "          throwError m!\"failed to classify public definition {name}: {error.toMessageData}\"",
+        "    | _ => pure ()",
+        "  return normalizeNames out",
+        "",
+        "namespace SelfTest",
+        "",
+        "/-- A generated-audit fixture proving that public proof-valued definitions",
+        "are discovered from the environment rather than only from source syntax. -/",
+        "def publicProofDefinition : True := True.intro",
+        "",
+        "end SelfTest",
+        "",
         "def auditTargets : Array Name := #[",
     ]
     for index, target in enumerate(targets):
@@ -127,9 +159,14 @@ def emit(targets: list[str]) -> str:
             "",
             "@[command_elab oraFormalAxiomAudit] def elabOraFormalAxiomAudit : CommandElab := fun _ => do",
             "  let env <- getEnv",
+            "  let proofDefinitions <- liftTermElabM do",
+            "    publicProofDefinitions (← getEnv) `Ora",
+            "  unless proofDefinitions.contains `Ora.FormalAxiomAudit.SelfTest.publicProofDefinition do",
+            "    throwError \"public proof-valued definition discovery self-test failed\"",
+            "  let declarations := normalizeNames (auditTargets ++ proofDefinitions)",
             "",
             "  let mut unexpected : Array (Prod Name Name) := #[]",
-            "  for decl in auditTargets do",
+            "  for decl in declarations do",
             "    unless env.contains decl do",
             "      throwError m!\"missing audited declaration: {decl}\"",
             "",
@@ -143,7 +180,7 @@ def emit(targets: list[str]) -> str:
             "    let renderedText := String.intercalate \"\\n\" rendered.toList",
             "    throwError m!\"unexpected Lean axiom dependencies in Ora formal tree:\\n{renderedText}\"",
             "",
-            "  logInfo m!\"OK: audited {auditTargets.size} Ora formal theorem/lemma declaration(s)\"",
+            "  logInfo m!\"OK: audited {declarations.size} Ora formal theorem/lemma and public proof-definition declaration(s)\"",
             "",
             "end Ora.FormalAxiomAudit",
             "",

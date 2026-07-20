@@ -165,7 +165,12 @@ pub fn overlayPreparedQueryResults(
 }
 
 fn queryRequiresPreparedRow(set: obligation.ObligationSet, query: obligation.VerificationQuery) bool {
+    if (query.artifact_policy == .diagnostic_only) return false;
     if (query.backend == .lean) return false;
+    // The induction bundle is a compiler-owned Lean target. Its underlying
+    // Step/Safety/Post checks remain ordinary verifier rows, but the aggregate
+    // certificate target deliberately has no synthetic Z3 counterpart.
+    if (query.kind == .loop_induction) return false;
     if (query.obligation_ids.len == 0) return true;
 
     for (query.obligation_ids) |id| {

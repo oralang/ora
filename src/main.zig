@@ -23,16 +23,22 @@ const import_graph = @import("ora_imports");
 const log = @import("log");
 const runtime_checks = @import("mlir/runtime_checks.zig");
 const formal_obligation = @import("formal/obligation.zig");
+const formal_obligation_dump = @import("formal/obligation_dump.zig");
 const formal_obligation_from_mlir = @import("formal/obligation_from_mlir.zig");
 const formal_obligation_from_z3 = @import("formal/obligation_from_z3.zig");
-const formal_obligation_to_lean = @import("formal/obligation_to_lean.zig");
 const formal_canonical_z3_measure = @import("formal/canonical_z3_measure.zig");
-const formal_dispatcher_table_gate = @import("formal/dispatcher_table_gate.zig");
+const formal_kernel_registry = @import("formal/kernel/registry.zig");
+const formal_artifact_catalog = @import("formal/shared/artifact_catalog.zig");
+const formal_source_accounting = @import("formal/shared/source_accounting.zig");
+const formal_source_accounting_from_z3 = @import("formal/source_accounting_from_z3.zig");
+const formal_source_accounting_pipeline = @import("formal/source_accounting_pipeline.zig");
+const formal_userland_coordinator = @import("formal/userland/coordinator.zig");
 const Metrics = lib.metrics.Metrics;
 const allocation_stats = lib.lsp.allocation_stats;
 const ManagedArrayList = std.array_list.Managed;
 
 const proof_sidecar_schema_version: u32 = 1;
+const default_formal_artifact_dir = "artifacts/formal-gate";
 
 /// MLIR-related command line options
 const MlirOptions = struct {
@@ -47,6 +53,9 @@ const MlirOptions = struct {
     /// Final user-facing artifact directory when output_dir points at a
     /// compiler-owned staging root.
     artifact_display_dir: ?[]const u8 = null,
+    /// Root used to make formal artifact index paths relative. This differs
+    /// from artifact_display_dir for the build layout's verify/ directory.
+    formal_artifact_root: ?[]const u8 = null,
     debug_enabled: bool = false,
     debug_info: bool = false,
     canonicalize: bool = true,
@@ -1073,6 +1082,7 @@ pub fn main(init: std.process.Init) !void {
     emit_mlir_options.output_dir = emit_output_dir;
     emit_mlir_options.output_file = emit_output_file;
     emit_mlir_options.artifact_display_dir = output_dir;
+    emit_mlir_options.formal_artifact_root = output_dir;
     if (direct_emit_staging_root != null) {
         emit_mlir_options.suppress_artifact_logs = true;
     }
@@ -1132,6 +1142,7 @@ pub fn main(init: std.process.Init) !void {
                 discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
                 exitCli(1);
             },
+            error.VerificationFailed => direct_emit_verification_failed = true,
             error.InvalidGeneratedMlir => {
                 discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
                 exitCli(2);
@@ -1145,7 +1156,10 @@ pub fn main(init: std.process.Init) !void {
             (std.fs.path.dirname(output_file.?) orelse ".")
         else
             output_dir.?;
-        const moved = try moveAllArtifactFiles(allocator, staging_root, final_dir);
+        const moved = if (direct_emit_verification_failed)
+            try moveRetainedFormalArtifactFiles(allocator, staging_root, std.fs.path.stem(file_path), final_dir)
+        else
+            try moveAllArtifactFiles(allocator, staging_root, final_dir);
         if (moved != 0) {
             var stdout_buffer: [1024]u8 = undefined;
             var stdout_writer = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
@@ -1297,6 +1311,26 @@ fn moveAllArtifactFiles(
     return moved;
 }
 
+fn moveRetainedFormalArtifactFiles(
+    allocator: std.mem.Allocator,
+    root_dir: []const u8,
+    stem: []const u8,
+    target_dir: []const u8,
+) !usize {
+    var moved: usize = 0;
+    for (formal_artifact_catalog.artifacts) |artifact| {
+        if (!artifact.retain_on_failure) continue;
+        const artifact_name = try formal_artifact_catalog.filename(allocator, stem, artifact.id);
+        defer allocator.free(artifact_name);
+        const source_path = try std.fs.path.join(allocator, &.{ root_dir, artifact_name });
+        defer allocator.free(source_path);
+        if (!pathExists(source_path)) continue;
+        try moveArtifactFile(allocator, root_dir, artifact_name, target_dir);
+        moved += 1;
+    }
+    return moved;
+}
+
 fn deleteArtifactFileIfExists(allocator: std.mem.Allocator, dir: []const u8, file_name: []const u8) !void {
     const path = try std.fs.path.join(allocator, &[_][]const u8{ dir, file_name });
     defer allocator.free(path);
@@ -1353,8 +1387,7 @@ fn invalidateBuildArtifactOutputs(
     try deleteStemArtifactFilesWithSuffixesIfExists(allocator, bin_dir, stem, &bin_suffixes);
     const sir_suffixes = [_][]const u8{".sir"};
     try deleteStemArtifactFilesWithSuffixesIfExists(allocator, sir_dir, stem, &sir_suffixes);
-    const verify_suffixes = [_][]const u8{ ".smt.report.md", ".smt.report.json", ".proof.json", ".lean.proof.json", ".lean.dispatcher.proof.json", ".canonical-z3.measure.json" };
-    try deleteStemArtifactFilesWithSuffixesIfExists(allocator, verify_dir, stem, &verify_suffixes);
+    try deleteStemArtifactFilesWithSuffixesIfExists(allocator, verify_dir, stem, &formal_artifact_catalog.suffixes);
     const mlir_suffixes = [_][]const u8{ ".ora.mlir", ".sir.mlir" };
     try deleteStemArtifactFilesWithSuffixesIfExists(allocator, mlir_dir, stem, &mlir_suffixes);
 }
@@ -1371,12 +1404,7 @@ fn invalidateDirectEmitOutputs(
         ".hex",
         ".sourcemap.json",
         ".debug.json",
-        ".proof.json",
-        ".lean.proof.json",
-        ".lean.dispatcher.proof.json",
         ".sir",
-        ".smt.report.md",
-        ".smt.report.json",
         ".ora.dot",
         ".sir.dot",
         ".sir.pre-opt.dot",
@@ -1386,6 +1414,7 @@ fn invalidateDirectEmitOutputs(
         ".mlir",
     };
     try deleteStemArtifactFilesWithSuffixesIfExists(allocator, output_dir, stem, &direct_emit_suffixes);
+    try deleteStemArtifactFilesWithSuffixesIfExists(allocator, output_dir, stem, &formal_artifact_catalog.suffixes);
 }
 
 fn invalidateDirectEmitOutputFile(
@@ -1493,6 +1522,7 @@ fn runBuildArtifacts(
     build_mlir_options.emit_bytecode = true;
     build_mlir_options.output_dir = staging_root;
     build_mlir_options.artifact_display_dir = verify_dir;
+    build_mlir_options.formal_artifact_root = artifact_root;
     build_mlir_options.verify_z3 = true;
     build_mlir_options.emit_smt_report = true;
     build_mlir_options.persist_ora_mlir = true;
@@ -1505,29 +1535,12 @@ fn runBuildArtifacts(
         else => return err,
     };
 
-    const smt_md_file = try std.fmt.allocPrint(allocator, "{s}.smt.report.md", .{stem});
-    defer allocator.free(smt_md_file);
-    try moveArtifactFileIfExists(allocator, staging_root, smt_md_file, verify_dir);
-
-    const smt_json_file = try std.fmt.allocPrint(allocator, "{s}.smt.report.json", .{stem});
-    defer allocator.free(smt_json_file);
-    try moveArtifactFileIfExists(allocator, staging_root, smt_json_file, verify_dir);
-
-    const lean_proof_file = try std.fmt.allocPrint(allocator, "{s}.lean.proof.json", .{stem});
-    defer allocator.free(lean_proof_file);
-    try moveArtifactFileIfExists(allocator, staging_root, lean_proof_file, verify_dir);
-
-    const lean_dispatcher_proof_file = try std.fmt.allocPrint(allocator, "{s}.lean.dispatcher.proof.json", .{stem});
-    defer allocator.free(lean_dispatcher_proof_file);
-    try moveArtifactFileIfExists(allocator, staging_root, lean_dispatcher_proof_file, verify_dir);
-
-    const lean_obligations_file = try std.fmt.allocPrint(allocator, "{s}.lean.obligations.lean", .{stem});
-    defer allocator.free(lean_obligations_file);
-    try moveArtifactFileIfExists(allocator, staging_root, lean_obligations_file, verify_dir);
-
-    const canonical_z3_measure_file = try std.fmt.allocPrint(allocator, "{s}.canonical-z3.measure.json", .{stem});
-    defer allocator.free(canonical_z3_measure_file);
-    try moveArtifactFileIfExists(allocator, staging_root, canonical_z3_measure_file, verify_dir);
+    for (formal_artifact_catalog.artifacts) |artifact| {
+        if (verification_failed and !artifact.retain_on_failure) continue;
+        const artifact_file = try formal_artifact_catalog.filename(allocator, stem, artifact.id);
+        defer allocator.free(artifact_file);
+        try moveArtifactFileIfExists(allocator, staging_root, artifact_file, verify_dir);
+    }
 
     if (verification_failed) {
         try stdout.print(
@@ -1589,10 +1602,12 @@ fn printBuildArtifactSummary(
     defer allocator.free(ora_mlir_path);
     const sir_mlir_path = try pathJoinWithStem(allocator, mlir_dir, stem, ".sir.mlir");
     defer allocator.free(sir_mlir_path);
-    const smt_md_path = try pathJoinWithStem(allocator, verify_dir, stem, ".smt.report.md");
+    const smt_md_path = try formalArtifactPath(allocator, verify_dir, stem, .smt_report_markdown);
     defer allocator.free(smt_md_path);
-    const smt_json_path = try pathJoinWithStem(allocator, verify_dir, stem, ".smt.report.json");
+    const smt_json_path = try formalArtifactPath(allocator, verify_dir, stem, .smt_report_json);
     defer allocator.free(smt_json_path);
+    const formal_index_path = try formalArtifactPath(allocator, verify_dir, stem, .formal_artifact_index);
+    defer allocator.free(formal_index_path);
 
     try stdout.print("Bytecode saved to {s}\n", .{bytecode_path});
     try stdout.print("Source map saved to {s}\n", .{source_map_path});
@@ -1601,6 +1616,7 @@ fn printBuildArtifactSummary(
     try stdout.print("SIR MLIR saved to {s}\n", .{sir_mlir_path});
     try stdout.print("SMT report saved to {s}\n", .{smt_md_path});
     try stdout.print("SMT report JSON saved to {s}\n", .{smt_json_path});
+    try stdout.print("Formal artifact index saved to {s}\n", .{formal_index_path});
     try stdout.print("Artifacts saved to {s}\n", .{artifact_root});
 }
 
@@ -1608,6 +1624,17 @@ fn pathJoinWithStem(allocator: std.mem.Allocator, dir: []const u8, stem: []const
     const filename = try std.fmt.allocPrint(allocator, "{s}{s}", .{ stem, suffix });
     defer allocator.free(filename);
     return try std.fs.path.join(allocator, &.{ dir, filename });
+}
+
+fn formalArtifactPath(
+    allocator: std.mem.Allocator,
+    dir: []const u8,
+    stem: []const u8,
+    id: formal_artifact_catalog.ArtifactId,
+) ![]u8 {
+    const artifact_name = try formal_artifact_catalog.filename(allocator, stem, id);
+    defer allocator.free(artifact_name);
+    return std.fs.path.join(allocator, &.{ dir, artifact_name });
 }
 
 fn runDebugArtifacts(
@@ -1647,15 +1674,11 @@ fn runDebugArtifacts(
         ".sir",
         ".sourcemap.json",
         ".debug.json",
-        ".proof.json",
-        ".lean.proof.json",
-        ".lean.dispatcher.proof.json",
-        ".smt.report.md",
-        ".smt.report.json",
         ".sir.dot",
         ".ora.dot",
     };
     try deleteStemArtifactFilesWithSuffixesIfExists(allocator, artifact_root, stem, &debug_suffixes);
+    try deleteStemArtifactFilesWithSuffixesIfExists(allocator, artifact_root, stem, &formal_artifact_catalog.suffixes);
     const abi_suffixes = [_][]const u8{ ".abi.json", ".abi.sol.json", ".abi.extras.json" };
     try deleteStemArtifactFilesWithSuffixesIfExists(allocator, abi_dir, stem, &abi_suffixes);
 
@@ -1663,10 +1686,13 @@ fn runDebugArtifacts(
 
     var debug_mlir_options = base_options;
     debug_mlir_options.output_dir = staging_root;
+    debug_mlir_options.artifact_display_dir = artifact_root;
+    debug_mlir_options.formal_artifact_root = artifact_root;
     try runMlirEmitAdvanced(allocator, file_path, debug_mlir_options, resolver_options, debug_mlir_options.debug_enabled);
 
     try promoteStagedAbiBundle(allocator, staging_abi_dir, abi_dir, stem);
     try moveArtifactFilesWithSuffixesIfExists(allocator, staging_root, &debug_suffixes, artifact_root);
+    try moveArtifactFilesWithSuffixesIfExists(allocator, staging_root, &formal_artifact_catalog.suffixes, artifact_root);
 
     try stdout.print("Debugger artifacts saved to {s}\n", .{artifact_root});
     try stdout.flush();
@@ -4685,6 +4711,50 @@ fn runCompilerMlirEmit(
     if (mlir_options.validate_mlir) {
         try verifyMlirModule(stdout, lowering.module.raw_module, "Ora MLIR");
     }
+
+    var formal = try formal_obligation_from_mlir.collect(allocator, lowering.module.raw_module, .{});
+    defer formal.deinit();
+    const formal_output_dir = formalArtifactOutputDir(mlir_options);
+    try writeLoopInductionReport(allocator, file_path, formal_output_dir, formal.set);
+    try printLoopInductionSummary(stdout, formal.set);
+    const const_eval = try compilation.db.constEval(compilation.root_module_id);
+    var source_accounting_result = formal_source_accounting_pipeline.run(
+        allocator,
+        &compilation.db,
+        compilation.package_id,
+        compilation.root_module_id,
+        const_eval,
+        &formal,
+        .unverified_emit,
+        null,
+    ) catch |err| {
+        try stdout.print("error: source-accounting kernel could not finish: {s}\n", .{@errorName(err)});
+        var statuses: formal_artifact_catalog.GateStatuses = .{ .source_accounting_kernel = .rejected };
+        markUnrunFormalGatesSkipped(&statuses);
+        try writeFormalArtifactIndex(allocator, file_path, mlir_options, statuses, .blocked);
+        try stdout.flush();
+        return error.VerificationFailed;
+    };
+    defer source_accounting_result.deinit();
+    try writeSourceAccountingReport(
+        allocator,
+        file_path,
+        formal_output_dir,
+        source_accounting_result.finished.report,
+    );
+    var formal_gate_statuses: formal_artifact_catalog.GateStatuses = .{
+        .source_accounting_kernel = switch (source_accounting_result.finished.decision) {
+            .accepted => .accepted,
+            .rejected => .rejected,
+        },
+    };
+    if (source_accounting_result.finished.decision == .rejected) {
+        try printSourceAccountingFailure(allocator, stdout, source_accounting_result.finished);
+        markUnrunFormalGatesSkipped(&formal_gate_statuses);
+        try writeFormalArtifactIndex(allocator, file_path, mlir_options, formal_gate_statuses, .blocked);
+        try stdout.flush();
+        return error.VerificationFailed;
+    }
     if (mlir_options.emit_mlir) {
         try emitMlirModuleText(
             allocator,
@@ -4720,6 +4790,7 @@ fn runCompilerMlirEmit(
             mlir_options.suppress_artifact_logs,
         );
     }
+    try writeFormalArtifactIndex(allocator, file_path, mlir_options, formal_gate_statuses, .allowed);
     try stdout.flush();
 }
 
@@ -4948,6 +5019,14 @@ fn runMlirEmitAdvanced(
         return error.VerificationFailed;
     }
     const needs_lean_dispatcher_gate = needs_userland_lean_gate;
+    const needs_external_lean_proof_gate = mlir_options.lean_proofs_path != null;
+    var needs_lean_proof_gate = needs_external_lean_proof_gate or needs_userland_lean_gate;
+    var needs_automatic_lean_proof_gate = needs_userland_lean_gate and !needs_external_lean_proof_gate;
+    var formal_gate_statuses: formal_artifact_catalog.GateStatuses = .{
+        .z3_userland = if (mlir_options.verify_z3) .not_run else .not_requested,
+        .lean_userland = if (needs_lean_proof_gate) .not_run else .not_requested,
+        .dispatcher_kernel = if (needs_lean_dispatcher_gate) .not_run else .not_requested,
+    };
     const needs_sir_conversion = mlir_options.emit_mlir_sir or
         mlir_options.emit_sir_text or
         mlir_options.emit_bytecode or
@@ -4965,12 +5044,14 @@ fn runMlirEmitAdvanced(
     var pending_smt_report: ?z3_verification.SmtReportArtifacts = null;
     var pending_smt_report_write_artifacts = false;
     var formal_result_for_smt_report: ?formal_obligation_from_mlir.CollectResult = null;
+    var source_prepared_query_manifest: ?z3_verification.PreparedQueryManifest = null;
     var z3_formal_query_bindings: []const z3_verification.FormalQueryBinding = &.{};
     defer {
         if (verification_result_opt) |*vr| vr.deinit();
         if (pending_smt_report) |*report| report.deinit(mlir_allocator);
         if (z3_formal_query_bindings.len > 0) allocator.free(z3_formal_query_bindings);
         if (formal_result_for_smt_report) |*result| result.deinit();
+        if (source_prepared_query_manifest) |*manifest| manifest.deinit();
     }
 
     if (mlir_options.lean_proofs_requested and !mlir_options.verify_z3) {
@@ -4978,6 +5059,27 @@ fn runMlirEmitAdvanced(
         try stdout.flush();
         return error.VerificationFailed;
     }
+
+    // Source accounting consumes this pre-optimization manifest in every
+    // compilation mode, even when verification is explicitly disabled.
+    formal_result_for_smt_report = try formal_obligation_from_mlir.collect(allocator, final_module, .{});
+    const formal_output_dir = formalArtifactOutputDir(mlir_options);
+    const formal_display_dir = mlir_options.artifact_display_dir orelse formal_output_dir;
+    try writeLoopInductionReport(
+        allocator,
+        file_path,
+        formal_output_dir,
+        formal_result_for_smt_report.?.set,
+    );
+    try printLoopInductionSummary(stdout, formal_result_for_smt_report.?.set);
+    const has_mandatory_loop_lean_gate = mlir_options.verify_z3 and
+        formal_result_for_smt_report.?.set.hasLeanCertificateRequirements();
+    if (has_mandatory_loop_lean_gate) {
+        needs_lean_proof_gate = true;
+        needs_automatic_lean_proof_gate = !needs_external_lean_proof_gate;
+        formal_gate_statuses.lean_userland = .not_run;
+    }
+    std.debug.assert(needs_lean_proof_gate == (needs_external_lean_proof_gate or needs_automatic_lean_proof_gate));
 
     if (mlir_options.verify_z3) {
         var verifier = try z3_verification.VerificationPass.initWithProofs(mlir_allocator, mlir_options.z3_proofs);
@@ -4996,17 +5098,26 @@ fn runMlirEmitAdvanced(
         verifier.setExplainCores(mlir_options.explain_cores);
         verifier.setMinimizeCores(mlir_options.minimize_cores);
 
-        const needs_external_lean_proof_gate = mlir_options.lean_proofs_path != null;
-        const needs_automatic_lean_proof_gate = needs_userland_lean_gate and mlir_options.lean_proofs_path == null;
-        const needs_lean_proof_gate = needs_external_lean_proof_gate or needs_automatic_lean_proof_gate;
         // Guard erasure now requires first-class formal identity at the SMT
         // verdict site. Collect the manifest once before verification so
         // prepared GuardViolate rows can authorize erasure fail-closed.
-        formal_result_for_smt_report = try formal_obligation_from_mlir.collect(allocator, final_module, .{});
         z3_formal_query_bindings = try z3FormalQueryBindingsFromFormal(allocator, formal_result_for_smt_report.?.query_bindings);
         verifier.setFormalQueryBindings(z3_formal_query_bindings);
 
+        // Capture the verifier's actual matched prepared-query identities for
+        // the source-accounting gate. Formal pre-verifier rows alone carry no
+        // authority here.
+        source_prepared_query_manifest = verifier.collectPreparedQueryManifest(final_module) catch |err| switch (err) {
+            // The verification pass owns the public degradation diagnostic.
+            // A preflight manifest has no authority when query construction
+            // degraded, so leave it unavailable and let verification report
+            // the named failure instead of leaking an internal error trace.
+            error.VerificationEncodingDegraded => null,
+            else => return err,
+        };
+
         const verification_result = try verifier.runVerificationPass(final_module);
+        formal_gate_statuses.z3_userland = if (verification_result.success) .accepted else .rejected;
 
         if (verification_result.diagnostics.items.len > 0) {
             // Refinement guards that SMT can't prove are lowered to runtime checks.
@@ -5026,72 +5137,6 @@ fn runMlirEmitAdvanced(
             if (pending_smt_report) |report| {
                 verification_report_blocked_artifacts = report.blocksTrustedArtifacts();
             }
-        }
-
-        var lean_artifact_gate_allowed = false;
-        var lean_artifact_gate_failed = false;
-        if (needs_external_lean_proof_gate) {
-            lean_artifact_gate_allowed = applyLeanProofArtifactGate(
-                allocator,
-                file_path,
-                &formal_result_for_smt_report.?,
-                mlir_options.lean_proofs_path.?,
-                pending_smt_report.?,
-                mlir_options,
-                stdout,
-            ) catch |err| blk: {
-                try stdout.print("Lean proof gate failed: {s}\n", .{@errorName(err)});
-                lean_artifact_gate_failed = true;
-                break :blk false;
-            };
-        } else if (needs_automatic_lean_proof_gate) {
-            lean_artifact_gate_allowed = applyAutomaticLeanProofArtifactGate(
-                allocator,
-                file_path,
-                &formal_result_for_smt_report.?,
-                pending_smt_report.?,
-                mlir_options,
-                stdout,
-            ) catch |err| blk: {
-                try stdout.print("Automatic Lean proof gate failed: {s}\n", .{@errorName(err)});
-                lean_artifact_gate_failed = true;
-                break :blk false;
-            };
-        }
-
-        if (lean_artifact_gate_failed) {
-            verification_failed = true;
-        }
-        if (needs_lean_proof_gate and !lean_artifact_gate_allowed) {
-            try stdout.writeAll(
-                "error: Lean userland obligation proof gate rejected the contract\n",
-            );
-            verification_failed = true;
-        }
-        if (!verification_result.success and !lean_artifact_gate_allowed) {
-            try printVerificationErrors(stdout, verification_result.errors.items);
-            if (needs_unknown_recipe and !needs_userland_lean_gate) {
-                if (pending_smt_report) |*report| {
-                    maybeEmitLeanUnknownRecipe(
-                        allocator,
-                        file_path,
-                        final_module,
-                        if (formal_result_for_smt_report) |*result| result else null,
-                        report.*,
-                        mlir_options,
-                        stdout,
-                    ) catch |err| {
-                        try stdout.print("note: could not emit Lean proof recipe: {s}\n", .{@errorName(err)});
-                    };
-                }
-            }
-            try stdout.flush();
-            verification_failed = true;
-        }
-        if (verification_report_blocked_artifacts and verification_result.success and !lean_artifact_gate_allowed) {
-            try stdout.print("Verification failed: SMT report did not authorize trusted artifact emission\n", .{});
-            try stdout.flush();
-            verification_failed = true;
         }
 
         verification_result_opt = verification_result;
@@ -5114,12 +5159,183 @@ fn runMlirEmitAdvanced(
         pending_smt_report = try verifier.buildSmtReport(final_module, file_path, null);
     }
 
+    var prepared_source_identity: ?formal_source_accounting_from_z3.PreparedIdentity = null;
+    defer if (prepared_source_identity) |*identity| identity.deinit(allocator);
+    if (source_prepared_query_manifest) |manifest| {
+        prepared_source_identity = try formal_source_accounting_from_z3.collectPreparedIdentity(allocator, manifest.source_accounting_rows);
+    }
+    if (!mlir_options.verify_z3 or prepared_source_identity != null) {
+        const accounting_mode = try sourceAccountingMode(mlir_options);
+        const const_eval = try compilation.db.constEval(compilation.root_module_id);
+        var source_accounting_result = formal_source_accounting_pipeline.run(
+            allocator,
+            &compilation.db,
+            compilation.package_id,
+            compilation.root_module_id,
+            const_eval,
+            &formal_result_for_smt_report.?,
+            accounting_mode,
+            if (prepared_source_identity) |*identity| identity.view() else null,
+        ) catch |err| {
+            try stdout.print("error: source-accounting kernel could not finish: {s}\n", .{@errorName(err)});
+            formal_gate_statuses.source_accounting_kernel = .rejected;
+            markUnrunFormalGatesSkipped(&formal_gate_statuses);
+            try writeFormalArtifactIndex(allocator, file_path, mlir_options, formal_gate_statuses, .blocked);
+            try stdout.flush();
+            return error.VerificationFailed;
+        };
+        defer source_accounting_result.deinit();
+        try writeSourceAccountingReport(
+            allocator,
+            file_path,
+            formal_output_dir,
+            source_accounting_result.finished.report,
+        );
+        formal_gate_statuses.source_accounting_kernel = switch (source_accounting_result.finished.decision) {
+            .accepted => .accepted,
+            .rejected => .rejected,
+        };
+        if (source_accounting_result.finished.decision == .rejected) {
+            try printSourceAccountingFailure(allocator, stdout, source_accounting_result.finished);
+            if (pending_smt_report) |*report| {
+                if (mlir_options.measure_canonical_z3) {
+                    try writeCanonicalZ3MeasurementArtifact(
+                        allocator,
+                        file_path,
+                        formal_output_dir,
+                        &formal_result_for_smt_report.?,
+                        report.*,
+                        stdout,
+                        mlir_options.suppress_artifact_logs,
+                    );
+                }
+                if (pending_smt_report_write_artifacts) {
+                    try writeSmtReportArtifacts(allocator, file_path, formal_output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
+                }
+                report.deinit(mlir_allocator);
+                pending_smt_report = null;
+            }
+            markUnrunFormalGatesSkipped(&formal_gate_statuses);
+            try writeFormalArtifactIndex(allocator, file_path, mlir_options, formal_gate_statuses, .blocked);
+            try stdout.flush();
+            return error.VerificationFailed;
+        }
+    } else if (verification_result_opt) |*verification_result| {
+        // A successful verified build must always have a prepared-query
+        // identity for the compiler-kernel source gate. Degradation is the
+        // only supported unavailable case and is reported by Z3 below.
+        if (verification_result.success) {
+            try stdout.writeAll("error: verified compilation produced no prepared-query identity\n");
+            formal_gate_statuses.source_accounting_kernel = .rejected;
+            markUnrunFormalGatesSkipped(&formal_gate_statuses);
+            try writeFormalArtifactIndex(allocator, file_path, mlir_options, formal_gate_statuses, .blocked);
+            try stdout.flush();
+            return error.VerificationFailed;
+        }
+    }
+
+    // Userland proof orchestration is deliberately downstream of the
+    // compiler-kernel source-accounting decision. It may discharge an existing
+    // UNKNOWN row, but it cannot create or waive a missing source use.
+    var lean_artifact_gate_allowed = false;
+    var lean_artifact_gate_failed = false;
+    if (needs_lean_proof_gate) {
+        const proof_gate_label = if (needs_external_lean_proof_gate)
+            "Lean proof gate"
+        else
+            "Automatic Lean proof gate";
+        const proof_mode: formal_userland_coordinator.ProofMode = if (needs_external_lean_proof_gate)
+            .{ .manifest = mlir_options.lean_proofs_path.? }
+        else
+            .automatic;
+        const outcome = formal_userland_coordinator.coordinate(
+            allocator,
+            file_path,
+            &formal_result_for_smt_report.?,
+            pending_smt_report.?,
+            proof_mode,
+            .{
+                .output_dir = formal_output_dir,
+                .artifact_display_dir = formal_display_dir,
+                .process_environ = mlir_options.process_environ,
+                .suppress_artifact_logs = mlir_options.suppress_artifact_logs,
+            },
+            stdout,
+        ) catch |err| blk: {
+            try stdout.print("{s} failed: {s}\n", .{ proof_gate_label, @errorName(err) });
+            lean_artifact_gate_failed = true;
+            formal_gate_statuses.lean_userland = .rejected;
+            break :blk null;
+        };
+        if (outcome) |result| {
+            lean_artifact_gate_allowed = result.artifact_emission_authorized;
+            formal_gate_statuses.lean_userland = if (result.artifact_emission_authorized) .accepted else .rejected;
+        }
+    }
+
+    if (lean_artifact_gate_failed) verification_failed = true;
+    if (needs_lean_proof_gate and !lean_artifact_gate_allowed) {
+        try stdout.writeAll("error: Lean userland obligation proof gate rejected the contract\n");
+        verification_failed = true;
+    }
+    if (needs_automatic_lean_proof_gate and !lean_artifact_gate_allowed) {
+        if (pending_smt_report) |*report| {
+            formal_userland_coordinator.emitUnknownRecipe(
+                allocator,
+                file_path,
+                &formal_result_for_smt_report.?,
+                report.*,
+                .{
+                    .output_dir = formal_output_dir,
+                    .artifact_display_dir = formal_display_dir,
+                    .process_environ = mlir_options.process_environ,
+                    .suppress_artifact_logs = mlir_options.suppress_artifact_logs,
+                },
+                stdout,
+            ) catch |err| {
+                try stdout.print("note: could not emit Lean proof recipe: {s}\n", .{@errorName(err)});
+            };
+        }
+    }
+    if (verification_result_opt) |*verification_result| {
+        const needs_unknown_recipe = !verification_result.success and hasUnknownVerificationError(verification_result);
+        if (!verification_result.success and !lean_artifact_gate_allowed) {
+            try printVerificationErrors(stdout, verification_result.errors.items);
+            if (needs_unknown_recipe and !needs_lean_proof_gate) {
+                if (pending_smt_report) |*report| {
+                    formal_userland_coordinator.emitUnknownRecipe(
+                        allocator,
+                        file_path,
+                        &formal_result_for_smt_report.?,
+                        report.*,
+                        .{
+                            .output_dir = formal_output_dir,
+                            .artifact_display_dir = formal_display_dir,
+                            .process_environ = mlir_options.process_environ,
+                            .suppress_artifact_logs = mlir_options.suppress_artifact_logs,
+                        },
+                        stdout,
+                    ) catch |err| {
+                        try stdout.print("note: could not emit Lean proof recipe: {s}\n", .{@errorName(err)});
+                    };
+                }
+            }
+            try stdout.flush();
+            verification_failed = true;
+        }
+        if (verification_report_blocked_artifacts and verification_result.success and !lean_artifact_gate_allowed) {
+            try stdout.print("Verification failed: SMT report did not authorize trusted artifact emission\n", .{});
+            try stdout.flush();
+            verification_failed = true;
+        }
+    }
+
     if (verification_failed) {
         const z3_status: []const u8 = if (verification_result_opt) |*result|
             if (result.success) "accepted" else "rejected"
         else
             "not-run";
-        const lean_status: []const u8 = if (needs_userland_lean_gate)
+        const lean_status: []const u8 = if (needs_lean_proof_gate)
             "rejected"
         else
             "not-requested";
@@ -5133,7 +5349,7 @@ fn runMlirEmitAdvanced(
                     try writeCanonicalZ3MeasurementArtifact(
                         allocator,
                         file_path,
-                        mlir_options.output_dir,
+                        formal_output_dir,
                         formal_result,
                         report.*,
                         stdout,
@@ -5142,11 +5358,13 @@ fn runMlirEmitAdvanced(
                 }
             }
             if (pending_smt_report_write_artifacts) {
-                try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
+                try writeSmtReportArtifacts(allocator, file_path, formal_output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
             }
             report.deinit(mlir_allocator);
             pending_smt_report = null;
         }
+        markUnrunFormalGatesSkipped(&formal_gate_statuses);
+        try writeFormalArtifactIndex(allocator, file_path, mlir_options, formal_gate_statuses, .blocked);
         try stdout.flush();
         return error.VerificationFailed;
     }
@@ -5158,10 +5376,8 @@ fn runMlirEmitAdvanced(
     // status strings as lib/evm/src/debug_info.zig:OpMeta.proof_status.
     if (verification_result_opt) |*vr| {
         if (vr.proven_guard_positions.items.len > 0) {
-            if (mlir_options.output_dir) |out_dir| {
-                const stem = std.fs.path.stem(file_path);
-                try writeProofSidecar(allocator, out_dir, stem, vr.proven_guard_positions.items);
-            }
+            const stem = std.fs.path.stem(file_path);
+            try writeProofSidecar(allocator, formal_output_dir, stem, vr.proven_guard_positions.items);
         }
     }
 
@@ -5228,13 +5444,13 @@ fn runMlirEmitAdvanced(
     if (needs_refinement_cleanup) {
         const refinement_guards = compiler.refinement_guards;
         if (verification_result_opt) |*vr| {
-            refinement_guards.cleanupRefinementGuardsWithOptions(ctx, final_module, &vr.proven_guard_ids, .{
+            refinement_guards.cleanupRefinementGuardsWithOptions(mlir_allocator, ctx, final_module, &vr.proven_guard_ids, .{
                 .keep_proved_checks = mlir_options.keep_proved_checks,
             });
         } else {
             var empty_guards = std.StringHashMap(void).init(mlir_allocator);
             defer empty_guards.deinit();
-            refinement_guards.cleanupRefinementGuardsWithOptions(ctx, final_module, &empty_guards, .{
+            refinement_guards.cleanupRefinementGuardsWithOptions(mlir_allocator, ctx, final_module, &empty_guards, .{
                 .keep_proved_checks = mlir_options.keep_proved_checks,
             });
         }
@@ -5354,14 +5570,16 @@ fn runMlirEmitAdvanced(
                 "error: Lean dispatcher userland proof failed: dispatcher intent extraction returned no facts for '{s}'\n",
                 .{file_path},
             );
+            formal_gate_statuses.dispatcher_kernel = .rejected;
+            try writeFormalArtifactIndex(allocator, file_path, mlir_options, formal_gate_statuses, .blocked);
             try stdout.flush();
             return error.VerificationFailed;
         }
         dispatcher_intent_json = try allocator.dupe(u8, intent_ref.data[0..intent_ref.length]);
     }
 
-    var dispatcher_check: ?formal_dispatcher_table_gate.CheckResult = null;
-    defer if (dispatcher_check) |*check| check.deinit();
+    var dispatcher_session: ?formal_kernel_registry.DispatcherSession = null;
+    defer if (dispatcher_session) |*session| session.deinit();
 
     if (mlir_options.emit_sir_text or mlir_options.emit_bytecode or needs_lean_dispatcher_gate) {
         if (!c.oraBuildSIRDispatcher(ctx, final_module)) {
@@ -5426,10 +5644,12 @@ fn runMlirEmitAdvanced(
         if (needs_lean_dispatcher_gate) {
             const dispatcher_intent = dispatcher_intent_json orelse {
                 try stdout.writeAll("Lean dispatcher userland proof failed: dispatcher intent facts are unavailable\n");
+                formal_gate_statuses.dispatcher_kernel = .rejected;
+                try writeFormalArtifactIndex(allocator, file_path, mlir_options, formal_gate_statuses, .blocked);
                 try stdout.flush();
                 return error.VerificationFailed;
             };
-            dispatcher_check = formal_dispatcher_table_gate.checkCurrentModule(
+            dispatcher_session = formal_kernel_registry.DispatcherSession.prepareFromSir(
                 allocator,
                 ctx,
                 final_module,
@@ -5440,6 +5660,8 @@ fn runMlirEmitAdvanced(
                 stdout,
             ) catch |err| {
                 try stdout.print("Lean dispatcher userland proof failed: {s}\n", .{@errorName(err)});
+                formal_gate_statuses.dispatcher_kernel = .rejected;
+                try writeFormalArtifactIndex(allocator, file_path, mlir_options, formal_gate_statuses, .blocked);
                 try stdout.flush();
                 return error.VerificationFailed;
             };
@@ -5487,18 +5709,27 @@ fn runMlirEmitAdvanced(
         }
         if (mlir_options.emit_bytecode) {
             if (mlir_options.emit_sir_text and mlir_options.output_dir == null) try stdout.print("\n", .{});
-            try emitBytecodeFromSirText(allocator, &compilation.db, compilation.root_module_id, &compilation.db.sources, sir_text, file_path, mlir_options.output_dir, mlir_options.output_file, sir_locations, sir_line_map, sir_debug_info, source_scopes, stdout, mlir_options.suppress_artifact_logs, mlir_options.optimize, if (dispatcher_check) |*check| check else null);
-        } else if (dispatcher_check) |*check| {
+            emitBytecodeFromSirText(allocator, &compilation.db, compilation.root_module_id, &compilation.db.sources, sir_text, file_path, mlir_options.output_dir, formal_output_dir, mlir_options.output_file, sir_locations, sir_line_map, sir_debug_info, source_scopes, stdout, mlir_options.suppress_artifact_logs, mlir_options.optimize, if (dispatcher_session) |*session| session else null) catch |err| {
+                if (needs_lean_dispatcher_gate) {
+                    formal_gate_statuses.dispatcher_kernel = .rejected;
+                    try writeFormalArtifactIndex(allocator, file_path, mlir_options, formal_gate_statuses, .blocked);
+                }
+                return err;
+            };
+            if (needs_lean_dispatcher_gate) formal_gate_statuses.dispatcher_kernel = .accepted;
+        } else if (dispatcher_session) |*session| {
+            const certificate_json = try session.finishCertificate(.sir);
             try writeLeanDispatcherProofCertificate(
                 allocator,
                 file_path,
-                mlir_options.output_dir,
-                check.certificate_json,
+                formal_output_dir,
+                certificate_json,
                 stdout,
                 mlir_options.suppress_artifact_logs,
             );
-            try check.writeVerificationSummary(stdout, false);
+            try session.writeVerificationSummary(stdout);
             try stdout.print("Lean dispatcher userland SIR proof accepted\n", .{});
+            formal_gate_statuses.dispatcher_kernel = .accepted;
         }
     }
 
@@ -5508,7 +5739,7 @@ fn runMlirEmitAdvanced(
                 try writeCanonicalZ3MeasurementArtifact(
                     allocator,
                     file_path,
-                    mlir_options.output_dir,
+                    formal_output_dir,
                     formal_result,
                     report.*,
                     stdout,
@@ -5517,11 +5748,13 @@ fn runMlirEmitAdvanced(
             }
         }
         if (pending_smt_report_write_artifacts) {
-            try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
+            try writeSmtReportArtifacts(allocator, file_path, formal_output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
         }
         report.deinit(mlir_allocator);
         pending_smt_report = null;
     }
+
+    try writeFormalArtifactIndex(allocator, file_path, mlir_options, formal_gate_statuses, .allowed);
 
     try stdout.flush();
     if (verification_failed) {
@@ -5891,9 +6124,9 @@ fn writeSmtReportArtifacts(
     suppress_log: bool,
 ) !void {
     const base_name = std.fs.path.stem(file_path);
-    const md_name = try std.fmt.allocPrint(allocator, "{s}.smt.report.md", .{base_name});
+    const md_name = try formal_artifact_catalog.filename(allocator, base_name, .smt_report_markdown);
     defer allocator.free(md_name);
-    const json_name = try std.fmt.allocPrint(allocator, "{s}.smt.report.json", .{base_name});
+    const json_name = try formal_artifact_catalog.filename(allocator, base_name, .smt_report_json);
     defer allocator.free(json_name);
 
     var md_path_buf: ?[]u8 = null;
@@ -5956,7 +6189,7 @@ fn writeCanonicalZ3MeasurementArtifact(
     defer allocator.free(json);
 
     const base_name = std.fs.path.stem(file_path);
-    const filename = try std.fmt.allocPrint(allocator, "{s}.canonical-z3.measure.json", .{base_name});
+    const filename = try formal_artifact_catalog.filename(allocator, base_name, .canonical_z3_measurement);
     defer allocator.free(filename);
 
     var path_buf: ?[]u8 = null;
@@ -5978,88 +6211,6 @@ fn writeCanonicalZ3MeasurementArtifact(
     }
 }
 
-const LeanObligationContext = struct {
-    allocator: std.mem.Allocator,
-    owned_formal_result: ?formal_obligation_from_mlir.CollectResult = null,
-    merged_result: formal_obligation_from_z3.OverlayResult,
-    generated_namespace: []const u8,
-    obligations_source: ?[]const u8 = null,
-
-    fn deinit(self: *LeanObligationContext) void {
-        if (self.obligations_source) |source| self.allocator.free(source);
-        self.allocator.free(self.generated_namespace);
-        self.merged_result.deinit();
-        if (self.owned_formal_result) |*result| result.deinit();
-        self.* = undefined;
-    }
-};
-
-fn collectLeanObligationContext(
-    allocator: std.mem.Allocator,
-    file_path: []const u8,
-    final_module: @import("mlir_c_api").c.MlirModule,
-    smt_report: z3_verification.SmtReportArtifacts,
-) !LeanObligationContext {
-    var formal_result = try formal_obligation_from_mlir.collect(allocator, final_module, .{});
-    errdefer formal_result.deinit();
-
-    var context = try collectLeanObligationContextFromFormalResult(allocator, file_path, &formal_result, smt_report);
-    context.owned_formal_result = formal_result;
-    return context;
-}
-
-fn collectLeanObligationContextFromFormalResult(
-    allocator: std.mem.Allocator,
-    file_path: []const u8,
-    formal_result: *const formal_obligation_from_mlir.CollectResult,
-    smt_report: z3_verification.SmtReportArtifacts,
-) !LeanObligationContext {
-    const query_manifest = smt_report.query_manifest orelse return error.MissingPreparedQueryManifest;
-
-    var merged_result = try formal_obligation_from_z3.overlayPreparedQueryResults(allocator, formal_result.set, query_manifest.rows);
-    errdefer merged_result.deinit();
-
-    const generated_namespace = try leanProofGeneratedNamespace(allocator, file_path);
-    errdefer allocator.free(generated_namespace);
-
-    return .{
-        .allocator = allocator,
-        .merged_result = merged_result,
-        .generated_namespace = generated_namespace,
-    };
-}
-
-fn renderLeanObligationsSource(
-    allocator: std.mem.Allocator,
-    set: formal_obligation.ObligationSet,
-    generated_namespace: []const u8,
-) ![]const u8 {
-    var obligations_source_out = std.Io.Writer.Allocating.init(allocator);
-    errdefer obligations_source_out.deinit();
-    try formal_obligation_to_lean.writeModule(&obligations_source_out.writer, set, .{
-        .namespace = generated_namespace,
-        .proof_surface = true,
-    });
-    return try obligations_source_out.toOwnedSlice();
-}
-
-fn buildLeanObligationContext(
-    allocator: std.mem.Allocator,
-    file_path: []const u8,
-    formal_result: *const formal_obligation_from_mlir.CollectResult,
-    smt_report: z3_verification.SmtReportArtifacts,
-) !LeanObligationContext {
-    var context = try collectLeanObligationContextFromFormalResult(allocator, file_path, formal_result, smt_report);
-    errdefer context.deinit();
-
-    context.obligations_source = try renderLeanObligationsSource(
-        allocator,
-        context.merged_result.set,
-        context.generated_namespace,
-    );
-    return context;
-}
-
 fn z3FormalQueryBindingsFromFormal(
     allocator: std.mem.Allocator,
     bindings: []const formal_obligation.FormalQueryBinding,
@@ -6071,6 +6222,7 @@ fn z3FormalQueryBindingsFromFormal(
     for (bindings, converted) |binding, *out| {
         out.* = .{
             .source_op_id = binding.source_op_id,
+            .loop_source_op_id = binding.loop_source_op_id,
             .kind = @tagName(binding.kind),
             .logical_role = if (binding.logical_role) |role| @tagName(role) else null,
             .guard_id = binding.guard_id,
@@ -6089,880 +6241,6 @@ fn hasUnknownVerificationError(result: *const z3_verification.VerificationResult
     return false;
 }
 
-fn isLeanUnknownRecipeTarget(query: @import("formal/obligation.zig").VerificationQuery) bool {
-    if (query.backend != .z3) return false;
-    if (query.obligation_ids.len == 0) return false;
-    const result = query.result orelse return false;
-    return result.status == .unknown and
-        !result.degraded and
-        !result.vacuous and
-        !result.vacuity_unknown;
-}
-
-const LeanFormulaProjectionSummary = struct {
-    term: u32 = 0,
-    origin_value: u32 = 0,
-
-    fn addFormula(self: *LeanFormulaProjectionSummary, formula: @import("formal/obligation.zig").FormulaRef) void {
-        switch (formula) {
-            .term => self.term +|= 1,
-            .origin_value => self.origin_value +|= 1,
-        }
-    }
-
-    fn addKind(self: *LeanFormulaProjectionSummary, kind: @import("formal/obligation.zig").Kind) void {
-        switch (kind) {
-            .logical => |logical| self.addFormula(logical.formula),
-            .runtime_guard => |guard| self.addFormula(guard.formula),
-            .resource => |resource| if (resource.amount) |amount| self.addFormula(amount),
-            .type_wf,
-            .type_relation,
-            .region_relation,
-            .effect_frame,
-            .quantifier,
-            .filtered_input,
-            .backend_fact,
-            => {},
-        }
-    }
-
-    fn total(self: LeanFormulaProjectionSummary) u32 {
-        return self.term +| self.origin_value;
-    }
-
-    fn termRatioBasisPoints(self: LeanFormulaProjectionSummary) u32 {
-        const denominator = self.total();
-        if (denominator == 0) return 0;
-        return @intCast((@as(u64, self.term) * 10_000) / @as(u64, denominator));
-    }
-
-    fn hasOpaqueFormula(self: LeanFormulaProjectionSummary) bool {
-        return self.origin_value != 0;
-    }
-};
-
-fn findLeanObligationById(
-    set: @import("formal/obligation.zig").ObligationSet,
-    id: @import("formal/obligation.zig").Id,
-) ?@import("formal/obligation.zig").Obligation {
-    for (set.obligations) |item| {
-        if (item.id == id) return item;
-    }
-    return null;
-}
-
-fn findLeanAssumptionById(
-    set: @import("formal/obligation.zig").ObligationSet,
-    id: @import("formal/obligation.zig").Id,
-) ?@import("formal/obligation.zig").Assumption {
-    for (set.assumptions) |item| {
-        if (item.id == id) return item;
-    }
-    return null;
-}
-
-fn projectionSummaryForLeanQuery(
-    set: @import("formal/obligation.zig").ObligationSet,
-    query: @import("formal/obligation.zig").VerificationQuery,
-) LeanFormulaProjectionSummary {
-    var summary: LeanFormulaProjectionSummary = .{};
-    for (query.assumption_ids) |id| {
-        const assumption = findLeanAssumptionById(set, id) orelse continue;
-        if (assumption.formula) |formula| summary.addFormula(formula);
-    }
-    for (query.obligation_ids) |id| {
-        const item = findLeanObligationById(set, id) orelse continue;
-        summary.addKind(item.kind);
-    }
-    return summary;
-}
-
-fn projectionSummaryForLeanSet(set: @import("formal/obligation.zig").ObligationSet) LeanFormulaProjectionSummary {
-    var summary: LeanFormulaProjectionSummary = .{};
-    for (set.assumptions) |assumption| {
-        if (assumption.formula) |formula| summary.addFormula(formula);
-    }
-    for (set.obligations) |item| {
-        summary.addKind(item.kind);
-    }
-    return summary;
-}
-
-fn plainUnknownPreparedRows(report: z3_verification.SmtReportArtifacts) usize {
-    const query_manifest = report.query_manifest orelse return 0;
-    var count: usize = 0;
-    for (query_manifest.rows) |row| {
-        const status = row.result_status orelse continue;
-        if (status != .unknown) continue;
-        if (row.vacuous or row.vacuity_unknown or row.verified_with_caveats) continue;
-        count += 1;
-    }
-    return count;
-}
-
-fn plainUnknownPreparedRowCountForLeanSet(set: formal_obligation.ObligationSet) usize {
-    var count: usize = 0;
-    for (set.queries) |query| {
-        if (isLeanUnknownRecipeTarget(query)) count += 1;
-    }
-    return count;
-}
-
-fn freeVarIdsEqual(lhs: formal_obligation.FreeVarId, rhs: formal_obligation.FreeVarId) bool {
-    return lhs.file_id == rhs.file_id and lhs.pattern_id == rhs.pattern_id;
-}
-
-fn appendUniqueFreeVarId(
-    allocator: std.mem.Allocator,
-    ids: *std.ArrayList(formal_obligation.FreeVarId),
-    id: formal_obligation.FreeVarId,
-) !void {
-    for (ids.items) |existing| {
-        if (freeVarIdsEqual(existing, id)) return;
-    }
-    try ids.append(allocator, id);
-}
-
-fn collectFreeVarsFromTerm(
-    allocator: std.mem.Allocator,
-    set: formal_obligation.ObligationSet,
-    term_id: formal_obligation.TermId,
-    ids: *std.ArrayList(formal_obligation.FreeVarId),
-    fuel: u32,
-) !void {
-    if (fuel == 0) return error.LeanAutoProofTermCycle;
-    if (term_id >= set.terms.len) return error.InvalidTermReference;
-    switch (set.terms[term_id]) {
-        .variable => |variable| switch (variable) {
-            .free => |free| try appendUniqueFreeVarId(allocator, ids, free.id),
-            .bound => {},
-        },
-        .old => |operand| try collectFreeVarsFromTerm(allocator, set, operand, ids, fuel - 1),
-        .unary => |unary| try collectFreeVarsFromTerm(allocator, set, unary.operand, ids, fuel - 1),
-        .binary => |binary| {
-            try collectFreeVarsFromTerm(allocator, set, binary.lhs, ids, fuel - 1);
-            try collectFreeVarsFromTerm(allocator, set, binary.rhs, ids, fuel - 1);
-        },
-        .refinement_predicate => |predicate| {
-            try collectFreeVarsFromTerm(allocator, set, predicate.value, ids, fuel - 1);
-            for (predicate.args) |arg| try collectFreeVarsFromTerm(allocator, set, arg, ids, fuel - 1);
-        },
-        .quantified => |quantified| {
-            if (quantified.condition) |condition| try collectFreeVarsFromTerm(allocator, set, condition, ids, fuel - 1);
-            try collectFreeVarsFromTerm(allocator, set, quantified.body, ids, fuel - 1);
-        },
-        .bool_lit,
-        .int_lit,
-        .result,
-        .place_read,
-        => {},
-    }
-}
-
-fn collectFreeVarsFromFormula(
-    allocator: std.mem.Allocator,
-    set: formal_obligation.ObligationSet,
-    formula: formal_obligation.FormulaRef,
-    ids: *std.ArrayList(formal_obligation.FreeVarId),
-) !void {
-    switch (formula) {
-        .term => |term_id| try collectFreeVarsFromTerm(allocator, set, term_id, ids, 256),
-        .origin_value => {},
-    }
-}
-
-fn collectFreeVarsFromQuery(
-    allocator: std.mem.Allocator,
-    set: formal_obligation.ObligationSet,
-    query: formal_obligation.VerificationQuery,
-) ![]formal_obligation.FreeVarId {
-    var ids: std.ArrayList(formal_obligation.FreeVarId) = .empty;
-    errdefer ids.deinit(allocator);
-    for (query.assumption_ids) |id| {
-        const assumption = findLeanAssumptionById(set, id) orelse return error.InvalidDependency;
-        if (assumption.formula) |formula| try collectFreeVarsFromFormula(allocator, set, formula, &ids);
-    }
-    for (query.obligation_ids) |id| {
-        const item = findLeanObligationById(set, id) orelse return error.InvalidDependency;
-        if (formal_obligation.kindFormula(item.kind)) |formula| {
-            try collectFreeVarsFromFormula(allocator, set, formula, &ids);
-        }
-    }
-    return try ids.toOwnedSlice(allocator);
-}
-
-fn writeLeanFreeVarId(writer: anytype, id: formal_obligation.FreeVarId) !void {
-    try writer.print("{{ file_id := {d}, pattern_id := {d} }}", .{ id.file_id, id.pattern_id });
-}
-
-fn writeLeanAutoWitnessEnv(
-    writer: anytype,
-    free_vars: []const formal_obligation.FreeVarId,
-) !void {
-    if (free_vars.len == 0) {
-        try writer.writeAll("Env.empty");
-        return;
-    }
-    for (free_vars, 0..) |_, index| {
-        try writer.writeByte('(');
-        if (index == 0) {
-            try writer.writeAll("Env.empty");
-        }
-    }
-    for (free_vars, 0..) |free_var, index| {
-        try writer.writeAll(".setFree ");
-        try writeLeanFreeVarId(writer, free_var);
-        try writer.print(" (.u256 (BitVec.ofNat 256 {d})))", .{index});
-    }
-}
-
-fn writeLeanAutoFreeVarEqFacts(
-    writer: anytype,
-    free_vars: []const formal_obligation.FreeVarId,
-) !void {
-    for (free_vars, 0..) |lhs, lhs_index| {
-        for (free_vars, 0..) |rhs, rhs_index| {
-            try writer.print("  have h_auto_free_{d}_{d} : ((", .{ lhs_index, rhs_index });
-            try writeLeanFreeVarId(writer, lhs);
-            try writer.writeAll(" : FreeVarId) == ");
-            try writeLeanFreeVarId(writer, rhs);
-            try writer.print(") = {s} := by rfl\n", .{if (freeVarIdsEqual(lhs, rhs)) "true" else "false"});
-        }
-    }
-}
-
-fn writeLeanAutoSimpSet(writer: anytype, free_var_count: usize) !void {
-    try writer.writeAll(
-        \\[
-        \\      assumptionsDenoteInEnv,
-        \\      assumptionsDenoteInEnv?,
-        \\      assumptionAnd?,
-        \\      assumptionDenotesInEnv?,
-        \\      obligationDenotesInEnv,
-        \\      obligationDenotesInEnv?,
-        \\      formulaDenotes?,
-        \\      denoteFormula?,
-        \\      denoteValue?,
-        \\      effectFrameGoalDenotes?,
-        \\      resourceGoalDenotes?,
-        \\      resourceGoalAmount?,
-        \\      resourceGoalSource?,
-        \\      resourceGoalDestination?,
-        \\      emittedManifest,
-        \\      emittedTerms,
-        \\      emittedAssumptions,
-        \\      emittedObligations,
-        \\      Env.setFree,
-        \\      Env.lookupVar,
-        \\      Env.lookupFree,
-        \\      lookupFreeBinding,
-        \\      Env.lookupBound,
-        \\      Env.lookupPlace,
-        \\      Env.lookupEntryPlace,
-        \\      Env.pushBound,
-        \\      Value.eqProp?,
-        \\      BinderRef.isU256,
-        \\      BoundVarRef.isU256,
-        \\      TyRef.isU256,
-        \\      TyRef.isI256,
-        \\      TyRef.isU256Carrier,
-        \\      compilerTypeIdU256,
-        \\      compilerTypeIdI256,
-        \\      compilerTypeIdBool,
-        \\      Ora.Spec.expectedCompilerTypeIdU256,
-        \\      Ora.Spec.expectedCompilerTypeIdI256,
-        \\      Ora.Spec.expectedCompilerTypeIdBool,
-        \\      U256.sle,
-        \\      U256.slt,
-        \\      U256.sge,
-        \\      U256.sgt
-    );
-    for (0..free_var_count) |lhs_index| {
-        for (0..free_var_count) |rhs_index| {
-            try writer.print(",\n      h_auto_free_{d}_{d}", .{ lhs_index, rhs_index });
-        }
-    }
-    try writer.writeAll(
-        \\
-        \\    ]
-    );
-}
-
-fn printLeanFormulaProjectionSummary(stdout: anytype, summary: LeanFormulaProjectionSummary) !void {
-    try stdout.print(
-        "formula projection: term={d}, origin_value={d}, total={d}, term_ratio_basis_points={d}",
-        .{ summary.term, summary.origin_value, summary.total(), summary.termRatioBasisPoints() },
-    );
-}
-
-fn leanSemanticSupportAvailable(support: formal_obligation_to_lean.SemanticSupport) bool {
-    return switch (support) {
-        .supported => true,
-        .unsupported => false,
-    };
-}
-
-fn printLeanTypeRef(stdout: anytype, ty: formal_obligation.TypeRef) !void {
-    switch (ty) {
-        .spelling => |text| try stdout.print("`{s}`", .{text}),
-        .compiler_type_id => |id| {
-            if (ora_types.builtin.lookupBuiltinByComptimeTypeId(id)) |spec| {
-                try stdout.print("`{s}`", .{spec.source_name});
-            } else {
-                try stdout.print("compiler_type_id:{d}", .{id});
-            }
-        },
-    }
-}
-
-fn printLeanSemanticUnsupportedReason(
-    stdout: anytype,
-    reason: formal_obligation_to_lean.SemanticUnsupportedReason,
-) !void {
-    switch (reason) {
-        .empty_query => try stdout.writeAll("    reason: query has no obligation ids, so no Lean semantic proposition can be emitted\n"),
-        .invalid_dependency => try stdout.writeAll("    reason: query references a missing obligation or assumption row\n"),
-        .unsupported_obligation_kind => try stdout.writeAll("    reason: this obligation kind is not in the Lean semantic proof fragment yet\n"),
-        .unsupported_effect_frame_relation => |relation| try stdout.print(
-            "    reason: effect-frame relation `{s}` is not in the Lean semantic proof fragment yet\n",
-            .{@tagName(relation)},
-        ),
-        .unsupported_origin_value => try stdout.writeAll("    reason: formula is still an MLIR origin_value; Lean proof export only supports projected Term formulas today\n"),
-        .unsupported_term_kind => try stdout.writeAll("    reason: this term shape is not in the Lean semantic proof fragment yet\n"),
-        .missing_type => try stdout.writeAll("    reason: term is missing type metadata required by the Lean semantic proof fragment\n"),
-        .unsupported_type => |ty| {
-            try stdout.writeAll("    reason: unsupported Lean semantic type ");
-            try printLeanTypeRef(stdout, ty);
-            try stdout.writeAll("; the current Lean semantic proof fragment supports bool formulas and u256 values only\n");
-        },
-        .unsupported_comparison_width => try stdout.writeAll("    reason: signed comparison width is outside the current Lean semantic proof fragment; only 256-bit signed comparisons are supported today\n"),
-        .unknown_signedness => try stdout.writeAll("    reason: signed comparison operand is missing compiler type-id signedness metadata\n"),
-        .mixed_signedness => try stdout.writeAll("    reason: comparison predicate signedness does not match both operand types\n"),
-        .unsupported_arithmetic_width => try stdout.writeAll("    reason: arithmetic value width is outside the current Lean semantic proof fragment; only 256-bit arithmetic values are supported today\n"),
-        .unknown_arithmetic_signedness => try stdout.writeAll("    reason: arithmetic value is missing compiler type-id signedness metadata\n"),
-        .mixed_arithmetic_signedness => try stdout.writeAll("    reason: arithmetic operation signedness does not match the value type\n"),
-        .missing_key_disjoint_evidence => try stdout.writeAll("    reason: evidence-backed storage frame has no key-disjointness evidence rows\n"),
-        .unsupported_key_disjoint_evidence_formula => try stdout.writeAll("    reason: key-disjointness evidence must be a direct requires free-variable disequality in the Lean fragment\n"),
-        .unsupported_key_disjoint_evidence_kind => try stdout.writeAll("    reason: key-disjointness evidence kind is not supported by the Lean fragment\n"),
-        .key_disjoint_evidence_type_unsupported => try stdout.writeAll("    reason: key-disjointness evidence currently supports only 256-bit carrier free variables\n"),
-        .key_disjoint_evidence_owner_mismatch => try stdout.writeAll("    reason: key-disjointness evidence references an assumption from a different owner\n"),
-        .key_disjoint_evidence_path_mismatch => try stdout.writeAll("    reason: key-disjointness evidence does not match the first differing parameter keys of the read/write paths\n"),
-    }
-}
-
-fn writeLeanObligationModuleArtifact(
-    allocator: std.mem.Allocator,
-    file_path: []const u8,
-    output_dir: ?[]const u8,
-    display_dir: ?[]const u8,
-    source: []const u8,
-) ![]const u8 {
-    const base_name = std.fs.path.stem(file_path);
-    const filename = try std.fmt.allocPrint(allocator, "{s}.lean.obligations.lean", .{base_name});
-    defer allocator.free(filename);
-
-    var write_path_buf: ?[]u8 = null;
-    defer if (write_path_buf) |buf| allocator.free(buf);
-    var display_path_buf: ?[]u8 = null;
-
-    const write_path = if (output_dir) |dir| blk: {
-        try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), dir);
-        write_path_buf = try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
-        break :blk write_path_buf.?;
-    } else filename;
-
-    const display_path = if (display_dir) |dir| blk: {
-        display_path_buf = try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
-        break :blk display_path_buf.?;
-    } else if (output_dir) |dir| blk: {
-        display_path_buf = try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
-        break :blk display_path_buf.?;
-    } else try allocator.dupe(u8, filename);
-    errdefer allocator.free(display_path);
-
-    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
-        .sub_path = write_path,
-        .data = source,
-    });
-
-    return display_path;
-}
-
-fn printIdListInline(stdout: anytype, ids: []const formal_obligation.Id) !void {
-    try stdout.writeByte('[');
-    for (ids, 0..) |id, index| {
-        if (index != 0) try stdout.writeAll(", ");
-        try stdout.print("{d}", .{id});
-    }
-    try stdout.writeByte(']');
-}
-
-fn printLeanUnknownRecipeSource(stdout: anytype, source: @import("formal/obligation.zig").SourceRef) !void {
-    if (source.file) |file| {
-        try stdout.print("{s}", .{file});
-        if (source.line != 0) try stdout.print(":{d}", .{source.line});
-        if (source.column != 0) try stdout.print(":{d}", .{source.column});
-    } else if (source.line != 0) {
-        try stdout.print("line {d}", .{source.line});
-        if (source.column != 0) try stdout.print(":{d}", .{source.column});
-    } else {
-        try stdout.writeAll("unknown source");
-    }
-}
-
-fn maybeEmitLeanUnknownRecipe(
-    allocator: std.mem.Allocator,
-    file_path: []const u8,
-    final_module: @import("mlir_c_api").c.MlirModule,
-    precollected_formal_result: ?*const formal_obligation_from_mlir.CollectResult,
-    smt_report: z3_verification.SmtReportArtifacts,
-    mlir_options: MlirOptions,
-    stdout: anytype,
-) !void {
-    var context = if (precollected_formal_result) |formal_result|
-        try collectLeanObligationContextFromFormalResult(allocator, file_path, formal_result, smt_report)
-    else
-        try collectLeanObligationContext(allocator, file_path, final_module, smt_report);
-    defer context.deinit();
-
-    var recipe_count: usize = 0;
-    var unavailable_count: usize = 0;
-    for (context.merged_result.set.queries) |query| {
-        if (!isLeanUnknownRecipeTarget(query)) continue;
-        const projection = projectionSummaryForLeanQuery(context.merged_result.set, query);
-        const semantic_support = formal_obligation_to_lean.querySemanticSupport(context.merged_result.set, query);
-        if (projection.hasOpaqueFormula() or !leanSemanticSupportAvailable(semantic_support)) {
-            unavailable_count += 1;
-        } else {
-            recipe_count += 1;
-        }
-    }
-
-    const unknown_rows = plainUnknownPreparedRows(smt_report);
-    const classified_targets = recipe_count + unavailable_count;
-    const unmatched_unknown_rows = if (unknown_rows > classified_targets) unknown_rows - classified_targets else 0;
-    if (unavailable_count != 0 or unmatched_unknown_rows != 0) {
-        try stdout.writeAll("Lean proof recipe unavailable for some Z3 UNKNOWN obligations:\n");
-        for (context.merged_result.set.queries) |query| {
-            if (!isLeanUnknownRecipeTarget(query)) continue;
-            const projection = projectionSummaryForLeanQuery(context.merged_result.set, query);
-            const semantic_support = formal_obligation_to_lean.querySemanticSupport(context.merged_result.set, query);
-            if (!projection.hasOpaqueFormula() and leanSemanticSupportAvailable(semantic_support)) continue;
-            try stdout.print("  - query: emittedQuery_{d} (", .{query.id});
-            try printLeanUnknownRecipeSource(stdout, query.source);
-            try stdout.writeAll(")\n    ");
-            try printLeanFormulaProjectionSummary(stdout, projection);
-            try stdout.writeByte('\n');
-            if (projection.hasOpaqueFormula()) {
-                try stdout.writeAll("    reason: formula is still an MLIR origin_value; Lean proof export only supports projected Term formulas today\n");
-            } else {
-                switch (semantic_support) {
-                    .supported => try stdout.writeAll("    reason: this obligation kind is not in the Lean semantic proof fragment yet\n"),
-                    .unsupported => |reason| try printLeanSemanticUnsupportedReason(stdout, reason),
-                }
-            }
-        }
-        if (unmatched_unknown_rows != 0) {
-            const projection = projectionSummaryForLeanSet(context.merged_result.set);
-            try stdout.print("  - unmatched UNKNOWN prepared rows: {d}\n    ", .{unmatched_unknown_rows});
-            try printLeanFormulaProjectionSummary(stdout, projection);
-            try stdout.writeByte('\n');
-            try stdout.writeAll("    reason: no matching Lean-dischargeable obligation query was derived from the MLIR manifest\n");
-        }
-        try stdout.writeByte('\n');
-    }
-
-    if (recipe_count == 0) return;
-
-    const obligations_source = renderLeanObligationsSource(
-        allocator,
-        context.merged_result.set,
-        context.generated_namespace,
-    ) catch |err| switch (err) {
-        error.UnsupportedOriginValue => {
-            const projection = projectionSummaryForLeanSet(context.merged_result.set);
-            try stdout.writeAll("Lean proof recipe unavailable for some Z3 UNKNOWN obligations:\n");
-            try stdout.writeAll("  - manifest contains formulas outside the Lean Term fragment\n    ");
-            try printLeanFormulaProjectionSummary(stdout, projection);
-            try stdout.writeByte('\n');
-            try stdout.writeAll("    reason: formula is still an MLIR origin_value; Lean proof export only supports projected Term formulas today\n\n");
-            return;
-        },
-        error.UnsupportedObligationKind => {
-            const projection = projectionSummaryForLeanSet(context.merged_result.set);
-            try stdout.writeAll("Lean proof recipe unavailable for some Z3 UNKNOWN obligations:\n");
-            try stdout.writeAll("  - manifest contains obligation kinds outside the Lean semantic proof fragment\n    ");
-            try printLeanFormulaProjectionSummary(stdout, projection);
-            try stdout.writeByte('\n');
-            try stdout.writeAll("    reason: this obligation kind is not in the Lean semantic proof fragment yet\n\n");
-            return;
-        },
-        else => return err,
-    };
-    defer allocator.free(obligations_source);
-
-    const module_path = try writeLeanObligationModuleArtifact(
-        allocator,
-        file_path,
-        mlir_options.output_dir,
-        mlir_options.artifact_display_dir,
-        obligations_source,
-    );
-    defer allocator.free(module_path);
-
-    try stdout.writeAll("Lean proof recipe for Z3 UNKNOWN obligations:\n");
-    try stdout.print("  obligation module: {s}\n", .{module_path});
-    try stdout.print("  generated namespace: {s}\n", .{context.generated_namespace});
-    for (context.merged_result.set.queries) |query| {
-        if (!isLeanUnknownRecipeTarget(query)) continue;
-        const projection = projectionSummaryForLeanQuery(context.merged_result.set, query);
-        const semantic_support = formal_obligation_to_lean.querySemanticSupport(context.merged_result.set, query);
-        if (projection.hasOpaqueFormula() or !leanSemanticSupportAvailable(semantic_support)) continue;
-        try stdout.print("  - query: emittedQuery_{d} (", .{query.id});
-        try printLeanUnknownRecipeSource(stdout, query.source);
-        try stdout.writeAll(")\n");
-        try stdout.print(
-            "    theorem shape: theorem discharge_q{d} : {s}.emittedQuery_{d} := by ...\n",
-            .{ query.id, context.generated_namespace, query.id },
-        );
-        try stdout.print("    proof row: query_id={d}, obligation_ids=", .{query.id});
-        try printIdListInline(stdout, query.obligation_ids);
-        try stdout.writeAll(", assumption_ids=");
-        try printIdListInline(stdout, query.assumption_ids);
-        try stdout.writeByte('\n');
-    }
-    try stdout.writeAll("  pass the proof manifest with `--lean-proofs <proofs.json>`\n\n");
-}
-
-fn applyLeanProofArtifactGate(
-    allocator: std.mem.Allocator,
-    file_path: []const u8,
-    formal_result: *const formal_obligation_from_mlir.CollectResult,
-    proof_manifest_path: []const u8,
-    smt_report: z3_verification.SmtReportArtifacts,
-    mlir_options: MlirOptions,
-    stdout: anytype,
-) !bool {
-    const proof_manifest = @import("formal/proof_manifest.zig");
-    const proof_check = @import("formal/proof_check.zig");
-
-    var context = try buildLeanObligationContext(allocator, file_path, formal_result, smt_report);
-    defer context.deinit();
-
-    const proof_manifest_bytes = try std.Io.Dir.cwd().readFileAlloc(
-        std.Io.Threaded.global_single_threaded.io(),
-        proof_manifest_path,
-        allocator,
-        .unlimited,
-    );
-    defer allocator.free(proof_manifest_bytes);
-
-    var parsed_manifest = try proof_manifest.parseProofManifestJson(allocator, proof_manifest_bytes);
-    defer parsed_manifest.deinit();
-
-    var applied = try proof_check.applyProofRows(
-        allocator,
-        context.merged_result.set,
-        parsed_manifest.rows,
-        context.generated_namespace,
-        context.obligations_source.?,
-        mlir_options.process_environ,
-        stdout,
-    );
-    defer if (applied) |*result| result.deinit();
-
-    const decided_set = if (applied) |*result| result.set else context.merged_result.set;
-    const decision = decided_set.artifactDecision();
-    if (applied) |*result| {
-        try writeLeanProofCertificate(
-            allocator,
-            file_path,
-            mlir_options.output_dir,
-            result.certificate_json,
-            stdout,
-            mlir_options.suppress_artifact_logs,
-        );
-    }
-
-    switch (decision) {
-        .allowed => return true,
-        .blocked => |reason| {
-            if (reason == .blocking_diagnostic) {
-                try printLeanProofGateDiagnostics(stdout, decided_set);
-            }
-            try stdout.print("Lean proof gate did not authorize artifact emission: {s}\n", .{@tagName(reason)});
-            return false;
-        },
-    }
-}
-
-fn leanAutoProofScratchSegment(allocator: std.mem.Allocator, file_path: []const u8) ![]const u8 {
-    const stem = std.fs.path.stem(file_path);
-    var component = std.Io.Writer.Allocating.init(allocator);
-    defer component.deinit();
-    try component.writer.writeAll("AutoProof_");
-    for (stem) |byte| {
-        if (std.ascii.isAlphanumeric(byte) or byte == '_') {
-            try component.writer.writeByte(byte);
-        } else {
-            try component.writer.writeByte('_');
-        }
-    }
-    const hash = std.hash.Wyhash.hash(0, file_path);
-    const pid = std.posix.system.getpid();
-    return try std.fmt.allocPrint(allocator, "{s}_{x}_{d}", .{ component.written(), hash, pid });
-}
-
-fn buildAutomaticLeanProofModuleSource(
-    allocator: std.mem.Allocator,
-    obligations_source: []const u8,
-    module_namespace: []const u8,
-    set: formal_obligation.ObligationSet,
-    queries: []const formal_obligation.VerificationQuery,
-) ![]const u8 {
-    const namespace_start = std.mem.indexOf(u8, obligations_source, "namespace ") orelse return error.LeanObligationsMissingNamespace;
-    const body_start = (std.mem.indexOfPos(u8, obligations_source, namespace_start, "\n") orelse return error.LeanObligationsMissingNamespace) + 1;
-    const end_start = std.mem.lastIndexOf(u8, obligations_source, "\nend ") orelse return error.LeanObligationsMissingNamespace;
-
-    var out = std.Io.Writer.Allocating.init(allocator);
-    errdefer out.deinit();
-    const writer = &out.writer;
-
-    try writer.writeAll(obligations_source[0..namespace_start]);
-    try writer.writeAll("namespace ");
-    try writer.writeAll(module_namespace);
-    try writer.writeByte('\n');
-    try writer.writeAll(obligations_source[body_start..end_start]);
-    try writer.writeByte('\n');
-
-    for (queries) |query| {
-        const free_vars = try collectFreeVarsFromQuery(allocator, set, query);
-        defer allocator.free(free_vars);
-
-        try writer.print("theorem discharge_q{d} : emittedQuery_{d} := by\n", .{ query.id, query.id });
-        try writeLeanAutoFreeVarEqFacts(writer, free_vars);
-        try writer.writeAll("  unfold ");
-        try writer.print("emittedQuery_{d}", .{query.id});
-        try writer.writeAll(" obligationFollowsFromAssumptions\n");
-        try writer.writeAll("  constructor\n");
-        try writer.writeAll("  · refine ⟨");
-        try writeLeanAutoWitnessEnv(writer, free_vars);
-        try writer.writeAll(", ?_⟩\n");
-        try writer.writeAll("    simp ");
-        try writeLeanAutoSimpSet(writer, free_vars.len);
-        try writer.writeAll(" <;> try decide\n");
-        try writer.writeAll("  · intro env hAssumptions\n");
-        try writer.writeAll("    simp ");
-        try writeLeanAutoSimpSet(writer, free_vars.len);
-        try writer.writeAll(" at hAssumptions ⊢\n");
-        try writer.writeAll("    repeat intro\n");
-        try writer.writeAll("    first\n");
-        try writer.writeAll("    | assumption\n");
-        try writer.writeAll("    | exact U256.ult_implies_ule _ _ (by assumption)\n");
-        try writer.writeAll("    | exact stable_place_read_self_eq_denotes env _\n");
-        try writer.writeAll("    | simp_all ");
-        try writeLeanAutoSimpSet(writer, free_vars.len);
-        try writer.writeAll("\n\n");
-    }
-
-    try writer.writeAll("end ");
-    try writer.writeAll(module_namespace);
-    try writer.writeByte('\n');
-    return try out.toOwnedSlice();
-}
-
-fn applyAutomaticLeanProofArtifactGate(
-    allocator: std.mem.Allocator,
-    file_path: []const u8,
-    formal_result: *const formal_obligation_from_mlir.CollectResult,
-    smt_report: z3_verification.SmtReportArtifacts,
-    mlir_options: MlirOptions,
-    stdout: anytype,
-) !bool {
-    const proof_check = @import("formal/proof_check.zig");
-
-    var context = try collectLeanObligationContextFromFormalResult(allocator, file_path, formal_result, smt_report);
-    defer context.deinit();
-
-    var target_queries: std.ArrayList(formal_obligation.VerificationQuery) = .empty;
-    defer target_queries.deinit(allocator);
-    var unavailable_count: usize = 0;
-    for (context.merged_result.set.queries) |query| {
-        if (!isLeanUnknownRecipeTarget(query)) continue;
-        const projection = projectionSummaryForLeanQuery(context.merged_result.set, query);
-        const semantic_support = formal_obligation_to_lean.querySemanticSupport(context.merged_result.set, query);
-        if (projection.hasOpaqueFormula() or !leanSemanticSupportAvailable(semantic_support)) {
-            unavailable_count += 1;
-            continue;
-        }
-        try target_queries.append(allocator, query);
-    }
-
-    const unknown_rows = plainUnknownPreparedRows(smt_report);
-    const classified_targets = plainUnknownPreparedRowCountForLeanSet(context.merged_result.set);
-    const unmatched_unknown_rows = if (unknown_rows > classified_targets) unknown_rows - classified_targets else 0;
-    if (unavailable_count != 0 or unmatched_unknown_rows != 0) {
-        try stdout.writeAll("Automatic Lean proof gate cannot cover all Z3 UNKNOWN userland obligations.\n");
-        if (unavailable_count != 0) {
-            try stdout.print("  unsupported Lean-fragment UNKNOWN queries: {d}\n", .{unavailable_count});
-        }
-        if (unmatched_unknown_rows != 0) {
-            try stdout.print("  unmatched UNKNOWN prepared rows: {d}\n", .{unmatched_unknown_rows});
-        }
-        return false;
-    }
-
-    if (target_queries.items.len == 0) {
-        return true;
-    }
-
-    context.obligations_source = try renderLeanObligationsSource(
-        allocator,
-        context.merged_result.set,
-        context.generated_namespace,
-    );
-
-    const scratch_segment = try leanAutoProofScratchSegment(allocator, file_path);
-    defer allocator.free(scratch_segment);
-    const scratch_rel = try std.fmt.allocPrint(allocator, "formal/Ora/AutoProofScratch/{s}", .{scratch_segment});
-    defer allocator.free(scratch_rel);
-    const io = std.Io.Threaded.global_single_threaded.io();
-    try std.Io.Dir.cwd().createDirPath(io, scratch_rel);
-    defer std.Io.Dir.cwd().deleteTree(io, scratch_rel) catch {};
-    defer std.Io.Dir.cwd().deleteDir(io, "formal/Ora/AutoProofScratch") catch {};
-
-    const module_name = try std.fmt.allocPrint(allocator, "Ora.AutoProofScratch.{s}.Proofs", .{scratch_segment});
-    defer allocator.free(module_name);
-    const proof_path = try std.fmt.allocPrint(allocator, "{s}/Proofs.lean", .{scratch_rel});
-    defer allocator.free(proof_path);
-    const proof_source = try buildAutomaticLeanProofModuleSource(
-        allocator,
-        context.obligations_source.?,
-        module_name,
-        context.merged_result.set,
-        target_queries.items,
-    );
-    defer allocator.free(proof_source);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = proof_path, .data = proof_source });
-
-    const rows = try allocator.alloc(proof_check.ProofRow, target_queries.items.len);
-    defer allocator.free(rows);
-    var theorem_names: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (theorem_names.items) |name| allocator.free(name);
-        theorem_names.deinit(allocator);
-    }
-    for (target_queries.items, rows) |query, *row| {
-        const theorem_name = try std.fmt.allocPrint(allocator, "{s}.discharge_q{d}", .{ module_name, query.id });
-        try theorem_names.append(allocator, theorem_name);
-        row.* = .{
-            .query_id = query.id,
-            .obligation_ids = query.obligation_ids,
-            .assumption_ids = query.assumption_ids,
-            .module_name = module_name,
-            .theorem_name = theorem_name,
-            .path = proof_path,
-            .content_sha256 = null,
-        };
-    }
-
-    var applied = try proof_check.applyProofRows(
-        allocator,
-        context.merged_result.set,
-        rows,
-        context.generated_namespace,
-        context.obligations_source.?,
-        mlir_options.process_environ,
-        stdout,
-    );
-    defer if (applied) |*result| result.deinit();
-    if (applied == null) {
-        try stdout.writeAll(
-            "Automatic Lean proof gate failed: the generated proof checker did not accept every targeted Z3 UNKNOWN obligation.\n",
-        );
-        return false;
-    }
-
-    const decided_set = applied.?.set;
-    const decision = decided_set.artifactDecision();
-    try writeLeanProofCertificate(
-        allocator,
-        file_path,
-        mlir_options.output_dir,
-        applied.?.certificate_json,
-        stdout,
-        mlir_options.suppress_artifact_logs,
-    );
-    switch (decision) {
-        .allowed => return true,
-        .blocked => |reason| {
-            if (reason == .blocking_diagnostic) {
-                try printLeanProofGateDiagnostics(stdout, decided_set);
-            }
-            try stdout.print("Automatic Lean proof gate did not authorize artifact emission: {s}\n", .{@tagName(reason)});
-            return false;
-        },
-    }
-}
-
-fn printLeanProofGateDiagnostics(stdout: anytype, set: @import("formal/obligation.zig").ObligationSet) !void {
-    var printed_header = false;
-    for (set.diagnostics) |diagnostic| {
-        if (!diagnostic.blocks_artifacts) continue;
-        if (!printed_header) {
-            try stdout.print("Formal proof gate diagnostics:\n", .{});
-            printed_header = true;
-        }
-        try stdout.print("  - {s}: {s}", .{ @tagName(diagnostic.kind), diagnostic.message });
-        try printFormalSourceRef(stdout, diagnostic.source);
-        try stdout.writeByte('\n');
-    }
-}
-
-fn printFormalSourceRef(stdout: anytype, source: @import("formal/obligation.zig").SourceRef) !void {
-    if (source.file) |file| {
-        try stdout.print(" ({s}", .{file});
-        if (source.line != 0) try stdout.print(":{d}", .{source.line});
-        if (source.column != 0) try stdout.print(":{d}", .{source.column});
-        try stdout.writeByte(')');
-    } else if (source.line != 0) {
-        try stdout.print(" (line {d}", .{source.line});
-        if (source.column != 0) try stdout.print(":{d}", .{source.column});
-        try stdout.writeByte(')');
-    }
-}
-
-fn writeLeanProofCertificate(
-    allocator: std.mem.Allocator,
-    file_path: []const u8,
-    output_dir: ?[]const u8,
-    certificate_json: []const u8,
-    stdout: anytype,
-    suppress_log: bool,
-) !void {
-    const base_name = std.fs.path.stem(file_path);
-    const filename = try std.fmt.allocPrint(allocator, "{s}.lean.proof.json", .{base_name});
-    defer allocator.free(filename);
-
-    var path_buf: ?[]u8 = null;
-    defer if (path_buf) |buf| allocator.free(buf);
-
-    const path = if (output_dir) |dir| blk: {
-        try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), dir);
-        path_buf = try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
-        break :blk path_buf.?;
-    } else filename;
-
-    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
-        .sub_path = path,
-        .data = certificate_json,
-    });
-
-    if (!suppress_log) {
-        try stdout.print("Lean proof certificate saved to {s}\n", .{path});
-    }
-}
-
 fn writeLeanDispatcherProofCertificate(
     allocator: std.mem.Allocator,
     file_path: []const u8,
@@ -6972,7 +6250,7 @@ fn writeLeanDispatcherProofCertificate(
     suppress_log: bool,
 ) !void {
     const base_name = std.fs.path.stem(file_path);
-    const filename = try std.fmt.allocPrint(allocator, "{s}.lean.dispatcher.proof.json", .{base_name});
+    const filename = try formal_artifact_catalog.filename(allocator, base_name, .dispatcher_proof_certificate);
     defer allocator.free(filename);
 
     var path_buf: ?[]u8 = null;
@@ -6994,27 +6272,172 @@ fn writeLeanDispatcherProofCertificate(
     }
 }
 
-fn leanProofGeneratedNamespace(allocator: std.mem.Allocator, file_path: []const u8) ![]const u8 {
-    const stem = std.fs.path.stem(file_path);
-    var component_out = std.Io.Writer.Allocating.init(allocator);
-    defer component_out.deinit();
-    const writer = &component_out.writer;
+fn markUnrunFormalGatesSkipped(statuses: *formal_artifact_catalog.GateStatuses) void {
+    if (statuses.z3_userland == .not_run) statuses.z3_userland = .skipped;
+    if (statuses.lean_userland == .not_run) statuses.lean_userland = .skipped;
+    if (statuses.dispatcher_kernel == .not_run) statuses.dispatcher_kernel = .skipped;
+    if (statuses.source_accounting_kernel == .not_run) statuses.source_accounting_kernel = .skipped;
+}
 
-    try writer.writeAll("Source_");
-    for (stem) |byte| {
-        if (std.ascii.isAlphanumeric(byte) or byte == '_') {
-            try writer.writeByte(byte);
+fn sourceAccountingMode(options: MlirOptions) !formal_source_accounting.CompilationMode {
+    if (!options.verify_z3) return .unverified_emit;
+    if (options.verify_mode) |mode| {
+        if (std.ascii.eqlIgnoreCase(mode, "full")) return .verified_full;
+        if (std.ascii.eqlIgnoreCase(mode, "basic")) return .verified_basic;
+        return error.InvalidVerificationMode;
+    }
+    return .verified_full;
+}
+
+fn printSourceAccountingFailure(
+    allocator: std.mem.Allocator,
+    stdout: anytype,
+    finished: formal_kernel_registry.SourceAccountingSession.FinishedView,
+) !void {
+    if (finished.failures.len == 0) {
+        try stdout.writeAll("error: formal source accounting rejected without a failure row\n");
+        return;
+    }
+    const diagnostic = try formal_kernel_registry.renderSourceAccountingDiagnostic(
+        allocator,
+        finished.failures[0],
+    );
+    defer allocator.free(diagnostic);
+    try stdout.print("error: {s}\n", .{diagnostic});
+}
+
+fn writeSourceAccountingReport(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    output_dir: ?[]const u8,
+    report: []const u8,
+) !void {
+    const filename = try formal_artifact_catalog.filename(
+        allocator,
+        std.fs.path.stem(file_path),
+        .source_accounting_report,
+    );
+    defer allocator.free(filename);
+    var owned_path: ?[]u8 = null;
+    defer if (owned_path) |path| allocator.free(path);
+    const path = if (output_dir) |dir| blk: {
+        try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), dir);
+        owned_path = try std.fs.path.join(allocator, &.{ dir, filename });
+        break :blk owned_path.?;
+    } else filename;
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = path,
+        .data = report,
+    });
+}
+
+fn formalArtifactOutputDir(options: MlirOptions) []const u8 {
+    return options.output_dir orelse default_formal_artifact_dir;
+}
+
+fn writeLoopInductionReport(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    output_dir: []const u8,
+    set: formal_obligation.ObligationSet,
+) !void {
+    if (set.loop_summaries.len == 0) return;
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+    try formal_obligation_dump.writeLoopInductionReport(&out.writer, set);
+
+    const filename = try formal_artifact_catalog.filename(
+        allocator,
+        std.fs.path.stem(file_path),
+        .loop_induction_report,
+    );
+    defer allocator.free(filename);
+    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), output_dir);
+    const path = try std.fs.path.join(allocator, &.{ output_dir, filename });
+    defer allocator.free(path);
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = path,
+        .data = out.written(),
+    });
+}
+
+fn printLoopInductionSummary(
+    writer: anytype,
+    set: formal_obligation.ObligationSet,
+) !void {
+    if (set.loop_summaries.len == 0) return;
+    var required: usize = 0;
+    var excluded: usize = 0;
+    for (set.loop_summaries) |summary| {
+        const query = loopInductionQuery(set, summary.id);
+        if (query != null and
+            query.?.artifact_policy == .blocks_verified_artifacts and
+            query.?.proof_requirement == .lean_certificate)
+        {
+            required += 1;
         } else {
-            try writer.writeByte('_');
+            if (summary.unsupported_reasons.len == 0) return error.LoopClassificationMissingReason;
+            excluded += 1;
         }
     }
-
-    const hash = std.hash.Wyhash.hash(0, file_path);
-    return try std.fmt.allocPrint(
-        allocator,
-        "Ora.Generated.Obligations.{s}_{x}",
-        .{ component_out.written(), hash },
+    try writer.print(
+        "Lean scalar-loop induction: total={d}, certificate-required={d}, excluded={d}\n",
+        .{ set.loop_summaries.len, required, excluded },
     );
+    for (set.loop_summaries) |summary| {
+        const query = loopInductionQuery(set, summary.id);
+        const certificate_required = query != null and
+            query.?.artifact_policy == .blocks_verified_artifacts and
+            query.?.proof_requirement == .lean_certificate;
+        try writer.writeAll("  - ");
+        if (summary.source.file) |file| try writer.writeAll(file) else try writer.writeAll("<generated>");
+        if (summary.source.line != 0) try writer.print(":{d}", .{summary.source.line});
+        if (summary.owner == .statement) {
+            try writer.print(" ({s})", .{summary.owner.statement.function_name});
+        }
+        if (certificate_required) {
+            try writer.print(" lean_certificate query={d}\n", .{query.?.id});
+            continue;
+        }
+        try writer.writeAll(" excluded_by=");
+        for (summary.unsupported_reasons, 0..) |reason, index| {
+            if (index != 0) try writer.writeByte(',');
+            try writer.writeAll(@tagName(reason));
+        }
+        try writer.writeByte('\n');
+    }
+}
+
+fn loopInductionQuery(
+    set: formal_obligation.ObligationSet,
+    summary_id: formal_obligation.Id,
+) ?formal_obligation.VerificationQuery {
+    for (set.queries) |query| {
+        if (query.kind == .loop_induction and query.loop_summary_id == summary_id) return query;
+    }
+    return null;
+}
+
+fn writeFormalArtifactIndex(
+    allocator: std.mem.Allocator,
+    file_path: []const u8,
+    options: MlirOptions,
+    statuses: formal_artifact_catalog.GateStatuses,
+    authorization: formal_artifact_catalog.FinalAuthorization,
+) !void {
+    const scan_dir = formalArtifactOutputDir(options);
+    const artifact_dir = options.artifact_display_dir orelse scan_dir;
+    const artifact_root = options.formal_artifact_root orelse artifact_dir;
+    try formal_artifact_catalog.writeIndex(allocator, .{
+        .source = file_path,
+        .stem = std.fs.path.stem(file_path),
+        .scan_dir = scan_dir,
+        .artifact_root = artifact_root,
+        .artifact_dir = artifact_dir,
+        .gate_statuses = statuses,
+        .final_authorization = authorization,
+    });
 }
 
 // ============================================================================
@@ -7114,6 +6537,7 @@ fn emitBytecodeFromSirText(
     sir_text: []const u8,
     file_path: []const u8,
     output_dir: ?[]const u8,
+    formal_output_dir: []const u8,
     output_file: ?[]const u8,
     sir_locations_json: ?[]const u8,
     sir_line_map_json: ?[]const u8,
@@ -7122,7 +6546,7 @@ fn emitBytecodeFromSirText(
     stdout: anytype,
     suppress_log: bool,
     optimize: ?project_config.OptimizeProfile,
-    dispatcher_check: ?*formal_dispatcher_table_gate.CheckResult,
+    dispatcher_session: ?*formal_kernel_registry.DispatcherSession,
 ) !void {
     const basename = std.fs.path.stem(file_path);
     const sir_extension = ".sir";
@@ -7148,7 +6572,7 @@ fn emitBytecodeFromSirText(
     else
         null;
     defer if (sinora_srcmap_path) |p| allocator.free(p);
-    const dispatcher_report_path = if (dispatcher_check != null)
+    const dispatcher_report_path = if (dispatcher_session != null)
         try std.fs.path.join(allocator, &[_][]const u8{ temp_dir, "dispatcher_bytecode_report.json" })
     else
         null;
@@ -7185,7 +6609,7 @@ fn emitBytecodeFromSirText(
         try stdout.flush();
         return error.SinoraEmptyBytecode;
     }
-    if (dispatcher_check) |check| {
+    if (dispatcher_session) |session| {
         const report_path = dispatcher_report_path orelse return error.DispatcherBytecodeReportMissing;
         const report_json = try std.Io.Dir.cwd().readFileAlloc(
             std.Io.Threaded.global_single_threaded.io(),
@@ -7194,7 +6618,7 @@ fn emitBytecodeFromSirText(
             std.Io.Limit.limited(16 * 1024 * 1024),
         );
         defer allocator.free(report_json);
-        check.validateAndBindBytecode(allocator, report_json, sinora_bytecode) catch |err| {
+        session.bindBackendOutput(allocator, report_json, sinora_bytecode) catch |err| {
             try stdout.print(
                 "Lean dispatcher userland bytecode proof failed: {s}\n",
                 .{@errorName(err)},
@@ -7202,15 +6626,16 @@ fn emitBytecodeFromSirText(
             try stdout.flush();
             return error.VerificationFailed;
         };
+        const certificate_json = try session.finishCertificate(.bytecode);
         try writeLeanDispatcherProofCertificate(
             allocator,
             file_path,
-            output_dir,
-            check.certificate_json,
+            formal_output_dir,
+            certificate_json,
             stdout,
             suppress_log,
         );
-        try check.writeVerificationSummary(stdout, true);
+        try session.writeVerificationSummary(stdout);
         try stdout.print("Lean dispatcher userland proof accepted (SIR + bytecode)\n", .{});
     }
     if (!suppress_log) {
@@ -7731,7 +7156,9 @@ fn writeProofSidecar(
     stem: []const u8,
     positions: []const z3_verification.ProvenGuardPosition,
 ) !void {
-    const filename = try std.fmt.allocPrint(allocator, "{s}/{s}.proof.json", .{ output_dir, stem });
+    const artifact_name = try formal_artifact_catalog.filename(allocator, stem, .guard_proof_sidecar);
+    defer allocator.free(artifact_name);
+    const filename = try std.fs.path.join(allocator, &.{ output_dir, artifact_name });
     defer allocator.free(filename);
 
     var out = std.Io.Writer.Allocating.init(allocator);

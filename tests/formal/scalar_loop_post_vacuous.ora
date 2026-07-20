@@ -1,0 +1,15 @@
+contract ScalarLoopPostVacuous {
+    pub fn countTo(n: u256) -> u256
+        requires n == 0
+        requires n == 1
+        ensures result <= n
+    {
+        var i: u256 = 0;
+        while (i < n)
+            invariant i <= n
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+}

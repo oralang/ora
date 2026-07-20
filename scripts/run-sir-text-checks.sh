@@ -4,6 +4,16 @@ set -euo pipefail
 FILECHECK_BIN=${FILECHECK:-./vendor/llvm-project/build-mlir/bin/FileCheck}
 ORA_BIN=${ORA_BIN:-./zig-out/bin/ora}
 ORA_VERIFY_FLAG=${ORA_VERIFY_FLAG:---no-verify}
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+ARTIFACT_DIR=${ORA_FORMAL_ARTIFACT_DIR:-$REPO_ROOT/artifacts/formal-gate/sir-text}
+
+case "$ORA_BIN" in
+  /*) ;;
+  *) ORA_BIN="$REPO_ROOT/${ORA_BIN#./}" ;;
+esac
+
+mkdir -p "$ARTIFACT_DIR"
 
 if ! command -v "$FILECHECK_BIN" >/dev/null 2>&1; then
   echo "error: FileCheck not found. Set FILECHECK=/path/to/FileCheck" >&2
@@ -37,9 +47,16 @@ while IFS= read -r -d '' check; do
   fi
   tmp_stdout=$(mktemp)
   tmp_stderr=$(mktemp)
-  if "$ORA_BIN" "$ORA_VERIFY_FLAG" --emit=sir-text "$input" >"$tmp_stdout" 2>"$tmp_stderr"; then
+  artifact_file="$ARTIFACT_DIR/$(basename "${input%.ora}").sir"
+  if "$ORA_BIN" "$ORA_VERIFY_FLAG" --emit=sir-text -o "$ARTIFACT_DIR" "$input" >"$tmp_stdout" 2>"$tmp_stderr"; then
     if [ "$expect_fail" -eq 1 ]; then
       echo "error: ora succeeded for expected-fail check $check" >&2
+      rm -f "$tmp_stdout" "$tmp_stderr"
+      fail=1
+      continue
+    fi
+    if [ ! -s "$artifact_file" ]; then
+      echo "error: missing SIR text artifact for $input (check: $check)" >&2
       rm -f "$tmp_stdout" "$tmp_stderr"
       fail=1
       continue
@@ -60,7 +77,7 @@ while IFS= read -r -d '' check; do
     "$FILECHECK_BIN" "$check" < "$tmp_combined" || fail=1
     rm -f "$tmp_combined"
   else
-    "$FILECHECK_BIN" --implicit-check-not=builtin.unrealized_conversion_cast "$check" < "$tmp_stdout" || fail=1
+    "$FILECHECK_BIN" --implicit-check-not=builtin.unrealized_conversion_cast "$check" < "$artifact_file" || fail=1
   fi
   rm -f "$tmp_stdout" "$tmp_stderr"
 done < <(find tests/sir_text -name "*.check" -print0 | sort -z)

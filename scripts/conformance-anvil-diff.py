@@ -12,6 +12,8 @@ unhandled spec.
 
 Usage:
   scripts/conformance-anvil-diff.py tests/conformance/counter.spec.toml
+  scripts/conformance-anvil-diff.py --verified tests/conformance/resource_basic_transfer.spec.toml
+  scripts/conformance-anvil-diff.py --verified --keep-proved-checks tests/conformance/resource_basic_transfer.spec.toml
 """
 
 from __future__ import annotations
@@ -628,6 +630,88 @@ def compare_static_word(wire_type: str, expected: str, data: bytes, offset: int)
     raise Unsupported(f"unsupported return type {wire_type}")
 
 
+def parse_expected_revert(text: str) -> tuple[str, bytes]:
+    value = text.strip()
+    if not (value.startswith("{") and value.endswith("}")):
+        raise Unsupported(f"invalid revert expectation {text}")
+    body = value[1:-1].strip()
+    if not body:
+        return "data", b""
+    if "," in body:
+        raise Unsupported(f"revert expectation must contain one field: {text}")
+    key, separator, raw_value = body.partition("=")
+    if not separator:
+        raise Unsupported(f"invalid revert expectation {text}")
+    key = key.strip()
+    raw_value = raw_value.strip().strip('"')
+    if key == "any":
+        if raw_value.lower() != "true":
+            raise Unsupported("reverts.any must be true")
+        return "any", b""
+    if key == "selector":
+        selector = bytes_from_hex(raw_value)
+        if len(selector) != 4:
+            raise Unsupported("revert selector must be exactly 4 bytes")
+        return "selector", selector
+    if key == "data":
+        return "data", bytes_from_hex(raw_value)
+    raise Unsupported(f"unknown revert expectation field {key}")
+
+
+def extract_rpc_revert_data(error: object) -> bytes | None:
+    if isinstance(error, dict):
+        if "data" in error:
+            extracted = extract_rpc_revert_data(error["data"])
+            if extracted is not None:
+                return extracted
+        for key in ("result", "originalError", "error"):
+            if key in error:
+                extracted = extract_rpc_revert_data(error[key])
+                if extracted is not None:
+                    return extracted
+        return None
+    if isinstance(error, str):
+        value = error.strip()
+        if re.fullmatch(r"0[xX][0-9a-fA-F]*", value):
+            return bytes_from_hex(value)
+        for pattern in (
+            r"\bdata\b\s*[:=]?\s*[\"']?(0[xX][0-9a-fA-F]*)",
+            r"\breverted\b(?:\s+with)?\s*[:=]?\s*[\"']?(0[xX][0-9a-fA-F]*)",
+        ):
+            match = re.search(pattern, value, re.IGNORECASE)
+            if match:
+                return bytes_from_hex(match.group(1))
+    return None
+
+
+def self_test_revert_data_extraction() -> None:
+    cases = (
+        ("0x0102", b"\x01\x02"),
+        ("execution reverted: data 0xdeadbeef, transaction 0xabcdef", bytes.fromhex("deadbeef")),
+        ("execution reverted: 0x0102, transaction 0xaabb", bytes.fromhex("0102")),
+        ({"message": "transaction 0xaabb", "data": "0x1234"}, bytes.fromhex("1234")),
+        ("transaction 0xaabb failed without revert data", None),
+    )
+    for rpc_error, expected in cases:
+        actual = extract_rpc_revert_data(rpc_error)
+        if actual != expected:
+            raise AssertionError(f"revert-data extraction mismatch: input={rpc_error!r} expected={expected!r} actual={actual!r}")
+
+
+def compare_revert_expectation(expectation: str, rpc_error: object) -> tuple[bool, str]:
+    kind, expected = parse_expected_revert(expectation)
+    if kind == "any":
+        return True, "any revert"
+    actual = extract_rpc_revert_data(rpc_error)
+    if actual is None:
+        return False, "RPC error contained no revert data"
+    if kind == "selector":
+        ok = len(actual) >= 4 and actual[:4] == expected
+        return ok, f"data=0x{actual.hex()} expected-selector=0x{expected.hex()}"
+    ok = actual == expected
+    return ok, f"data=0x{actual.hex()} expected=0x{expected.hex()}"
+
+
 # --- supported subset ---------------------------------------------------------
 
 EMPTY_RET = re.compile(r"\{\s*\}")
@@ -666,9 +750,9 @@ def constructor_sig(abi_doc: dict) -> str | None:
     return None
 
 
-def compile_contract(ora_path: Path, outdir: Path) -> tuple[str, dict]:
+def compile_contract(ora_path: Path, outdir: Path, compiler_args: list[str]) -> tuple[str, dict]:
     progress(f"compile {ora_path.relative_to(ROOT)}")
-    p = sh([str(ORA), "emit", "--no-verify", "--emit=abi,bytecode", str(ora_path), "-o", str(outdir)])
+    p = sh([str(ORA), "emit", *compiler_args, "--emit=abi,bytecode", str(ora_path), "-o", str(outdir)])
     if p.returncode != 0:
         raise RuntimeError(f"compile failed for {ora_path}: {p.stderr[:300]}")
     stem = source_stem(ora_path)
@@ -728,11 +812,38 @@ def deploy_contract(bytecode: str, abi_doc: dict, args: list[str], caller: str |
     return address
 
 
+def parse_cli(argv: list[str]) -> tuple[Path, list[str]]:
+    args = list(argv)
+    verified = False
+    keep_proved_checks = False
+    while args and args[0].startswith("--"):
+        option = args.pop(0)
+        if option == "--verified":
+            verified = True
+        elif option == "--keep-proved-checks":
+            keep_proved_checks = True
+        else:
+            raise Unsupported(f"unknown option {option}")
+    if len(args) != 1:
+        raise Unsupported("expected exactly one spec.toml path")
+    if keep_proved_checks and not verified:
+        raise Unsupported("--keep-proved-checks requires --verified")
+    compiler_args = [] if verified else ["--no-verify"]
+    if keep_proved_checks:
+        compiler_args.append("--keep-proved-checks")
+    return Path(args[0]), compiler_args
+
+
 def main() -> int:
-    if len(sys.argv) != 2:
-        print("usage: conformance-anvil-diff.py <spec.toml>", file=sys.stderr)
+    if sys.argv[1:] == ["--self-test"]:
+        self_test_revert_data_extraction()
+        print("conformance-anvil-diff: revert-data extraction self-test ok")
+        return 0
+    try:
+        spec_path, compiler_args = parse_cli(sys.argv[1:])
+    except Unsupported as err:
+        print(f"usage: conformance-anvil-diff.py [--verified [--keep-proved-checks]] <spec.toml>\nerror: {err}", file=sys.stderr)
         return 2
-    spec_path = Path(sys.argv[1])
     if not spec_path.is_absolute():
         spec_path = ROOT / spec_path
     spec = read_spec(spec_path)
@@ -748,15 +859,15 @@ def main() -> int:
     # deletion against sibling runs.
     outdir = Path(tempfile.mkdtemp(prefix="anvil-diff-", dir=ROOT / ".zig-cache"))
     try:
-        return run_spec(spec, spec_path, ora_path, outdir)
+        return run_spec(spec, spec_path, ora_path, outdir, compiler_args)
     finally:
         shutil.rmtree(outdir, ignore_errors=True)
 
 
-def run_spec(spec: dict, spec_path: Path, ora_path: Path, outdir: Path) -> int:
+def run_spec(spec: dict, spec_path: Path, ora_path: Path, outdir: Path, compiler_args: list[str]) -> int:
 
     progress(f"spec {spec_path.relative_to(ROOT)}")
-    bytecode, abi_doc = compile_contract(ora_path, outdir)
+    bytecode, abi_doc = compile_contract(ora_path, outdir, compiler_args)
 
     addresses: dict[str, str] = {}
 
@@ -780,7 +891,7 @@ def run_spec(spec: dict, spec_path: Path, ora_path: Path, outdir: Path) -> int:
         if not name or not source:
             raise Unsupported("[[contract]] requires name and source")
         secondary_path = ROOT / source
-        bytecode, secondary_abi = compile_contract(secondary_path, outdir)
+        bytecode, secondary_abi = compile_contract(secondary_path, outdir, compiler_args)
         caddr = deploy_contract(
             bytecode,
             secondary_abi,
@@ -854,16 +965,21 @@ def run_spec(spec: dict, spec_path: Path, ora_path: Path, outdir: Path) -> int:
             mark = "OK" if not ok else "DIVERGE"
             if ok:
                 diverged += 1
-            elif gas_ceiling(call) is not None:
-                tx_ok, receipt = send_transaction(from_addr, target_addr, calldata, value, stage=f"{label}:revert-tx")
-                receipt_for_assertions = receipt
-                if tx_ok:
+                note = "did NOT revert"
+            else:
+                revert_matches, note = compare_revert_expectation(call["reverts"], out)
+                if not revert_matches:
                     mark = "DIVERGE"
                     diverged += 1
-                if not check_receipt_gas(label, call, receipt):
-                    mark = "DIVERGE"
-                    diverged += 1
-            note = str(out).split(":")[-1].strip()[:40] if not ok else "did NOT revert"
+                if gas_ceiling(call) is not None:
+                    tx_ok, receipt = send_transaction(from_addr, target_addr, calldata, value, stage=f"{label}:revert-tx")
+                    receipt_for_assertions = receipt
+                    if tx_ok:
+                        mark = "DIVERGE"
+                        diverged += 1
+                    if not check_receipt_gas(label, call, receipt):
+                        mark = "DIVERGE"
+                        diverged += 1
             print(f"  [{mark}] {label} -> anvil reverts ({note})")
             checked += 1
         elif "succeeds" in call:

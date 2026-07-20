@@ -2,14 +2,14 @@
 // INPUT: ora-example/expressions/fixed_bytes_return.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @tag4() -> !sir.u256 attributes {ora.abi_return = "bytes4", ora.abi_return_layout = "bytes4", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x039f8588", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @tag4() -> !sir.u256 attributes {ora.abi_return = "bytes4", ora.abi_return_layout = "bytes4", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0x039f8588", ora.source_module_path = "{{.*}}/ora-example/expressions/fixed_bytes_return.ora", ora.source_owner_key = "module/contract:FixedBytesReturnGolden/function:tag4", ora.source_owner_start = 103 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":5:9)))
 // CHECK-NEXT:     %1 = sir.const 77709350758674044152859720590831655020045057208999545725263350842205182885888 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":5:9)))
 // CHECK-NEXT:     %2 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":5:9)))
 // CHECK-NEXT:     sir.store %2 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":5:9)))
 // CHECK-NEXT:     sir.return %2 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":5:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":4:5)
-// CHECK-NEXT:   func.func @tag32() -> !sir.u256 attributes {ora.abi_return = "bytes32", ora.abi_return_layout = "bytes32", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0xf4c9e3d7", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @tag32() -> !sir.u256 attributes {ora.abi_return = "bytes32", ora.abi_return_layout = "bytes32", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.selector = "0xf4c9e3d7", ora.source_module_path = "{{.*}}/ora-example/expressions/fixed_bytes_return.ora", ora.source_owner_key = "module/contract:FixedBytesReturnGolden/function:tag32", ora.source_owner_start = 170 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":9:9)))
 // CHECK-NEXT:     %1 = sir.const 455867356320691211509944977504407603390036387149619137164185182714736811808 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":9:16)))
 // CHECK-NEXT:     %2 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":9:9)))

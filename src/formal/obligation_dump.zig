@@ -21,6 +21,31 @@ pub fn write(writer: anytype, set: obligation.ObligationSet, comptime format: Fo
 pub fn writeJsonLines(writer: anytype, set: obligation.ObligationSet) !void {
     try writeArtifactDecisionRecord(writer, set);
     try writeCoverageSummaryRecord(writer, set);
+    if (set.loop_summaries.len != 0) try writeLoopSummaryCoverageRecord(writer, set);
+
+    for (set.loop_summaries) |item| {
+        try writer.writeAll("{\"record\":\"loop_summary\"");
+        try writeSchemaVersionField(writer);
+        try writeIdField(writer, "id", item.id);
+        try writeOwnerField(writer, item.owner);
+        try writeSourceField(writer, item.source);
+        try writeStringField(writer, "phase", @tagName(item.phase));
+        try writeOriginField(writer, item.origin);
+        try writeOptionalNumberField(writer, "loop_source_op_id", item.loop_source_op_id);
+        try writeStringField(writer, "loop_kind", @tagName(item.loop_kind));
+        try writeLoopVariableListField(writer, "context_variables", item.context_variables);
+        try writeLoopVariableListField(writer, "variables", item.variables);
+        try writeFormulaListField(writer, "init_formulas", item.init_formulas);
+        try writeOptionalFormulaField(writer, "guard_formula", item.guard_formula);
+        try writeFormulaListField(writer, "invariant_formulas", item.invariant_formulas);
+        try writeLoopStepAssignmentListField(writer, item.step_assignments);
+        try writeFormulaListField(writer, "body_safety_formulas", item.body_safety_formulas);
+        try writeFormulaListField(writer, "post_formulas", item.post_formulas);
+        try writeLoopQueryIdsField(writer, item.query_ids);
+        try writeBoolField(writer, "projection_supported", item.projectionSupported());
+        try writeEnumListField(writer, "unsupported_reasons", obligation.LoopUnsupportedReason, item.unsupported_reasons);
+        try writer.writeAll("}\n");
+    }
 
     for (set.assumptions) |item| {
         try writer.writeAll("{\"record\":\"assumption\"");
@@ -73,6 +98,8 @@ pub fn writeJsonLines(writer: anytype, set: obligation.ObligationSet) !void {
         try writeSourceField(writer, item.source);
         try writeStringField(writer, "phase", @tagName(item.phase));
         try writeOriginField(writer, item.origin);
+        try writeStringField(writer, "artifact_policy", @tagName(item.artifact_policy));
+        try writeStringField(writer, "proof_requirement", @tagName(item.proof_requirement));
         try writeStringField(writer, "backend", @tagName(item.backend));
         try writeStringField(writer, "kind", @tagName(item.kind));
         try writeOptionalEnumField(writer, "logical_role", obligation.LogicalRole, item.logical_role);
@@ -84,6 +111,7 @@ pub fn writeJsonLines(writer: anytype, set: obligation.ObligationSet) !void {
         try writeNumberField(writer, "constraint_count", item.constraint_count);
         try writeOptionalNumberField(writer, "smtlib_hash", item.smtlib_hash);
         try writeOptionalNumberField(writer, "proof_artifact_id", item.proof_artifact_id);
+        try writeOptionalNumberField(writer, "loop_summary_id", item.loop_summary_id);
         if (item.result) |result| try writeQueryResultField(writer, result);
         try writer.writeAll("}\n");
     }
@@ -105,6 +133,66 @@ pub fn writeJsonLines(writer: anytype, set: obligation.ObligationSet) !void {
         try writeTermField(writer, item);
         try writer.writeAll("}\n");
     }
+}
+
+/// Machine-readable user boundary for scalar-loop induction classification.
+/// Every excluded row must carry at least one named reason; absence is a
+/// compiler defect and fails the producer instead of emitting an ambiguous
+/// report.
+pub fn writeLoopInductionReport(writer: anytype, set: obligation.ObligationSet) !void {
+    var required: u32 = 0;
+    var excluded: u32 = 0;
+    for (set.loop_summaries) |summary| {
+        const query = loopInductionQueryForSummary(set, summary.id);
+        if (query != null and
+            query.?.artifact_policy == .blocks_verified_artifacts and
+            query.?.proof_requirement == .lean_certificate)
+        {
+            required +|= 1;
+        } else {
+            if (summary.unsupported_reasons.len == 0) return error.LoopClassificationMissingReason;
+            excluded +|= 1;
+        }
+    }
+
+    try writer.writeAll("{\"schema_version\":1,\"record\":\"loop_induction_report\"");
+    try writeNumberField(writer, "total", saturatedLen(set.loop_summaries));
+    try writeNumberField(writer, "certificate_required", required);
+    try writeNumberField(writer, "excluded", excluded);
+    try writer.writeAll(",\"loops\":[");
+    for (set.loop_summaries, 0..) |summary, index| {
+        if (index != 0) try writer.writeByte(',');
+        const query = loopInductionQueryForSummary(set, summary.id);
+        const certificate_required = query != null and
+            query.?.artifact_policy == .blocks_verified_artifacts and
+            query.?.proof_requirement == .lean_certificate;
+        try writer.writeAll("{\"id\":");
+        try writer.print("{d}", .{summary.id});
+        try writeOwnerField(writer, summary.owner);
+        try writeSourceField(writer, summary.source);
+        try writeStringField(writer, "loop_kind", @tagName(summary.loop_kind));
+        try writeStringField(writer, "status", if (certificate_required) "lean_certificate_required" else "excluded");
+        try writeBoolField(writer, "certificate_required", certificate_required);
+        try writeOptionalNumberField(writer, "induction_query_id", if (query) |item| item.id else null);
+        try writeEnumListField(
+            writer,
+            "excluded_by",
+            obligation.LoopUnsupportedReason,
+            summary.unsupported_reasons,
+        );
+        try writer.writeByte('}');
+    }
+    try writer.writeAll("]}\n");
+}
+
+fn loopInductionQueryForSummary(
+    set: obligation.ObligationSet,
+    summary_id: obligation.Id,
+) ?obligation.VerificationQuery {
+    for (set.queries) |query| {
+        if (query.kind == .loop_induction and query.loop_summary_id == summary_id) return query;
+    }
+    return null;
 }
 
 fn writeArtifactDecisionRecord(writer: anytype, set: obligation.ObligationSet) !void {
@@ -258,6 +346,28 @@ fn writeCoverageSummaryRecord(writer: anytype, set: obligation.ObligationSet) !v
     try writeCanonicalZ3CoverageField(writer, summary.canonical_z3_coverage);
     try writeEnumCountObjectField(writer, "query_backends", obligation.VerificationBackend, &summary.query_backends);
     try writeQueryResultCountObjectField(writer, summary.query_results_missing, &summary.query_results);
+    try writer.writeAll("}\n");
+}
+
+fn writeLoopSummaryCoverageRecord(writer: anytype, set: obligation.ObligationSet) !void {
+    var supported: u32 = 0;
+    var unsupported: u32 = 0;
+    var reason_counts = [_]u32{0} ** enumFieldCount(obligation.LoopUnsupportedReason);
+    for (set.loop_summaries) |loop| {
+        if (loop.projectionSupported()) {
+            supported +|= 1;
+        } else {
+            unsupported +|= 1;
+        }
+        for (loop.unsupported_reasons) |reason| reason_counts[@intFromEnum(reason)] +|= 1;
+    }
+
+    try writer.writeAll("{\"record\":\"loop_summary_coverage\"");
+    try writeSchemaVersionField(writer);
+    try writeNumberField(writer, "total", saturatedLen(set.loop_summaries));
+    try writeNumberField(writer, "supported", supported);
+    try writeNumberField(writer, "unsupported", unsupported);
+    try writeEnumCountObjectField(writer, "unsupported_reasons", obligation.LoopUnsupportedReason, &reason_counts);
     try writer.writeAll("}\n");
 }
 
@@ -589,6 +699,125 @@ fn writeFormulaFieldNamed(writer: anytype, comptime name: []const u8, formula: o
     try writer.writeByte('}');
 }
 
+fn writeOptionalFormulaField(
+    writer: anytype,
+    comptime name: []const u8,
+    formula: ?obligation.FormulaRef,
+) !void {
+    if (formula) |value| {
+        try writeFormulaFieldNamed(writer, name, value);
+    } else {
+        try writeFieldPrefix(writer, name);
+        try writer.writeAll("null");
+    }
+}
+
+fn writeFormulaListField(
+    writer: anytype,
+    comptime name: []const u8,
+    formulas: []const obligation.FormulaRef,
+) !void {
+    try writeFieldPrefix(writer, name);
+    try writer.writeByte('[');
+    for (formulas, 0..) |formula, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writeTaggedObjectPrefix(writer, @tagName(formula));
+        switch (formula) {
+            .origin_value => |value| {
+                try writeOriginField(writer, value.origin);
+                try writeStringField(writer, "value_kind", @tagName(value.kind));
+                try writeNumberField(writer, "index", value.index);
+            },
+            .term => |term_id| try writeIdField(writer, "id", term_id),
+        }
+        try writer.writeByte('}');
+    }
+    try writer.writeByte(']');
+}
+
+fn writeLoopVariableListField(
+    writer: anytype,
+    comptime name: []const u8,
+    variables: []const obligation.LoopVariable,
+) !void {
+    try writeFieldPrefix(writer, name);
+    try writer.writeByte('[');
+    for (variables, 0..) |variable, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.writeAll("{\"index\":");
+        try writer.print("{d}", .{variable.index});
+        try writeFieldPrefix(writer, "id");
+        if (variable.id) |id| {
+            try writeFreeVarIdObject(writer, id);
+        } else {
+            try writer.writeAll("null");
+        }
+        try writeOptionalStringField(writer, "name", variable.name);
+        try writeTypeRefField(writer, "ty", variable.ty);
+        try writer.writeByte('}');
+    }
+    try writer.writeByte(']');
+}
+
+fn writeLoopStepAssignmentListField(
+    writer: anytype,
+    assignments: []const obligation.LoopStepAssignment,
+) !void {
+    try writeFieldPrefix(writer, "step_assignments");
+    try writer.writeByte('[');
+    for (assignments, 0..) |assignment, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.writeAll("{\"variable_index\":");
+        try writer.print("{d}", .{assignment.variable_index});
+        try writeFieldPrefix(writer, "target");
+        if (assignment.target) |target| {
+            try writeFreeVarIdObject(writer, target);
+        } else {
+            try writer.writeAll("null");
+        }
+        try writeFormulaFieldNamed(writer, "value", assignment.value);
+        try writer.writeByte('}');
+    }
+    try writer.writeByte(']');
+}
+
+fn writeLoopQueryIdsField(writer: anytype, ids: obligation.LoopQueryIds) !void {
+    try writeFieldPrefix(writer, "query_ids");
+    try writer.writeAll("{\"induction\":[");
+    try writeBareIdList(writer, ids.induction);
+    try writer.writeAll("],\"base\":[");
+    try writeBareIdList(writer, ids.base);
+    try writer.writeAll("],\"step\":[");
+    try writeBareIdList(writer, ids.step);
+    try writer.writeAll("],\"body_safety\":[");
+    try writeBareIdList(writer, ids.body_safety);
+    try writer.writeAll("],\"post\":[");
+    try writeBareIdList(writer, ids.post);
+    try writer.writeAll("]}");
+}
+
+fn writeBareIdList(writer: anytype, ids: []const obligation.Id) !void {
+    for (ids, 0..) |id, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.print("{d}", .{id});
+    }
+}
+
+fn writeEnumListField(
+    writer: anytype,
+    comptime name: []const u8,
+    comptime T: type,
+    values: []const T,
+) !void {
+    try writeFieldPrefix(writer, name);
+    try writer.writeByte('[');
+    for (values, 0..) |value, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writeJsonString(writer, @tagName(value));
+    }
+    try writer.writeByte(']');
+}
+
 fn writeTypeRefField(writer: anytype, comptime name: []const u8, ty: obligation.TypeRef) !void {
     try writeTaggedFieldPrefix(writer, name, @tagName(ty));
     switch (ty) {
@@ -792,55 +1021,55 @@ const canonical_z3_coverage_zero =
     "\"canonical_z3_coverage\":{\"lean_supported\":0,\"canonical_supported_for_lean\":0,\"canonical_supported_total\":0,\"required\":0,\"canonical_supported_ratio_basis_points\":0}";
 
 const coverage_zero =
-    "{\"record\":\"coverage_summary\",\"schema_version\":4,\"assumptions\":0,\"obligations\":0,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0}," ++
+    "{\"record\":\"coverage_summary\",\"schema_version\":8,\"assumptions\":0,\"obligations\":0,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0}," ++
     formula_projection_zero ++
     "," ++ canonical_z3_coverage_zero ++
     ",\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
 
 const coverage_one_logical =
-    "{\"record\":\"coverage_summary\",\"schema_version\":4,\"assumptions\":0,\"obligations\":1,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":1,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0}," ++
+    "{\"record\":\"coverage_summary\",\"schema_version\":8,\"assumptions\":0,\"obligations\":1,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":1,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0}," ++
     formula_projection_logical_origin ++
     "," ++ canonical_z3_coverage_zero ++
     ",\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
 
 const coverage_one_logical_one_term =
-    "{\"record\":\"coverage_summary\",\"schema_version\":4,\"assumptions\":0,\"obligations\":1,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":1,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":1,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0}," ++
+    "{\"record\":\"coverage_summary\",\"schema_version\":8,\"assumptions\":0,\"obligations\":1,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":1,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":1,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0}," ++
     formula_projection_logical_term ++
     "," ++ canonical_z3_coverage_zero ++
     ",\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
 
 const coverage_one_logical_three_terms =
-    "{\"record\":\"coverage_summary\",\"schema_version\":4,\"assumptions\":0,\"obligations\":1,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":3,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":1,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0}," ++
+    "{\"record\":\"coverage_summary\",\"schema_version\":8,\"assumptions\":0,\"obligations\":1,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":3,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":1,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0}," ++
     formula_projection_logical_term ++
     "," ++ canonical_z3_coverage_zero ++
     ",\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
 
 const coverage_one_diagnostic =
-    "{\"record\":\"coverage_summary\",\"schema_version\":4,\"assumptions\":0,\"obligations\":0,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":1,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0}," ++
+    "{\"record\":\"coverage_summary\",\"schema_version\":8,\"assumptions\":0,\"obligations\":0,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":1,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0}," ++
     formula_projection_zero ++
     "," ++ canonical_z3_coverage_zero ++
     ",\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
 
 const coverage_one_backend_fact =
-    "{\"record\":\"coverage_summary\",\"schema_version\":4,\"assumptions\":0,\"obligations\":1,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":1}," ++
+    "{\"record\":\"coverage_summary\",\"schema_version\":8,\"assumptions\":0,\"obligations\":1,\"queries\":0,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":1}," ++
     formula_projection_zero ++
     "," ++ canonical_z3_coverage_zero ++
     ",\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
 
 const coverage_one_z3_unknown_query =
-    "{\"record\":\"coverage_summary\",\"schema_version\":4,\"assumptions\":0,\"obligations\":0,\"queries\":1,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":1,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0}," ++
+    "{\"record\":\"coverage_summary\",\"schema_version\":8,\"assumptions\":0,\"obligations\":0,\"queries\":1,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":1,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0}," ++
     formula_projection_zero ++
     "," ++ canonical_z3_coverage_zero ++
     ",\"query_backends\":{\"unspecified\":0,\"z3\":1,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":1,\"proved\":0,\"failed\":0}}\n";
 
 const coverage_one_proof_artifact =
-    "{\"record\":\"coverage_summary\",\"schema_version\":4,\"assumptions\":0,\"obligations\":0,\"queries\":0,\"proof_artifacts\":1,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":1,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0}," ++
+    "{\"record\":\"coverage_summary\",\"schema_version\":8,\"assumptions\":0,\"obligations\":0,\"queries\":0,\"proof_artifacts\":1,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":0,\"proof_obligation_links\":1,\"obligation_kinds\":{\"logical\":0,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0}," ++
     formula_projection_zero ++
     "," ++ canonical_z3_coverage_zero ++
     ",\"query_backends\":{\"unspecified\":0,\"z3\":0,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
 
 const coverage_one_z3_unsat_proof =
-    "{\"record\":\"coverage_summary\",\"schema_version\":4,\"assumptions\":0,\"obligations\":1,\"queries\":1,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":1,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":1,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0}," ++
+    "{\"record\":\"coverage_summary\",\"schema_version\":8,\"assumptions\":0,\"obligations\":1,\"queries\":1,\"proof_artifacts\":0,\"diagnostics\":0,\"terms\":0,\"query_obligation_links\":1,\"proof_obligation_links\":0,\"obligation_kinds\":{\"logical\":1,\"runtime_guard\":0,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":0,\"resource\":0,\"quantifier\":0,\"filtered_input\":0,\"backend_fact\":0}," ++
     formula_projection_logical_origin ++
     "," ++ canonical_z3_coverage_zero ++
     ",\"query_backends\":{\"unspecified\":0,\"z3\":1,\"lean\":0},\"query_results\":{\"missing\":0,\"sat\":0,\"unsat\":1,\"unknown\":0,\"proved\":0,\"failed\":0}}\n";
@@ -849,7 +1078,7 @@ test "json-lines dump of empty manifest is empty" {
     const actual = try dumpToOwnedString(std.testing.allocator, .{});
     defer std.testing.allocator.free(actual);
     try std.testing.expectEqualStrings(
-        "{\"record\":\"artifact_decision\",\"schema_version\":4,\"status\":\"allowed\",\"reason\":null}\n" ++
+        "{\"record\":\"artifact_decision\",\"schema_version\":8,\"status\":\"allowed\",\"reason\":null}\n" ++
             coverage_zero,
         actual,
     );
@@ -874,9 +1103,9 @@ test "json-lines dump of mlir-origin logical obligation" {
     defer std.testing.allocator.free(actual);
 
     try std.testing.expectEqualStrings(
-        "{\"record\":\"artifact_decision\",\"schema_version\":4,\"status\":\"blocked\",\"reason\":\"missing_proof\"}\n" ++
+        "{\"record\":\"artifact_decision\",\"schema_version\":8,\"status\":\"blocked\",\"reason\":\"missing_proof\"}\n" ++
             coverage_one_logical ++
-            "{\"record\":\"obligation\",\"schema_version\":4,\"id\":1,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":\"Token\",\"name\":\"transfer\"},\"source\":{\"file\":\"erc20.ora\",\"line\":10,\"column\":5,\"byte_start\":100,\"byte_end\":120},\"phase\":\"ora_mlir\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":2},\"kind\":{\"tag\":\"logical\",\"role\":\"ensures\",\"formula\":{\"tag\":\"origin_value\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":2},\"value_kind\":\"result\",\"index\":0}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n",
+            "{\"record\":\"obligation\",\"schema_version\":8,\"id\":1,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":\"Token\",\"name\":\"transfer\"},\"source\":{\"file\":\"erc20.ora\",\"line\":10,\"column\":5,\"byte_start\":100,\"byte_end\":120},\"phase\":\"ora_mlir\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":2},\"kind\":{\"tag\":\"logical\",\"role\":\"ensures\",\"formula\":{\"tag\":\"origin_value\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":2},\"value_kind\":\"result\",\"index\":0}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n",
         actual,
     );
 }
@@ -902,9 +1131,9 @@ test "json-lines dump of arithmetic safety subtype" {
     defer std.testing.allocator.free(actual);
 
     try std.testing.expectEqualStrings(
-        "{\"record\":\"artifact_decision\",\"schema_version\":4,\"status\":\"blocked\",\"reason\":\"missing_proof\"}\n" ++
+        "{\"record\":\"artifact_decision\",\"schema_version\":8,\"status\":\"blocked\",\"reason\":\"missing_proof\"}\n" ++
             coverage_one_logical ++
-            "{\"record\":\"obligation\",\"schema_version\":4,\"id\":2,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"pow\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"ora_mlir\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.assert\",\"symbol\":\"pow\",\"ordinal\":4},\"kind\":{\"tag\":\"logical\",\"role\":\"arithmetic_safety\",\"arithmetic_safety\":\"power_overflow\",\"formula\":{\"tag\":\"origin_value\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.assert\",\"symbol\":\"pow\",\"ordinal\":4},\"value_kind\":\"operand\",\"index\":0}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n",
+            "{\"record\":\"obligation\",\"schema_version\":8,\"id\":2,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"pow\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"ora_mlir\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.assert\",\"symbol\":\"pow\",\"ordinal\":4},\"kind\":{\"tag\":\"logical\",\"role\":\"arithmetic_safety\",\"arithmetic_safety\":\"power_overflow\",\"formula\":{\"tag\":\"origin_value\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.assert\",\"symbol\":\"pow\",\"ordinal\":4},\"value_kind\":\"operand\",\"index\":0}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n",
         actual,
     );
 }
@@ -932,12 +1161,12 @@ test "json-lines dump of canonical refinement predicate terms" {
     defer std.testing.allocator.free(actual);
 
     try std.testing.expectEqualStrings(
-        "{\"record\":\"artifact_decision\",\"schema_version\":4,\"status\":\"blocked\",\"reason\":\"missing_proof\"}\n" ++
+        "{\"record\":\"artifact_decision\",\"schema_version\":8,\"status\":\"blocked\",\"reason\":\"missing_proof\"}\n" ++
             coverage_one_logical_three_terms ++
-            "{\"record\":\"obligation\",\"schema_version\":4,\"id\":4,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"deposit\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"sema\",\"origin\":{\"tag\":\"sema_fact\",\"kind\":\"refinement_guard\",\"ordinal\":0},\"kind\":{\"tag\":\"logical\",\"role\":\"refinement\",\"formula\":{\"tag\":\"term\",\"id\":2}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n" ++
-            "{\"record\":\"term\",\"schema_version\":4,\"id\":0,\"term\":{\"tag\":\"variable\",\"value\":{\"tag\":\"free\",\"id\":{\"file_id\":0,\"pattern_id\":0},\"name\":\"amount\",\"ty\":{\"tag\":\"spelling\",\"value\":\"u256\"}}}}\n" ++
-            "{\"record\":\"term\",\"schema_version\":4,\"id\":1,\"term\":{\"tag\":\"int_lit\",\"value\":\"1\",\"ty\":{\"tag\":\"spelling\",\"value\":\"u256\"}}}\n" ++
-            "{\"record\":\"term\",\"schema_version\":4,\"id\":2,\"term\":{\"tag\":\"refinement_predicate\",\"name\":\"MinValue\",\"value\":0,\"args\":[1]}}\n",
+            "{\"record\":\"obligation\",\"schema_version\":8,\"id\":4,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"deposit\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"sema\",\"origin\":{\"tag\":\"sema_fact\",\"kind\":\"refinement_guard\",\"ordinal\":0},\"kind\":{\"tag\":\"logical\",\"role\":\"refinement\",\"formula\":{\"tag\":\"term\",\"id\":2}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n" ++
+            "{\"record\":\"term\",\"schema_version\":8,\"id\":0,\"term\":{\"tag\":\"variable\",\"value\":{\"tag\":\"free\",\"id\":{\"file_id\":0,\"pattern_id\":0},\"name\":\"amount\",\"ty\":{\"tag\":\"spelling\",\"value\":\"u256\"}}}}\n" ++
+            "{\"record\":\"term\",\"schema_version\":8,\"id\":1,\"term\":{\"tag\":\"int_lit\",\"value\":\"1\",\"ty\":{\"tag\":\"spelling\",\"value\":\"u256\"}}}\n" ++
+            "{\"record\":\"term\",\"schema_version\":8,\"id\":2,\"term\":{\"tag\":\"refinement_predicate\",\"name\":\"MinValue\",\"value\":0,\"args\":[1]}}\n",
         actual,
     );
 }
@@ -967,10 +1196,10 @@ test "json-lines dump of parameter place key uses free variable id" {
     defer std.testing.allocator.free(actual);
 
     try std.testing.expectEqualStrings(
-        "{\"record\":\"artifact_decision\",\"schema_version\":4,\"status\":\"blocked\",\"reason\":\"missing_proof\"}\n" ++
+        "{\"record\":\"artifact_decision\",\"schema_version\":8,\"status\":\"blocked\",\"reason\":\"missing_proof\"}\n" ++
             coverage_one_logical_one_term ++
-            "{\"record\":\"obligation\",\"schema_version\":4,\"id\":5,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"balance_of\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"ora_mlir\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"balance_of\",\"ordinal\":0},\"kind\":{\"tag\":\"logical\",\"role\":\"ensures\",\"formula\":{\"tag\":\"term\",\"id\":0}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n" ++
-            "{\"record\":\"term\",\"schema_version\":4,\"id\":0,\"term\":{\"tag\":\"place_read\",\"place\":{\"root\":\"balances\",\"region\":\"storage\",\"fields\":[],\"keys\":[{\"tag\":\"parameter\",\"id\":{\"file_id\":77,\"pattern_id\":1}}]}}}\n",
+            "{\"record\":\"obligation\",\"schema_version\":8,\"id\":5,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"balance_of\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"ora_mlir\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"balance_of\",\"ordinal\":0},\"kind\":{\"tag\":\"logical\",\"role\":\"ensures\",\"formula\":{\"tag\":\"term\",\"id\":0}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n" ++
+            "{\"record\":\"term\",\"schema_version\":8,\"id\":0,\"term\":{\"tag\":\"place_read\",\"place\":{\"root\":\"balances\",\"region\":\"storage\",\"fields\":[],\"keys\":[{\"tag\":\"parameter\",\"id\":{\"file_id\":77,\"pattern_id\":1}}]}}}\n",
         actual,
     );
 }
@@ -1069,9 +1298,9 @@ test "json-lines dump of blocking diagnostic" {
     defer std.testing.allocator.free(actual);
 
     try std.testing.expectEqualStrings(
-        "{\"record\":\"artifact_decision\",\"schema_version\":4,\"status\":\"blocked\",\"reason\":\"blocking_diagnostic\"}\n" ++
+        "{\"record\":\"artifact_decision\",\"schema_version\":8,\"status\":\"blocked\",\"reason\":\"blocking_diagnostic\"}\n" ++
             coverage_one_diagnostic ++
-            "{\"record\":\"diagnostic\",\"schema_version\":4,\"kind\":\"unsupported\",\"source\":{\"file\":\"test.ora\",\"line\":3,\"column\":9,\"byte_start\":0,\"byte_end\":0},\"message\":\"unsupported quantified binder\",\"blocks_artifacts\":true}\n",
+            "{\"record\":\"diagnostic\",\"schema_version\":8,\"kind\":\"unsupported\",\"source\":{\"file\":\"test.ora\",\"line\":3,\"column\":9,\"byte_start\":0,\"byte_end\":0},\"message\":\"unsupported quantified binder\",\"blocks_artifacts\":true}\n",
         actual,
     );
 }
@@ -1095,9 +1324,9 @@ test "json-lines dump of derived backend fact" {
     defer std.testing.allocator.free(actual);
 
     try std.testing.expectEqualStrings(
-        "{\"record\":\"artifact_decision\",\"schema_version\":4,\"status\":\"blocked\",\"reason\":\"invalid_dependency\"}\n" ++
+        "{\"record\":\"artifact_decision\",\"schema_version\":8,\"status\":\"blocked\",\"reason\":\"invalid_dependency\"}\n" ++
             coverage_one_backend_fact ++
-            "{\"record\":\"obligation\",\"schema_version\":4,\"id\":3,\"owner\":{\"tag\":\"backend\",\"component\":\"dispatcher\",\"name\":\"erc20\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"sinora\",\"origin\":{\"tag\":\"backend_fact\",\"component\":\"dispatcher\",\"fact\":\"selector_table_complete\",\"ordinal\":0},\"kind\":{\"tag\":\"backend_fact\",\"component\":\"dispatcher\",\"property\":\"complete\"},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[1,2]}\n",
+            "{\"record\":\"obligation\",\"schema_version\":8,\"id\":3,\"owner\":{\"tag\":\"backend\",\"component\":\"dispatcher\",\"name\":\"erc20\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"sinora\",\"origin\":{\"tag\":\"backend_fact\",\"component\":\"dispatcher\",\"fact\":\"selector_table_complete\",\"ordinal\":0},\"kind\":{\"tag\":\"backend_fact\",\"component\":\"dispatcher\",\"property\":\"complete\"},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[1,2]}\n",
         actual,
     );
 }
@@ -1125,9 +1354,9 @@ test "json-lines dump of projected verifier query" {
     defer std.testing.allocator.free(actual);
 
     try std.testing.expectEqualStrings(
-        "{\"record\":\"artifact_decision\",\"schema_version\":4,\"status\":\"blocked\",\"reason\":\"invalid_dependency\"}\n" ++
+        "{\"record\":\"artifact_decision\",\"schema_version\":8,\"status\":\"blocked\",\"reason\":\"invalid_dependency\"}\n" ++
             coverage_one_z3_unknown_query ++
-            "{\"record\":\"query\",\"schema_version\":4,\"id\":8,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"transfer\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"report\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.refinement_guard\",\"symbol\":\"transfer\",\"ordinal\":4},\"backend\":\"z3\",\"kind\":\"guard_violate\",\"logical_role\":null,\"guard_id\":\"guard:transfer:amount\",\"obligation_ids\":[7],\"assumption_ids\":[],\"fragment\":\"qf_bv_array\",\"solver_logic\":\"qf_aufbv\",\"constraint_count\":5,\"smtlib_hash\":1234,\"proof_artifact_id\":null,\"result\":{\"tag\":\"unknown\",\"vacuous\":false,\"vacuity_unknown\":true,\"degraded\":false}}\n",
+            "{\"record\":\"query\",\"schema_version\":8,\"id\":8,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"transfer\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"report\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.refinement_guard\",\"symbol\":\"transfer\",\"ordinal\":4},\"artifact_policy\":\"blocks_verified_artifacts\",\"proof_requirement\":\"backend_result\",\"backend\":\"z3\",\"kind\":\"guard_violate\",\"logical_role\":null,\"guard_id\":\"guard:transfer:amount\",\"obligation_ids\":[7],\"assumption_ids\":[],\"fragment\":\"qf_bv_array\",\"solver_logic\":\"qf_aufbv\",\"constraint_count\":5,\"smtlib_hash\":1234,\"proof_artifact_id\":null,\"loop_summary_id\":null,\"result\":{\"tag\":\"unknown\",\"vacuous\":false,\"vacuity_unknown\":true,\"degraded\":false}}\n",
         actual,
     );
 }
@@ -1149,9 +1378,9 @@ test "json-lines dump of userland proof artifact attachment" {
     defer std.testing.allocator.free(actual);
 
     try std.testing.expectEqualStrings(
-        "{\"record\":\"artifact_decision\",\"schema_version\":4,\"status\":\"blocked\",\"reason\":\"invalid_dependency\"}\n" ++
+        "{\"record\":\"artifact_decision\",\"schema_version\":8,\"status\":\"blocked\",\"reason\":\"invalid_dependency\"}\n" ++
             coverage_one_proof_artifact ++
-            "{\"record\":\"proof_artifact\",\"schema_version\":4,\"id\":9,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"transfer\"},\"source\":{\"file\":\"proofs/ERC20/Transfer.lean\",\"line\":1,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"kind\":\"userland_lean\",\"module_name\":\"ERC20.Transfer\",\"theorem_name\":\"transfer_preserves_supply\",\"path\":\"proofs/ERC20/Transfer.lean\",\"content_hash\":4660,\"obligation_ids\":[7]}\n",
+            "{\"record\":\"proof_artifact\",\"schema_version\":8,\"id\":9,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"transfer\"},\"source\":{\"file\":\"proofs/ERC20/Transfer.lean\",\"line\":1,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"kind\":\"userland_lean\",\"module_name\":\"ERC20.Transfer\",\"theorem_name\":\"transfer_preserves_supply\",\"path\":\"proofs/ERC20/Transfer.lean\",\"content_hash\":4660,\"obligation_ids\":[7]}\n",
         actual,
     );
 }
@@ -1191,10 +1420,61 @@ test "json-lines summary shows checker coverage for allowed artifacts" {
     defer std.testing.allocator.free(actual);
 
     try std.testing.expectEqualStrings(
-        "{\"record\":\"artifact_decision\",\"schema_version\":4,\"status\":\"allowed\",\"reason\":null}\n" ++
+        "{\"record\":\"artifact_decision\",\"schema_version\":8,\"status\":\"allowed\",\"reason\":null}\n" ++
             coverage_one_z3_unsat_proof ++
-            "{\"record\":\"obligation\",\"schema_version\":4,\"id\":1,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"transfer\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"ora_mlir\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":0},\"kind\":{\"tag\":\"logical\",\"role\":\"ensures\",\"formula\":{\"tag\":\"origin_value\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":0},\"value_kind\":\"result\",\"index\":0}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n" ++
-            "{\"record\":\"query\",\"schema_version\":4,\"id\":2,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"transfer\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"report\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":0},\"backend\":\"z3\",\"kind\":\"obligation\",\"logical_role\":\"ensures\",\"guard_id\":null,\"obligation_ids\":[1],\"assumption_ids\":[],\"fragment\":\"qf_bv\",\"solver_logic\":\"qf_aufbv\",\"constraint_count\":3,\"smtlib_hash\":null,\"proof_artifact_id\":null,\"result\":{\"tag\":\"unsat\",\"vacuous\":false,\"vacuity_unknown\":false,\"degraded\":false}}\n",
+            "{\"record\":\"obligation\",\"schema_version\":8,\"id\":1,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"transfer\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"ora_mlir\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":0},\"kind\":{\"tag\":\"logical\",\"role\":\"ensures\",\"formula\":{\"tag\":\"origin_value\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":0},\"value_kind\":\"result\",\"index\":0}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n" ++
+            "{\"record\":\"query\",\"schema_version\":8,\"id\":2,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"transfer\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"report\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"transfer\",\"ordinal\":0},\"artifact_policy\":\"blocks_verified_artifacts\",\"proof_requirement\":\"backend_result\",\"backend\":\"z3\",\"kind\":\"obligation\",\"logical_role\":\"ensures\",\"guard_id\":null,\"obligation_ids\":[1],\"assumption_ids\":[],\"fragment\":\"qf_bv\",\"solver_logic\":\"qf_aufbv\",\"constraint_count\":3,\"smtlib_hash\":null,\"proof_artifact_id\":null,\"loop_summary_id\":null,\"result\":{\"tag\":\"unsat\",\"vacuous\":false,\"vacuity_unknown\":false,\"degraded\":false}}\n",
         actual,
     );
+}
+
+test "json-lines dump pins owner-scoped loop summary schema without authorizing artifacts" {
+    const variables = [_]obligation.LoopVariable{.{
+        .index = 0,
+        .name = "i",
+        .ty = .{ .spelling = "u256" },
+    }};
+    const reasons = [_]obligation.LoopUnsupportedReason{
+        .loop_identity_missing,
+        .loop_query_not_owner_scoped,
+    };
+    const row: obligation.LoopSummaryRow = .{
+        .id = 1,
+        .owner = .{ .statement = .{ .function_name = "count", .ordinal = 7 } },
+        .source = .{ .file = "loops.ora", .line = 12, .column = 9 },
+        .phase = .report,
+        .origin = .{ .mlir_op = .{ .op_name = "scf.while", .symbol = "count", .ordinal = 4 } },
+        .loop_source_op_id = 7,
+        .loop_kind = .scf_while,
+        .variables = &variables,
+        .query_ids = .{},
+        .unsupported_reasons = &reasons,
+    };
+    const actual = try dumpToOwnedString(std.testing.allocator, .{ .loop_summaries = &.{row} });
+    defer std.testing.allocator.free(actual);
+
+    try std.testing.expect(std.mem.startsWith(
+        u8,
+        actual,
+        "{\"record\":\"artifact_decision\",\"schema_version\":8,\"status\":\"allowed\",\"reason\":null}\n",
+    ));
+    try std.testing.expect(std.mem.containsAtLeast(
+        u8,
+        actual,
+        1,
+        "{\"record\":\"loop_summary_coverage\",\"schema_version\":8,\"total\":1,\"supported\":0,\"unsupported\":1",
+    ));
+    try std.testing.expect(std.mem.containsAtLeast(
+        u8,
+        actual,
+        1,
+        "{\"record\":\"loop_summary\",\"schema_version\":8,\"id\":1,\"owner\":{\"tag\":\"statement\",\"function_name\":\"count\",\"ordinal\":7}",
+    ));
+    try std.testing.expect(std.mem.containsAtLeast(u8, actual, 1, "\"query_ids\":{\"induction\":[],\"base\":[],\"step\":[],\"body_safety\":[],\"post\":[]}"));
+    try std.testing.expect(std.mem.containsAtLeast(
+        u8,
+        actual,
+        1,
+        "\"projection_supported\":false,\"unsupported_reasons\":[\"loop_identity_missing\",\"loop_query_not_owner_scoped\"]",
+    ));
 }

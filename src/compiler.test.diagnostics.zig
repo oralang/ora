@@ -1753,6 +1753,18 @@ test "compiler writes SMT diagnostic report when verification fails" {
 
     try tmp.dir.access(std.testing.io, "out/main.smt.report.md", .{});
     try tmp.dir.access(std.testing.io, "out/main.smt.report.json", .{});
+    const failure_index = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "out/main.formal.artifacts.json",
+        testing.allocator,
+        std.Io.Limit.limited(64 * 1024),
+    );
+    defer testing.allocator.free(failure_index);
+    try testing.expect(std.mem.containsAtLeast(u8, failure_index, 1, "\"final_artifact_authorization\": \"blocked\""));
+    try testing.expect(std.mem.containsAtLeast(u8, failure_index, 1, "\"id\": \"z3_userland\""));
+    try testing.expect(std.mem.containsAtLeast(u8, failure_index, 1, "\"status\": \"rejected\""));
+    try testing.expect(std.mem.containsAtLeast(u8, failure_index, 1, "\"path\": \"main.smt.report.json\""));
+    try testing.expect(!std.mem.containsAtLeast(u8, failure_index, 1, ".ora-staging-"));
     try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/main.proof.json", .{}));
     try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/main.hex", .{}));
 }
@@ -1910,6 +1922,16 @@ test "compiler build accepts public fallible returns with no declared custom err
         else => return error.TestUnexpectedResult,
     }
     try tmp.dir.access(std.testing.io, "out/bin/main.hex", .{});
+    const artifact_index = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "out/verify/main.formal.artifacts.json",
+        testing.allocator,
+        std.Io.Limit.limited(64 * 1024),
+    );
+    defer testing.allocator.free(artifact_index);
+    try testing.expect(std.mem.containsAtLeast(u8, artifact_index, 1, "\"final_artifact_authorization\": \"allowed\""));
+    try testing.expect(std.mem.containsAtLeast(u8, artifact_index, 1, "\"path\": \"verify/main.smt.report.json\""));
+    try testing.expect(!std.mem.containsAtLeast(u8, artifact_index, 1, ".ora-staging-"));
 }
 
 test "compiler reports undefined type names at value resolution positions once" {
@@ -1974,8 +1996,8 @@ test "compiler treats result as an ensures-only reserved pseudo variable" {
         \\    return value;
         \\}
     ,
-        .resolution,
-        "undefined name 'result'",
+        .typecheck,
+        "`result` is only available in ensures clauses",
     );
 
     {

@@ -12,11 +12,12 @@ inadmissible dense plan structurally unavailable to the reference planner.
 -/
 
 import Ora.Dispatcher
+import Ora.Dispatcher.PlannerArithmetic
 import Ora.Spec.DispatcherFacts
 
 namespace Ora.DispatcherPlannerSpec
 
-open Ora.Spec.DispatcherFacts
+open Ora.Dispatcher.PlannerArithmetic Ora.Spec.DispatcherFacts
 
 abbrev Selector := Ora.Dispatcher.Selector
 
@@ -64,21 +65,6 @@ structure Input (Label : Type) where
 
 def selectors (input : Input Label) : List Selector :=
   input.cases.map Prod.fst
-
-def pow2 (bits : Nat) : Nat := 2 ^ bits
-
-def bitWindowIndex (selector bits shift : Nat) : Nat :=
-  (selector / pow2 shift) % pow2 bits
-
-def multiplicativeCandidate (index : Nat) : Nat :=
-  let z0 : BitVec 32 := BitVec.ofNat 32 index + BitVec.ofNat 32 0x9E3779B9
-  let z1 : BitVec 32 := (z0 ^^^ (z0 >>> 16)) * BitVec.ofNat 32 0x85EBCA6B
-  let z2 : BitVec 32 := (z1 ^^^ (z1 >>> 13)) * BitVec.ofNat 32 0xC2B2AE35
-  let z3 : BitVec 32 := z2 ^^^ (z2 >>> 16)
-  (z3 ||| BitVec.ofNat 32 1).toNat
-
-def multiplicativeIndex (selector constant bits : Nat) : Nat :=
-  (selector * constant / pow2 (32 - bits)) % pow2 bits
 
 def DensePlan.index : DensePlan → Selector → Nat
   | .bitWindow _ bits shift => fun selector => bitWindowIndex selector bits shift
@@ -147,20 +133,9 @@ structure CertifiedPlan (cases : List (Selector × Label)) where
   admissible : Plan.admissible cases plan = true
   wellShaped : Plan.wellShaped plan = true
 
-def noDuplicateNat : List Nat → Bool
-  | [] => true
-  | value :: rest => !(rest.contains value) && noDuplicateNat rest
-
-def collisionFree (cases : List (Selector × Label)) (index : Selector → Nat) : Bool :=
-  noDuplicateNat ((cases.map Prod.fst).map index)
-
-theorem noDuplicateNat_sound (values : List Nat)
-    (h : noDuplicateNat values = true) : values.Nodup := by
-  induction values with
-  | nil => simp
-  | cons value rest ih =>
-      simp [noDuplicateNat] at h
-      simp [List.nodup_cons, h.1, ih h.2]
+def caseSelectorsCollisionFree
+    (cases : List (Selector × Label)) (index : Selector → Nat) : Bool :=
+  Ora.Dispatcher.PlannerArithmetic.collisionFree (cases.map Prod.fst) index
 
 theorem map_nodup_injective (values : List Nat) (index : Nat → Nat)
     (hnodup : (values.map index).Nodup) :
@@ -182,11 +157,11 @@ theorem map_nodup_injective (values : List Nat) (index : Nat → Nat)
             (hnodup.1 (heq ▸ List.mem_map_of_mem index hfirst))
         · exact ih hnodup.2 first second hfirst hsecond heq
 
-theorem collisionFree_admissible (cases : List (Selector × Label))
-    (index : Selector → Nat) (h : collisionFree cases index = true) :
+theorem caseSelectorsCollisionFree_admissible (cases : List (Selector × Label))
+    (index : Selector → Nat) (h : caseSelectorsCollisionFree cases index = true) :
     Ora.Dispatcher.PlanAdmissible cases (.dense index) = true := by
   have hinjective := map_nodup_injective (cases.map Prod.fst) index
-    (noDuplicateNat_sound _ h)
+    (Ora.Util.noDuplicateNat_sound _ h)
   simp [Ora.Dispatcher.PlanAdmissible]
   intro first firstLabel hfirst second secondLabel hsecond
   by_cases heq : index first = index second
@@ -197,9 +172,9 @@ theorem collisionFree_admissible (cases : List (Selector × Label))
 
 def mkDenseCandidate? (cases : List (Selector × Label)) (plan : DensePlan) :
     Option (DenseCandidate cases) :=
-  if hcollision : collisionFree cases plan.index = true then
+  if hcollision : caseSelectorsCollisionFree cases plan.index = true then
     if hshape : Plan.wellShaped (.dense plan) = true then
-      some ⟨plan, collisionFree_admissible cases plan.index hcollision, hshape⟩
+      some ⟨plan, caseSelectorsCollisionFree_admissible cases plan.index hcollision, hshape⟩
     else none
   else none
 
@@ -215,37 +190,6 @@ def bitWindowCandidates (cases : List (Selector × Label)) : List (DenseCandidat
   sparseBucketBits.flatMap fun bits =>
     sparseBucketShifts.filterMap fun shift =>
       mkDenseCandidate? cases (.bitWindow (pow2 bits) bits shift)
-
-def ceilPowerOfTwoFrom : Nat → Nat → Nat → Nat
-  | 0, current, _ => current
-  | fuel + 1, current, minimum =>
-      if minimum <= current then current
-      else ceilPowerOfTwoFrom fuel (current * 2) minimum
-
-def ceilPowerOfTwo (minimum : Nat) : Nat :=
-  ceilPowerOfTwoFrom 8 2 minimum
-
-def multiplicativeTableSlotsFrom : Nat → Nat → List Nat
-  | 0, _ => []
-  | fuel + 1, tableSlots =>
-      if tableSlots <= expectedDenseMaxTableSlots then
-        tableSlots :: multiplicativeTableSlotsFrom fuel (tableSlots * 2)
-      else
-        []
-
-def multiplicativeTableSlots (casesLen : Nat) : List Nat :=
-  multiplicativeTableSlotsFrom 9 (ceilPowerOfTwo (max casesLen 2))
-
-def indexBitsForSlots? : Nat → Option Nat
-  | 2 => some 1
-  | 4 => some 2
-  | 8 => some 3
-  | 16 => some 4
-  | 32 => some 5
-  | 64 => some 6
-  | 128 => some 7
-  | 256 => some 8
-  | _ => none
 
 def firstMultiplicativeCandidate? (cases : List (Selector × Label))
     (tableSlots bits : Nat) : Nat → Nat → Option (DenseCandidate cases)
@@ -268,30 +212,6 @@ def multiplicativeCandidates (cases : List (Selector × Label)) :
 
 def denseCandidates (cases : List (Selector × Label)) : List (DenseCandidate cases) :=
   bitWindowCandidates cases ++ multiplicativeCandidates cases
-
-def incrementBucket : Nat → List (Nat × Nat) → List (Nat × Nat)
-  | bucket, [] => [(bucket, 1)]
-  | bucket, entry :: rest =>
-      if entry.1 == bucket then (entry.1, entry.2 + 1) :: rest
-      else entry :: incrementBucket bucket rest
-
-def bucketCounts (selectors : List Nat) (bits shift : Nat) : List Nat :=
-  (selectors.foldl (fun counts selector =>
-    incrementBucket (bitWindowIndex selector bits shift) counts) []).map Prod.snd
-
-def usedBucketCount (counts : List Nat) : Nat := counts.length
-def maxBucketSize (counts : List Nat) : Nat := (counts.max?).getD 0
-
-def successfulScanChecks (counts : List Nat) : Nat :=
-  counts.foldl (fun total count => total + count * (count + 1) / 2) 0
-
-def divRound (numerator denominator : Nat) : Nat :=
-  (numerator + denominator / 2) / denominator
-
-def linearAverageChecks (casesLen : Nat) : Nat :=
-  divRound
-    ((casesLen * (casesLen + 1) / 2) * expectedExactSelectorCheckX1000)
-    casesLen
 
 def planScore (runtimeAverage codeBytes : Nat) (policy : DispatchPolicy) : Nat :=
   runtimeAverage + policy.lambdaX1000PerByte * codeBytes

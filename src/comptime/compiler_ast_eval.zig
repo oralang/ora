@@ -57,6 +57,19 @@ fn keccakFixedBytes(allocator: std.mem.Allocator, bytes: []const u8) ![]const u8
     return allocator.dupe(u8, hash[0..]);
 }
 
+fn writeLengthPrefixed(writer: anytype, value: []const u8) !void {
+    try writer.print("{d}:", .{value.len});
+    try writer.writeAll(value);
+}
+
+fn writeHexBytes(writer: anytype, bytes: []const u8) !void {
+    const digits = "0123456789abcdef";
+    for (bytes) |byte| {
+        try writer.writeByte(digits[byte >> 4]);
+        try writer.writeByte(digits[byte & 0x0f]);
+    }
+}
+
 pub const ConstEvalOptions = struct {
     module_id: ?source.ModuleId = null,
     type_query: ?compiler_query.ComptimeView = null,
@@ -114,6 +127,7 @@ pub fn constEval(allocator: std.mem.Allocator, file: *const ast.AstFile, options
     }
 
     result.values = values;
+    result.formal_folds = try evaluator.formal_folds.toOwnedSlice(arena);
     return result;
 }
 
@@ -152,20 +166,60 @@ const ConstEvaluator = struct {
     call_depth: u32 = 0,
     required_comptime_depth: u32 = 0,
     last_error: ?error_mod.CtError = null,
+    current_result: ?CtValue = null,
+    formal_folds: std.ArrayList(model.ComptimeFoldEvidence) = .empty,
+    fold_stack: std.ArrayList(FoldBuilder) = .empty,
+    next_fold_invocation_id: u32 = 1,
+
+    const FoldBuilder = struct {
+        invocation_id: u32,
+        parent_invocation_id: ?u32,
+        activation: model.ComptimeFoldActivation,
+        call_site_file_id: source.FileId,
+        call_range: source.TextRange,
+        call_site_chain: []const model.ComptimeFoldCallSite,
+        root_runtime_module_id: source.ModuleId,
+        root_runtime_owner_key: []const u8,
+        callee_module_id: source.ModuleId,
+        callee_file_id: source.FileId,
+        callee_item_id: ast.ItemId,
+        callee_range: source.TextRange,
+        callee_name: []const u8,
+        callee_owner_key: []const u8,
+        generic_bindings: []const []const u8,
+        trait_implementation: ?[]const u8,
+        trait_method: ?[]const u8,
+        events: std.ArrayList(model.ComptimeFormalEvent) = .empty,
+        committed_folds_start: usize,
+        current_node_kind: model.ComptimeFormalNodeKind = .owner_entry,
+        current_node_range: source.TextRange,
+        rejected: bool = false,
+        error_at_start: bool,
+    };
+
+    const ConstJump = struct {
+        label: ?[]const u8,
+        value: ?ConstValue,
+    };
+
+    const CtJump = struct {
+        label: ?[]const u8,
+        value: ?CtValue,
+    };
 
     const BodyControl = union(enum) {
         value: ?ConstValue,
         return_value: ?ConstValue,
-        break_loop,
-        continue_loop,
+        break_loop: ConstJump,
+        continue_loop: ConstJump,
         indeterminate,
     };
 
     const CtBodyControl = union(enum) {
         value: ?CtValue,
         return_value: ?CtValue,
-        break_loop,
-        continue_loop,
+        break_loop: CtJump,
+        continue_loop: CtJump,
         indeterminate,
     };
 
@@ -185,7 +239,7 @@ const ConstEvaluator = struct {
                 const previous_contract = self.current_contract;
                 self.current_contract = item_id;
                 defer self.current_contract = previous_contract;
-                for (contract.invariants) |expr_id| _ = self.evalExpr(expr_id) catch null;
+                for (contract.invariants) |invariant| _ = self.evalExpr(invariant.predicate) catch null;
                 for (contract.members) |member_id| self.visitItem(member_id);
             },
             .Function => |function| {
@@ -279,12 +333,12 @@ const ConstEvaluator = struct {
                 },
                 .While => |while_stmt| {
                     _ = self.evalExpr(while_stmt.condition) catch null;
-                    for (while_stmt.invariants) |expr_id| _ = self.evalExpr(expr_id) catch null;
+                    for (while_stmt.invariants) |invariant| _ = self.evalExpr(invariant.predicate) catch null;
                     self.visitBody(while_stmt.body);
                 },
                 .For => |for_stmt| {
                     _ = self.evalExpr(for_stmt.iterable) catch null;
-                    for (for_stmt.invariants) |expr_id| _ = self.evalExpr(expr_id) catch null;
+                    for (for_stmt.invariants) |invariant| _ = self.evalExpr(invariant.predicate) catch null;
                     self.visitBody(for_stmt.body);
                 },
                 .Switch => |switch_stmt| {
@@ -458,10 +512,14 @@ const ConstEvaluator = struct {
                 break :blk null;
             },
             .Name => |name| blk: {
-                const value = self.env.lookupValue(name.name) orelse break :blk null;
+                const value = self.env.lookupValue(name.name) orelse
+                    if (std.mem.eql(u8, name.name, "result")) self.current_result orelse break :blk null else break :blk null;
                 break :blk try ctValueToConstValue(self.allocator, &self.env.heap, value);
             },
-            .Result => null,
+            .Result => if (self.current_result) |result|
+                try ctValueToConstValue(self.allocator, &self.env.heap, result)
+            else
+                null,
             .Unary => |unary| try evalUnary(self.allocator, unary.op, try self.evalExprImpl(unary.operand, use_cache)),
             .Binary => |binary| try self.evalBinaryExpr(binary, use_cache),
             .Call => |call| blk: {
@@ -469,7 +527,7 @@ const ConstEvaluator = struct {
                     break :blk try ctValueToConstValue(self.allocator, &self.env.heap, ct_value);
                 }
                 if (self.last_error != null) break :blk null;
-                break :blk try self.evalCall(call, use_cache);
+                break :blk try self.evalCall(call, use_cache, true);
             },
             .Builtin => |builtin| blk: {
                 if (self.exprStage(expr_id) == .runtime_only) {
@@ -660,9 +718,13 @@ const ConstEvaluator = struct {
                 break :blk CtValue{ .bytes_ref = heap_id };
             },
             .Name => |name| self.env.lookupValue(name.name) orelse blk: {
+                if (std.mem.eql(u8, name.name, "result")) {
+                    if (self.current_result) |result| break :blk result;
+                }
                 if (self.pathTypeId(name.name)) |type_id| break :blk CtValue{ .type_val = type_id };
                 break :blk null;
             },
+            .Result => self.current_result,
             .Group => |group| try self.evalExprCtValueImpl(group.expr, use_cache, true),
             .Call => |call| if (try self.evalResultConstructorCallCtValue(call, use_cache)) |result_value|
                 result_value
@@ -1605,9 +1667,19 @@ const ConstEvaluator = struct {
         return try type_query.constEval(module_id);
     }
 
-    fn callableFunctionIsPure(self: *ConstEvaluator, item_id: ast.ItemId) !bool {
-        const typecheck = (try self.currentModuleTypeCheckResult()) orelse return true;
-        return typecheck.itemEffect(item_id) == .pure;
+    fn callableFunctionCanEvaluate(self: *ConstEvaluator, item_id: ast.ItemId) !bool {
+        const typecheck = (try self.currentTypeCheckResult()) orelse
+            (try self.currentModuleTypeCheckResult()) orelse return true;
+        const effect = typecheck.itemEffect(item_id);
+        if (effect == .pure) return true;
+        const flags = effect.flags();
+        return effect.readSlots().len == 0 and
+            effect.writeSlots().len == 0 and
+            flags.has_havoc and
+            !flags.has_external and
+            !flags.has_log and
+            !flags.has_lock and
+            !flags.has_unlock;
     }
 
     fn ensureNamedItemTypeChecked(self: *ConstEvaluator, name: []const u8) !void {
@@ -2645,55 +2717,64 @@ const ConstEvaluator = struct {
                 const function = callable.function;
                 if (function.return_type != null) break :blk false;
 
-                const arg_values = (try self.materializeCallArgumentCtValues(callable, call, false)) orelse break :blk true;
+                const arg_values = (try self.materializeCallArgumentCtValues(callable, call, false)) orelse break :blk false;
                 const previous_file = self.file;
                 const previous_module_id = self.module_id;
                 const previous_key = self.current_typecheck_key;
                 const previous_contract = self.current_contract;
+                const previous_result = self.current_result;
                 self.file = callable.file;
                 self.module_id = callable.module_id;
                 self.current_typecheck_key = .{ .item = callable.item_id };
                 self.current_contract = callable.contract_id;
+                self.current_result = null;
                 defer {
                     self.file = previous_file;
                     self.module_id = previous_module_id;
                     self.current_typecheck_key = previous_key;
                     self.current_contract = previous_contract;
+                    self.current_result = previous_result;
                 }
 
                 try self.ensureTypeChecked(.{ .item = callable.item_id });
-                if (!(try self.callableFunctionIsPure(callable.item_id))) break :blk true;
+                try self.beginFormalFold(previous_module_id orelse callable.module_id, previous_file.file_id, call, callable, arg_values, false);
+                var formal_fold_open = true;
+                defer if (formal_fold_open) self.rollbackFormalFold();
+                if (!(try self.callableFunctionCanEvaluate(callable.item_id))) break :blk false;
                 if (self.functionStage(function) == .runtime_only) {
                     self.recordCtError(error_mod.CtError.stageViolation(
                         self.sourceSpan(call.range),
                         function.name,
                     ));
-                    break :blk true;
+                    break :blk false;
                 }
-                if (self.call_depth >= self.env.config.max_recursion_depth) {
+                if (self.recursionLimitReached()) {
                     self.recordCtError(error_mod.CtError.init(
                         .recursion_limit,
                         self.sourceSpan(call.range),
                         "comptime recursion depth exceeded",
                     ));
-                    break :blk true;
+                    break :blk false;
                 }
 
-                self.env.pushScope(false) catch break :blk true;
+                self.env.pushScope(false) catch break :blk false;
                 defer self.env.popScope();
                 try self.bindCallArguments(function, arg_values);
 
                 self.call_depth += 1;
                 defer self.call_depth -= 1;
 
-                for (function.clauses) |clause| {
-                    if (clause.kind != .requires and clause.kind != .guard) continue;
-                    const condition = (try self.evalExprUncached(clause.expr)) orelse break :blk true;
-                    const truthy = self.constConditionTruthy(condition) orelse break :blk true;
-                    if (!truthy) break :blk true;
-                }
+                if (!(try self.checkFunctionEntryPredicates(function))) break :blk false;
 
-                _ = try self.evalComptimeBodyControlCtValue(function.body, false);
+                const control = try self.evalComptimeBodyControlCtValue(function.body, false);
+                switch (control) {
+                    .value, .return_value => {},
+                    .break_loop, .continue_loop, .indeterminate => break :blk false,
+                }
+                try self.recordFormalNode(.success_exit, self.file.body(function.body).range);
+                if (!(try self.checkFunctionExitPredicates(function, null))) break :blk false;
+                try self.commitFormalFold();
+                formal_fold_open = false;
                 break :blk true;
             },
             else => false,
@@ -2910,7 +2991,121 @@ const ConstEvaluator = struct {
         }
     }
 
-    fn evalCall(self: *ConstEvaluator, call: ast.CallExpr, comptime use_cache: bool) anyerror!?ConstValue {
+    fn normalizeFunctionResultCtValue(self: *ConstEvaluator, item_id: ast.ItemId, value: CtValue) !CtValue {
+        const typecheck = (try self.currentTypeCheckResult()) orelse return value;
+        const return_types = typecheck.item_types[item_id.index()].returnTypes();
+        if (return_types.len != 1 or return_types[0].kind() != .error_union or value == .error_union_val) return value;
+
+        const is_error = switch (value) {
+            .adt_val => |adt| blk: {
+                for (return_types[0].error_union.error_types) |error_type| {
+                    const error_name = error_type.name() orelse continue;
+                    const error_item_id = self.lookupNamedItem(error_name) orelse continue;
+                    if (self.file.item(error_item_id).* == .ErrorDecl and adt.type_id == self.namedTypeId(error_item_id)) {
+                        break :blk true;
+                    }
+                }
+                break :blk false;
+            },
+            else => false,
+        };
+        const payload = try self.env.heap.allocTupleOwned(try self.allocator.dupe(CtValue, &.{value}));
+        return .{ .error_union_val = .{ .is_error = is_error, .payload = payload } };
+    }
+
+    fn checkCurrentContractInvariants(self: *ConstEvaluator) anyerror!bool {
+        const contract_id = self.current_contract orelse return true;
+        const contract = switch (self.file.item(contract_id).*) {
+            .Contract => |contract| contract,
+            else => return true,
+        };
+        for (contract.invariants) |invariant| {
+            if (!(try self.checkFormalPredicate(
+                invariant.predicate,
+                invariant.source_fact_id,
+                invariant.range,
+                invariant.label orelse "contract invariant",
+            ))) return false;
+        }
+        return true;
+    }
+
+    fn checkFunctionEntryPredicates(self: *ConstEvaluator, function: ast.FunctionItem) anyerror!bool {
+        if (!(try self.checkCurrentContractInvariants())) return false;
+        for (function.clauses) |clause| switch (clause.kind) {
+            .requires, .guard, .invariant => if (!(try self.checkFormalPredicate(
+                clause.expr,
+                clause.source_fact_id,
+                clause.range,
+                @tagName(clause.kind),
+            ))) return false,
+            .modifies => {
+                self.recordUnsupportedFormalEffect(clause.range, "modifies");
+                return false;
+            },
+            .ensures, .ensures_ok, .ensures_err => {},
+        };
+        return true;
+    }
+
+    fn resultSelectsClause(result: ?CtValue, kind: ast.SpecClauseKind) bool {
+        return switch (kind) {
+            .ensures => true,
+            .ensures_ok => if (result) |value| switch (value) {
+                .error_union_val => |error_union| !error_union.is_error,
+                else => true,
+            } else true,
+            .ensures_err => if (result) |value| switch (value) {
+                .error_union_val => |error_union| error_union.is_error,
+                else => false,
+            } else false,
+            else => false,
+        };
+    }
+
+    fn resultNodeKind(result: ?CtValue) model.ComptimeFormalNodeKind {
+        if (result) |value| switch (value) {
+            .error_union_val => |error_union| if (error_union.is_error) return .error_exit,
+            else => {},
+        };
+        return .success_exit;
+    }
+
+    fn checkFunctionExitPredicates(self: *ConstEvaluator, function: ast.FunctionItem, result: ?CtValue) anyerror!bool {
+        const previous_result = self.current_result;
+        self.current_result = result;
+        defer self.current_result = previous_result;
+
+        for (function.clauses) |clause| {
+            if (!resultSelectsClause(result, clause.kind) and clause.kind != .invariant) continue;
+            if (!(try self.checkFormalPredicate(
+                clause.expr,
+                clause.source_fact_id,
+                clause.range,
+                @tagName(clause.kind),
+            ))) return false;
+        }
+        return try self.checkCurrentContractInvariants();
+    }
+
+    fn checkInvariantClauses(self: *ConstEvaluator, invariants: []const ast.InvariantClause) anyerror!bool {
+        for (invariants) |invariant| {
+            if (!(try self.checkFormalPredicate(
+                invariant.predicate,
+                invariant.source_fact_id,
+                invariant.range,
+                invariant.label orelse "loop invariant",
+            ))) return false;
+        }
+        return true;
+    }
+
+    fn evalCall(
+        self: *ConstEvaluator,
+        call: ast.CallExpr,
+        comptime use_cache: bool,
+        retry_previous_representation: bool,
+    ) anyerror!?ConstValue {
         const callable = (try self.lookupCallableFunction(call.callee)) orelse {
             _ = try self.evalExprImpl(call.callee, use_cache);
             for (call.args) |arg| _ = try self.evalExprImpl(arg, use_cache);
@@ -2922,18 +3117,24 @@ const ConstEvaluator = struct {
         const previous_module_id = self.module_id;
         const previous_key = self.current_typecheck_key;
         const previous_contract = self.current_contract;
+        const previous_result = self.current_result;
         self.file = callable.file;
         self.module_id = callable.module_id;
         self.current_typecheck_key = .{ .item = callable.item_id };
         self.current_contract = callable.contract_id;
+        self.current_result = null;
         defer {
             self.file = previous_file;
             self.module_id = previous_module_id;
             self.current_typecheck_key = previous_key;
             self.current_contract = previous_contract;
+            self.current_result = previous_result;
         }
         try self.ensureTypeChecked(.{ .item = callable.item_id });
-        if (!(try self.callableFunctionIsPure(callable.item_id))) {
+        try self.beginFormalFold(previous_module_id orelse callable.module_id, previous_file.file_id, call, callable, arg_values, retry_previous_representation);
+        var formal_fold_open = true;
+        defer if (formal_fold_open) self.rollbackFormalFold();
+        if (!(try self.callableFunctionCanEvaluate(callable.item_id))) {
             return null;
         }
 
@@ -2945,7 +3146,7 @@ const ConstEvaluator = struct {
             return null;
         }
 
-        if (self.call_depth >= self.env.config.max_recursion_depth) {
+        if (self.recursionLimitReached()) {
             self.recordCtError(error_mod.CtError.init(
                 .recursion_limit,
                 self.sourceSpan(call.range),
@@ -2961,12 +3162,7 @@ const ConstEvaluator = struct {
         self.call_depth += 1;
         defer self.call_depth -= 1;
 
-        for (function.clauses) |clause| {
-            if (clause.kind != .requires and clause.kind != .guard) continue;
-            const condition = (try self.evalExprUncached(clause.expr)) orelse return null;
-            const truthy = self.constConditionTruthy(condition) orelse return null;
-            if (!truthy) return null;
-        }
+        if (!(try self.checkFunctionEntryPredicates(function))) return null;
 
         const value = try self.evalComptimeBody(function.body);
         if (value == null) {
@@ -2975,7 +3171,16 @@ const ConstEvaluator = struct {
                 "comptime call did not produce a value",
                 function.name,
             );
+            return null;
         }
+        const result = try self.normalizeFunctionResultCtValue(
+            callable.item_id,
+            (try self.constValueToCtValue(value.?)) orelse return null,
+        );
+        try self.recordFormalNode(resultNodeKind(result), self.file.body(function.body).range);
+        if (!(try self.checkFunctionExitPredicates(function, result))) return null;
+        try self.commitFormalFold();
+        formal_fold_open = false;
         return value;
     }
 
@@ -2991,18 +3196,24 @@ const ConstEvaluator = struct {
         const previous_module_id = self.module_id;
         const previous_key = self.current_typecheck_key;
         const previous_contract = self.current_contract;
+        const previous_result = self.current_result;
         self.file = callable.file;
         self.module_id = callable.module_id;
         self.current_typecheck_key = .{ .item = callable.item_id };
         self.current_contract = callable.contract_id;
+        self.current_result = null;
         defer {
             self.file = previous_file;
             self.module_id = previous_module_id;
             self.current_typecheck_key = previous_key;
             self.current_contract = previous_contract;
+            self.current_result = previous_result;
         }
         try self.ensureTypeChecked(.{ .item = callable.item_id });
-        if (!(try self.callableFunctionIsPure(callable.item_id))) {
+        try self.beginFormalFold(previous_module_id orelse callable.module_id, previous_file.file_id, call, callable, arg_values, false);
+        var formal_fold_open = true;
+        defer if (formal_fold_open) self.rollbackFormalFold();
+        if (!(try self.callableFunctionCanEvaluate(callable.item_id))) {
             return null;
         }
 
@@ -3014,7 +3225,7 @@ const ConstEvaluator = struct {
             return null;
         }
 
-        if (self.call_depth >= self.env.config.max_recursion_depth) {
+        if (self.recursionLimitReached()) {
             self.recordCtError(error_mod.CtError.init(
                 .recursion_limit,
                 self.sourceSpan(call.range),
@@ -3030,24 +3241,25 @@ const ConstEvaluator = struct {
         self.call_depth += 1;
         defer self.call_depth -= 1;
 
-        for (function.clauses) |clause| {
-            if (clause.kind != .requires and clause.kind != .guard) continue;
-            const condition = (try self.evalExprUncached(clause.expr)) orelse return null;
-            const truthy = self.constConditionTruthy(condition) orelse return null;
-            if (!truthy) return null;
-        }
+        if (!(try self.checkFunctionEntryPredicates(function))) return null;
 
         // Do not persist callee-body expression values into the module-global
         // const-eval cache. Those expression ids belong to the generic function
         // body and can otherwise be polluted by one concrete call context.
-        const value = try self.evalComptimeBodyCtValue(function.body, false);
-        if (value == null) {
+        const body_value = try self.evalComptimeBodyCtValue(function.body, false);
+        if (body_value == null) {
             self.recordMissingComptimeValue(
                 self.sourceSpan(call.range),
                 "comptime call did not produce a value",
                 function.name,
             );
+            return null;
         }
+        const value = try self.normalizeFunctionResultCtValue(callable.item_id, body_value.?);
+        try self.recordFormalNode(resultNodeKind(value), self.file.body(function.body).range);
+        if (!(try self.checkFunctionExitPredicates(function, value))) return null;
+        try self.commitFormalFold();
+        formal_fold_open = false;
         return value;
     }
 
@@ -3059,6 +3271,10 @@ const ConstEvaluator = struct {
                 if (try self.evalErrorDeclCallCtValue(call, use_cache)) |ct_value| return ct_value;
                 if (try self.evalCallCtValue(call, use_cache)) |ct_value| return ct_value;
                 if (self.last_error != null) return null;
+                // A recursion-limit miss must unwind to the caller. Re-entering
+                // the ConstValue fallback would call this same CtValue path
+                // again before call_depth can decrease.
+                if (self.recursionLimitReached()) return null;
             },
             else => {
                 if (try self.evalExprCtValueImpl(expr_id, use_cache, true)) |ct_value| return ct_value;
@@ -3387,6 +3603,497 @@ const ConstEvaluator = struct {
         self.last_error = ct_error;
     }
 
+    /// A reached false formal predicate is a concrete counterexample, not a
+    /// speculative-evaluation miss.  It must survive even when the caller
+    /// could otherwise fall back to runtime lowering.
+    fn recordFormalError(self: *ConstEvaluator, ct_error: error_mod.CtError) void {
+        if (self.fold_stack.items.len != 0) {
+            self.fold_stack.items[self.fold_stack.items.len - 1].rejected = true;
+        }
+        if (self.last_error != null) return;
+        self.last_error = ct_error;
+    }
+
+    fn checkFormalPredicate(
+        self: *ConstEvaluator,
+        expr_id: ast.ExprId,
+        source_fact_id: ?ast.SourceFactId,
+        range: source.TextRange,
+        description: []const u8,
+    ) anyerror!bool {
+        const value = (try self.evalExprUncached(expr_id)) orelse {
+            self.recordCtError(error_mod.CtError.notComptime(
+                self.sourceSpan(range),
+                description,
+            ));
+            return false;
+        };
+        return switch (value) {
+            .boolean => |boolean| blk: {
+                try self.recordFormalPredicate(source_fact_id, range, boolean);
+                if (boolean) break :blk true;
+                self.recordFormalError(error_mod.CtError.withReason(
+                    .compile_error,
+                    self.sourceSpan(range),
+                    "compile-time formal predicate is false",
+                    description,
+                ));
+                break :blk false;
+            },
+            else => blk: {
+                self.recordFormalError(error_mod.CtError.withReason(
+                    .type_mismatch,
+                    self.sourceSpan(range),
+                    "compile-time formal predicate is not boolean",
+                    description,
+                ));
+                break :blk false;
+            },
+        };
+    }
+
+    fn recordUnsupportedFormalEffect(self: *ConstEvaluator, range: source.TextRange, description: []const u8) void {
+        self.recordCtError(error_mod.CtError.withReason(
+            .not_comptime,
+            self.sourceSpan(range),
+            "formal state effect cannot be evaluated at compile time",
+            description,
+        ));
+    }
+
+    fn jumpTargets(label: ?[]const u8, target: ?[]const u8) bool {
+        if (label == null) return true;
+        return target != null and std.mem.eql(u8, label.?, target.?);
+    }
+
+    fn recursionLimitReached(self: *const ConstEvaluator) bool {
+        // The AST evaluator is recursive and its frames include environment
+        // and proof-state bookkeeping. Keep the configured limit, but never
+        // allow it to exceed the process-safe evaluator depth.
+        return self.call_depth >= @min(self.env.config.max_recursion_depth, 128);
+    }
+
+    const FormalCalleeIdentity = struct {
+        owner_key: []const u8,
+        trait_implementation: ?[]const u8 = null,
+        trait_method: ?[]const u8 = null,
+    };
+
+    fn formalCalleeIdentity(self: *ConstEvaluator, callable: CallableFunction) !FormalCalleeIdentity {
+        return self.formalFunctionIdentity(callable.file, callable.item_id, callable.function);
+    }
+
+    fn formalFunctionIdentity(
+        self: *ConstEvaluator,
+        file: *const ast.AstFile,
+        item_id: ast.ItemId,
+        function: ast.FunctionItem,
+    ) !FormalCalleeIdentity {
+        if (function.parent_contract) |contract_id| {
+            const contract = file.item(contract_id).Contract;
+            return .{ .owner_key = try std.fmt.allocPrint(
+                self.allocator,
+                "module/contract:{s}/function:{s}",
+                .{ contract.name, function.name },
+            ) };
+        }
+        for (file.root_items) |root_id| switch (file.item(root_id).*) {
+            .Impl => |impl_item| {
+                for (impl_item.methods) |method_id| {
+                    if (method_id.index() != item_id.index()) continue;
+                    return .{
+                        .owner_key = try std.fmt.allocPrint(
+                            self.allocator,
+                            "module/impl:{s}:{s}/function:{s}",
+                            .{ impl_item.trait_name, impl_item.target_name, function.name },
+                        ),
+                        .trait_implementation = try std.fmt.allocPrint(
+                            self.allocator,
+                            "{s}:{s}",
+                            .{ impl_item.trait_name, impl_item.target_name },
+                        ),
+                        .trait_method = try self.allocator.dupe(u8, function.name),
+                    };
+                }
+            },
+            else => {},
+        };
+        return .{ .owner_key = try std.fmt.allocPrint(
+            self.allocator,
+            "module/function:{s}",
+            .{function.name},
+        ) };
+    }
+
+    fn runtimeOwnerForCall(
+        self: *ConstEvaluator,
+        file: *const ast.AstFile,
+        call_range: source.TextRange,
+    ) ![]const u8 {
+        var best_item: ?ast.ItemId = null;
+        var best_function: ?ast.FunctionItem = null;
+        var best_width: u32 = std.math.maxInt(u32);
+        for (file.items, 0..) |item, index| {
+            if (item != .Function) continue;
+            const function = item.Function;
+            if (function.range.start > call_range.start or function.range.end < call_range.end) continue;
+            const width = function.range.end - function.range.start;
+            if (best_function == null or width < best_width) {
+                best_item = ast.ItemId.fromIndex(index);
+                best_function = function;
+                best_width = width;
+            }
+        }
+        if (best_function) |function| {
+            return (try self.formalFunctionIdentity(file, best_item.?, function)).owner_key;
+        }
+        return std.fmt.allocPrint(self.allocator, "module/comptime@{d}", .{call_range.start});
+    }
+
+    fn canonicalFoldBindings(
+        self: *ConstEvaluator,
+        function: ast.FunctionItem,
+        arg_values: []const CtValue,
+    ) ![]const []const u8 {
+        if (function.parameters.len != arg_values.len) return error.ComptimeFoldBindingArityMismatch;
+        const bindings = try self.allocator.alloc([]const u8, function.parameters.len);
+        for (function.parameters, arg_values, bindings, 0..) |parameter, value, *binding, index| {
+            var rendered = std.Io.Writer.Allocating.init(self.allocator);
+            const writer = &rendered.writer;
+            var heap_stack: std.ArrayList(u32) = .empty;
+            const name = self.patternName(parameter.pattern) orelse
+                try std.fmt.allocPrint(self.allocator, "param#{d}", .{index});
+            try writer.writeAll("arg:");
+            try writeLengthPrefixed(writer, name);
+            try writer.writeByte('=');
+            try self.writeCanonicalCtValue(writer, value, &heap_stack);
+            binding.* = try rendered.toOwnedSlice();
+        }
+        std.mem.sort([]const u8, bindings, {}, struct {
+            fn less(_: void, lhs: []const u8, rhs: []const u8) bool {
+                return std.mem.order(u8, lhs, rhs) == .lt;
+            }
+        }.less);
+        return bindings;
+    }
+
+    fn writeCanonicalCtValue(
+        self: *ConstEvaluator,
+        writer: anytype,
+        value: CtValue,
+        heap_stack: *std.ArrayList(u32),
+    ) anyerror!void {
+        switch (value) {
+            .integer => |integer| try writer.print("integer:{d}", .{integer}),
+            .boolean => |boolean| try writer.writeAll(if (boolean) "boolean:true" else "boolean:false"),
+            .address => |address| try writer.print("address:{d}", .{address}),
+            .type_val => |type_id| {
+                try writer.writeAll("type:");
+                if (self.typeNameForTypeId(type_id)) |name| {
+                    try writeLengthPrefixed(writer, name);
+                } else try writer.print("id:{d}", .{type_id});
+            },
+            .void_val => try writer.writeAll("void"),
+            .bytes_ref => |heap_id| {
+                try self.enterCanonicalHeap(heap_stack, heap_id);
+                defer _ = heap_stack.pop();
+                try writer.writeAll("bytes:");
+                try writeHexBytes(writer, self.env.heap.getBytes(heap_id));
+            },
+            .string_ref => |heap_id| {
+                try self.enterCanonicalHeap(heap_stack, heap_id);
+                defer _ = heap_stack.pop();
+                try writer.writeAll("string:");
+                try writeHexBytes(writer, self.env.heap.getString(heap_id));
+            },
+            .array_ref => |heap_id| {
+                try self.enterCanonicalHeap(heap_stack, heap_id);
+                defer _ = heap_stack.pop();
+                const aggregate = self.env.heap.getArray(heap_id);
+                try writer.writeAll("array[");
+                for (aggregate.elems, 0..) |element, index| {
+                    if (index != 0) try writer.writeByte(',');
+                    try self.writeCanonicalCtValue(writer, element, heap_stack);
+                }
+                try writer.writeByte(']');
+            },
+            .slice_ref => |heap_id| {
+                try self.enterCanonicalHeap(heap_stack, heap_id);
+                defer _ = heap_stack.pop();
+                const aggregate = self.env.heap.getSlice(heap_id);
+                try writer.writeAll("slice[");
+                for (aggregate.elems, 0..) |element, index| {
+                    if (index != 0) try writer.writeByte(',');
+                    try self.writeCanonicalCtValue(writer, element, heap_stack);
+                }
+                try writer.writeByte(']');
+            },
+            .tuple_ref => |heap_id| {
+                try self.enterCanonicalHeap(heap_stack, heap_id);
+                defer _ = heap_stack.pop();
+                try writer.writeAll("tuple[");
+                try self.writeCanonicalCtValues(writer, self.env.heap.getTuple(heap_id).elems, heap_stack);
+                try writer.writeByte(']');
+            },
+            .struct_ref => |heap_id| {
+                try self.enterCanonicalHeap(heap_stack, heap_id);
+                defer _ = heap_stack.pop();
+                const aggregate = self.env.heap.getStruct(heap_id);
+                try writer.writeAll("struct:");
+                if (self.typeNameForTypeId(aggregate.type_id)) |name| {
+                    try writeLengthPrefixed(writer, name);
+                } else try writer.print("id:{d}", .{aggregate.type_id});
+                const order = try self.allocator.alloc(usize, aggregate.fields.len);
+                for (order, 0..) |*field_index, index| field_index.* = index;
+                std.mem.sort(usize, order, aggregate.fields, struct {
+                    fn less(fields: []const CtAggregate.StructField, lhs: usize, rhs: usize) bool {
+                        return fields[lhs].field_id < fields[rhs].field_id;
+                    }
+                }.less);
+                try writer.writeByte('{');
+                for (order, 0..) |field_index, index| {
+                    if (index != 0) try writer.writeByte(',');
+                    const field = aggregate.fields[field_index];
+                    try writer.print("{d}=", .{field.field_id});
+                    try self.writeCanonicalCtValue(writer, field.value, heap_stack);
+                }
+                try writer.writeByte('}');
+            },
+            .map_ref => |heap_id| {
+                try self.enterCanonicalHeap(heap_stack, heap_id);
+                defer _ = heap_stack.pop();
+                const aggregate = self.env.heap.getMap(heap_id);
+                const entries = try self.allocator.alloc([]const u8, aggregate.entries.len);
+                for (aggregate.entries, entries) |entry, *rendered_entry| {
+                    var rendered = std.Io.Writer.Allocating.init(self.allocator);
+                    try self.writeCanonicalCtValue(&rendered.writer, entry.key, heap_stack);
+                    try rendered.writer.writeAll("=>");
+                    try self.writeCanonicalCtValue(&rendered.writer, entry.value, heap_stack);
+                    rendered_entry.* = try rendered.toOwnedSlice();
+                }
+                std.mem.sort([]const u8, entries, {}, struct {
+                    fn less(_: void, lhs: []const u8, rhs: []const u8) bool {
+                        return std.mem.order(u8, lhs, rhs) == .lt;
+                    }
+                }.less);
+                try writer.writeAll("map{");
+                for (entries, 0..) |entry, index| {
+                    if (index != 0) try writer.writeByte(',');
+                    try writeLengthPrefixed(writer, entry);
+                }
+                try writer.writeByte('}');
+            },
+            .adt_val => |adt| {
+                try writer.writeAll("adt:");
+                if (self.typeNameForTypeId(adt.type_id)) |name| {
+                    try writeLengthPrefixed(writer, name);
+                } else try writer.print("id:{d}", .{adt.type_id});
+                try writer.print(":variant:{d}", .{adt.variant_id});
+                if (adt.payload) |heap_id| {
+                    try self.enterCanonicalHeap(heap_stack, heap_id);
+                    defer _ = heap_stack.pop();
+                    try writer.writeAll(":payload[");
+                    try self.writeCanonicalCtValues(writer, self.env.heap.getTuple(heap_id).elems, heap_stack);
+                    try writer.writeByte(']');
+                }
+            },
+            .error_union_val => |error_union| {
+                try self.enterCanonicalHeap(heap_stack, error_union.payload);
+                defer _ = heap_stack.pop();
+                try writer.writeAll(if (error_union.is_error) "error[" else "ok[");
+                try self.writeCanonicalCtValues(writer, self.env.heap.getTuple(error_union.payload).elems, heap_stack);
+                try writer.writeByte(']');
+            },
+        }
+    }
+
+    fn writeCanonicalCtValues(
+        self: *ConstEvaluator,
+        writer: anytype,
+        values: []const CtValue,
+        heap_stack: *std.ArrayList(u32),
+    ) anyerror!void {
+        for (values, 0..) |element, index| {
+            if (index != 0) try writer.writeByte(',');
+            try self.writeCanonicalCtValue(writer, element, heap_stack);
+        }
+    }
+
+    fn enterCanonicalHeap(self: *ConstEvaluator, heap_stack: *std.ArrayList(u32), heap_id: u32) !void {
+        for (heap_stack.items) |active| if (active == heap_id) return error.CyclicComptimeFoldBinding;
+        try heap_stack.append(self.allocator, heap_id);
+    }
+
+    fn beginFormalFold(
+        self: *ConstEvaluator,
+        call_site_module_id: source.ModuleId,
+        call_site_file_id: source.FileId,
+        call: ast.CallExpr,
+        callable: CallableFunction,
+        arg_values: []const CtValue,
+        retry_previous_representation: bool,
+    ) !void {
+        const body_range = callable.file.body(callable.function.body).range;
+        const parent_invocation_id = if (self.fold_stack.getLastOrNull()) |parent| parent.invocation_id else null;
+        var retry: ?model.ComptimeFoldEvidence = null;
+        if (retry_previous_representation) {
+            if (self.formal_folds.getLastOrNull()) |previous| {
+                if ((previous.disposition == .abandoned or previous.disposition == .rejected) and
+                    previous.parent_invocation_id == parent_invocation_id and
+                    previous.call_site_file_id == call_site_file_id and
+                    previous.call_range.start == call.range.start and
+                    previous.call_range.end == call.range.end and
+                    previous.callee_file_id == callable.file.file_id and
+                    previous.callee_item_id == callable.item_id)
+                {
+                    retry = self.formal_folds.pop();
+                }
+            }
+        }
+        const invocation_id = if (retry) |previous| previous.invocation_id else blk: {
+            const next = self.next_fold_invocation_id;
+            self.next_fold_invocation_id = std.math.add(u32, next, 1) catch return error.ComptimeFoldIdentityOverflow;
+            break :blk next;
+        };
+        try self.formal_folds.ensureTotalCapacity(
+            self.allocator,
+            self.formal_folds.items.len + self.fold_stack.items.len + 1,
+        );
+        const call_site_chain = if (retry) |previous| previous.call_site_chain else blk: {
+            const chain = try self.allocator.alloc(model.ComptimeFoldCallSite, self.fold_stack.items.len + 1);
+            for (self.fold_stack.items, chain[0..self.fold_stack.items.len]) |parent, *site| {
+                site.* = .{ .file_id = parent.call_site_file_id, .range = parent.call_range };
+            }
+            chain[chain.len - 1] = .{ .file_id = call_site_file_id, .range = call.range };
+            break :blk chain;
+        };
+        const callee_identity = if (retry) |previous|
+            FormalCalleeIdentity{
+                .owner_key = previous.callee_owner_key,
+                .trait_implementation = previous.trait_implementation,
+                .trait_method = previous.trait_method,
+            }
+        else
+            try self.formalCalleeIdentity(callable);
+        const generic_bindings = if (retry) |previous| previous.generic_bindings else try self.canonicalFoldBindings(callable.function, arg_values);
+        const root_runtime_module_id = if (self.fold_stack.getLastOrNull()) |parent|
+            parent.root_runtime_module_id
+        else if (retry) |previous|
+            previous.root_runtime_module_id
+        else
+            call_site_module_id;
+        const root_runtime_owner_key = if (self.fold_stack.getLastOrNull()) |parent|
+            parent.root_runtime_owner_key
+        else if (retry) |previous|
+            previous.root_runtime_owner_key
+        else
+            try self.runtimeOwnerForCall(try self.astFileForModule(call_site_module_id), call.range);
+        try self.fold_stack.append(self.allocator, .{
+            .invocation_id = invocation_id,
+            .parent_invocation_id = parent_invocation_id,
+            .activation = if (self.inRequiredComptime()) .required else .speculative,
+            .call_site_file_id = call_site_file_id,
+            .call_range = call.range,
+            .call_site_chain = call_site_chain,
+            .root_runtime_module_id = root_runtime_module_id,
+            .root_runtime_owner_key = root_runtime_owner_key,
+            .callee_module_id = callable.module_id,
+            .callee_file_id = callable.file.file_id,
+            .callee_item_id = callable.item_id,
+            .callee_range = callable.function.range,
+            .callee_name = if (retry) |previous| previous.callee_name else try self.allocator.dupe(u8, callable.function.name),
+            .callee_owner_key = callee_identity.owner_key,
+            .generic_bindings = generic_bindings,
+            .trait_implementation = callee_identity.trait_implementation,
+            .trait_method = callee_identity.trait_method,
+            .committed_folds_start = self.formal_folds.items.len,
+            .current_node_range = body_range,
+            .error_at_start = self.last_error != null,
+        });
+        try self.recordFormalNode(.owner_entry, body_range);
+    }
+
+    fn rollbackFormalFold(self: *ConstEvaluator) void {
+        const builder = self.fold_stack.pop() orelse return;
+        self.formal_folds.shrinkRetainingCapacity(builder.committed_folds_start);
+        self.formal_folds.appendAssumeCapacity(.{
+            .invocation_id = builder.invocation_id,
+            .parent_invocation_id = builder.parent_invocation_id,
+            .activation = builder.activation,
+            .disposition = if (builder.activation == .required or builder.rejected or (!builder.error_at_start and self.last_error != null)) .rejected else .abandoned,
+            .call_site_file_id = builder.call_site_file_id,
+            .call_range = builder.call_range,
+            .call_site_chain = builder.call_site_chain,
+            .root_runtime_module_id = builder.root_runtime_module_id,
+            .root_runtime_owner_key = builder.root_runtime_owner_key,
+            .callee_module_id = builder.callee_module_id,
+            .callee_file_id = builder.callee_file_id,
+            .callee_item_id = builder.callee_item_id,
+            .callee_range = builder.callee_range,
+            .callee_name = builder.callee_name,
+            .callee_owner_key = builder.callee_owner_key,
+            .generic_bindings = builder.generic_bindings,
+            .trait_implementation = builder.trait_implementation,
+            .trait_method = builder.trait_method,
+            .events = &.{},
+        });
+    }
+
+    fn commitFormalFold(self: *ConstEvaluator) !void {
+        var builder = self.fold_stack.pop() orelse return;
+        self.formal_folds.appendAssumeCapacity(.{
+            .invocation_id = builder.invocation_id,
+            .parent_invocation_id = builder.parent_invocation_id,
+            .activation = builder.activation,
+            .disposition = .committed,
+            .call_site_file_id = builder.call_site_file_id,
+            .call_range = builder.call_range,
+            .call_site_chain = builder.call_site_chain,
+            .root_runtime_module_id = builder.root_runtime_module_id,
+            .root_runtime_owner_key = builder.root_runtime_owner_key,
+            .callee_module_id = builder.callee_module_id,
+            .callee_file_id = builder.callee_file_id,
+            .callee_item_id = builder.callee_item_id,
+            .callee_range = builder.callee_range,
+            .callee_name = builder.callee_name,
+            .callee_owner_key = builder.callee_owner_key,
+            .generic_bindings = builder.generic_bindings,
+            .trait_implementation = builder.trait_implementation,
+            .trait_method = builder.trait_method,
+            .events = try builder.events.toOwnedSlice(self.allocator),
+        });
+    }
+
+    fn recordFormalNode(self: *ConstEvaluator, kind: model.ComptimeFormalNodeKind, range: source.TextRange) !void {
+        if (self.fold_stack.items.len == 0) return;
+        const builder = &self.fold_stack.items[self.fold_stack.items.len - 1];
+        builder.current_node_kind = kind;
+        builder.current_node_range = range;
+        try builder.events.append(self.allocator, .{
+            .kind = .enter_node,
+            .node_kind = kind,
+            .node_range = range,
+        });
+    }
+
+    fn recordFormalPredicate(
+        self: *ConstEvaluator,
+        source_fact_id: ?ast.SourceFactId,
+        range: source.TextRange,
+        value: bool,
+    ) !void {
+        if (self.fold_stack.items.len == 0) return;
+        const builder = &self.fold_stack.items[self.fold_stack.items.len - 1];
+        try builder.events.append(self.allocator, .{
+            .kind = .predicate_check,
+            .node_kind = builder.current_node_kind,
+            .node_range = builder.current_node_range,
+            .source_fact_id = source_fact_id,
+            .fact_range = range,
+            .predicate_value = value,
+        });
+    }
+
     fn consumeStep(self: *ConstEvaluator, range: source.TextRange) bool {
         self.env.stats.recordStep();
         if (LimitCheck.init(self.env.config, &self.env.stats).checkSteps() != null) {
@@ -3535,7 +4242,12 @@ const ConstEvaluator = struct {
                 ));
                 return .{ .value = null };
             }
-            switch (self.file.statement(statement_id).*) {
+            const statement = self.file.statement(statement_id).*;
+            switch (statement) {
+                .While, .For, .Switch => {},
+                else => try self.recordFormalNode(.statement, self.statementRange(statement_id)),
+            }
+            switch (statement) {
                 .VariableDecl => |decl| {
                     if (decl.value) |expr_id| {
                         switch (self.file.expression(expr_id).*) {
@@ -3580,8 +4292,8 @@ const ConstEvaluator = struct {
                     switch (try self.evalComptimeBodyControl(block_stmt.body)) {
                         .value => |value| last_value = value,
                         .return_value => |value| return .{ .return_value = value },
-                        .break_loop => return .break_loop,
-                        .continue_loop => return .continue_loop,
+                        .break_loop => |jump| return .{ .break_loop = jump },
+                        .continue_loop => |jump| return .{ .continue_loop = jump },
                         .indeterminate => return .indeterminate,
                     }
                 },
@@ -3589,8 +4301,12 @@ const ConstEvaluator = struct {
                     switch (try self.evalComptimeBodyControl(labeled.body)) {
                         .value => |value| last_value = value,
                         .return_value => |value| return .{ .return_value = value },
-                        .break_loop => return .break_loop,
-                        .continue_loop => return .continue_loop,
+                        .break_loop => |jump| {
+                            if (jump.label != null and std.mem.eql(u8, jump.label.?, labeled.label)) {
+                                last_value = jump.value;
+                            } else return .{ .break_loop = jump };
+                        },
+                        .continue_loop => |jump| return .{ .continue_loop = jump },
                         .indeterminate => return .indeterminate,
                     }
                 },
@@ -3598,8 +4314,8 @@ const ConstEvaluator = struct {
                     switch (try self.evalComptimeIf(if_stmt)) {
                         .value => |value| last_value = value,
                         .return_value => |value| return .{ .return_value = value },
-                        .break_loop => return .break_loop,
-                        .continue_loop => return .continue_loop,
+                        .break_loop => |jump| return .{ .break_loop = jump },
+                        .continue_loop => |jump| return .{ .continue_loop = jump },
                         .indeterminate => return .indeterminate,
                     }
                 },
@@ -3607,8 +4323,8 @@ const ConstEvaluator = struct {
                     switch (try self.evalComptimeWhile(while_stmt)) {
                         .value => |value| last_value = value,
                         .return_value => |value| return .{ .return_value = value },
-                        .break_loop => return .break_loop,
-                        .continue_loop => return .continue_loop,
+                        .break_loop => |jump| return .{ .break_loop = jump },
+                        .continue_loop => |jump| return .{ .continue_loop = jump },
                         .indeterminate => return .indeterminate,
                     }
                 },
@@ -3616,8 +4332,8 @@ const ConstEvaluator = struct {
                     switch (try self.evalComptimeFor(for_stmt)) {
                         .value => |value| last_value = value,
                         .return_value => |value| return .{ .return_value = value },
-                        .break_loop => return .break_loop,
-                        .continue_loop => return .continue_loop,
+                        .break_loop => |jump| return .{ .break_loop = jump },
+                        .continue_loop => |jump| return .{ .continue_loop = jump },
                         .indeterminate => return .indeterminate,
                     }
                 },
@@ -3625,16 +4341,34 @@ const ConstEvaluator = struct {
                     switch (try self.evalComptimeSwitchStmt(switch_stmt)) {
                         .value => |value| last_value = value,
                         .return_value => |value| return .{ .return_value = value },
-                        .break_loop => return .break_loop,
-                        .continue_loop => return .continue_loop,
+                        .break_loop => |jump| return .{ .break_loop = jump },
+                        .continue_loop => |jump| return .{ .continue_loop = jump },
                         .indeterminate => return .indeterminate,
                     }
                 },
                 .Assign => |assign| {
                     last_value = try self.evalComptimeAssign(assign, true);
                 },
-                .Break => return .break_loop,
-                .Continue => return .continue_loop,
+                .Assert => |assert_stmt| {
+                    if (!(try self.checkFormalPredicate(assert_stmt.condition, assert_stmt.source_fact_id, assert_stmt.range, assert_stmt.message orelse "assertion"))) return .indeterminate;
+                    last_value = null;
+                },
+                .Assume => |assume_stmt| {
+                    if (!(try self.checkFormalPredicate(assume_stmt.condition, assume_stmt.source_fact_id, assume_stmt.range, "assumption"))) return .indeterminate;
+                    last_value = null;
+                },
+                .Havoc => |havoc_stmt| {
+                    self.recordUnsupportedFormalEffect(havoc_stmt.range, "havoc");
+                    return .indeterminate;
+                },
+                .Break => |jump| return .{ .break_loop = .{
+                    .label = jump.label,
+                    .value = if (jump.value) |value| try self.evalExprUncached(value) else null,
+                } },
+                .Continue => |jump| return .{ .continue_loop = .{
+                    .label = jump.label,
+                    .value = if (jump.value) |value| try self.evalExprUncached(value) else null,
+                } },
                 else => {
                     self.visitBodyStatementForComptime(statement_id);
                     last_value = null;
@@ -3659,7 +4393,12 @@ const ConstEvaluator = struct {
                 ));
                 return .{ .value = null };
             }
-            switch (self.file.statement(statement_id).*) {
+            const statement = self.file.statement(statement_id).*;
+            switch (statement) {
+                .While, .For, .Switch => {},
+                else => try self.recordFormalNode(.statement, self.statementRange(statement_id)),
+            }
+            switch (statement) {
                 .VariableDecl => |decl| {
                     if (decl.value) |expr_id| {
                         if (try self.evalExprAsCtValue(expr_id, use_cache)) |ct_value| {
@@ -3694,8 +4433,8 @@ const ConstEvaluator = struct {
                     switch (try self.evalComptimeBodyControlCtValue(block_stmt.body, use_cache)) {
                         .value => |value| last_value = value,
                         .return_value => |value| return .{ .return_value = value },
-                        .break_loop => return .break_loop,
-                        .continue_loop => return .continue_loop,
+                        .break_loop => |jump| return .{ .break_loop = jump },
+                        .continue_loop => |jump| return .{ .continue_loop = jump },
                         .indeterminate => return .indeterminate,
                     }
                 },
@@ -3703,8 +4442,12 @@ const ConstEvaluator = struct {
                     switch (try self.evalComptimeBodyControlCtValue(labeled.body, use_cache)) {
                         .value => |value| last_value = value,
                         .return_value => |value| return .{ .return_value = value },
-                        .break_loop => return .break_loop,
-                        .continue_loop => return .continue_loop,
+                        .break_loop => |jump| {
+                            if (jump.label != null and std.mem.eql(u8, jump.label.?, labeled.label)) {
+                                last_value = jump.value;
+                            } else return .{ .break_loop = jump };
+                        },
+                        .continue_loop => |jump| return .{ .continue_loop = jump },
                         .indeterminate => return .indeterminate,
                     }
                 },
@@ -3712,8 +4455,8 @@ const ConstEvaluator = struct {
                     switch (try self.evalComptimeIfCtValue(if_stmt, use_cache)) {
                         .value => |value| last_value = value,
                         .return_value => |value| return .{ .return_value = value },
-                        .break_loop => return .break_loop,
-                        .continue_loop => return .continue_loop,
+                        .break_loop => |jump| return .{ .break_loop = jump },
+                        .continue_loop => |jump| return .{ .continue_loop = jump },
                         .indeterminate => return .indeterminate,
                     }
                 },
@@ -3721,8 +4464,8 @@ const ConstEvaluator = struct {
                     switch (try self.evalComptimeWhileCtValue(while_stmt, use_cache)) {
                         .value => |value| last_value = value,
                         .return_value => |value| return .{ .return_value = value },
-                        .break_loop => return .break_loop,
-                        .continue_loop => return .continue_loop,
+                        .break_loop => |jump| return .{ .break_loop = jump },
+                        .continue_loop => |jump| return .{ .continue_loop = jump },
                         .indeterminate => return .indeterminate,
                     }
                 },
@@ -3730,8 +4473,8 @@ const ConstEvaluator = struct {
                     switch (try self.evalComptimeForCtValue(for_stmt, use_cache)) {
                         .value => |value| last_value = value,
                         .return_value => |value| return .{ .return_value = value },
-                        .break_loop => return .break_loop,
-                        .continue_loop => return .continue_loop,
+                        .break_loop => |jump| return .{ .break_loop = jump },
+                        .continue_loop => |jump| return .{ .continue_loop = jump },
                         .indeterminate => return .indeterminate,
                     }
                 },
@@ -3739,8 +4482,8 @@ const ConstEvaluator = struct {
                     switch (try self.evalComptimeSwitchStmtCtValue(switch_stmt, use_cache)) {
                         .value => |value| last_value = value,
                         .return_value => |value| return .{ .return_value = value },
-                        .break_loop => return .break_loop,
-                        .continue_loop => return .continue_loop,
+                        .break_loop => |jump| return .{ .break_loop = jump },
+                        .continue_loop => |jump| return .{ .continue_loop = jump },
                         .indeterminate => return .indeterminate,
                     }
                 },
@@ -3748,8 +4491,26 @@ const ConstEvaluator = struct {
                     const value = try self.evalComptimeAssign(assign, use_cache);
                     last_value = if (value) |const_value| (try constToCtValue(const_value)) orelse null else null;
                 },
-                .Break => return .break_loop,
-                .Continue => return .continue_loop,
+                .Assert => |assert_stmt| {
+                    if (!(try self.checkFormalPredicate(assert_stmt.condition, assert_stmt.source_fact_id, assert_stmt.range, assert_stmt.message orelse "assertion"))) return .indeterminate;
+                    last_value = null;
+                },
+                .Assume => |assume_stmt| {
+                    if (!(try self.checkFormalPredicate(assume_stmt.condition, assume_stmt.source_fact_id, assume_stmt.range, "assumption"))) return .indeterminate;
+                    last_value = null;
+                },
+                .Havoc => |havoc_stmt| {
+                    self.recordUnsupportedFormalEffect(havoc_stmt.range, "havoc");
+                    return .indeterminate;
+                },
+                .Break => |jump| return .{ .break_loop = .{
+                    .label = jump.label,
+                    .value = if (jump.value) |value| try self.evalExprAsCtValue(value, use_cache) else null,
+                } },
+                .Continue => |jump| return .{ .continue_loop = .{
+                    .label = jump.label,
+                    .value = if (jump.value) |value| try self.evalExprAsCtValue(value, use_cache) else null,
+                } },
                 else => {
                     self.visitBodyStatementForComptime(statement_id);
                     last_value = null;
@@ -3776,73 +4537,132 @@ const ConstEvaluator = struct {
     }
 
     fn evalComptimeSwitchStmt(self: *ConstEvaluator, switch_stmt: ast.SwitchStmt) anyerror!BodyControl {
-        if (try self.evalExprAsCtValue(switch_stmt.condition, false)) |condition_ct| {
+        var condition_ct = (try self.evalExprAsCtValue(switch_stmt.condition, false)) orelse return .indeterminate;
+        var iterations: u64 = 0;
+        while (true) {
+            iterations += 1;
+            if (iterations > self.env.config.max_loop_iterations) {
+                self.recordLoopLimitExceeded(switch_stmt.range);
+                return .indeterminate;
+            }
+            try self.recordFormalNode(.statement, switch_stmt.range);
+            if (!(try self.checkInvariantClauses(switch_stmt.invariants))) return .indeterminate;
+
+            var control: BodyControl = .indeterminate;
+            var matched = false;
             for (switch_stmt.arms) |arm| {
                 if (try self.patternMatchesCt(condition_ct, arm.pattern)) {
+                    matched = true;
                     self.env.pushScope(false) catch return .indeterminate;
                     defer self.env.popScope();
                     try self.bindSwitchPatternCtValue(condition_ct, arm.pattern);
-                    return try self.evalComptimeBodyControl(arm.body);
+                    control = try self.evalComptimeBodyControl(arm.body);
+                    break;
                 }
             }
-            if (switch_stmt.else_body) |else_body| return try self.evalComptimeBodyControl(else_body);
-            return .indeterminate;
-        }
+            if (!matched) {
+                if (switch_stmt.else_body) |else_body| {
+                    control = try self.evalComptimeBodyControl(else_body);
+                } else return .indeterminate;
+            }
 
-        const condition = (try self.evalExprUncached(switch_stmt.condition)) orelse return .indeterminate;
-        for (switch_stmt.arms) |arm| {
-            if (self.patternMatches(condition, arm.pattern)) {
-                return try self.evalComptimeBodyControl(arm.body);
+            switch (control) {
+                .value, .return_value, .indeterminate => return control,
+                .break_loop => |jump| {
+                    if (jumpTargets(jump.label, switch_stmt.label)) return .{ .value = jump.value };
+                    return .{ .break_loop = jump };
+                },
+                .continue_loop => |jump| {
+                    if (jump.label == null or switch_stmt.label == null or !std.mem.eql(u8, jump.label.?, switch_stmt.label.?)) {
+                        return .{ .continue_loop = jump };
+                    }
+                    if (jump.value) |value| {
+                        condition_ct = (try self.constValueToCtValue(value)) orelse return .indeterminate;
+                    }
+                    continue;
+                },
             }
         }
-        if (switch_stmt.else_body) |else_body| return try self.evalComptimeBodyControl(else_body);
-        return .indeterminate;
     }
 
     fn evalComptimeSwitchStmtCtValue(self: *ConstEvaluator, switch_stmt: ast.SwitchStmt, comptime use_cache: bool) anyerror!CtBodyControl {
-        if (try self.evalExprAsCtValue(switch_stmt.condition, use_cache)) |condition_ct| {
+        var condition_ct = (try self.evalExprAsCtValue(switch_stmt.condition, use_cache)) orelse return .indeterminate;
+        var iterations: u64 = 0;
+        while (true) {
+            iterations += 1;
+            if (iterations > self.env.config.max_loop_iterations) {
+                self.recordLoopLimitExceeded(switch_stmt.range);
+                return .indeterminate;
+            }
+            try self.recordFormalNode(.statement, switch_stmt.range);
+            if (!(try self.checkInvariantClauses(switch_stmt.invariants))) return .indeterminate;
+
+            var control: CtBodyControl = .indeterminate;
+            var matched = false;
             for (switch_stmt.arms) |arm| {
                 const matches = try self.patternMatchesCt(condition_ct, arm.pattern);
                 if (matches) {
+                    matched = true;
                     self.env.pushScope(false) catch return .indeterminate;
                     defer self.env.popScope();
                     try self.bindSwitchPatternCtValue(condition_ct, arm.pattern);
-                    return try self.evalComptimeBodyControlCtValue(arm.body, use_cache);
+                    control = try self.evalComptimeBodyControlCtValue(arm.body, use_cache);
+                    break;
                 }
             }
-            if (switch_stmt.else_body) |else_body| return try self.evalComptimeBodyControlCtValue(else_body, use_cache);
-            return .indeterminate;
-        }
+            if (!matched) {
+                if (switch_stmt.else_body) |else_body| {
+                    control = try self.evalComptimeBodyControlCtValue(else_body, use_cache);
+                } else return .indeterminate;
+            }
 
-        const condition = (try self.evalExprUncached(switch_stmt.condition)) orelse return .indeterminate;
-        for (switch_stmt.arms) |arm| {
-            if (self.patternMatches(condition, arm.pattern)) {
-                return try self.evalComptimeBodyControlCtValue(arm.body, use_cache);
+            switch (control) {
+                .value, .return_value, .indeterminate => return control,
+                .break_loop => |jump| {
+                    if (jumpTargets(jump.label, switch_stmt.label)) return .{ .value = jump.value };
+                    return .{ .break_loop = jump };
+                },
+                .continue_loop => |jump| {
+                    if (jump.label == null or switch_stmt.label == null or !std.mem.eql(u8, jump.label.?, switch_stmt.label.?)) {
+                        return .{ .continue_loop = jump };
+                    }
+                    if (jump.value) |value| condition_ct = value;
+                    continue;
+                },
             }
         }
-        if (switch_stmt.else_body) |else_body| return try self.evalComptimeBodyControlCtValue(else_body, use_cache);
-        return .indeterminate;
     }
 
     fn evalComptimeWhile(self: *ConstEvaluator, while_stmt: ast.WhileStmt) anyerror!BodyControl {
         var iterations: u64 = 0;
         var last_value: ?ConstValue = null;
         while (true) {
+            try self.recordFormalNode(.statement, while_stmt.range);
+            if (!(try self.checkInvariantClauses(while_stmt.invariants))) return .indeterminate;
+
+            const condition = (try self.evalExprUncached(while_stmt.condition)) orelse return .indeterminate;
+            const should_continue = self.constConditionTruthy(condition) orelse return .indeterminate;
+            if (!should_continue) break;
             iterations += 1;
             if (iterations > self.env.config.max_loop_iterations) {
                 self.recordLoopLimitExceeded(while_stmt.range);
                 return .indeterminate;
             }
 
-            const condition = (try self.evalExprUncached(while_stmt.condition)) orelse return .indeterminate;
-            const should_continue = self.constConditionTruthy(condition) orelse return .indeterminate;
-            if (!should_continue) break;
-
             switch (try self.evalComptimeBodyControl(while_stmt.body)) {
                 .value => |value| last_value = value,
                 .return_value => |value| return .{ .return_value = value },
-                .break_loop => break,
-                .continue_loop => continue,
+                .break_loop => |jump| {
+                    if (jumpTargets(jump.label, while_stmt.label)) {
+                        last_value = jump.value;
+                        break;
+                    }
+                    return .{ .break_loop = jump };
+                },
+                .continue_loop => |jump| {
+                    if (jumpTargets(jump.label, while_stmt.label)) continue;
+                    return .{ .continue_loop = jump };
+                },
                 .indeterminate => return .indeterminate,
             }
         }
@@ -3853,21 +4673,32 @@ const ConstEvaluator = struct {
         var iterations: u64 = 0;
         var last_value: ?CtValue = null;
         while (true) {
+            try self.recordFormalNode(.statement, while_stmt.range);
+            if (!(try self.checkInvariantClauses(while_stmt.invariants))) return .indeterminate;
+
+            const condition = (try self.evalExprUncached(while_stmt.condition)) orelse return .indeterminate;
+            const should_continue = self.constConditionTruthy(condition) orelse return .indeterminate;
+            if (!should_continue) break;
             iterations += 1;
             if (iterations > self.env.config.max_loop_iterations) {
                 self.recordLoopLimitExceeded(while_stmt.range);
                 return .indeterminate;
             }
 
-            const condition = (try self.evalExprUncached(while_stmt.condition)) orelse return .indeterminate;
-            const should_continue = self.constConditionTruthy(condition) orelse return .indeterminate;
-            if (!should_continue) break;
-
             switch (try self.evalComptimeBodyControlCtValue(while_stmt.body, use_cache)) {
                 .value => |value| last_value = value,
                 .return_value => |value| return .{ .return_value = value },
-                .break_loop => break,
-                .continue_loop => continue,
+                .break_loop => |jump| {
+                    if (jumpTargets(jump.label, while_stmt.label)) {
+                        last_value = jump.value;
+                        break;
+                    }
+                    return .{ .break_loop = jump };
+                },
+                .continue_loop => |jump| {
+                    if (jumpTargets(jump.label, while_stmt.label)) continue;
+                    return .{ .continue_loop = jump };
+                },
                 .indeterminate => return .indeterminate,
             }
         }
@@ -3875,121 +4706,78 @@ const ConstEvaluator = struct {
     }
 
     fn evalComptimeFor(self: *ConstEvaluator, for_stmt: ast.ForStmt) anyerror!BodyControl {
-        const iterable = (try self.evalIterableCtValue(for_stmt.iterable)) orelse return .{ .value = null };
-        var last_value: ?ConstValue = null;
-
-        switch (iterable) {
-            .integer => |integer| {
-                if (integer > std.math.maxInt(usize)) return .{ .value = null };
-                const trip_count: usize = @intCast(integer);
-                var iteration: usize = 0;
-                while (iteration < trip_count) : (iteration += 1) {
-                    if (iteration >= self.env.config.max_loop_iterations) {
-                        self.recordLoopLimitExceeded(for_stmt.range);
-                        return .{ .value = null };
-                    }
-
-                    const item_value = CtValue{ .integer = @intCast(iteration) };
-                    try self.bindPatternCtValue(for_stmt.item_pattern, item_value);
-
-                    if (for_stmt.index_pattern) |index_pattern| {
-                        const index_value = CtValue{ .integer = @intCast(iteration) };
-                        try self.bindPatternCtValue(index_pattern, index_value);
-                    }
-
-                    switch (try self.evalComptimeBodyControl(for_stmt.body)) {
-                        .value => |value| last_value = value,
-                        .return_value => |value| return .{ .return_value = value },
-                        .break_loop => break,
-                        .continue_loop => continue,
-                        .indeterminate => return .indeterminate,
-                    }
-                }
-            },
-            .array_ref => |heap_id| {
-                const elems = self.env.heap.getArray(heap_id).elems;
-                for (elems, 0..) |elem, iteration| {
-                    if (iteration >= self.env.config.max_loop_iterations) {
-                        self.recordLoopLimitExceeded(for_stmt.range);
-                        return .{ .value = null };
-                    }
-
-                    try self.bindPatternCtValue(for_stmt.item_pattern, elem);
-                    if (for_stmt.index_pattern) |index_pattern| {
-                        const index_value = CtValue{ .integer = @intCast(iteration) };
-                        try self.bindPatternCtValue(index_pattern, index_value);
-                    }
-
-                    switch (try self.evalComptimeBodyControl(for_stmt.body)) {
-                        .value => |value| last_value = value,
-                        .return_value => |value| return .{ .return_value = value },
-                        .break_loop => break,
-                        .continue_loop => continue,
-                        .indeterminate => return .indeterminate,
-                    }
-                }
-            },
-            .slice_ref => |heap_id| {
-                const elems = self.env.heap.getSlice(heap_id).elems;
-                for (elems, 0..) |elem, iteration| {
-                    if (iteration >= self.env.config.max_loop_iterations) {
-                        self.recordLoopLimitExceeded(for_stmt.range);
-                        return .{ .value = null };
-                    }
-
-                    try self.bindPatternCtValue(for_stmt.item_pattern, elem);
-                    if (for_stmt.index_pattern) |index_pattern| {
-                        const index_value = CtValue{ .integer = @intCast(iteration) };
-                        try self.bindPatternCtValue(index_pattern, index_value);
-                    }
-
-                    switch (try self.evalComptimeBodyControl(for_stmt.body)) {
-                        .value => |value| last_value = value,
-                        .return_value => |value| return .{ .return_value = value },
-                        .break_loop => break,
-                        .continue_loop => continue,
-                        .indeterminate => return .indeterminate,
-                    }
-                }
-            },
-            .tuple_ref => |heap_id| {
-                const elems = self.env.heap.getTuple(heap_id).elems;
-                for (elems, 0..) |elem, iteration| {
-                    if (iteration >= self.env.config.max_loop_iterations) {
-                        self.recordLoopLimitExceeded(for_stmt.range);
-                        return .{ .value = null };
-                    }
-
-                    try self.bindPatternCtValue(for_stmt.item_pattern, elem);
-                    if (for_stmt.index_pattern) |index_pattern| {
-                        const index_value = CtValue{ .integer = @intCast(iteration) };
-                        try self.bindPatternCtValue(index_pattern, index_value);
-                    }
-
-                    switch (try self.evalComptimeBodyControl(for_stmt.body)) {
-                        .value => |value| last_value = value,
-                        .return_value => |value| return .{ .return_value = value },
-                        .break_loop => break,
-                        .continue_loop => continue,
-                        .indeterminate => return .indeterminate,
-                    }
-                }
-            },
-            else => return .{ .value = null },
-        }
-        return .{ .value = last_value };
+        return switch (try self.evalComptimeForCtValue(for_stmt, false)) {
+            .value => |value| .{ .value = if (value) |inner| try ctValueToConstValue(self.allocator, &self.env.heap, inner) else null },
+            .return_value => |value| .{ .return_value = if (value) |inner| try ctValueToConstValue(self.allocator, &self.env.heap, inner) else null },
+            .break_loop => |jump| .{ .break_loop = .{
+                .label = jump.label,
+                .value = if (jump.value) |inner| try ctValueToConstValue(self.allocator, &self.env.heap, inner) else null,
+            } },
+            .continue_loop => |jump| .{ .continue_loop = .{
+                .label = jump.label,
+                .value = if (jump.value) |inner| try ctValueToConstValue(self.allocator, &self.env.heap, inner) else null,
+            } },
+            .indeterminate => .indeterminate,
+        };
     }
 
     fn evalComptimeForCtValue(self: *ConstEvaluator, for_stmt: ast.ForStmt, comptime use_cache: bool) anyerror!CtBodyControl {
         const iterable = (try self.evalIterableCtValue(for_stmt.iterable)) orelse return .{ .value = null };
         var last_value: ?CtValue = null;
+        try self.recordFormalNode(.statement, for_stmt.range);
+        if (!(try self.checkInvariantClauses(for_stmt.invariants))) return .indeterminate;
+
+        if (for_stmt.range_end) |end_expr| {
+            const start = switch (iterable) {
+                .integer => |value| value,
+                else => return .indeterminate,
+            };
+            const end_value = (try self.evalExprAsCtValue(end_expr, use_cache)) orelse return .indeterminate;
+            const end = switch (end_value) {
+                .integer => |value| value,
+                else => return .indeterminate,
+            };
+            var current = start;
+            var iteration: usize = 0;
+            range_loop: while (if (for_stmt.range_inclusive) current <= end else current < end) {
+                if (iteration >= self.env.config.max_loop_iterations) {
+                    self.recordLoopLimitExceeded(for_stmt.range);
+                    return .indeterminate;
+                }
+                try self.bindPatternCtValue(for_stmt.item_pattern, .{ .integer = current });
+                if (for_stmt.index_pattern) |index_pattern| {
+                    try self.bindPatternCtValue(index_pattern, .{ .integer = @intCast(iteration) });
+                }
+                switch (try self.evalComptimeBodyControlCtValue(for_stmt.body, use_cache)) {
+                    .value => |value| last_value = value,
+                    .return_value => |value| return .{ .return_value = value },
+                    .break_loop => |jump| {
+                        if (jumpTargets(jump.label, for_stmt.label)) {
+                            last_value = jump.value;
+                            break :range_loop;
+                        }
+                        return .{ .break_loop = jump };
+                    },
+                    .continue_loop => |jump| {
+                        if (!jumpTargets(jump.label, for_stmt.label)) return .{ .continue_loop = jump };
+                    },
+                    .indeterminate => return .indeterminate,
+                }
+                try self.recordFormalNode(.statement, for_stmt.range);
+                if (!(try self.checkInvariantClauses(for_stmt.invariants))) return .indeterminate;
+                iteration += 1;
+                if (current == std.math.maxInt(u256)) break;
+                current += 1;
+            }
+            return .{ .value = last_value };
+        }
 
         switch (iterable) {
             .integer => |integer| {
                 if (integer > std.math.maxInt(usize)) return .{ .value = null };
                 const trip_count: usize = @intCast(integer);
                 var iteration: usize = 0;
-                while (iteration < trip_count) : (iteration += 1) {
+                integer_loop: while (iteration < trip_count) : (iteration += 1) {
                     if (iteration >= self.env.config.max_loop_iterations) {
                         self.recordLoopLimitExceeded(for_stmt.range);
                         return .{ .value = null };
@@ -4006,10 +4794,20 @@ const ConstEvaluator = struct {
                     switch (try self.evalComptimeBodyControlCtValue(for_stmt.body, use_cache)) {
                         .value => |value| last_value = value,
                         .return_value => |value| return .{ .return_value = value },
-                        .break_loop => break,
-                        .continue_loop => continue,
+                        .break_loop => |jump| {
+                            if (jumpTargets(jump.label, for_stmt.label)) {
+                                last_value = jump.value;
+                                break :integer_loop;
+                            }
+                            return .{ .break_loop = jump };
+                        },
+                        .continue_loop => |jump| {
+                            if (!jumpTargets(jump.label, for_stmt.label)) return .{ .continue_loop = jump };
+                        },
                         .indeterminate => return .indeterminate,
                     }
+                    try self.recordFormalNode(.statement, for_stmt.range);
+                    if (!(try self.checkInvariantClauses(for_stmt.invariants))) return .indeterminate;
                 }
             },
             .array_ref => |heap_id| {
@@ -4029,10 +4827,17 @@ const ConstEvaluator = struct {
                     switch (try self.evalComptimeBodyControlCtValue(for_stmt.body, use_cache)) {
                         .value => |value| last_value = value,
                         .return_value => |value| return .{ .return_value = value },
-                        .break_loop => break,
-                        .continue_loop => continue,
+                        .break_loop => |jump| {
+                            if (jumpTargets(jump.label, for_stmt.label)) return .{ .value = jump.value };
+                            return .{ .break_loop = jump };
+                        },
+                        .continue_loop => |jump| {
+                            if (!jumpTargets(jump.label, for_stmt.label)) return .{ .continue_loop = jump };
+                        },
                         .indeterminate => return .indeterminate,
                     }
+                    try self.recordFormalNode(.statement, for_stmt.range);
+                    if (!(try self.checkInvariantClauses(for_stmt.invariants))) return .indeterminate;
                 }
             },
             .slice_ref => |heap_id| {
@@ -4052,10 +4857,17 @@ const ConstEvaluator = struct {
                     switch (try self.evalComptimeBodyControlCtValue(for_stmt.body, use_cache)) {
                         .value => |value| last_value = value,
                         .return_value => |value| return .{ .return_value = value },
-                        .break_loop => break,
-                        .continue_loop => continue,
+                        .break_loop => |jump| {
+                            if (jumpTargets(jump.label, for_stmt.label)) return .{ .value = jump.value };
+                            return .{ .break_loop = jump };
+                        },
+                        .continue_loop => |jump| {
+                            if (!jumpTargets(jump.label, for_stmt.label)) return .{ .continue_loop = jump };
+                        },
                         .indeterminate => return .indeterminate,
                     }
+                    try self.recordFormalNode(.statement, for_stmt.range);
+                    if (!(try self.checkInvariantClauses(for_stmt.invariants))) return .indeterminate;
                 }
             },
             .tuple_ref => |heap_id| {
@@ -4075,10 +4887,17 @@ const ConstEvaluator = struct {
                     switch (try self.evalComptimeBodyControlCtValue(for_stmt.body, use_cache)) {
                         .value => |value| last_value = value,
                         .return_value => |value| return .{ .return_value = value },
-                        .break_loop => break,
-                        .continue_loop => continue,
+                        .break_loop => |jump| {
+                            if (jumpTargets(jump.label, for_stmt.label)) return .{ .value = jump.value };
+                            return .{ .break_loop = jump };
+                        },
+                        .continue_loop => |jump| {
+                            if (!jumpTargets(jump.label, for_stmt.label)) return .{ .continue_loop = jump };
+                        },
                         .indeterminate => return .indeterminate,
                     }
+                    try self.recordFormalNode(.statement, for_stmt.range);
+                    if (!(try self.checkInvariantClauses(for_stmt.invariants))) return .indeterminate;
                 }
             },
             else => return .{ .value = null },
@@ -4342,16 +5161,17 @@ const ConstEvaluator = struct {
             },
             .While => |while_stmt| {
                 _ = self.evalExpr(while_stmt.condition) catch null;
-                for (while_stmt.invariants) |expr_id| _ = self.evalExpr(expr_id) catch null;
+                for (while_stmt.invariants) |invariant| _ = self.evalExpr(invariant.predicate) catch null;
                 self.visitBody(while_stmt.body);
             },
             .For => |for_stmt| {
                 _ = self.evalExpr(for_stmt.iterable) catch null;
-                for (for_stmt.invariants) |expr_id| _ = self.evalExpr(expr_id) catch null;
+                for (for_stmt.invariants) |invariant| _ = self.evalExpr(invariant.predicate) catch null;
                 self.visitBody(for_stmt.body);
             },
             .Switch => |switch_stmt| {
                 _ = self.evalExpr(switch_stmt.condition) catch null;
+                for (switch_stmt.invariants) |invariant| _ = self.evalExpr(invariant.predicate) catch null;
                 for (switch_stmt.arms) |arm| {
                     self.visitSwitchPattern(arm.pattern);
                     self.visitBody(arm.body);
