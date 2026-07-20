@@ -233,6 +233,8 @@ theorem generated_vocabulary_matches_closed_lean_vocabulary :
 
 theorem generated_policy_matrix_matches_lean :
     sourceAccountingPolicyRows.all policyRowMatches = true := by
+  -- The generated policy matrix is a nested data reduction; the larger
+  -- recursion allowance does not grant more elaboration search.
   set_option maxRecDepth 10000 in decide
 
 theorem generated_failure_witnesses_are_complete_rejections :
@@ -243,6 +245,8 @@ theorem generated_failure_witnesses_are_complete_rejections :
 
 theorem generated_decisions_match_lean :
     sourceAccountingDecisionRows.all decisionRowMatches = true := by
+  -- Decision rows contain complete manifests and traces, so kernel `decide`
+  -- needs data-proportional recursion depth while retaining default heartbeats.
   set_option maxRecDepth 100000 in decide
 
 end Ora.SourceAccountingSync

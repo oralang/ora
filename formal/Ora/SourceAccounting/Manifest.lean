@@ -1,3 +1,5 @@
+import Ora.Util.List
+
 /-
 Handwritten data model for the compiler-kernel source-accounting law.
 
@@ -7,6 +9,8 @@ activated semantic uses, terminal evidence, and concrete-fold trace authority.
 -/
 
 namespace Ora.SourceAccounting
+
+open Ora.Util
 
 inductive CompilationMode where
   | verifiedFull | verifiedBasic | unverifiedEmit
@@ -355,9 +359,6 @@ def Manifest.bag (m : Manifest) : BagManifest := {
   stateEffects := RowBag.ofList m.stateEffects
   handlings := RowBag.ofList m.handlings
 }
-
-def noDuplicateNat (values : List Nat) : Bool :=
-  values.all fun value => decide (values.count value = 1)
 
 def exactlyOneNat (value : Nat) (values : List Nat) : Bool :=
   decide (values.count value = 1)

@@ -165,6 +165,8 @@ theorem srem_min_neg_one_is_zero :
     sremTotal minSigned negOne = zero := by
   decide
 
+-- Reducing the two concrete 256-bit signed-remainder examples expands their
+-- `2^256` data representation; no additional tactic search is authorized.
 set_option maxRecDepth 100000 in
 theorem srem_dividend_sign_examples :
     sremTotal (BitVec.ofNat 256 (2^256 - 10)) (BitVec.ofNat 256 3) =
