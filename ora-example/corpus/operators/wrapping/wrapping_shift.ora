@@ -1,4 +1,64 @@
 contract WrappingShift {
+    pub fn wrapping_shl_u8(a: u8, b: u8) -> u8 {
+        let res: u8 = a <<% b;
+        return res;
+    }
+
+    pub fn wrapping_shr_u8(a: u8, b: u8) -> u8 {
+        let res: u8 = a >>% b;
+        return res;
+    }
+
+    pub fn wrapping_shl_u16(a: u16, b: u16) -> u16 {
+        let res: u16 = a <<% b;
+        return res;
+    }
+
+    pub fn wrapping_shr_u16(a: u16, b: u16) -> u16 {
+        let res: u16 = a >>% b;
+        return res;
+    }
+
+    pub fn wrapping_shl_u32(a: u32, b: u32) -> u32 {
+        let res: u32 = a <<% b;
+        return res;
+    }
+
+    pub fn wrapping_shr_u32(a: u32, b: u32) -> u32 {
+        let res: u32 = a >>% b;
+        return res;
+    }
+
+    pub fn wrapping_shl_u64(a: u64, b: u64) -> u64 {
+        let res: u64 = a <<% b;
+        return res;
+    }
+
+    pub fn wrapping_shr_u64(a: u64, b: u64) -> u64 {
+        let res: u64 = a >>% b;
+        return res;
+    }
+
+    pub fn wrapping_shl_u128(a: u128, b: u128) -> u128 {
+        let res: u128 = a <<% b;
+        return res;
+    }
+
+    pub fn wrapping_shr_u128(a: u128, b: u128) -> u128 {
+        let res: u128 = a >>% b;
+        return res;
+    }
+
+    pub fn wrapping_shl_u160(a: u160, b: u160) -> u160 {
+        let res: u160 = a <<% b;
+        return res;
+    }
+
+    pub fn wrapping_shr_u160(a: u160, b: u160) -> u160 {
+        let res: u160 = a >>% b;
+        return res;
+    }
+
     pub fn wrapping_shl_u256(a: u256, b: u256) -> u256 {
         let res: u256 = a <<% b;
         return res;
@@ -6,6 +66,66 @@ contract WrappingShift {
 
     pub fn wrapping_shr_u256(a: u256, b: u256) -> u256 {
         let res: u256 = a >>% b;
+        return res;
+    }
+
+    pub fn wrapping_shl_i8(a: i8, b: i8) -> i8 {
+        let res: i8 = a <<% b;
+        return res;
+    }
+
+    pub fn wrapping_shr_i8(a: i8, b: i8) -> i8 {
+        let res: i8 = a >>% b;
+        return res;
+    }
+
+    pub fn wrapping_shl_i16(a: i16, b: i16) -> i16 {
+        let res: i16 = a <<% b;
+        return res;
+    }
+
+    pub fn wrapping_shr_i16(a: i16, b: i16) -> i16 {
+        let res: i16 = a >>% b;
+        return res;
+    }
+
+    pub fn wrapping_shl_i32(a: i32, b: i32) -> i32 {
+        let res: i32 = a <<% b;
+        return res;
+    }
+
+    pub fn wrapping_shr_i32(a: i32, b: i32) -> i32 {
+        let res: i32 = a >>% b;
+        return res;
+    }
+
+    pub fn wrapping_shl_i64(a: i64, b: i64) -> i64 {
+        let res: i64 = a <<% b;
+        return res;
+    }
+
+    pub fn wrapping_shr_i64(a: i64, b: i64) -> i64 {
+        let res: i64 = a >>% b;
+        return res;
+    }
+
+    pub fn wrapping_shl_i128(a: i128, b: i128) -> i128 {
+        let res: i128 = a <<% b;
+        return res;
+    }
+
+    pub fn wrapping_shr_i128(a: i128, b: i128) -> i128 {
+        let res: i128 = a >>% b;
+        return res;
+    }
+
+    pub fn wrapping_shl_i256(a: i256, b: i256) -> i256 {
+        let res: i256 = a <<% b;
+        return res;
+    }
+
+    pub fn wrapping_shr_i256(a: i256, b: i256) -> i256 {
+        let res: i256 = a >>% b;
         return res;
     }
 }

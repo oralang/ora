@@ -1,1 +1,2 @@
 reentrancy_attacker.ora # secondary-only; deployed by reentrancy_lock_guard.spec.toml
+integer_shift_matrix.ora # executed exhaustively by integer_shift_matrix.zig

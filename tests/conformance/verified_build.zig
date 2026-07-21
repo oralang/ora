@@ -71,7 +71,7 @@ test "verified conformance manifest pins all three build classes" {
         }
     }
 
-    try testing.expectEqual(@as(usize, 58), counts[@intFromEnum(runner.VerifiedBuildClass.same_bytecode)]);
+    try testing.expectEqual(@as(usize, 59), counts[@intFromEnum(runner.VerifiedBuildClass.same_bytecode)]);
     try testing.expectEqual(@as(usize, 11), counts[@intFromEnum(runner.VerifiedBuildClass.rewritten)]);
     try testing.expectEqual(@as(usize, 24), counts[@intFromEnum(runner.VerifiedBuildClass.unverifiable)]);
 }
@@ -89,6 +89,18 @@ test "resource rewrite executes with proved runtime checks kept" {
         (try runner.classifyVerifiedBuild(testing.allocator, source_path, spec_path)).class,
     );
     try runner.runConformanceSpecWithExtraArgs(testing.allocator, source_path, spec_path, &.{"--keep-proved-checks"});
+}
+
+test "checked shift bounds execute in verified and no-verify builds" {
+    std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const source_path = types.CONFORMANCE_DIR_REL ++ "/checked_shift_verified.ora";
+    const spec_path = types.CONFORMANCE_DIR_REL ++ "/checked_shift_verified.spec.toml";
+    try runner.runConformanceSpecWithExtraArgs(testing.allocator, source_path, spec_path, &.{"--no-verify"});
+    try runner.runConformanceSpecWithExtraArgs(testing.allocator, source_path, spec_path, &.{});
 }
 
 test "verified conformance manifest parser rejects unordered membership" {

@@ -1,5 +1,29 @@
 // AUTO-GENERATED. Do not edit by hand.
 // INPUT: ora-example/corpus/operators/wrapping/wrapping_shift.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-LABEL: func.func @wrapping_shl_u8
+// CHECK-LABEL: func.func @wrapping_shr_u8
+// CHECK-LABEL: func.func @wrapping_shl_u16
+// CHECK-LABEL: func.func @wrapping_shr_u16
+// CHECK-LABEL: func.func @wrapping_shl_u32
+// CHECK-LABEL: func.func @wrapping_shr_u32
+// CHECK-LABEL: func.func @wrapping_shl_u64
+// CHECK-LABEL: func.func @wrapping_shr_u64
+// CHECK-LABEL: func.func @wrapping_shl_u128
+// CHECK-LABEL: func.func @wrapping_shr_u128
+// CHECK-LABEL: func.func @wrapping_shl_u160
+// CHECK-LABEL: func.func @wrapping_shr_u160
 // CHECK-LABEL: func.func @wrapping_shl_u256
 // CHECK-LABEL: func.func @wrapping_shr_u256
+// CHECK-LABEL: func.func @wrapping_shl_i8
+// CHECK-LABEL: func.func @wrapping_shr_i8
+// CHECK-LABEL: func.func @wrapping_shl_i16
+// CHECK-LABEL: func.func @wrapping_shr_i16
+// CHECK-LABEL: func.func @wrapping_shl_i32
+// CHECK-LABEL: func.func @wrapping_shr_i32
+// CHECK-LABEL: func.func @wrapping_shl_i64
+// CHECK-LABEL: func.func @wrapping_shr_i64
+// CHECK-LABEL: func.func @wrapping_shl_i128
+// CHECK-LABEL: func.func @wrapping_shr_i128
+// CHECK-LABEL: func.func @wrapping_shl_i256
+// CHECK-LABEL: func.func @wrapping_shr_i256
