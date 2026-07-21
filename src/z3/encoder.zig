@@ -6351,10 +6351,25 @@ pub const Encoder = struct {
             const rhs_type = mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 1));
             const shift_op: ShiftOp = if (std.mem.eql(u8, op_name, "ora.shl_wrapping"))
                 .Shl
-            else if (self.isSignedBitPatternType(lhs_type))
-                .ShrSigned
-            else
-                .ShrUnsigned;
+            else blk: {
+                const signed_attr = mlir.oraOperationGetAttributeByName(
+                    mlir_op,
+                    mlir.oraStringRefCreate("ora.integer_signed".ptr, "ora.integer_signed".len),
+                );
+                if (!mlir.oraAttributeIsNull(signed_attr)) {
+                    break :blk if (mlir.oraBoolAttrGetValue(signed_attr)) .ShrSigned else .ShrUnsigned;
+                }
+                if (mlir.oraTypeIsIntegerType(lhs_type)) {
+                    break :blk if (self.isSignedBitPatternType(lhs_type)) .ShrSigned else .ShrUnsigned;
+                }
+                return try self.soundnessLossUndef(
+                    z3.Z3_get_sort(self.context.ctx, operands[0]),
+                    "shr_wrapping_signedness",
+                    @intFromPtr(mlir_op.ptr),
+                    .missing_type_metadata,
+                    "ora.shr_wrapping on a builtin integer carrier has no compiler-owned signedness metadata",
+                );
+            };
             return try self.encodeWrappingShiftOp(shift_op, operands[0], operands[1], rhs_type, @intFromPtr(mlir_op.ptr));
         }
 

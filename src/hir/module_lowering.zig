@@ -794,8 +794,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             if (parameters.len > 0) {
                 const param_name_attrs = try self.allocator.alloc(mlir.MlirAttribute, parameters.len);
                 const param_binding_id_attrs = try self.allocator.alloc(mlir.MlirAttribute, parameters.len);
+                const param_type_id_attrs = try self.allocator.alloc(mlir.MlirAttribute, parameters.len);
                 defer self.allocator.free(param_name_attrs);
                 defer self.allocator.free(param_binding_id_attrs);
+                defer self.allocator.free(param_type_id_attrs);
                 for (parameters, 0..) |parameter, index| {
                     const param_name = switch (self.file.pattern(parameter.pattern).*) {
                         .Name => |name| name.name,
@@ -809,6 +811,19 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     );
                     param_name_attrs[index] = mlir.oraStringAttrCreate(self.context, strRef(param_name));
                     param_binding_id_attrs[index] = mlir.oraStringAttrCreate(self.context, strRef(binding_id));
+                    const param_type = if (concrete_runtime_parameter_types) |resolved|
+                        resolved[index]
+                    else
+                        self.typecheck.pattern_types[parameter.pattern.index()].type;
+                    const base_type = support.unwrapRefinementSemaType(param_type);
+                    const compiler_type_id: u32 = switch (base_type) {
+                        .integer => |integer| if (integer.builtinSpec()) |spec| spec.comptime_type_id else 0,
+                        else => 0,
+                    };
+                    param_type_id_attrs[index] = mlir.oraIntegerAttrCreateI64FromType(
+                        reprIntegerType(self.context),
+                        @intCast(compiler_type_id),
+                    );
                 }
                 mlir.oraOperationSetAttributeByName(
                     op,
@@ -819,6 +834,11 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     op,
                     strRef("ora.param_binding_ids"),
                     mlir.oraArrayAttrCreate(self.context, @intCast(param_binding_id_attrs.len), param_binding_id_attrs.ptr),
+                );
+                mlir.oraOperationSetAttributeByName(
+                    op,
+                    strRef("ora.param_compiler_type_ids"),
+                    mlir.oraArrayAttrCreate(self.context, @intCast(param_type_id_attrs.len), param_type_id_attrs.ptr),
                 );
             }
 

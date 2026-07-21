@@ -15,6 +15,7 @@ a frame equality between them.
 
 import Ora.Obligation.Manifest
 import Ora.Obligation.BitVec
+import Ora.Integer.Arithmetic
 import Ora.Resource.Theorems
 import Ora.Spec.Facts
 
@@ -22,7 +23,7 @@ namespace Ora.Obligation
 
 inductive Value where
   | bool : Bool → Value
-  | u256 : U256 → Value
+  | integer : Ora.Integer.Value → Value
   deriving Repr
 
 inductive PlaceBindingKey where
@@ -32,7 +33,7 @@ inductive PlaceBindingKey where
 
 structure Env where
   freeBindings : List (FreeVarId × Value) := []
-  placeValue : PlaceBindingKey → Value := fun _ => .u256 (BitVec.ofNat 256 0)
+  placeValue : PlaceBindingKey → Value := fun _ => .bool false
   /-- Bound variables use De Bruijn order: head is index `0`. -/
   boundBindings : List Value := []
   result : Option Value := none
@@ -121,43 +122,112 @@ def sampleStoragePlace : PlaceRef :=
 def sampleOldPlaceReadManifest : Manifest :=
   { terms := [.placeRead sampleStoragePlace, .old 0] }
 
-def compilerTypeIdU256 : Nat := Ora.Spec.expectedCompilerTypeIdU256
-def compilerTypeIdI256 : Nat := Ora.Spec.expectedCompilerTypeIdI256
 def compilerTypeIdBool : Nat := Ora.Spec.expectedCompilerTypeIdBool
 
-def TyRef.isU256 : TyRef → Bool
-  | .spelling name => name == "u256" || name == "uint256"
-  | .compilerTypeId id => id == compilerTypeIdU256
+def integerShapeForCanonicalSpelling? (name : String) : Option Ora.Spec.IntegerShape :=
+  (Ora.Spec.expectedIntegerRegistrationFacts.find? (fun row => row.name == name)).map
+    Ora.Spec.IntegerRegistrationFact.shape
 
-def TyRef.isI256 : TyRef → Bool
-  | .spelling name => name == "i256" || name == "int256"
-  | .compilerTypeId id => id == compilerTypeIdI256
+def integerShapeForSpelling? (name : String) : Option Ora.Spec.IntegerShape :=
+  match integerShapeForCanonicalSpelling? name with
+  | some shape => some shape
+  | none =>
+      match name with
+      | "uint8" => some (.unsigned .w8)
+      | "uint16" => some (.unsigned .w16)
+      | "uint32" => some (.unsigned .w32)
+      | "uint64" => some (.unsigned .w64)
+      | "uint128" => some (.unsigned .w128)
+      | "uint160" => some (.unsigned .w160)
+      | "uint256" => some (.unsigned .w256)
+      | "int8" => some (.signed .w8)
+      | "int16" => some (.signed .w16)
+      | "int32" => some (.signed .w32)
+      | "int64" => some (.signed .w64)
+      | "int128" => some (.signed .w128)
+      | "int256" => some (.signed .w256)
+      | _ => none
+
+def integerShapeForCompilerTypeId? (id : Nat) : Option Ora.Spec.IntegerShape :=
+  (Ora.Spec.expectedIntegerRegistrationFacts.find? (fun row => row.compilerTypeId == id)).map
+    Ora.Spec.IntegerRegistrationFact.shape
+
+@[simp] theorem integerShapeForCompilerTypeId_u8 :
+    integerShapeForCompilerTypeId? 1 = some (.unsigned .w8) := by decide
+@[simp] theorem integerShapeForCompilerTypeId_u16 :
+    integerShapeForCompilerTypeId? 2 = some (.unsigned .w16) := by decide
+@[simp] theorem integerShapeForCompilerTypeId_u32 :
+    integerShapeForCompilerTypeId? 3 = some (.unsigned .w32) := by decide
+@[simp] theorem integerShapeForCompilerTypeId_u64 :
+    integerShapeForCompilerTypeId? 4 = some (.unsigned .w64) := by decide
+@[simp] theorem integerShapeForCompilerTypeId_u128 :
+    integerShapeForCompilerTypeId? 5 = some (.unsigned .w128) := by decide
+@[simp] theorem integerShapeForCompilerTypeId_u160 :
+    integerShapeForCompilerTypeId? 18 = some (.unsigned .w160) := by decide
+@[simp] theorem integerShapeForCompilerTypeId_u256 :
+    integerShapeForCompilerTypeId? 6 = some (.unsigned .w256) := by decide
+@[simp] theorem integerShapeForCompilerTypeId_i8 :
+    integerShapeForCompilerTypeId? 7 = some (.signed .w8) := by decide
+@[simp] theorem integerShapeForCompilerTypeId_i16 :
+    integerShapeForCompilerTypeId? 8 = some (.signed .w16) := by decide
+@[simp] theorem integerShapeForCompilerTypeId_i32 :
+    integerShapeForCompilerTypeId? 9 = some (.signed .w32) := by decide
+@[simp] theorem integerShapeForCompilerTypeId_i64 :
+    integerShapeForCompilerTypeId? 10 = some (.signed .w64) := by decide
+@[simp] theorem integerShapeForCompilerTypeId_i128 :
+    integerShapeForCompilerTypeId? 11 = some (.signed .w128) := by decide
+@[simp] theorem integerShapeForCompilerTypeId_i256 :
+    integerShapeForCompilerTypeId? 12 = some (.signed .w256) := by decide
+
+@[simp] def TyRef.integerShape? : TyRef → Option Ora.Spec.IntegerShape
+  | .spelling name => integerShapeForSpelling? name
+  | .compilerTypeId id => integerShapeForCompilerTypeId? id
+
+@[simp] theorem TyRef.compilerTypeId_u256_integerShape :
+    (TyRef.compilerTypeId 6).integerShape? = some (.unsigned .w256) := by
+  simp [TyRef.integerShape?]
+
+/-- U256-specific aliases remain proof-script conveniences, not a second value model. -/
+def compilerTypeIdU256 : Nat := Ora.Spec.expectedCompilerTypeIdU256
+def compilerTypeIdI256 : Nat := Ora.Spec.expectedCompilerTypeIdI256
+
+def TyRef.isU256 (ty : TyRef) : Bool :=
+  ty.integerShape? == some (.unsigned .w256)
+
+def TyRef.isI256 (ty : TyRef) : Bool :=
+  ty.integerShape? == some (.signed .w256)
+
+def TyRef.isU256Carrier (ty : TyRef) : Bool :=
+  ty.isU256 || ty.isI256
 
 def TyRef.isBool : TyRef → Bool
   | .spelling name => name == "bool" || name == "i1"
   | .compilerTypeId id => id == compilerTypeIdBool
 
-def TyRef.isU256Carrier (ty : TyRef) : Bool :=
-  ty.isU256 || ty.isI256
-
-def FreeVarRef.isU256 (var : FreeVarRef) : Bool :=
+def FreeVarRef.integerShape? (var : FreeVarRef) : Option Ora.Spec.IntegerShape :=
   match var.ty with
-  | some ty => ty.isU256Carrier
-  | none => false
+  | some ty => ty.integerShape?
+  | none => none
+
+def BoundVarRef.integerShape? (var : BoundVarRef) : Option Ora.Spec.IntegerShape :=
+  match var.ty with
+  | some ty => ty.integerShape?
+  | none => none
+
+def BinderRef.integerShape? (binder : BinderRef) : Option Ora.Spec.IntegerShape :=
+  match binder.ty with
+  | some ty => ty.integerShape?
+  | none => none
 
 def BoundVarRef.isU256 (var : BoundVarRef) : Bool :=
-  match var.ty with
-  | some ty => ty.isU256Carrier
-  | none => false
+  var.integerShape? == some (.unsigned .w256)
 
 def BinderRef.isU256 (binder : BinderRef) : Bool :=
-  match binder.ty with
-  | some ty => ty.isU256Carrier
-  | none => false
+  binder.integerShape? == some (.unsigned .w256)
 
-def VarRef.isU256 : VarRef → Bool
-  | VarRef.free var => FreeVarRef.isU256 var
-  | VarRef.bound var => BoundVarRef.isU256 var
+def VarRef.integerShape? : VarRef → Option Ora.Spec.IntegerShape
+  | VarRef.free var => FreeVarRef.integerShape? var
+  | VarRef.bound var => BoundVarRef.integerShape? var
 
 /-
 Compiler manifests carry integer literals as normalized ASCII decimal text.
@@ -187,55 +257,88 @@ def parseDecimalNatAux : List Char → Nat → Bool → Option Nat
 def parseDecimalNat? (text : String) : Option Nat :=
   parseDecimalNatAux text.data 0 false
 
+@[simp] theorem parseDecimalNat_zero : parseDecimalNat? "0" = some 0 := by rfl
+@[simp] theorem parseDecimalNat_one : parseDecimalNat? "1" = some 1 := by rfl
 example : parseDecimalNat? "3" = some 3 := by rfl
 example : parseDecimalNat? "123" = some 123 := by rfl
 example : parseDecimalNat? "" = none := by rfl
 example : parseDecimalNat? "1_0" = none := by rfl
 
-def IntegerLiteralTerm.asU256? (lit : IntegerLiteralTerm) : Option U256 :=
+def IntegerLiteralTerm.asInteger? (lit : IntegerLiteralTerm) : Option Ora.Integer.Value :=
   match lit.ty with
   | some ty =>
-      if ty.isU256Carrier then
-        match lit.value with
-        | "0" => some (BitVec.ofNat 256 0)
-        | "1" => some (BitVec.ofNat 256 1)
-        | _ => parseDecimalNat? lit.value |>.map (BitVec.ofNat 256)
-      else
-        none
+      match ty.integerShape?, parseDecimalNat? lit.value with
+      | some shape, some value => some (Ora.Integer.Value.ofNat shape value)
+      | _, _ => none
   | none => none
+
+def IntegerLiteralTerm.asU256? (lit : IntegerLiteralTerm) : Option U256 := do
+  let value ← lit.asInteger?
+  value.bitsFor? (.unsigned .w256)
+
+@[simp] theorem integerLiteral_u256_asInteger (text : String) :
+    ({ value := text, ty := some (.compilerTypeId 6) } : IntegerLiteralTerm).asInteger? =
+      (parseDecimalNat? text).map (fun value =>
+        { shape := .unsigned .w256, bits := BitVec.ofNat 256 value }) := by
+  cases hParsed : parseDecimalNat? text <;>
+    simp [IntegerLiteralTerm.asInteger?, TyRef.integerShape?,
+      Ora.Integer.Value.ofNat, hParsed]
+
+@[simp] theorem integerLiteral_u256_zero :
+    ({ value := "0", ty := some (.compilerTypeId 6) } : IntegerLiteralTerm).asInteger? =
+      some { shape := .unsigned .w256, bits := BitVec.ofNat 256 0 } := by
+  simp [IntegerLiteralTerm.asInteger?, TyRef.integerShape?, Ora.Integer.Value.ofNat]
+
+@[simp] theorem integerLiteral_u256_one :
+    ({ value := "1", ty := some (.compilerTypeId 6) } : IntegerLiteralTerm).asInteger? =
+      some { shape := .unsigned .w256, bits := BitVec.ofNat 256 1 } := by
+  simp [IntegerLiteralTerm.asInteger?, TyRef.integerShape?, Ora.Integer.Value.ofNat]
+
+def Value.u256 (value : U256) : Value :=
+  .integer { shape := .unsigned .w256, bits := value }
+
+@[simp] theorem Value.u256_eq_integer (value : U256) :
+    Value.u256 value =
+      .integer { shape := .unsigned .w256, bits := value } := by
+  rfl
+
+def Value.binaryU256? (op : U256 → U256 → U256) : Value → Value → Option Value
+  | .integer lhs, .integer rhs =>
+      (lhs.binary? (.unsigned .w256) op rhs).map Value.integer
+  | _, _ => none
 
 def Value.eqProp? : Value → Value → Option Prop
   | .bool lhs, .bool rhs => some (lhs = rhs)
-  | .u256 lhs, .u256 rhs => some (lhs = rhs)
-  | _, _ => none
-
-def Value.binaryU256? (op : U256 → U256 → U256) : Value → Value → Option Value
-  | .u256 lhs, .u256 rhs => some (.u256 (op lhs rhs))
+  | .integer lhs, .integer rhs => lhs.eqProp? rhs
   | _, _ => none
 
 def Value.refinementPredicate? (name : String) (value : Value) (args : List Value) :
     Option Prop :=
   match name, value, args with
-  | "NonZero", .u256 value, [] =>
-      some (value ≠ BitVec.ofNat 256 0)
-  | "NonZeroAddress", .u256 value, [] =>
-      some (value ≠ BitVec.ofNat 256 0)
-  | "MinValue", .u256 value, [.u256 bound] =>
-      some (U256.ule bound value)
-  | "MaxValue", .u256 value, [.u256 bound] =>
-      some (U256.ule value bound)
-  | "InRange", .u256 value, [.u256 lower, .u256 upper] =>
-      some (U256.ule lower value ∧ U256.ule value upper)
-  | "BasisPoints", .u256 value, [] =>
-      some (U256.ule (BitVec.ofNat 256 0) value ∧
-        U256.ule value (BitVec.ofNat 256 10000))
+  | "NonZero", .integer value, [] =>
+      some (value.bits ≠ Ora.Integer.zero value.shape)
+  | "MinValue", .integer value, [.integer bound] =>
+      bound.relation? value.shape (Ora.Integer.le value.shape) value
+  | "MaxValue", .integer value, [.integer bound] =>
+      value.relation? value.shape (Ora.Integer.le value.shape) bound
+  | "InRange", .integer value, [.integer lower, .integer upper] => do
+      let lowerOk ← lower.relation? value.shape (Ora.Integer.le value.shape) value
+      let upperOk ← value.relation? value.shape (Ora.Integer.le value.shape) upper
+      some (lowerOk ∧ upperOk)
+  | "BasisPoints", .integer value, [] =>
+      let lower := Ora.Integer.Value.ofNat value.shape 0
+      let upper := Ora.Integer.Value.ofNat value.shape 10000
+      match lower.relation? value.shape (Ora.Integer.le value.shape) value,
+          value.relation? value.shape (Ora.Integer.le value.shape) upper with
+      | some lowerOk, some upperOk => some (lowerOk ∧ upperOk)
+      | _, _ => none
   | _, _, _ => none
 
-theorem unsupported_refinement_predicate_fails_closed (value : U256) :
-    Value.refinementPredicate? "Exact" (.u256 value) [] = none := rfl
+theorem unsupported_refinement_predicate_fails_closed (value : Ora.Integer.Value) :
+    Value.refinementPredicate? "Exact" (.integer value) [] = none := rfl
 
-theorem malformed_refinement_arity_fails_closed (value : U256) :
-    Value.refinementPredicate? "MinValue" (.u256 value) [] = none := rfl
+theorem malformed_refinement_arity_fails_closed (value : Ora.Integer.Value) :
+    Value.refinementPredicate? "MinValue" (.integer value) [] = none := rfl
 
 mutual
 
@@ -244,7 +347,7 @@ def denoteValue? (manifest : Manifest) (env : Env) : Nat → TermId → Option V
   | fuel + 1, id =>
       match manifest.terms[id]? with
       | some (.boolLit value) => some (.bool value)
-      | some (.intLit lit) => lit.asU256?.map Value.u256
+      | some (.intLit lit) => lit.asInteger?.map Value.integer
       | some (.variable var) => env.lookupVar var
       | some (.old operand) =>
           match manifest.terms[operand]? with
@@ -253,60 +356,66 @@ def denoteValue? (manifest : Manifest) (env : Env) : Nat → TermId → Option V
       | some .result => env.result
       | some (.placeRead place) => env.lookupPlace place
       | some (.binary binary) =>
-          let binaryU256? (op : U256 → U256 → U256) :=
-            match binary.ty with
-            | some ty =>
-                if ty.isU256Carrier then
-                  match denoteValue? manifest env fuel binary.lhs,
-                        denoteValue? manifest env fuel binary.rhs with
-                  | some lhsValue, some rhsValue =>
-                      lhsValue.binaryU256? op rhsValue
-                  | _, _ => none
-                else
-                  none
-            | none => none
-          let div? :=
-            match binary.ty with
-            | some ty =>
-                if ty.isU256 then
-                  match denoteValue? manifest env fuel binary.lhs,
-                        denoteValue? manifest env fuel binary.rhs with
-                  | some lhsValue, some rhsValue =>
-                      lhsValue.binaryU256? U256.udivTotal rhsValue
-                  | _, _ => none
-                else if ty.isI256 then
-                  match denoteValue? manifest env fuel binary.lhs,
-                        denoteValue? manifest env fuel binary.rhs with
-                  | some lhsValue, some rhsValue =>
-                      lhsValue.binaryU256? U256.sdivTotal rhsValue
-                  | _, _ => none
-                else
-                  none
-            | none => none
-          let mod? :=
-            match binary.ty with
-            | some ty =>
-                if ty.isU256 then
-                  match denoteValue? manifest env fuel binary.lhs,
-                        denoteValue? manifest env fuel binary.rhs with
-                  | some lhsValue, some rhsValue =>
-                      lhsValue.binaryU256? U256.uremTotal rhsValue
-                  | _, _ => none
-                else if ty.isI256 then
-                  match denoteValue? manifest env fuel binary.lhs,
-                        denoteValue? manifest env fuel binary.rhs with
-                  | some lhsValue, some rhsValue =>
-                      lhsValue.binaryU256? U256.sremTotal rhsValue
-                  | _, _ => none
-                else
-                  none
-            | none => none
+          let binaryInteger? (op : Ora.Integer.BinaryOp) :=
+            match binary.ty,
+                denoteValue? manifest env fuel binary.lhs,
+                denoteValue? manifest env fuel binary.rhs with
+            | some ty, some (.integer lhs), some (.integer rhs) =>
+                match ty.integerShape? with
+                | some shape =>
+                    (lhs.binary? shape (Ora.Integer.wrappingResult shape op) rhs).map
+                      Value.integer
+                | none => none
+            | _, _, _ => none
+          let division? :=
+            match binary.ty,
+                denoteValue? manifest env fuel binary.lhs,
+                denoteValue? manifest env fuel binary.rhs with
+            | some ty, some (.integer lhs), some (.integer rhs) =>
+                match ty.integerShape? with
+                | some shape =>
+                    (lhs.binary? shape (Ora.Integer.divResult shape) rhs).map Value.integer
+                | none => none
+            | _, _, _ => none
+          let remainder? :=
+            match binary.ty,
+                denoteValue? manifest env fuel binary.lhs,
+                denoteValue? manifest env fuel binary.rhs with
+            | some ty, some (.integer lhs), some (.integer rhs) =>
+                match ty.integerShape? with
+                | some shape =>
+                    (lhs.binary? shape (Ora.Integer.remResult shape) rhs).map Value.integer
+                | none => none
+            | _, _, _ => none
           match binary.op with
-          | .add => binaryU256? U256.add
-          | .sub => binaryU256? U256.sub
-          | .mul => binaryU256? U256.mul
-          | .div => div?
-          | .mod_ => mod?
+          | .add => binaryInteger? .add
+          | .sub => binaryInteger? .sub
+          | .mul => binaryInteger? .mul
+          | .pow => binaryInteger? .pow
+          | .shl => binaryInteger? .shl
+          | .shr => binaryInteger? .shr
+          | .div => division?
+          | .mod_ => remainder?
+          | .bitAnd =>
+              match binary.ty,
+                  denoteValue? manifest env fuel binary.lhs,
+                  denoteValue? manifest env fuel binary.rhs with
+              | some ty, some (.integer lhs), some (.integer rhs) =>
+                  match ty.integerShape? with
+                  | some shape =>
+                      (lhs.binary? shape (Ora.Integer.bitAndResult shape) rhs).map Value.integer
+                  | none => none
+              | _, _, _ => none
+          | .bitXor =>
+              match binary.ty,
+                  denoteValue? manifest env fuel binary.lhs,
+                  denoteValue? manifest env fuel binary.rhs with
+              | some ty, some (.integer lhs), some (.integer rhs) =>
+                  match ty.integerShape? with
+                  | some shape =>
+                      (lhs.binary? shape (Ora.Integer.bitXorResult shape) rhs).map Value.integer
+                  | none => none
+              | _, _, _ => none
           | _ => none
       | _ => none
 
@@ -341,12 +450,21 @@ def denoteFormula? (manifest : Manifest) (env : Env) : Nat → TermId → Option
               | none => none
           | .neg => none
       | some (.binary binary) =>
-          let binU256? (relation : U256 → U256 → Prop) :=
-            match denoteValue? manifest env fuel binary.lhs,
-                  denoteValue? manifest env fuel binary.rhs with
-            | some (.u256 lhsValue), some (.u256 rhsValue) =>
-                some (relation lhsValue rhsValue)
-            | _, _ => none
+          let binInteger? (expectedSigned : Bool)
+              (relation : (shape : Ora.Spec.IntegerShape) →
+                Ora.Integer.Carrier shape → Ora.Integer.Carrier shape → Prop) :=
+            match binary.ty,
+                denoteValue? manifest env fuel binary.lhs,
+                denoteValue? manifest env fuel binary.rhs with
+            | some ty, some (.integer lhs), some (.integer rhs) =>
+                match ty.integerShape? with
+                | some shape =>
+                    if shape.isSigned == expectedSigned then
+                      lhs.relation? shape (relation shape) rhs
+                    else
+                      none
+                | none => none
+            | _, _, _ => none
           let binFormula? (relation : Prop → Prop → Prop) :=
             match denoteFormula? manifest env fuel binary.lhs,
                   denoteFormula? manifest env fuel binary.rhs with
@@ -367,21 +485,21 @@ def denoteFormula? (manifest : Manifest) (env : Env) : Nat → TermId → Option
                   | none => none
               | _, _ => none
           | .lt =>
-              binU256? U256.ult
+              binInteger? false (fun _ => Ora.Integer.unsignedLt)
           | .le =>
-              binU256? U256.ule
+              binInteger? false (fun _ => Ora.Integer.unsignedLe)
           | .gt =>
-              binU256? U256.ugt
+              binInteger? false (fun _ lhs rhs => Ora.Integer.unsignedLt rhs lhs)
           | .ge =>
-              binU256? U256.uge
+              binInteger? false (fun _ lhs rhs => Ora.Integer.unsignedLe rhs lhs)
           | .slt =>
-              binU256? U256.slt
+              binInteger? true (fun _ => Ora.Integer.signedLt)
           | .sle =>
-              binU256? U256.sle
+              binInteger? true (fun _ => Ora.Integer.signedLe)
           | .sgt =>
-              binU256? U256.sgt
+              binInteger? true (fun _ lhs rhs => Ora.Integer.signedLt rhs lhs)
           | .sge =>
-              binU256? U256.sge
+              binInteger? true (fun _ lhs rhs => Ora.Integer.signedLe rhs lhs)
           | .and_ =>
               binFormula? (fun lhs rhs => lhs ∧ rhs)
           | .or_ =>
@@ -390,40 +508,42 @@ def denoteFormula? (manifest : Manifest) (env : Env) : Nat → TermId → Option
               binFormula? (fun lhs rhs => lhs → rhs)
           | _ => none
       | some (.quantified quantified) =>
-          if !quantified.binder.isU256 then
-            none
-          else
-            match quantified.quantifier with
-            | .forall_ =>
-                some (
-                  ∀ value : U256,
-                    let localEnv := env.pushBound (.u256 value);
-                    match quantified.condition with
-                    | none =>
-                        match denoteFormula? manifest localEnv fuel quantified.body with
-                        | some body => body
-                        | none => False
-                    | some condition =>
-                        match denoteFormula? manifest localEnv fuel condition,
-                              denoteFormula? manifest localEnv fuel quantified.body with
-                        | some antecedent, some consequent => antecedent → consequent
-                        | _, _ => False
-                )
-            | .exists_ =>
-                some (
-                  ∃ value : U256,
-                    let localEnv := env.pushBound (.u256 value);
-                    match quantified.condition with
-                    | none =>
-                        match denoteFormula? manifest localEnv fuel quantified.body with
-                        | some body => body
-                        | none => False
-                    | some condition =>
-                        match denoteFormula? manifest localEnv fuel condition,
-                              denoteFormula? manifest localEnv fuel quantified.body with
-                        | some antecedent, some consequent => antecedent ∧ consequent
-                        | _, _ => False
-                )
+          match quantified.binder.integerShape? with
+          | none => none
+          | some shape =>
+              match quantified.quantifier with
+              | .forall_ =>
+                  some (
+                    ∀ bits : Ora.Integer.Carrier shape,
+                      let value : Ora.Integer.Value := { shape, bits }
+                      let localEnv := env.pushBound (.integer value)
+                      match quantified.condition with
+                      | none =>
+                          match denoteFormula? manifest localEnv fuel quantified.body with
+                          | some body => body
+                          | none => False
+                      | some condition =>
+                          match denoteFormula? manifest localEnv fuel condition,
+                                denoteFormula? manifest localEnv fuel quantified.body with
+                          | some antecedent, some consequent => antecedent → consequent
+                          | _, _ => False
+                  )
+              | .exists_ =>
+                  some (
+                    ∃ bits : Ora.Integer.Carrier shape,
+                      let value : Ora.Integer.Value := { shape, bits }
+                      let localEnv := env.pushBound (.integer value)
+                      match quantified.condition with
+                      | none =>
+                          match denoteFormula? manifest localEnv fuel quantified.body with
+                          | some body => body
+                          | none => False
+                      | some condition =>
+                          match denoteFormula? manifest localEnv fuel condition,
+                                denoteFormula? manifest localEnv fuel quantified.body with
+                          | some antecedent, some consequent => antecedent ∧ consequent
+                          | _, _ => False
+                  )
       | _ => none
 
 end
@@ -450,18 +570,21 @@ def formulaValue? (manifest : Manifest) (env : Env) : FormulaRef → Option Valu
 
 def formulaU256? (manifest : Manifest) (env : Env) (formula : FormulaRef) : Option U256 :=
   match formulaValue? manifest env formula with
-  | some (.u256 value) => some value
+  | some (.integer value) => value.bitsFor? (.unsigned .w256)
   | _ => none
 
 def Env.resourceState (env : Env) : Ora.Resource.State PlaceRef :=
   fun place =>
     match env.placeValue (.stable place) with
-    | .u256 value => value
+    | .integer value =>
+        match value.bitsFor? (.unsigned .w256) with
+        | some bits => bits
+        | none => U256.zero
     | .bool _ => U256.zero
 
 def Env.resourcePlaceValue? (env : Env) (place : PlaceRef) : Option U256 :=
   match env.placeValue (.stable place) with
-  | .u256 value => some value
+  | .integer value => value.bitsFor? (.unsigned .w256)
   | .bool _ => none
 
 def Env.resourcePlaceKnown? (env : Env) (place : PlaceRef) : Option PlaceRef :=

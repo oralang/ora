@@ -2,7 +2,7 @@
 // INPUT: ora-example/refinements/simple_refinement_test.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @test(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/simple_refinement_test.ora":4:13)) attributes {ora.param_binding_ids = ["file:0:pattern:0"], ora.param_names = ["amount"], ora.source_module_path = "{{.*}}/ora-example/refinements/simple_refinement_test.ora", ora.source_owner_key = "module/contract:SimpleRefinementTest/function:test", ora.source_owner_start = 84 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @test(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/simple_refinement_test.ora":4:13)) attributes {ora.param_binding_ids = ["file:0:pattern:0"], ora.param_compiler_type_ids = [6 : i256], ora.param_names = ["amount"], ora.source_module_path = "{{.*}}/ora-example/refinements/simple_refinement_test.ora", ora.source_owner_key = "module/contract:SimpleRefinementTest/function:test", ora.source_owner_start = 84 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c1000 = sir.const 1000 : !sir.u256 loc("{{.*}}/ora-example/refinements/simple_refinement_test.ora":1:1)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)

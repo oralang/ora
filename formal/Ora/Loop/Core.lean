@@ -6,11 +6,11 @@ finite number of loop steps, and the main theorem only characterizes a state
 that is known to be an exit reached from an initial state.
 -/
 
-import Ora.Obligation.BitVec
+import Ora.Integer.Arithmetic
 
 namespace Ora.Loop
 
-abbrev ScalarLoopState := List Ora.Obligation.U256
+abbrev ScalarLoopState := List Ora.Integer.Value
 
 structure ScalarLoopSummary where
   initial : ScalarLoopState → Prop
@@ -115,8 +115,8 @@ theorem verified_of_induction
 
 /-! A tiny one-step scalar-loop instantiation. -/
 
-private def zero : Ora.Obligation.U256 := BitVec.ofNat 256 0
-private def one : Ora.Obligation.U256 := BitVec.ofNat 256 1
+private def zero : Ora.Integer.Value := Ora.Integer.Value.ofNat (.unsigned .w8) 0
+private def one : Ora.Integer.Value := Ora.Integer.Value.ofNat (.unsigned .w8) 1
 
 private def tinyLoop : ScalarLoopSummary where
   initial := fun state => state = [zero]

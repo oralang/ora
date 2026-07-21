@@ -829,6 +829,13 @@ fn decimalLiteralCanBeEmitted(value: []const u8) bool {
     return true;
 }
 
+fn typeRefIsAutomaticU256(ty: obligation.TypeRef) bool {
+    return switch (ty) {
+        .compiler_type_id => |id| id == ora_types.builtin.lookupBuiltinById(.u256).comptime_type_id,
+        .spelling => |name| std.mem.eql(u8, name, "u256") or std.mem.eql(u8, name, "uint256"),
+    };
+}
+
 fn classifyAutomaticCounterLoop(
     set: obligation.ObligationSet,
     query: obligation.VerificationQuery,
@@ -843,6 +850,10 @@ fn classifyAutomaticCounterLoop(
         summary.step_assignments.len != 1 or
         summary.body_safety_formulas.len > 1 or
         summary.post_formulas.len > 1) return null;
+    if (!typeRefIsAutomaticU256(summary.variables[0].ty)) return null;
+    for (summary.context_variables) |variable| {
+        if (!typeRefIsAutomaticU256(variable.ty)) return null;
+    }
 
     const loop_variable = summary.variables[0].id orelse return null;
     const init_id = formulaTermId(summary.init_formulas[0]) orelse return null;
@@ -980,6 +991,15 @@ fn writeAutomaticCounterNotations(
             .{ query.id, context.file_id, context.pattern_id, query.id, query.id },
         ),
     }
+    try writer.print(
+        "private abbrev autoValue_q{d} (bits : U256) : Ora.Integer.Value :=\n" ++
+            "  {{ shape := .unsigned .w256, bits := bits }}\n" ++
+            "local notation \"autoValue\" => autoValue_q{d}\n" ++
+            "private abbrev autoZero_q{d} : Ora.Integer.Value := autoValue (BitVec.ofNat 256 0)\n" ++
+            "local notation \"autoZero\" => autoZero_q{d}\n" ++
+            "attribute [local simp] autoValue_q{d} autoZero_q{d}\n",
+        .{ query.id, query.id, query.id, query.id, query.id, query.id },
+    );
     try writer.print("theorem discharge_q{d} : emittedQuery_{d} := by\n", .{ query.id, query.id });
     try writer.print(
         "  unfold emittedQuery_{d} Ora.Loop.loopInductionProofFromAssumptions\n",
@@ -1011,7 +1031,7 @@ fn writeAutomaticCounterBase(
     try writer.writeAll("  constructor\n  · refine ⟨");
     try writer.writeAll(witness_env);
     try writer.writeAll(
-        \\, [BitVec.ofNat 256 0], ?_⟩
+        \\, [autoZero], ?_⟩
         \\    constructor
         \\    · simp [assumptionsDenoteInEnv, assumptionsDenoteInEnv?]
         \\    constructor
@@ -1033,7 +1053,7 @@ fn writeAutomaticCounterInitialProof(
             \\      intro loopVar hLoopVar
             \\      simp at hLoopVar
             \\      subst loopVar
-            \\      exact ⟨BitVec.ofNat 256 0, rfl⟩
+            \\      exact ⟨autoZero, rfl, rfl⟩
             \\
         );
     } else {
@@ -1048,13 +1068,14 @@ fn writeAutomaticCounterInitialProof(
     try writer.writeAll("        ");
     try writer.writeAll(witness_env);
     try writer.writeAll(
-        \\ (autoSummary).init [BitVec.ofNat 256 0]
+        \\ (autoSummary).init [autoZero]
         \\      simp [Ora.Loop.valuesInitializeState,
         \\        formulaValue?, denoteValue?, IntegerLiteralTerm.asU256?,
+        \\        Ora.Integer.Value.ofNat,
         \\        TyRef.isU256Carrier, TyRef.isU256, TyRef.isI256,
         \\        compilerTypeIdU256, compilerTypeIdI256,
         \\        Ora.Spec.expectedCompilerTypeIdU256,
-        \\        Ora.Spec.expectedCompilerTypeIdI256, emittedManifest, emittedTerms]
+        \\        Ora.Spec.expectedCompilerTypeIdI256, emittedManifest, emittedTerms] <;> rfl
         \\
     );
 }
@@ -1065,13 +1086,14 @@ fn writeAutomaticCounterInductionStart(writer: anytype) !void {
         \\    · intro state hInitial
         \\      change Ora.Loop.valuesInitializeState emittedManifest env
         \\        (autoSummary).init state at hInitial
-        \\      have hState : state = [BitVec.ofNat 256 0] := by
+        \\      have hState : state = [autoZero] := by
         \\        rcases state with _ | ⟨value, state⟩
         \\        · simp [Ora.Loop.valuesInitializeState] at hInitial
         \\        · rcases state with _ | ⟨extra, state⟩
-        \\          · have hValue : BitVec.ofNat 256 0 = value := by
+        \\          · have hValue : autoZero = value := by
         \\              simpa [Ora.Loop.valuesInitializeState, formulaValue?, denoteValue?,
-        \\                IntegerLiteralTerm.asU256?, TyRef.isU256Carrier, TyRef.isU256,
+        \\                IntegerLiteralTerm.asU256?,
+        \\                Ora.Integer.Value.ofNat, TyRef.isU256Carrier, TyRef.isU256,
         \\                TyRef.isI256, compilerTypeIdU256, compilerTypeIdI256,
         \\                Ora.Spec.expectedCompilerTypeIdU256,
         \\                Ora.Spec.expectedCompilerTypeIdI256,
@@ -1083,11 +1105,14 @@ fn writeAutomaticCounterInductionStart(writer: anytype) !void {
         \\      intro formula hFormula
         \\      simp [] at hFormula
         \\      subst formula
-        \\      simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
+        \\      simpa [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
         \\        formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
         \\        emittedTerms, hAutoBound, U256.ule, Env.setFree, Env.lookupVar,
         \\        Env.lookupFree, lookupFreeBinding, hAutoIdentityA, hAutoIdentityB,
-        \\        IntegerLiteralTerm.asU256?, TyRef.isU256Carrier,
+        \\        IntegerLiteralTerm.asU256?,
+        \\        Value.u256, Ora.Integer.Value.ofNat,
+        \\        Ora.Integer.Value.relation_u256, Ora.Integer.unsignedLe,
+        \\        TyRef.isU256Carrier,
         \\        TyRef.isU256, TyRef.isI256, compilerTypeIdU256,
         \\        compilerTypeIdI256, Ora.Spec.expectedCompilerTypeIdU256,
         \\        Ora.Spec.expectedCompilerTypeIdI256]
@@ -1109,20 +1134,38 @@ fn writeAutomaticCounterInductionStart(writer: anytype) !void {
         \\          · simp [Ora.Loop.formulasHoldInState, Ora.Loop.formulaHoldsInState,
         \\              Ora.Loop.bindState] at hInvariant
         \\      rcases hCurrentShape with ⟨i, rfl⟩
+        \\      rcases i with ⟨iShape, i⟩
+        \\      have hIShapeBinding :
+        \\          (.compilerTypeId 6 : TyRef).integerShape? = some iShape := by
+        \\        by_cases hShape :
+        \\            (.compilerTypeId 6 : TyRef).integerShape? = some iShape
+        \\        · exact hShape
+        \\        · exfalso
+        \\          have hNe : ¬(.unsigned .w256 = iShape) := by
+        \\            simpa using hShape
+        \\          simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
+        \\            hNe] at hLoopGuard
+        \\      have hIShape : iShape = .unsigned .w256 := by
+        \\        have hSome : some (.unsigned .w256) = some iShape := by
+        \\          simpa using
+        \\            hIShapeBinding
+        \\        exact (Option.some.inj hSome).symm
+        \\      subst iShape
         \\      have hFollowingShape : ∃ next, following = [next] := by
         \\        rcases following with _ | ⟨next, following⟩
-        \\        · simp [Ora.Loop.assignmentsProduceState, Ora.Loop.bindState,
-        \\            ] at hStep
+        \\        · simp [Ora.Loop.assignmentsProduceState, Ora.Loop.bindState] at hStep
         \\        · rcases following with _ | ⟨extra, following⟩
         \\          · exact ⟨next, rfl⟩
-        \\          · simp [Ora.Loop.assignmentsProduceState, Ora.Loop.bindState,
-        \\              ] at hStep
+        \\          · simp [Ora.Loop.assignmentsProduceState, Ora.Loop.bindState] at hStep
         \\      rcases hFollowingShape with ⟨next, rfl⟩
         \\      simp [Ora.Loop.assignmentsProduceState, Ora.Loop.bindState,
         \\        formulaValue?, denoteValue?, emittedManifest, emittedTerms,
         \\        Env.setFree, Env.lookupVar, Env.lookupFree,
         \\        lookupFreeBinding, hAutoIdentityA, hAutoIdentityB,
-        \\        IntegerLiteralTerm.asU256?, Value.binaryU256?, TyRef.isU256Carrier,
+        \\        IntegerLiteralTerm.asU256?, Value.u256, Value.binaryU256?,
+        \\        Ora.Integer.Value.binary_u256,
+        \\        Ora.Integer.Value.ofNat, Ora.Integer.wrappingResult,
+        \\        TyRef.isU256Carrier,
         \\        TyRef.isU256, TyRef.isI256, compilerTypeIdU256,
         \\        compilerTypeIdI256, Ora.Spec.expectedCompilerTypeIdU256,
         \\        Ora.Spec.expectedCompilerTypeIdI256] at hStep
@@ -1139,17 +1182,27 @@ fn writeAutomaticCounterInductionStart(writer: anytype) !void {
         \\          Ora.Spec.expectedCompilerTypeIdU256,
         \\          Ora.Spec.expectedCompilerTypeIdI256, hAutoIdentityA,
         \\          hAutoIdentityB, IntegerLiteralTerm.asU256?,
-        \\          Value.binaryU256?] using hLoopGuard
+        \\          Ora.Integer.unsignedLt,
+        \\          Value.u256, Value.binaryU256?,
+        \\          Ora.Integer.Value.relation_u256] using hLoopGuard
         \\      have hNextInvariant := U256.lt_add_one_ule_bound i n hGuardDecoded
-        \\      simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
+        \\      have hNextInvariantWrapped :
+        \\          Ora.Integer.unsignedLe
+        \\            (Ora.Integer.wrappingResult (.unsigned .w256) .add i
+        \\              (BitVec.ofNat 256 1)) n := by
+        \\        simpa [U256.ule, U256.add, Ora.Integer.unsignedLe,
+        \\          Ora.Integer.wrappingResult] using hNextInvariant
+        \\      simpa [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
         \\        formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
         \\        emittedTerms, hAutoBound, Env.setFree, Env.lookupVar, Env.lookupFree,
         \\        lookupFreeBinding, TyRef.isU256, TyRef.isI256,
         \\        TyRef.isU256Carrier, compilerTypeIdU256, compilerTypeIdI256,
         \\        Ora.Spec.expectedCompilerTypeIdU256,
         \\        Ora.Spec.expectedCompilerTypeIdI256, hAutoIdentityA, hAutoIdentityB,
-        \\        IntegerLiteralTerm.asU256?, Value.binaryU256?,
-        \\        hNextInvariant]
+        \\        IntegerLiteralTerm.asU256?, Ora.Integer.unsignedLe,
+        \\        Value.u256, Value.binaryU256?,
+        \\        Ora.Integer.Value.binary_u256,
+        \\        Ora.Integer.Value.relation_u256] using hNextInvariantWrapped
         \\
     );
 }
@@ -1179,6 +1232,22 @@ fn writeAutomaticCounterSafety(writer: anytype, has_body_safety: bool) !void {
         \\          · simp [Ora.Loop.formulasHoldInState, Ora.Loop.formulaHoldsInState,
         \\              Ora.Loop.bindState] at hInvariant
         \\      rcases hStateShape with ⟨i, rfl⟩
+        \\      rcases i with ⟨iShape, i⟩
+        \\      have hIShapeBinding :
+        \\          (.compilerTypeId 6 : TyRef).integerShape? = some iShape := by
+        \\        by_cases hShape :
+        \\            (.compilerTypeId 6 : TyRef).integerShape? = some iShape
+        \\        · exact hShape
+        \\        · exfalso
+        \\          have hNe : ¬(.unsigned .w256 = iShape) := by
+        \\            simpa using hShape
+        \\          simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
+        \\            hNe] at hLoopGuard
+        \\      have hIShape : iShape = .unsigned .w256 := by
+        \\        have hSome : some (.unsigned .w256) = some iShape := by
+        \\          simpa using hIShapeBinding
+        \\        exact (Option.some.inj hSome).symm
+        \\      subst iShape
         \\      intro formula hFormula
         \\      simp [] at hFormula
         \\      subst formula
@@ -1191,8 +1260,16 @@ fn writeAutomaticCounterSafety(writer: anytype, has_body_safety: bool) !void {
         \\          Ora.Spec.expectedCompilerTypeIdU256,
         \\          Ora.Spec.expectedCompilerTypeIdI256, hAutoIdentityA,
         \\          hAutoIdentityB, IntegerLiteralTerm.asU256?,
-        \\          Value.binaryU256?] using hLoopGuard
+        \\          Ora.Integer.unsignedLt,
+        \\          Value.u256, Value.binaryU256?,
+        \\          Ora.Integer.Value.relation_u256] using hLoopGuard
         \\      have hSafe := U256.lt_bound_add_one_not_lt_self i n hGuardDecoded
+        \\      have hSafeNat :
+        \\          i.toNat ≤
+        \\            (Ora.Integer.wrappingResult (.unsigned .w256) .add i
+        \\              (BitVec.ofNat 256 1)).toNat := by
+        \\        apply Nat.le_of_not_gt
+        \\        simpa [U256.ult, U256.add, Ora.Integer.wrappingResult] using hSafe
         \\      simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
         \\        formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
         \\        emittedTerms, hAutoBound, Env.setFree, Env.lookupVar, Env.lookupFree,
@@ -1200,7 +1277,9 @@ fn writeAutomaticCounterSafety(writer: anytype, has_body_safety: bool) !void {
         \\        TyRef.isU256Carrier, compilerTypeIdU256, compilerTypeIdI256,
         \\        Ora.Spec.expectedCompilerTypeIdU256,
         \\        Ora.Spec.expectedCompilerTypeIdI256, hAutoIdentityA, hAutoIdentityB,
-        \\        IntegerLiteralTerm.asU256?, Value.binaryU256?, hSafe]
+        \\        IntegerLiteralTerm.asU256?, Ora.Integer.unsignedLt,
+        \\        Value.u256, Value.binaryU256?, Ora.Integer.Value.binary_u256,
+        \\        Ora.Integer.Value.relation_u256, hSafeNat]
         \\
     );
 }
@@ -1308,7 +1387,13 @@ fn writeAutomaticContextCounterProof(
         \\    simp only [Ora.Loop.loopInductionObligationsAtEnv,
         \\      Ora.Loop.denoteLoopSummary?, hSupported, hGuard]
         \\    rcases hContext (autoSummary).contextVariables[0]
-        \\        (by simp []) with ⟨n, hn⟩
+        \\        (by simp []) with ⟨nValue, hNShapeBinding, hn⟩
+        \\    rcases nValue with ⟨nShape, n⟩
+        \\    have hNShape : nShape = .unsigned .w256 := by
+        \\      have hSome : some (.unsigned .w256) = some nShape := by
+        \\        simpa using hNShapeBinding
+        \\      exact (Option.some.inj hSome).symm
+        \\    subst nShape
         \\    change lookupFreeBinding env.freeBindings autoContextId = some (.u256 n) at hn
         \\
     );
@@ -1479,18 +1564,18 @@ fn printUnsupportedReason(writer: anytype, reason: obligation_to_lean.SemanticUn
         .unsupported_type => |ty| {
             try writer.writeAll("    reason: unsupported Lean semantic type ");
             try printTypeRef(writer, ty);
-            try writer.writeAll("; the current Lean semantic proof fragment supports bool formulas and u256 values only\n");
+            try writer.writeAll("; the Lean semantic proof fragment supports bool and registered Ora integer types\n");
         },
-        .unsupported_comparison_width => try writer.writeAll("    reason: signed comparison width is outside the current Lean semantic proof fragment; only 256-bit signed comparisons are supported today\n"),
+        .unsupported_comparison_width => try writer.writeAll("    reason: comparison operands do not have the same registered integer width\n"),
         .unknown_signedness => try writer.writeAll("    reason: signed comparison operand is missing compiler type-id signedness metadata\n"),
         .mixed_signedness => try writer.writeAll("    reason: comparison predicate signedness does not match both operand types\n"),
-        .unsupported_arithmetic_width => try writer.writeAll("    reason: arithmetic value width is outside the current Lean semantic proof fragment; only 256-bit arithmetic values are supported today\n"),
+        .unsupported_arithmetic_width => try writer.writeAll("    reason: arithmetic operands do not have the same registered integer width\n"),
         .unknown_arithmetic_signedness => try writer.writeAll("    reason: arithmetic value is missing compiler type-id signedness metadata\n"),
         .mixed_arithmetic_signedness => try writer.writeAll("    reason: arithmetic operation signedness does not match the value type\n"),
         .missing_key_disjoint_evidence => try writer.writeAll("    reason: evidence-backed storage frame has no key-disjointness evidence rows\n"),
         .unsupported_key_disjoint_evidence_formula => try writer.writeAll("    reason: key-disjointness evidence must be a direct requires free-variable disequality in the Lean fragment\n"),
         .unsupported_key_disjoint_evidence_kind => try writer.writeAll("    reason: key-disjointness evidence kind is not supported by the Lean fragment\n"),
-        .key_disjoint_evidence_type_unsupported => try writer.writeAll("    reason: key-disjointness evidence currently supports only 256-bit carrier free variables\n"),
+        .key_disjoint_evidence_type_unsupported => try writer.writeAll("    reason: key-disjointness evidence requires matching registered integer free-variable types\n"),
         .key_disjoint_evidence_owner_mismatch => try writer.writeAll("    reason: key-disjointness evidence references an assumption from a different owner\n"),
         .key_disjoint_evidence_path_mismatch => try writer.writeAll("    reason: key-disjointness evidence does not match the first differing parameter keys of the read/write paths\n"),
         .loop_summary_missing => try writer.writeAll("    reason: loop proof target has no owner-scoped loop summary\n"),

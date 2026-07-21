@@ -30,7 +30,7 @@ open Ora.Types
 
 /-! ## Integer registrations -/
 
-def uintBits : UIntWidth → Nat
+@[simp] def uintBits : UIntWidth → Nat
   | .w8 => 8
   | .w16 => 16
   | .w32 => 32
@@ -39,7 +39,7 @@ def uintBits : UIntWidth → Nat
   | .w160 => 160
   | .w256 => 256
 
-def sintBits : SIntWidth → Nat
+@[simp] def sintBits : SIntWidth → Nat
   | .w8 => 8
   | .w16 => 16
   | .w32 => 32
@@ -52,11 +52,11 @@ inductive IntegerShape where
   | signed : SIntWidth → IntegerShape
   deriving Repr, DecidableEq
 
-def IntegerShape.bits : IntegerShape → Nat
+@[simp] def IntegerShape.bits : IntegerShape → Nat
   | .unsigned width => uintBits width
   | .signed width => sintBits width
 
-def IntegerShape.isSigned : IntegerShape → Bool
+@[simp] def IntegerShape.isSigned : IntegerShape → Bool
   | .unsigned _ => false
   | .signed _ => true
 

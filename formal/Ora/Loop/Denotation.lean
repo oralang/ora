@@ -54,8 +54,8 @@ def variablesIndexedFrom : Nat → List VariableRow → Bool
   | expected, loopVar :: rest =>
       loopVar.index == expected && variablesIndexedFrom (expected + 1) rest
 
-def variablesAreU256 (variables : List VariableRow) : Bool :=
-  variables.all (fun loopVar => loopVar.ty.isU256)
+def variablesAreIntegers (variables : List VariableRow) : Bool :=
+  variables.all (fun loopVar => loopVar.ty.integerShape?.isSome)
 
 def variableSetsDisjoint (lhs rhs : List VariableRow) : Bool :=
   lhs.all (fun left => rhs.all (fun right => left.id != right.id))
@@ -69,13 +69,16 @@ def assignmentsMatchVariables : List VariableRow → List StepAssignmentRow → 
   | _, _ => false
 
 def valueForTy : TyRef → Value
-  | ty => if ty.isBool then .bool true else .u256 (BitVec.ofNat 256 0)
+  | ty =>
+      match ty.integerShape? with
+      | some shape => .integer (Ora.Integer.Value.ofNat shape 0)
+      | none => .bool true
 
 def bindFreeVarsFromTerm (env : Env) : Term → Env
   | .variable (.free free) =>
       match free.ty with
       | some ty => env.setFree free.id (valueForTy ty)
-      | none => env.setFree free.id (.u256 (BitVec.ofNat 256 0))
+      | none => env.setFree free.id (.bool false)
   | _ => env
 
 def totalEnv (manifest : Manifest) : Env :=
@@ -97,8 +100,8 @@ def SummaryRow.shapeSupported (row : SummaryRow) : Bool :=
     variablesIndexedFrom 0 row.variables &&
     idsUnique row.variables &&
     idsUnique row.contextVariables &&
-    variablesAreU256 row.variables &&
-    variablesAreU256 row.contextVariables &&
+    variablesAreIntegers row.variables &&
+    variablesAreIntegers row.contextVariables &&
     variableSetsDisjoint row.variables row.contextVariables &&
     assignmentsMatchVariables row.variables row.step
 
@@ -114,12 +117,17 @@ def SummaryRow.supported (manifest : Manifest) (row : SummaryRow) : Bool :=
   manifest.wf && manifest.termsTopological && row.shapeSupported && row.formulasDenotable manifest
 
 def contextReady (env : Env) (variables : List VariableRow) : Prop :=
-  ∀ loopVar ∈ variables, ∃ value, env.lookupFree loopVar.id = some (.u256 value)
+  ∀ loopVar ∈ variables, ∃ value,
+    loopVar.ty.integerShape? = some value.shape ∧
+      env.lookupFree loopVar.id = some (.integer value)
 
 def bindState : Env → List VariableRow → ScalarLoopState → Option Env
   | env, [], [] => some env
   | env, loopVar :: variables, value :: values =>
-      bindState (env.setFree loopVar.id (.u256 value)) variables values
+      if loopVar.ty.integerShape? = some value.shape then
+        bindState (env.setFree loopVar.id (.integer value)) variables values
+      else
+        none
   | _, _, _ => none
 
 def formulaHoldsInState
@@ -148,7 +156,7 @@ def valuesInitializeState
     (base : Env) : List FormulaRef → ScalarLoopState → Prop
   | [], [] => True
   | formula :: formulas, value :: values =>
-      formulaValue? manifest base formula = some (.u256 value) ∧
+      formulaValue? manifest base formula = some (.integer value) ∧
         valuesInitializeState manifest base formulas values
   | _, _ => False
 
@@ -161,7 +169,7 @@ def assignmentsProduceState
   | assignment :: assignments, value :: values =>
       match bindState base variables current with
       | some env =>
-          formulaValue? manifest env assignment.value = some (.u256 value) ∧
+          formulaValue? manifest env assignment.value = some (.integer value) ∧
             assignmentsProduceState manifest base variables current assignments values
       | none => False
   | _, _ => False

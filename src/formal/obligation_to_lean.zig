@@ -455,9 +455,9 @@ fn loopInductionQuerySemanticSupport(
 
     for (summary.context_variables) |variable| {
         if (variable.id == null) return .{ .unsupported = .{ .unsupported_loop_summary = .loop_identity_missing } };
-        switch (optionalTypeSupportsU256(variable.ty)) {
+        switch (optionalTypeSupportsInteger(variable.ty)) {
             .supported => {},
-            .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_variable_not_u256 } },
+            .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_variable_not_registered_integer } },
         }
         for (summary.variables) |loop_variable| {
             if (loop_variable.id != null and obligation.freeVarIdEql(variable.id.?, loop_variable.id.?)) {
@@ -469,9 +469,9 @@ fn loopInductionQuerySemanticSupport(
         if (variable.index != index or variable.id == null) {
             return .{ .unsupported = .{ .unsupported_loop_summary = .loop_identity_missing } };
         }
-        switch (optionalTypeSupportsU256(variable.ty)) {
+        switch (optionalTypeSupportsInteger(variable.ty)) {
             .supported => {},
-            .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_variable_not_u256 } },
+            .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_variable_not_registered_integer } },
         }
         const assignment = summary.step_assignments[index];
         if (assignment.variable_index != index or assignment.target == null or
@@ -481,7 +481,7 @@ fn loopInductionQuerySemanticSupport(
         }
     }
 
-    for (summary.init_formulas) |formula| switch (valueFormulaSemanticSupport(set, formula)) {
+    for (summary.init_formulas, summary.variables) |formula, variable| switch (valueFormulaSemanticSupportForType(set, formula, variable.ty)) {
         .supported => {},
         .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
     };
@@ -493,7 +493,7 @@ fn loopInductionQuerySemanticSupport(
         .supported => {},
         .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
     };
-    for (summary.step_assignments) |assignment| switch (valueFormulaSemanticSupport(set, assignment.value)) {
+    for (summary.step_assignments, summary.variables) |assignment, variable| switch (valueFormulaSemanticSupportForType(set, assignment.value, variable.ty)) {
         .supported => {},
         .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
     };
@@ -510,7 +510,20 @@ fn loopInductionQuerySemanticSupport(
 
 fn valueFormulaSemanticSupport(set: obligation.ObligationSet, formula: obligation.FormulaRef) SemanticSupport {
     return switch (formula) {
-        .term => |id| u256ValueTermSemanticSupport(set, id, set.terms.len + 1),
+        .term => |id| integerValueTermSemanticSupport(set, id, set.terms.len + 1),
+        .origin_value => .{ .unsupported = .unsupported_origin_value },
+    };
+}
+
+fn valueFormulaSemanticSupportForType(
+    set: obligation.ObligationSet,
+    formula: obligation.FormulaRef,
+    ty: obligation.TypeRef,
+) SemanticSupport {
+    const expected = compilerIntegerInfo(ty) orelse
+        return .{ .unsupported = .{ .unsupported_type = ty } };
+    return switch (formula) {
+        .term => |id| integerValueTermSemanticSupportForInfo(set, id, set.terms.len + 1, expected),
         .origin_value => .{ .unsupported = .unsupported_origin_value },
     };
 }
@@ -659,7 +672,13 @@ fn keyDisjointEvidenceSemanticSupport(
     if (!freeVarPairMatches(lhs.id, rhs.id, evidence.lhs, evidence.rhs)) {
         return .{ .unsupported = .key_disjoint_evidence_path_mismatch };
     }
-    if (!typeRefSupportsU256Carrier(lhs.ty) or !typeRefSupportsU256Carrier(rhs.ty)) {
+    const lhs_info = compilerIntegerInfo(lhs.ty orelse
+        return .{ .unsupported = .key_disjoint_evidence_type_unsupported }) orelse
+        return .{ .unsupported = .key_disjoint_evidence_type_unsupported };
+    const rhs_info = compilerIntegerInfo(rhs.ty orelse
+        return .{ .unsupported = .key_disjoint_evidence_type_unsupported }) orelse
+        return .{ .unsupported = .key_disjoint_evidence_type_unsupported };
+    if (!compilerIntegerInfoEql(lhs_info, rhs_info)) {
         return .{ .unsupported = .key_disjoint_evidence_type_unsupported };
     }
     return .supported;
@@ -704,13 +723,6 @@ fn freeVariableByTermId(set: obligation.ObligationSet, id: obligation.TermId) ?o
     const term = termById(set, id) orelse return null;
     if (term != .variable or term.variable != .free) return null;
     return term.variable.free;
-}
-
-fn typeRefSupportsU256Carrier(ty: ?obligation.TypeRef) bool {
-    return switch (optionalTypeSupportsU256Carrier(ty)) {
-        .supported => true,
-        .unsupported => false,
-    };
 }
 
 fn stringSlicesEql(lhs: []const []const u8, rhs: []const []const u8) bool {
@@ -767,12 +779,12 @@ fn valueTermSemanticSupport(
     const term = termById(set, id) orelse return .{ .unsupported = .invalid_dependency };
     return switch (term) {
         .bool_lit => .supported,
-        .int_lit => |literal| optionalTypeSupportsU256Carrier(literal.ty),
-        .variable => |variable| varRefSupportsBoolOrU256CarrierValue(variable),
+        .int_lit => |literal| optionalTypeSupportsInteger(literal.ty),
+        .variable => |variable| varRefSupportsBoolOrIntegerValue(variable),
         .result => .supported,
         .place_read => .supported,
         .binary => |binary| switch (binary.op) {
-            .add, .sub, .mul, .div, .mod => binaryCarrierArithmeticValueSemanticSupport(set, binary, fuel - 1),
+            .add, .sub, .mul, .pow, .shl, .shr, .div, .mod, .bit_and, .bit_xor => binaryCarrierArithmeticValueSemanticSupport(set, binary, fuel - 1),
             else => .{ .unsupported = .unsupported_term_kind },
         },
         .old => |operand| oldPlaceReadSemanticSupport(set, operand),
@@ -780,6 +792,81 @@ fn valueTermSemanticSupport(
         .refinement_predicate,
         .quantified,
         => .{ .unsupported = .unsupported_term_kind },
+    };
+}
+
+fn integerValueTermSemanticSupport(
+    set: obligation.ObligationSet,
+    id: obligation.TermId,
+    fuel: usize,
+) SemanticSupport {
+    if (fuel == 0) return .{ .unsupported = .unsupported_term_kind };
+    const term = termById(set, id) orelse return .{ .unsupported = .invalid_dependency };
+    return switch (term) {
+        .int_lit => |literal| optionalTypeSupportsInteger(literal.ty),
+        .variable => |variable| varRefSupportsIntegerValue(variable),
+        .result => .supported,
+        .place_read => .supported,
+        .binary => |binary| switch (binary.op) {
+            .add, .sub, .mul, .pow, .shl, .shr, .div, .mod, .bit_and, .bit_xor => binaryCarrierArithmeticValueSemanticSupport(set, binary, fuel - 1),
+            else => .{ .unsupported = .unsupported_term_kind },
+        },
+        .old => |operand| oldPlaceReadSemanticSupport(set, operand),
+        else => .{ .unsupported = .unsupported_term_kind },
+    };
+}
+
+fn integerValueTermSemanticSupportForInfo(
+    set: obligation.ObligationSet,
+    id: obligation.TermId,
+    fuel: usize,
+    expected: CompilerIntegerInfo,
+) SemanticSupport {
+    if (fuel == 0) return .{ .unsupported = .unsupported_term_kind };
+    const term = termById(set, id) orelse return .{ .unsupported = .invalid_dependency };
+    return switch (term) {
+        .int_lit => |literal| optionalTypeMatchesIntegerInfo(literal.ty, expected),
+        .variable => |variable| varRefMatchesIntegerInfo(variable, expected),
+        .result, .place_read => .supported,
+        .binary => |binary| blk: {
+            const actual = switch (arithmeticTypeSupport(binary.ty)) {
+                .supported => |info| info,
+                .unsupported => |reason| break :blk .{ .unsupported = reason },
+            };
+            if (!compilerIntegerInfoEql(actual, expected)) {
+                break :blk .{ .unsupported = if (actual.signed != expected.signed)
+                    .mixed_arithmetic_signedness
+                else
+                    .unsupported_arithmetic_width };
+            }
+            break :blk firstUnsupported(.{
+                integerValueTermSemanticSupportForInfo(set, binary.lhs, fuel - 1, expected),
+                integerValueTermSemanticSupportForInfo(set, binary.rhs, fuel - 1, expected),
+            });
+        },
+        .old => |operand| oldPlaceReadSemanticSupport(set, operand),
+        else => .{ .unsupported = .unsupported_term_kind },
+    };
+}
+
+fn unsignedIntegerValueTermSemanticSupport(
+    set: obligation.ObligationSet,
+    id: obligation.TermId,
+    fuel: usize,
+) SemanticSupport {
+    if (fuel == 0) return .{ .unsupported = .unsupported_term_kind };
+    const term = termById(set, id) orelse return .{ .unsupported = .invalid_dependency };
+    return switch (term) {
+        .int_lit => |literal| optionalTypeSupportsUnsignedInteger(literal.ty),
+        .variable => |variable| varRefSupportsUnsignedIntegerValue(variable),
+        .result => .supported,
+        .place_read => .supported,
+        .binary => |binary| switch (binary.op) {
+            .add, .sub, .mul, .pow, .shl, .shr, .div, .mod, .bit_and, .bit_xor => binaryUnsignedArithmeticValueSemanticSupport(set, binary, fuel - 1),
+            else => .{ .unsupported = .unsupported_term_kind },
+        },
+        .old => |operand| oldPlaceReadSemanticSupport(set, operand),
+        else => .{ .unsupported = .unsupported_term_kind },
     };
 }
 
@@ -793,11 +880,16 @@ fn u256ValueTermSemanticSupport(
     return switch (term) {
         .int_lit => |literal| optionalTypeSupportsU256(literal.ty),
         .variable => |variable| varRefSupportsU256Value(variable),
-        .result => .supported,
-        .place_read => .supported,
-        .binary => |binary| switch (binary.op) {
-            .add, .sub, .mul, .div, .mod => binaryUnsignedArithmeticValueSemanticSupport(set, binary, fuel - 1),
-            else => .{ .unsupported = .unsupported_term_kind },
+        .result, .place_read => .supported,
+        .binary => |binary| blk: {
+            switch (optionalTypeSupportsU256(binary.ty)) {
+                .supported => {},
+                .unsupported => |reason| break :blk .{ .unsupported = reason },
+            }
+            break :blk firstUnsupported(.{
+                u256ValueTermSemanticSupport(set, binary.lhs, fuel - 1),
+                u256ValueTermSemanticSupport(set, binary.rhs, fuel - 1),
+            });
         },
         .old => |operand| oldPlaceReadSemanticSupport(set, operand),
         else => .{ .unsupported = .unsupported_term_kind },
@@ -822,10 +914,7 @@ fn binaryFormulaSemanticSupport(
             valueTermSemanticSupport(set, binary.lhs, fuel),
             valueTermSemanticSupport(set, binary.rhs, fuel),
         }),
-        .lt, .le, .gt, .ge => firstUnsupported(.{
-            u256ValueTermSemanticSupport(set, binary.lhs, fuel),
-            u256ValueTermSemanticSupport(set, binary.rhs, fuel),
-        }),
+        .lt, .le, .gt, .ge => unsignedComparisonSemanticSupport(set, binary, fuel),
         .slt, .sle, .sgt, .sge => signedComparisonSemanticSupport(set, binary, fuel),
         .and_, .or_, .implies => firstUnsupported(.{
             formulaTermSemanticSupport(set, binary.lhs, fuel),
@@ -834,13 +923,18 @@ fn binaryFormulaSemanticSupport(
         .add,
         .sub,
         .mul,
+        .pow,
+        .shl,
+        .shr,
         .div,
         .mod,
+        .bit_and,
+        .bit_xor,
         => .{ .unsupported = .unsupported_term_kind },
     };
 }
 
-fn i256ValueTermSemanticSupport(
+fn signedIntegerValueTermSemanticSupport(
     set: obligation.ObligationSet,
     id: obligation.TermId,
     fuel: usize,
@@ -848,12 +942,12 @@ fn i256ValueTermSemanticSupport(
     if (fuel == 0) return .{ .unsupported = .unsupported_term_kind };
     const term = termById(set, id) orelse return .{ .unsupported = .invalid_dependency };
     return switch (term) {
-        .int_lit => |literal| optionalTypeSupportsI256(literal.ty),
-        .variable => |variable| varRefSupportsI256Value(variable),
+        .int_lit => |literal| optionalTypeSupportsSignedInteger(literal.ty),
+        .variable => |variable| varRefSupportsSignedIntegerValue(variable),
         .result => .supported,
         .place_read => .supported,
         .binary => |binary| switch (binary.op) {
-            .add, .sub, .mul, .div, .mod => binarySignedArithmeticValueSemanticSupport(set, binary, fuel - 1),
+            .add, .sub, .mul, .pow, .shl, .shr, .div, .mod, .bit_and, .bit_xor => binarySignedArithmeticValueSemanticSupport(set, binary, fuel - 1),
             else => .{ .unsupported = .unsupported_term_kind },
         },
         .old => |operand| oldPlaceReadSemanticSupport(set, operand),
@@ -866,13 +960,28 @@ fn signedComparisonSemanticSupport(
     binary: obligation.BinaryTerm,
     fuel: usize,
 ) SemanticSupport {
-    switch (optionalTypeSupportsI256(binary.ty)) {
-        .supported => {},
-        .unsupported => |reason| return .{ .unsupported = reason },
-    }
+    const ty = binary.ty orelse return .{ .unsupported = .unknown_signedness };
+    const info = compilerIntegerInfo(ty) orelse
+        return .{ .unsupported = .unknown_signedness };
+    if (!info.signed) return .{ .unsupported = .mixed_signedness };
     return firstUnsupported(.{
-        i256ValueTermSemanticSupport(set, binary.lhs, fuel),
-        i256ValueTermSemanticSupport(set, binary.rhs, fuel),
+        integerValueTermSemanticSupportForInfo(set, binary.lhs, fuel, info),
+        integerValueTermSemanticSupportForInfo(set, binary.rhs, fuel, info),
+    });
+}
+
+fn unsignedComparisonSemanticSupport(
+    set: obligation.ObligationSet,
+    binary: obligation.BinaryTerm,
+    fuel: usize,
+) SemanticSupport {
+    const ty = binary.ty orelse return .{ .unsupported = .unknown_signedness };
+    const info = compilerIntegerInfo(ty) orelse
+        return .{ .unsupported = .unknown_signedness };
+    if (info.signed) return .{ .unsupported = .mixed_signedness };
+    return firstUnsupported(.{
+        integerValueTermSemanticSupportForInfo(set, binary.lhs, fuel, info),
+        integerValueTermSemanticSupportForInfo(set, binary.rhs, fuel, info),
     });
 }
 
@@ -887,8 +996,8 @@ fn binarySignedArithmeticValueSemanticSupport(
     };
     if (!info.signed) return .{ .unsupported = .mixed_arithmetic_signedness };
     return firstUnsupported(.{
-        i256ValueTermSemanticSupport(set, binary.lhs, fuel),
-        i256ValueTermSemanticSupport(set, binary.rhs, fuel),
+        integerValueTermSemanticSupportForInfo(set, binary.lhs, fuel, info),
+        integerValueTermSemanticSupportForInfo(set, binary.rhs, fuel, info),
     });
 }
 
@@ -903,8 +1012,8 @@ fn binaryUnsignedArithmeticValueSemanticSupport(
     };
     if (info.signed) return .{ .unsupported = .mixed_arithmetic_signedness };
     return firstUnsupported(.{
-        u256ValueTermSemanticSupport(set, binary.lhs, fuel),
-        u256ValueTermSemanticSupport(set, binary.rhs, fuel),
+        integerValueTermSemanticSupportForInfo(set, binary.lhs, fuel, info),
+        integerValueTermSemanticSupportForInfo(set, binary.rhs, fuel, info),
     });
 }
 
@@ -913,13 +1022,13 @@ fn binaryCarrierArithmeticValueSemanticSupport(
     binary: obligation.BinaryTerm,
     fuel: usize,
 ) SemanticSupport {
-    _ = switch (arithmeticTypeSupport(binary.ty)) {
+    const info = switch (arithmeticTypeSupport(binary.ty)) {
         .supported => |info| info,
         .unsupported => |reason| return .{ .unsupported = reason },
     };
     return firstUnsupported(.{
-        valueTermSemanticSupport(set, binary.lhs, fuel),
-        valueTermSemanticSupport(set, binary.rhs, fuel),
+        integerValueTermSemanticSupportForInfo(set, binary.lhs, fuel, info),
+        integerValueTermSemanticSupportForInfo(set, binary.rhs, fuel, info),
     });
 }
 
@@ -928,12 +1037,12 @@ fn refinementPredicateSemanticSupport(
     predicate: obligation.RefinementPredicateTerm,
     fuel: usize,
 ) SemanticSupport {
-    switch (u256ValueTermSemanticSupport(set, predicate.value, fuel)) {
+    switch (integerValueTermSemanticSupport(set, predicate.value, fuel)) {
         .supported => {},
         .unsupported => |reason| return .{ .unsupported = reason },
     }
     for (predicate.args) |arg| {
-        switch (u256ValueTermSemanticSupport(set, arg, fuel)) {
+        switch (integerValueTermSemanticSupport(set, arg, fuel)) {
             .supported => {},
             .unsupported => |reason| return .{ .unsupported = reason },
         }
@@ -947,7 +1056,7 @@ fn quantifiedSemanticSupport(
     fuel: usize,
 ) SemanticSupport {
     var binder_reason: ?SemanticUnsupportedReason = null;
-    switch (optionalTypeSupportsU256Carrier(quantified.binder.ty)) {
+    switch (optionalTypeSupportsInteger(quantified.binder.ty)) {
         .supported => {},
         .unsupported => |reason| binder_reason = reason,
     }
@@ -1001,10 +1110,31 @@ fn varRefSupportsBoolFormula(variable: obligation.VarRef) SemanticSupport {
     };
 }
 
-fn varRefSupportsBoolOrU256CarrierValue(variable: obligation.VarRef) SemanticSupport {
+fn varRefSupportsBoolOrIntegerValue(variable: obligation.VarRef) SemanticSupport {
     return switch (variable) {
-        .free => |free| optionalTypeSupportsBoolOrU256Carrier(free.ty),
-        .bound => |bound| optionalTypeSupportsBoolOrU256Carrier(bound.ty),
+        .free => |free| optionalTypeSupportsBoolOrInteger(free.ty),
+        .bound => |bound| optionalTypeSupportsBoolOrInteger(bound.ty),
+    };
+}
+
+fn varRefSupportsIntegerValue(variable: obligation.VarRef) SemanticSupport {
+    return switch (variable) {
+        .free => |free| optionalTypeSupportsInteger(free.ty),
+        .bound => |bound| optionalTypeSupportsInteger(bound.ty),
+    };
+}
+
+fn varRefSupportsSignedIntegerValue(variable: obligation.VarRef) SemanticSupport {
+    return switch (variable) {
+        .free => |free| optionalTypeSupportsSignedInteger(free.ty),
+        .bound => |bound| optionalTypeSupportsSignedInteger(bound.ty),
+    };
+}
+
+fn varRefSupportsUnsignedIntegerValue(variable: obligation.VarRef) SemanticSupport {
+    return switch (variable) {
+        .free => |free| optionalTypeSupportsUnsignedInteger(free.ty),
+        .bound => |bound| optionalTypeSupportsUnsignedInteger(bound.ty),
     };
 }
 
@@ -1015,10 +1145,13 @@ fn varRefSupportsU256Value(variable: obligation.VarRef) SemanticSupport {
     };
 }
 
-fn varRefSupportsI256Value(variable: obligation.VarRef) SemanticSupport {
+fn varRefMatchesIntegerInfo(
+    variable: obligation.VarRef,
+    expected: CompilerIntegerInfo,
+) SemanticSupport {
     return switch (variable) {
-        .free => |free| optionalTypeSupportsI256(free.ty),
-        .bound => |bound| optionalTypeSupportsI256(bound.ty),
+        .free => |free| optionalTypeMatchesIntegerInfo(free.ty, expected),
+        .bound => |bound| optionalTypeMatchesIntegerInfo(bound.ty, expected),
     };
 }
 
@@ -1034,10 +1167,38 @@ fn optionalTypeSupportsU256(ty: ?obligation.TypeRef) SemanticSupport {
     return .{ .unsupported = .{ .unsupported_type = value } };
 }
 
-fn optionalTypeSupportsI256(ty: ?obligation.TypeRef) SemanticSupport {
+fn optionalTypeSupportsInteger(ty: ?obligation.TypeRef) SemanticSupport {
+    const value = ty orelse return .{ .unsupported = .missing_type };
+    if (compilerIntegerInfo(value) != null) return .supported;
+    return .{ .unsupported = .{ .unsupported_type = value } };
+}
+
+fn optionalTypeMatchesIntegerInfo(
+    ty: ?obligation.TypeRef,
+    expected: CompilerIntegerInfo,
+) SemanticSupport {
+    const value = ty orelse return .{ .unsupported = .missing_type };
+    const actual = compilerIntegerInfo(value) orelse
+        return .{ .unsupported = .{ .unsupported_type = value } };
+    if (actual.signed != expected.signed) {
+        return .{ .unsupported = .mixed_arithmetic_signedness };
+    }
+    if (actual.width != expected.width) {
+        return .{ .unsupported = .unsupported_arithmetic_width };
+    }
+    return .supported;
+}
+
+fn optionalTypeSupportsUnsignedInteger(ty: ?obligation.TypeRef) SemanticSupport {
     const value = ty orelse return .{ .unsupported = .unknown_signedness };
     const info = compilerIntegerInfo(value) orelse return .{ .unsupported = .unknown_signedness };
-    if (info.width != 256) return .{ .unsupported = .unsupported_comparison_width };
+    if (info.signed) return .{ .unsupported = .mixed_signedness };
+    return .supported;
+}
+
+fn optionalTypeSupportsSignedInteger(ty: ?obligation.TypeRef) SemanticSupport {
+    const value = ty orelse return .{ .unsupported = .unknown_signedness };
+    const info = compilerIntegerInfo(value) orelse return .{ .unsupported = .unknown_signedness };
     if (!info.signed) return .{ .unsupported = .mixed_signedness };
     return .supported;
 }
@@ -1048,9 +1209,9 @@ fn optionalTypeSupportsU256Carrier(ty: ?obligation.TypeRef) SemanticSupport {
     return .{ .unsupported = .{ .unsupported_type = value } };
 }
 
-fn optionalTypeSupportsBoolOrU256Carrier(ty: ?obligation.TypeRef) SemanticSupport {
+fn optionalTypeSupportsBoolOrInteger(ty: ?obligation.TypeRef) SemanticSupport {
     const value = ty orelse return .{ .unsupported = .missing_type };
-    if (typeRefIsBool(value) or typeRefIsU256(value) or typeRefIsI256(value)) return .supported;
+    if (typeRefIsBool(value) or compilerIntegerInfo(value) != null) return .supported;
     return .{ .unsupported = .{ .unsupported_type = value } };
 }
 
@@ -1062,7 +1223,6 @@ const ArithmeticTypeSupport = union(enum) {
 fn arithmeticTypeSupport(ty: ?obligation.TypeRef) ArithmeticTypeSupport {
     const value = ty orelse return .{ .unsupported = .missing_type };
     const info = compilerIntegerInfo(value) orelse return .{ .unsupported = .unknown_arithmetic_signedness };
-    if (info.width != 256) return .{ .unsupported = .unsupported_arithmetic_width };
     return .{ .supported = info };
 }
 
@@ -1092,6 +1252,10 @@ const CompilerIntegerInfo = struct {
     signed: bool,
 };
 
+fn compilerIntegerInfoEql(lhs: CompilerIntegerInfo, rhs: CompilerIntegerInfo) bool {
+    return lhs.width == rhs.width and lhs.signed == rhs.signed;
+}
+
 fn compilerIntegerInfo(ty: obligation.TypeRef) ?CompilerIntegerInfo {
     return switch (ty) {
         .compiler_type_id => |id| blk: {
@@ -1101,8 +1265,48 @@ fn compilerIntegerInfo(ty: obligation.TypeRef) ?CompilerIntegerInfo {
                 .signed = info.signed,
             };
         },
-        .spelling => null,
+        .spelling => |name| blk: {
+            const canonical = type_builtin.integerInfoByName(name) orelse
+                abiIntegerInfo(name) orelse break :blk null;
+            break :blk .{
+                .width = canonical.width,
+                .signed = canonical.signed,
+            };
+        },
     };
+}
+
+fn abiIntegerInfo(name: []const u8) ?type_builtin.BuiltinIntegerInfo {
+    const builtin_id: type_builtin.BuiltinTypeId = if (std.mem.eql(u8, name, "uint8"))
+        .u8
+    else if (std.mem.eql(u8, name, "uint16"))
+        .u16
+    else if (std.mem.eql(u8, name, "uint32"))
+        .u32
+    else if (std.mem.eql(u8, name, "uint64"))
+        .u64
+    else if (std.mem.eql(u8, name, "uint128"))
+        .u128
+    else if (std.mem.eql(u8, name, "uint160"))
+        .u160
+    else if (std.mem.eql(u8, name, "uint256"))
+        .u256
+    else if (std.mem.eql(u8, name, "int8"))
+        .i8
+    else if (std.mem.eql(u8, name, "int16"))
+        .i16
+    else if (std.mem.eql(u8, name, "int32"))
+        .i32
+    else if (std.mem.eql(u8, name, "int64"))
+        .i64
+    else if (std.mem.eql(u8, name, "int128"))
+        .i128
+    else if (std.mem.eql(u8, name, "int256"))
+        .i256
+    else
+        return null;
+    const spec = type_builtin.lookupBuiltinById(builtin_id);
+    return type_builtin.integerInfoByComptimeTypeId(spec.comptime_type_id);
 }
 
 fn compilerTypeIdIsBuiltin(id: u32, builtin: type_builtin.BuiltinTypeId) bool {
@@ -1643,8 +1847,13 @@ fn binaryOpName(op: obligation.BinaryOp) []const u8 {
         .add => "add",
         .sub => "sub",
         .mul => "mul",
+        .pow => "pow",
+        .shl => "shl",
+        .shr => "shr",
         .div => "div",
         .mod => "mod_",
+        .bit_and => "bitAnd",
+        .bit_xor => "bitXor",
         .and_ => "and_",
         .or_ => "or_",
         .implies => "implies",

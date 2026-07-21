@@ -1095,7 +1095,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             const is_signed_int_op = switch (binary.op) {
-                .add, .sub, .mul, .div, .mod, .shr => try @This().binaryIntegerExprIsSigned(self, expr_id, binary.lhs, binary.rhs),
+                .add,
+                .wrapping_add,
+                .sub,
+                .wrapping_sub,
+                .mul,
+                .wrapping_mul,
+                .div,
+                .mod,
+                .wrapping_pow,
+                .shl,
+                .wrapping_shl,
+                .shr,
+                .wrapping_shr,
+                => try @This().binaryIntegerExprIsSigned(self, expr_id, binary.lhs, binary.rhs),
                 .lt, .le, .gt, .ge => if (mlir.oraTypeIsAInteger(mlir.oraValueGetType(lhs)) and mlir.oraTypeIsAInteger(mlir.oraValueGetType(rhs)))
                     try @This().binaryIntegerExprIsSigned(self, expr_id, binary.lhs, binary.rhs)
                 else
@@ -1148,6 +1161,32 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 "failed to lower binary operator '{s}'",
                 .{@tagName(binary.op)},
             );
+            switch (binary.op) {
+                .add,
+                .wrapping_add,
+                .sub,
+                .wrapping_sub,
+                .mul,
+                .wrapping_mul,
+                .wrapping_pow,
+                .shl,
+                .wrapping_shl,
+                .shr,
+                .wrapping_shr,
+                => mlir.oraOperationSetAttributeByName(
+                    op,
+                    strRef("ora.integer_signed"),
+                    mlir.oraBoolAttrCreate(self.parent.context, is_signed_int_op),
+                ),
+                else => {},
+            }
+            if (binary.op == .wrapping_pow) {
+                mlir.oraOperationSetAttributeByName(
+                    op,
+                    strRef("ora.integer_checked"),
+                    mlir.oraBoolAttrCreate(self.parent.context, false),
+                );
+            }
             const value = appendValueOp(self.block, op);
             try @This().maybeEmitCheckedBinaryOverflowAssert(self, binary.op, lhs, rhs, value, is_signed_int_op, binary.range);
             return value;
@@ -1207,6 +1246,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const shift = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, value_ty, bit_width));
                 const min_op = mlir.oraArithShlIOpCreate(self.parent.context, loc, one, shift);
                 if (mlir.oraOperationIsNull(min_op)) return error.MlirOperationCreationFailed;
+                mlir.oraOperationSetAttributeByName(
+                    min_op,
+                    strRef("ora.integer_signed"),
+                    mlir.oraBoolAttrCreate(self.parent.context, true),
+                );
                 const min_int = appendValueOp(self.block, min_op);
                 break :blk appendValueOp(self.block, self.createCompareOp(loc, "eq", operand, min_int));
             } else blk: {
@@ -4181,6 +4225,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const shift = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, val_ty, @intCast(mlir.oraIntegerTypeGetWidth(val_ty) - 1)));
             const min_op = mlir.oraArithShlIOpCreate(self.parent.context, loc, one, shift);
             if (mlir.oraOperationIsNull(min_op)) return error.MlirOperationCreationFailed;
+            mlir.oraOperationSetAttributeByName(
+                min_op,
+                strRef("ora.integer_signed"),
+                mlir.oraBoolAttrCreate(self.parent.context, true),
+            );
             const min_int = appendValueOp(self.block, min_op);
             const neg_one = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, val_ty, -1));
             const a_min = appendValueOp(self.block, self.createCompareOp(loc, "eq", a, min_int));

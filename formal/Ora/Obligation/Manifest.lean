@@ -98,8 +98,13 @@ inductive BinaryOp where
   | add
   | sub
   | mul
+  | pow
+  | shl
+  | shr
   | div
   | mod_
+  | bitAnd
+  | bitXor
   | and_
   | or_
   | implies

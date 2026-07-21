@@ -52,7 +52,11 @@ theorem stable_place_read_self_eq_denotes (env : Env) (place : PlaceRef) :
     match Value.eqProp? (env.placeValue (.stable place)) (env.placeValue (.stable place)) with
     | some proposition => proposition
     | none => False := by
-  cases env.placeValue (.stable place) <;> simp [Value.eqProp?]
+  cases hValue : env.placeValue (.stable place) with
+  | bool value => simp [Value.eqProp?]
+  | integer value =>
+      rcases value with ⟨shape, bits⟩
+      simp [Value.eqProp?, Ora.Integer.Value.eqProp?]
 
 /-! ## Effect-frame facts over decoded manifests -/
 

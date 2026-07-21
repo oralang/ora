@@ -28,6 +28,29 @@ def baseManifest : Manifest := {
   ]
 }
 
+def typeIdForMutation : String → Nat
+  | "supported_u8" => 1
+  | "supported_u16" => 2
+  | "supported_u32" => 3
+  | "supported_u64" => 4
+  | "supported_u128" => 5
+  | "supported_u160" => 18
+  | "supported_i8" => 7
+  | "supported_i16" => 8
+  | "supported_i32" => 9
+  | "supported_i64" => 10
+  | "supported_i128" => 11
+  | "supported_i256" => 12
+  | "unregistered_integer_variable" => 999
+  | _ => 6
+
+def manifestForMutation (mutation : String) : Manifest := {
+  terms := [
+    .intLit { value := "0", ty := some (.compilerTypeId (typeIdForMutation mutation)) },
+    .boolLit true
+  ]
+}
+
 def baseVariable : VariableRow := {
   index := 0, id := loopId, name := "i", ty := .compilerTypeId 6
 }
@@ -50,6 +73,18 @@ def baseSummary : SummaryRow := {
 }
 
 def summaryForMutation : String → SummaryRow
+  | "supported_u8" => { baseSummary with variables := [{ baseVariable with ty := .compilerTypeId 1 }] }
+  | "supported_u16" => { baseSummary with variables := [{ baseVariable with ty := .compilerTypeId 2 }] }
+  | "supported_u32" => { baseSummary with variables := [{ baseVariable with ty := .compilerTypeId 3 }] }
+  | "supported_u64" => { baseSummary with variables := [{ baseVariable with ty := .compilerTypeId 4 }] }
+  | "supported_u128" => { baseSummary with variables := [{ baseVariable with ty := .compilerTypeId 5 }] }
+  | "supported_u160" => { baseSummary with variables := [{ baseVariable with ty := .compilerTypeId 18 }] }
+  | "supported_i8" => { baseSummary with variables := [{ baseVariable with ty := .compilerTypeId 7 }] }
+  | "supported_i16" => { baseSummary with variables := [{ baseVariable with ty := .compilerTypeId 8 }] }
+  | "supported_i32" => { baseSummary with variables := [{ baseVariable with ty := .compilerTypeId 9 }] }
+  | "supported_i64" => { baseSummary with variables := [{ baseVariable with ty := .compilerTypeId 10 }] }
+  | "supported_i128" => { baseSummary with variables := [{ baseVariable with ty := .compilerTypeId 11 }] }
+  | "supported_i256" => { baseSummary with variables := [{ baseVariable with ty := .compilerTypeId 12 }] }
   | "supported_for" => { baseSummary with kind := .scfFor }
   | "storage_write" => { baseSummary with unsupportedReasons := ["loop_has_storage_write"] }
   | "storage_read" => { baseSummary with unsupportedReasons := ["loop_has_storage_read"] }
@@ -64,8 +99,8 @@ def summaryForMutation : String → SummaryRow
   | "missing_invariant" => { baseSummary with invariants := [], unsupportedReasons := ["loop_invariant_missing"] }
   | "missing_body_safety" => { baseSummary with bodySafety := [], unsupportedReasons := ["loop_body_safety_missing"] }
   | "unsupported_kind" => { baseSummary with kind := .other, unsupportedReasons := ["loop_kind_unsupported"] }
-  | "non_u256_variable" =>
-      { baseSummary with variables := [{ baseVariable with ty := .compilerTypeId 5 }] }
+  | "unregistered_integer_variable" =>
+      { baseSummary with variables := [{ baseVariable with ty := .compilerTypeId 999 }] }
   | "bad_update_target" =>
       { baseSummary with step := [{ baseAssignment with target := otherId }] }
   | "unsupported_formula" => { baseSummary with guard := some (.term 0) }
@@ -73,11 +108,19 @@ def summaryForMutation : String → SummaryRow
   | _ => baseSummary
 
 def expectedCompilerSupport : String → Bool
-  | "supported_while" | "supported_for" => true
+  | "supported_while" | "supported_for" |
+    "supported_u8" | "supported_u16" | "supported_u32" | "supported_u64" |
+    "supported_u128" | "supported_u160" |
+    "supported_i8" | "supported_i16" | "supported_i32" | "supported_i64" |
+    "supported_i128" | "supported_i256" => true
   | _ => false
 
 def expectedReason : String → String
-  | "supported_while" | "supported_for" => ""
+  | "supported_while" | "supported_for" |
+    "supported_u8" | "supported_u16" | "supported_u32" | "supported_u64" |
+    "supported_u128" | "supported_u160" |
+    "supported_i8" | "supported_i16" | "supported_i32" | "supported_i64" |
+    "supported_i128" | "supported_i256" => ""
   | "storage_write" => "loop_has_storage_write"
   | "storage_read" => "loop_has_storage_read"
   | "call" => "loop_has_call"
@@ -91,7 +134,7 @@ def expectedReason : String → String
   | "missing_invariant" => "loop_invariant_missing"
   | "missing_body_safety" => "loop_body_safety_missing"
   | "unsupported_kind" => "loop_kind_unsupported"
-  | "non_u256_variable" => "loop_variable_not_u256"
+  | "unregistered_integer_variable" => "loop_variable_not_registered_integer"
   | "bad_update_target" => "loop_update_target_not_loop_variable"
   | "unsupported_formula" => "loop_formula_unsupported"
   | "identity_collision" => "loop_identity_missing"
@@ -100,6 +143,10 @@ def expectedReason : String → String
 
 def expectedLeanDenotable : String → Bool
   | "supported_while" | "supported_for" |
+    "supported_u8" | "supported_u16" | "supported_u32" | "supported_u64" |
+    "supported_u128" | "supported_u160" |
+    "supported_i8" | "supported_i16" | "supported_i32" | "supported_i64" |
+    "supported_i128" | "supported_i256" |
     "query_owner_mismatch" | "query_id_mismatch" => true
   | _ => false
 
@@ -109,7 +156,8 @@ def rowMatches : RawRow → Bool
       compilerSupported == expectedCompilerSupport mutation &&
       reason == expectedReason mutation &&
       leanDenotable == expectedLeanDenotable mutation &&
-      (denoteLoopSummary? baseManifest Env.empty (summaryForMutation mutation)).isSome ==
+      (denoteLoopSummary? (manifestForMutation mutation) Env.empty
+        (summaryForMutation mutation)).isSome ==
         leanDenotable
 
 theorem loop_totality_matrix_matches : loopTotalityRows.all rowMatches = true := by
@@ -118,7 +166,8 @@ theorem loop_totality_matrix_matches : loopTotalityRows.all rowMatches = true :=
 def unsupportedSummaryFails : RawRow → Bool
   | (_, mutation, _, _, leanDenotable) =>
       leanDenotable ||
-        (denoteLoopSummary? baseManifest Env.empty (summaryForMutation mutation)).isNone
+        (denoteLoopSummary? (manifestForMutation mutation) Env.empty
+          (summaryForMutation mutation)).isNone
 
 theorem negative_shapes_fail_closed :
     loopTotalityRows.all unsupportedSummaryFails = true := by

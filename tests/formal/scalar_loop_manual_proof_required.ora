@@ -1,0 +1,12 @@
+contract ScalarLoopManualProofRequired {
+    pub fn count() -> u256 {
+        var i: u256 = 0;
+        while (i < 3)
+            invariant i <= 3
+            invariant i >= 0
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+}

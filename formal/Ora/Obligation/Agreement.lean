@@ -30,8 +30,11 @@ structure Row where
   deriving Repr
 
 def valueForTy? : Option TyRef → Value
-  | some ty => if ty.isBool then .bool true else .u256 (BitVec.ofNat 256 0)
-  | none => .u256 (BitVec.ofNat 256 0)
+  | some ty =>
+      match ty.integerShape? with
+      | some shape => .integer (Ora.Integer.Value.ofNat shape 0)
+      | none => .bool true
+  | none => .bool false
 
 def bindFreeVarsFromTerm (env : Env) : Term → Env
   | .variable (.free free) => env.setFree free.id (valueForTy? free.ty)
@@ -54,7 +57,8 @@ over all environments.
 -/
 def canonicalEnv (manifest : Manifest) : Env :=
   { manifest.terms.foldl bindFreeVarsFromTerm Env.empty with
-    result := some (.u256 (BitVec.ofNat 256 0)) }
+    placeValue := fun _ => .integer (Ora.Integer.Value.ofNat (.unsigned .w256) 0)
+    result := some (.integer (Ora.Integer.Value.ofNat (.unsigned .w256) 0)) }
 
 def findAssumptionById (manifest : Manifest) (id : Nat) : Option AssumptionRow :=
   manifest.assumptions.find? (fun row => row.id == id)

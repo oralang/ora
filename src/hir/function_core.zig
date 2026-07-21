@@ -2777,6 +2777,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             const power_op = mlir.oraPowerOpCreate(self.parent.context, loc, lhs, rhs, value_ty);
             if (mlir.oraOperationIsNull(power_op)) return error.MlirOperationCreationFailed;
+            mlir.oraOperationSetAttributeByName(
+                power_op,
+                strRef("ora.integer_signed"),
+                mlir.oraBoolAttrCreate(self.parent.context, is_signed),
+            );
+            mlir.oraOperationSetAttributeByName(
+                power_op,
+                strRef("ora.integer_checked"),
+                mlir.oraBoolAttrCreate(self.parent.context, true),
+            );
             const power_value = appendValueOp(self.block, power_op);
             return .{ .value = power_value, .overflow = overflow };
         }
@@ -4280,6 +4290,25 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             for (carried_locals, 0..) |local_id, index| {
                 if (index >= mlir.oraOperationGetNumResults(op)) break;
                 @This().annotateLocalValue(self, local_id, mlir.oraOperationGetResult(op, index));
+
+                const sema_type = support.unwrapRefinementSemaType(
+                    self.parent.typecheck.pattern_types[local_id.index()].type,
+                );
+                const signed = switch (sema_type) {
+                    .integer => |integer| integer.signed,
+                    else => continue,
+                };
+                var attr_name_buffer: [64]u8 = undefined;
+                const attr_name = std.fmt.bufPrint(
+                    &attr_name_buffer,
+                    "ora.result_integer_signed_{d}",
+                    .{index},
+                ) catch continue;
+                mlir.oraOperationSetAttributeByName(
+                    op,
+                    strRef(attr_name),
+                    mlir.oraBoolAttrCreate(self.parent.context, signed),
+                );
             }
         }
 

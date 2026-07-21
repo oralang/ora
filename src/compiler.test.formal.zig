@@ -1139,8 +1139,8 @@ fn proofModuleFromGeneratedObligations(
             \\      Ora.Spec.expectedCompilerTypeIdI256,
             \\      Ora.Spec.expectedCompilerTypeIdBool
             \\    ]
-            \\    intro i hi
-            \\    exact U256.ult_implies_ule i x hi
+            \\    repeat intro
+            \\    exact U256.ult_implies_ule _ _ (by assumption)
             \\
         );
     }
@@ -1195,22 +1195,24 @@ fn loopProofModuleFromGeneratedObligations(
             \\      emittedTerms]
             \\  constructor
             \\  · refine ⟨Env.empty.setFree { file_id := 0, pattern_id := 0 }
-            \\        (.u256 (BitVec.ofNat 256 0)), [BitVec.ofNat 256 0], ?_⟩
+            \\        (.u256 (BitVec.ofNat 256 0)),
+            \\        [Ora.Integer.Value.ofNat (.unsigned .w256) 0], ?_⟩
             \\    constructor
             \\    · simp [assumptionsDenoteInEnv, assumptionsDenoteInEnv?]
             \\    constructor
             \\    · intro loopVar hLoopVar
             \\      simp [emittedLoopSummary_1] at hLoopVar
             \\      subst loopVar
-            \\      exact ⟨BitVec.ofNat 256 0, rfl⟩
+            \\      exact ⟨Ora.Integer.Value.ofNat (.unsigned .w256) 0, rfl, rfl⟩
             \\    · simp only [Ora.Loop.loopInitialPremises,
             \\        Ora.Loop.denoteLoopSummary?, hSupported, hGuard]
             \\      change Ora.Loop.valuesInitializeState emittedManifest
             \\        (Env.empty.setFree { file_id := 0, pattern_id := 0 }
             \\          (.u256 (BitVec.ofNat 256 0))) emittedLoopSummary_1.init
-            \\        [BitVec.ofNat 256 0]
+            \\        [Ora.Integer.Value.ofNat (.unsigned .w256) 0]
             \\      simp [emittedLoopSummary_1, Ora.Loop.valuesInitializeState,
             \\        formulaValue?, denoteValue?, IntegerLiteralTerm.asU256?,
+            \\        Ora.Integer.Value.ofNat,
             \\        TyRef.isU256Carrier, TyRef.isU256, TyRef.isI256,
             \\        compilerTypeIdU256, compilerTypeIdI256,
             \\        Ora.Spec.expectedCompilerTypeIdU256,
@@ -1221,7 +1223,13 @@ fn loopProofModuleFromGeneratedObligations(
             \\    rcases hContext
             \\        { index := 0, id := { file_id := 0, pattern_id := 0 },
             \\          name := "n", ty := .compilerTypeId 6 }
-            \\        (by simp [emittedLoopSummary_1]) with ⟨n, hn⟩
+            \\        (by simp [emittedLoopSummary_1]) with ⟨nValue, hNShape, hn⟩
+            \\    rcases nValue with ⟨nShape, n⟩
+            \\    have hNShapeValue : nShape = .unsigned .w256 := by
+            \\      have hSome : some (.unsigned .w256) = some nShape := by
+            \\        simpa using hNShape
+            \\      exact (Option.some.inj hSome).symm
+            \\    subst nShape
             \\    change lookupFreeBinding env.freeBindings
             \\      { file_id := 0, pattern_id := 0 } = some (.u256 n) at hn
             \\    have hLoopIdSelf :
@@ -1234,13 +1242,16 @@ fn loopProofModuleFromGeneratedObligations(
             \\    · intro state hInitial
             \\      change Ora.Loop.valuesInitializeState emittedManifest env
             \\        emittedLoopSummary_1.init state at hInitial
-            \\      have hState : state = [BitVec.ofNat 256 0] := by
+            \\      have hState : state =
+            \\          [Ora.Integer.Value.ofNat (.unsigned .w256) 0] := by
             \\        rcases state with _ | ⟨value, state⟩
             \\        · simp [Ora.Loop.valuesInitializeState, emittedLoopSummary_1] at hInitial
             \\        · rcases state with _ | ⟨extra, state⟩
-            \\          · have hValue : BitVec.ofNat 256 0 = value := by
+            \\          · have hValue :
+            \\                Ora.Integer.Value.ofNat (.unsigned .w256) 0 = value := by
             \\              simpa [Ora.Loop.valuesInitializeState, formulaValue?, denoteValue?,
-            \\                IntegerLiteralTerm.asU256?, TyRef.isU256Carrier, TyRef.isU256,
+            \\                IntegerLiteralTerm.asU256?, Ora.Integer.Value.ofNat,
+            \\                TyRef.isU256Carrier, TyRef.isU256,
             \\                TyRef.isI256, compilerTypeIdU256, compilerTypeIdI256,
             \\                Ora.Spec.expectedCompilerTypeIdU256,
             \\                Ora.Spec.expectedCompilerTypeIdI256,
@@ -1259,7 +1270,9 @@ fn loopProofModuleFromGeneratedObligations(
             \\        IntegerLiteralTerm.asU256?, TyRef.isU256Carrier, TyRef.isU256,
             \\        TyRef.isI256, compilerTypeIdU256, compilerTypeIdI256,
             \\        Ora.Spec.expectedCompilerTypeIdU256,
-            \\        Ora.Spec.expectedCompilerTypeIdI256]
+            \\        Ora.Spec.expectedCompilerTypeIdI256,
+            \\        Value.u256, Ora.Integer.Value.ofNat,
+            \\        Ora.Integer.Value.relation_u256, Ora.Integer.unsignedLe]
             \\    · intro current following hInvariant hLoopGuard hStep
             \\      change Ora.Loop.formulasHoldInState emittedManifest env
             \\        emittedLoopSummary_1.variables current emittedLoopSummary_1.invariants at hInvariant
@@ -1278,6 +1291,22 @@ fn loopProofModuleFromGeneratedObligations(
             \\          · simp [Ora.Loop.formulasHoldInState, Ora.Loop.formulaHoldsInState,
             \\              Ora.Loop.bindState, emittedLoopSummary_1] at hInvariant
             \\      rcases hCurrentShape with ⟨i, rfl⟩
+            \\      rcases i with ⟨iShape, i⟩
+            \\      have hIShapeBinding :
+            \\          (.compilerTypeId 6 : TyRef).integerShape? = some iShape := by
+            \\        by_cases hShape :
+            \\            (.compilerTypeId 6 : TyRef).integerShape? = some iShape
+            \\        · exact hShape
+            \\        · exfalso
+            \\          have hNe : ¬(.unsigned .w256 = iShape) := by
+            \\            simpa using hShape
+            \\          simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
+            \\            hNe] at hLoopGuard
+            \\      have hIShape : iShape = .unsigned .w256 := by
+            \\        have hSome : some (.unsigned .w256) = some iShape := by
+            \\          simpa using hIShapeBinding
+            \\        exact (Option.some.inj hSome).symm
+            \\      subst iShape
             \\      have hFollowingShape : ∃ next, following = [next] := by
             \\        rcases following with _ | ⟨next, following⟩
             \\        · simp [Ora.Loop.assignmentsProduceState, Ora.Loop.bindState,
@@ -1310,14 +1339,22 @@ fn loopProofModuleFromGeneratedObligations(
             \\        IntegerLiteralTerm.asU256?, Value.binaryU256?]
             \\          using hLoopGuard
             \\      have hNextInvariant := U256.lt_add_one_ule_bound i n hGuardDecoded
-            \\      simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
+            \\      have hNextInvariantWrapped :
+            \\          Ora.Integer.unsignedLe
+            \\            (Ora.Integer.wrappingResult (.unsigned .w256) .add i
+            \\              (BitVec.ofNat 256 1)) n := by
+            \\        simpa [U256.ule, U256.add, Ora.Integer.unsignedLe,
+            \\          Ora.Integer.wrappingResult] using hNextInvariant
+            \\      simpa [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
             \\        formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
             \\        emittedTerms, hn, Env.setFree, Env.lookupVar, Env.lookupFree,
             \\        lookupFreeBinding, TyRef.isU256, TyRef.isI256,
             \\        TyRef.isU256Carrier, compilerTypeIdU256, compilerTypeIdI256,
             \\        Ora.Spec.expectedCompilerTypeIdU256,
             \\        Ora.Spec.expectedCompilerTypeIdI256, hLoopIdSelf, hLoopIdContext,
-            \\        IntegerLiteralTerm.asU256?, Value.binaryU256?, hNextInvariant]
+            \\        IntegerLiteralTerm.asU256?, Ora.Integer.unsignedLe,
+            \\        Value.u256, Value.binaryU256?, Ora.Integer.Value.binary_u256,
+            \\        Ora.Integer.Value.relation_u256] using hNextInvariantWrapped
             \\    · intro state hInvariant hLoopGuard
             \\      change Ora.Loop.formulasHoldInState emittedManifest env
             \\        emittedLoopSummary_1.variables state emittedLoopSummary_1.invariants at hInvariant
@@ -1334,6 +1371,22 @@ fn loopProofModuleFromGeneratedObligations(
             \\          · simp [Ora.Loop.formulasHoldInState, Ora.Loop.formulaHoldsInState,
             \\              Ora.Loop.bindState, emittedLoopSummary_1] at hInvariant
             \\      rcases hStateShape with ⟨i, rfl⟩
+            \\      rcases i with ⟨iShape, i⟩
+            \\      have hIShapeBinding :
+            \\          (.compilerTypeId 6 : TyRef).integerShape? = some iShape := by
+            \\        by_cases hShape :
+            \\            (.compilerTypeId 6 : TyRef).integerShape? = some iShape
+            \\        · exact hShape
+            \\        · exfalso
+            \\          have hNe : ¬(.unsigned .w256 = iShape) := by
+            \\            simpa using hShape
+            \\          simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
+            \\            hNe] at hLoopGuard
+            \\      have hIShape : iShape = .unsigned .w256 := by
+            \\        have hSome : some (.unsigned .w256) = some iShape := by
+            \\          simpa using hIShapeBinding
+            \\        exact (Option.some.inj hSome).symm
+            \\      subst iShape
             \\      intro formula hFormula
             \\      simp [emittedLoopSummary_1] at hFormula
             \\      subst formula
@@ -1349,6 +1402,12 @@ fn loopProofModuleFromGeneratedObligations(
             \\        IntegerLiteralTerm.asU256?, Value.binaryU256?]
             \\          using hLoopGuard
             \\      have hSafe := U256.lt_bound_add_one_not_lt_self i n hGuardDecoded
+            \\      have hSafeNat :
+            \\          i.toNat ≤
+            \\            (Ora.Integer.wrappingResult (.unsigned .w256) .add i
+            \\              (BitVec.ofNat 256 1)).toNat := by
+            \\        apply Nat.le_of_not_gt
+            \\        simpa [U256.ult, U256.add, Ora.Integer.wrappingResult] using hSafe
             \\      simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
             \\        formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
             \\        emittedTerms, hn, Env.setFree, Env.lookupVar, Env.lookupFree,
@@ -1356,7 +1415,9 @@ fn loopProofModuleFromGeneratedObligations(
             \\        TyRef.isU256Carrier, compilerTypeIdU256, compilerTypeIdI256,
             \\        Ora.Spec.expectedCompilerTypeIdU256,
             \\        Ora.Spec.expectedCompilerTypeIdI256, hLoopIdSelf, hLoopIdContext,
-            \\        IntegerLiteralTerm.asU256?, Value.binaryU256?, hSafe]
+            \\        IntegerLiteralTerm.asU256?, Ora.Integer.unsignedLt,
+            \\        Value.u256, Value.binaryU256?, Ora.Integer.Value.binary_u256,
+            \\        Ora.Integer.Value.relation_u256, hSafeNat]
             \\    · intro state hInvariant _
             \\      change Ora.Loop.formulasHoldInState emittedManifest env
             \\        emittedLoopSummary_1.variables state emittedLoopSummary_1.invariants at hInvariant
@@ -1416,7 +1477,8 @@ fn countThreeProofModuleFromGeneratedObligations(
         \\      (({ file_id := 4294967294, pattern_id := 0 } : FreeVarId) ==
         \\        { file_id := 4294967294, pattern_id := 0 }) = true := by rfl
         \\  constructor
-        \\  · refine ⟨Env.empty, [BitVec.ofNat 256 0], ?_⟩
+        \\  · refine ⟨Env.empty,
+        \\      [Ora.Integer.Value.ofNat (.unsigned .w256) 0], ?_⟩
         \\    constructor
         \\    · simp [assumptionsDenoteInEnv, assumptionsDenoteInEnv?]
         \\    constructor
@@ -1425,9 +1487,11 @@ fn countThreeProofModuleFromGeneratedObligations(
         \\    · simp only [Ora.Loop.loopInitialPremises,
         \\        Ora.Loop.denoteLoopSummary?, hSupported, hGuard]
         \\      change Ora.Loop.valuesInitializeState emittedManifest Env.empty
-        \\        emittedLoopSummary_1.init [BitVec.ofNat 256 0]
+        \\        emittedLoopSummary_1.init
+        \\        [Ora.Integer.Value.ofNat (.unsigned .w256) 0]
         \\      simp [emittedLoopSummary_1, Ora.Loop.valuesInitializeState,
         \\        formulaValue?, denoteValue?, IntegerLiteralTerm.asU256?,
+        \\        Ora.Integer.Value.ofNat,
         \\        TyRef.isU256Carrier, TyRef.isU256, TyRef.isI256,
         \\        compilerTypeIdU256, compilerTypeIdI256,
         \\        Ora.Spec.expectedCompilerTypeIdU256,
@@ -1439,13 +1503,16 @@ fn countThreeProofModuleFromGeneratedObligations(
         \\    · intro state hInitial
         \\      change Ora.Loop.valuesInitializeState emittedManifest env
         \\        emittedLoopSummary_1.init state at hInitial
-        \\      have hState : state = [BitVec.ofNat 256 0] := by
+        \\      have hState : state =
+        \\          [Ora.Integer.Value.ofNat (.unsigned .w256) 0] := by
         \\        rcases state with _ | ⟨value, state⟩
         \\        · simp [Ora.Loop.valuesInitializeState, emittedLoopSummary_1] at hInitial
         \\        · rcases state with _ | ⟨extra, state⟩
-        \\          · have hValue : BitVec.ofNat 256 0 = value := by
+        \\          · have hValue :
+        \\                Ora.Integer.Value.ofNat (.unsigned .w256) 0 = value := by
         \\              simpa [Ora.Loop.valuesInitializeState, formulaValue?, denoteValue?,
-        \\                IntegerLiteralTerm.asU256?, TyRef.isU256Carrier, TyRef.isU256,
+        \\                IntegerLiteralTerm.asU256?, Ora.Integer.Value.ofNat,
+        \\                TyRef.isU256Carrier, TyRef.isU256,
         \\                TyRef.isI256, compilerTypeIdU256, compilerTypeIdI256,
         \\                Ora.Spec.expectedCompilerTypeIdU256,
         \\                Ora.Spec.expectedCompilerTypeIdI256,
@@ -1461,7 +1528,10 @@ fn countThreeProofModuleFromGeneratedObligations(
         \\        formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
         \\        emittedTerms, U256.ule, Env.setFree, Env.lookupVar,
         \\        Env.lookupFree, lookupFreeBinding, hLoopIdSelf,
-        \\        IntegerLiteralTerm.asU256?, hLiteralThree, TyRef.isU256Carrier, TyRef.isU256,
+        \\        IntegerLiteralTerm.asU256?, hLiteralThree,
+        \\        Value.u256, Ora.Integer.Value.ofNat,
+        \\        Ora.Integer.Value.relation_u256, Ora.Integer.unsignedLe,
+        \\        TyRef.isU256Carrier, TyRef.isU256,
         \\        TyRef.isI256, compilerTypeIdU256, compilerTypeIdI256,
         \\        Ora.Spec.expectedCompilerTypeIdU256,
         \\        Ora.Spec.expectedCompilerTypeIdI256]
@@ -1483,6 +1553,22 @@ fn countThreeProofModuleFromGeneratedObligations(
         \\          · simp [Ora.Loop.formulasHoldInState, Ora.Loop.formulaHoldsInState,
         \\              Ora.Loop.bindState, emittedLoopSummary_1] at hInvariant
         \\      rcases hCurrentShape with ⟨i, rfl⟩
+        \\      rcases i with ⟨iShape, i⟩
+        \\      have hIShapeBinding :
+        \\          (.compilerTypeId 6 : TyRef).integerShape? = some iShape := by
+        \\        by_cases hShape :
+        \\            (.compilerTypeId 6 : TyRef).integerShape? = some iShape
+        \\        · exact hShape
+        \\        · exfalso
+        \\          have hNe : ¬(.unsigned .w256 = iShape) := by
+        \\            simpa using hShape
+        \\          simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
+        \\            hNe] at hLoopGuard
+        \\      have hIShape : iShape = .unsigned .w256 := by
+        \\        have hSome : some (.unsigned .w256) = some iShape := by
+        \\          simpa using hIShapeBinding
+        \\        exact (Option.some.inj hSome).symm
+        \\      subst iShape
         \\      have hFollowingShape : ∃ next, following = [next] := by
         \\        rcases following with _ | ⟨next, following⟩
         \\        · simp [Ora.Loop.assignmentsProduceState, Ora.Loop.bindState,
@@ -1515,14 +1601,23 @@ fn countThreeProofModuleFromGeneratedObligations(
         \\          IntegerLiteralTerm.asU256?, hLiteralThree, Value.binaryU256?] using hLoopGuard
         \\      have hNextInvariant := U256.lt_add_one_ule_bound i
         \\        (BitVec.ofNat 256 3) hGuardDecoded
-        \\      simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
+        \\      have hNextInvariantWrapped :
+        \\          Ora.Integer.unsignedLe
+        \\            (Ora.Integer.wrappingResult (.unsigned .w256) .add i
+        \\              (BitVec.ofNat 256 1)) (BitVec.ofNat 256 3) := by
+        \\        simpa [U256.ule, U256.add, Ora.Integer.unsignedLe,
+        \\          Ora.Integer.wrappingResult] using hNextInvariant
+        \\      simpa [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
         \\        formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
         \\        emittedTerms, Env.setFree, Env.lookupVar, Env.lookupFree,
         \\        lookupFreeBinding, TyRef.isU256, TyRef.isI256,
         \\        TyRef.isU256Carrier, compilerTypeIdU256, compilerTypeIdI256,
         \\        Ora.Spec.expectedCompilerTypeIdU256,
         \\        Ora.Spec.expectedCompilerTypeIdI256, hLoopIdSelf,
-        \\        IntegerLiteralTerm.asU256?, hLiteralThree, Value.binaryU256?, hNextInvariant]
+        \\        IntegerLiteralTerm.asU256?, hLiteralThree,
+        \\        Ora.Integer.unsignedLe, Value.u256, Value.binaryU256?,
+        \\        Ora.Integer.Value.binary_u256,
+        \\        Ora.Integer.Value.relation_u256] using hNextInvariantWrapped
         \\    · intro state hInvariant hLoopGuard
         \\      change Ora.Loop.formulasHoldInState emittedManifest env
         \\        emittedLoopSummary_1.variables state emittedLoopSummary_1.invariants at hInvariant
@@ -1539,6 +1634,22 @@ fn countThreeProofModuleFromGeneratedObligations(
         \\          · simp [Ora.Loop.formulasHoldInState, Ora.Loop.formulaHoldsInState,
         \\              Ora.Loop.bindState, emittedLoopSummary_1] at hInvariant
         \\      rcases hStateShape with ⟨i, rfl⟩
+        \\      rcases i with ⟨iShape, i⟩
+        \\      have hIShapeBinding :
+        \\          (.compilerTypeId 6 : TyRef).integerShape? = some iShape := by
+        \\        by_cases hShape :
+        \\            (.compilerTypeId 6 : TyRef).integerShape? = some iShape
+        \\        · exact hShape
+        \\        · exfalso
+        \\          have hNe : ¬(.unsigned .w256 = iShape) := by
+        \\            simpa using hShape
+        \\          simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
+        \\            hNe] at hLoopGuard
+        \\      have hIShape : iShape = .unsigned .w256 := by
+        \\        have hSome : some (.unsigned .w256) = some iShape := by
+        \\          simpa using hIShapeBinding
+        \\        exact (Option.some.inj hSome).symm
+        \\      subst iShape
         \\      intro formula hFormula
         \\      simp [emittedLoopSummary_1] at hFormula
         \\      subst formula
@@ -1553,6 +1664,12 @@ fn countThreeProofModuleFromGeneratedObligations(
         \\          IntegerLiteralTerm.asU256?, hLiteralThree, Value.binaryU256?] using hLoopGuard
         \\      have hSafe := U256.lt_bound_add_one_not_lt_self i
         \\        (BitVec.ofNat 256 3) hGuardDecoded
+        \\      have hSafeNat :
+        \\          i.toNat ≤
+        \\            (Ora.Integer.wrappingResult (.unsigned .w256) .add i
+        \\              (BitVec.ofNat 256 1)).toNat := by
+        \\        apply Nat.le_of_not_gt
+        \\        simpa [U256.ult, U256.add, Ora.Integer.wrappingResult] using hSafe
         \\      simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
         \\        formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
         \\        emittedTerms, Env.setFree, Env.lookupVar, Env.lookupFree,
@@ -1560,7 +1677,9 @@ fn countThreeProofModuleFromGeneratedObligations(
         \\        TyRef.isU256Carrier, compilerTypeIdU256, compilerTypeIdI256,
         \\        Ora.Spec.expectedCompilerTypeIdU256,
         \\        Ora.Spec.expectedCompilerTypeIdI256, hLoopIdSelf,
-        \\        IntegerLiteralTerm.asU256?, Value.binaryU256?, hSafe]
+        \\        IntegerLiteralTerm.asU256?, Ora.Integer.unsignedLt,
+        \\        Value.u256, Value.binaryU256?, Ora.Integer.Value.binary_u256,
+        \\        Ora.Integer.Value.relation_u256, hSafeNat]
         \\    · intro state _ _
         \\      change Ora.Loop.formulasHoldInState emittedManifest env
         \\        emittedLoopSummary_1.variables state emittedLoopSummary_1.post
@@ -2189,7 +2308,8 @@ fn divRemProofModuleFromGeneratedObligations(
         \\      Ora.Spec.expectedCompilerTypeIdU256,
         \\      Ora.Spec.expectedCompilerTypeIdI256,
         \\      Ora.Spec.expectedCompilerTypeIdBool,
-        \\      U256.udivTotal
+        \\      Ora.Integer.divResult,
+        \\      Ora.Integer.unsignedDivTotal
         \\    ]
         \\
         \\
@@ -2267,6 +2387,195 @@ test "loop support classifier reserves induction for owner-scoped summaries" {
             obligation_to_lean.SemanticUnsupportedReason.loop_summary_missing,
             reason,
         ),
+    }
+}
+
+test "wrapping scalar loop steps do not invent arithmetic safety requirements" {
+    const source_text =
+        \\pub fn count_wrapping() -> u256 {
+        \\    var i: u256 = 0;
+        \\    while (i < 3)
+        \\        invariant i <= 3
+        \\    {
+        \\        i = i +% 1;
+        \\    }
+        \\    return i;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+
+    var result = try obligation_from_mlir.collect(
+        testing.allocator,
+        hir_result.module.raw_module,
+        .{},
+    );
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 1), result.set.loop_summaries.len);
+    const summary = result.set.loop_summaries[0];
+    try testing.expectEqual(@as(usize, 0), summary.body_safety_formulas.len);
+    try testing.expect(!loopSummaryHasReason(summary, .loop_body_safety_missing));
+    try testing.expect(summary.projectionSupported());
+
+    const query = try findLoopInductionQuery(result.set);
+    try testing.expectEqual(obligation.ProofRequirement.lean_certificate, query.proof_requirement);
+}
+
+test "narrow scalar loop comparison retypes compiler generated literal truncation" {
+    const source_text =
+        \\pub fn count_wrapping_sub() -> u8 {
+        \\    var i: u8 = 3;
+        \\    while (i > 0) invariant i <= 3 {
+        \\        i = i -% 1;
+        \\    }
+        \\    return i;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+
+    var result = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+    defer result.deinit();
+    try testing.expectEqual(@as(usize, 1), result.set.loop_summaries.len);
+    const summary = result.set.loop_summaries[0];
+    try testing.expect(summary.projectionSupported());
+
+    const step_id = summary.step_assignments[0].value.term;
+    const step = result.set.terms[step_id].binary;
+    try testing.expectEqual(obligation.BinaryOp.sub, step.op);
+    try testing.expectEqual(@as(u32, 1), step.ty.?.compiler_type_id);
+
+    const guard = result.set.terms[summary.guard_formula.?.term].binary;
+    const guard_rhs = result.set.terms[guard.rhs].int_lit;
+    try testing.expectEqual(obligation.BinaryOp.gt, guard.op);
+    try testing.expectEqual(@as(u32, 1), guard.ty.?.compiler_type_id);
+    try testing.expectEqual(@as(u32, 1), guard_rhs.ty.?.compiler_type_id);
+
+    const query = try findLoopInductionQuery(result.set);
+    try testing.expectEqual(obligation.ProofRequirement.lean_certificate, query.proof_requirement);
+}
+
+test "narrow checked scalar arithmetic safety formulas activate certification" {
+    const source_text =
+        \\pub fn checked_signed_sub() -> i8 {
+        \\    var signedSubValue: i8 = 3;
+        \\    while (signedSubValue > 0) invariant signedSubValue <= 3 {
+        \\        signedSubValue = signedSubValue - 1;
+        \\    }
+        \\    return signedSubValue;
+        \\}
+        \\
+        \\pub fn checked_signed_mul() -> i8 {
+        \\    var signedMulValue: i8 = 1;
+        \\    while (signedMulValue < 3) invariant signedMulValue <= 4 {
+        \\        signedMulValue = signedMulValue * 2;
+        \\    }
+        \\    return signedMulValue;
+        \\}
+        \\
+        \\pub fn checked_unsigned_mul() -> u8 {
+        \\    var unsignedMulValue: u8 = 1;
+        \\    while (unsignedMulValue < 3) invariant unsignedMulValue <= 4 {
+        \\        unsignedMulValue = unsignedMulValue * 2;
+        \\    }
+        \\    return unsignedMulValue;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+
+    var result = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+    defer result.deinit();
+    try testing.expectEqual(@as(usize, 3), result.set.loop_summaries.len);
+
+    for (result.set.loop_summaries) |summary| {
+        try testing.expect(summary.projectionSupported());
+        try testing.expect(summary.body_safety_formulas.len > 0);
+        try testing.expect(!loopSummaryHasReason(summary, .loop_formula_unsupported));
+    }
+    var induction_count: usize = 0;
+    for (result.set.queries) |query| {
+        if (query.kind != .loop_induction) continue;
+        induction_count += 1;
+        try testing.expectEqual(obligation.ProofRequirement.lean_certificate, query.proof_requirement);
+        switch (obligation_to_lean.querySemanticSupport(result.set, query)) {
+            .supported => {},
+            .unsupported => return error.TestUnexpectedResult,
+        }
+    }
+    try testing.expectEqual(@as(usize, 3), induction_count);
+}
+
+test "every registered integer width activates scalar loop certification" {
+    const expected = [_]struct {
+        owner: []const u8,
+        compiler_type_id: u32,
+    }{
+        .{ .owner = "countU8", .compiler_type_id = 1 },
+        .{ .owner = "countU16", .compiler_type_id = 2 },
+        .{ .owner = "countU32", .compiler_type_id = 3 },
+        .{ .owner = "countU64", .compiler_type_id = 4 },
+        .{ .owner = "countU128", .compiler_type_id = 5 },
+        .{ .owner = "countU160", .compiler_type_id = 18 },
+        .{ .owner = "countU256", .compiler_type_id = 6 },
+        .{ .owner = "countI8", .compiler_type_id = 7 },
+        .{ .owner = "countI16", .compiler_type_id = 8 },
+        .{ .owner = "countI32", .compiler_type_id = 9 },
+        .{ .owner = "countI64", .compiler_type_id = 10 },
+        .{ .owner = "countI128", .compiler_type_id = 11 },
+        .{ .owner = "countI256", .compiler_type_id = 12 },
+    };
+
+    var result = try collectPackageObligations(
+        testing.allocator,
+        "tests/formal/scalar_loop_integer_widths.ora",
+    );
+    defer result.deinit();
+
+    try testing.expectEqual(expected.len, result.set.loop_summaries.len);
+    var induction_query_count: usize = 0;
+    for (result.set.queries) |query| {
+        if (query.kind != .loop_induction) continue;
+        induction_query_count += 1;
+        try testing.expectEqual(obligation.ProofRequirement.lean_certificate, query.proof_requirement);
+        switch (obligation_to_lean.querySemanticSupport(result.set, query)) {
+            .supported => {},
+            .unsupported => return error.TestUnexpectedResult,
+        }
+    }
+    try testing.expectEqual(expected.len, induction_query_count);
+
+    for (expected) |wanted| {
+        var matched: ?obligation.LoopSummaryRow = null;
+        for (result.set.loop_summaries) |summary| {
+            if (summary.owner != .statement) continue;
+            if (std.mem.eql(u8, summary.owner.statement.function_name, wanted.owner)) {
+                matched = summary;
+                break;
+            }
+        }
+        const summary = matched orelse return error.TestUnexpectedResult;
+        try testing.expect(summary.projectionSupported());
+        try testing.expectEqual(@as(usize, 1), summary.variables.len);
+        try testing.expectEqual(@as(usize, 1), summary.context_variables.len);
+        try testing.expectEqual(
+            obligation.TypeRef{ .compiler_type_id = wanted.compiler_type_id },
+            summary.variables[0].ty,
+        );
+        try testing.expectEqual(
+            obligation.TypeRef{ .compiler_type_id = wanted.compiler_type_id },
+            summary.context_variables[0].ty,
+        );
     }
 }
 
@@ -2488,7 +2797,7 @@ test "automatic scalar loop synthesis failure is parsed and points to proof mani
         "--out-dir",
         output_path,
         "--lean-proofs",
-        "ora-example/smt/propagation/control_flow.ora",
+        "tests/formal/scalar_loop_manual_proof_required.ora",
     });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
@@ -4705,8 +5014,8 @@ test "B4 unknown diagnostic rejects Lean recipe for unsupported semantic type" {
 
     const source =
         \\contract B4UnsupportedLeanType {
-        \\    pub fn small(x: u32) -> bool
-        \\        ensures x <= x
+        \\    pub fn same(x: address) -> bool
+        \\        ensures x == x
         \\    {
         \\        return true;
         \\    }
@@ -4732,7 +5041,7 @@ test "B4 unknown diagnostic rejects Lean recipe for unsupported semantic type" {
 
     try expectExited(result, 1);
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean proof recipe unavailable for some required userland obligations"));
-    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "unsupported Lean semantic type `u32`"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "unsupported Lean semantic type `address`"));
     try testing.expect(!std.mem.containsAtLeast(u8, result.stdout, 1, "Lean proof recipe for required userland obligations"));
     try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "b4-out/b4_unsupported_lean_type.lean.obligations.lean", .{}));
 }
@@ -5268,7 +5577,7 @@ test "formal Z3 adapter proves canonical term obligation from assumptions" {
     const terms = [_]obligation.Term{
         .{ .variable = .{ .free = .{ .id = .{ .file_id = 0, .pattern_id = 0 }, .name = "balance", .ty = .{ .spelling = "u256" } } } },
         .{ .variable = .{ .free = .{ .id = .{ .file_id = 0, .pattern_id = 1 }, .name = "amount", .ty = .{ .spelling = "u256" } } } },
-        .{ .binary = .{ .op = .ge, .lhs = 0, .rhs = 1 } },
+        .{ .binary = .{ .op = .ge, .lhs = 0, .rhs = 1, .ty = builtinTypeRef(.u256) } },
     };
     const assumptions = [_]obligation.Assumption{
         .{
@@ -5531,7 +5840,7 @@ test "formal Lean emitter writes manifest rows from canonical obligations" {
     const terms = [_]obligation.Term{
         .{ .variable = .{ .free = .{ .id = .{ .file_id = 0, .pattern_id = 0 }, .name = "balance", .ty = .{ .spelling = "u256" } } } },
         .{ .variable = .{ .free = .{ .id = .{ .file_id = 0, .pattern_id = 1 }, .name = "amount", .ty = .{ .spelling = "u256" } } } },
-        .{ .binary = .{ .op = .ge, .lhs = 0, .rhs = 1 } },
+        .{ .binary = .{ .op = .ge, .lhs = 0, .rhs = 1, .ty = builtinTypeRef(.u256) } },
     };
     const assumptions = [_]obligation.Assumption{
         .{
@@ -6339,7 +6648,7 @@ test "formal obligation MLIR adapter projects signed i256 comparison tags" {
     try testing.expect(std.mem.containsAtLeast(u8, lean, 1, ".compilerTypeId 12"));
 }
 
-test "formal obligation Lean support rejects narrow signed comparison width" {
+test "formal obligation Lean supports registered narrow signed comparison width" {
     const h = createContext();
     defer destroyContext(h);
 
@@ -6368,7 +6677,12 @@ test "formal obligation Lean support rejects narrow signed comparison width" {
     const b = try expectQuantifiedTerm(result.set, a.body, .forall, "b");
     const body = try expectBinaryTerm(result.set, b.body, .slt);
     try expectTypeRefBuiltin(body.ty, .i64);
-    try expectEnsuresQueryUnsupported(result.set, .unsupported_comparison_width);
+    try expectEnsuresQuerySupported(result.set);
+
+    const lean = try emitLeanToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(lean);
+    try testing.expect(std.mem.containsAtLeast(u8, lean, 1, ".slt"));
+    try testing.expect(std.mem.containsAtLeast(u8, lean, 1, ".compilerTypeId 10"));
 }
 
 test "formal obligation MLIR adapter blocks signed predicate on unsigned operands" {
@@ -6404,7 +6718,7 @@ test "formal obligation MLIR adapter blocks signed predicate on unsigned operand
     try testing.expect(!std.mem.containsAtLeast(u8, report, 1, "\"op\":\"slt\""));
 }
 
-test "formal obligation Lean signed comparison support requires compiler type identity" {
+test "formal obligation Lean supports canonical signed type spelling" {
     const terms = [_]obligation.Term{
         .{ .variable = .{ .free = .{ .id = .{ .file_id = 31, .pattern_id = 1 }, .name = "a", .ty = .{ .spelling = "i256" } } } },
         .{ .variable = .{ .free = .{ .id = .{ .file_id = 31, .pattern_id = 2 }, .name = "b", .ty = .{ .spelling = "i256" } } } },
@@ -6428,6 +6742,48 @@ test "formal obligation Lean signed comparison support requires compiler type id
         .{
             .id = 2,
             .owner = .{ .function = .{ .name = "signed_cmp" } },
+            .source = .generated(),
+            .phase = .report,
+            .origin = .source,
+            .backend = .z3,
+            .kind = .obligation,
+            .logical_role = .ensures,
+            .obligation_ids = &obligation_ids,
+        },
+    };
+    const set: obligation.ObligationSet = .{
+        .obligations = &obligations,
+        .queries = &queries,
+        .terms = &terms,
+    };
+
+    try expectEnsuresQuerySupported(set);
+}
+
+test "formal obligation Lean rejects unregistered signed type spelling" {
+    const terms = [_]obligation.Term{
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 31, .pattern_id = 1 }, .name = "a", .ty = .{ .spelling = "i167" } } } },
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 31, .pattern_id = 2 }, .name = "b", .ty = .{ .spelling = "i167" } } } },
+        .{ .binary = .{ .op = .slt, .lhs = 0, .rhs = 1, .ty = .{ .spelling = "i167" } } },
+    };
+    const obligations = [_]obligation.Obligation{
+        .{
+            .id = 1,
+            .owner = .{ .function = .{ .name = "unregistered_signed_cmp" } },
+            .source = .generated(),
+            .phase = .ora_mlir,
+            .origin = .{ .mlir_op = .{ .op_name = "ora.ensures", .symbol = "unregistered_signed_cmp" } },
+            .kind = .{ .logical = .{
+                .role = .ensures,
+                .formula = .{ .term = 2 },
+            } },
+        },
+    };
+    const obligation_ids = [_]obligation.Id{1};
+    const queries = [_]obligation.VerificationQuery{
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "unregistered_signed_cmp" } },
             .source = .generated(),
             .phase = .report,
             .origin = .source,
@@ -6588,7 +6944,148 @@ test "formal obligation MLIR adapter projects div and rem value terms with opcod
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, ".compilerTypeId 12"));
 }
 
-test "formal obligation Lean rejects narrow div and rem arithmetic width" {
+test "formal obligation MLIR adapter projects wrapping power and shifts with compiler signedness" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @integer_terms(%arg0: i256, %arg1: i256, %small0: i8, %small1: i8) attributes {
+        \\    ora.param_names = ["x", "y", "small_x", "small_y"],
+        \\    ora.param_binding_ids = ["file:41:pattern:1", "file:41:pattern:2", "file:41:pattern:3", "file:41:pattern:4"]
+        \\  } {
+        \\    %c3 = arith.constant 3 : i256
+        \\    %add = ora.add_wrapping %arg0, %arg1 {ora.integer_signed = false} : i256, i256 -> i256
+        \\    %pow = ora.power %arg0, %c3 {ora.integer_checked = false, ora.integer_signed = false} : i256, i256 -> i256
+        \\    %shl = ora.shl_wrapping %arg0, %arg1 {ora.integer_signed = false} : i256, i256 -> i256
+        \\    %shr = ora.shr_wrapping %arg0, %arg1 {ora.integer_signed = true} : i256, i256 -> i256
+        \\    %dynamic_pow = ora.power %small0, %small1 {ora.integer_checked = false, ora.integer_signed = false} : i8, i8 -> i8
+        \\    %add_ok = arith.cmpi eq, %add, %arg0 : i256
+        \\    %pow_ok = arith.cmpi eq, %pow, %arg0 : i256
+        \\    %shl_ok = arith.cmpi eq, %shl, %arg0 : i256
+        \\    %shr_ok = arith.cmpi eq, %shr, %arg0 : i256
+        \\    %dynamic_pow_ok = arith.cmpi eq, %dynamic_pow, %small0 : i8
+        \\    "ora.ensures"(%add_ok) : (i1) -> ()
+        \\    "ora.ensures"(%pow_ok) : (i1) -> ()
+        \\    "ora.ensures"(%shl_ok) : (i1) -> ()
+        \\    "ora.ensures"(%shr_ok) : (i1) -> ()
+        \\    "ora.ensures"(%dynamic_pow_ok) : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    var saw_add = false;
+    var saw_pow = false;
+    var saw_shl = false;
+    var saw_signed_shr = false;
+    for (result.set.terms) |term| {
+        if (term != .binary) continue;
+        const binary = term.binary;
+        switch (binary.op) {
+            .add => saw_add = true,
+            .pow => saw_pow = true,
+            .shl => saw_shl = true,
+            .shr => if (binary.ty) |ty| {
+                saw_signed_shr = ty == .compiler_type_id and
+                    ty.compiler_type_id == type_builtin.lookupBuiltinById(.i256).comptime_type_id;
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_add);
+    try testing.expect(saw_pow);
+    try testing.expect(saw_shl);
+    try testing.expect(saw_signed_shr);
+
+    const rendered = try emitLeanToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, ".pow"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, ".shl"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, ".shr"));
+
+    var pass = try z3_verification.VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    const z3_bindings = try test_helpers.z3FormalQueryBindingsFromFormalForTest(
+        testing.allocator,
+        result.query_bindings,
+    );
+    defer testing.allocator.free(z3_bindings);
+    pass.setFormalQueryBindings(z3_bindings);
+    var z3_manifest = try pass.collectPreparedQueryManifest(module);
+    defer z3_manifest.deinit();
+
+    var overlay = try obligation_from_z3.overlayPreparedQueryResults(
+        testing.allocator,
+        result.set,
+        z3_manifest.rows,
+    );
+    defer overlay.deinit();
+
+    var z3_ctx = try z3_verification.Z3Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+    var adapter = obligation_to_z3.Adapter.init(&z3_ctx, testing.allocator, overlay.set);
+
+    var parity_rows: usize = 0;
+    for (overlay.set.queries) |query| {
+        if (query.kind != .obligation or query.smtlib_hash == null) continue;
+        const canonical = try adapter.queryHashForRow(query);
+        try testing.expectEqual(query.constraint_count, canonical.constraint_count);
+        try testing.expectEqual(query.smtlib_hash.?, canonical.smtlib_hash);
+        parity_rows += 1;
+    }
+    try testing.expectEqual(@as(usize, 5), parity_rows);
+}
+
+test "formal obligation MLIR adapter rejects arithmetic with missing compiler metadata" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @missing_signedness(%arg0: i256, %arg1: i256) attributes {
+        \\    ora.param_names = ["x", "y"],
+        \\    ora.param_binding_ids = ["file:42:pattern:1", "file:42:pattern:2"]
+        \\  } {
+        \\    %shr = ora.shr_wrapping %arg0, %arg1 : i256, i256 -> i256
+        \\    %pow = ora.power %arg0, %arg1 {ora.integer_signed = false} : i256, i256 -> i256
+        \\    %ok = arith.cmpi eq, %shr, %arg0 : i256
+        \\    %pow_ok = arith.cmpi eq, %pow, %arg0 : i256
+        \\    "ora.requires"(%ok) : (i1) -> ()
+        \\    "ora.requires"(%pow_ok) : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expect(result.set.hasBlockingDiagnostic());
+    var saw_signedness_reason = false;
+    var saw_checked_mode_reason = false;
+    for (result.set.diagnostics) |diagnostic| {
+        if (diagnostic.kind != .missing_type) continue;
+        if (std.mem.indexOf(u8, diagnostic.message, "ora.integer_signed") != null)
+            saw_signedness_reason = true;
+        if (std.mem.indexOf(u8, diagnostic.message, "ora.integer_checked") != null)
+            saw_checked_mode_reason = true;
+    }
+    try testing.expect(saw_signedness_reason);
+    try testing.expect(saw_checked_mode_reason);
+}
+
+test "formal obligation Lean supports registered narrow div arithmetic width" {
     const h = createContext();
     defer destroyContext(h);
 
@@ -6613,7 +7110,12 @@ test "formal obligation Lean rejects narrow div and rem arithmetic width" {
     defer result.deinit();
 
     try testing.expect(!result.set.hasBlockingDiagnostic());
-    try expectEnsuresQueryUnsupported(result.set, .unsupported_arithmetic_width);
+    try expectEnsuresQuerySupported(result.set);
+
+    const lean = try emitLeanToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(lean);
+    try testing.expect(std.mem.containsAtLeast(u8, lean, 1, ".div"));
+    try testing.expect(std.mem.containsAtLeast(u8, lean, 1, ".compilerTypeId 3"));
 }
 
 test "formal obligation Lean rejects signed comparison over unsigned div result" {
@@ -6844,7 +7346,7 @@ test "formal obligation MLIR adapter does not project scalar sload in functions 
     try testing.expect(!std.mem.containsAtLeast(u8, report, 1, "\"tag\":\"place_read\""));
 }
 
-test "formal obligation MLIR adapter keeps non-u256 scalar sload outside Lean term fragment" {
+test "formal obligation MLIR adapter projects registered narrow scalar sload" {
     const h = createContext();
     defer destroyContext(h);
 
@@ -6873,17 +7375,17 @@ test "formal obligation MLIR adapter keeps non-u256 scalar sload outside Lean te
 
     try testing.expect(!result.set.hasBlockingDiagnostic());
     try testing.expectEqual(@as(usize, 1), countLogical(result.set, .ensures));
-    for (result.set.obligations) |item| {
-        if (item.kind != .logical or item.kind.logical.role != .ensures) continue;
-        try testing.expect(item.kind.logical.formula == .origin_value);
-    }
+    const body = try expectBinaryTerm(result.set, try expectLogicalTerm(result.set, .ensures), .le);
+    try expectTypeRefBuiltin(body.ty, .u32);
+    try expectPlaceReadTerm(result.set, body.lhs, "small", .storage);
+    try expectPlaceReadTerm(result.set, body.rhs, "small", .storage);
 
     const report = try dumpManifestToOwnedString(testing.allocator, result.set);
     defer testing.allocator.free(report);
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"formula_projection_by_kind\":{\"logical\":{\"term\":0,\"origin_value\":1,\"total\":1,\"term_ratio_basis_points\":0}"));
-    try testing.expect(!std.mem.containsAtLeast(u8, report, 1, "\"tag\":\"place_read\""));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"formula_projection_by_kind\":{\"logical\":{\"term\":1,\"origin_value\":0,\"total\":1,\"term_ratio_basis_points\":10000}"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"tag\":\"place_read\""));
 
-    try expectEnsuresQueryUnsupported(result.set, .unsupported_origin_value);
+    try expectEnsuresQuerySupported(result.set);
 }
 
 test "formal obligation MLIR adapter projects old written scalar sload as entry place read" {
@@ -8521,7 +9023,7 @@ test "formal obligation MLIR adapter records lock and external frame metadata" {
     try testing.expectEqualStrings("caller_storage", external.declared[0].root);
 }
 
-test "formal obligation MLIR adapter covers Z3 assertion tags and implicit safety ops" {
+test "formal obligation MLIR adapter covers Z3 assertion tags and implicit division safety" {
     const h = createContext();
     defer destroyContext(h);
 
@@ -8571,15 +9073,15 @@ test "formal obligation MLIR adapter covers Z3 assertion tags and implicit safet
     defer result.deinit();
 
     try testing.expect(!result.set.hasBlockingDiagnostic());
-    try testing.expectEqual(@as(usize, 3), result.set.obligations.len);
+    try testing.expectEqual(@as(usize, 2), result.set.obligations.len);
     try testing.expectEqual(@as(usize, 1), result.set.assumptions.len);
-    try testing.expectEqual(@as(usize, 5), result.set.queries.len);
+    try testing.expectEqual(@as(usize, 4), result.set.queries.len);
     try testing.expectEqual(@as(usize, 0), countAssumption(result.set, .requires));
     try testing.expectEqual(@as(usize, 1), countAssumption(result.set, .path_assume));
     try testing.expectEqual(@as(usize, 1), countRuntimeGuards(result.set));
-    try testing.expectEqual(@as(usize, 2), countLogical(result.set, .arithmetic_safety));
+    try testing.expectEqual(@as(usize, 1), countLogical(result.set, .arithmetic_safety));
     try testing.expectEqual(@as(usize, 1), countQuery(result.set, .base));
-    try testing.expectEqual(@as(usize, 2), countQuery(result.set, .obligation));
+    try testing.expectEqual(@as(usize, 1), countQuery(result.set, .obligation));
     try testing.expectEqual(@as(usize, 1), countQuery(result.set, .guard_satisfy));
     try testing.expectEqual(@as(usize, 1), countQuery(result.set, .guard_violate));
 
@@ -8600,7 +9102,7 @@ test "formal obligation MLIR adapter expands resource op properties" {
         \\    ora.param_names = ["balances", "from", "to", "amount"],
         \\    ora.param_binding_ids = ["file:201:pattern:0", "file:201:pattern:1", "file:201:pattern:2", "file:201:pattern:3"]
         \\  } {
-        \\    "ora.move"(%balances, %from, %balances, %to, %amount) <{operand_segment_sizes = array<i32: 2, 2, 1>, domain = "TokenUnit", carrier_type = !ora.int<256, false>, carrier_signed = false}> : (!ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.int<256, false>) -> ()
+        \\    "ora.move"(%balances, %from, %balances, %to, %amount) <{operandSegmentSizes = array<i32: 2, 2, 1>, domain = "TokenUnit", carrier_type = !ora.int<256, false>, carrier_signed = false}> : (!ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.int<256, false>) -> ()
         \\    func.return
         \\  }
         \\}
@@ -8778,7 +9280,7 @@ test "formal report coverage summarizes representative MLIR obligation classes" 
         \\    "ora.ensures"(%flag) : (i1) -> ()
         \\    "ora.assert"(%flag) <{message = "checked addition overflow"}> : (i1) -> ()
         \\    "ora.refinement_guard"(%flag) <{message = "guard"}> : (i1) -> ()
-        \\    "ora.move"(%balances, %from, %balances, %to, %amount) <{operand_segment_sizes = array<i32: 2, 2, 1>, domain = "TokenUnit", carrier_type = !ora.int<256, false>, carrier_signed = false}> : (!ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.int<256, false>) -> ()
+        \\    "ora.move"(%balances, %from, %balances, %to, %amount) <{operandSegmentSizes = array<i32: 2, 2, 1>, domain = "TokenUnit", carrier_type = !ora.int<256, false>, carrier_signed = false}> : (!ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.int<256, false>) -> ()
         \\    %q = "ora.quantified"(%flag, %flag) <{quantifier = "forall", variable = "i", variable_type = "u256"}> : (i1, i1) -> i1
         \\    "ora.assert"(%q) <{message = "bounded"}> : (i1) -> ()
         \\    %d = arith.divui %x, %y : i256
@@ -8861,8 +9363,8 @@ test "formal loop summary rows are source-owner scoped scalar data" {
     try testing.expectEqual(@as(usize, 3), row.invariant_formulas.len);
     try testing.expectEqual(@as(usize, 2), row.step_assignments.len);
     try testing.expect(row.body_safety_formulas.len > 0);
-    try testing.expect(loopSummaryHasReason(row, .loop_formula_unsupported));
-    try testing.expect(!row.projectionSupported());
+    try testing.expect(!loopSummaryHasReason(row, .loop_formula_unsupported));
+    try testing.expect(row.projectionSupported());
     try testing.expectEqual(@as(usize, 1), row.context_variables.len);
     try testing.expectEqual(@as(usize, 0), row.post_formulas.len);
     try testing.expectEqual(@as(usize, 0), row.query_ids.post.len);
@@ -8877,8 +9379,7 @@ test "formal loop summary rows are source-owner scoped scalar data" {
     defer loop_report.deinit();
     try obligation_dump.writeLoopInductionReport(&loop_report.writer, result.set);
     try testing.expect(std.mem.containsAtLeast(u8, loop_report.written(), 1, "\"schema_version\":1"));
-    try testing.expect(std.mem.containsAtLeast(u8, loop_report.written(), 1, "\"status\":\"excluded\""));
-    try testing.expect(std.mem.containsAtLeast(u8, loop_report.written(), 1, "loop_formula_unsupported"));
+    try testing.expect(std.mem.containsAtLeast(u8, loop_report.written(), 1, "\"status\":\"lean_certificate_required\""));
 
     var storage_loop: ?obligation.LoopSummaryRow = null;
     var nested_loop: ?obligation.LoopSummaryRow = null;
