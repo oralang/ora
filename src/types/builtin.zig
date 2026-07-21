@@ -212,6 +212,11 @@ pub fn parseIntegerBuiltin(name: []const u8) ?BuiltinTypeSpec {
     return if (spec.category == .Integer) spec else null;
 }
 
+pub fn integerInfoByName(name: []const u8) ?BuiltinIntegerInfo {
+    const spec = parseIntegerBuiltin(name) orelse return null;
+    return integerInfoByComptimeTypeId(spec.comptime_type_id);
+}
+
 pub fn lookupIntegerBuiltin(signed: bool, bits: u16) ?BuiltinTypeSpec {
     for (builtin_types) |spec| {
         if (spec.category != .Integer) continue;

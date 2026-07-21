@@ -1,0 +1,33 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "shift_left(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1, 7]
+returns = { u256 = 128 }
+
+[[call]]
+fn = "shift_right(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [128, 7]
+returns = { u256 = 1 }
+
+# The source-owned bound is enforced in both verified and no-verify builds.
+[[call]]
+fn = "shift_left(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1, 256]
+reverts = { any = true }
+
+[[call]]
+fn = "shift_right(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [128, 256]
+reverts = { any = true }

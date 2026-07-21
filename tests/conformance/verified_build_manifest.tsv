@@ -8,6 +8,7 @@ rewritten	app_resource_points.spec.toml	-
 same-bytecode	app_staking.spec.toml	-
 same-bytecode	app_vault_errors.spec.toml	-
 unverifiable	arithmetic_checked_revert.spec.toml	callee_precondition_unproved
+same-bytecode	checked_shift_verified.spec.toml	-
 same-bytecode	comptime_observable.spec.toml	-
 unverifiable	computed_storage_cost_array.spec.toml	contract_invariant_unproved
 unverifiable	computed_storage_cost_compare.spec.toml	contract_invariant_unproved

@@ -2039,6 +2039,29 @@ test "compiler lowers remaining wrapping ops through real wrapping ops" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.mul_wrapping"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.shl_wrapping"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.shr_wrapping"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "checked shift amount out of range"));
+}
+
+test "compiler lowers checked shifts with source-owned range asserts" {
+    const source_text =
+        \\pub fn checked_shifts(value: u8, amount: u8) -> u8 {
+        \\    let left = value << amount;
+        \\    return left >> amount;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, hir_text, "checked shift amount out of range"));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, hir_text, "ora.assert %"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shli"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shrui"));
 }
 
 test "compiler lowers wrapping power through ora.power" {
@@ -2056,7 +2079,28 @@ test "compiler lowers wrapping power through ora.power" {
     defer testing.allocator.free(hir_text);
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.power"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.integer_signed = false"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.integer_checked = false"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.power\""));
+}
+
+test "compiler records signedness on wrapping right shift" {
+    const source_text =
+        \\pub fn signed_wrap(value: i8, amount: i8) -> i8 {
+        \\    return value >>% amount;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.shr_wrapping"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.integer_signed = true"));
 }
 
 test "compiler lowers checked power with overflow assert" {
@@ -2074,6 +2118,7 @@ test "compiler lowers checked power with overflow assert" {
     defer testing.allocator.free(hir_text);
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.power"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.integer_checked = true"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.assert"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.power\""));
 }
@@ -2154,6 +2199,8 @@ test "compiler lowers shift compound assignment" {
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shli"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shrui"));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, hir_text, "checked shift amount out of range"));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, hir_text, "ora.assert %"));
 }
 
 test "compiler resolves generic compound shift signedness before lowering" {
@@ -2968,6 +3015,33 @@ test "compiler lowers labeled switch invariants" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.invariant"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_placeholder"));
+}
+
+test "loop-carried integer signedness is compiler-owned metadata" {
+    const source_text =
+        \\contract LoopCarriers {
+        \\pub fn count_u8() -> u8 {
+        \\    var i: u8 = 0;
+        \\    while (i < 3) invariant i <= 3 { i = i + 1; }
+        \\    return i;
+        \\}
+        \\pub fn count_i8() -> i8 {
+        \\    var i: i8 = 0;
+        \\    while (i < 3) invariant i <= 3 { i = i + 1; }
+        \\    return i;
+        \\}
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.result_integer_signed_0 = false"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.result_integer_signed_0 = true"));
 }
 
 test "compiler lowers switch arms with nested for carried locals" {

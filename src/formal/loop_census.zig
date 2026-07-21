@@ -7,9 +7,11 @@ const std = @import("std");
 const ora_root = @import("ora_root");
 const mlir_c_api = @import("mlir_c_api");
 const z3_verification = @import("ora_z3_verification");
+const ora_types = @import("ora_types");
 const obligation = @import("obligation.zig");
 const obligation_from_mlir = @import("obligation_from_mlir.zig");
 const obligation_to_lean = @import("obligation_to_lean.zig");
+const type_builtin = ora_types.builtin;
 
 const compiler = ora_root.compiler;
 const ast = compiler.ast;
@@ -384,7 +386,7 @@ fn buildLoopRecord(
     if (loop_data.invariants.len == 0) try appendReason(&shape_excluded, arena, "loop_missing_invariant");
     if (!formula_supported) try appendReason(&shape_excluded, arena, "loop_formula_unsupported:condition");
     if (std.mem.eql(u8, loop_data.form, "labeled_switch")) try appendReason(&shape_excluded, arena, "loop_form_unsupported:labeled_switch");
-    if (!allTypesU256(loop_var_types.items)) try appendReason(&shape_excluded, arena, "loop_variable_not_u256");
+    if (!allTypesRegisteredInteger(loop_var_types.items)) try appendReason(&shape_excluded, arena, "loop_variable_not_registered_integer");
     if (!facts.scalar_updates) try appendReason(&shape_excluded, arena, "loop_update_not_scalar_assignment");
     if (!effect_found) try appendReason(&shape_excluded, arena, "loop_effect_identity_missing");
     if (writes_storage) try appendReason(&shape_excluded, arena, "loop_has_storage_write");
@@ -611,7 +613,7 @@ const BodyFacts = struct {
             .VariableDecl => |decl| {
                 if (decl.storage_class != .none and decl.storage_class != .memory) self.scalar_updates = false;
                 if (file.pattern(decl.pattern).* != .Name) self.scalar_updates = false;
-                if (!isU256(self.typecheck.pattern_types[decl.pattern.index()].type)) self.scalar_updates = false;
+                if (!isRegisteredInteger(self.typecheck.pattern_types[decl.pattern.index()].type)) self.scalar_updates = false;
                 if (decl.value) |value| {
                     if (!scalarTerm(file, self.typecheck, value)) self.scalar_updates = false;
                 } else self.scalar_updates = false;
@@ -707,7 +709,7 @@ fn scalarFormula(file: *const ast.AstFile, typecheck: *const sema.TypeCheckResul
 
 fn scalarTerm(file: *const ast.AstFile, typecheck: *const sema.TypeCheckResult, expr_id: ast.ExprId) bool {
     const ty = typecheck.exprType(expr_id);
-    if (ty.kind() != .bool and !isU256(ty) and ty.kind() != .comptime_integer) return false;
+    if (ty.kind() != .bool and !isRegisteredInteger(ty) and ty.kind() != .comptime_integer) return false;
     return switch (file.expression(expr_id).*) {
         .IntegerLiteral, .BoolLiteral, .Name => true,
         .Unary => |unary| unary.op != .try_ and scalarTerm(file, typecheck, unary.operand),
@@ -717,10 +719,10 @@ fn scalarTerm(file: *const ast.AstFile, typecheck: *const sema.TypeCheckResult, 
     };
 }
 
-fn isU256(ty: sema.Type) bool {
+fn isRegisteredInteger(ty: sema.Type) bool {
     const base = if (ty.refinementBaseType()) |refinement_base| refinement_base.* else ty;
     return switch (base) {
-        .integer => |integer| integer.isUnsignedBits(256),
+        .integer => |integer| type_builtin.lookupIntegerBuiltin(integer.signed, integer.bits) != null,
         else => false,
     };
 }
@@ -733,8 +735,8 @@ fn typeLabel(arena: std.mem.Allocator, ty: sema.Type) ![]const u8 {
     };
 }
 
-fn allTypesU256(types: []const []const u8) bool {
-    for (types) |label| if (!std.mem.eql(u8, label, "u256")) return false;
+fn allTypesRegisteredInteger(types: []const []const u8) bool {
+    for (types) |label| if (type_builtin.parseIntegerBuiltin(label) == null) return false;
     return true;
 }
 

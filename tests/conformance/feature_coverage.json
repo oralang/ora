@@ -689,9 +689,18 @@
     {
       "id": "arithmetic.checked_arith_runtime_behavior",
       "area": "arithmetic",
-      "behavior": "Retained checked-add assert reverts on real overflow; CHARACTERIZATION pins: requires not boundary-enforced, discharged div-zero check removed (silent 0) - known finding with audit",
+      "behavior": "Retained checked-add and checked-shift assertions revert on overflow or an out-of-range amount in verified and no-verify builds; CHARACTERIZATION pins: requires not boundary-enforced, discharged div-zero check removed (silent 0) - known finding with audit",
       "specs": [
-        "tests/conformance/arithmetic_checked_revert.spec.toml"
+        "tests/conformance/arithmetic_checked_revert.spec.toml",
+        "tests/conformance/checked_shift_verified.spec.toml"
+      ]
+    },
+    {
+      "id": "arithmetic.integer_shift_width_matrix",
+      "area": "arithmetic",
+      "behavior": "Checked and wrapping left/right shifts execute at zero, width-minus-one, width, and above-width amounts for every registered signed and unsigned integer type; signed amounts additionally cover negative rejection or total wrapping behavior",
+      "specs": [
+        "tests/conformance/integer_shift_matrix.zig#run"
       ]
     },
     {

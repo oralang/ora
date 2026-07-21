@@ -70,8 +70,13 @@ def decodeBinaryOp : String → Option BinaryOp
   | "add" => some .add
   | "sub" => some .sub
   | "mul" => some .mul
+  | "pow" => some .pow
+  | "shl" => some .shl
+  | "shr" => some .shr
   | "div" => some .div
   | "mod" => some .mod_
+  | "bit_and" => some .bitAnd
+  | "bit_xor" => some .bitXor
   | "and" => some .and_
   | "or" => some .or_
   | "implies" => some .implies
@@ -281,10 +286,12 @@ theorem unary_op_decode_pins :
 
 theorem binary_op_decode_pins :
     ["eq", "ne", "lt", "le", "gt", "ge", "slt", "sle", "sgt", "sge",
-     "add", "sub", "mul", "div", "mod", "and", "or", "implies"].map decodeBinaryOp =
+     "add", "sub", "mul", "pow", "shl", "shr", "div", "mod", "bit_and", "bit_xor",
+     "and", "or", "implies"].map decodeBinaryOp =
       [some .eq, some .ne, some .lt, some .le, some .gt, some .ge,
        some .slt, some .sle, some .sgt, some .sge,
-       some .add, some .sub, some .mul, some .div, some .mod_,
+       some .add, some .sub, some .mul, some .pow, some .shl, some .shr,
+       some .div, some .mod_, some .bitAnd, some .bitXor,
        some .and_, some .or_, some .implies] := by decide
 
 theorem quantifier_decode_pins :
@@ -346,8 +353,11 @@ theorem ty_spelling_decode_pins :
        some (.compilerTypeId 12), none] := by decide
 
 def valueForTy? : Option TyRef → Value
-  | some ty => if ty.isBool then .bool true else .u256 (BitVec.ofNat 256 0)
-  | none => .u256 (BitVec.ofNat 256 0)
+  | some ty =>
+      match ty.integerShape? with
+      | some shape => .integer (Ora.Integer.Value.ofNat shape 0)
+      | none => .bool true
+  | none => .bool false
 
 def bindFreeVarsFromTerm (env : Env) : Term → Env
   | .variable (.free free) => env.setFree free.id (valueForTy? free.ty)
@@ -355,14 +365,20 @@ def bindFreeVarsFromTerm (env : Env) : Term → Env
 
 def canonicalEnv (manifest : Manifest) : Env :=
   { manifest.terms.foldl bindFreeVarsFromTerm Env.empty with
-    result := some (.u256 (BitVec.ofNat 256 0)) }
+    placeValue := fun _ => .integer (Ora.Integer.Value.ofNat (.unsigned .w256) 0)
+    result := some (.integer (Ora.Integer.Value.ofNat (.unsigned .w256) 0)) }
 
 def valueDenotes? (manifest : Manifest) (env : Env) (fuel : Nat) (id : TermId) : Bool :=
   (denoteValue? manifest env fuel id).isSome
 
+def valueDenotesInteger? (manifest : Manifest) (env : Env) (fuel : Nat) (id : TermId) : Bool :=
+  match denoteValue? manifest env fuel id with
+  | some (.integer _) => true
+  | _ => false
+
 def valueDenotesU256? (manifest : Manifest) (env : Env) (fuel : Nat) (id : TermId) : Bool :=
   match denoteValue? manifest env fuel id with
-  | some (.u256 _) => true
+  | some (.integer value) => (value.bitsFor? (.unsigned .w256)).isSome
   | _ => false
 
 def valueDenotesBool? (manifest : Manifest) (env : Env) (fuel : Nat) (id : TermId) : Bool :=
@@ -386,14 +402,13 @@ def refinementPredicateFullyDenotable?
     (name : String)
     (value : TermId)
     (args : List TermId) : Bool :=
-  let argsDenote := args.all (valueDenotesU256? manifest env fuel)
+  let argsDenote := args.all (valueDenotesInteger? manifest env fuel)
   match name, args with
-  | "NonZero", [] => valueDenotesU256? manifest env fuel value
-  | "NonZeroAddress", [] => valueDenotesU256? manifest env fuel value
-  | "MinValue", [_] => valueDenotesU256? manifest env fuel value && argsDenote
-  | "MaxValue", [_] => valueDenotesU256? manifest env fuel value && argsDenote
-  | "InRange", [_, _] => valueDenotesU256? manifest env fuel value && argsDenote
-  | "BasisPoints", [] => valueDenotesU256? manifest env fuel value
+  | "NonZero", [] => valueDenotesInteger? manifest env fuel value
+  | "MinValue", [_] => valueDenotesInteger? manifest env fuel value && argsDenote
+  | "MaxValue", [_] => valueDenotesInteger? manifest env fuel value && argsDenote
+  | "InRange", [_, _] => valueDenotesInteger? manifest env fuel value && argsDenote
+  | "BasisPoints", [] => valueDenotesInteger? manifest env fuel value
   | _, _ => false
 
 def formulaFullyDenotable? (manifest : Manifest) (env : Env) : Nat → TermId → Bool
@@ -415,24 +430,33 @@ def formulaFullyDenotable? (manifest : Manifest) (env : Env) : Nat → TermId �
           | .eq | .ne =>
               valueEqDenotable? manifest env fuel binary.lhs binary.rhs
           | .lt | .le | .gt | .ge =>
-              valueDenotesU256? manifest env fuel binary.lhs &&
-                valueDenotesU256? manifest env fuel binary.rhs
+              match binary.ty with
+              | some ty =>
+                  match ty.integerShape? with
+                  | some (.unsigned _) =>
+                      valueDenotesInteger? manifest env fuel binary.lhs &&
+                        valueDenotesInteger? manifest env fuel binary.rhs
+                  | _ => false
+              | none => false
           | .slt | .sle | .sgt | .sge =>
               match binary.ty with
               | some ty =>
-                  ty.isI256 &&
-                    valueDenotesU256? manifest env fuel binary.lhs &&
-                    valueDenotesU256? manifest env fuel binary.rhs
+                  match ty.integerShape? with
+                  | some (.signed _) =>
+                      valueDenotesInteger? manifest env fuel binary.lhs &&
+                        valueDenotesInteger? manifest env fuel binary.rhs
+                  | _ => false
               | none => false
           | .and_ | .or_ | .implies =>
               formulaFullyDenotable? manifest env fuel binary.lhs &&
                 formulaFullyDenotable? manifest env fuel binary.rhs
-          | .add | .sub | .mul | .div | .mod_ => false
+          | .add | .sub | .mul | .pow | .shl | .shr | .div | .mod_ |
+              .bitAnd | .bitXor => false
       | some (.quantified quantified) =>
-          if !quantified.binder.isU256 then
-            false
-          else
-            let localEnv := env.pushBound (.u256 (BitVec.ofNat 256 0))
+          match quantified.binder.integerShape? with
+          | none => false
+          | some shape =>
+            let localEnv := env.pushBound (.integer (Ora.Integer.Value.ofNat shape 0))
             let conditionOk :=
               match quantified.condition with
               | none => true
@@ -580,5 +604,6 @@ def rowMatches : RawRow → Bool
 
 theorem obligation_totality_fixture_matches :
     obligationTotalityRows.all rowMatches = true := by decide
+
 
 end Ora.ObligationTotalitySync

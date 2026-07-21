@@ -29,6 +29,12 @@ def extract_sir_output(stdout: str) -> str:
     if marker in stdout:
         stdout = stdout.split(marker, 1)[1]
     lines = [line.rstrip() for line in stdout.strip("\n").splitlines() if line.rstrip() != ""]
+    for index, line in enumerate(lines):
+        if line.startswith("module ") or line.startswith('"builtin.module"'):
+            lines = lines[index:]
+            break
+    else:
+        return ""
     return "\n".join(lines)
 
 

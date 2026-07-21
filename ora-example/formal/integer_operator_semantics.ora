@@ -1,0 +1,25 @@
+contract IntegerOperatorSemantics {
+    pub fn wrapping_power(base: u256) -> u256
+        ensures(result == base **% 3)
+    {
+        return base **% 3;
+    }
+
+    pub fn wrapping_left_shift(value: u256, amount: u256) -> u256
+        ensures(result == value <<% amount)
+    {
+        return value <<% amount;
+    }
+
+    pub fn wrapping_unsigned_right_shift(value: u256, amount: u256) -> u256
+        ensures(result == value >>% amount)
+    {
+        return value >>% amount;
+    }
+
+    pub fn wrapping_signed_right_shift(value: i256, amount: i256) -> i256
+        ensures(result == value >>% amount)
+    {
+        return value >>% amount;
+    }
+}

@@ -1561,11 +1561,17 @@ LogicalResult ConvertShrWrappingOp::matchAndRewrite(
     auto loc = op.getLoc();
     Value shift = coerceToU256(rewriter, loc, adaptor.getRhs());
     auto intType = llvm::dyn_cast<ora::IntegerType>(op.getLhs().getType());
-    Value value = (intType && intType.getIsSigned())
+    auto signedAttr = op->getAttrOfType<mlir::BoolAttr>("ora.integer_signed");
+    if (!signedAttr && !intType)
+        return rewriter.notifyMatchFailure(
+            op,
+            "shr_wrapping requires compiler-owned ora.integer_signed metadata for builtin integer carriers");
+    const bool isSigned = signedAttr ? signedAttr.getValue() : intType.getIsSigned();
+    Value value = isSigned
         ? signExtendToU256(rewriter, loc, adaptor.getLhs(), op.getLhs().getType())
         : coerceToU256(rewriter, loc, adaptor.getLhs());
     auto u256Type = sir::U256Type::get(op.getContext());
-    Value shifted = (intType && intType.getIsSigned())
+    Value shifted = isSigned
         ? rewriter.create<sir::SarOp>(loc, u256Type, shift, value).getResult()
         : rewriter.create<sir::ShrOp>(loc, u256Type, shift, value).getResult();
     auto *typeConverter = getTypeConverter();

@@ -129,6 +129,10 @@ test "compiler lowers signed integer operations through signed SIR ops" {
         \\        return a >> b;
         \\    }
         \\
+        \\    pub fn signed_wrapping_shr(a: i8, b: i8) -> i8 {
+        \\        return a >>% b;
+        \\    }
+        \\
         \\    pub fn signed_gt(a: i256, b: i256) -> bool {
         \\        return a > b;
         \\    }
@@ -151,6 +155,9 @@ test "compiler lowers signed integer operations through signed SIR ops" {
     try testing.expect(std.mem.containsAtLeast(u8, try functionSlice(rendered, "signed_div"), 1, "sdiv"));
     try testing.expect(std.mem.containsAtLeast(u8, try functionSlice(rendered, "signed_mod"), 1, "smod"));
     try testing.expect(std.mem.containsAtLeast(u8, try functionSlice(rendered, "signed_shr"), 1, "sar"));
+    const wrapping_shr = try functionSlice(rendered, "signed_wrapping_shr");
+    try testing.expect(std.mem.containsAtLeast(u8, wrapping_shr, 1, "sar"));
+    try testing.expect(!std.mem.containsAtLeast(u8, wrapping_shr, 1, " = shr "));
     try testing.expect(std.mem.containsAtLeast(u8, try functionSlice(rendered, "signed_gt"), 1, "sgt"));
     try testing.expect(std.mem.containsAtLeast(u8, try functionSlice(rendered, "signed_checked_add"), 1, "slt"));
 }

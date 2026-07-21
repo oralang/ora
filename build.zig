@@ -666,6 +666,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     conformance_test_mod.addImport("ora_evm", ora_evm_mod);
+    conformance_test_mod.addImport("ora_types", ora_types_mod);
     const conformance_tests = b.addTest(.{
         .name = "ora-conformance-tests",
         .root_module = conformance_test_mod,

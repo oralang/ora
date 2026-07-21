@@ -5,12 +5,17 @@ const abi = @import("abi.zig");
 const fuzz = @import("fuzz.zig");
 const properties = @import("properties.zig");
 const runner = @import("runner.zig");
+const integer_shift_matrix = @import("integer_shift_matrix.zig");
 const slots = @import("slots.zig");
 const spec = @import("spec.zig");
 const types = @import("types.zig");
 
 test "conformance properties execute and catch planted failures" {
     try properties.run(testing.allocator);
+}
+
+test "checked and wrapping shifts cover every registered integer width" {
+    try integer_shift_matrix.run(testing.allocator);
 }
 
 test "structured ABI fuzzer rejects malformed calldata" {

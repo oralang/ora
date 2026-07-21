@@ -4207,15 +4207,9 @@ pub const Encoder = struct {
         op_id: usize,
     ) !z3.Z3_ast {
         const coerced_rhs = try self.coerceShiftAmount(lhs, rhs, rhs_type, op_id);
-        // Obligation: shift amount must be < bit_width (undefined behavior otherwise)
-        const sort = z3.Z3_get_sort(self.context.ctx, lhs);
-        const sort_kind = z3.Z3_get_sort_kind(self.context.ctx, sort);
-        if (sort_kind == z3.Z3_BV_SORT) {
-            const width = z3.Z3_get_bv_sort_size(self.context.ctx, sort);
-            const max_shift = z3.Z3_mk_unsigned_int64(self.context.ctx, width, sort);
-            const in_range = z3.Z3_mk_bvult(self.context.ctx, coerced_rhs, max_shift);
-            self.addObligation(in_range);
-        }
+        // Checked-shift safety is represented by the source-anchored ora.assert
+        // emitted by HIR. A raw shift operation has total bitvector semantics and
+        // must not independently invent a source-level verification obligation.
         return switch (op) {
             .Shl => z3.Z3_mk_bvshl(self.context.ctx, lhs, coerced_rhs),
             .ShrSigned => z3.Z3_mk_bvashr(self.context.ctx, lhs, coerced_rhs),
@@ -6357,10 +6351,25 @@ pub const Encoder = struct {
             const rhs_type = mlir.oraValueGetType(mlir.oraOperationGetOperand(mlir_op, 1));
             const shift_op: ShiftOp = if (std.mem.eql(u8, op_name, "ora.shl_wrapping"))
                 .Shl
-            else if (self.isSignedBitPatternType(lhs_type))
-                .ShrSigned
-            else
-                .ShrUnsigned;
+            else blk: {
+                const signed_attr = mlir.oraOperationGetAttributeByName(
+                    mlir_op,
+                    mlir.oraStringRefCreate("ora.integer_signed".ptr, "ora.integer_signed".len),
+                );
+                if (!mlir.oraAttributeIsNull(signed_attr)) {
+                    break :blk if (mlir.oraBoolAttrGetValue(signed_attr)) .ShrSigned else .ShrUnsigned;
+                }
+                if (mlir.oraTypeIsIntegerType(lhs_type)) {
+                    break :blk if (self.isSignedBitPatternType(lhs_type)) .ShrSigned else .ShrUnsigned;
+                }
+                return try self.soundnessLossUndef(
+                    z3.Z3_get_sort(self.context.ctx, operands[0]),
+                    "shr_wrapping_signedness",
+                    @intFromPtr(mlir_op.ptr),
+                    .missing_type_metadata,
+                    "ora.shr_wrapping on a builtin integer carrier has no compiler-owned signedness metadata",
+                );
+            };
             return try self.encodeWrappingShiftOp(shift_op, operands[0], operands[1], rhs_type, @intFromPtr(mlir_op.ptr));
         }
 

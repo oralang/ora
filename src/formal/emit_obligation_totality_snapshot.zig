@@ -219,8 +219,13 @@ fn binaryName(op: obligation.BinaryOp) []const u8 {
         .add => "add",
         .sub => "sub",
         .mul => "mul",
+        .pow => "pow",
+        .shl => "shl",
+        .shr => "shr",
         .div => "div",
         .mod => "mod",
+        .bit_and => "bit_and",
+        .bit_xor => "bit_xor",
         .and_ => "and",
         .or_ => "or",
         .implies => "implies",
@@ -658,7 +663,7 @@ pub fn main(init: std.process.Init) !void {
             .{ .binary = .{ .op = .mod, .lhs = 1, .rhs = 0, .ty = ty_u256 } },
             .{ .binary = .{ .op = .eq, .lhs = 2, .rhs = 3 } },
             .{ .binary = .{ .op = .eq, .lhs = 4, .rhs = 5 } },
-            .{ .binary = .{ .op = .le, .lhs = 6, .rhs = 1 } },
+            .{ .binary = .{ .op = .le, .lhs = 6, .rhs = 1, .ty = ty_u256 } },
             .{ .binary = .{ .op = .and_, .lhs = 7, .rhs = 8 } },
             .{ .binary = .{ .op = .and_, .lhs = 10, .rhs = 9 } },
         };
@@ -685,10 +690,58 @@ pub fn main(init: std.process.Init) !void {
     }
     {
         const terms = [_]obligation.Term{
+            .{ .int_lit = .{ .value = "3", .ty = ty_u256 } },
+            .{ .int_lit = .{ .value = "1", .ty = ty_u256 } },
+            .{ .binary = .{ .op = .bit_and, .lhs = 0, .rhs = 1, .ty = ty_u256 } },
+            .{ .binary = .{ .op = .bit_xor, .lhs = 0, .rhs = 1, .ty = ty_u256 } },
+            .{ .binary = .{ .op = .eq, .lhs = 2, .rhs = 3 } },
+        };
+        try writeFixture(out, &first, "u256_bitwise_formula", &terms, &.{}, .{ .formula = 4 });
+    }
+    {
+        const terms = [_]obligation.Term{
+            .{ .int_lit = .{ .value = "3", .ty = ty_i256 } },
+            .{ .int_lit = .{ .value = "1", .ty = ty_i256 } },
+            .{ .binary = .{ .op = .bit_and, .lhs = 0, .rhs = 1, .ty = ty_i256 } },
+            .{ .binary = .{ .op = .bit_xor, .lhs = 0, .rhs = 1, .ty = ty_i256 } },
+            .{ .binary = .{ .op = .eq, .lhs = 2, .rhs = 3 } },
+        };
+        try writeFixture(out, &first, "i256_bitwise_formula", &terms, &.{}, .{ .formula = 4 });
+    }
+    {
+        const terms = [_]obligation.Term{
+            .{ .int_lit = .{ .value = "2", .ty = ty_u256 } },
+            .{ .int_lit = .{ .value = "1", .ty = ty_u256 } },
+            .{ .binary = .{ .op = .pow, .lhs = 0, .rhs = 1, .ty = ty_u256 } },
+            .{ .binary = .{ .op = .shl, .lhs = 0, .rhs = 1, .ty = ty_u256 } },
+            .{ .binary = .{ .op = .shr, .lhs = 0, .rhs = 1, .ty = ty_u256 } },
+            .{ .binary = .{ .op = .eq, .lhs = 2, .rhs = 3 } },
+            .{ .binary = .{ .op = .eq, .lhs = 4, .rhs = 1 } },
+            .{ .binary = .{ .op = .and_, .lhs = 5, .rhs = 6 } },
+        };
+        try writeFixture(out, &first, "u256_power_shift_formula", &terms, &.{}, .{ .formula = 7 });
+        try writeAssumptionFormulaFixture(out, &first, "assumption_u256_power_shift_formula", &terms, 7);
+    }
+    {
+        const terms = [_]obligation.Term{
+            .{ .int_lit = .{ .value = "2", .ty = ty_i256 } },
+            .{ .int_lit = .{ .value = "1", .ty = ty_i256 } },
+            .{ .binary = .{ .op = .pow, .lhs = 0, .rhs = 1, .ty = ty_i256 } },
+            .{ .binary = .{ .op = .shl, .lhs = 0, .rhs = 1, .ty = ty_i256 } },
+            .{ .binary = .{ .op = .shr, .lhs = 0, .rhs = 1, .ty = ty_i256 } },
+            .{ .binary = .{ .op = .eq, .lhs = 2, .rhs = 3 } },
+            .{ .binary = .{ .op = .eq, .lhs = 4, .rhs = 1 } },
+            .{ .binary = .{ .op = .and_, .lhs = 5, .rhs = 6 } },
+        };
+        try writeFixture(out, &first, "i256_power_shift_formula", &terms, &.{}, .{ .formula = 7 });
+        try writeAssumptionFormulaFixture(out, &first, "assumption_i256_power_shift_formula", &terms, 7);
+    }
+    {
+        const terms = [_]obligation.Term{
             .{ .variable = .{ .bound = .{ .index = 0, .name = "i", .ty = ty_u256 } } },
             .{ .int_lit = .{ .value = "0", .ty = ty_u256 } },
-            .{ .binary = .{ .op = .le, .lhs = 1, .rhs = 0 } },
-            .{ .binary = .{ .op = .le, .lhs = 0, .rhs = 0 } },
+            .{ .binary = .{ .op = .le, .lhs = 1, .rhs = 0, .ty = ty_u256 } },
+            .{ .binary = .{ .op = .le, .lhs = 0, .rhs = 0, .ty = ty_u256 } },
             .{ .quantified = .{ .quantifier = .forall, .binder = .{ .name = "i", .ty = ty_u256 }, .condition = 2, .body = 3 } },
         };
         try writeFixture(out, &first, "forall_with_condition_formula", &terms, &.{}, .{ .formula = 4 });
@@ -697,7 +750,7 @@ pub fn main(init: std.process.Init) !void {
     {
         const terms = [_]obligation.Term{
             .{ .variable = .{ .bound = .{ .index = 0, .name = "i", .ty = ty_u256 } } },
-            .{ .binary = .{ .op = .le, .lhs = 0, .rhs = 0 } },
+            .{ .binary = .{ .op = .le, .lhs = 0, .rhs = 0, .ty = ty_u256 } },
             .{ .quantified = .{ .quantifier = .exists, .binder = .{ .name = "i", .ty = ty_u256 }, .body = 1 } },
         };
         try writeFixture(out, &first, "exists_formula", &terms, &.{}, .{ .formula = 2 });
@@ -716,7 +769,7 @@ pub fn main(init: std.process.Init) !void {
         const terms = [_]obligation.Term{
             .result,
             .{ .int_lit = .{ .value = "0", .ty = ty_u256 } },
-            .{ .binary = .{ .op = .ge, .lhs = 0, .rhs = 1 } },
+            .{ .binary = .{ .op = .ge, .lhs = 0, .rhs = 1, .ty = ty_u256 } },
         };
         try writeFixture(out, &first, "result_formula_with_canonical_result_env", &terms, &.{}, .{ .formula = 2 });
         try writeAssumptionFormulaFixture(out, &first, "assumption_result_formula_with_canonical_result_env", &terms, 2);

@@ -2,7 +2,7 @@
 // INPUT: ora-example/refinements/mlir_test.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @testMinValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/mlir_test.ora":5:21)) attributes {ora.param_binding_ids = ["file:0:pattern:0"], ora.param_names = ["amount"], ora.source_module_path = "{{.*}}/ora-example/refinements/mlir_test.ora", ora.source_owner_key = "module/contract:RefinementMLIRTest/function:testMinValue", ora.source_owner_start = 144 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testMinValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/mlir_test.ora":5:21)) attributes {ora.param_binding_ids = ["file:0:pattern:0"], ora.param_compiler_type_ids = [6 : i256], ora.param_names = ["amount"], ora.source_module_path = "{{.*}}/ora-example/refinements/mlir_test.ora", ora.source_owner_key = "module/contract:RefinementMLIRTest/function:testMinValue", ora.source_owner_start = 144 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 1000000000000000000000000000000000000 : !sir.u256 loc("{{.*}}/ora-example/refinements/mlir_test.ora":1:1)
 // CHECK-NEXT:     %2 = sir.const 1 : !sir.u256 loc(unknown)
@@ -19,7 +19,7 @@
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/mlir_test.ora":5:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/mlir_test.ora":5:5)
-// CHECK-NEXT:   func.func @testMaxValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/mlir_test.ora":10:21)) attributes {ora.param_binding_ids = ["file:0:pattern:1"], ora.param_names = ["limit"], ora.source_module_path = "{{.*}}/ora-example/refinements/mlir_test.ora", ora.source_owner_key = "module/contract:RefinementMLIRTest/function:testMaxValue", ora.source_owner_start = 328 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testMaxValue(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/mlir_test.ora":10:21)) attributes {ora.param_binding_ids = ["file:0:pattern:1"], ora.param_compiler_type_ids = [6 : i256], ora.param_names = ["limit"], ora.source_module_path = "{{.*}}/ora-example/refinements/mlir_test.ora", ora.source_owner_key = "module/contract:RefinementMLIRTest/function:testMaxValue", ora.source_owner_start = 328 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 100000000000000000000000000000000000 : !sir.u256 loc("{{.*}}/ora-example/refinements/mlir_test.ora":1:1)
 // CHECK-NEXT:     %2 = sir.const 1 : !sir.u256 loc(unknown)
@@ -36,7 +36,7 @@
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/mlir_test.ora":10:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/mlir_test.ora":10:5)
-// CHECK-NEXT:   func.func @testInRange(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/mlir_test.ora":15:20)) attributes {ora.param_binding_ids = ["file:0:pattern:2"], ora.param_names = ["rate"], ora.source_module_path = "{{.*}}/ora-example/refinements/mlir_test.ora", ora.source_owner_key = "module/contract:RefinementMLIRTest/function:testInRange", ora.source_owner_start = 508 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testInRange(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/mlir_test.ora":15:20)) attributes {ora.param_binding_ids = ["file:0:pattern:2"], ora.param_compiler_type_ids = [6 : i256], ora.param_names = ["rate"], ora.source_module_path = "{{.*}}/ora-example/refinements/mlir_test.ora", ora.source_owner_key = "module/contract:RefinementMLIRTest/function:testInRange", ora.source_owner_start = 508 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 10000000000000000000000000000000000 : !sir.u256 loc("{{.*}}/ora-example/refinements/mlir_test.ora":1:1)
 // CHECK-NEXT:     %2 = sir.const 1 : !sir.u256 loc(unknown)
@@ -57,13 +57,13 @@
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/mlir_test.ora":15:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/mlir_test.ora":15:5)
-// CHECK-NEXT:   func.func @testScaled(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/mlir_test.ora":20:19)) attributes {ora.param_binding_ids = ["file:0:pattern:3"], ora.param_names = ["amount"], ora.source_module_path = "{{.*}}/ora-example/refinements/mlir_test.ora", ora.source_owner_key = "module/contract:RefinementMLIRTest/function:testScaled", ora.source_owner_start = 685 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testScaled(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/mlir_test.ora":20:19)) attributes {ora.param_binding_ids = ["file:0:pattern:3"], ora.param_compiler_type_ids = [6 : i256], ora.param_names = ["amount"], ora.source_module_path = "{{.*}}/ora-example/refinements/mlir_test.ora", ora.source_owner_key = "module/contract:RefinementMLIRTest/function:testScaled", ora.source_owner_start = 685 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/mlir_test.ora":20:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/mlir_test.ora":20:5)
-// CHECK-NEXT:   func.func @testExact(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/mlir_test.ora":25:18)) attributes {ora.param_binding_ids = ["file:0:pattern:4"], ora.param_names = ["total"], ora.source_module_path = "{{.*}}/ora-example/refinements/mlir_test.ora", ora.source_owner_key = "module/contract:RefinementMLIRTest/function:testExact", ora.source_owner_start = 811 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testExact(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/mlir_test.ora":25:18)) attributes {ora.param_binding_ids = ["file:0:pattern:4"], ora.param_compiler_type_ids = [6 : i256], ora.param_names = ["total"], ora.source_module_path = "{{.*}}/ora-example/refinements/mlir_test.ora", ora.source_owner_key = "module/contract:RefinementMLIRTest/function:testExact", ora.source_owner_start = 811 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/mlir_test.ora":25:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/mlir_test.ora":25:5)
-// CHECK-NEXT:   func.func @testNonZeroAddress(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/mlir_test.ora":30:27)) attributes {ora.param_binding_ids = ["file:0:pattern:5"], ora.param_names = ["recipient"], ora.source_module_path = "{{.*}}/ora-example/refinements/mlir_test.ora", ora.source_owner_key = "module/contract:RefinementMLIRTest/function:testNonZeroAddress", ora.source_owner_start = 934 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testNonZeroAddress(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/mlir_test.ora":30:27)) attributes {ora.param_binding_ids = ["file:0:pattern:5"], ora.param_compiler_type_ids = [0 : i256], ora.param_names = ["recipient"], ora.source_module_path = "{{.*}}/ora-example/refinements/mlir_test.ora", ora.source_owner_key = "module/contract:RefinementMLIRTest/function:testNonZeroAddress", ora.source_owner_start = 934 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc("{{.*}}/ora-example/refinements/mlir_test.ora":30:27)
@@ -80,7 +80,7 @@
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/mlir_test.ora":30:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/mlir_test.ora":30:5)
-// CHECK-NEXT:   func.func @testVariables(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/mlir_test.ora":35:22), %arg1: !sir.u256 loc("{{.*}}/ora-example/refinements/mlir_test.ora":35:54)) attributes {ora.param_binding_ids = ["file:0:pattern:6", "file:0:pattern:7"], ora.param_names = ["scaled_input", "exact_input"], ora.source_module_path = "{{.*}}/ora-example/refinements/mlir_test.ora", ora.source_owner_key = "module/contract:RefinementMLIRTest/function:testVariables", ora.source_owner_start = 1102 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @testVariables(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/mlir_test.ora":35:22), %arg1: !sir.u256 loc("{{.*}}/ora-example/refinements/mlir_test.ora":35:54)) attributes {ora.param_binding_ids = ["file:0:pattern:6", "file:0:pattern:7"], ora.param_compiler_type_ids = [6 : i256, 6 : i256], ora.param_names = ["scaled_input", "exact_input"], ora.source_module_path = "{{.*}}/ora-example/refinements/mlir_test.ora", ora.source_owner_key = "module/contract:RefinementMLIRTest/function:testVariables", ora.source_owner_start = 1102 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/mlir_test.ora":35:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/mlir_test.ora":35:5)
 // CHECK-NEXT:   func.func @testReturn() -> !sir.u256 attributes {ora.source_module_path = "{{.*}}/ora-example/refinements/mlir_test.ora", ora.source_owner_key = "module/contract:RefinementMLIRTest/function:testReturn", ora.source_owner_start = 1487 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {

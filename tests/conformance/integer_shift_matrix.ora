@@ -1,0 +1,92 @@
+contract IntegerShiftMatrix {
+    pub fn shift_u8(value: u8, amount: u8, mode: u8) -> u8 {
+        if (mode == 0) { return value << amount; }
+        if (mode == 1) { return value >> amount; }
+        if (mode == 2) { return value <<% amount; }
+        return value >>% amount;
+    }
+
+    pub fn shift_u16(value: u16, amount: u16, mode: u8) -> u16 {
+        if (mode == 0) { return value << amount; }
+        if (mode == 1) { return value >> amount; }
+        if (mode == 2) { return value <<% amount; }
+        return value >>% amount;
+    }
+
+    pub fn shift_u32(value: u32, amount: u32, mode: u8) -> u32 {
+        if (mode == 0) { return value << amount; }
+        if (mode == 1) { return value >> amount; }
+        if (mode == 2) { return value <<% amount; }
+        return value >>% amount;
+    }
+
+    pub fn shift_u64(value: u64, amount: u64, mode: u8) -> u64 {
+        if (mode == 0) { return value << amount; }
+        if (mode == 1) { return value >> amount; }
+        if (mode == 2) { return value <<% amount; }
+        return value >>% amount;
+    }
+
+    pub fn shift_u128(value: u128, amount: u128, mode: u8) -> u128 {
+        if (mode == 0) { return value << amount; }
+        if (mode == 1) { return value >> amount; }
+        if (mode == 2) { return value <<% amount; }
+        return value >>% amount;
+    }
+
+    pub fn shift_u160(value: u160, amount: u160, mode: u8) -> u160 {
+        if (mode == 0) { return value << amount; }
+        if (mode == 1) { return value >> amount; }
+        if (mode == 2) { return value <<% amount; }
+        return value >>% amount;
+    }
+
+    pub fn shift_u256(value: u256, amount: u256, mode: u8) -> u256 {
+        if (mode == 0) { return value << amount; }
+        if (mode == 1) { return value >> amount; }
+        if (mode == 2) { return value <<% amount; }
+        return value >>% amount;
+    }
+
+    pub fn shift_i8(value: i8, amount: i8, mode: u8) -> i8 {
+        if (mode == 0) { return value << amount; }
+        if (mode == 1) { return value >> amount; }
+        if (mode == 2) { return value <<% amount; }
+        return value >>% amount;
+    }
+
+    pub fn shift_i16(value: i16, amount: i16, mode: u8) -> i16 {
+        if (mode == 0) { return value << amount; }
+        if (mode == 1) { return value >> amount; }
+        if (mode == 2) { return value <<% amount; }
+        return value >>% amount;
+    }
+
+    pub fn shift_i32(value: i32, amount: i32, mode: u8) -> i32 {
+        if (mode == 0) { return value << amount; }
+        if (mode == 1) { return value >> amount; }
+        if (mode == 2) { return value <<% amount; }
+        return value >>% amount;
+    }
+
+    pub fn shift_i64(value: i64, amount: i64, mode: u8) -> i64 {
+        if (mode == 0) { return value << amount; }
+        if (mode == 1) { return value >> amount; }
+        if (mode == 2) { return value <<% amount; }
+        return value >>% amount;
+    }
+
+    pub fn shift_i128(value: i128, amount: i128, mode: u8) -> i128 {
+        if (mode == 0) { return value << amount; }
+        if (mode == 1) { return value >> amount; }
+        if (mode == 2) { return value <<% amount; }
+        return value >>% amount;
+    }
+
+    pub fn shift_i256(value: i256, amount: i256, mode: u8) -> i256 {
+        if (mode == 0) { return value << amount; }
+        if (mode == 1) { return value >> amount; }
+        if (mode == 2) { return value <<% amount; }
+        return value >>% amount;
+    }
+}

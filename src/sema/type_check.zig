@@ -10240,7 +10240,7 @@ const TypeChecker = struct {
 
     fn hasInvalidConstantShiftAmount(self: *TypeChecker, expr_id: ast.ExprId, op: ast.BinaryOp, lhs_type: Type, rhs_expr_id: ast.ExprId) !bool {
         switch (op) {
-            .shl, .wrapping_shl, .shr, .wrapping_shr => {},
+            .shl, .shr => {},
             else => return false,
         }
         if (lhs_type.kind() != .integer) return false;

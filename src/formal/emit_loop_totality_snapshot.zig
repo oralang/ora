@@ -11,6 +11,18 @@ const builtin = formal.builtin;
 const Mutation = enum {
     supported_while,
     supported_for,
+    supported_u8,
+    supported_u16,
+    supported_u32,
+    supported_u64,
+    supported_u128,
+    supported_u160,
+    supported_i8,
+    supported_i16,
+    supported_i32,
+    supported_i64,
+    supported_i128,
+    supported_i256,
     storage_write,
     storage_read,
     call,
@@ -24,7 +36,7 @@ const Mutation = enum {
     missing_invariant,
     missing_body_safety,
     unsupported_kind,
-    non_u256_variable,
+    unregistered_integer_variable,
     bad_update_target,
     unsupported_formula,
     identity_collision,
@@ -35,6 +47,18 @@ const Mutation = enum {
 const cases = [_]Mutation{
     .supported_while,
     .supported_for,
+    .supported_u8,
+    .supported_u16,
+    .supported_u32,
+    .supported_u64,
+    .supported_u128,
+    .supported_u160,
+    .supported_i8,
+    .supported_i16,
+    .supported_i32,
+    .supported_i64,
+    .supported_i128,
+    .supported_i256,
     .storage_write,
     .storage_read,
     .call,
@@ -48,7 +72,7 @@ const cases = [_]Mutation{
     .missing_invariant,
     .missing_body_safety,
     .unsupported_kind,
-    .non_u256_variable,
+    .unregistered_integer_variable,
     .bad_update_target,
     .unsupported_formula,
     .identity_collision,
@@ -59,18 +83,26 @@ const cases = [_]Mutation{
 const ty_u256: obligation.TypeRef = .{
     .compiler_type_id = builtin.lookupBuiltinById(.u256).comptime_type_id,
 };
-const ty_u128: obligation.TypeRef = .{
-    .compiler_type_id = builtin.lookupBuiltinById(.u128).comptime_type_id,
+const ty_u8: obligation.TypeRef = .{ .compiler_type_id = builtin.lookupBuiltinById(.u8).comptime_type_id };
+const ty_u16: obligation.TypeRef = .{ .compiler_type_id = builtin.lookupBuiltinById(.u16).comptime_type_id };
+const ty_u32: obligation.TypeRef = .{ .compiler_type_id = builtin.lookupBuiltinById(.u32).comptime_type_id };
+const ty_u64: obligation.TypeRef = .{ .compiler_type_id = builtin.lookupBuiltinById(.u64).comptime_type_id };
+const ty_u128: obligation.TypeRef = .{ .compiler_type_id = builtin.lookupBuiltinById(.u128).comptime_type_id };
+const ty_u160: obligation.TypeRef = .{ .compiler_type_id = builtin.lookupBuiltinById(.u160).comptime_type_id };
+const ty_i8: obligation.TypeRef = .{ .compiler_type_id = builtin.lookupBuiltinById(.i8).comptime_type_id };
+const ty_i16: obligation.TypeRef = .{ .compiler_type_id = builtin.lookupBuiltinById(.i16).comptime_type_id };
+const ty_i32: obligation.TypeRef = .{ .compiler_type_id = builtin.lookupBuiltinById(.i32).comptime_type_id };
+const ty_i64: obligation.TypeRef = .{ .compiler_type_id = builtin.lookupBuiltinById(.i64).comptime_type_id };
+const ty_i128: obligation.TypeRef = .{ .compiler_type_id = builtin.lookupBuiltinById(.i128).comptime_type_id };
+const ty_i256: obligation.TypeRef = .{ .compiler_type_id = builtin.lookupBuiltinById(.i256).comptime_type_id };
+const ty_unregistered_integer: obligation.TypeRef = .{
+    .compiler_type_id = 999,
 };
 const loop_id: obligation.FreeVarId = .{ .file_id = 10, .pattern_id = 1 };
 const other_id: obligation.FreeVarId = .{ .file_id = 10, .pattern_id = 2 };
 const query_id: obligation.Id = 200;
 const summary_id: obligation.Id = 100;
 
-const terms = [_]obligation.Term{
-    .{ .int_lit = .{ .value = "0", .ty = ty_u256 } },
-    .{ .bool_lit = true },
-};
 const init_formulas = [_]obligation.FormulaRef{.{ .term = 0 }};
 const invariant_formulas = [_]obligation.FormulaRef{.{ .term = 1 }};
 const body_safety_formulas = [_]obligation.FormulaRef{.{ .term = 1 }};
@@ -121,17 +153,57 @@ fn unsupportedReason(mutation: Mutation) ?obligation.LoopUnsupportedReason {
 
 fn leanDenotable(mutation: Mutation) bool {
     return switch (mutation) {
-        .supported_while, .supported_for, .query_owner_mismatch, .query_id_mismatch => true,
+        .supported_while,
+        .supported_for,
+        .supported_u8,
+        .supported_u16,
+        .supported_u32,
+        .supported_u64,
+        .supported_u128,
+        .supported_u160,
+        .supported_i8,
+        .supported_i16,
+        .supported_i32,
+        .supported_i64,
+        .supported_i128,
+        .supported_i256,
+        .query_owner_mismatch,
+        .query_id_mismatch,
+        => true,
         else => false,
     };
 }
 
+fn integerTypeFor(mutation: Mutation) obligation.TypeRef {
+    return switch (mutation) {
+        .supported_u8 => ty_u8,
+        .supported_u16 => ty_u16,
+        .supported_u32 => ty_u32,
+        .supported_u64 => ty_u64,
+        .supported_u128 => ty_u128,
+        .supported_u160 => ty_u160,
+        .supported_i8 => ty_i8,
+        .supported_i16 => ty_i16,
+        .supported_i32 => ty_i32,
+        .supported_i64 => ty_i64,
+        .supported_i128 => ty_i128,
+        .supported_i256 => ty_i256,
+        .unregistered_integer_variable => ty_unregistered_integer,
+        else => ty_u256,
+    };
+}
+
 fn supportFor(mutation: Mutation) obligation_to_lean.SemanticSupport {
+    const integer_ty = integerTypeFor(mutation);
+    const terms = [_]obligation.Term{
+        .{ .int_lit = .{ .value = "0", .ty = integer_ty } },
+        .{ .bool_lit = true },
+    };
     var variables = [_]obligation.LoopVariable{.{
         .index = 0,
         .id = loop_id,
         .name = "i",
-        .ty = if (mutation == .non_u256_variable) ty_u128 else ty_u256,
+        .ty = integer_ty,
     }};
     var context_variables = [_]obligation.LoopVariable{.{
         .index = 0,

@@ -663,6 +663,34 @@ pub const Adapter = struct {
                 try self.requireBitVector(rhs);
                 break :blk z3.Z3_mk_bv_mul(self.context.ctx, lhs, rhs);
             },
+            .bit_and => blk: {
+                try self.requireBitVector(lhs);
+                try self.requireBitVector(rhs);
+                break :blk z3.Z3_mk_bvand(self.context.ctx, lhs, rhs);
+            },
+            .bit_xor => blk: {
+                try self.requireBitVector(lhs);
+                try self.requireBitVector(rhs);
+                break :blk z3.Z3_mk_bvxor(self.context.ctx, lhs, rhs);
+            },
+            .pow => blk: {
+                try self.requireBitVector(lhs);
+                try self.requireBitVector(rhs);
+                break :blk self.encodePowerTotal(lhs, rhs);
+            },
+            .shl => blk: {
+                try self.requireBitVector(lhs);
+                try self.requireBitVector(rhs);
+                break :blk z3.Z3_mk_bvshl(self.context.ctx, lhs, rhs);
+            },
+            .shr => blk: {
+                try self.requireBitVector(lhs);
+                try self.requireBitVector(rhs);
+                break :blk if (try self.binaryOperandsSigned(binary, expected))
+                    z3.Z3_mk_bvashr(self.context.ctx, lhs, rhs)
+                else
+                    z3.Z3_mk_bvlshr(self.context.ctx, lhs, rhs);
+            },
             .div => blk: {
                 try self.requireBitVector(lhs);
                 try self.requireBitVector(rhs);
@@ -690,6 +718,48 @@ pub const Adapter = struct {
         };
         try self.context.checkNoError();
         return ast;
+    }
+
+    fn encodePowerTotal(self: *Adapter, base: z3.Z3_ast, exponent: z3.Z3_ast) z3.Z3_ast {
+        const sort = z3.Z3_get_sort(self.context.ctx, base);
+        const width = z3.Z3_get_bv_sort_size(self.context.ctx, sort);
+        const one = z3.Z3_mk_unsigned_int64(self.context.ctx, 1, sort);
+
+        if (self.tryParseBitVectorNumeral(exponent)) |constant_exponent| {
+            var result = one;
+            var factor = base;
+            var remaining = constant_exponent;
+            while (remaining != 0) : (remaining >>= 1) {
+                if ((remaining & 1) != 0) {
+                    result = z3.Z3_mk_bv_mul(self.context.ctx, result, factor);
+                }
+                if (remaining != 1) {
+                    factor = z3.Z3_mk_bv_mul(self.context.ctx, factor, factor);
+                }
+            }
+            return result;
+        }
+
+        const bit_sort = z3.Z3_mk_bv_sort(self.context.ctx, 1);
+        const bit_one = z3.Z3_mk_unsigned_int64(self.context.ctx, 1, bit_sort);
+        var result = one;
+        var factor = base;
+        var bit_index: u32 = 0;
+        while (bit_index < width) : (bit_index += 1) {
+            const bit = z3.Z3_mk_extract(self.context.ctx, bit_index, bit_index, exponent);
+            const bit_is_set = z3.Z3_mk_eq(self.context.ctx, bit, bit_one);
+            const multiplied = z3.Z3_mk_bv_mul(self.context.ctx, result, factor);
+            result = z3.Z3_mk_ite(self.context.ctx, bit_is_set, multiplied, result);
+            factor = z3.Z3_mk_bv_mul(self.context.ctx, factor, factor);
+        }
+        return result;
+    }
+
+    fn tryParseBitVectorNumeral(self: *Adapter, ast: z3.Z3_ast) ?u256 {
+        const sort = z3.Z3_get_sort(self.context.ctx, ast);
+        if (z3.Z3_get_sort_kind(self.context.ctx, sort) != z3.Z3_BV_SORT) return null;
+        const numeral_z = z3.Z3_get_numeral_string(self.context.ctx, ast) orelse return null;
+        return std.fmt.parseInt(u256, std.mem.span(numeral_z), 10) catch null;
     }
 
     fn signedMinIntAst(self: *Adapter, sort: z3.Z3_sort) z3.Z3_ast {

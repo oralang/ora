@@ -124,9 +124,6 @@ const arithmetic_op_map = std.StaticStringMap(obligation.ArithmeticSafetyKind).i
     .{ "arith.divsi", .division_by_zero },
     .{ "arith.remui", .division_by_zero },
     .{ "arith.remsi", .division_by_zero },
-    .{ "arith.shli", .shift_amount_bounds },
-    .{ "arith.shrsi", .shift_amount_bounds },
-    .{ "arith.shrui", .shift_amount_bounds },
 });
 
 const assert_safety_map = std.StaticStringMap(obligation.ArithmeticSafetyKind).initComptime(.{
@@ -135,6 +132,7 @@ const assert_safety_map = std.StaticStringMap(obligation.ArithmeticSafetyKind).i
     .{ "checked multiplication overflow", .multiplication_overflow },
     .{ "checked power overflow", .power_overflow },
     .{ "checked negation overflow", .negation_overflow },
+    .{ "checked shift amount out of range", .shift_amount_bounds },
 });
 
 const transparent_value_ops = std.StaticStringMap(void).initComptime(.{
@@ -143,7 +141,6 @@ const transparent_value_ops = std.StaticStringMap(void).initComptime(.{
     .{ "arith.bitcast", {} },
     .{ "arith.extui", {} },
     .{ "arith.extsi", {} },
-    .{ "arith.trunci", {} },
     .{ "arith.index_cast", {} },
     .{ "arith.index_castui", {} },
     .{ "arith.index_castsi", {} },
@@ -151,10 +148,37 @@ const transparent_value_ops = std.StaticStringMap(void).initComptime(.{
     .{ "tensor.cast", {} },
 });
 
-const arithmetic_value_op_map = std.StaticStringMap(obligation.BinaryOp).initComptime(.{
-    .{ "arith.addi", .add },
-    .{ "arith.subi", .sub },
-    .{ "arith.muli", .mul },
+const ArithmeticSignednessSource = enum {
+    compiler_attribute,
+    unsigned,
+    signed,
+};
+
+const ArithmeticSafetySource = enum {
+    required,
+    wrapping,
+    compiler_attribute,
+};
+
+const ArithmeticValueOp = struct {
+    op: obligation.BinaryOp,
+    signedness: ArithmeticSignednessSource,
+    safety: ArithmeticSafetySource,
+};
+
+const arithmetic_value_op_map = std.StaticStringMap(ArithmeticValueOp).initComptime(.{
+    .{ "arith.addi", ArithmeticValueOp{ .op = .add, .signedness = .compiler_attribute, .safety = .required } },
+    .{ "arith.subi", ArithmeticValueOp{ .op = .sub, .signedness = .compiler_attribute, .safety = .required } },
+    .{ "arith.muli", ArithmeticValueOp{ .op = .mul, .signedness = .compiler_attribute, .safety = .required } },
+    .{ "ora.add_wrapping", ArithmeticValueOp{ .op = .add, .signedness = .compiler_attribute, .safety = .wrapping } },
+    .{ "ora.sub_wrapping", ArithmeticValueOp{ .op = .sub, .signedness = .compiler_attribute, .safety = .wrapping } },
+    .{ "ora.mul_wrapping", ArithmeticValueOp{ .op = .mul, .signedness = .compiler_attribute, .safety = .wrapping } },
+    .{ "ora.power", ArithmeticValueOp{ .op = .pow, .signedness = .compiler_attribute, .safety = .compiler_attribute } },
+    .{ "arith.shli", ArithmeticValueOp{ .op = .shl, .signedness = .compiler_attribute, .safety = .required } },
+    .{ "ora.shl_wrapping", ArithmeticValueOp{ .op = .shl, .signedness = .compiler_attribute, .safety = .wrapping } },
+    .{ "arith.shrui", ArithmeticValueOp{ .op = .shr, .signedness = .unsigned, .safety = .required } },
+    .{ "arith.shrsi", ArithmeticValueOp{ .op = .shr, .signedness = .signed, .safety = .required } },
+    .{ "ora.shr_wrapping", ArithmeticValueOp{ .op = .shr, .signedness = .compiler_attribute, .safety = .wrapping } },
 });
 
 const ArithmeticDivRemValueOp = struct {
@@ -313,6 +337,7 @@ const Collector = struct {
     resource_sites: std.ArrayList(ResourceCompletenessSite) = .empty,
     active_binders: std.ArrayList(BinderFrame) = .empty,
     loop_value_bindings: std.ArrayList(LoopValueBinding) = .empty,
+    arithmetic_safety_terms: std.AutoHashMapUnmanaged(obligation.TermId, void) = .empty,
     next_id: obligation.Id = 1,
     next_loop_summary_id: obligation.Id = 1,
     next_loop_variable_pattern_id: u32 = 0,
@@ -576,7 +601,7 @@ const Collector = struct {
         const variables = try self.collectLoopVariables(op, loop_kind);
         try self.bindLoopValues(op, loop_kind, variables);
         const context_variables = try self.collectLoopContextVariables();
-        const init_formulas = try self.collectLoopInitFormulas(op, loop_kind, symbol, ordinal);
+        const init_formulas = try self.collectLoopInitFormulas(op, loop_kind, variables, symbol, ordinal);
         const guard_formula = try self.collectLoopGuardFormula(op, loop_kind, symbol, ordinal);
         const invariant_formulas = try self.collectLoopInvariantFormulas(op, loop_kind, symbol, ordinal);
         const step_assignments = try self.collectLoopStepAssignments(op, loop_kind, symbol, ordinal);
@@ -587,8 +612,8 @@ const Collector = struct {
         for (variables) |variable| {
             if (variable.id == null) try appendLoopReason(&reasons, self.allocator, .loop_identity_missing);
             const value = loopVariableValue(op, loop_kind, variable.index);
-            if (mlir.oraValueIsNull(value) or !mlirTypeIsSupportedU256Carrier(mlir.oraValueGetType(value))) {
-                try appendLoopReason(&reasons, self.allocator, .loop_variable_not_u256);
+            if (mlir.oraValueIsNull(value) or !mlirTypeIsSupportedInteger(mlir.oraValueGetType(value))) {
+                try appendLoopReason(&reasons, self.allocator, .loop_variable_not_registered_integer);
             }
         }
         if (guard_formula == null) try appendLoopReason(&reasons, self.allocator, .loop_guard_missing);
@@ -723,11 +748,9 @@ const Collector = struct {
     ) bool {
         if (formula != .term or formula.term >= self.terms.items.len or fuel == 0) return false;
         return switch (self.terms.items[formula.term]) {
-            .binary => |binary| switch (binary.op) {
-                .add, .sub, .mul, .div, .mod => true,
-                else => self.termRequiresArithmeticSafety(.{ .term = binary.lhs }, fuel - 1) or
-                    self.termRequiresArithmeticSafety(.{ .term = binary.rhs }, fuel - 1),
-            },
+            .binary => |binary| self.arithmeticSafetyTermRecorded(formula.term) or
+                self.termRequiresArithmeticSafety(.{ .term = binary.lhs }, fuel - 1) or
+                self.termRequiresArithmeticSafety(.{ .term = binary.rhs }, fuel - 1),
             .unary => |unary| self.termRequiresArithmeticSafety(.{ .term = unary.operand }, fuel - 1),
             .old => |operand| self.termRequiresArithmeticSafety(.{ .term = operand }, fuel - 1),
             .refinement_predicate => |predicate| blk: {
@@ -740,6 +763,14 @@ const Collector = struct {
             .quantified => |quantified| self.termRequiresArithmeticSafety(.{ .term = quantified.body }, fuel - 1),
             else => false,
         };
+    }
+
+    fn arithmeticSafetyTermRecorded(self: *const Collector, term_id: obligation.TermId) bool {
+        return self.arithmetic_safety_terms.contains(term_id);
+    }
+
+    fn recordArithmeticSafetyTerm(self: *Collector, term_id: obligation.TermId) !void {
+        try self.arithmetic_safety_terms.put(self.allocator, term_id, {});
     }
 
     fn collectLoopVariables(
@@ -765,10 +796,32 @@ const Collector = struct {
                     .pattern_id = pattern_id,
                 },
                 .name = try self.loopVariableName(op, loop_kind, index),
-                .ty = try self.typeRefFromValue(value),
+                .ty = try self.loopVariableTypeRef(op, loop_kind, index, value),
             };
         }
         return variables;
+    }
+
+    fn loopVariableTypeRef(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        loop_kind: obligation.LoopKind,
+        variable_index: usize,
+        value: mlir.MlirValue,
+    ) !obligation.TypeRef {
+        if (mlir.oraValueIsNull(value)) return self.unknownTypeRef();
+        const result_index = switch (loop_kind) {
+            .scf_while => variable_index,
+            .scf_for => if (variable_index == 0) return self.typeRefFromValue(value) else variable_index - 1,
+            .other => return self.typeRefFromValue(value),
+        };
+        const attr_name = try std.fmt.allocPrint(
+            self.allocator,
+            "ora.result_integer_signed_{d}",
+            .{result_index},
+        );
+        const signed = (try self.boolAttr(op, attr_name)) orelse return self.unknownTypeRef();
+        return self.typeRefFromValueWithIntegerSignedness(value, signed);
     }
 
     fn collectLoopContextVariables(self: *Collector) ![]const obligation.LoopVariable {
@@ -844,6 +897,7 @@ const Collector = struct {
         self: *Collector,
         op: mlir.MlirOperation,
         loop_kind: obligation.LoopKind,
+        variables: []const obligation.LoopVariable,
         symbol: ?[]const u8,
         ordinal: u32,
     ) ![]const obligation.FormulaRef {
@@ -858,7 +912,18 @@ const Collector = struct {
         for (formulas, 0..) |*formula, index| {
             const operand_index = if (loop_kind == .scf_for and index > 0) index + 2 else index;
             const value = mlir.oraOperationGetOperand(op, operand_index);
-            formula.* = try self.loopFormulaFromValue(value, operationName(op), symbol, ordinal, @intCast(operand_index));
+            const signed_override = if (index < variables.len)
+                if (typeRefIntegerInfo(variables[index].ty)) |info| info.signed else null
+            else
+                null;
+            formula.* = try self.loopFormulaFromValueWithIntegerSignedness(
+                value,
+                signed_override,
+                operationName(op),
+                symbol,
+                ordinal,
+                @intCast(operand_index),
+            );
         }
         return formulas;
     }
@@ -873,13 +938,18 @@ const Collector = struct {
         if (loop_kind == .scf_for) {
             if (mlir.oraOperationGetNumOperands(op) < 2) return null;
             const induction = loopVariableValue(op, loop_kind, 0);
-            const induction_term = (try self.termFromValue(induction)) orelse return null;
-            const upper_term = (try self.termFromValue(mlir.oraOperationGetOperand(op, 1))) orelse return null;
+            const induction_ty = try self.typeRefFromValue(induction);
+            const signed_override = if (typeRefIntegerInfo(induction_ty)) |info| info.signed else null;
+            const induction_term = (try self.termFromValueWithIntegerSignedness(induction, signed_override)) orelse return null;
+            const upper_term = (try self.termFromValueWithIntegerSignedness(
+                mlir.oraOperationGetOperand(op, 1),
+                signed_override,
+            )) orelse return null;
             return .{ .term = try self.addTerm(.{ .binary = .{
                 .op = .lt,
                 .lhs = induction_term,
                 .rhs = upper_term,
-                .ty = try self.typeRefFromValue(induction),
+                .ty = induction_ty,
             } }) };
         }
         if (loop_kind != .scf_while) return null;
@@ -949,13 +1019,15 @@ const Collector = struct {
             if (mlir.oraOperationGetNumOperands(op) < 3) return &.{};
             const induction = loopVariableValue(op, loop_kind, 0);
             const step = mlir.oraOperationGetOperand(op, 2);
-            const induction_term = (try self.termFromValue(induction)) orelse return &.{};
-            const step_term = (try self.termFromValue(step)) orelse return &.{};
+            const induction_ty = try self.typeRefFromValue(induction);
+            const signed_override = if (typeRefIntegerInfo(induction_ty)) |info| info.signed else null;
+            const induction_term = (try self.termFromValueWithIntegerSignedness(induction, signed_override)) orelse return &.{};
+            const step_term = (try self.termFromValueWithIntegerSignedness(step, signed_override)) orelse return &.{};
             const value = try self.addTerm(.{ .binary = .{
                 .op = .add,
                 .lhs = induction_term,
                 .rhs = step_term,
-                .ty = try self.typeRefFromValue(induction),
+                .ty = induction_ty,
             } });
             assignments[0] = .{
                 .variable_index = 0,
@@ -966,11 +1038,16 @@ const Collector = struct {
         for (assignments[induction_count..], 0..) |*assignment, index| {
             const variable_index = index + induction_count;
             const target_variable = self.loopVariableForValue(loopVariableValue(op, loop_kind, @intCast(variable_index)));
+            const signed_override = if (target_variable) |variable|
+                if (typeRefIntegerInfo(variable.ty)) |info| info.signed else null
+            else
+                null;
             assignment.* = .{
                 .variable_index = @intCast(variable_index),
                 .target = if (target_variable) |variable| variable.id else null,
-                .value = try self.loopFormulaFromValue(
+                .value = try self.loopFormulaFromValueWithIntegerSignedness(
                     mlir.oraOperationGetOperand(terminator, index),
+                    signed_override,
                     "scf.yield",
                     symbol,
                     ordinal,
@@ -989,7 +1066,19 @@ const Collector = struct {
         ordinal: u32,
         index: u32,
     ) !obligation.FormulaRef {
-        if (try self.termFromValue(value)) |term| return .{ .term = term };
+        return self.loopFormulaFromValueWithIntegerSignedness(value, null, op_name, symbol, ordinal, index);
+    }
+
+    fn loopFormulaFromValueWithIntegerSignedness(
+        self: *Collector,
+        value: mlir.MlirValue,
+        signed_override: ?bool,
+        op_name: []const u8,
+        symbol: ?[]const u8,
+        ordinal: u32,
+        index: u32,
+    ) !obligation.FormulaRef {
+        if (try self.termFromValueWithIntegerSignedness(value, signed_override)) |term| return .{ .term = term };
         return .{ .origin_value = .{
             .origin = mlirOrigin(op_name, symbol, ordinal),
             .kind = .operand,
@@ -1161,7 +1250,7 @@ const Collector = struct {
             if (formula != .term) continue;
             const disequality = self.freeVarDisequality(formula.term) orelse continue;
             if (!freeVarPairMatches(disequality.lhs.id, disequality.rhs.id, key_pair.read, key_pair.write)) continue;
-            if (!typeRefIsU256Carrier(disequality.lhs.ty) or !typeRefIsU256Carrier(disequality.rhs.ty)) continue;
+            if (!typeRefsAreSameRegisteredInteger(disequality.lhs.ty, disequality.rhs.ty)) continue;
             return .{
                 .kind = .free_var_disequality,
                 .assumption_id = assumption.id,
@@ -2239,14 +2328,53 @@ const Collector = struct {
         if (std.mem.eql(u8, owner_name, "ora.sload")) return try self.scalarStorageLoadTerm(owner);
         if (std.mem.eql(u8, owner_name, "ora.map_get")) return try self.storageMapReadTerm(owner);
         if (std.mem.eql(u8, owner_name, "arith.constant")) return try self.constantTerm(owner, signed_override);
-        if (arithmetic_value_op_map.get(owner_name)) |binary_op| {
-            if (signed_override) |signed| return try self.binaryTermFromOperands(owner, binary_op, .{ .explicit_signedness = signed });
-            return try self.binaryTermFromOperands(owner, binary_op, .operand_signedness);
+        if (std.mem.eql(u8, owner_name, "arith.trunci")) {
+            return try self.truncatedIntegerLiteralTerm(owner, signed_override);
+        }
+        if (arithmetic_value_op_map.get(owner_name)) |spec| {
+            const type_source: BinaryTypeSource = switch (spec.signedness) {
+                .compiler_attribute => blk: {
+                    const signed = (try self.boolAttr(owner, "ora.integer_signed")) orelse {
+                        try self.addBlockingDiagnosticFmt(
+                            .missing_type,
+                            "{s} has no compiler-owned ora.integer_signed metadata",
+                            .{owner_name},
+                        );
+                        return null;
+                    };
+                    break :blk .{ .explicit_signedness = signed };
+                },
+                .unsigned => .{ .explicit_signedness = false },
+                .signed => .{ .explicit_signedness = true },
+            };
+            const term_id = (try self.binaryTermFromOperands(owner, spec.op, type_source)) orelse return null;
+            const requires_safety = switch (spec.safety) {
+                .required => true,
+                .wrapping => false,
+                .compiler_attribute => (try self.boolAttr(owner, "ora.integer_checked")) orelse {
+                    try self.addBlockingDiagnosticFmt(
+                        .missing_type,
+                        "{s} has no compiler-owned ora.integer_checked metadata",
+                        .{owner_name},
+                    );
+                    return null;
+                },
+            };
+            if (requires_safety) try self.recordArithmeticSafetyTerm(term_id);
+            return term_id;
         }
         if (arithmetic_div_rem_value_op_map.get(owner_name)) |spec| {
-            return try self.binaryTermFromOperands(owner, spec.op, .{ .explicit_signedness = spec.signed });
+            const term_id = (try self.binaryTermFromOperands(
+                owner,
+                spec.op,
+                .{ .explicit_signedness = spec.signed },
+            )) orelse return null;
+            try self.recordArithmeticSafetyTerm(term_id);
+            return term_id;
         }
-        if (std.mem.eql(u8, owner_name, "arith.xori")) return try self.xoriTerm(owner);
+        if (std.mem.eql(u8, owner_name, "arith.xori")) return try self.xoriTerm(owner, signed_override);
+        if (std.mem.eql(u8, owner_name, "arith.andi")) return try self.andiTerm(owner, signed_override);
+        if (std.mem.eql(u8, owner_name, "arith.ori")) return try self.booleanLogicalTerm(owner, .or_);
         if (std.mem.eql(u8, owner_name, "arith.cmpi")) return try self.cmpiTerm(owner);
         if (std.mem.eql(u8, owner_name, "ora.cmp")) return try self.oraCmpTerm(owner);
         if (std.mem.eql(u8, owner_name, "ora.quantified")) return try self.quantifiedTerm(owner);
@@ -2268,14 +2396,14 @@ const Collector = struct {
     }
 
     fn scalarStorageLoadTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
-        if (!mlirTypeIsSupportedU256Carrier(self.operationResultType(op, 0))) return null;
+        if (!mlirTypeIsSupportedInteger(self.operationResultType(op, 0))) return null;
         const root = try self.stringAttr(op, "global") orelse return null;
         if (!self.canProjectStablePlace(.{ .root = root, .region = .storage })) return null;
         return try self.placeReadTerm(root);
     }
 
     fn storageMapReadTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
-        if (!mlirTypeIsSupportedU256Carrier(self.operationResultType(op, 0))) return null;
+        if (!mlirTypeIsSupportedInteger(self.operationResultType(op, 0))) return null;
         const place = (try self.storageMapReadPlaceFromMapGet(op)) orelse return null;
         if (!self.canProjectStablePlace(place)) return null;
         return try self.placeReadTermFromPlace(place);
@@ -2290,7 +2418,7 @@ const Collector = struct {
 
     fn oldTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
         if (mlir.oraOperationGetNumOperands(op) != 1) return null;
-        if (!mlirTypeIsSupportedU256Carrier(self.operationResultType(op, 0))) return null;
+        if (!mlirTypeIsSupportedInteger(self.operationResultType(op, 0))) return null;
         if (self.function_has_external_call) return null;
         if (!self.function_write_slots_complete) return null;
         const write_slots = self.function_write_slots orelse return null;
@@ -2315,7 +2443,7 @@ const Collector = struct {
         const owner = mlir.oraOpResultGetOwner(value);
         if (mlir.oraOperationIsNull(owner)) return null;
         if (!std.mem.eql(u8, operationName(owner), "ora.sload")) return null;
-        if (!mlirTypeIsSupportedU256Carrier(self.operationResultType(owner, 0))) return null;
+        if (!mlirTypeIsSupportedInteger(self.operationResultType(owner, 0))) return null;
         return try self.stringAttr(owner, "global");
     }
 
@@ -2407,6 +2535,39 @@ const Collector = struct {
         return try self.addTerm(.{ .bool_lit = mlir.oraBoolAttrGetValue(value_attr) });
     }
 
+    fn truncatedIntegerLiteralTerm(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        signed_override: ?bool,
+    ) anyerror!?obligation.TermId {
+        if (mlir.oraOperationGetNumOperands(op) != 1 or mlir.oraOperationGetNumResults(op) != 1) return null;
+
+        const operand = mlir.oraOperationGetOperand(op, 0);
+        if (!mlir.oraValueIsAOpResult(operand)) return null;
+        const literal_op = mlir.oraOpResultGetOwner(operand);
+        if (mlir.oraOperationIsNull(literal_op) or
+            !std.mem.eql(u8, operationName(literal_op), "arith.constant")) return null;
+
+        const target_ty = self.operationResultType(op, 0);
+        const target_width = integerTypeWidth(target_ty) orelse return null;
+        if (target_width <= 1) return null;
+
+        const value_attr = mlir.oraOperationGetAttributeByName(literal_op, strRef("value"));
+        if (mlir.oraAttributeIsNull(value_attr)) return null;
+        const text = mlir.oraIntegerAttrGetValueString(value_attr);
+        defer if (text.data != null) mlir.oraStringRefFree(text);
+        if (text.data == null) return null;
+
+        return try self.addTerm(.{ .int_lit = .{
+            .value = try normalizeIntegerLiteralText(
+                self.allocator,
+                text.data[0..text.length],
+                target_width,
+            ),
+            .ty = try self.typeRefFromMlirTypeWithIntegerSignedness(target_ty, signed_override),
+        } });
+    }
+
     fn cmpiTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
         if (mlir.oraOperationGetNumOperands(op) < 2) return null;
         const predicate_attr = mlir.oraOperationGetAttributeByName(op, strRef("predicate"));
@@ -2423,8 +2584,13 @@ const Collector = struct {
         return try self.binaryTermFromOperands(op, binary_op, .operand_signedness);
     }
 
-    fn xoriTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
+    fn xoriTerm(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        signed_override: ?bool,
+    ) anyerror!?obligation.TermId {
         if (mlir.oraOperationGetNumOperands(op) < 2) return null;
+        if (!operationResultIsI1(op)) return try self.integerBitwiseTerm(op, .bit_xor, signed_override);
         const lhs = (try self.termFromValue(mlir.oraOperationGetOperand(op, 0))) orelse return null;
         const rhs = (try self.termFromValue(mlir.oraOperationGetOperand(op, 1))) orelse return null;
         if (self.termIsBoolLiteral(rhs, true)) {
@@ -2434,6 +2600,40 @@ const Collector = struct {
             return try self.addTerm(.{ .unary = .{ .op = .not, .operand = rhs } });
         }
         return null;
+    }
+
+    fn andiTerm(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        signed_override: ?bool,
+    ) anyerror!?obligation.TermId {
+        if (operationResultIsI1(op)) return try self.booleanLogicalTerm(op, .and_);
+        return try self.integerBitwiseTerm(op, .bit_and, signed_override);
+    }
+
+    fn booleanLogicalTerm(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        binary_op: obligation.BinaryOp,
+    ) anyerror!?obligation.TermId {
+        if (!operationResultIsI1(op)) return null;
+        return try self.binaryTermFromOperands(op, binary_op, .operand_signedness);
+    }
+
+    fn integerBitwiseTerm(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        binary_op: obligation.BinaryOp,
+        signed_override: ?bool,
+    ) anyerror!?obligation.TermId {
+        return try self.binaryTermFromOperands(
+            op,
+            binary_op,
+            if (signed_override) |signed|
+                .{ .explicit_signedness = signed }
+            else
+                .operand_signedness,
+        );
     }
 
     fn termIsBoolLiteral(self: *Collector, id: obligation.TermId, value: bool) bool {
@@ -2469,6 +2669,7 @@ const Collector = struct {
         const types = try self.allocator.alloc(obligation.TypeRef, expected_count);
         const block = functionEntryBlock(op);
         const arg_count: usize = if (!mlir.oraBlockIsNull(block)) @intCast(mlir.oraBlockGetNumArguments(block)) else 0;
+        const compiler_type_ids = (try self.u32ArrayAttr(op, "ora.param_compiler_type_ids")) orelse &.{};
         if (arg_count < expected_count) {
             try self.addBlockingDiagnosticFmt(
                 .missing_type,
@@ -2476,12 +2677,39 @@ const Collector = struct {
                 .{ expected_count, arg_count },
             );
         }
+        if (compiler_type_ids.len != 0 and compiler_type_ids.len != expected_count) {
+            try self.addBlockingDiagnosticFmt(
+                .missing_type,
+                "ora.param_compiler_type_ids has {d} entries but ora.param_names has {d}",
+                .{ compiler_type_ids.len, expected_count },
+            );
+        }
 
         for (types, 0..) |*ty, index| {
-            ty.* = if (index < arg_count)
-                try self.typeRefFromValue(mlir.oraBlockGetArgument(block, index))
-            else
-                try self.unknownTypeRef();
+            if (index >= arg_count) {
+                ty.* = try self.unknownTypeRef();
+                continue;
+            }
+            const value = mlir.oraBlockGetArgument(block, index);
+            if (index < compiler_type_ids.len and compiler_type_ids[index] != 0) {
+                const type_id = compiler_type_ids[index];
+                const info = type_builtin.integerInfoByComptimeTypeId(type_id) orelse {
+                    ty.* = .{ .compiler_type_id = type_id };
+                    continue;
+                };
+                if (integerTypeWidth(mlir.oraValueGetType(value)) != info.width) {
+                    try self.addBlockingDiagnosticFmt(
+                        .missing_type,
+                        "parameter {d} compiler type id {d} disagrees with its MLIR width",
+                        .{ index, type_id },
+                    );
+                    ty.* = try self.unknownTypeRef();
+                    continue;
+                }
+                ty.* = .{ .compiler_type_id = type_id };
+                continue;
+            }
+            ty.* = try self.typeRefFromValue(value);
         }
         return types;
     }
@@ -3350,18 +3578,20 @@ fn freeVarPairMatches(
         (obligation.freeVarIdEql(lhs, second) and obligation.freeVarIdEql(rhs, first));
 }
 
-fn typeRefIsU256Carrier(ty: ?obligation.TypeRef) bool {
-    const value = ty orelse return false;
+fn typeRefIntegerInfo(ty: ?obligation.TypeRef) ?type_builtin.BuiltinIntegerInfo {
+    const value = ty orelse return null;
     return switch (value) {
         .compiler_type_id => |id| blk: {
-            const info = type_builtin.integerInfoByComptimeTypeId(id) orelse break :blk false;
-            break :blk info.width == 256;
+            break :blk type_builtin.integerInfoByComptimeTypeId(id);
         },
-        .spelling => |name| std.mem.eql(u8, name, "u256") or
-            std.mem.eql(u8, name, "uint256") or
-            std.mem.eql(u8, name, "i256") or
-            std.mem.eql(u8, name, "int256"),
+        .spelling => |name| type_builtin.integerInfoByName(name),
     };
+}
+
+fn typeRefsAreSameRegisteredInteger(lhs: ?obligation.TypeRef, rhs: ?obligation.TypeRef) bool {
+    const left = typeRefIntegerInfo(lhs) orelse return false;
+    const right = typeRefIntegerInfo(rhs) orelse return false;
+    return left.width == right.width and left.signed == right.signed;
 }
 
 fn stringSlicesEql(lhs: []const []const u8, rhs: []const []const u8) bool {
@@ -3414,11 +3644,13 @@ fn integerTypeWidth(ty: mlir.MlirType) ?u32 {
     return null;
 }
 
-fn mlirTypeIsSupportedU256Carrier(ty: mlir.MlirType) bool {
+fn mlirTypeIsSupportedInteger(ty: mlir.MlirType) bool {
     if (mlir.oraTypeIsNull(ty)) return false;
     const refinement_base = mlir.oraRefinementTypeGetBaseType(ty);
-    if (!mlir.oraTypeIsNull(refinement_base)) return mlirTypeIsSupportedU256Carrier(refinement_base);
-    return integerTypeWidth(ty) == 256;
+    if (!mlir.oraTypeIsNull(refinement_base)) return mlirTypeIsSupportedInteger(refinement_base);
+    const width = integerTypeWidth(ty) orelse return false;
+    const signed = mlirIntegerTypeIsSigned(ty);
+    return type_builtin.lookupIntegerBuiltin(signed, @intCast(width)) != null;
 }
 
 fn mlirIntegerTypeIsSigned(ty: mlir.MlirType) bool {
@@ -3892,6 +4124,8 @@ fn isFormalFormulaIntermediate(op_name: []const u8) bool {
         arithmetic_value_op_map.has(op_name) or
         arithmetic_div_rem_value_op_map.has(op_name) or
         std.mem.eql(u8, op_name, "arith.xori") or
+        std.mem.eql(u8, op_name, "arith.andi") or
+        std.mem.eql(u8, op_name, "arith.ori") or
         std.mem.eql(u8, op_name, "arith.cmpi") or
         std.mem.eql(u8, op_name, "ora.cmp") or
         std.mem.eql(u8, op_name, "ora.quantified");

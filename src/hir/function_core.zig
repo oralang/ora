@@ -1684,6 +1684,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         .shl_assign => blk: {
                             const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
+                            try @This().emitCheckedShiftAmountAssert(self, lhs, rhs, assign.range);
                             const op = mlir.oraArithShlIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
@@ -1691,6 +1692,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         .shr_assign => blk: {
                             const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
+                            try @This().emitCheckedShiftAmountAssert(self, lhs, rhs, assign.range);
                             const op = if (try @This().patternIntegerSignedness(self, assign.target, locals, assign.range))
                                 mlir.oraArithShrSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs)
                             else
@@ -2775,6 +2777,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             const power_op = mlir.oraPowerOpCreate(self.parent.context, loc, lhs, rhs, value_ty);
             if (mlir.oraOperationIsNull(power_op)) return error.MlirOperationCreationFailed;
+            mlir.oraOperationSetAttributeByName(
+                power_op,
+                strRef("ora.integer_signed"),
+                mlir.oraBoolAttrCreate(self.parent.context, is_signed),
+            );
+            mlir.oraOperationSetAttributeByName(
+                power_op,
+                strRef("ora.integer_checked"),
+                mlir.oraBoolAttrCreate(self.parent.context, true),
+            );
             const power_value = appendValueOp(self.block, power_op);
             return .{ .value = power_value, .overflow = overflow };
         }
@@ -2877,16 +2889,41 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return appendValueOp(self.block, overflow_op);
         }
 
+        pub fn emitCheckedShiftAmountAssert(
+            self: *FunctionLowerer,
+            lhs: mlir.MlirValue,
+            rhs: mlir.MlirValue,
+            range: source.TextRange,
+        ) anyerror!void {
+            const value_ty = mlir.oraValueGetType(lhs);
+            if (!mlir.oraTypeIsAInteger(value_ty) or !mlir.oraTypeEqual(value_ty, mlir.oraValueGetType(rhs))) {
+                return error.MlirOperationCreationFailed;
+            }
+
+            const loc = self.parent.location(range);
+            const bit_width: i64 = @intCast(mlir.oraIntegerTypeGetWidth(value_ty));
+            const width = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, value_ty, bit_width));
+            const amount_in_range_op = self.createCompareOp(loc, "ult", rhs, width);
+            if (mlir.oraOperationIsNull(amount_in_range_op)) return error.MlirOperationCreationFailed;
+            const amount_in_range = appendValueOp(self.block, amount_in_range_op);
+            try @This().emitSafetyAssert(self, amount_in_range, "checked shift amount out of range", range);
+        }
+
+        fn emitSafetyAssert(self: *FunctionLowerer, condition: mlir.MlirValue, message: []const u8, range: source.TextRange) anyerror!void {
+            const loc = self.parent.location(range);
+            const assert_op = mlir.oraAssertOpCreate(self.parent.context, loc, condition, strRef(message));
+            if (mlir.oraOperationIsNull(assert_op)) return error.MlirOperationCreationFailed;
+            try @This().attachAssertMessageSelector(self, assert_op, message);
+            appendOp(self.block, assert_op);
+        }
+
         pub fn emitOverflowAssert(self: *FunctionLowerer, overflow_flag: mlir.MlirValue, message: []const u8, range: source.TextRange) anyerror!void {
             const loc = self.parent.location(range);
             const true_val = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
             const not_op = mlir.oraArithXorIOpCreate(self.parent.context, loc, overflow_flag, true_val);
             if (mlir.oraOperationIsNull(not_op)) return error.MlirOperationCreationFailed;
             const no_overflow = appendValueOp(self.block, not_op);
-            const assert_op = mlir.oraAssertOpCreate(self.parent.context, loc, no_overflow, strRef(message));
-            if (mlir.oraOperationIsNull(assert_op)) return error.MlirOperationCreationFailed;
-            try @This().attachAssertMessageSelector(self, assert_op, message);
-            appendOp(self.block, assert_op);
+            try @This().emitSafetyAssert(self, no_overflow, message, range);
         }
 
         pub fn storePattern(self: *FunctionLowerer, pattern_id: ast.PatternId, value: mlir.MlirValue, locals: *LocalEnv) anyerror!void {
@@ -4253,6 +4290,25 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             for (carried_locals, 0..) |local_id, index| {
                 if (index >= mlir.oraOperationGetNumResults(op)) break;
                 @This().annotateLocalValue(self, local_id, mlir.oraOperationGetResult(op, index));
+
+                const sema_type = support.unwrapRefinementSemaType(
+                    self.parent.typecheck.pattern_types[local_id.index()].type,
+                );
+                const signed = switch (sema_type) {
+                    .integer => |integer| integer.signed,
+                    else => continue,
+                };
+                var attr_name_buffer: [64]u8 = undefined;
+                const attr_name = std.fmt.bufPrint(
+                    &attr_name_buffer,
+                    "ora.result_integer_signed_{d}",
+                    .{index},
+                ) catch continue;
+                mlir.oraOperationSetAttributeByName(
+                    op,
+                    strRef(attr_name),
+                    mlir.oraBoolAttrCreate(self.parent.context, signed),
+                );
             }
         }
 

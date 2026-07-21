@@ -1,0 +1,13 @@
+contract CheckedShiftVerified {
+    pub fn shift_left(value: u256, amount: u256) -> u256
+        requires amount < 256
+    {
+        return value << amount;
+    }
+
+    pub fn shift_right(value: u256, amount: u256) -> u256
+        requires amount < 256
+    {
+        return value >> amount;
+    }
+}

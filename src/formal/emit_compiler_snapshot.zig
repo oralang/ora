@@ -73,27 +73,24 @@ fn emitRefinementNameList(out: anytype, comptime name: []const u8, filter: Refin
     try out.writeAll("]\n\n");
 }
 
-const Signedness = enum { unsigned, signed };
-
-/// Writes the comma-separated bit widths of the builtin integer types of the
-/// given signedness — i.e. the body of `compilerUIntWidths` / `compilerSIntWidths`.
-/// Fails CLOSED: a malformed Integer spec (missing signedness or width) is an
-/// error, never a silent skip — per the no-default / no-silent-skip rule.
-fn writeIntegerWidths(out: anytype, sign: Signedness) !void {
+/// Emits the complete integer registration owned by `builtin_types`.
+/// Fails closed: every Integer row must name its signedness and width, so the
+/// formal snapshot cannot silently lose a malformed compiler registration.
+fn emitIntegerTypeRegistrations(out: anytype) !void {
+    try out.writeAll("def compilerIntegerTypeRegistrations : List (String × Bool × Nat × Nat) :=\n  [");
     var first = true;
     for (builtin.builtin_types) |spec| {
         if (spec.category != .Integer) continue;
         const is_signed = if (spec.signed) |s| s else return error.IntegerSpecMissingSignedness;
         const bits = if (spec.bit_width) |b| b else return error.IntegerSpecMissingBitWidth;
-        const matches = switch (sign) {
-            .unsigned => !is_signed,
-            .signed => is_signed,
-        };
-        if (!matches) continue;
         if (!first) try out.writeAll(", ");
         first = false;
-        try out.print("{d}", .{bits});
+        try out.print(
+            "(\"{s}\", {s}, {d}, {d})",
+            .{ spec.source_name, if (is_signed) "true" else "false", bits, spec.comptime_type_id },
+        );
     }
+    try out.writeAll("]\n\n");
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -114,14 +111,9 @@ pub fn main(init: std.process.Init) !void {
     }
     try out.writeAll("]\n\n");
 
-    // Integer widths from the builtin spec table (fail-closed on bad specs).
-    try out.writeAll("def compilerUIntWidths : List Nat := [");
-    try writeIntegerWidths(out, .unsigned);
-    try out.writeAll("]\n");
-
-    try out.writeAll("def compilerSIntWidths : List Nat := [");
-    try writeIntegerWidths(out, .signed);
-    try out.writeAll("]\n\n");
+    // One authoritative integer registration table: spelling, signedness,
+    // width, and compiler type ID. Width projections are derived in Lean.
+    try emitIntegerTypeRegistrations(out);
 
     // Fixed-bytes bounds.
     try out.print("def compilerFixedBytesMin : Nat := {d}\n", .{builtin.fixed_bytes_min_len});

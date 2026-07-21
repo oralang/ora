@@ -309,6 +309,10 @@ test "arith shrui encodes logical right shift" {
     const ast = try encoder.encodeOperation(shr_op);
     const ast_str = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, ast));
     try testing.expect(std.mem.indexOf(u8, ast_str, "bvlshr") != null);
+
+    const obligations = try encoder.takeObligations(testing.allocator);
+    defer if (obligations.len > 0) testing.allocator.free(obligations);
+    try testing.expectEqual(@as(usize, 0), obligations.len);
 }
 
 test "arith shli encodes left shift" {
@@ -337,6 +341,10 @@ test "arith shli encodes left shift" {
     const ast = try encoder.encodeOperation(shl_op);
     const ast_str = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, ast));
     try testing.expect(std.mem.indexOf(u8, ast_str, "bvshl") != null);
+
+    const obligations = try encoder.takeObligations(testing.allocator);
+    defer if (obligations.len > 0) testing.allocator.free(obligations);
+    try testing.expectEqual(@as(usize, 0), obligations.len);
 }
 
 test "arith shrsi encodes arithmetic right shift" {
@@ -365,6 +373,10 @@ test "arith shrsi encodes arithmetic right shift" {
     const ast = try encoder.encodeOperation(shr_op);
     const ast_str = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, ast));
     try testing.expect(std.mem.indexOf(u8, ast_str, "bvashr") != null);
+
+    const obligations = try encoder.takeObligations(testing.allocator);
+    defer if (obligations.len > 0) testing.allocator.free(obligations);
+    try testing.expectEqual(@as(usize, 0), obligations.len);
 }
 
 test "precision note kinds are structured and labeled" {

@@ -2158,6 +2158,11 @@ test "ora.shr_wrapping keeps logical shift for unsigned integer type" {
     const rhs = mlir.oraOperationGetResult(rhs_const, 0);
 
     const shr_op = mlir.oraShrWrappingOpCreate(mlir_ctx, loc, lhs, rhs, i256_ty);
+    mlir.oraOperationSetAttributeByName(
+        shr_op,
+        stringRef("ora.integer_signed"),
+        mlir.oraBoolAttrCreate(mlir_ctx, false),
+    );
     const ast = try encoder.encodeOperation(shr_op);
     const ast_str = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, ast));
     try testing.expect(std.mem.indexOf(u8, ast_str, "bvlshr") != null);

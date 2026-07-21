@@ -349,6 +349,34 @@ test "verification accepts wrapping shifts with narrow shift operand without deg
     try testing.expect(!right_result.degraded);
 }
 
+test "verification consumes checked shift range asserts emitted by HIR" {
+    const source_text =
+        \\contract C {
+        \\    pub fn bounded(a: u8, bits: u8) -> u8
+        \\        requires bits < 8
+        \\    {
+        \\        return a << bits;
+        \\    }
+        \\
+        \\    pub fn unbounded(a: u8, bits: u8) -> u8 {
+        \\        return a >> bits;
+        \\    }
+        \\}
+    ;
+
+    var bounded = try verifyTextWithoutDegradation(source_text, "bounded");
+    defer bounded.deinit(testing.allocator);
+    try testing.expect(bounded.success);
+    try testing.expect(!bounded.degraded);
+    try testing.expectEqual(@as(usize, 0), bounded.errors_len);
+
+    var unbounded = try verifyTextWithoutDegradation(source_text, "unbounded");
+    defer unbounded.deinit(testing.allocator);
+    try testing.expect(!unbounded.success);
+    try testing.expect(!unbounded.degraded);
+    try testing.expect(unbounded.errors_len > 0);
+}
+
 test "verification accepts lowered EVM environment builtins without degradation" {
     const source_text =
         \\contract EnvProbe {

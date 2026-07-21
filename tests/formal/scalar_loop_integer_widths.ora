@@ -1,0 +1,144 @@
+contract ScalarLoopIntegerWidths {
+    pub fn countU8(limit: u8) -> u8 {
+        var u8Value: u8 = 0;
+        while (u8Value < 3)
+            invariant u8Value <= 3
+            invariant limit == limit
+        {
+            u8Value = u8Value + 1;
+        }
+        return u8Value;
+    }
+
+    pub fn countU16(limit: u16) -> u16 {
+        var u16Value: u16 = 0;
+        while (u16Value < 3)
+            invariant u16Value <= 3
+            invariant limit == limit
+        {
+            u16Value = u16Value + 1;
+        }
+        return u16Value;
+    }
+
+    pub fn countU32(limit: u32) -> u32 {
+        var u32Value: u32 = 0;
+        while (u32Value < 3)
+            invariant u32Value <= 3
+            invariant limit == limit
+        {
+            u32Value = u32Value + 1;
+        }
+        return u32Value;
+    }
+
+    pub fn countU64(limit: u64) -> u64 {
+        var u64Value: u64 = 0;
+        while (u64Value < 3)
+            invariant u64Value <= 3
+            invariant limit == limit
+        {
+            u64Value = u64Value + 1;
+        }
+        return u64Value;
+    }
+
+    pub fn countU128(limit: u128) -> u128 {
+        var u128Value: u128 = 0;
+        while (u128Value < 3)
+            invariant u128Value <= 3
+            invariant limit == limit
+        {
+            u128Value = u128Value + 1;
+        }
+        return u128Value;
+    }
+
+    pub fn countU160(limit: u160) -> u160 {
+        var u160Value: u160 = 0;
+        while (u160Value < 3)
+            invariant u160Value <= 3
+            invariant limit == limit
+        {
+            u160Value = u160Value + 1;
+        }
+        return u160Value;
+    }
+
+    pub fn countU256(limit: u256) -> u256 {
+        var u256Value: u256 = 0;
+        while (u256Value < 3)
+            invariant u256Value <= 3
+            invariant limit == limit
+        {
+            u256Value = u256Value + 1;
+        }
+        return u256Value;
+    }
+
+    pub fn countI8(limit: i8) -> i8 {
+        var i8Value: i8 = 0;
+        while (i8Value < 3)
+            invariant i8Value <= 3
+            invariant limit == limit
+        {
+            i8Value = i8Value + 1;
+        }
+        return i8Value;
+    }
+
+    pub fn countI16(limit: i16) -> i16 {
+        var i16Value: i16 = 0;
+        while (i16Value < 3)
+            invariant i16Value <= 3
+            invariant limit == limit
+        {
+            i16Value = i16Value + 1;
+        }
+        return i16Value;
+    }
+
+    pub fn countI32(limit: i32) -> i32 {
+        var i32Value: i32 = 0;
+        while (i32Value < 3)
+            invariant i32Value <= 3
+            invariant limit == limit
+        {
+            i32Value = i32Value + 1;
+        }
+        return i32Value;
+    }
+
+    pub fn countI64(limit: i64) -> i64 {
+        var i64Value: i64 = 0;
+        while (i64Value < 3)
+            invariant i64Value <= 3
+            invariant limit == limit
+        {
+            i64Value = i64Value + 1;
+        }
+        return i64Value;
+    }
+
+    pub fn countI128(limit: i128) -> i128 {
+        var i128Value: i128 = 0;
+        while (i128Value < 3)
+            invariant i128Value <= 3
+            invariant limit == limit
+        {
+            i128Value = i128Value + 1;
+        }
+        return i128Value;
+    }
+
+    pub fn countI256(limit: i256) -> i256 {
+        var i256Value: i256 = 0;
+        while (i256Value < 3)
+            invariant i256Value <= 3
+            invariant limit == limit
+        {
+            i256Value = i256Value + 1;
+        }
+        return i256Value;
+    }
+}

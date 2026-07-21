@@ -76,3 +76,85 @@ caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
 args = [18, 0]
 reverts = { any = true }
+
+# Checked shifts accept amounts below the source integer width.
+[[call]]
+fn = "checked_shl(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1, 7]
+returns = { u256 = 128 }
+
+[[call]]
+fn = "checked_shr(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [128, 7]
+returns = { u256 = 1 }
+
+[[call]]
+fn = "checked_shr_i8(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-8, 1]
+returns = { i8 = -4 }
+
+# The checked HIR assertion remains executable with verification disabled.
+[[call]]
+fn = "checked_shl(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1, 256]
+reverts = { data = "0xb3215f31" }
+
+[[call]]
+fn = "checked_shr(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [128, 256]
+reverts = { data = "0xb3215f31" }
+
+# Unsigned comparison against the width also rejects negative signed amounts.
+[[call]]
+fn = "checked_shr_i8(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-8, -1]
+reverts = { data = "0xb3215f31" }
+
+# Wrapping shifts retain total EVM semantics for the same large amount.
+[[call]]
+fn = "wrapping_shl(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1, 256]
+returns = { u256 = 0 }
+
+[[call]]
+fn = "wrapping_shr(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [128, 256]
+returns = { u256 = 0 }
+
+[[call]]
+fn = "wrapping_shr_i8(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-8, 8]
+returns = { i8 = -1 }
+
+# Constant evaluation applies the same width-normalized wrapping semantics.
+[[call]]
+fn = "wrapping_shl_constant_u8()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u8 = 0 }
+
+[[call]]
+fn = "wrapping_shr_constant_u8()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u8 = 0 }
