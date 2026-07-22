@@ -5,7 +5,9 @@
 // Canonical formatter for Ora source code (ora fmt)
 //
 // DESIGN:
-//   • AST-driven formatting (not regex-based)
+//   • Token-stream emitter; parse + AST lowering gate formatting (files with
+//     diagnostics are refused) and classify ambiguous angle tokens
+//     (`<` `>` `>>` as binary operators vs generic brackets)
 //   • Comment preservation via lexer trivia
 //   • Deterministic and idempotent
 //   • Semantics-preserving

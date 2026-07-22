@@ -227,3 +227,215 @@ test "lsp formatting: preserves resource error-union and builtin syntax" {
     try testing.expect(std.mem.indexOf(u8, formatted_once, "@ move") == null);
     try testing.expect(std.mem.indexOf(u8, formatted_once, "@\n") == null);
 }
+
+const ora_lib = @import("ora_lib");
+
+fn formatAndExpect(source: []const u8, expected_needle: []const u8) !void {
+    const formatted = try formatting.formatSourceAlloc(testing.allocator, source, .{
+        .line_width = 100,
+        .indent_size = 4,
+    });
+    defer testing.allocator.free(formatted);
+    try testing.expect(std.mem.containsAtLeast(u8, formatted, 1, expected_needle));
+
+    const twice = try formatting.formatSourceAlloc(testing.allocator, formatted, .{
+        .line_width = 100,
+        .indent_size = 4,
+    });
+    defer testing.allocator.free(twice);
+    try testing.expectEqualStrings(formatted, twice);
+}
+
+const BinaryOpSpacing = struct {
+    op: ora_lib.compiler.ast.nodes.BinaryOp,
+    glued: []const u8,
+    spaced: []const u8,
+};
+
+const binary_op_spacing_table = [_]BinaryOpSpacing{
+    .{ .op = .add, .glued = "a+b", .spaced = "a + b" },
+    .{ .op = .wrapping_add, .glued = "a+%b", .spaced = "a +% b" },
+    .{ .op = .sub, .glued = "a-b", .spaced = "a - b" },
+    .{ .op = .wrapping_sub, .glued = "a-%b", .spaced = "a -% b" },
+    .{ .op = .mul, .glued = "a*b", .spaced = "a * b" },
+    .{ .op = .wrapping_mul, .glued = "a*%b", .spaced = "a *% b" },
+    .{ .op = .div, .glued = "a/b", .spaced = "a / b" },
+    .{ .op = .mod, .glued = "a%b", .spaced = "a % b" },
+    .{ .op = .pow, .glued = "a**b", .spaced = "a ** b" },
+    .{ .op = .wrapping_pow, .glued = "a**%b", .spaced = "a **% b" },
+    .{ .op = .eq, .glued = "a==b", .spaced = "a == b" },
+    .{ .op = .ne, .glued = "a!=b", .spaced = "a != b" },
+    .{ .op = .lt, .glued = "a<b", .spaced = "a < b" },
+    .{ .op = .le, .glued = "a<=b", .spaced = "a <= b" },
+    .{ .op = .gt, .glued = "a>b", .spaced = "a > b" },
+    .{ .op = .ge, .glued = "a>=b", .spaced = "a >= b" },
+    .{ .op = .and_and, .glued = "c&&d", .spaced = "c && d" },
+    .{ .op = .or_or, .glued = "c||d", .spaced = "c || d" },
+    .{ .op = .bit_and, .glued = "a&b", .spaced = "a & b" },
+    .{ .op = .bit_or, .glued = "a|b", .spaced = "a | b" },
+    .{ .op = .bit_xor, .glued = "a^b", .spaced = "a ^ b" },
+    .{ .op = .shl, .glued = "a<<b", .spaced = "a << b" },
+    .{ .op = .wrapping_shl, .glued = "a<<%b", .spaced = "a <<% b" },
+    .{ .op = .shr, .glued = "a>>b", .spaced = "a >> b" },
+    .{ .op = .wrapping_shr, .glued = "a>>%b", .spaced = "a >>% b" },
+};
+
+comptime {
+    const fields = @typeInfo(ora_lib.compiler.ast.nodes.BinaryOp).@"enum".fields;
+    if (fields.len != binary_op_spacing_table.len)
+        @compileError("binary_op_spacing_table must cover every ast.BinaryOp variant");
+    for (fields) |field| {
+        var found = false;
+        for (binary_op_spacing_table) |row| {
+            if (@intFromEnum(row.op) == field.value) found = true;
+        }
+        if (!found) @compileError("binary_op_spacing_table missing op: " ++ field.name);
+    }
+}
+
+test "lsp formatting: every binary operator is spaced" {
+    inline for (binary_op_spacing_table) |row| {
+        const source = try std.fmt.allocPrint(testing.allocator,
+            \\contract T {{
+            \\    pub fn f(a: u256, b: u256, c: bool, d: bool) -> u256 {{
+            \\        let r = {s};
+            \\        return a;
+            \\    }}
+            \\}}
+        , .{row.glued});
+        defer testing.allocator.free(source);
+        try formatAndExpect(source, row.spaced);
+    }
+}
+
+test "lsp formatting: generic angle brackets stay tight" {
+    const source =
+        \\contract T {
+        \\    storage var one: map<address, u256>;
+        \\    storage var two: map<u256, map<u256, u256>>;
+        \\    pub fn f(a: u256, b: u256) -> u256 {
+        \\        let cmp = a<b;
+        \\        let shifted = a>>b;
+        \\        return a;
+        \\    }
+        \\}
+    ;
+    const formatted = try formatting.formatSourceAlloc(testing.allocator, source, .{
+        .line_width = 100,
+        .indent_size = 4,
+    });
+    defer testing.allocator.free(formatted);
+    try testing.expect(std.mem.containsAtLeast(u8, formatted, 1, "map<address, u256>"));
+    try testing.expect(std.mem.containsAtLeast(u8, formatted, 1, "map<u256, map<u256, u256>>"));
+    try testing.expect(std.mem.containsAtLeast(u8, formatted, 1, "a < b"));
+    try testing.expect(std.mem.containsAtLeast(u8, formatted, 1, "a >> b"));
+}
+
+test "lsp formatting: reported operator regressions" {
+    try formatAndExpect(
+        \\contract T {
+        \\    pub fn f(executed: u256, cycles: u256) -> bool {
+        \\        return executed<cycles;
+        \\    }
+        \\}
+    , "executed < cycles");
+    try formatAndExpect(
+        \\contract T {
+        \\    pub fn f(op: u256) -> u256 {
+        \\        switch (op>>12) {
+        \\            0 => { return 1; },
+        \\            else => { return 0; }
+        \\        }
+        \\    }
+        \\}
+    , "switch (op >> 12)");
+    try formatAndExpect(
+        \\contract T {
+        \\    pub fn f(sp: u256) -> u256 {
+        \\        var call_stack: [u256; 4] = [0, 0, 0, 0];
+        \\        return call_stack[sp]&0xFFF;
+        \\    }
+        \\}
+    , "call_stack[sp] & 0xFFF");
+}
+
+test "lsp formatting: prefix operators keep operands tight" {
+    try formatAndExpect(
+        \\contract T {
+        \\    pub fn f(a: u256) -> u256 {
+        \\        let n = -1;
+        \\        return a;
+        \\    }
+        \\}
+    , "let n = -1;");
+    try formatAndExpect(
+        \\contract T {
+        \\    pub fn f(c: bool) -> bool {
+        \\        return !c;
+        \\    }
+        \\}
+    , "return !c;");
+}
+
+test "lsp formatting: comparison spacing in spec clauses" {
+    try formatAndExpect(
+        \\contract T {
+        \\    pub fn f(key: u256) -> u256
+        \\        requires(key<16)
+        \\    {
+        \\        var i: u256 = 0;
+        \\        while (i<key)
+        \\            invariant(i<=key)
+        \\        {
+        \\            i = i+1;
+        \\        }
+        \\        return i;
+        \\    }
+        \\}
+    , "requires(key < 16)");
+}
+
+test "lsp formatting: operator followed by parenthesis or bracket is spaced" {
+    try formatAndExpect(
+        \\contract T {
+        \\    pub fn f(a: u256, b: u256) -> u256 {
+        \\        let p =(a<b);
+        \\        return a;
+        \\    }
+        \\}
+    , "let p = (a < b);");
+    try formatAndExpect(
+        \\contract T {
+        \\    pub fn f(a: u256, b: u256) -> u256 {
+        \\        return a+(b*2);
+        \\    }
+        \\}
+    , "return a + (b * 2);");
+    try formatAndExpect(
+        \\contract T {
+        \\    pub fn f(keys: u256, x: u256) -> u256 {
+        \\        var v: [u256; 4] = [0, 0, 0, 0];
+        \\        return keys>>(v[x]&0xF);
+        \\    }
+        \\}
+    , "return keys >> (v[x] & 0xF);");
+    try formatAndExpect(
+        \\contract T {
+        \\    pub fn f(a: u256) -> u256 {
+        \\        let arr =[1, 2];
+        \\        return a;
+        \\    }
+        \\}
+    , "let arr = [1, 2];");
+}
+
+test "lsp formatting: call parentheses stay tight" {
+    try formatAndExpect(
+        \\contract T {
+        \\    fn g(a: u256) -> u256 { return a; }
+        \\    pub fn f(a: u256) -> u256 {
+        \\        return g(a);
+        \\    }
+        \\}
+    , "return g(a);");
+}
