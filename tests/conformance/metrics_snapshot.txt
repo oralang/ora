@@ -604,6 +604,16 @@ runtime_assert_message::__bytecode_bytes	336
 runtime_assert_message::__deploy_gas	61559
 runtime_assert_message::c0:checked(bool)	426
 runtime_assert_message::c1:checked(bool)	482
+runtime_keccak::__bytecode_bytes	1007
+runtime_keccak::__deploy_gas	195950
+runtime_keccak::c0:hash_bytes(bytes)	1070
+runtime_keccak::c1:hash_bytes(bytes)	5763
+runtime_keccak::c2:hash_bytes(bytes)	1233
+runtime_keccak::c3:hash_bytes(bytes)	1082
+runtime_keccak::c4:hash_bytes(bytes)	5775
+runtime_keccak::c5:hash_bytes(bytes)	1094
+runtime_keccak::c6:hash_string(string)	1094
+runtime_keccak::c7:hash_string(string)	5485
 short_calldata_dispatch::__bytecode_bytes	427
 short_calldata_dispatch::__deploy_gas	79786
 short_calldata_dispatch::c0:ping124()	427

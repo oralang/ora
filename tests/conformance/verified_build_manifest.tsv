@@ -65,6 +65,7 @@ unverifiable	resource_transient_immediate.spec.toml	contract_invariant_unproved
 same-bytecode	result_memref_opaque.spec.toml	-
 same-bytecode	result_memref_scalar.spec.toml	-
 unverifiable	runtime_assert_message.spec.toml	contract_invariant_unproved
+same-bytecode	runtime_keccak.spec.toml	-
 unverifiable	short_calldata_dispatch.spec.toml	contract_invariant_unproved
 same-bytecode	source_inline.spec.toml	-
 same-bytecode	storage_bitfield.spec.toml	-

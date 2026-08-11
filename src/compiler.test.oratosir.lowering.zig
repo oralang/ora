@@ -40,7 +40,11 @@ test "compiler lowers indexed event fields as EVM log topics" {
 
 test "compiler lowers runtime keccak256 through OraToSIR" {
     const source_text =
-        \\pub fn hash(data: bytes) -> u256 {
+        \\pub fn hash_bytes(data: bytes) -> u256 {
+        \\    return @keccak256(data);
+        \\}
+        \\
+        \\pub fn hash_string(data: string) -> u256 {
         \\    return @keccak256(data);
         \\}
     ;
@@ -49,13 +53,18 @@ test "compiler lowers runtime keccak256 through OraToSIR" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
     try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
     defer testing.allocator.free(rendered);
 
-    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "keccak256"));
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.keccak256"));
+    inline for (.{ "hash_bytes", "hash_string" }) |function_name| {
+        const function_text = try functionSlice(rendered, function_name);
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, function_text, "keccak256"));
+        try expectOrderedNeedles(function_text, &.{ "const 0x20", "mload256", " = add ", "keccak256" });
+    }
 }
 
 test "compiler lowers computed storage derive and word operations through OraToSIR" {
