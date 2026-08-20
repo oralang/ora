@@ -1,0 +1,9 @@
+contract RuntimeKeccak {
+    pub fn hash_bytes(data: bytes) -> u256 {
+        return @keccak256(data);
+    }
+
+    pub fn hash_string(data: string) -> u256 {
+        return @keccak256(data);
+    }
+}

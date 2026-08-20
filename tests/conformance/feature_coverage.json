@@ -650,6 +650,23 @@
       ]
     },
     {
+      "id": "crypto.runtime_keccak256",
+      "area": "crypto",
+      "behavior": "@keccak256 hashes runtime string and bytes payloads with EVM Keccak-256 semantics across empty and multiword inputs",
+      "specs": [
+        "tests/conformance/runtime_keccak.spec.toml"
+      ]
+    },
+    {
+      "id": "crypto.keccak256_arguments_fail_closed",
+      "area": "crypto",
+      "behavior": "@keccak256 rejects invalid arity and non-string/bytes input types",
+      "negative_specs": [
+        "tests/negative/keccak_bad_arity.ora",
+        "tests/negative/keccak_wrong_type.ora"
+      ]
+    },
+    {
       "id": "arithmetic.wrapping_ops",
       "area": "arithmetic",
       "behavior": "Wrapping add/sub/mul match u256 reference semantics",
