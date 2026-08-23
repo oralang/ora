@@ -407,6 +407,17 @@ def termsTopologicalFrom : TermId → List Term → Bool
       term.refsBefore id &&
       termsTopologicalFrom (id + 1) rest
 
+theorem termsTopologicalFrom_append
+    (start : TermId) (lhs rhs : List Term) :
+    termsTopologicalFrom start (lhs ++ rhs) =
+      (termsTopologicalFrom start lhs &&
+        termsTopologicalFrom (start + lhs.length) rhs) := by
+  induction lhs generalizing start with
+  | nil => simp [termsTopologicalFrom]
+  | cons term rest ih =>
+      simp [termsTopologicalFrom, ih, Nat.add_assoc, Nat.add_left_comm,
+        Nat.add_comm, Bool.and_assoc]
+
 def ObligationKind.wf (terms : List Term) : ObligationKind → Bool
   | .logical _ formula => formula.wf terms
   | .runtimeGuard _ formula => formula.wf terms

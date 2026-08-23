@@ -1,155 +1,278 @@
 /-
-Generic partial-correctness model for scalar loops.
+Generic partial correctness and safety for loop control-flow edges.
 
-The model deliberately says nothing about termination. `Reaches` describes a
-finite number of loop steps, and the main theorem only characterizes a state
-that is known to be an exit reached from an initial state.
+The theorem is independent of source loop syntax and says nothing about
+termination. `Reaches` contains only a finite sequence of certified backedges.
 -/
-
-import Ora.Integer.Arithmetic
 
 namespace Ora.Loop
 
-abbrev ScalarLoopState := List Ora.Integer.Value
+inductive ControlTarget where
+  | backedge
+  | successor
+  | functionReturn
+  | errorReturn
+  | explicitRevert
+  deriving Repr, BEq, DecidableEq
 
-structure ScalarLoopSummary where
-  initial : ScalarLoopState → Prop
-  guard : ScalarLoopState → Prop
-  invariant : ScalarLoopState → Prop
-  step : ScalarLoopState → ScalarLoopState → Prop
-  safe : ScalarLoopState → Prop
-  post : ScalarLoopState → Prop
+structure Edge (State : Type) where
+  path : State → Prop
+  safe : State → Prop
+  next : State → State → Prop
+  target : ControlTarget
 
-inductive Reaches (summary : ScalarLoopSummary) :
-    ScalarLoopState → ScalarLoopState → Prop where
-  | refl (state) : Reaches summary state state
-  | next {initial current following} :
-      Reaches summary initial current →
-      summary.guard current →
-      summary.step current following →
-      Reaches summary initial following
+structure LoopVC (State : Type) where
+  initial : State → Prop
+  invariant : State → Prop
+  edges : List (Edge State)
+  targetAssertion : ControlTarget → State → Prop
 
-def ScalarLoopSummary.BaseObligation (summary : ScalarLoopSummary) : Prop :=
-  ∀ state, summary.initial state → summary.invariant state
+inductive Reaches (vc : LoopVC State) : State → State → Prop where
+  | refl (state) : Reaches vc state state
+  | next {initial current following edge} :
+      Reaches vc initial current →
+      edge ∈ vc.edges →
+      edge.target = .backedge →
+      edge.path current →
+      edge.safe current →
+      edge.next current following →
+      Reaches vc initial following
 
-def ScalarLoopSummary.StepObligation (summary : ScalarLoopSummary) : Prop :=
-  ∀ current following,
-    summary.invariant current →
-    summary.guard current →
-    summary.step current following →
-    summary.invariant following
+def LoopVC.BaseObligation (vc : LoopVC State) : Prop :=
+  ∀ state, vc.initial state → vc.invariant state
 
-def ScalarLoopSummary.ExitObligation (summary : ScalarLoopSummary) : Prop :=
-  ∀ state, summary.invariant state → ¬summary.guard state → summary.post state
+def LoopVC.EdgeSafetyObligation (vc : LoopVC State) : Prop :=
+  ∀ edge state,
+    edge ∈ vc.edges →
+    vc.invariant state →
+    edge.path state →
+    edge.safe state
 
-def ScalarLoopSummary.SafetyObligation (summary : ScalarLoopSummary) : Prop :=
-  ∀ state, summary.invariant state → summary.guard state → summary.safe state
+def LoopVC.BackedgeObligation (vc : LoopVC State) : Prop :=
+  ∀ edge current following,
+    edge ∈ vc.edges →
+    edge.target = .backedge →
+    vc.invariant current →
+    edge.path current →
+    edge.safe current →
+    edge.next current following →
+    vc.invariant following
 
-def ScalarLoopSummary.PartialCorrect (summary : ScalarLoopSummary) : Prop :=
-  ∀ initial exit,
-    summary.initial initial →
-    Reaches summary initial exit →
-    ¬summary.guard exit →
-    summary.post exit
+def LoopVC.ExitTargetObligation (vc : LoopVC State) : Prop :=
+  ∀ edge current following,
+    edge ∈ vc.edges →
+    edge.target ≠ .backedge →
+    vc.invariant current →
+    edge.path current →
+    edge.safe current →
+    edge.next current following →
+    vc.targetAssertion edge.target following
 
-def ScalarLoopSummary.SafeOnReachableStates (summary : ScalarLoopSummary) : Prop :=
-  ∀ initial current,
-    summary.initial initial →
-    Reaches summary initial current →
-    summary.guard current →
-    summary.safe current
+def LoopVC.TargetsHoldOnReachableEdges (vc : LoopVC State) : Prop :=
+  ∀ initial current following edge,
+    vc.initial initial →
+    Reaches vc initial current →
+    edge ∈ vc.edges →
+    edge.path current →
+    edge.safe current →
+    edge.next current following →
+    edge.target ≠ .backedge →
+    vc.targetAssertion edge.target following
 
-def ScalarLoopSummary.Verified (summary : ScalarLoopSummary) : Prop :=
-  summary.PartialCorrect ∧ summary.SafeOnReachableStates
+def LoopVC.SafeOnReachableEdges (vc : LoopVC State) : Prop :=
+  ∀ initial current edge,
+    vc.initial initial →
+    Reaches vc initial current →
+    edge ∈ vc.edges →
+    edge.path current →
+    edge.safe current
 
-structure ScalarLoopSummary.InductionObligations
-    (summary : ScalarLoopSummary) : Prop where
-  base : summary.BaseObligation
-  step : summary.StepObligation
-  safety : summary.SafetyObligation
-  exit : summary.ExitObligation
+def LoopVC.Verified (vc : LoopVC State) : Prop :=
+  vc.TargetsHoldOnReachableEdges ∧ vc.SafeOnReachableEdges
+
+structure LoopVC.InductionObligations (vc : LoopVC State) : Prop where
+  base : vc.BaseObligation
+  backedge : vc.BackedgeObligation
+  edgeSafety : vc.EdgeSafetyObligation
+  exit : vc.ExitTargetObligation
 
 theorem invariant_holds_on_reached_state
-    (summary : ScalarLoopSummary)
-    (hBase : summary.BaseObligation)
-    (hStep : summary.StepObligation)
-    {initial current : ScalarLoopState}
-    (hInitial : summary.initial initial)
-    (hReaches : Reaches summary initial current) :
-    summary.invariant current := by
+    (vc : LoopVC State)
+    (hBase : vc.BaseObligation)
+    (hBackedgeObligation : vc.BackedgeObligation)
+    {initial current : State}
+    (hInitial : vc.initial initial)
+    (hReaches : Reaches vc initial current) :
+    vc.invariant current := by
   induction hReaches with
   | refl => exact hBase initial hInitial
-  | next hPrefix hGuard hBody ih =>
-      exact hStep _ _ ih hGuard hBody
+  | @next previous following edge hPrefix hMember hBackedge hPath hSafe hNext ih =>
+      exact hBackedgeObligation edge previous following hMember hBackedge ih hPath hSafe hNext
 
-theorem invariant_preserved_to_exit
-    (summary : ScalarLoopSummary)
-    (hBase : summary.BaseObligation)
-    (hStep : summary.StepObligation)
-    (hExit : summary.ExitObligation) :
-    summary.PartialCorrect := by
-  intro initial exit hInitial hReaches hNotGuard
-  exact hExit exit
-    (invariant_holds_on_reached_state summary hBase hStep hInitial hReaches)
-    hNotGuard
+theorem targets_hold_on_reachable_edges
+    (vc : LoopVC State)
+    (hBase : vc.BaseObligation)
+    (hBackedge : vc.BackedgeObligation)
+    (hExit : vc.ExitTargetObligation) :
+    vc.TargetsHoldOnReachableEdges := by
+  intro initial current following edge hInitial hReaches hMember hPath hSafe hNext hNotBackedge
+  exact hExit edge current following hMember hNotBackedge
+    (invariant_holds_on_reached_state vc hBase hBackedge hInitial hReaches)
+    hPath hSafe hNext
 
-theorem safety_holds_on_reached_state
-    (summary : ScalarLoopSummary)
-    (hBase : summary.BaseObligation)
-    (hStep : summary.StepObligation)
-    (hSafety : summary.SafetyObligation) :
-    summary.SafeOnReachableStates := by
-  intro initial current hInitial hReaches hGuard
-  exact hSafety current
-    (invariant_holds_on_reached_state summary hBase hStep hInitial hReaches)
-    hGuard
+theorem safety_holds_on_reachable_edges
+    (vc : LoopVC State)
+    (hBase : vc.BaseObligation)
+    (hBackedge : vc.BackedgeObligation)
+    (hSafety : vc.EdgeSafetyObligation) :
+    vc.SafeOnReachableEdges := by
+  intro initial current edge hInitial hReaches hMember hPath
+  exact hSafety edge current hMember
+    (invariant_holds_on_reached_state vc hBase hBackedge hInitial hReaches)
+    hPath
 
 theorem verified_of_induction
-    (summary : ScalarLoopSummary)
-    (proof : summary.InductionObligations) :
-    summary.Verified := by
+    (vc : LoopVC State)
+    (proof : vc.InductionObligations) :
+    vc.Verified := by
   exact ⟨
-    invariant_preserved_to_exit summary proof.base proof.step proof.exit,
-    safety_holds_on_reached_state summary proof.base proof.step proof.safety
+    targets_hold_on_reachable_edges vc proof.base proof.backedge proof.exit,
+    safety_holds_on_reachable_edges vc proof.base proof.backedge proof.edgeSafety
   ⟩
 
-/-! A tiny one-step scalar-loop instantiation. -/
+private inductive TinyState where
+  | zero
+  | one
+  deriving DecidableEq
 
-private def zero : Ora.Integer.Value := Ora.Integer.Value.ofNat (.unsigned .w8) 0
-private def one : Ora.Integer.Value := Ora.Integer.Value.ofNat (.unsigned .w8) 1
-
-private def tinyLoop : ScalarLoopSummary where
-  initial := fun state => state = [zero]
-  guard := fun state => state = [zero]
-  invariant := fun state => state = [zero] ∨ state = [one]
-  step := fun current following => current = [zero] ∧ following = [one]
+private def tinyBackedge : Edge TinyState where
+  path := fun state => state = .zero
   safe := fun _ => True
-  post := fun state => state = [one]
+  next := fun current following => current = .zero ∧ following = .one
+  target := .backedge
+
+private def tinyExit : Edge TinyState where
+  path := fun state => state = .one
+  safe := fun _ => True
+  next := fun current following => current = following
+  target := .successor
+
+private def tinyLoop : LoopVC TinyState where
+  initial := fun state => state = .zero
+  invariant := fun state => state = .zero ∨ state = .one
+  edges := [tinyBackedge, tinyExit]
+  targetAssertion := fun target state => target = .successor ∧ state = .one
 
 private theorem tinyLoop_base : tinyLoop.BaseObligation := by
   intro state hInitial
   exact Or.inl hInitial
 
-private theorem tinyLoop_step : tinyLoop.StepObligation := by
-  intro current following _ _ hBody
-  exact Or.inr hBody.2
+private theorem tinyLoop_safety : tinyLoop.EdgeSafetyObligation := by
+  intro edge state hMember _ _
+  simp [tinyLoop] at hMember
+  rcases hMember with hBackedge | hExit
+  · rw [hBackedge]
+    trivial
+  · rw [hExit]
+    trivial
 
-private theorem tinyLoop_exit : tinyLoop.ExitObligation := by
-  intro state hInvariant hNotGuard
-  cases hInvariant with
-  | inl hZero => exact False.elim (hNotGuard hZero)
-  | inr hOne => exact hOne
+private theorem tinyLoop_backedge : tinyLoop.BackedgeObligation := by
+  intro edge current following hMember hTarget _ hPath _ hNext
+  simp [tinyLoop] at hMember
+  rcases hMember with hBackedge | hExit
+  · rw [hBackedge] at hPath hNext
+    exact Or.inr hNext.2
+  · rw [hExit] at hTarget
+    contradiction
 
-private theorem tinyLoop_safety : tinyLoop.SafetyObligation := by
-  simp [ScalarLoopSummary.SafetyObligation, tinyLoop]
+private theorem tinyLoop_exit : tinyLoop.ExitTargetObligation := by
+  intro edge current following hMember hTarget _ hPath _ hNext
+  simp [tinyLoop] at hMember
+  rcases hMember with hBackedge | hExit
+  · rw [hBackedge] at hTarget
+    contradiction
+  · rw [hExit] at hPath hNext ⊢
+    exact ⟨rfl, hNext ▸ hPath⟩
 
 private def tinyLoop_induction : tinyLoop.InductionObligations where
   base := tinyLoop_base
-  step := tinyLoop_step
-  safety := tinyLoop_safety
+  backedge := tinyLoop_backedge
+  edgeSafety := tinyLoop_safety
   exit := tinyLoop_exit
 
 example : tinyLoop.Verified :=
   verified_of_induction tinyLoop tinyLoop_induction
+
+example : Reaches tinyLoop .zero .zero :=
+  Reaches.refl TinyState.zero
+
+example : Reaches tinyLoop .zero .one := by
+  apply Reaches.next (edge := tinyBackedge) (Reaches.refl TinyState.zero)
+  · simp [tinyLoop]
+  · rfl
+  · rfl
+  · trivial
+  · exact ⟨rfl, rfl⟩
+
+private def falseBaseLoop : LoopVC Bool where
+  initial := fun state => state = true
+  invariant := fun _ => False
+  edges := []
+  targetAssertion := fun _ _ => True
+
+example : ¬ falseBaseLoop.BaseObligation := by
+  intro hBase
+  exact hBase true rfl
+
+private def falseSafetyEdge : Edge Bool where
+  path := fun _ => True
+  safe := fun _ => False
+  next := fun current following => current = following
+  target := .backedge
+
+private def falseSafetyLoop : LoopVC Bool where
+  initial := fun _ => True
+  invariant := fun _ => True
+  edges := [falseSafetyEdge]
+  targetAssertion := fun _ _ => True
+
+example : ¬ falseSafetyLoop.EdgeSafetyObligation := by
+  intro hSafety
+  exact hSafety falseSafetyEdge true (by simp [falseSafetyLoop]) trivial trivial
+
+private def falseBackedgeEdge : Edge Bool where
+  path := fun _ => True
+  safe := fun _ => True
+  next := fun current following => current = true ∧ following = false
+  target := .backedge
+
+private def falseBackedgeLoop : LoopVC Bool where
+  initial := fun state => state = true
+  invariant := fun state => state = true
+  edges := [falseBackedgeEdge]
+  targetAssertion := fun _ _ => True
+
+example : ¬ falseBackedgeLoop.BackedgeObligation := by
+  intro hBackedge
+  have hInvariant := hBackedge falseBackedgeEdge true false
+    (by simp [falseBackedgeLoop]) rfl rfl trivial trivial ⟨rfl, rfl⟩
+  contradiction
+
+private def falseExitEdge : Edge Bool where
+  path := fun _ => True
+  safe := fun _ => True
+  next := fun current following => current = following
+  target := .successor
+
+private def falseExitLoop : LoopVC Bool where
+  initial := fun _ => True
+  invariant := fun _ => True
+  edges := [falseExitEdge]
+  targetAssertion := fun _ _ => False
+
+example : ¬ falseExitLoop.ExitTargetObligation := by
+  intro hExit
+  exact hExit falseExitEdge true true (by simp [falseExitLoop]) (by decide)
+    trivial trivial trivial rfl
 
 end Ora.Loop

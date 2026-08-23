@@ -2909,10 +2909,73 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             try @This().emitSafetyAssert(self, amount_in_range, "checked shift amount out of range", range);
         }
 
+        pub fn emitCheckedDivRemSafetyAsserts(
+            self: *FunctionLowerer,
+            is_division: bool,
+            is_signed: bool,
+            lhs: mlir.MlirValue,
+            rhs: mlir.MlirValue,
+            range: source.TextRange,
+        ) anyerror!void {
+            const value_ty = mlir.oraValueGetType(lhs);
+            if (!mlir.oraTypeIsAInteger(value_ty) or !mlir.oraTypeEqual(value_ty, mlir.oraValueGetType(rhs))) {
+                return error.MlirOperationCreationFailed;
+            }
+
+            const loc = self.parent.location(range);
+            const zero = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, value_ty, 0));
+            const divisor_non_zero_op = self.createCompareOp(loc, "ne", rhs, zero);
+            if (mlir.oraOperationIsNull(divisor_non_zero_op)) return error.MlirOperationCreationFailed;
+            const divisor_non_zero = appendValueOp(self.block, divisor_non_zero_op);
+            try @This().emitSafetyAssert(
+                self,
+                divisor_non_zero,
+                if (is_division) "checked division by zero" else "checked remainder by zero",
+                range,
+            );
+
+            if (!is_division or !is_signed) return;
+
+            const bit_width = mlir.oraIntegerTypeGetWidth(value_ty);
+            if (bit_width == 0) return error.MlirOperationCreationFailed;
+            const one = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, value_ty, 1));
+            const shift = appendValueOp(self.block, createIntegerConstant(
+                self.parent.context,
+                loc,
+                value_ty,
+                @intCast(bit_width - 1),
+            ));
+            const min_op = mlir.oraArithShlIOpCreate(self.parent.context, loc, one, shift);
+            if (mlir.oraOperationIsNull(min_op)) return error.MlirOperationCreationFailed;
+            mlir.oraOperationSetAttributeByName(
+                min_op,
+                strRef("ora.integer_signed"),
+                mlir.oraBoolAttrCreate(self.parent.context, true),
+            );
+            const min_int = appendValueOp(self.block, min_op);
+            const neg_one = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, value_ty, -1));
+            const lhs_is_min = appendValueOp(self.block, self.createCompareOp(loc, "eq", lhs, min_int));
+            const rhs_is_neg_one = appendValueOp(self.block, self.createCompareOp(loc, "eq", rhs, neg_one));
+            const special_case_op = mlir.oraArithAndIOpCreate(
+                self.parent.context,
+                loc,
+                lhs_is_min,
+                rhs_is_neg_one,
+            );
+            if (mlir.oraOperationIsNull(special_case_op)) return error.MlirOperationCreationFailed;
+            const special_case = appendValueOp(self.block, special_case_op);
+            try @This().emitOverflowAssert(self, special_case, "checked division overflow", range);
+        }
+
         fn emitSafetyAssert(self: *FunctionLowerer, condition: mlir.MlirValue, message: []const u8, range: source.TextRange) anyerror!void {
             const loc = self.parent.location(range);
             const assert_op = mlir.oraAssertOpCreate(self.parent.context, loc, condition, strRef(message));
             if (mlir.oraOperationIsNull(assert_op)) return error.MlirOperationCreationFailed;
+            mlir.oraOperationSetAttributeByName(
+                assert_op,
+                strRef("ora.verification_context"),
+                mlir.oraStringAttrCreate(self.parent.context, strRef("arithmetic_safety")),
+            );
             try @This().attachAssertMessageSelector(self, assert_op, message);
             appendOp(self.block, assert_op);
         }

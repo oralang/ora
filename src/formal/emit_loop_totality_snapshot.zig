@@ -211,11 +211,41 @@ fn supportFor(mutation: Mutation) obligation_to_lean.SemanticSupport {
         .name = "collision",
         .ty = ty_u256,
     }};
-    var assignments = [_]obligation.LoopStepAssignment{.{
+    const assignments = [_]obligation.LoopStepAssignment{.{
         .variable_index = 0,
         .target = if (mutation == .bad_update_target) other_id else loop_id,
         .value = .{ .term = 0 },
     }};
+    const exit_assignments = [_]obligation.LoopStepAssignment{.{
+        .variable_index = 0,
+        .target = loop_id,
+        .value = .{ .term = 0 },
+    }};
+    const backedge_path: []const obligation.FormulaRef = if (mutation == .missing_guard)
+        &.{}
+    else if (mutation == .unsupported_formula)
+        &init_formulas
+    else
+        &invariant_formulas;
+    const safety_formulas: []const obligation.FormulaRef = if (mutation == .missing_body_safety)
+        &.{}
+    else
+        &body_safety_formulas;
+    const edges = [_]obligation.LoopEdgeRow{
+        .{
+            .id = 0,
+            .path_formulas = backedge_path,
+            .safety_formulas = safety_formulas,
+            .next_state = assignments[0..],
+            .target = .backedge,
+        },
+        .{
+            .id = 1,
+            .path_formulas = &invariant_formulas,
+            .next_state = exit_assignments[0..],
+            .target = .successor,
+        },
+    };
     var reasons: [1]obligation.LoopUnsupportedReason = undefined;
     const reason_slice: []const obligation.LoopUnsupportedReason = if (unsupportedReason(mutation)) |reason| blk: {
         reasons[0] = reason;
@@ -233,10 +263,8 @@ fn supportFor(mutation: Mutation) obligation_to_lean.SemanticSupport {
         .context_variables = if (mutation == .identity_collision) context_variables[0..] else &.{},
         .variables = variables[0..],
         .init_formulas = &init_formulas,
-        .guard_formula = if (mutation == .missing_guard) null else if (mutation == .unsupported_formula) .{ .term = 0 } else .{ .term = 1 },
         .invariant_formulas = if (mutation == .missing_invariant) &.{} else &invariant_formulas,
-        .step_assignments = assignments[0..],
-        .body_safety_formulas = &body_safety_formulas,
+        .edges = &edges,
         .post_formulas = &post_formulas,
         .query_ids = .{ .induction = if (mutation == .query_id_mismatch) &.{} else &induction_query_ids },
         .unsupported_reasons = reason_slice,

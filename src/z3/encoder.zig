@@ -15707,6 +15707,13 @@ pub const Encoder = struct {
         return value.data[0..value.length];
     }
 
+    fn getBoolAttr(_: *Encoder, op: mlir.MlirOperation, name: []const u8) ?bool {
+        const attr_name_ref = mlir.oraStringRefCreate(name.ptr, name.len);
+        const attr = mlir.oraOperationGetAttributeByName(op, attr_name_ref);
+        if (mlir.oraAttributeIsNull(attr)) return null;
+        return mlir.oraBoolAttrGetValue(attr);
+    }
+
     fn sourceFactIdForSummaryOp(op: mlir.MlirOperation) ?u32 {
         const name = "ora.source_fact_id";
         const attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate(name.ptr, name.len));
@@ -16697,7 +16704,8 @@ pub const Encoder = struct {
             std.mem.eql(u8, value, "true")
         else
             false;
-        if (!guard_internal) {
+        const source_safety_asserted = self.getBoolAttr(mlir_op, "ora.arithmetic_safety_asserted") orelse false;
+        if (!guard_internal and !source_safety_asserted) {
             // For arith.* ops, only emit div-by-zero obligations here.
             // Overflow obligations for add/sub/mul are emitted by ora.assert ops
             // that the MLIR lowering places alongside checked arithmetic.

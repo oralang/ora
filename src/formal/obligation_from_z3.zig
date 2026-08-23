@@ -9,6 +9,7 @@ const std = @import("std");
 const z3_verification = @import("ora_z3_verification");
 const obligation = @import("obligation.zig");
 const obligation_to_z3 = @import("obligation_to_z3.zig");
+const obligation_to_lean = @import("obligation_to_lean.zig");
 
 pub const CollectResult = struct {
     arena: std.heap.ArenaAllocator,
@@ -154,6 +155,14 @@ pub fn overlayPreparedQueryResults(
         try appendUnmatchedRowDiagnostic(arena_allocator, &diagnostics, row);
     }
 
+    try applyCanonicalLoopQueryResults(
+        arena_allocator,
+        base,
+        queries.items,
+        &diagnostics,
+        &canonical_context,
+    );
+
     var merged = base;
     merged.queries = try queries.toOwnedSlice(arena_allocator);
     merged.diagnostics = try diagnostics.toOwnedSlice(arena_allocator);
@@ -171,6 +180,7 @@ fn queryRequiresPreparedRow(set: obligation.ObligationSet, query: obligation.Ver
     // Step/Safety/Post checks remain ordinary verifier rows, but the aggregate
     // certificate target deliberately has no synthetic Z3 counterpart.
     if (query.kind == .loop_induction) return false;
+    if (query.loop_vc_sha256 != null) return false;
     if (query.obligation_ids.len == 0) return true;
 
     for (query.obligation_ids) |id| {
@@ -178,6 +188,74 @@ fn queryRequiresPreparedRow(set: obligation.ObligationSet, query: obligation.Ver
         if (item.kind != .effect_frame) return true;
     }
     return false;
+}
+
+fn applyCanonicalLoopQueryResults(
+    allocator: std.mem.Allocator,
+    set: obligation.ObligationSet,
+    queries: []obligation.VerificationQuery,
+    diagnostics: *std.ArrayList(obligation.ObligationDiagnostic),
+    canonical_context: *?z3_verification.Z3Context,
+) !void {
+    for (queries) |*query| {
+        if (!isCanonicalLoopZ3Query(query.*)) continue;
+        const summary_id = query.loop_summary_id orelse unreachable;
+        const expected_digest = obligation_to_lean.loopVcSha256(set, summary_id) catch |err| {
+            try appendCanonicalLoopDiagnostic(allocator, diagnostics, query.*, @errorName(err));
+            continue;
+        };
+        if (query.loop_vc_sha256 == null or !std.mem.eql(
+            u8,
+            &query.loop_vc_sha256.?,
+            &expected_digest,
+        )) {
+            try appendCanonicalLoopDiagnostic(allocator, diagnostics, query.*, "loop_vc_sha256_mismatch");
+            continue;
+        }
+        if (canonical_context.* == null) {
+            canonical_context.* = try z3_verification.Z3Context.init(allocator);
+        }
+        var adapter = obligation_to_z3.Adapter.init(&canonical_context.*.?, allocator, set);
+        const checked = adapter.checkLoopQueryForRow(query.*) catch |err| {
+            try appendCanonicalLoopDiagnostic(allocator, diagnostics, query.*, @errorName(err));
+            continue;
+        };
+        query.constraint_count = checked.query_hash.constraint_count;
+        query.smtlib_hash = checked.query_hash.smtlib_hash;
+        query.result = .{ .status = switch (checked.status) {
+            .proved => .proved,
+            .disproved => .failed,
+            .unknown => .unknown,
+        } };
+    }
+}
+
+fn isCanonicalLoopZ3Query(query: obligation.VerificationQuery) bool {
+    if (query.artifact_policy == .diagnostic_only or query.backend != .z3) return false;
+    if (query.loop_summary_id == null) return false;
+    return switch (query.kind) {
+        .loop_base, .loop_invariant_step, .loop_body_safety, .loop_invariant_post => true,
+        else => false,
+    };
+}
+
+fn appendCanonicalLoopDiagnostic(
+    allocator: std.mem.Allocator,
+    diagnostics: *std.ArrayList(obligation.ObligationDiagnostic),
+    query: obligation.VerificationQuery,
+    reason: []const u8,
+) !void {
+    const message = try std.fmt.allocPrint(
+        allocator,
+        "canonical LoopVC Z3 query id={d} could not be checked: {s}",
+        .{ query.id, reason },
+    );
+    try diagnostics.append(allocator, .{
+        .kind = .canonical_z3_unavailable,
+        .source = query.source,
+        .message = message,
+        .blocks_artifacts = true,
+    });
 }
 
 fn appendCanonicalSmtCrosscheckDiagnostic(
@@ -347,6 +425,9 @@ test "formal logical role labels stay in lockstep with the obligation vocabulary
 }
 
 fn queryMatchesPreparedRow(query: obligation.VerificationQuery, row: z3_verification.PreparedQueryManifestRow) bool {
+    // Canonical LoopVC queries are built directly from the backend-neutral VC
+    // below. Legacy verifier rows cannot satisfy or duplicate that authority.
+    if (query.loop_vc_sha256 != null) return false;
     if (row.formal_query_id) |id| {
         return query.id == id and
             obligation.equalIdSlices(query.assumption_ids, row.formal_assumption_ids) and

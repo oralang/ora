@@ -35,7 +35,7 @@ def loopTotalityRows : List (String × String × Bool × String × Bool) := [
   ("missing_body_safety", "missing_body_safety", false, "loop_body_safety_missing", false),
   ("unsupported_kind", "unsupported_kind", false, "loop_kind_unsupported", false),
   ("unregistered_integer_variable", "unregistered_integer_variable", false, "loop_variable_not_registered_integer", false),
-  ("bad_update_target", "bad_update_target", false, "loop_update_target_not_loop_variable", false),
+  ("bad_update_target", "bad_update_target", false, "loop_state_binding_foreign", false),
   ("unsupported_formula", "unsupported_formula", false, "loop_formula_unsupported", false),
   ("identity_collision", "identity_collision", false, "loop_identity_missing", false),
   ("query_owner_mismatch", "query_owner_mismatch", false, "loop_summary_query_mismatch", true),

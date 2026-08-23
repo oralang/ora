@@ -16,6 +16,7 @@ const CanonicalQueryState = ct.CanonicalQueryState;
 const CanonicalUnsupportedReason = ct.CanonicalUnsupportedReason;
 const CheckStatus = ct.CheckStatus;
 const EncodeError = ct.EncodeError;
+const LoopQueryCheck = ct.LoopQueryCheck;
 const QueryHash = ct.QueryHash;
 const TypeInfo = ct.TypeInfo;
 const canonical_promotion_table = ct.canonical_promotion_table;
@@ -42,6 +43,7 @@ pub const Adapter = struct {
     allocator: std.mem.Allocator,
     set: obligation.ObligationSet,
     query_state: ?*CanonicalQueryState,
+    use_free_variable_identity_names: bool = false,
 
     pub const EncodeTermState = struct {
         expected: ?TypeInfo = null,
@@ -90,6 +92,34 @@ pub const Adapter = struct {
             .constraint_count = std.math.cast(u32, constraints.items.len) orelse return error.Overflow,
             .smtlib_hash = smtlib_hash,
         };
+    }
+
+    /// Checks one of the canonical LoopVC obligations. These constraints are
+    /// built from `LoopSummaryRow`; they do not reconstruct loop semantics from
+    /// verifier annotations or source syntax.
+    pub fn checkLoopQueryForRow(
+        self: *Adapter,
+        query: obligation.VerificationQuery,
+    ) EncodeError!LoopQueryCheck {
+        try self.set.validateTermReferences();
+
+        var constraints: std.ArrayList(z3.Z3_ast) = .empty;
+        defer constraints.deinit(self.allocator);
+        try self.appendLoopQueryConstraints(&constraints, query);
+
+        const query_hash: QueryHash = .{
+            .constraint_count = std.math.cast(u32, constraints.items.len) orelse return error.Overflow,
+            .smtlib_hash = try self.hashConstraints(constraints.items, query.solver_logic),
+        };
+        var solver = try Solver.init(self.context, self.allocator);
+        defer solver.deinit();
+        for (constraints.items) |constraint| try solver.assertChecked(constraint);
+        const status: CheckStatus = switch (try solver.checkChecked()) {
+            z3.Z3_L_FALSE => .proved,
+            z3.Z3_L_TRUE => .disproved,
+            else => .unknown,
+        };
+        return .{ .status = status, .query_hash = query_hash };
     }
 
     fn checkQueryRow(self: *Adapter, query: obligation.VerificationQuery) EncodeError!CheckStatus {
@@ -148,6 +178,179 @@ pub const Adapter = struct {
         const negated_goal = z3.Z3_mk_not(self.context.ctx, goal);
         try self.context.checkNoError();
         try constraints.append(self.allocator, negated_goal);
+    }
+
+    fn appendLoopQueryConstraints(
+        self: *Adapter,
+        constraints: *std.ArrayList(z3.Z3_ast),
+        query: obligation.VerificationQuery,
+    ) EncodeError!void {
+        const summary_id = query.loop_summary_id orelse return error.InvalidLoopQuery;
+        const summary = obligation.findById(self.set.loop_summaries, summary_id) orelse
+            return error.UnknownLoopSummary;
+        if (!summary.projectionSupported()) return error.InvalidLoopQuery;
+
+        var query_state: CanonicalQueryState = .{};
+        defer query_state.deinit(self.allocator);
+        self.query_state = &query_state;
+        defer self.query_state = null;
+        self.use_free_variable_identity_names = true;
+        defer self.use_free_variable_identity_names = false;
+
+        try self.appendLoopAssumptions(constraints, query.assumption_ids);
+
+        switch (query.kind) {
+            .loop_base => {
+                if (query.loop_edge_id != null) return error.InvalidLoopQuery;
+                const goal = try self.encodeFormulaConjunction(constraints, summary.invariant_formulas);
+                const replacements = try self.encodeFormulaValues(constraints, summary.init_formulas);
+                defer self.allocator.free(replacements);
+                const initialized_goal = try self.substituteLoopVariables(goal, summary.variables, replacements);
+                try self.appendNegatedGoal(constraints, initialized_goal);
+            },
+            .loop_body_safety, .loop_invariant_step, .loop_invariant_post => {
+                const edge = findLoopEdge(summary, query.loop_edge_id orelse return error.InvalidLoopQuery) orelse
+                    return error.UnknownLoopEdge;
+                try self.appendFormulaPremises(constraints, summary.invariant_formulas);
+                try self.appendFormulaPremises(constraints, edge.path_formulas);
+
+                if (query.kind == .loop_body_safety) {
+                    const goal = try self.encodeFormulaConjunction(constraints, edge.safety_formulas);
+                    try self.appendNegatedGoal(constraints, goal);
+                    return;
+                }
+
+                try self.appendFormulaPremises(constraints, edge.safety_formulas);
+                const expected_target: obligation.LoopControlTarget = if (query.kind == .loop_invariant_step)
+                    .backedge
+                else
+                    .successor;
+                if (edge.target != expected_target) return error.InvalidLoopQuery;
+                const goal_formulas = if (query.kind == .loop_invariant_step)
+                    summary.invariant_formulas
+                else
+                    summary.post_formulas;
+                const goal = try self.encodeFormulaConjunction(constraints, goal_formulas);
+                const replacements = try self.encodeBindingValues(constraints, summary.variables, edge.next_state);
+                defer self.allocator.free(replacements);
+                const following_goal = try self.substituteLoopVariables(goal, summary.variables, replacements);
+                try self.appendNegatedGoal(constraints, following_goal);
+            },
+            else => return error.InvalidLoopQuery,
+        }
+    }
+
+    fn appendLoopAssumptions(
+        self: *Adapter,
+        constraints: *std.ArrayList(z3.Z3_ast),
+        assumption_ids: []const obligation.Id,
+    ) EncodeError!void {
+        for (assumption_ids) |assumption_id| {
+            const assumption = obligation.findById(self.set.assumptions, assumption_id) orelse
+                return error.UnknownAssumption;
+            const formula = assumption.formula orelse return error.MissingFormula;
+            const ast = try self.encodeFormula(formula);
+            try self.appendSideConstraints(constraints);
+            try constraints.append(self.allocator, ast);
+        }
+    }
+
+    fn appendFormulaPremises(
+        self: *Adapter,
+        constraints: *std.ArrayList(z3.Z3_ast),
+        formulas: []const obligation.FormulaRef,
+    ) EncodeError!void {
+        for (formulas) |formula| {
+            const ast = try self.encodeFormula(formula);
+            try self.appendSideConstraints(constraints);
+            try constraints.append(self.allocator, ast);
+        }
+    }
+
+    fn encodeFormulaConjunction(
+        self: *Adapter,
+        constraints: *std.ArrayList(z3.Z3_ast),
+        formulas: []const obligation.FormulaRef,
+    ) EncodeError!z3.Z3_ast {
+        if (formulas.len == 0) return z3.Z3_mk_true(self.context.ctx);
+        var result = try self.encodeFormula(formulas[0]);
+        try self.appendSideConstraints(constraints);
+        for (formulas[1..]) |formula| {
+            const next = try self.encodeFormula(formula);
+            try self.appendSideConstraints(constraints);
+            result = z3.Z3_mk_and(self.context.ctx, 2, &[_]z3.Z3_ast{ result, next });
+            try self.context.checkNoError();
+        }
+        return result;
+    }
+
+    fn encodeFormulaValues(
+        self: *Adapter,
+        constraints: *std.ArrayList(z3.Z3_ast),
+        formulas: []const obligation.FormulaRef,
+    ) EncodeError![]const z3.Z3_ast {
+        const values = try self.allocator.alloc(z3.Z3_ast, formulas.len);
+        errdefer self.allocator.free(values);
+        for (formulas, values) |formula, *value| {
+            value.* = try self.encodeValueFormula(formula);
+            try self.appendSideConstraints(constraints);
+        }
+        return values;
+    }
+
+    fn encodeBindingValues(
+        self: *Adapter,
+        constraints: *std.ArrayList(z3.Z3_ast),
+        variables: []const obligation.LoopVariable,
+        bindings: []const obligation.LoopStepAssignment,
+    ) EncodeError![]const z3.Z3_ast {
+        if (bindings.len != variables.len) return error.InvalidLoopQuery;
+        const values = try self.allocator.alloc(z3.Z3_ast, bindings.len);
+        errdefer self.allocator.free(values);
+        for (bindings, variables, values, 0..) |binding, variable, *value, index| {
+            if (binding.variable_index != index or binding.target == null or variable.id == null or
+                !obligation.freeVarIdEql(binding.target.?, variable.id.?)) return error.InvalidLoopQuery;
+            value.* = try self.encodeValueFormula(binding.value);
+            try self.appendSideConstraints(constraints);
+        }
+        return values;
+    }
+
+    fn encodeValueFormula(self: *Adapter, formula: obligation.FormulaRef) EncodeError!z3.Z3_ast {
+        return switch (formula) {
+            .term => |term_id| self.encodeTermId(term_id),
+            .origin_value => error.UnsupportedOriginValue,
+        };
+    }
+
+    fn substituteLoopVariables(
+        self: *Adapter,
+        formula: z3.Z3_ast,
+        variables: []const obligation.LoopVariable,
+        replacements: []const z3.Z3_ast,
+    ) EncodeError!z3.Z3_ast {
+        if (variables.len != replacements.len) return error.InvalidLoopQuery;
+        if (variables.len == 0) return formula;
+        const current = try self.allocator.alloc(z3.Z3_ast, variables.len);
+        defer self.allocator.free(current);
+        for (variables, current) |variable, *ast| {
+            const id = variable.id orelse return error.InvalidLoopQuery;
+            ast.* = try self.encodeFreeVariableIdentity(id, variable.ty);
+        }
+        const count = std.math.cast(c_uint, variables.len) orelse return error.Overflow;
+        const result = z3.Z3_substitute(self.context.ctx, formula, count, current.ptr, replacements.ptr);
+        try self.context.checkNoError();
+        return result;
+    }
+
+    fn appendNegatedGoal(
+        self: *Adapter,
+        constraints: *std.ArrayList(z3.Z3_ast),
+        goal: z3.Z3_ast,
+    ) EncodeError!void {
+        const negated = z3.Z3_mk_not(self.context.ctx, goal);
+        try self.context.checkNoError();
+        try constraints.append(self.allocator, negated);
     }
 
     fn hashConstraints(
@@ -438,11 +641,28 @@ pub const Adapter = struct {
             .bound => |bound| return self.encodeBoundVariable(bound),
         };
         const ty = free.ty orelse return error.MissingType;
+        if (self.use_free_variable_identity_names) {
+            return self.encodeFreeVariableIdentity(free.id, ty);
+        }
         const sort = try self.sortForType(try typeInfo(ty));
         // Canonical SMT is byte-parity with the live encoder, which names free
         // variables from the source surface. Semantic identity remains FreeVarId
         // in the manifest and Lean denotation.
         return self.namedConst(free.name, sort);
+    }
+
+    fn encodeFreeVariableIdentity(
+        self: *Adapter,
+        id: obligation.FreeVarId,
+        ty: obligation.TypeRef,
+    ) EncodeError!z3.Z3_ast {
+        const name = try std.fmt.allocPrint(
+            self.allocator,
+            "$ora.loop.f{d}.p{d}",
+            .{ id.file_id, id.pattern_id },
+        );
+        defer self.allocator.free(name);
+        return self.namedConst(name, try self.sortForType(try typeInfo(ty)));
     }
 
     fn encodeBoundVariable(self: *Adapter, bound: obligation.BoundVarRef) EncodeError!z3.Z3_ast {
@@ -953,6 +1173,14 @@ pub const Adapter = struct {
         if (z3.Z3_get_sort_kind(self.context.ctx, sort) != z3.Z3_BV_SORT) return error.ExpectedBitVector;
     }
 };
+
+fn findLoopEdge(
+    summary: obligation.LoopSummaryRow,
+    edge_id: u32,
+) ?obligation.LoopEdgeRow {
+    for (summary.edges) |edge| if (edge.id == edge_id) return edge;
+    return null;
+}
 
 fn expectCanonicalSupported(set: obligation.ObligationSet, query: obligation.VerificationQuery) !void {
     switch (queryCanonicalSupport(set, query)) {

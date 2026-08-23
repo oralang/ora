@@ -2039,7 +2039,12 @@ pub const VerificationPass = struct {
                         break :blk .ContractInvariant;
                     } else .ContractInvariant;
                     // In full mode, treat untagged assert ops as proof obligations.
-                    _ = try self.recordEncodedAnnotation(op, obligation_kind, condition_value, guard_id);
+                    const annotation_index = try self.recordEncodedAnnotation(op, obligation_kind, condition_value, guard_id);
+                    self.encoded_annotations.items[annotation_index].verification_context = try self.getStringAttr(
+                        op,
+                        "ora.verification_context",
+                        &self.guard_id_storage,
+                    );
                 }
             }
         }
@@ -2391,7 +2396,7 @@ pub const VerificationPass = struct {
             defer if (old_safety.len > 0) self.allocator.free(old_safety);
             for (old_safety) |obligation| {
                 const loc_old = try self.getLocationInfo(op);
-                try self.encoded_annotations.append(.{
+                _ = try appendEncodedAnnotation(self, .{
                     .function_name = function_name,
                     .kind = .ContractInvariant,
                     .condition = obligation,
@@ -2418,7 +2423,7 @@ pub const VerificationPass = struct {
             defer if (loop_exit_safety.len > 0) self.allocator.free(loop_exit_safety);
             for (loop_exit_safety) |obligation| {
                 const loc_loop = try self.getLocationInfo(op);
-                try self.encoded_annotations.append(.{
+                _ = try appendEncodedAnnotation(self, .{
                     .function_name = function_name,
                     .kind = .ContractInvariant,
                     .condition = obligation,
@@ -2441,8 +2446,7 @@ pub const VerificationPass = struct {
         }
 
         const annotation_label = try self.annotationLabelForOp(op, kind);
-        const annotation_index = self.encoded_annotations.items.len;
-        try self.encoded_annotations.append(.{
+        const annotation_index = try appendEncodedAnnotation(self, .{
             .function_name = function_name,
             .kind = kind,
             .condition = encoded,
@@ -3397,7 +3401,7 @@ pub const VerificationPass = struct {
                 vacuity_tags_copy = explain.explain_tags;
                 break :blk explain.status;
             } else blk: {
-                if (query.kind != .Base) {
+                if (requiresMandatoryVacuityCheck(query.kind)) {
                     const vacuity = runMandatoryVacuityCheck(self, active_solver, query, query.log_prefix) catch |err| {
                         return try self.queryExecutionFailureResult(query, "vacuity query execution", err, duplicateZ3ApiMessageOrNull(self.context, self.allocator, err));
                     };
@@ -4056,7 +4060,7 @@ pub const VerificationPass = struct {
                 if (explain.explain_tags.len > 0) self.allocator.free(explain.explain_tags);
                 break :blk explain.status;
             } else blk: {
-                if (query.kind != .Base) {
+                if (requiresMandatoryVacuityCheck(query.kind)) {
                     const vacuity = try runMandatoryVacuityCheck(self, &self.solver, query, null);
                     core_minimized = vacuity.core_minimized;
                     vacuous = vacuity.vacuous;
@@ -5181,7 +5185,7 @@ pub const VerificationPass = struct {
                 try addConstraintSlice(&obligation_constraints, ann.extra_constraints);
                 try appendTrackedSemanticConstraintsForSlice(self, &tracked_obligation_assumptions, ann.extra_constraints);
                 for (guard_annotations.items) |guard_ann| {
-                    if (!annotationLocationPrecedes(guard_ann, ann)) continue;
+                    if (!annotationPrecedesInVerifierInput(guard_ann, ann)) continue;
                     if (!pathConstraintsCompatible(self, guard_ann.path_constraints, ann.path_constraints)) continue;
                     try addRelevantTrackedSemanticConstraintSlice(self, &obligation_constraints, &tracked_obligation_assumptions, guard_ann.path_constraints, &relevant_symbols);
                     try addRelevantTrackedSemanticConstraintSlice(self, &obligation_constraints, &tracked_obligation_assumptions, guard_ann.extra_constraints, &relevant_symbols);
@@ -6338,6 +6342,10 @@ const EncodedAnnotation = struct {
     loop_exit_condition: ?z3.Z3_ast = null,
     loop_exit_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{},
     loop_snapshot_value_bindings: []const VerificationPass.SnapshotValueBinding = &[_]VerificationPass.SnapshotValueBinding{},
+    /// Deterministic verifier-input traversal order. Source locations cannot
+    /// establish execution order: a later operation may start at an earlier
+    /// source column on the same line.
+    discovery_order: usize = 0,
     file: []const u8,
     line: u32,
     column: u32,
@@ -6450,6 +6458,13 @@ fn formalLogicalRoleForAnnotation(kind: AnnotationKind) ?[]const u8 {
     };
 }
 
+fn formalLogicalRoleForPreparedAnnotation(ann: EncodedAnnotation) ?[]const u8 {
+    if (ann.verification_context) |context| {
+        if (std.mem.eql(u8, context, "arithmetic_safety")) return "arithmetic_safety";
+    }
+    return formalLogicalRoleForAnnotation(ann.kind);
+}
+
 fn formalQueryKindForPrepared(kind: QueryKind) ?[]const u8 {
     return switch (kind) {
         .Obligation => "obligation",
@@ -6528,7 +6543,7 @@ fn formalIdentityForAnnotation(
     const formal_kind = formalQueryKindForPrepared(prepared_kind) orelse return .{};
     const role: ?[]const u8 = switch (prepared_kind) {
         .Obligation => switch (ann.kind) {
-            .Ensures, .ContractInvariant => formalLogicalRoleForAnnotation(ann.kind),
+            .Ensures, .ContractInvariant => formalLogicalRoleForPreparedAnnotation(ann),
             .Requires,
             .CalleePrecondition,
             .Guard,
@@ -6772,11 +6787,9 @@ fn constraintSliceContains(self: *VerificationPass, haystack: []const z3.Z3_ast,
     return false;
 }
 
-fn annotationLocationPrecedes(lhs: EncodedAnnotation, rhs: EncodedAnnotation) bool {
-    if (!std.mem.eql(u8, lhs.file, rhs.file)) return false;
-    if (lhs.line < rhs.line) return true;
-    if (lhs.line > rhs.line) return false;
-    return lhs.column <= rhs.column;
+fn annotationPrecedesInVerifierInput(lhs: EncodedAnnotation, rhs: EncodedAnnotation) bool {
+    if (!std.mem.eql(u8, lhs.function_name, rhs.function_name)) return false;
+    return lhs.discovery_order < rhs.discovery_order;
 }
 
 fn annotationKindSortKey(kind: AnnotationKind) u8 {
@@ -6816,7 +6829,7 @@ fn lessThanEncodedAnnotation(_: void, lhs: EncodedAnnotation, rhs: EncodedAnnota
     const rhs_loop = rhs.loop_owner orelse 0;
     if (lhs_loop != rhs_loop) return lhs_loop < rhs_loop;
 
-    return false;
+    return lhs.discovery_order < rhs.discovery_order;
 }
 
 fn stableSortAnnotations(items: []EncodedAnnotation) void {
@@ -6857,7 +6870,7 @@ fn pathAssumeAppliesToAnnotation(
             return false;
         }
     }
-    if (!annotationLocationPrecedes(path_assume, ann)) return false;
+    if (!annotationPrecedesInVerifierInput(path_assume, ann)) return false;
     return pathConstraintsCompatible(self, path_assume.path_constraints, ann.path_constraints);
 }
 
@@ -7019,7 +7032,15 @@ fn appendEncodedAnnotationUnique(self: *VerificationPass, ann: EncodedAnnotation
             return;
         }
     }
+    _ = try appendEncodedAnnotation(self, ann);
+}
+
+fn appendEncodedAnnotation(self: *VerificationPass, incoming: EncodedAnnotation) !usize {
+    var ann = incoming;
+    ann.discovery_order = self.encoded_annotations.items.len;
+    const index = ann.discovery_order;
     try self.encoded_annotations.append(ann);
+    return index;
 }
 
 fn collectAstSymbols(
@@ -7278,6 +7299,26 @@ pub const QueryKind = enum(u8) {
     GuardSatisfy,
     GuardViolate,
 };
+
+fn requiresMandatoryVacuityCheck(kind: QueryKind) bool {
+    // A structured loop edge may be unreachable. Loop authorization checks
+    // function/initial-state satisfiability separately; requiring every edge
+    // premise to be satisfiable would reject valid dead branches.
+    return switch (kind) {
+        .Base, .LoopInvariantStep, .LoopBodySafety, .LoopInvariantPost => false,
+        .Obligation, .GuardSatisfy, .GuardViolate => true,
+    };
+}
+
+test "loop edge proof queries do not require edge feasibility" {
+    try std.testing.expect(!requiresMandatoryVacuityCheck(.Base));
+    try std.testing.expect(!requiresMandatoryVacuityCheck(.LoopInvariantStep));
+    try std.testing.expect(!requiresMandatoryVacuityCheck(.LoopBodySafety));
+    try std.testing.expect(!requiresMandatoryVacuityCheck(.LoopInvariantPost));
+    try std.testing.expect(requiresMandatoryVacuityCheck(.Obligation));
+    try std.testing.expect(requiresMandatoryVacuityCheck(.GuardSatisfy));
+    try std.testing.expect(requiresMandatoryVacuityCheck(.GuardViolate));
+}
 
 const ForcedUnknownQuery = struct {
     kind: QueryKind,
@@ -9151,36 +9192,40 @@ fn runExplainCheck(
     try assertPreparedQueryTrackedImplications(self, solver, query);
 
     if (query.kind != .Base) {
-        const vacuity = try checkPreparedQueryTrackedAssumptions(self, solver, query, false);
-        if (vacuity.status == z3.Z3_L_FALSE) {
-            if (firstFailClosedCoreAssumptionLabel(vacuity.explain_tags) != null) {
-                if (log_prefix) |prefix| {
-                    if (vacuity.explain_str) |core| {
-                        std.debug.print("{s} note: assumptions inconsistent ({s})\n", .{ prefix, core });
-                    } else {
-                        std.debug.print("{s} note: assumptions inconsistent\n", .{prefix});
+        var vacuity_unknown = false;
+        if (requiresMandatoryVacuityCheck(query.kind)) {
+            const vacuity = try checkPreparedQueryTrackedAssumptions(self, solver, query, false);
+            if (vacuity.status == z3.Z3_L_FALSE) {
+                if (firstFailClosedCoreAssumptionLabel(vacuity.explain_tags) != null) {
+                    if (log_prefix) |prefix| {
+                        if (vacuity.explain_str) |core| {
+                            std.debug.print("{s} note: assumptions inconsistent ({s})\n", .{ prefix, core });
+                        } else {
+                            std.debug.print("{s} note: assumptions inconsistent\n", .{prefix});
+                        }
                     }
+                    return .{
+                        .status = vacuity.status,
+                        .explain_str = vacuity.explain_str,
+                        .explain_tags = vacuity.explain_tags,
+                        .core_minimized = vacuity.core_minimized,
+                        .vacuous = true,
+                    };
                 }
-                return .{
-                    .status = vacuity.status,
-                    .explain_str = vacuity.explain_str,
-                    .explain_tags = vacuity.explain_tags,
-                    .core_minimized = vacuity.core_minimized,
-                    .vacuous = true,
-                };
+                if (vacuity.explain_str) |core| self.allocator.free(core);
+                if (vacuity.explain_tags.len > 0) self.allocator.free(vacuity.explain_tags);
             }
-            if (vacuity.explain_str) |core| self.allocator.free(core);
-            if (vacuity.explain_tags.len > 0) self.allocator.free(vacuity.explain_tags);
-        }
-        if (vacuity.status == z3.Z3_L_UNDEF) {
-            if (log_prefix) |prefix| {
-                std.debug.print("{s} note: vacuity check inconclusive; proceeding with proof check\n", .{prefix});
+            if (vacuity.status == z3.Z3_L_UNDEF) {
+                vacuity_unknown = true;
+                if (log_prefix) |prefix| {
+                    std.debug.print("{s} note: vacuity check inconclusive; proceeding with proof check\n", .{prefix});
+                }
+                if (vacuity.explain_str) |core| self.allocator.free(core);
+                if (vacuity.explain_tags.len > 0) self.allocator.free(vacuity.explain_tags);
+            } else if (vacuity.status != z3.Z3_L_FALSE) {
+                if (vacuity.explain_str) |core| self.allocator.free(core);
+                if (vacuity.explain_tags.len > 0) self.allocator.free(vacuity.explain_tags);
             }
-            if (vacuity.explain_str) |core| self.allocator.free(core);
-            if (vacuity.explain_tags.len > 0) self.allocator.free(vacuity.explain_tags);
-        } else if (vacuity.status != z3.Z3_L_FALSE) {
-            if (vacuity.explain_str) |core| self.allocator.free(core);
-            if (vacuity.explain_tags.len > 0) self.allocator.free(vacuity.explain_tags);
         }
 
         const proof = try checkPreparedQueryTrackedAssumptions(self, solver, query, true);
@@ -9196,7 +9241,7 @@ fn runExplainCheck(
             .explain_str = proof.explain_str,
             .explain_tags = proof.explain_tags,
             .core_minimized = proof.core_minimized,
-            .vacuity_unknown = vacuity.status == z3.Z3_L_UNDEF,
+            .vacuity_unknown = vacuity_unknown,
         };
     }
 
@@ -9453,6 +9498,28 @@ fn loopStatementIndex(op: mlir.MlirOperation) ?u32 {
 }
 
 const testing = std.testing;
+
+test "annotation precedence follows verifier-input order, not source coordinates" {
+    var earlier: EncodedAnnotation = .{
+        .function_name = "f",
+        .kind = .ContractInvariant,
+        .condition = undefined,
+        .extra_constraints = &.{},
+        .discovery_order = 4,
+        .file = "test.ora",
+        .line = 9,
+        .column = 30,
+    };
+    var later = earlier;
+    later.discovery_order = 5;
+    later.column = 5;
+
+    try testing.expect(annotationPrecedesInVerifierInput(earlier, later));
+    try testing.expect(!annotationPrecedesInVerifierInput(later, earlier));
+
+    earlier.function_name = "other";
+    try testing.expect(!annotationPrecedesInVerifierInput(earlier, later));
+}
 
 fn testStringRef(comptime s: []const u8) mlir.MlirStringRef {
     return mlir.oraStringRefCreate(s.ptr, s.len);
@@ -10169,7 +10236,7 @@ fn buildUntaggedCfAssertModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     return module;
 }
 
-fn buildUntaggedOraAssertModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
+fn buildUntaggedOraAssertModule(mlir_ctx: mlir.MlirContext, arithmetic_safety_context: bool) mlir.MlirModule {
     const loc = mlir.oraLocationUnknownGet(mlir_ctx);
     const module = mlir.oraModuleCreateEmpty(loc);
     const module_body = mlir.oraModuleGetBody(module);
@@ -10188,6 +10255,13 @@ fn buildUntaggedOraAssertModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     const cond_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, cond_attr);
     const cond = mlir.oraOperationGetResult(cond_op, 0);
     const assert_op = mlir.oraAssertOpCreate(mlir_ctx, loc, cond, testStringRef("assert"));
+    if (arithmetic_safety_context) {
+        mlir.oraOperationSetAttributeByName(
+            assert_op,
+            testStringRef("ora.verification_context"),
+            mlir.oraStringAttrCreate(mlir_ctx, testStringRef("arithmetic_safety")),
+        );
+    }
     const empty_return_vals = [_]mlir.MlirValue{};
     const ret_op = mlir.oraReturnOpCreate(mlir_ctx, loc, &empty_return_vals, empty_return_vals.len);
 
@@ -11859,7 +11933,7 @@ test "full verify mode treats untagged ora.assert as obligation" {
     testLoadAllDialects(mlir_ctx);
     _ = mlir.oraDialectRegister(mlir_ctx);
 
-    const module = buildUntaggedOraAssertModule(mlir_ctx);
+    const module = buildUntaggedOraAssertModule(mlir_ctx, false);
     defer mlir.oraModuleDestroy(module);
 
     try pass.extractAnnotationsFromMLIR(module);
@@ -11900,6 +11974,54 @@ test "full verify mode treats untagged ora.assert as obligation" {
         }
     }
     try testing.expect(saw_contract_obligation);
+}
+
+test "arithmetic safety ora.assert matches the formal arithmetic-safety query" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setVerifyMode(.Full);
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    testLoadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const module = buildUntaggedOraAssertModule(mlir_ctx, true);
+    defer mlir.oraModuleDestroy(module);
+
+    try pass.extractAnnotationsFromMLIR(module);
+    var assert_ann: ?EncodedAnnotation = null;
+    for (pass.encoded_annotations.items) |ann| {
+        if (ann.kind == .ContractInvariant) {
+            assert_ann = ann;
+            break;
+        }
+    }
+    const ann = assert_ann orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("arithmetic_safety", ann.verification_context orelse return error.TestUnexpectedResult);
+    const source_op_id = sourceOpId(ann.source_op) orelse return error.TestUnexpectedResult;
+    const bindings = [_]FormalQueryBinding{.{
+        .source_op_id = source_op_id,
+        .kind = "obligation",
+        .logical_role = "arithmetic_safety",
+        .query_id = 74,
+    }};
+    pass.setFormalQueryBindings(&bindings);
+
+    var queries = try pass.buildPreparedQueries();
+    defer {
+        for (queries.items) |*q| q.deinit(testing.allocator);
+        queries.deinit();
+    }
+
+    var saw_safety_obligation = false;
+    for (queries.items) |q| {
+        if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
+        saw_safety_obligation = true;
+        try testing.expectEqual(FormalMatchStatus.matched, q.formal_match_status);
+        try testing.expectEqual(@as(?u32, 74), q.formal_query_id);
+    }
+    try testing.expect(saw_safety_obligation);
 }
 
 test "full verify mode classifies guard-tagged ora.assert as guard obligation" {
@@ -12020,7 +12142,7 @@ test "basic verify mode ignores untagged ora.assert as obligation" {
     testLoadAllDialects(mlir_ctx);
     _ = mlir.oraDialectRegister(mlir_ctx);
 
-    const module = buildUntaggedOraAssertModule(mlir_ctx);
+    const module = buildUntaggedOraAssertModule(mlir_ctx, false);
     defer mlir.oraModuleDestroy(module);
 
     try pass.extractAnnotationsFromMLIR(module);

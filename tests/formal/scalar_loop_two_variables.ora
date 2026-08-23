@@ -1,0 +1,14 @@
+contract ScalarLoopTwoVariables {
+    pub fn countPair() -> u256 {
+        var left: u256 = 0;
+        var right: u256 = 0;
+        while (left < 3)
+            invariant left <= 3
+            invariant right == left
+        {
+            left = left + 1;
+            right = right + 1;
+        }
+        return right;
+    }
+}

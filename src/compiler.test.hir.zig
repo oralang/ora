@@ -2341,7 +2341,7 @@ test "compiler lowers checked arithmetic compound assignment" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.muli"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.divui"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.remui"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.assert"));
+    try testing.expect(std.mem.count(u8, hir_text, "ora.assert") >= 5);
 }
 
 test "compiler lowers array literals through memref allocation and stores" {

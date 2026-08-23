@@ -63,9 +63,7 @@ pub const ObligationSet = struct {
                 {
                     return .{ .blocked = .lean_required_failure };
                 }
-            } else if (query.obligation_ids.len > 0 or
-                query.proof_requirement == .lean_certificate)
-            {
+            } else {
                 if (self.hasSuccessfulLeanProofForQuery(query)) continue;
                 return .{ .blocked = if (query.backend == .lean or query.proof_requirement == .lean_certificate)
                     .lean_required_failure
@@ -104,10 +102,12 @@ pub const ObligationSet = struct {
         }
         for (self.loop_summaries) |summary| {
             for (summary.init_formulas) |formula| try self.validateFormulaRef(formula);
-            if (summary.guard_formula) |formula| try self.validateFormulaRef(formula);
             for (summary.invariant_formulas) |formula| try self.validateFormulaRef(formula);
-            for (summary.step_assignments) |assignment| try self.validateFormulaRef(assignment.value);
-            for (summary.body_safety_formulas) |formula| try self.validateFormulaRef(formula);
+            for (summary.edges) |edge| {
+                for (edge.path_formulas) |formula| try self.validateFormulaRef(formula);
+                for (edge.safety_formulas) |formula| try self.validateFormulaRef(formula);
+                for (edge.next_state) |binding| try self.validateFormulaRef(binding.value);
+            }
             for (summary.post_formulas) |formula| try self.validateFormulaRef(formula);
         }
     }
@@ -165,6 +165,7 @@ pub const ObligationSet = struct {
     }
 
     pub fn validateIdReferences(self: ObligationSet) !void {
+        for (self.loop_summaries) |summary| try self.validateLoopQueryIds(summary);
         for (self.obligations) |item| {
             for (item.dependencies) |id| {
                 if (!self.obligationIdExists(id)) return error.InvalidDependency;
@@ -189,7 +190,10 @@ pub const ObligationSet = struct {
                 if (!self.obligationIdExists(id)) return error.InvalidDependency;
             }
         }
-        for (self.queries) |query| {
+        for (self.queries, 0..) |query, query_index| {
+            for (self.queries[0..query_index]) |candidate| {
+                if (candidate.id == query.id) return error.InvalidDependency;
+            }
             for (query.obligation_ids) |id| {
                 if (!self.obligationIdExists(id)) return error.InvalidDependency;
             }
@@ -204,10 +208,119 @@ pub const ObligationSet = struct {
                 }
             }
             if (query.loop_summary_id) |loop_summary_id| {
-                if (query.kind != .loop_induction and query.kind != .loop_invariant_post) {
+                if (query.kind != .loop_induction and
+                    query.kind != .loop_base and
+                    query.kind != .loop_invariant_step and
+                    query.kind != .loop_body_safety and
+                    query.kind != .loop_invariant_post)
+                {
                     return error.InvalidDependency;
                 }
                 if (!self.loopSummaryIdExists(loop_summary_id)) return error.InvalidDependency;
+                if (query.loop_vc_sha256 != null) {
+                    if (query.kind == .loop_base and query.loop_edge_id != null) return error.InvalidDependency;
+                    if (query.kind != .loop_base and query.kind != .loop_induction and query.loop_edge_id == null) {
+                        return error.InvalidDependency;
+                    }
+                }
+            }
+        }
+    }
+
+    fn validateLoopQueryIds(self: ObligationSet, summary: LoopSummaryRow) !void {
+        // Unsupported summaries carry diagnostic-only census rows and no proof
+        // authority. Exact query inventory is mandatory once the VC is a
+        // production certificate target.
+        if (!summary.projectionSupported()) return;
+        if (summary.query_ids.base.len != 1 or summary.query_ids.induction.len != 1) {
+            return error.InvalidDependency;
+        }
+        try self.validateLoopQueryIdList(summary, summary.query_ids.base, .loop_base, null);
+        try self.validateLoopQueryIdList(summary, summary.query_ids.induction, .loop_induction, null);
+
+        var expected_step: usize = 0;
+        var expected_post: usize = 0;
+        if (summary.query_ids.body_safety.len != summary.edges.len) return error.InvalidDependency;
+        for (summary.edges) |edge| switch (edge.target orelse return error.InvalidDependency) {
+            .backedge => expected_step += 1,
+            else => expected_post += 1,
+        };
+        if (summary.query_ids.step.len != expected_step or summary.query_ids.post.len != expected_post) {
+            return error.InvalidDependency;
+        }
+
+        for (summary.edges, summary.query_ids.body_safety) |edge, id| {
+            try self.validateLoopQueryIdList(summary, &.{id}, .loop_body_safety, edge.id);
+        }
+        var step_index: usize = 0;
+        var post_index: usize = 0;
+        for (summary.edges) |edge| switch (edge.target orelse return error.InvalidDependency) {
+            .backedge => {
+                try self.validateLoopQueryIdList(
+                    summary,
+                    &.{summary.query_ids.step[step_index]},
+                    .loop_invariant_step,
+                    edge.id,
+                );
+                step_index += 1;
+            },
+            else => {
+                try self.validateLoopQueryIdList(
+                    summary,
+                    &.{summary.query_ids.post[post_index]},
+                    .loop_invariant_post,
+                    edge.id,
+                );
+                post_index += 1;
+            },
+        };
+
+        if (summary.projectionSupported()) {
+            const induction = findById(self.queries, summary.query_ids.induction[0]) orelse
+                return error.InvalidDependency;
+            const digest = induction.loop_vc_sha256 orelse return error.InvalidDependency;
+            for (self.queries) |query| {
+                if (query.loop_summary_id != summary.id) continue;
+                if (!equalIdSlices(query.assumption_ids, induction.assumption_ids)) {
+                    return error.InvalidDependency;
+                }
+                if (query.loop_vc_sha256 == null or !std.mem.eql(u8, &digest, &query.loop_vc_sha256.?)) {
+                    return error.InvalidDependency;
+                }
+            }
+        }
+    }
+
+    fn validateLoopQueryIdList(
+        self: ObligationSet,
+        summary: LoopSummaryRow,
+        ids: []const Id,
+        kind: VerificationQueryKind,
+        edge_id: ?u32,
+    ) !void {
+        var previous: ?Id = null;
+        for (ids) |id| {
+            if (previous) |value| if (id <= value) return error.InvalidDependency;
+            previous = id;
+            const query = findById(self.queries, id) orelse return error.InvalidDependency;
+            if (query.kind != kind or query.loop_summary_id != summary.id or query.loop_edge_id != edge_id) {
+                return error.InvalidDependency;
+            }
+            if (query.loop_vc_sha256 != null) {
+                if (kind == .loop_induction) {
+                    if (query.backend != .unspecified or
+                        query.artifact_policy != .blocks_verified_artifacts or
+                        query.proof_requirement != .lean_certificate or
+                        query.result != null)
+                    {
+                        return error.InvalidDependency;
+                    }
+                } else if (query.backend != .z3 or
+                    query.artifact_policy != .blocks_verified_artifacts or
+                    query.proof_requirement != .backend_result)
+                {
+                    return error.InvalidDependency;
+                }
             }
         }
     }
@@ -323,6 +436,10 @@ pub const VerificationQuery = struct {
     proof_artifact_id: ?Id = null,
     discharges_query_id: ?Id = null,
     loop_summary_id: ?Id = null,
+    loop_edge_id: ?u32 = null,
+    /// SHA-256 of the canonical LoopVC data, its term table, and the exact
+    /// assumptions used by the loop-induction target.
+    loop_vc_sha256: ?[32]u8 = null,
     result: ?VerificationQueryResult = null,
 };
 
@@ -346,6 +463,9 @@ pub const VerificationBackend = enum(u8) {
 pub const VerificationQueryKind = enum(u8) {
     base,
     obligation,
+    /// Canonical LoopVC base obligation. Unlike the verifier-wide `base`
+    /// satisfiability query, success is UNSAT for its counterexample formula.
+    loop_base,
     /// Compiler-owned proof target for the whole Base/Step/Safety/Exit
     /// induction bundle. It is independent of any one Z3 query row.
     loop_induction,
@@ -388,6 +508,7 @@ pub const VerificationQueryStatus = enum(u8) {
 pub const VerificationQuerySummary = struct {
     base: u32 = 0,
     obligation: u32 = 0,
+    loop_base: u32 = 0,
     loop_induction: u32 = 0,
     loop_invariant_step: u32 = 0,
     loop_body_safety: u32 = 0,
@@ -399,6 +520,7 @@ pub const VerificationQuerySummary = struct {
         switch (kind) {
             .base => self.base += 1,
             .obligation => self.obligation += 1,
+            .loop_base => self.loop_base += 1,
             .loop_induction => self.loop_induction += 1,
             .loop_invariant_step => self.loop_invariant_step += 1,
             .loop_body_safety => self.loop_body_safety += 1,
@@ -569,6 +691,7 @@ fn querySucceeded(query: VerificationQuery, result: VerificationQueryResult) boo
             else => switch (query.kind) {
                 .base, .guard_satisfy => true,
                 .obligation,
+                .loop_base,
                 .loop_induction,
                 .loop_invariant_step,
                 .loop_body_safety,
@@ -581,6 +704,7 @@ fn querySucceeded(query: VerificationQuery, result: VerificationQueryResult) boo
             .lean => false,
             else => switch (query.kind) {
                 .obligation,
+                .loop_base,
                 .loop_invariant_step,
                 .loop_body_safety,
                 .loop_invariant_post,
@@ -660,18 +784,72 @@ pub const LoopSummaryRow = struct {
     context_variables: []const LoopVariable = &.{},
     variables: []const LoopVariable = &.{},
     init_formulas: []const FormulaRef = &.{},
-    guard_formula: ?FormulaRef = null,
     invariant_formulas: []const FormulaRef = &.{},
-    step_assignments: []const LoopStepAssignment = &.{},
-    body_safety_formulas: []const FormulaRef = &.{},
+    /// Canonical semantic edges. These are the proof authority for paths,
+    /// safety, state transition, and control outcome. Ordering is part of the
+    /// certificate identity and must already be canonical.
+    edges: []const LoopEdgeRow = &.{},
     post_formulas: []const FormulaRef = &.{},
     query_ids: LoopQueryIds = .{},
     unsupported_reasons: []const LoopUnsupportedReason = &.{},
 
     pub fn projectionSupported(self: LoopSummaryRow) bool {
-        return self.unsupported_reasons.len == 0;
+        return self.unsupported_reasons.len == 0 and self.validationReason() == null;
+    }
+
+    pub fn validationReason(self: LoopSummaryRow) ?LoopUnsupportedReason {
+        if (self.variables.len == 0) return .loop_state_empty;
+        if (self.edges.len == 0) return .loop_edge_missing;
+
+        for (self.variables, 0..) |variable, index| {
+            if (variable.index != index or variable.id == null) return .loop_identity_missing;
+            for (self.variables[0..index]) |previous| {
+                if (previous.id != null and freeVarIdEql(previous.id.?, variable.id.?)) {
+                    return .loop_duplicate_state_identity;
+                }
+            }
+        }
+
+        var has_backedge = false;
+        var has_exit = false;
+        for (self.edges, 0..) |edge, edge_index| {
+            for (self.edges[0..edge_index]) |previous| {
+                if (previous.id == edge.id) return .loop_duplicate_edge_identity;
+            }
+            if (edge.id != edge_index) return .loop_edge_order_invalid;
+            if (edge.path_formulas.len == 0) return .loop_edge_path_missing;
+            const target = edge.target orelse return .loop_edge_target_unresolved;
+            switch (target) {
+                .backedge => has_backedge = true,
+                .successor => has_exit = true,
+                .function_return, .error_return, .explicit_revert => {},
+            }
+            if (edge.next_state.len < self.variables.len) return .loop_state_binding_missing;
+            if (edge.next_state.len > self.variables.len) return .loop_state_binding_extra;
+            for (edge.next_state, self.variables, 0..) |binding, variable, binding_index| {
+                if (binding.variable_index != binding_index or binding.target == null) {
+                    return .loop_state_binding_invalid;
+                }
+                for (edge.next_state[0..binding_index]) |previous| {
+                    if (previous.target != null and freeVarIdEql(previous.target.?, binding.target.?)) {
+                        return .loop_state_binding_duplicate;
+                    }
+                }
+                if (!freeVarIdEql(binding.target.?, variable.id.?)) {
+                    return .loop_state_binding_foreign;
+                }
+            }
+        }
+        if (!has_backedge) return .loop_backedge_missing;
+        if (!has_exit) return .loop_exit_edge_missing;
+        return null;
     }
 };
+
+/// Loop proof claims are made about the Ora MLIR module supplied to the
+/// verifier before Ora-to-SIR conversion. The frontend, projection from this
+/// module into formal rows, and later backend lowering remain trusted.
+pub const loop_verification_boundary = "verifier_input_ora_mlir";
 
 pub const LoopKind = enum(u8) {
     scf_while,
@@ -690,6 +868,22 @@ pub const LoopStepAssignment = struct {
     variable_index: u32,
     target: ?FreeVarId = null,
     value: FormulaRef,
+};
+
+pub const LoopControlTarget = enum(u8) {
+    backedge,
+    successor,
+    function_return,
+    error_return,
+    explicit_revert,
+};
+
+pub const LoopEdgeRow = struct {
+    id: u32,
+    path_formulas: []const FormulaRef = &.{},
+    safety_formulas: []const FormulaRef = &.{},
+    next_state: []const LoopStepAssignment = &.{},
+    target: ?LoopControlTarget = null,
 };
 
 pub const LoopQueryIds = struct {
@@ -721,6 +915,24 @@ pub const LoopUnsupportedReason = enum(u8) {
     loop_duplicate_update,
     loop_update_target_not_loop_variable,
     loop_body_safety_missing,
+    loop_state_empty,
+    loop_duplicate_state_identity,
+    loop_edge_missing,
+    loop_duplicate_edge_identity,
+    loop_edge_order_invalid,
+    loop_edge_path_missing,
+    loop_edge_target_unresolved,
+    loop_control_target_unsupported,
+    loop_backedge_missing,
+    loop_exit_edge_missing,
+    loop_state_binding_missing,
+    loop_state_binding_extra,
+    loop_state_binding_duplicate,
+    loop_state_binding_invalid,
+    loop_state_binding_foreign,
+    loop_value_type_unresolved,
+    loop_value_width_mismatch,
+    loop_value_signedness_mismatch,
 };
 
 pub const SourceRef = struct {
@@ -845,6 +1057,7 @@ pub const ArithmeticSafetyKind = enum(u8) {
     power_overflow,
     negation_overflow,
     division_by_zero,
+    signed_division_overflow,
     shift_amount_bounds,
 };
 
@@ -1714,6 +1927,38 @@ test "artifact policy blocks invalid dependencies and missing proofs" {
     try expectArtifactBlocked(.missing_proof, (ObligationSet{
         .obligations = &obligations,
         .terms = &.{.{ .bool_lit = true }},
+    }).artifactDecision());
+}
+
+test "artifact policy blocks a canonical loop Z3 row with no result" {
+    const digest = [_]u8{0} ** 32;
+    const summaries = [_]LoopSummaryRow{.{
+        .id = 7,
+        .owner = .{ .statement = .{ .function_name = "count", .ordinal = 0 } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .loop_source_op_id = 0,
+        .loop_kind = .scf_while,
+        // Deliberately unsupported so this unit isolates the artifact policy
+        // from the complete canonical-query inventory validator.
+        .unsupported_reasons = &.{.loop_state_empty},
+    }};
+    const queries = [_]VerificationQuery{.{
+        .id = 8,
+        .owner = .{ .function = .{ .name = "count" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .backend = .z3,
+        .kind = .loop_base,
+        .loop_summary_id = 7,
+        .loop_vc_sha256 = digest,
+    }};
+
+    try expectArtifactBlocked(.missing_proof, (ObligationSet{
+        .loop_summaries = &summaries,
+        .queries = &queries,
     }).artifactDecision());
 }
 

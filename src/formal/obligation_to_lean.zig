@@ -62,10 +62,131 @@ pub fn writeModule(writer: anytype, set: obligation.ObligationSet, options: Opti
     try writeModulePreamble(writer, "Ora.Obligation.Theorems", options.namespace, true);
     try writeManifestRows(writer, set, options.proof_surface);
     try writeManifestDefinition(writer);
-    try writer.writeAll("theorem emitted_manifest_wf : emittedManifest.wf = true := by decide\n\n");
+    try writeTermLookupTheorems(writer, set.terms);
+    try writeManifestWfTheorem(writer, set.terms);
+    try writeTermsTopologicalTheorem(writer, set.terms);
     try writeLoopSummaryDefinitions(writer, set);
     try writeSemanticDefinitions(writer, set, options.proof_surface);
     try writeNamespaceEnd(writer, options.namespace);
+}
+
+fn writeTermLookupTheorems(writer: anytype, terms: []const obligation.Term) !void {
+    if (terms.len > lean_term_chunk_size) {
+        const chunk_count = leanTermChunkCount(terms.len);
+        for (0..chunk_count) |chunk_index| {
+            const start = chunk_index * lean_term_chunk_size;
+            const end = @min(start + lean_term_chunk_size, terms.len);
+            try writer.print(
+                "theorem emitted_terms_chunk_{d}_length : emittedTermsChunk_{d}.length = {d} := by rfl\n",
+                .{ chunk_index, chunk_index, end - start },
+            );
+        }
+        try writer.print("\ntheorem emitted_terms_raw_length : emittedTerms.length = {d} := by\n", .{terms.len});
+        try writer.writeAll("  simp only [emittedTerms, List.length_append");
+        for (0..chunk_count) |chunk_index| {
+            try writer.print(", emitted_terms_chunk_{d}_length", .{chunk_index});
+        }
+        try writer.writeAll("]\n\n");
+    }
+    try writer.print("theorem emitted_terms_length : emittedManifest.terms.length = {d} := by ", .{terms.len});
+    if (terms.len <= lean_term_chunk_size) {
+        try writer.writeAll("rfl\n\n");
+    } else {
+        try writer.writeAll("simpa [emittedManifest] using emitted_terms_raw_length\n\n");
+    }
+    for (terms, 0..) |term, index| {
+        try writer.print(
+            "theorem emitted_term_{d}_lookup : emittedManifest.terms[{d}]? = some (",
+            .{ index, index },
+        );
+        try writeTerm(writer, term);
+        try writer.writeAll(") := by ");
+        if (terms.len <= lean_term_chunk_size) {
+            try writer.writeAll("rfl\n");
+        } else {
+            const chunk_count = leanTermChunkCount(terms.len);
+            const chunk_index = index / lean_term_chunk_size;
+            try writer.writeAll("\n  simp only [emittedManifest, emittedTerms]\n");
+            for (0..chunk_index) |_| {
+                try writer.writeAll("  rw [List.getElem?_append_right (by decide)]\n");
+            }
+            if (chunk_index + 1 != chunk_count) {
+                try writer.writeAll("  rw [List.getElem?_append_left (by decide)]\n");
+            }
+            try writer.writeAll("  simp [");
+            for (0..chunk_index + 1) |prior_chunk| {
+                if (prior_chunk != 0) try writer.writeAll(", ");
+                try writer.print("emittedTermsChunk_{d}", .{prior_chunk});
+            }
+            try writer.writeAll("]\n");
+        }
+    }
+    if (terms.len != 0) try writer.writeByte('\n');
+}
+
+fn writeManifestWfTheorem(writer: anytype, terms: []const obligation.Term) !void {
+    if (terms.len <= lean_term_chunk_size) {
+        return writer.writeAll("theorem emitted_manifest_wf : emittedManifest.wf = true := by decide\n\n");
+    }
+    const chunk_count = leanTermChunkCount(terms.len);
+    for (0..chunk_count) |chunk_index| {
+        try writer.print(
+            "theorem emitted_terms_chunk_{d}_wf :\n" ++
+                "    emittedTermsChunk_{d}.all (Term.wf emittedTerms) = true := by\n" ++
+                "  simp [emittedTermsChunk_{d}, Term.wf, termRefInBounds, optionalTermRefInBounds,\n" ++
+                "    emitted_terms_raw_length]\n\n",
+            .{ chunk_index, chunk_index, chunk_index },
+        );
+    }
+    try writer.writeAll(
+        "theorem emitted_terms_wf : emittedTerms.all (Term.wf emittedTerms) = true := by\n" ++
+            "  change (",
+    );
+    try writeLeanTermAppendExpression(writer, chunk_count);
+    try writer.writeAll(").all (Term.wf emittedTerms) = true\n  simp only [List.all_append");
+    for (0..chunk_count) |chunk_index| {
+        try writer.print(", emitted_terms_chunk_{d}_wf", .{chunk_index});
+    }
+    try writer.writeAll(", Bool.true_and]\n\n");
+    try writer.writeAll(
+        "theorem emitted_manifest_wf : emittedManifest.wf = true := by\n" ++
+            "  simp [Manifest.wf, emittedManifest, emitted_terms_wf",
+    );
+    try writer.writeAll(
+        ", emittedAssumptions, emittedObligations, emittedProofArtifacts,\n" ++
+            "    Term.wf, AssumptionRow.wf, ObligationRow.wf, ObligationKind.wf,\n" ++
+            "    FormulaRef.wf, termRefInBounds, emitted_terms_raw_length,\n" ++
+            "    ProofArtifactRow.wf, obligationIdExists]\n\n",
+    );
+}
+
+fn writeTermsTopologicalTheorem(writer: anytype, terms: []const obligation.Term) !void {
+    if (terms.len <= lean_term_chunk_size) {
+        return writer.writeAll(
+            "theorem emitted_terms_topological : emittedManifest.termsTopological = true := by decide\n\n",
+        );
+    }
+
+    const chunk_count = leanTermChunkCount(terms.len);
+    for (0..chunk_count) |chunk_index| {
+        try writer.print(
+            "theorem emitted_terms_chunk_{d}_topological :\n" ++
+                "    termsTopologicalFrom {d} emittedTermsChunk_{d} = true := by decide\n\n",
+            .{ chunk_index, chunk_index * lean_term_chunk_size, chunk_index },
+        );
+    }
+    try writer.writeAll(
+        "theorem emitted_terms_topological : emittedManifest.termsTopological = true := by\n" ++
+            "  simp only [Manifest.termsTopological, emittedManifest, emittedTerms,\n" ++
+            "    termsTopologicalFrom_append, Nat.reduceAdd",
+    );
+    for (0..chunk_count) |chunk_index| {
+        try writer.print(
+            ", emitted_terms_chunk_{d}_length, emitted_terms_chunk_{d}_topological",
+            .{ chunk_index, chunk_index },
+        );
+    }
+    try writer.writeAll(", Nat.zero_add, Bool.true_and]\n\n");
 }
 
 fn writeModulePreamble(
@@ -88,8 +209,39 @@ fn writeLoopSummaryDefinitions(writer: anytype, set: obligation.ObligationSet) !
         if (!row.projectionSupported()) continue;
         try writer.print("def emittedLoopSummary_{d} : Ora.Loop.SummaryRow :=\n  ", .{row.id});
         try writeLoopSummaryRow(writer, row);
-        try writer.writeAll("\n\n");
+        const digest = try loopVcSha256(set, row.id);
+        const digest_hex = std.fmt.bytesToHex(digest, .lower);
+        try writer.print("\n\ndef emittedLoopVcSha256_{d} : String := \"{s}\"\n\n", .{ row.id, &digest_hex });
     }
+}
+
+/// Deterministic identity for the exact LoopVC proof input. The complete term
+/// table is included deliberately: it may over-invalidate a certificate when
+/// an unrelated term changes, but it cannot retain a certificate after a
+/// referenced term changes.
+pub fn loopVcSha256(set: obligation.ObligationSet, summary_id: obligation.Id) ![32]u8 {
+    const summary = obligation.findById(set.loop_summaries, summary_id) orelse
+        return error.InvalidDependency;
+    var induction_query: ?obligation.VerificationQuery = null;
+    for (set.queries) |query| {
+        if (query.kind != .loop_induction or query.loop_summary_id != summary_id) continue;
+        if (induction_query != null) return error.InvalidDependency;
+        induction_query = query;
+    }
+    const query = induction_query orelse return error.InvalidDependency;
+
+    var canonical = std.Io.Writer.Allocating.init(std.heap.page_allocator);
+    defer canonical.deinit();
+    try canonical.writer.writeAll("ora-loop-vc-v1\n");
+    try writeCanonicalTerms(&canonical.writer, set.terms);
+    try writeAssumptionRowsByIds(&canonical.writer, set, query.assumption_ids);
+    try canonical.writer.writeByte('\n');
+    try writeLoopSummaryRow(&canonical.writer, summary);
+    try canonical.writer.writeByte('\n');
+
+    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(canonical.written(), &digest, .{});
+    return digest;
 }
 
 fn writeLoopSummaryRow(writer: anytype, row: obligation.LoopSummaryRow) !void {
@@ -108,18 +260,10 @@ fn writeLoopSummaryRow(writer: anytype, row: obligation.LoopSummaryRow) !void {
     try writeLoopVariables(writer, row.variables);
     try writer.writeAll(", init := ");
     try writeFormulaList(writer, row.init_formulas);
-    try writer.writeAll(", guard := ");
-    if (row.guard_formula) |formula| {
-        try writer.writeAll("some (");
-        try writeFormula(writer, formula);
-        try writer.writeByte(')');
-    } else try writer.writeAll("none");
     try writer.writeAll(", invariants := ");
     try writeFormulaList(writer, row.invariant_formulas);
-    try writer.writeAll(", step := ");
-    try writeLoopStepAssignments(writer, row.step_assignments);
-    try writer.writeAll(", bodySafety := ");
-    try writeFormulaList(writer, row.body_safety_formulas);
+    try writer.writeAll(", edges := ");
+    try writeLoopEdges(writer, row.edges);
     try writer.writeAll(", post := ");
     try writeFormulaList(writer, row.post_formulas);
     try writer.writeAll(", unsupportedReasons := []");
@@ -168,8 +312,32 @@ fn writeLoopStepAssignments(
     try writer.writeByte(']');
 }
 
+fn writeLoopEdges(writer: anytype, edges: []const obligation.LoopEdgeRow) !void {
+    try writer.writeByte('[');
+    for (edges, 0..) |edge, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writer.writeAll("{ id := ");
+        try writer.print("{d}, path := ", .{edge.id});
+        try writeFormulaList(writer, edge.path_formulas);
+        try writer.writeAll(", safety := ");
+        try writeFormulaList(writer, edge.safety_formulas);
+        try writer.writeAll(", nextState := ");
+        try writeLoopStepAssignments(writer, edge.next_state);
+        try writer.writeAll(", target := .");
+        try writer.writeAll(if (edge.target) |target| switch (target) {
+            .backedge => "backedge",
+            .successor => "successor",
+            .function_return => "functionReturn",
+            .error_return => "errorReturn",
+            .explicit_revert => "explicitRevert",
+        } else "unresolved");
+        try writer.writeAll(" }");
+    }
+    try writer.writeByte(']');
+}
+
 fn writeManifestRows(writer: anytype, set: obligation.ObligationSet, proof_surface: bool) !void {
-    try writeTerms(writer, set.terms);
+    try writeLeanTerms(writer, set.terms);
     try writer.writeByte('\n');
     try writeAssumptions(writer, set, proof_surface);
     try writer.writeByte('\n');
@@ -194,8 +362,59 @@ fn writeNamespaceEnd(writer: anytype, namespace: []const u8) !void {
     try writer.writeByte('\n');
 }
 
-fn writeTerms(writer: anytype, terms: []const obligation.Term) !void {
-    try writer.writeAll("def emittedTerms : List Term := ");
+pub const lean_term_chunk_size: usize = 32;
+
+fn leanTermChunkCount(term_count: usize) usize {
+    return std.math.divCeil(usize, term_count, lean_term_chunk_size) catch unreachable;
+}
+
+fn writeLeanTermChunkNames(writer: anytype, chunk_count: usize) !void {
+    for (0..chunk_count) |chunk_index| {
+        try writer.print(", emittedTermsChunk_{d}", .{chunk_index});
+    }
+}
+
+fn writeLeanTermAppendExpression(writer: anytype, chunk_count: usize) !void {
+    for (0..chunk_count) |chunk_index| {
+        try writer.print("emittedTermsChunk_{d}", .{chunk_index});
+        if (chunk_index + 1 != chunk_count) try writer.writeAll(" ++ (");
+    }
+    if (chunk_count > 1) try writer.splatByteAll(')', chunk_count - 1);
+}
+
+fn writeLeanTerms(writer: anytype, terms: []const obligation.Term) !void {
+    if (terms.len <= lean_term_chunk_size) {
+        return writeNamedTermList(writer, "emittedTerms", terms);
+    }
+
+    const chunk_count = leanTermChunkCount(terms.len);
+    for (0..chunk_count) |chunk_index| {
+        const start = chunk_index * lean_term_chunk_size;
+        const end = @min(start + lean_term_chunk_size, terms.len);
+        var name_buffer: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buffer, "emittedTermsChunk_{d}", .{chunk_index});
+        try writeNamedTermList(writer, name, terms[start..end]);
+        try writer.writeByte('\n');
+    }
+
+    try writer.writeAll("def emittedTerms : List Term :=\n");
+    for (0..chunk_count) |chunk_index| {
+        try writer.print("  emittedTermsChunk_{d}", .{chunk_index});
+        if (chunk_index + 1 != chunk_count) {
+            try writer.writeAll(" ++ (\n");
+        } else {
+            try writer.splatByteAll(')', chunk_count - 1);
+            try writer.writeByte('\n');
+        }
+    }
+}
+
+fn writeNamedTermList(
+    writer: anytype,
+    name: []const u8,
+    terms: []const obligation.Term,
+) !void {
+    try writer.print("def {s} : List Term := ", .{name});
     if (terms.len == 0) return writer.writeAll("[]\n");
 
     try writer.writeAll("[\n");
@@ -205,6 +424,12 @@ fn writeTerms(writer: anytype, terms: []const obligation.Term) !void {
         try writeListSeparator(writer, index, terms.len);
     }
     try writer.writeAll("]\n");
+}
+
+/// Certificate identity uses one stable serialization independent of how the
+/// generated Lean module groups declarations for elaboration.
+fn writeCanonicalTerms(writer: anytype, terms: []const obligation.Term) !void {
+    return writeNamedTermList(writer, "emittedTerms", terms);
 }
 
 fn writeAssumptions(writer: anytype, set: obligation.ObligationSet, proof_surface: bool) !void {
@@ -338,19 +563,31 @@ fn writeSemanticDefinitions(writer: anytype, set: obligation.ObligationSet, proo
         try writer.writeAll(" : Prop :=\n");
         if (query.kind == .loop_induction) {
             const summary_id = query.loop_summary_id orelse return error.InvalidDependency;
-            try writer.writeAll("  Ora.Loop.loopInductionProofFromAssumptions emittedManifest\n    ");
+            try writer.writeAll("  Ora.Loop.loopProofAuthorizationFromAssumptions emittedManifest\n    ");
             try writeAssumptionRowsByIds(writer, set, query.assumption_ids);
             try writer.print("\n    emittedLoopSummary_{d}\n\n", .{summary_id});
             try writer.print("def emittedVerifiedQuery_{d} : Prop :=\n", .{query.id});
             try writer.writeAll("  Ora.Loop.loopVerifiedFromAssumptions emittedManifest\n    ");
             try writeAssumptionRowsByIds(writer, set, query.assumption_ids);
             try writer.print("\n    emittedLoopSummary_{d}\n\n", .{summary_id});
+            if (set.terms.len > lean_term_chunk_size) {
+                try writer.writeAll(
+                    "section\n" ++
+                        "-- Do not delta-reduce the complete package table while applying the\n" ++
+                        "-- generic soundness theorem. This local attribute ends before clients\n" ++
+                        "-- import the module and evaluate the canonical manifest.\n" ++
+                        "attribute [local irreducible] emittedManifest\n\n",
+                );
+            }
             try writer.print(
-                "theorem emittedQuery_{d}_sound : emittedQuery_{d} -> emittedVerifiedQuery_{d} :=\n  Ora.Loop.loop_induction_proof_sound emittedManifest ",
+                "theorem emittedQuery_{d}_sound : emittedQuery_{d} -> emittedVerifiedQuery_{d} := by\n" ++
+                    "  intro proof\n" ++
+                    "  exact Ora.Loop.loop_authorization_sound emittedManifest ",
                 .{ query.id, query.id, query.id },
             );
             try writeAssumptionRowsByIds(writer, set, query.assumption_ids);
-            try writer.print(" emittedLoopSummary_{d}\n\n", .{summary_id});
+            try writer.print(" emittedLoopSummary_{d} proof\n\n", .{summary_id});
+            if (set.terms.len > lean_term_chunk_size) try writer.writeAll("end\n\n");
             continue;
         }
         for (query.obligation_ids, 0..) |obligation_id, index| {
@@ -444,11 +681,13 @@ fn loopInductionQuerySemanticSupport(
     if (summary.unsupported_reasons.len != 0) {
         return .{ .unsupported = .{ .unsupported_loop_summary = summary.unsupported_reasons[0] } };
     }
+    if (summary.validationReason()) |reason| {
+        return .{ .unsupported = .{ .unsupported_loop_summary = reason } };
+    }
     if (summary.variables.len == 0 or
         summary.init_formulas.len != summary.variables.len or
-        summary.guard_formula == null or
         summary.invariant_formulas.len == 0 or
-        summary.step_assignments.len != summary.variables.len)
+        summary.edges.len == 0)
     {
         return .{ .unsupported = .{ .unsupported_loop_summary = .loop_update_not_scalar_assignment } };
     }
@@ -473,39 +712,58 @@ fn loopInductionQuerySemanticSupport(
             .supported => {},
             .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_variable_not_registered_integer } },
         }
-        const assignment = summary.step_assignments[index];
-        if (assignment.variable_index != index or assignment.target == null or
-            !obligation.freeVarIdEql(assignment.target.?, variable.id.?))
-        {
-            return .{ .unsupported = .{ .unsupported_loop_summary = .loop_update_target_not_loop_variable } };
-        }
     }
 
     for (summary.init_formulas, summary.variables) |formula, variable| switch (valueFormulaSemanticSupportForType(set, formula, variable.ty)) {
         .supported => {},
-        .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
+        .unsupported => |reason| return .{ .unsupported = .{ .unsupported_loop_summary = loopValueUnsupportedReason(reason) } },
     };
-    switch (formulaSemanticSupport(set, summary.guard_formula.?)) {
-        .supported => {},
-        .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
-    }
     for (summary.invariant_formulas) |formula| switch (formulaSemanticSupport(set, formula)) {
         .supported => {},
         .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
     };
-    for (summary.step_assignments, summary.variables) |assignment, variable| switch (valueFormulaSemanticSupportForType(set, assignment.value, variable.ty)) {
-        .supported => {},
-        .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
-    };
-    for (summary.body_safety_formulas) |formula| switch (formulaSemanticSupport(set, formula)) {
-        .supported => {},
-        .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
-    };
+    for (summary.edges) |edge| {
+        switch (edge.target orelse
+            return .{ .unsupported = .{ .unsupported_loop_summary = .loop_edge_target_unresolved } }) {
+            .backedge, .successor => {},
+            .function_return, .error_return, .explicit_revert => return .{
+                .unsupported = .{ .unsupported_loop_summary = .loop_control_target_unsupported },
+            },
+        }
+        for (edge.path_formulas) |formula| switch (formulaSemanticSupport(set, formula)) {
+            .supported => {},
+            .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
+        };
+        for (edge.safety_formulas) |formula| switch (formulaSemanticSupport(set, formula)) {
+            .supported => {},
+            .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
+        };
+        for (edge.next_state, summary.variables) |binding, variable| switch (valueFormulaSemanticSupportForType(set, binding.value, variable.ty)) {
+            .supported => {},
+            .unsupported => |reason| return .{ .unsupported = .{ .unsupported_loop_summary = loopValueUnsupportedReason(reason) } },
+        };
+    }
     for (summary.post_formulas) |formula| switch (formulaSemanticSupport(set, formula)) {
         .supported => {},
         .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
     };
     return .supported;
+}
+
+fn loopValueUnsupportedReason(reason: SemanticUnsupportedReason) obligation.LoopUnsupportedReason {
+    return switch (reason) {
+        .missing_type => .loop_value_type_unresolved,
+        .unsupported_type => .loop_value_type_unresolved,
+        .unsupported_comparison_width,
+        .unsupported_arithmetic_width,
+        => .loop_value_width_mismatch,
+        .unknown_signedness,
+        .mixed_signedness,
+        .unknown_arithmetic_signedness,
+        .mixed_arithmetic_signedness,
+        => .loop_value_signedness_mismatch,
+        else => .loop_formula_unsupported,
+    };
 }
 
 fn valueFormulaSemanticSupport(set: obligation.ObligationSet, formula: obligation.FormulaRef) SemanticSupport {
@@ -2074,4 +2332,188 @@ test "Lean emitter writes effect frame obligations" {
     try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "keys := [.parameter { file_id := 0, pattern_id := 0 }]"));
     try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "def emittedQuery_2 : Prop :="));
     try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "obligationFollowsFromAssumptions emittedManifest"));
+}
+
+test "LoopVC digest covers every certificate-authority component class" {
+    const int_ty: obligation.TypeRef = .{ .spelling = "u256" };
+    const loop_id: obligation.FreeVarId = .{ .file_id = 1, .pattern_id = 1 };
+    const terms = [_]obligation.Term{
+        .{ .variable = .{ .free = .{ .id = loop_id, .name = "i", .ty = int_ty } } },
+        .{ .int_lit = .{ .value = "0", .ty = int_ty } },
+        .{ .int_lit = .{ .value = "1", .ty = int_ty } },
+        .{ .int_lit = .{ .value = "3", .ty = int_ty } },
+        .{ .binary = .{ .op = .le, .lhs = 0, .rhs = 3, .ty = int_ty } },
+        .{ .binary = .{ .op = .lt, .lhs = 0, .rhs = 3, .ty = int_ty } },
+        .{ .bool_lit = true },
+        .{ .binary = .{ .op = .add, .lhs = 0, .rhs = 2, .ty = int_ty } },
+        .{ .unary = .{ .op = .not, .operand = 5 } },
+        .{ .binary = .{ .op = .eq, .lhs = 0, .rhs = 3, .ty = int_ty } },
+    };
+    const variables = [_]obligation.LoopVariable{.{ .index = 0, .id = loop_id, .name = "i", .ty = int_ty }};
+    const backedge_bindings = [_]obligation.LoopStepAssignment{.{
+        .variable_index = 0,
+        .target = loop_id,
+        .value = .{ .term = 7 },
+    }};
+    const exit_bindings = [_]obligation.LoopStepAssignment{.{
+        .variable_index = 0,
+        .target = loop_id,
+        .value = .{ .term = 0 },
+    }};
+    const edges = [_]obligation.LoopEdgeRow{
+        .{ .id = 0, .path_formulas = &.{.{ .term = 5 }}, .safety_formulas = &.{.{ .term = 6 }}, .next_state = &backedge_bindings, .target = .backedge },
+        .{ .id = 1, .path_formulas = &.{.{ .term = 8 }}, .next_state = &exit_bindings, .target = .successor },
+    };
+    const summary: obligation.LoopSummaryRow = .{
+        .id = 1,
+        .owner = .{ .statement = .{ .function_name = "count", .ordinal = 0 } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .loop_source_op_id = 0,
+        .loop_kind = .scf_while,
+        .variables = &variables,
+        .init_formulas = &.{.{ .term = 1 }},
+        .invariant_formulas = &.{.{ .term = 4 }},
+        .edges = &edges,
+        .post_formulas = &.{.{ .term = 9 }},
+        .query_ids = .{ .induction = &.{60} },
+    };
+    const assumptions = [_]obligation.Assumption{.{
+        .id = 50,
+        .owner = .{ .function = .{ .name = "count" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .source,
+        .kind = .requires,
+        .formula = .{ .term = 6 },
+    }};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 60,
+        .owner = .{ .function = .{ .name = "count" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .loop_induction,
+        .assumption_ids = &.{50},
+        .loop_summary_id = 1,
+    }};
+    const summaries = [_]obligation.LoopSummaryRow{summary};
+    const set: obligation.ObligationSet = .{
+        .terms = &terms,
+        .assumptions = &assumptions,
+        .queries = &queries,
+        .loop_summaries = &summaries,
+    };
+    const baseline = try loopVcSha256(set, 1);
+
+    var changed_summary = summary;
+    changed_summary.invariant_formulas = &.{.{ .term = 6 }};
+    var changed_summaries = [_]obligation.LoopSummaryRow{changed_summary};
+    try std.testing.expect(!std.mem.eql(u8, &baseline, &(try loopVcSha256(.{
+        .terms = &terms,
+        .assumptions = &assumptions,
+        .queries = &queries,
+        .loop_summaries = &changed_summaries,
+    }, 1))));
+
+    changed_summary = summary;
+    changed_summary.init_formulas = &.{.{ .term = 2 }};
+    changed_summaries[0] = changed_summary;
+    try std.testing.expect(!std.mem.eql(u8, &baseline, &(try loopVcSha256(.{
+        .terms = &terms,
+        .assumptions = &assumptions,
+        .queries = &queries,
+        .loop_summaries = &changed_summaries,
+    }, 1))));
+
+    changed_summary = summary;
+    changed_summary.post_formulas = &.{.{ .term = 6 }};
+    changed_summaries[0] = changed_summary;
+    try std.testing.expect(!std.mem.eql(u8, &baseline, &(try loopVcSha256(.{
+        .terms = &terms,
+        .assumptions = &assumptions,
+        .queries = &queries,
+        .loop_summaries = &changed_summaries,
+    }, 1))));
+
+    var changed_edges = edges;
+    changed_edges[0].path_formulas = &.{.{ .term = 6 }};
+    changed_summary = summary;
+    changed_summary.edges = &changed_edges;
+    changed_summaries[0] = changed_summary;
+    try std.testing.expect(!std.mem.eql(u8, &baseline, &(try loopVcSha256(.{
+        .terms = &terms,
+        .assumptions = &assumptions,
+        .queries = &queries,
+        .loop_summaries = &changed_summaries,
+    }, 1))));
+
+    changed_edges = edges;
+    changed_edges[0].safety_formulas = &.{.{ .term = 4 }};
+    changed_summary = summary;
+    changed_summary.edges = &changed_edges;
+    changed_summaries[0] = changed_summary;
+    try std.testing.expect(!std.mem.eql(u8, &baseline, &(try loopVcSha256(.{
+        .terms = &terms,
+        .assumptions = &assumptions,
+        .queries = &queries,
+        .loop_summaries = &changed_summaries,
+    }, 1))));
+
+    var changed_bindings = backedge_bindings;
+    changed_bindings[0].value = .{ .term = 2 };
+    changed_edges = edges;
+    changed_edges[0].next_state = &changed_bindings;
+    changed_summary = summary;
+    changed_summary.edges = &changed_edges;
+    changed_summaries[0] = changed_summary;
+    try std.testing.expect(!std.mem.eql(u8, &baseline, &(try loopVcSha256(.{
+        .terms = &terms,
+        .assumptions = &assumptions,
+        .queries = &queries,
+        .loop_summaries = &changed_summaries,
+    }, 1))));
+
+    changed_edges = edges;
+    changed_edges[0].target = .successor;
+    changed_summary = summary;
+    changed_summary.edges = &changed_edges;
+    changed_summaries[0] = changed_summary;
+    try std.testing.expect(!std.mem.eql(u8, &baseline, &(try loopVcSha256(.{
+        .terms = &terms,
+        .assumptions = &assumptions,
+        .queries = &queries,
+        .loop_summaries = &changed_summaries,
+    }, 1))));
+
+    var changed_variables = variables;
+    changed_variables[0].ty = .{ .spelling = "i256" };
+    changed_summary = summary;
+    changed_summary.variables = &changed_variables;
+    changed_summaries[0] = changed_summary;
+    try std.testing.expect(!std.mem.eql(u8, &baseline, &(try loopVcSha256(.{
+        .terms = &terms,
+        .assumptions = &assumptions,
+        .queries = &queries,
+        .loop_summaries = &changed_summaries,
+    }, 1))));
+
+    var changed_assumptions = assumptions;
+    changed_assumptions[0].formula = .{ .term = 4 };
+    try std.testing.expect(!std.mem.eql(u8, &baseline, &(try loopVcSha256(.{
+        .terms = &terms,
+        .assumptions = &changed_assumptions,
+        .queries = &queries,
+        .loop_summaries = &summaries,
+    }, 1))));
+
+    var changed_terms = terms;
+    changed_terms[3] = .{ .int_lit = .{ .value = "4", .ty = int_ty } };
+    try std.testing.expect(!std.mem.eql(u8, &baseline, &(try loopVcSha256(.{
+        .terms = &changed_terms,
+        .assumptions = &assumptions,
+        .queries = &queries,
+        .loop_summaries = &summaries,
+    }, 1))));
 }

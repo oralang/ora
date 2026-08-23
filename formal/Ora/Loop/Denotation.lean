@@ -1,8 +1,8 @@
 /-
-Fail-closed denotation of compiler-emitted scalar loop summaries.
+Fail-closed denotation of compiler-emitted loop verification conditions.
 
-The compiler emits only the data structures below. Unsupported identities,
-types, references, or update layouts make `denoteLoopSummary?` return `none`.
+The compiler emits only data. Unsupported identities, types, references, edge
+targets, or incomplete state bindings make `denoteLoopSummary?` return `none`.
 -/
 
 import Ora.Loop.Core
@@ -18,6 +18,15 @@ inductive LoopKind where
   | other
   deriving Repr, BEq, DecidableEq
 
+inductive ControlTargetRow where
+  | backedge
+  | successor
+  | functionReturn
+  | errorReturn
+  | explicitRevert
+  | unresolved
+  deriving Repr, BEq, DecidableEq
+
 structure VariableRow where
   index : Nat
   id : FreeVarId
@@ -25,10 +34,18 @@ structure VariableRow where
   ty : TyRef
   deriving Repr, BEq, DecidableEq
 
-structure StepAssignmentRow where
+structure StateBindingRow where
   variableIndex : Nat
   target : FreeVarId
   value : FormulaRef
+  deriving Repr, BEq, DecidableEq
+
+structure EdgeRow where
+  id : Nat
+  path : List FormulaRef := []
+  safety : List FormulaRef := []
+  nextState : List StateBindingRow := []
+  target : ControlTargetRow := .unresolved
   deriving Repr, BEq, DecidableEq
 
 structure SummaryRow where
@@ -38,10 +55,8 @@ structure SummaryRow where
   contextVariables : List VariableRow := []
   variables : List VariableRow := []
   init : List FormulaRef := []
-  guard : Option FormulaRef := none
   invariants : List FormulaRef := []
-  step : List StepAssignmentRow := []
-  bodySafety : List FormulaRef := []
+  edges : List EdgeRow := []
   post : List FormulaRef := []
   unsupportedReasons : List String := []
   deriving Repr, BEq, DecidableEq
@@ -60,13 +75,31 @@ def variablesAreIntegers (variables : List VariableRow) : Bool :=
 def variableSetsDisjoint (lhs rhs : List VariableRow) : Bool :=
   lhs.all (fun left => rhs.all (fun right => left.id != right.id))
 
-def assignmentsMatchVariables : List VariableRow → List StepAssignmentRow → Bool
+def bindingsMatchVariables : List VariableRow → List StateBindingRow → Bool
   | [], [] => true
-  | loopVar :: variables, assignment :: assignments =>
-      assignment.variableIndex == loopVar.index &&
-        assignment.target == loopVar.id &&
-        assignmentsMatchVariables variables assignments
+  | loopVar :: variables, binding :: bindings =>
+      binding.variableIndex == loopVar.index &&
+        binding.target == loopVar.id &&
+        bindingsMatchVariables variables bindings
   | _, _ => false
+
+def edgesIndexedFrom : Nat → List EdgeRow → Bool
+  | _, [] => true
+  | expected, edge :: rest => edge.id == expected && edgesIndexedFrom (expected + 1) rest
+
+def edgeTargetSupported : ControlTargetRow → Bool
+  | .backedge | .successor => true
+  | .functionReturn | .errorReturn | .explicitRevert | .unresolved => false
+
+def edgeShapeSupported (variables : List VariableRow) (edge : EdgeRow) : Bool :=
+  !edge.path.isEmpty && edgeTargetSupported edge.target &&
+    bindingsMatchVariables variables edge.nextState
+
+def hasBackedge (edges : List EdgeRow) : Bool :=
+  edges.any (fun edge => edge.target == .backedge)
+
+def hasSuccessor (edges : List EdgeRow) : Bool :=
+  edges.any (fun edge => edge.target == .successor)
 
 def valueForTy : TyRef → Value
   | ty =>
@@ -74,44 +107,46 @@ def valueForTy : TyRef → Value
       | some shape => .integer (Ora.Integer.Value.ofNat shape 0)
       | none => .bool true
 
-def bindFreeVarsFromTerm (env : Env) : Term → Env
-  | .variable (.free free) =>
-      match free.ty with
-      | some ty => env.setFree free.id (valueForTy ty)
-      | none => env.setFree free.id (.bool false)
-  | _ => env
+def bindSupportVariable (env : Env) (rowVariable : VariableRow) : Env :=
+  env.setFree rowVariable.id (valueForTy rowVariable.ty)
 
-def totalEnv (manifest : Manifest) : Env :=
-  manifest.terms.foldl bindFreeVarsFromTerm Env.empty
+def SummaryRow.supportEnv (row : SummaryRow) : Env :=
+  (row.contextVariables ++ row.variables).foldl bindSupportVariable Env.empty
 
-def formulaDenotable (manifest : Manifest) (formula : FormulaRef) : Bool :=
-  (formulaDenotes? manifest (totalEnv manifest) formula).isSome
+def formulaDenotable (manifest : Manifest) (env : Env) (formula : FormulaRef) : Bool :=
+  (formulaDenotes? manifest env formula).isSome
 
-def valueDenotable (manifest : Manifest) (formula : FormulaRef) : Bool :=
-  (formulaValue? manifest (totalEnv manifest) formula).isSome
+def valueDenotable (manifest : Manifest) (env : Env) (formula : FormulaRef) : Bool :=
+  (formulaValue? manifest env formula).isSome
+
+def edgeFormulasDenotable (manifest : Manifest) (env : Env) (edge : EdgeRow) : Bool :=
+  edge.path.all (formulaDenotable manifest env) &&
+    edge.safety.all (formulaDenotable manifest env) &&
+    edge.nextState.all (fun binding => valueDenotable manifest env binding.value)
 
 def SummaryRow.shapeSupported (row : SummaryRow) : Bool :=
   row.unsupportedReasons.isEmpty &&
     (row.kind == .scfWhile || row.kind == .scfFor) &&
-    row.variables.length > 0 &&
+    !row.variables.isEmpty &&
     row.init.length == row.variables.length &&
-    row.guard.isSome &&
-    row.invariants.length > 0 &&
+    !row.invariants.isEmpty &&
+    !row.edges.isEmpty &&
     variablesIndexedFrom 0 row.variables &&
     idsUnique row.variables &&
     idsUnique row.contextVariables &&
     variablesAreIntegers row.variables &&
     variablesAreIntegers row.contextVariables &&
     variableSetsDisjoint row.variables row.contextVariables &&
-    assignmentsMatchVariables row.variables row.step
+    edgesIndexedFrom 0 row.edges &&
+    row.edges.all (edgeShapeSupported row.variables) &&
+    hasBackedge row.edges && hasSuccessor row.edges
 
 def SummaryRow.formulasDenotable (manifest : Manifest) (row : SummaryRow) : Bool :=
-  row.init.all (valueDenotable manifest) &&
-    row.guard.all (formulaDenotable manifest) &&
-    row.invariants.all (formulaDenotable manifest) &&
-    row.step.all (fun assignment => valueDenotable manifest assignment.value) &&
-    row.bodySafety.all (formulaDenotable manifest) &&
-    row.post.all (formulaDenotable manifest)
+  let env := row.supportEnv
+  row.init.all (valueDenotable manifest env) &&
+    row.invariants.all (formulaDenotable manifest env) &&
+    row.edges.all (edgeFormulasDenotable manifest env) &&
+    row.post.all (formulaDenotable manifest env)
 
 def SummaryRow.supported (manifest : Manifest) (row : SummaryRow) : Bool :=
   manifest.wf && manifest.termsTopological && row.shapeSupported && row.formulasDenotable manifest
@@ -121,11 +156,26 @@ def contextReady (env : Env) (variables : List VariableRow) : Prop :=
     loopVar.ty.integerShape? = some value.shape ∧
       env.lookupFree loopVar.id = some (.integer value)
 
-def bindState : Env → List VariableRow → ScalarLoopState → Option Env
+/- Loop state contains only loop-carried integer values. The obligation
+environment is captured by the denoted VC and remains unchanged; binding the
+state shadows only the declared loop variables. -/
+abbrev ScalarLoopState := List Ora.Integer.Value
+
+def valuesMatchVariables : List VariableRow → ScalarLoopState → Bool
+  | [], [] => true
+  | loopVar :: variables, value :: values =>
+      loopVar.ty.integerShape? == some value.shape &&
+        valuesMatchVariables variables values
+  | _, _ => false
+
+def stateReady (variables : List VariableRow) (state : ScalarLoopState) : Prop :=
+  valuesMatchVariables variables state = true
+
+def bindState? : Env → List VariableRow → ScalarLoopState → Option Env
   | env, [], [] => some env
   | env, loopVar :: variables, value :: values =>
       if loopVar.ty.integerShape? = some value.shape then
-        bindState (env.setFree loopVar.id (.integer value)) variables values
+        bindState? (env.setFree loopVar.id (.integer value)) variables values
       else
         none
   | _, _, _ => none
@@ -136,7 +186,7 @@ def formulaHoldsInState
     (variables : List VariableRow)
     (state : ScalarLoopState)
     (formula : FormulaRef) : Prop :=
-  match bindState base variables state with
+  match bindState? base variables state with
   | some env =>
       match formulaDenotes? manifest env formula with
       | some proposition => proposition
@@ -151,45 +201,163 @@ def formulasHoldInState
     (formulas : List FormulaRef) : Prop :=
   ∀ formula ∈ formulas, formulaHoldsInState manifest base variables state formula
 
-def valuesInitializeState
+def integerFormulaValue?
     (manifest : Manifest)
-    (base : Env) : List FormulaRef → ScalarLoopState → Prop
-  | [], [] => True
-  | formula :: formulas, value :: values =>
-      formulaValue? manifest base formula = some (.integer value) ∧
-        valuesInitializeState manifest base formulas values
-  | _, _ => False
+    (env : Env)
+    (formula : FormulaRef) : Option Ora.Integer.Value :=
+  match formulaValue? manifest env formula with
+  | some (.integer value) => some value
+  | _ => none
 
-def assignmentsProduceState
+def evaluateIntegerFormulas?
+    (manifest : Manifest)
+    (env : Env) : List FormulaRef → Option (List Ora.Integer.Value)
+  | [] => some []
+  | formula :: formulas => do
+      let value ← integerFormulaValue? manifest env formula
+      let values ← evaluateIntegerFormulas? manifest env formulas
+      pure (value :: values)
+
+def initializeState?
     (manifest : Manifest)
     (base : Env)
     (variables : List VariableRow)
-    (current : ScalarLoopState) : List StepAssignmentRow → ScalarLoopState → Prop
-  | [], [] => True
-  | assignment :: assignments, value :: values =>
-      match bindState base variables current with
-      | some env =>
-          formulaValue? manifest env assignment.value = some (.integer value) ∧
-            assignmentsProduceState manifest base variables current assignments values
-      | none => False
-  | _, _ => False
+    (formulas : List FormulaRef) : Option ScalarLoopState := do
+  let values ← evaluateIntegerFormulas? manifest base formulas
+  if valuesMatchVariables variables values then
+    pure values
+  else
+    none
+
+def bindingFormulas (bindings : List StateBindingRow) : List FormulaRef :=
+  bindings.map StateBindingRow.value
+
+def applyStateBindings?
+    (manifest : Manifest)
+    (base : Env)
+    (variables : List VariableRow)
+    (current : ScalarLoopState)
+    (bindings : List StateBindingRow) : Option ScalarLoopState :=
+  if bindingsMatchVariables variables bindings then do
+    let env ← bindState? base variables current
+    let values ← evaluateIntegerFormulas? manifest env (bindingFormulas bindings)
+    if valuesMatchVariables variables values then
+      pure values
+    else
+      none
+  else
+    none
+
+def valuesInitializeState
+    (manifest : Manifest)
+    (base : Env)
+    (variables : List VariableRow)
+    (formulas : List FormulaRef)
+    (state : ScalarLoopState) : Prop :=
+  initializeState? manifest base variables formulas = some state
+
+theorem initialized_state_ready
+    (manifest : Manifest)
+    (base : Env)
+    (variables : List VariableRow)
+    (formulas : List FormulaRef)
+    (state : ScalarLoopState)
+    (hInitial : valuesInitializeState manifest base variables formulas state) :
+    stateReady variables state := by
+  unfold valuesInitializeState initializeState? at hInitial
+  cases hValues : evaluateIntegerFormulas? manifest base formulas with
+  | none => simp [hValues] at hInitial
+  | some values =>
+      cases hReady : valuesMatchVariables variables values with
+      | false => simp [hValues, hReady] at hInitial
+      | true =>
+        simp [hValues, hReady] at hInitial
+        subst state
+        exact hReady
+
+def stateBindingsProduceState
+    (manifest : Manifest)
+    (base : Env)
+    (variables : List VariableRow)
+    (current : ScalarLoopState)
+    (bindings : List StateBindingRow)
+    (following : ScalarLoopState) : Prop :=
+  applyStateBindings? manifest base variables current bindings = some following
+
+theorem bound_state_ready
+    (manifest : Manifest)
+    (base : Env)
+    (variables : List VariableRow)
+    (current following : ScalarLoopState)
+    (bindings : List StateBindingRow)
+    (hNext : stateBindingsProduceState manifest base variables current bindings following) :
+    stateReady variables following := by
+  unfold stateBindingsProduceState applyStateBindings? at hNext
+  by_cases hBindings : bindingsMatchVariables variables bindings = true
+  · cases hEnv : bindState? base variables current with
+    | none => simp [hBindings, hEnv] at hNext
+    | some env =>
+        cases hValues : evaluateIntegerFormulas? manifest env (bindingFormulas bindings) with
+        | none => simp [hBindings, hEnv, hValues] at hNext
+        | some values =>
+            by_cases hReady : valuesMatchVariables variables values = true
+            · simp [hBindings, hEnv, hValues, hReady] at hNext
+              subst following
+              exact hReady
+            · cases hReadyValue : valuesMatchVariables variables values <;>
+                simp_all
+  · cases hBindingsValue : bindingsMatchVariables variables bindings <;>
+      simp_all
+
+abbrev assignmentsProduceState := stateBindingsProduceState
+
+def denoteControlTarget? : ControlTargetRow → Option ControlTarget
+  | .backedge => some .backedge
+  | .successor => some .successor
+  | .functionReturn => some .functionReturn
+  | .errorReturn => some .errorReturn
+  | .explicitRevert => some .explicitRevert
+  | .unresolved => none
+
+def denoteEdge?
+    (manifest : Manifest)
+    (base : Env)
+    (variables : List VariableRow)
+    (row : EdgeRow) : Option (Edge ScalarLoopState) := do
+  let target ← denoteControlTarget? row.target
+  pure {
+    path := fun state => formulasHoldInState manifest base variables state row.path
+    safe := fun state => formulasHoldInState manifest base variables state row.safety
+    next := fun current following =>
+      stateBindingsProduceState manifest base variables current row.nextState following
+    target := target
+  }
+
+def denoteEdges?
+    (manifest : Manifest)
+    (base : Env)
+    (variables : List VariableRow) : List EdgeRow → Option (List (Edge ScalarLoopState))
+  | [] => some []
+  | edge :: rest => do
+      let denoted ← denoteEdge? manifest base variables edge
+      let denotedRest ← denoteEdges? manifest base variables rest
+      pure (denoted :: denotedRest)
 
 def denoteLoopSummary? (manifest : Manifest) (base : Env) (row : SummaryRow) :
-    Option ScalarLoopSummary :=
-  if row.supported manifest then
-    match row.guard with
-    | some guard => some {
-        initial := fun state => valuesInitializeState manifest base row.init state
-        guard := fun state => formulaHoldsInState manifest base row.variables state guard
-        invariant := fun state =>
+    Option (LoopVC ScalarLoopState) :=
+  if row.supported manifest then do
+    let edges ← denoteEdges? manifest base row.variables row.edges
+    pure {
+      initial := fun state => valuesInitializeState manifest base row.variables row.init state
+      invariant := fun state =>
+        stateReady row.variables state ∧
           formulasHoldInState manifest base row.variables state row.invariants
-        step := fun current following =>
-          assignmentsProduceState manifest base row.variables current row.step following
-        safe := fun state =>
-          formulasHoldInState manifest base row.variables state row.bodySafety
-        post := fun state => formulasHoldInState manifest base row.variables state row.post
-      }
-    | none => none
+      edges := edges
+      targetAssertion := fun target state =>
+        match target with
+        | .successor => formulasHoldInState manifest base row.variables state row.post
+        | .backedge | .functionReturn | .errorReturn | .explicitRevert => False
+    }
   else
     none
 
@@ -215,18 +383,30 @@ def loopVerifiedAtEnv
   | some summary => summary.Verified
   | none => False
 
-def loopInductionProofFromAssumptions
+def loopSpecificationNonvacuous
     (manifest : Manifest)
     (assumptions : List AssumptionRow)
     (row : SummaryRow) : Prop :=
-  (∃ env state,
-      assumptionsDenoteInEnv manifest env assumptions ∧
-      contextReady env row.contextVariables ∧
-      loopInitialPremises manifest env row state) ∧
-    ∀ env,
-      assumptionsDenoteInEnv manifest env assumptions →
-      contextReady env row.contextVariables →
-      loopInductionObligationsAtEnv manifest env row
+  ∃ env state,
+    assumptionsDenoteInEnv manifest env assumptions ∧
+    contextReady env row.contextVariables ∧
+    loopInitialPremises manifest env row state
+
+def loopInductionCertificateFromAssumptions
+    (manifest : Manifest)
+    (assumptions : List AssumptionRow)
+    (row : SummaryRow) : Prop :=
+  ∀ env,
+    assumptionsDenoteInEnv manifest env assumptions →
+    contextReady env row.contextVariables →
+    loopInductionObligationsAtEnv manifest env row
+
+def loopProofAuthorizationFromAssumptions
+    (manifest : Manifest)
+    (assumptions : List AssumptionRow)
+    (row : SummaryRow) : Prop :=
+  loopSpecificationNonvacuous manifest assumptions row ∧
+    loopInductionCertificateFromAssumptions manifest assumptions row
 
 def loopVerifiedFromAssumptions
     (manifest : Manifest)
@@ -237,14 +417,14 @@ def loopVerifiedFromAssumptions
     contextReady env row.contextVariables →
     loopVerifiedAtEnv manifest env row
 
-theorem loop_induction_proof_sound
+theorem loop_induction_certificate_sound
     (manifest : Manifest)
     (assumptions : List AssumptionRow)
     (row : SummaryRow)
-    (proof : loopInductionProofFromAssumptions manifest assumptions row) :
+    (proof : loopInductionCertificateFromAssumptions manifest assumptions row) :
     loopVerifiedFromAssumptions manifest assumptions row := by
   intro env hAssumptions hContext
-  have hObligations := proof.2 env hAssumptions hContext
+  have hObligations := proof env hAssumptions hContext
   unfold loopInductionObligationsAtEnv at hObligations
   unfold loopVerifiedAtEnv
   cases hSummary : denoteLoopSummary? manifest env row with
@@ -253,11 +433,19 @@ theorem loop_induction_proof_sound
       simp only [hSummary] at hObligations ⊢
       exact verified_of_induction summary hObligations
 
-theorem loop_induction_proof_has_nonvacuous_initial_state
+theorem loop_authorization_sound
     (manifest : Manifest)
     (assumptions : List AssumptionRow)
     (row : SummaryRow)
-    (proof : loopInductionProofFromAssumptions manifest assumptions row) :
+    (proof : loopProofAuthorizationFromAssumptions manifest assumptions row) :
+    loopVerifiedFromAssumptions manifest assumptions row :=
+  loop_induction_certificate_sound manifest assumptions row proof.2
+
+theorem loop_authorization_has_nonvacuous_initial_state
+    (manifest : Manifest)
+    (assumptions : List AssumptionRow)
+    (row : SummaryRow)
+    (proof : loopProofAuthorizationFromAssumptions manifest assumptions row) :
     ∃ env state,
       assumptionsDenoteInEnv manifest env assumptions ∧
       contextReady env row.contextVariables ∧

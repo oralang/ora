@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "proofs": [
+    {
+      "query_id": 12,
+      "obligation_ids": [],
+      "assumption_ids": [],
+      "module_name": "Ora.UserProof.ScalarLoopManual",
+      "theorem_name": "Ora.UserProof.ScalarLoopManual.Query_12.discharge_q12",
+      "path": "tests/formal/scalar_loop_manual_proof_required.lean",
+      "content_sha256": null,
+      "inline_source": true
+    }
+  ]
+}

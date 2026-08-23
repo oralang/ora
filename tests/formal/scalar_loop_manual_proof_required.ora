@@ -3,7 +3,7 @@ contract ScalarLoopManualProofRequired {
         var i: u256 = 0;
         while (i < 3)
             invariant i <= 3
-            invariant i >= 0
+            invariant i *% 1 <= 3
         {
             i = i + 1;
         }

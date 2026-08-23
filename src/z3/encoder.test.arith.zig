@@ -44,6 +44,40 @@ test "arith div emits safety obligation" {
     try testing.expect(obligations.len > 0);
 }
 
+test "source asserted div does not duplicate encoder safety authority" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const lhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 6);
+    const rhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 2);
+    const lhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, lhs_attr);
+    const rhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, rhs_attr);
+    const lhs = mlir.oraOperationGetResult(lhs_const, 0);
+    const rhs = mlir.oraOperationGetResult(rhs_const, 0);
+
+    const div_op = mlir.oraArithDivUIOpCreate(mlir_ctx, loc, lhs, rhs);
+    mlir.oraOperationSetAttributeByName(
+        div_op,
+        stringRef("ora.arithmetic_safety_asserted"),
+        mlir.oraBoolAttrCreate(mlir_ctx, true),
+    );
+    _ = try encoder.encodeOperation(div_op);
+
+    const obligations = try encoder.takeObligations(testing.allocator);
+    defer if (obligations.len > 0) testing.allocator.free(obligations);
+    try testing.expectEqual(@as(usize, 0), obligations.len);
+}
+
 test "arith divsi encodes signed division" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

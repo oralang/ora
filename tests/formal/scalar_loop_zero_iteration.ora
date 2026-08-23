@@ -1,0 +1,11 @@
+contract ScalarLoopZeroIteration {
+    pub fn neverEnter() -> u256 {
+        var value: u256 = 0;
+        while (value < 0)
+            invariant value == 0
+        {
+            value = value + 1;
+        }
+        return value;
+    }
+}

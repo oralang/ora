@@ -114,6 +114,24 @@ fn loopSummaryHasReason(
     return false;
 }
 
+fn expectLoopSummaryRejected(
+    set: obligation.ObligationSet,
+    query: obligation.VerificationQuery,
+    row: obligation.LoopSummaryRow,
+    expected: obligation.LoopUnsupportedReason,
+) !void {
+    var mutated_set = set;
+    const rows = [_]obligation.LoopSummaryRow{row};
+    mutated_set.loop_summaries = &rows;
+    switch (obligation_to_lean.querySemanticSupport(mutated_set, query)) {
+        .supported => return error.TestUnexpectedResult,
+        .unsupported => |reason| try testing.expectEqual(
+            obligation_to_lean.SemanticUnsupportedReason{ .unsupported_loop_summary = expected },
+            reason,
+        ),
+    }
+}
+
 fn countAssumption(set: obligation.ObligationSet, kind: obligation.AssumptionKind) usize {
     var count: usize = 0;
     for (set.assumptions) |item| {
@@ -1150,547 +1168,6 @@ fn proofModuleFromGeneratedObligations(
     return try out.toOwnedSlice();
 }
 
-fn loopProofModuleFromGeneratedObligations(
-    allocator: std.mem.Allocator,
-    obligations_source: []const u8,
-    module_namespace: []const u8,
-    query_id: obligation.Id,
-    summary_id: obligation.Id,
-    use_sorry: bool,
-) ![]const u8 {
-    const namespace_start = std.mem.indexOf(u8, obligations_source, "namespace ") orelse return error.TestUnexpectedResult;
-    const body_start = (std.mem.indexOfPos(u8, obligations_source, namespace_start, "\n") orelse return error.TestUnexpectedResult) + 1;
-    const end_start = std.mem.lastIndexOf(u8, obligations_source, "\nend ") orelse return error.TestUnexpectedResult;
-
-    var out = std.Io.Writer.Allocating.init(allocator);
-    errdefer out.deinit();
-    const writer = &out.writer;
-
-    try writer.writeAll(obligations_source[0..namespace_start]);
-    try writer.writeAll("namespace ");
-    try writer.writeAll(module_namespace);
-    try writer.writeByte('\n');
-    try writer.writeAll(obligations_source[body_start..end_start]);
-    try writer.writeByte('\n');
-    if (!use_sorry) try writer.writeAll("set_option maxRecDepth 10000 in\nset_option maxHeartbeats 2000000 in\n");
-    try writer.print("theorem discharge : emittedQuery_{d} := by\n", .{query_id});
-    if (use_sorry) {
-        try writer.writeAll("  sorry\n\n");
-    } else {
-        try writer.print("  unfold emittedQuery_{d} Ora.Loop.loopInductionProofFromAssumptions\n", .{query_id});
-        try writer.print(
-            "  have hSupported : emittedLoopSummary_{d}.supported emittedManifest = true := by decide\n",
-            .{summary_id},
-        );
-        try writer.print(
-            "  have hGuard : emittedLoopSummary_{d}.guard = some (.term 3) := rfl\n",
-            .{summary_id},
-        );
-        try writer.writeAll(
-            \\  have hFormulaEquality : ∀ env,
-            \\      formulaDenotes? emittedManifest env (.term 6) =
-            \\        formulaDenotes? emittedManifest env (.term 33) := by
-            \\    intro env
-            \\    simp [formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
-            \\      emittedTerms]
-            \\  constructor
-            \\  · refine ⟨Env.empty.setFree { file_id := 0, pattern_id := 0 }
-            \\        (.u256 (BitVec.ofNat 256 0)),
-            \\        [Ora.Integer.Value.ofNat (.unsigned .w256) 0], ?_⟩
-            \\    constructor
-            \\    · simp [assumptionsDenoteInEnv, assumptionsDenoteInEnv?]
-            \\    constructor
-            \\    · intro loopVar hLoopVar
-            \\      simp [emittedLoopSummary_1] at hLoopVar
-            \\      subst loopVar
-            \\      exact ⟨Ora.Integer.Value.ofNat (.unsigned .w256) 0, rfl, rfl⟩
-            \\    · simp only [Ora.Loop.loopInitialPremises,
-            \\        Ora.Loop.denoteLoopSummary?, hSupported, hGuard]
-            \\      change Ora.Loop.valuesInitializeState emittedManifest
-            \\        (Env.empty.setFree { file_id := 0, pattern_id := 0 }
-            \\          (.u256 (BitVec.ofNat 256 0))) emittedLoopSummary_1.init
-            \\        [Ora.Integer.Value.ofNat (.unsigned .w256) 0]
-            \\      simp [emittedLoopSummary_1, Ora.Loop.valuesInitializeState,
-            \\        formulaValue?, denoteValue?, IntegerLiteralTerm.asU256?,
-            \\        Ora.Integer.Value.ofNat,
-            \\        TyRef.isU256Carrier, TyRef.isU256, TyRef.isI256,
-            \\        compilerTypeIdU256, compilerTypeIdI256,
-            \\        Ora.Spec.expectedCompilerTypeIdU256,
-            \\        Ora.Spec.expectedCompilerTypeIdI256, emittedManifest, emittedTerms]
-            \\  · intro env _ hContext
-            \\    simp only [Ora.Loop.loopInductionObligationsAtEnv,
-            \\      Ora.Loop.denoteLoopSummary?, hSupported, hGuard]
-            \\    rcases hContext
-            \\        { index := 0, id := { file_id := 0, pattern_id := 0 },
-            \\          name := "n", ty := .compilerTypeId 6 }
-            \\        (by simp [emittedLoopSummary_1]) with ⟨nValue, hNShape, hn⟩
-            \\    rcases nValue with ⟨nShape, n⟩
-            \\    have hNShapeValue : nShape = .unsigned .w256 := by
-            \\      have hSome : some (.unsigned .w256) = some nShape := by
-            \\        simpa using hNShape
-            \\      exact (Option.some.inj hSome).symm
-            \\    subst nShape
-            \\    change lookupFreeBinding env.freeBindings
-            \\      { file_id := 0, pattern_id := 0 } = some (.u256 n) at hn
-            \\    have hLoopIdSelf :
-            \\        (({ file_id := 4294967294, pattern_id := 0 } : FreeVarId) ==
-            \\          { file_id := 4294967294, pattern_id := 0 }) = true := by rfl
-            \\    have hLoopIdContext :
-            \\        (({ file_id := 4294967294, pattern_id := 0 } : FreeVarId) ==
-            \\          { file_id := 0, pattern_id := 0 }) = false := by rfl
-            \\    constructor
-            \\    · intro state hInitial
-            \\      change Ora.Loop.valuesInitializeState emittedManifest env
-            \\        emittedLoopSummary_1.init state at hInitial
-            \\      have hState : state =
-            \\          [Ora.Integer.Value.ofNat (.unsigned .w256) 0] := by
-            \\        rcases state with _ | ⟨value, state⟩
-            \\        · simp [Ora.Loop.valuesInitializeState, emittedLoopSummary_1] at hInitial
-            \\        · rcases state with _ | ⟨extra, state⟩
-            \\          · have hValue :
-            \\                Ora.Integer.Value.ofNat (.unsigned .w256) 0 = value := by
-            \\              simpa [Ora.Loop.valuesInitializeState, formulaValue?, denoteValue?,
-            \\                IntegerLiteralTerm.asU256?, Ora.Integer.Value.ofNat,
-            \\                TyRef.isU256Carrier, TyRef.isU256,
-            \\                TyRef.isI256, compilerTypeIdU256, compilerTypeIdI256,
-            \\                Ora.Spec.expectedCompilerTypeIdU256,
-            \\                Ora.Spec.expectedCompilerTypeIdI256,
-            \\                emittedManifest, emittedTerms, emittedLoopSummary_1] using hInitial
-            \\            subst value
-            \\            rfl
-            \\          · simp [Ora.Loop.valuesInitializeState, emittedLoopSummary_1] at hInitial
-            \\      subst state
-            \\      intro formula hFormula
-            \\      simp [emittedLoopSummary_1] at hFormula
-            \\      subst formula
-            \\      simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
-            \\        formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
-            \\        emittedTerms, hn, U256.ule, Env.setFree, Env.lookupVar,
-            \\        Env.lookupFree, lookupFreeBinding, hLoopIdSelf, hLoopIdContext,
-            \\        IntegerLiteralTerm.asU256?, TyRef.isU256Carrier, TyRef.isU256,
-            \\        TyRef.isI256, compilerTypeIdU256, compilerTypeIdI256,
-            \\        Ora.Spec.expectedCompilerTypeIdU256,
-            \\        Ora.Spec.expectedCompilerTypeIdI256,
-            \\        Value.u256, Ora.Integer.Value.ofNat,
-            \\        Ora.Integer.Value.relation_u256, Ora.Integer.unsignedLe]
-            \\    · intro current following hInvariant hLoopGuard hStep
-            \\      change Ora.Loop.formulasHoldInState emittedManifest env
-            \\        emittedLoopSummary_1.variables current emittedLoopSummary_1.invariants at hInvariant
-            \\      change Ora.Loop.formulaHoldsInState emittedManifest env
-            \\        emittedLoopSummary_1.variables current (.term 3) at hLoopGuard
-            \\      change Ora.Loop.assignmentsProduceState emittedManifest env
-            \\        emittedLoopSummary_1.variables current emittedLoopSummary_1.step following at hStep
-            \\      change Ora.Loop.formulasHoldInState emittedManifest env
-            \\        emittedLoopSummary_1.variables following emittedLoopSummary_1.invariants
-            \\      have hCurrentShape : ∃ i, current = [i] := by
-            \\        rcases current with _ | ⟨i, current⟩
-            \\        · simp [Ora.Loop.formulasHoldInState, Ora.Loop.formulaHoldsInState,
-            \\            Ora.Loop.bindState, emittedLoopSummary_1] at hInvariant
-            \\        · rcases current with _ | ⟨extra, current⟩
-            \\          · exact ⟨i, rfl⟩
-            \\          · simp [Ora.Loop.formulasHoldInState, Ora.Loop.formulaHoldsInState,
-            \\              Ora.Loop.bindState, emittedLoopSummary_1] at hInvariant
-            \\      rcases hCurrentShape with ⟨i, rfl⟩
-            \\      rcases i with ⟨iShape, i⟩
-            \\      have hIShapeBinding :
-            \\          (.compilerTypeId 6 : TyRef).integerShape? = some iShape := by
-            \\        by_cases hShape :
-            \\            (.compilerTypeId 6 : TyRef).integerShape? = some iShape
-            \\        · exact hShape
-            \\        · exfalso
-            \\          have hNe : ¬(.unsigned .w256 = iShape) := by
-            \\            simpa using hShape
-            \\          simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
-            \\            hNe] at hLoopGuard
-            \\      have hIShape : iShape = .unsigned .w256 := by
-            \\        have hSome : some (.unsigned .w256) = some iShape := by
-            \\          simpa using hIShapeBinding
-            \\        exact (Option.some.inj hSome).symm
-            \\      subst iShape
-            \\      have hFollowingShape : ∃ next, following = [next] := by
-            \\        rcases following with _ | ⟨next, following⟩
-            \\        · simp [Ora.Loop.assignmentsProduceState, Ora.Loop.bindState,
-            \\            emittedLoopSummary_1] at hStep
-            \\        · rcases following with _ | ⟨extra, following⟩
-            \\          · exact ⟨next, rfl⟩
-            \\          · simp [Ora.Loop.assignmentsProduceState, Ora.Loop.bindState,
-            \\              emittedLoopSummary_1] at hStep
-            \\      rcases hFollowingShape with ⟨next, rfl⟩
-            \\      simp [Ora.Loop.assignmentsProduceState, Ora.Loop.bindState,
-            \\        formulaValue?, denoteValue?, emittedManifest, emittedTerms,
-            \\        emittedLoopSummary_1, Env.setFree, Env.lookupVar, Env.lookupFree,
-            \\        lookupFreeBinding, hLoopIdSelf, hLoopIdContext,
-            \\        IntegerLiteralTerm.asU256?, Value.binaryU256?, TyRef.isU256Carrier,
-            \\        TyRef.isU256, TyRef.isI256, compilerTypeIdU256,
-            \\        compilerTypeIdI256, Ora.Spec.expectedCompilerTypeIdU256,
-            \\        Ora.Spec.expectedCompilerTypeIdI256] at hStep
-            \\      subst next
-            \\      intro formula hFormula
-            \\      simp [emittedLoopSummary_1] at hFormula
-            \\      subst formula
-            \\      have hGuardDecoded : U256.ult i n := by
-            \\        simpa [Ora.Loop.formulaHoldsInState,
-            \\        Ora.Loop.bindState, formulaDenotes?, denoteFormula?, denoteValue?,
-            \\        emittedManifest, emittedTerms, hn, Env.setFree, Env.lookupVar,
-            \\        Env.lookupFree, lookupFreeBinding, TyRef.isU256,
-            \\        TyRef.isI256, TyRef.isU256Carrier, compilerTypeIdU256,
-            \\        compilerTypeIdI256, Ora.Spec.expectedCompilerTypeIdU256,
-            \\        Ora.Spec.expectedCompilerTypeIdI256, hLoopIdSelf, hLoopIdContext,
-            \\        IntegerLiteralTerm.asU256?, Value.binaryU256?]
-            \\          using hLoopGuard
-            \\      have hNextInvariant := U256.lt_add_one_ule_bound i n hGuardDecoded
-            \\      have hNextInvariantWrapped :
-            \\          Ora.Integer.unsignedLe
-            \\            (Ora.Integer.wrappingResult (.unsigned .w256) .add i
-            \\              (BitVec.ofNat 256 1)) n := by
-            \\        simpa [U256.ule, U256.add, Ora.Integer.unsignedLe,
-            \\          Ora.Integer.wrappingResult] using hNextInvariant
-            \\      simpa [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
-            \\        formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
-            \\        emittedTerms, hn, Env.setFree, Env.lookupVar, Env.lookupFree,
-            \\        lookupFreeBinding, TyRef.isU256, TyRef.isI256,
-            \\        TyRef.isU256Carrier, compilerTypeIdU256, compilerTypeIdI256,
-            \\        Ora.Spec.expectedCompilerTypeIdU256,
-            \\        Ora.Spec.expectedCompilerTypeIdI256, hLoopIdSelf, hLoopIdContext,
-            \\        IntegerLiteralTerm.asU256?, Ora.Integer.unsignedLe,
-            \\        Value.u256, Value.binaryU256?, Ora.Integer.Value.binary_u256,
-            \\        Ora.Integer.Value.relation_u256] using hNextInvariantWrapped
-            \\    · intro state hInvariant hLoopGuard
-            \\      change Ora.Loop.formulasHoldInState emittedManifest env
-            \\        emittedLoopSummary_1.variables state emittedLoopSummary_1.invariants at hInvariant
-            \\      change Ora.Loop.formulaHoldsInState emittedManifest env
-            \\        emittedLoopSummary_1.variables state (.term 3) at hLoopGuard
-            \\      change Ora.Loop.formulasHoldInState emittedManifest env
-            \\        emittedLoopSummary_1.variables state emittedLoopSummary_1.bodySafety
-            \\      have hStateShape : ∃ i, state = [i] := by
-            \\        rcases state with _ | ⟨i, state⟩
-            \\        · simp [Ora.Loop.formulasHoldInState, Ora.Loop.formulaHoldsInState,
-            \\            Ora.Loop.bindState, emittedLoopSummary_1] at hInvariant
-            \\        · rcases state with _ | ⟨extra, state⟩
-            \\          · exact ⟨i, rfl⟩
-            \\          · simp [Ora.Loop.formulasHoldInState, Ora.Loop.formulaHoldsInState,
-            \\              Ora.Loop.bindState, emittedLoopSummary_1] at hInvariant
-            \\      rcases hStateShape with ⟨i, rfl⟩
-            \\      rcases i with ⟨iShape, i⟩
-            \\      have hIShapeBinding :
-            \\          (.compilerTypeId 6 : TyRef).integerShape? = some iShape := by
-            \\        by_cases hShape :
-            \\            (.compilerTypeId 6 : TyRef).integerShape? = some iShape
-            \\        · exact hShape
-            \\        · exfalso
-            \\          have hNe : ¬(.unsigned .w256 = iShape) := by
-            \\            simpa using hShape
-            \\          simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
-            \\            hNe] at hLoopGuard
-            \\      have hIShape : iShape = .unsigned .w256 := by
-            \\        have hSome : some (.unsigned .w256) = some iShape := by
-            \\          simpa using hIShapeBinding
-            \\        exact (Option.some.inj hSome).symm
-            \\      subst iShape
-            \\      intro formula hFormula
-            \\      simp [emittedLoopSummary_1] at hFormula
-            \\      subst formula
-            \\      have hGuardDecoded : U256.ult i n := by
-            \\        simpa [Ora.Loop.formulaHoldsInState,
-            \\        Ora.Loop.bindState, formulaDenotes?, denoteFormula?, denoteValue?,
-            \\        emittedManifest, emittedTerms, hn, Env.setFree, Env.lookupVar,
-            \\        Env.lookupFree, lookupFreeBinding, Env.lookupBound, Env.pushBound,
-            \\        TyRef.isU256, TyRef.isI256, TyRef.isU256Carrier,
-            \\        BinderRef.isU256, compilerTypeIdU256, compilerTypeIdI256,
-            \\        Ora.Spec.expectedCompilerTypeIdU256,
-            \\        Ora.Spec.expectedCompilerTypeIdI256, hLoopIdSelf, hLoopIdContext,
-            \\        IntegerLiteralTerm.asU256?, Value.binaryU256?]
-            \\          using hLoopGuard
-            \\      have hSafe := U256.lt_bound_add_one_not_lt_self i n hGuardDecoded
-            \\      have hSafeNat :
-            \\          i.toNat ≤
-            \\            (Ora.Integer.wrappingResult (.unsigned .w256) .add i
-            \\              (BitVec.ofNat 256 1)).toNat := by
-            \\        apply Nat.le_of_not_gt
-            \\        simpa [U256.ult, U256.add, Ora.Integer.wrappingResult] using hSafe
-            \\      simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
-            \\        formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
-            \\        emittedTerms, hn, Env.setFree, Env.lookupVar, Env.lookupFree,
-            \\        lookupFreeBinding, TyRef.isU256, TyRef.isI256,
-            \\        TyRef.isU256Carrier, compilerTypeIdU256, compilerTypeIdI256,
-            \\        Ora.Spec.expectedCompilerTypeIdU256,
-            \\        Ora.Spec.expectedCompilerTypeIdI256, hLoopIdSelf, hLoopIdContext,
-            \\        IntegerLiteralTerm.asU256?, Ora.Integer.unsignedLt,
-            \\        Value.u256, Value.binaryU256?, Ora.Integer.Value.binary_u256,
-            \\        Ora.Integer.Value.relation_u256, hSafeNat]
-            \\    · intro state hInvariant _
-            \\      change Ora.Loop.formulasHoldInState emittedManifest env
-            \\        emittedLoopSummary_1.variables state emittedLoopSummary_1.invariants at hInvariant
-            \\      change Ora.Loop.formulasHoldInState emittedManifest env
-            \\        emittedLoopSummary_1.variables state emittedLoopSummary_1.post
-            \\      intro formula hFormula
-            \\      simp [emittedLoopSummary_1] at hFormula
-            \\      subst formula
-            \\      have hInvariantFormula := hInvariant (.term 6) (by simp [emittedLoopSummary_1])
-            \\      unfold Ora.Loop.formulaHoldsInState at hInvariantFormula ⊢
-            \\      cases hBind : Ora.Loop.bindState env emittedLoopSummary_1.variables state with
-            \\      | none => simp [hBind] at hInvariantFormula
-            \\      | some bound =>
-            \\          simp only [hBind] at hInvariantFormula ⊢
-            \\          rw [← hFormulaEquality]
-            \\          exact hInvariantFormula
-            \\
-        );
-    }
-    try writer.writeAll("end ");
-    try writer.writeAll(module_namespace);
-    try writer.writeByte('\n');
-    return try out.toOwnedSlice();
-}
-
-fn countThreeProofModuleFromGeneratedObligations(
-    allocator: std.mem.Allocator,
-    obligations_source: []const u8,
-    module_namespace: []const u8,
-    query_id: obligation.Id,
-    summary_id: obligation.Id,
-) ![]const u8 {
-    const namespace_start = std.mem.indexOf(u8, obligations_source, "namespace ") orelse return error.TestUnexpectedResult;
-    const body_start = (std.mem.indexOfPos(u8, obligations_source, namespace_start, "\n") orelse return error.TestUnexpectedResult) + 1;
-    const end_start = std.mem.lastIndexOf(u8, obligations_source, "\nend ") orelse return error.TestUnexpectedResult;
-
-    var out = std.Io.Writer.Allocating.init(allocator);
-    errdefer out.deinit();
-    const writer = &out.writer;
-    try writer.writeAll(obligations_source[0..namespace_start]);
-    try writer.print("namespace {s}\n", .{module_namespace});
-    try writer.writeAll(obligations_source[body_start..end_start]);
-    try writer.writeAll("\nset_option maxRecDepth 10000 in\nset_option maxHeartbeats 2000000 in\n");
-    try writer.print("theorem discharge : emittedQuery_{d} := by\n", .{query_id});
-    try writer.print("  unfold emittedQuery_{d} Ora.Loop.loopInductionProofFromAssumptions\n", .{query_id});
-    try writer.print(
-        "  have hSupported : emittedLoopSummary_{d}.supported emittedManifest = true := by decide\n",
-        .{summary_id},
-    );
-    try writer.print(
-        "  have hGuard : emittedLoopSummary_{d}.guard = some (.term 3) := rfl\n",
-        .{summary_id},
-    );
-    try writer.writeAll("  have hLiteralThree : parseDecimalNat? \"3\" = some 3 := rfl\n");
-    try writer.writeAll(
-        \\  have hLoopIdSelf :
-        \\      (({ file_id := 4294967294, pattern_id := 0 } : FreeVarId) ==
-        \\        { file_id := 4294967294, pattern_id := 0 }) = true := by rfl
-        \\  constructor
-        \\  · refine ⟨Env.empty,
-        \\      [Ora.Integer.Value.ofNat (.unsigned .w256) 0], ?_⟩
-        \\    constructor
-        \\    · simp [assumptionsDenoteInEnv, assumptionsDenoteInEnv?]
-        \\    constructor
-        \\    · intro loopVar hLoopVar
-        \\      simp [emittedLoopSummary_1] at hLoopVar
-        \\    · simp only [Ora.Loop.loopInitialPremises,
-        \\        Ora.Loop.denoteLoopSummary?, hSupported, hGuard]
-        \\      change Ora.Loop.valuesInitializeState emittedManifest Env.empty
-        \\        emittedLoopSummary_1.init
-        \\        [Ora.Integer.Value.ofNat (.unsigned .w256) 0]
-        \\      simp [emittedLoopSummary_1, Ora.Loop.valuesInitializeState,
-        \\        formulaValue?, denoteValue?, IntegerLiteralTerm.asU256?,
-        \\        Ora.Integer.Value.ofNat,
-        \\        TyRef.isU256Carrier, TyRef.isU256, TyRef.isI256,
-        \\        compilerTypeIdU256, compilerTypeIdI256,
-        \\        Ora.Spec.expectedCompilerTypeIdU256,
-        \\        Ora.Spec.expectedCompilerTypeIdI256, emittedManifest, emittedTerms]
-        \\  · intro env _ _
-        \\    simp only [Ora.Loop.loopInductionObligationsAtEnv,
-        \\      Ora.Loop.denoteLoopSummary?, hSupported, hGuard]
-        \\    constructor
-        \\    · intro state hInitial
-        \\      change Ora.Loop.valuesInitializeState emittedManifest env
-        \\        emittedLoopSummary_1.init state at hInitial
-        \\      have hState : state =
-        \\          [Ora.Integer.Value.ofNat (.unsigned .w256) 0] := by
-        \\        rcases state with _ | ⟨value, state⟩
-        \\        · simp [Ora.Loop.valuesInitializeState, emittedLoopSummary_1] at hInitial
-        \\        · rcases state with _ | ⟨extra, state⟩
-        \\          · have hValue :
-        \\                Ora.Integer.Value.ofNat (.unsigned .w256) 0 = value := by
-        \\              simpa [Ora.Loop.valuesInitializeState, formulaValue?, denoteValue?,
-        \\                IntegerLiteralTerm.asU256?, Ora.Integer.Value.ofNat,
-        \\                TyRef.isU256Carrier, TyRef.isU256,
-        \\                TyRef.isI256, compilerTypeIdU256, compilerTypeIdI256,
-        \\                Ora.Spec.expectedCompilerTypeIdU256,
-        \\                Ora.Spec.expectedCompilerTypeIdI256,
-        \\                emittedManifest, emittedTerms, emittedLoopSummary_1] using hInitial
-        \\            subst value
-        \\            rfl
-        \\          · simp [Ora.Loop.valuesInitializeState, emittedLoopSummary_1] at hInitial
-        \\      subst state
-        \\      intro formula hFormula
-        \\      simp [emittedLoopSummary_1] at hFormula
-        \\      subst formula
-        \\      simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
-        \\        formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
-        \\        emittedTerms, U256.ule, Env.setFree, Env.lookupVar,
-        \\        Env.lookupFree, lookupFreeBinding, hLoopIdSelf,
-        \\        IntegerLiteralTerm.asU256?, hLiteralThree,
-        \\        Value.u256, Ora.Integer.Value.ofNat,
-        \\        Ora.Integer.Value.relation_u256, Ora.Integer.unsignedLe,
-        \\        TyRef.isU256Carrier, TyRef.isU256,
-        \\        TyRef.isI256, compilerTypeIdU256, compilerTypeIdI256,
-        \\        Ora.Spec.expectedCompilerTypeIdU256,
-        \\        Ora.Spec.expectedCompilerTypeIdI256]
-        \\    · intro current following hInvariant hLoopGuard hStep
-        \\      change Ora.Loop.formulasHoldInState emittedManifest env
-        \\        emittedLoopSummary_1.variables current emittedLoopSummary_1.invariants at hInvariant
-        \\      change Ora.Loop.formulaHoldsInState emittedManifest env
-        \\        emittedLoopSummary_1.variables current (.term 3) at hLoopGuard
-        \\      change Ora.Loop.assignmentsProduceState emittedManifest env
-        \\        emittedLoopSummary_1.variables current emittedLoopSummary_1.step following at hStep
-        \\      change Ora.Loop.formulasHoldInState emittedManifest env
-        \\        emittedLoopSummary_1.variables following emittedLoopSummary_1.invariants
-        \\      have hCurrentShape : ∃ i, current = [i] := by
-        \\        rcases current with _ | ⟨i, current⟩
-        \\        · simp [Ora.Loop.formulasHoldInState, Ora.Loop.formulaHoldsInState,
-        \\            Ora.Loop.bindState, emittedLoopSummary_1] at hInvariant
-        \\        · rcases current with _ | ⟨extra, current⟩
-        \\          · exact ⟨i, rfl⟩
-        \\          · simp [Ora.Loop.formulasHoldInState, Ora.Loop.formulaHoldsInState,
-        \\              Ora.Loop.bindState, emittedLoopSummary_1] at hInvariant
-        \\      rcases hCurrentShape with ⟨i, rfl⟩
-        \\      rcases i with ⟨iShape, i⟩
-        \\      have hIShapeBinding :
-        \\          (.compilerTypeId 6 : TyRef).integerShape? = some iShape := by
-        \\        by_cases hShape :
-        \\            (.compilerTypeId 6 : TyRef).integerShape? = some iShape
-        \\        · exact hShape
-        \\        · exfalso
-        \\          have hNe : ¬(.unsigned .w256 = iShape) := by
-        \\            simpa using hShape
-        \\          simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
-        \\            hNe] at hLoopGuard
-        \\      have hIShape : iShape = .unsigned .w256 := by
-        \\        have hSome : some (.unsigned .w256) = some iShape := by
-        \\          simpa using hIShapeBinding
-        \\        exact (Option.some.inj hSome).symm
-        \\      subst iShape
-        \\      have hFollowingShape : ∃ next, following = [next] := by
-        \\        rcases following with _ | ⟨next, following⟩
-        \\        · simp [Ora.Loop.assignmentsProduceState, Ora.Loop.bindState,
-        \\            emittedLoopSummary_1] at hStep
-        \\        · rcases following with _ | ⟨extra, following⟩
-        \\          · exact ⟨next, rfl⟩
-        \\          · simp [Ora.Loop.assignmentsProduceState, Ora.Loop.bindState,
-        \\              emittedLoopSummary_1] at hStep
-        \\      rcases hFollowingShape with ⟨next, rfl⟩
-        \\      simp [Ora.Loop.assignmentsProduceState, Ora.Loop.bindState,
-        \\        formulaValue?, denoteValue?, emittedManifest, emittedTerms,
-        \\        emittedLoopSummary_1, Env.setFree, Env.lookupVar, Env.lookupFree,
-        \\        lookupFreeBinding, hLoopIdSelf, IntegerLiteralTerm.asU256?,
-        \\        Value.binaryU256?, TyRef.isU256Carrier, TyRef.isU256,
-        \\        TyRef.isI256, compilerTypeIdU256, compilerTypeIdI256,
-        \\        Ora.Spec.expectedCompilerTypeIdU256,
-        \\        Ora.Spec.expectedCompilerTypeIdI256] at hStep
-        \\      subst next
-        \\      intro formula hFormula
-        \\      simp [emittedLoopSummary_1] at hFormula
-        \\      subst formula
-        \\      have hGuardDecoded : U256.ult i (BitVec.ofNat 256 3) := by
-        \\        simpa [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
-        \\          formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
-        \\          emittedTerms, Env.setFree, Env.lookupVar, Env.lookupFree,
-        \\          lookupFreeBinding, TyRef.isU256, TyRef.isI256,
-        \\          TyRef.isU256Carrier, compilerTypeIdU256, compilerTypeIdI256,
-        \\          Ora.Spec.expectedCompilerTypeIdU256,
-        \\          Ora.Spec.expectedCompilerTypeIdI256, hLoopIdSelf,
-        \\          IntegerLiteralTerm.asU256?, hLiteralThree, Value.binaryU256?] using hLoopGuard
-        \\      have hNextInvariant := U256.lt_add_one_ule_bound i
-        \\        (BitVec.ofNat 256 3) hGuardDecoded
-        \\      have hNextInvariantWrapped :
-        \\          Ora.Integer.unsignedLe
-        \\            (Ora.Integer.wrappingResult (.unsigned .w256) .add i
-        \\              (BitVec.ofNat 256 1)) (BitVec.ofNat 256 3) := by
-        \\        simpa [U256.ule, U256.add, Ora.Integer.unsignedLe,
-        \\          Ora.Integer.wrappingResult] using hNextInvariant
-        \\      simpa [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
-        \\        formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
-        \\        emittedTerms, Env.setFree, Env.lookupVar, Env.lookupFree,
-        \\        lookupFreeBinding, TyRef.isU256, TyRef.isI256,
-        \\        TyRef.isU256Carrier, compilerTypeIdU256, compilerTypeIdI256,
-        \\        Ora.Spec.expectedCompilerTypeIdU256,
-        \\        Ora.Spec.expectedCompilerTypeIdI256, hLoopIdSelf,
-        \\        IntegerLiteralTerm.asU256?, hLiteralThree,
-        \\        Ora.Integer.unsignedLe, Value.u256, Value.binaryU256?,
-        \\        Ora.Integer.Value.binary_u256,
-        \\        Ora.Integer.Value.relation_u256] using hNextInvariantWrapped
-        \\    · intro state hInvariant hLoopGuard
-        \\      change Ora.Loop.formulasHoldInState emittedManifest env
-        \\        emittedLoopSummary_1.variables state emittedLoopSummary_1.invariants at hInvariant
-        \\      change Ora.Loop.formulaHoldsInState emittedManifest env
-        \\        emittedLoopSummary_1.variables state (.term 3) at hLoopGuard
-        \\      change Ora.Loop.formulasHoldInState emittedManifest env
-        \\        emittedLoopSummary_1.variables state emittedLoopSummary_1.bodySafety
-        \\      have hStateShape : ∃ i, state = [i] := by
-        \\        rcases state with _ | ⟨i, state⟩
-        \\        · simp [Ora.Loop.formulasHoldInState, Ora.Loop.formulaHoldsInState,
-        \\            Ora.Loop.bindState, emittedLoopSummary_1] at hInvariant
-        \\        · rcases state with _ | ⟨extra, state⟩
-        \\          · exact ⟨i, rfl⟩
-        \\          · simp [Ora.Loop.formulasHoldInState, Ora.Loop.formulaHoldsInState,
-        \\              Ora.Loop.bindState, emittedLoopSummary_1] at hInvariant
-        \\      rcases hStateShape with ⟨i, rfl⟩
-        \\      rcases i with ⟨iShape, i⟩
-        \\      have hIShapeBinding :
-        \\          (.compilerTypeId 6 : TyRef).integerShape? = some iShape := by
-        \\        by_cases hShape :
-        \\            (.compilerTypeId 6 : TyRef).integerShape? = some iShape
-        \\        · exact hShape
-        \\        · exfalso
-        \\          have hNe : ¬(.unsigned .w256 = iShape) := by
-        \\            simpa using hShape
-        \\          simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
-        \\            hNe] at hLoopGuard
-        \\      have hIShape : iShape = .unsigned .w256 := by
-        \\        have hSome : some (.unsigned .w256) = some iShape := by
-        \\          simpa using hIShapeBinding
-        \\        exact (Option.some.inj hSome).symm
-        \\      subst iShape
-        \\      intro formula hFormula
-        \\      simp [emittedLoopSummary_1] at hFormula
-        \\      subst formula
-        \\      have hGuardDecoded : U256.ult i (BitVec.ofNat 256 3) := by
-        \\        simpa [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
-        \\          formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
-        \\          emittedTerms, Env.setFree, Env.lookupVar, Env.lookupFree,
-        \\          lookupFreeBinding, TyRef.isU256, TyRef.isI256,
-        \\          TyRef.isU256Carrier, compilerTypeIdU256, compilerTypeIdI256,
-        \\          Ora.Spec.expectedCompilerTypeIdU256,
-        \\          Ora.Spec.expectedCompilerTypeIdI256, hLoopIdSelf,
-        \\          IntegerLiteralTerm.asU256?, hLiteralThree, Value.binaryU256?] using hLoopGuard
-        \\      have hSafe := U256.lt_bound_add_one_not_lt_self i
-        \\        (BitVec.ofNat 256 3) hGuardDecoded
-        \\      have hSafeNat :
-        \\          i.toNat ≤
-        \\            (Ora.Integer.wrappingResult (.unsigned .w256) .add i
-        \\              (BitVec.ofNat 256 1)).toNat := by
-        \\        apply Nat.le_of_not_gt
-        \\        simpa [U256.ult, U256.add, Ora.Integer.wrappingResult] using hSafe
-        \\      simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
-        \\        formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
-        \\        emittedTerms, Env.setFree, Env.lookupVar, Env.lookupFree,
-        \\        lookupFreeBinding, TyRef.isU256, TyRef.isI256,
-        \\        TyRef.isU256Carrier, compilerTypeIdU256, compilerTypeIdI256,
-        \\        Ora.Spec.expectedCompilerTypeIdU256,
-        \\        Ora.Spec.expectedCompilerTypeIdI256, hLoopIdSelf,
-        \\        IntegerLiteralTerm.asU256?, Ora.Integer.unsignedLt,
-        \\        Value.u256, Value.binaryU256?, Ora.Integer.Value.binary_u256,
-        \\        Ora.Integer.Value.relation_u256, hSafeNat]
-        \\    · intro state _ _
-        \\      change Ora.Loop.formulasHoldInState emittedManifest env
-        \\        emittedLoopSummary_1.variables state emittedLoopSummary_1.post
-        \\      intro formula hFormula
-        \\      simp [emittedLoopSummary_1] at hFormula
-        \\
-    );
-    try writer.print("end {s}\n", .{module_namespace});
-    return try out.toOwnedSlice();
-}
-
 fn storageProofModuleFromGeneratedObligations(
     allocator: std.mem.Allocator,
     obligations_source: []const u8,
@@ -2417,7 +1894,7 @@ test "wrapping scalar loop steps do not invent arithmetic safety requirements" {
 
     try testing.expectEqual(@as(usize, 1), result.set.loop_summaries.len);
     const summary = result.set.loop_summaries[0];
-    try testing.expectEqual(@as(usize, 0), summary.body_safety_formulas.len);
+    try testing.expectEqual(@as(usize, 0), summary.edges[0].safety_formulas.len);
     try testing.expect(!loopSummaryHasReason(summary, .loop_body_safety_missing));
     try testing.expect(summary.projectionSupported());
 
@@ -2447,12 +1924,12 @@ test "narrow scalar loop comparison retypes compiler generated literal truncatio
     const summary = result.set.loop_summaries[0];
     try testing.expect(summary.projectionSupported());
 
-    const step_id = summary.step_assignments[0].value.term;
+    const step_id = summary.edges[0].next_state[0].value.term;
     const step = result.set.terms[step_id].binary;
     try testing.expectEqual(obligation.BinaryOp.sub, step.op);
     try testing.expectEqual(@as(u32, 1), step.ty.?.compiler_type_id);
 
-    const guard = result.set.terms[summary.guard_formula.?.term].binary;
+    const guard = result.set.terms[summary.edges[0].path_formulas[0].term].binary;
     const guard_rhs = result.set.terms[guard.rhs].int_lit;
     try testing.expectEqual(obligation.BinaryOp.gt, guard.op);
     try testing.expectEqual(@as(u32, 1), guard.ty.?.compiler_type_id);
@@ -2500,7 +1977,7 @@ test "narrow checked scalar arithmetic safety formulas activate certification" {
 
     for (result.set.loop_summaries) |summary| {
         try testing.expect(summary.projectionSupported());
-        try testing.expect(summary.body_safety_formulas.len > 0);
+        try testing.expect(summary.edges[0].safety_formulas.len > 0);
         try testing.expect(!loopSummaryHasReason(summary, .loop_formula_unsupported));
     }
     var induction_count: usize = 0;
@@ -2514,6 +1991,110 @@ test "narrow checked scalar arithmetic safety formulas activate certification" {
         }
     }
     try testing.expectEqual(@as(usize, 3), induction_count);
+}
+
+test "div rem loop safety comes from canonical source assertions" {
+    const source_text =
+        \\pub fn unsigned_div_loop(start: u8, divisor: u8) -> u8
+        \\    requires divisor != 0
+        \\{
+        \\    var value: u8 = start;
+        \\    while (value > 0) invariant value <= start {
+        \\        value = value / divisor;
+        \\    }
+        \\    return value;
+        \\}
+        \\
+        \\pub fn signed_div_loop(start: i8, divisor: i8) -> i8
+        \\    requires divisor != 0
+        \\{
+        \\    var value: i8 = start;
+        \\    while (value > 0) invariant value <= start {
+        \\        value = value / divisor;
+        \\    }
+        \\    return value;
+        \\}
+        \\
+        \\pub fn signed_rem_loop(start: i8, divisor: i8) -> i8
+        \\    requires divisor != 0
+        \\{
+        \\    var value: i8 = start;
+        \\    while (value > 0) invariant value <= start {
+        \\        value = value % divisor;
+        \\    }
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+
+    var result = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+    defer result.deinit();
+    try testing.expectEqual(@as(usize, 3), result.set.loop_summaries.len);
+    try testing.expectEqual(@as(usize, 3), countArithmeticSafety(result.set, .division_by_zero));
+    try testing.expectEqual(@as(usize, 1), countArithmeticSafety(result.set, .signed_division_overflow));
+
+    var z3_context = try z3_verification.Z3Context.init(testing.allocator);
+    defer z3_context.deinit();
+    var adapter = obligation_to_z3.Adapter.init(&z3_context, testing.allocator, result.set);
+
+    for (result.set.loop_summaries) |summary| {
+        try testing.expect(summary.projectionSupported());
+        try testing.expect(!loopSummaryHasReason(summary, .loop_body_safety_missing));
+        try testing.expectEqual(@as(usize, 2), summary.edges.len);
+        const expected_safety_count: usize = if (std.mem.eql(
+            u8,
+            summary.owner.statement.function_name,
+            "signed_div_loop",
+        )) 2 else 1;
+        try testing.expectEqual(expected_safety_count, summary.edges[0].safety_formulas.len);
+        try testing.expectEqual(@as(usize, 0), summary.edges[1].safety_formulas.len);
+        for (summary.query_ids.body_safety) |query_id| {
+            const query = obligation.findById(result.set.queries, query_id) orelse
+                return error.TestUnexpectedResult;
+            const checked = try adapter.checkLoopQueryForRow(query);
+            try testing.expectEqual(obligation_to_z3.CheckStatus.proved, checked.status);
+        }
+    }
+
+    const unsafe_source =
+        \\pub fn unsafe_div_loop(start: u8, divisor: u8) -> u8 {
+        \\    var value: u8 = start;
+        \\    while (value > 0) invariant value <= start {
+        \\        value = value / divisor;
+        \\    }
+        \\    return value;
+        \\}
+    ;
+    var unsafe_compilation = try compileText(unsafe_source);
+    defer unsafe_compilation.deinit();
+    const unsafe_hir = try unsafe_compilation.db.lowerToHir(unsafe_compilation.root_module_id);
+    try testing.expect(unsafe_hir.diagnostics.isEmpty());
+    var unsafe_result = try obligation_from_mlir.collect(
+        testing.allocator,
+        unsafe_hir.module.raw_module,
+        .{},
+    );
+    defer unsafe_result.deinit();
+    try testing.expectEqual(@as(usize, 1), unsafe_result.set.loop_summaries.len);
+    const unsafe_summary = unsafe_result.set.loop_summaries[0];
+    try testing.expectEqual(@as(usize, 2), unsafe_summary.query_ids.body_safety.len);
+    const unsafe_query = obligation.findById(
+        unsafe_result.set.queries,
+        unsafe_summary.query_ids.body_safety[0],
+    ) orelse return error.TestUnexpectedResult;
+    var unsafe_z3_context = try z3_verification.Z3Context.init(testing.allocator);
+    defer unsafe_z3_context.deinit();
+    var unsafe_adapter = obligation_to_z3.Adapter.init(
+        &unsafe_z3_context,
+        testing.allocator,
+        unsafe_result.set,
+    );
+    const unsafe_checked = try unsafe_adapter.checkLoopQueryForRow(unsafe_query);
+    try testing.expectEqual(obligation_to_z3.CheckStatus.disproved, unsafe_checked.status);
 }
 
 test "every registered integer width activates scalar loop certification" {
@@ -2576,6 +2157,37 @@ test "every registered integer width activates scalar loop certification" {
             obligation.TypeRef{ .compiler_type_id = wanted.compiler_type_id },
             summary.context_variables[0].ty,
         );
+
+        // Signedness-neutral operations such as equality must retain the
+        // compiler-owned parameter type instead of re-inferring unsigned from
+        // a signless MLIR carrier.
+        try testing.expect(summary.invariant_formulas.len >= 2);
+        const context_formula_id = switch (summary.invariant_formulas[1]) {
+            .term => |id| id,
+            .origin_value => return error.TestUnexpectedResult,
+        };
+        const context_equality = switch (result.set.terms[context_formula_id]) {
+            .binary => |binary| binary,
+            else => return error.TestUnexpectedResult,
+        };
+        try testing.expectEqual(obligation.BinaryOp.eq, context_equality.op);
+        try testing.expectEqual(
+            obligation.TypeRef{ .compiler_type_id = wanted.compiler_type_id },
+            context_equality.ty.?,
+        );
+        for ([_]obligation.TermId{ context_equality.lhs, context_equality.rhs }) |term_id| {
+            const parameter = switch (result.set.terms[term_id]) {
+                .variable => |variable| switch (variable) {
+                    .free => |free| free,
+                    .bound => return error.TestUnexpectedResult,
+                },
+                else => return error.TestUnexpectedResult,
+            };
+            try testing.expectEqual(
+                obligation.TypeRef{ .compiler_type_id = wanted.compiler_type_id },
+                parameter.ty.?,
+            );
+        }
     }
 }
 
@@ -2635,53 +2247,6 @@ test "canonical invariant-only loop activates Lean induction in the real CLI" {
         tmp.dir.access(std.testing.io, "blocked/scalar_loop_induction.hex", .{}),
     );
 
-    const generated_namespace = try leanProofGeneratedNamespaceForTest(allocator, source_path);
-    defer allocator.free(generated_namespace);
-    var obligations_source_out = std.Io.Writer.Allocating.init(allocator);
-    defer obligations_source_out.deinit();
-    try obligation_to_lean.writeModule(&obligations_source_out.writer, formal_result.set, .{
-        .namespace = generated_namespace,
-        .proof_surface = true,
-    });
-    const module_suffix = try moduleSuffixFromTmp(allocator, tmp);
-    defer allocator.free(module_suffix);
-    const fixture_dir = try std.fmt.allocPrint(allocator, "formal/Ora/LoopFixture/{s}", .{module_suffix});
-    defer allocator.free(fixture_dir);
-    try std.Io.Dir.cwd().createDirPath(std.testing.io, fixture_dir);
-    defer std.Io.Dir.cwd().deleteTree(std.testing.io, fixture_dir) catch {};
-    defer std.Io.Dir.cwd().deleteDir(std.testing.io, "formal/Ora/LoopFixture") catch {};
-    const proof_module = try std.fmt.allocPrint(allocator, "Ora.LoopFixture.{s}.CountThree", .{module_suffix});
-    defer allocator.free(proof_module);
-    const proof_theorem = try std.fmt.allocPrint(allocator, "{s}.discharge", .{proof_module});
-    defer allocator.free(proof_theorem);
-    const proof_path = try std.fmt.allocPrint(allocator, "{s}/CountThree.lean", .{fixture_dir});
-    defer allocator.free(proof_path);
-    const proof_source = try countThreeProofModuleFromGeneratedObligations(
-        allocator,
-        obligations_source_out.written(),
-        proof_module,
-        induction_query.id,
-        induction_query.loop_summary_id.?,
-    );
-    defer allocator.free(proof_source);
-    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = proof_path, .data = proof_source });
-    {
-        const result = try runLeanFileForTest(allocator, proof_path);
-        defer allocator.free(result.stdout);
-        defer allocator.free(result.stderr);
-        try expectExited(result, 0);
-    }
-    const proof_manifest = try pathFromTmpAlloc(allocator, tmp, "count-three-proofs.json");
-    defer allocator.free(proof_manifest);
-    try writeProofManifestForTest(
-        allocator,
-        proof_manifest,
-        proof_module,
-        proof_theorem,
-        proof_path,
-        induction_query,
-    );
-
     {
         const result = try runProcessWithLeanPath(allocator, &.{
             ORA_BINARY_REL,
@@ -2690,21 +2255,28 @@ test "canonical invariant-only loop activates Lean induction in the real CLI" {
             "--out-dir",
             accepted_out,
             "--lean-proofs",
-            proof_manifest,
             source_path,
         });
         defer allocator.free(result.stdout);
         defer allocator.free(result.stderr);
         try expectExited(result, 0);
         try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "certificate-required=1"));
+        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean checker output:\n  exit status: 0"));
     }
 
     const report_path = try pathFromTmpAlloc(allocator, tmp, "accepted/scalar_loop_induction.formal.loops.json");
     defer allocator.free(report_path);
     const report = try readFileAllocForTest(allocator, report_path);
     defer allocator.free(report);
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        report,
+        1,
+        "\"verification_boundary\":\"verifier_input_ora_mlir\"",
+    ));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"certificate_required\":1"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"status\":\"lean_certificate_required\""));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"loop_source_op_id\":"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"excluded_by\":[]"));
 
     const certificate_path = try pathFromTmpAlloc(allocator, tmp, "accepted/scalar_loop_induction.lean.proof.json");
@@ -2713,6 +2285,7 @@ test "canonical invariant-only loop activates Lean induction in the real CLI" {
     defer allocator.free(certificate);
     try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"proof_count\": 1"));
     try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"loop_summary_id\":"));
+    try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"loop_vc_sha256\": \""));
     try testing.expect(!std.mem.containsAtLeast(u8, certificate, 1, "sorryAx"));
 }
 
@@ -2774,11 +2347,310 @@ test "automatic scalar loop induction parses and proves literal and context boun
         defer allocator.free(certificate);
         try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"proof_count\": 1"));
         try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"loop_summary_id\":"));
+        try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"loop_vc_sha256\": \""));
         try testing.expect(!std.mem.containsAtLeast(u8, certificate, 1, "sorryAx"));
     }
 }
 
-test "automatic scalar loop synthesis failure is parsed and points to proof manifest" {
+test "automatic loop proofs certify all integer widths and multiple carried variables through the real CLI" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const cases = [_]struct {
+        source_path: []const u8,
+        stem: []const u8,
+        proof_count: usize,
+    }{
+        .{
+            .source_path = "tests/formal/scalar_loop_integer_widths.ora",
+            .stem = "scalar_loop_integer_widths",
+            .proof_count = 13,
+        },
+        .{
+            .source_path = "tests/formal/scalar_loop_two_variables.ora",
+            .stem = "scalar_loop_two_variables",
+            .proof_count = 1,
+        },
+    };
+
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    for (cases, 0..) |case, index| {
+        const output_sub_path = try std.fmt.allocPrint(allocator, "automatic-generic-{d}", .{index});
+        defer allocator.free(output_sub_path);
+        const output_path = try pathFromTmpAlloc(allocator, tmp, output_sub_path);
+        defer allocator.free(output_path);
+
+        const result = try runProcessWithLeanPath(allocator, &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=smt-report,bytecode",
+            "--out-dir",
+            output_path,
+            "--lean-proofs",
+            case.source_path,
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try expectExited(result, 0);
+
+        const required = try std.fmt.allocPrint(
+            allocator,
+            "certificate-required={d}",
+            .{case.proof_count},
+        );
+        defer allocator.free(required);
+        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, required));
+        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean checker output:\n  exit status: 0"));
+        try testing.expect(!std.mem.containsAtLeast(u8, result.stdout, 1, "Automatic Lean proof gate failed"));
+        try testing.expect(!std.mem.containsAtLeast(u8, result.stdout, 1, "AutoProofScratch"));
+
+        const certificate_sub_path = try std.fmt.allocPrint(
+            allocator,
+            "{s}/{s}.lean.proof.json",
+            .{ output_sub_path, case.stem },
+        );
+        defer allocator.free(certificate_sub_path);
+        const certificate_path = try pathFromTmpAlloc(allocator, tmp, certificate_sub_path);
+        defer allocator.free(certificate_path);
+        const certificate = try readFileAllocForTest(allocator, certificate_path);
+        defer allocator.free(certificate);
+        const proof_count = try std.fmt.allocPrint(
+            allocator,
+            "\"proof_count\": {d}",
+            .{case.proof_count},
+        );
+        defer allocator.free(proof_count);
+        try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, proof_count));
+        try testing.expect(std.mem.containsAtLeast(u8, certificate, case.proof_count, "\"loop_vc_sha256\": \""));
+        try testing.expect(!std.mem.containsAtLeast(u8, certificate, 1, "sorryAx"));
+
+        const bytecode_sub_path = try std.fmt.allocPrint(
+            allocator,
+            "{s}/{s}.hex",
+            .{ output_sub_path, case.stem },
+        );
+        defer allocator.free(bytecode_sub_path);
+        const bytecode_path = try pathFromTmpAlloc(allocator, tmp, bytecode_sub_path);
+        defer allocator.free(bytecode_path);
+        const bytecode = try readFileAllocForTest(allocator, bytecode_path);
+        defer allocator.free(bytecode);
+        try testing.expect(bytecode.len > 0);
+    }
+
+    var two_variable_result = try collectPackageObligations(
+        allocator,
+        "tests/formal/scalar_loop_two_variables.ora",
+    );
+    defer two_variable_result.deinit();
+    try testing.expectEqual(@as(usize, 1), two_variable_result.set.loop_summaries.len);
+    const summary = two_variable_result.set.loop_summaries[0];
+    try testing.expectEqual(@as(usize, 2), summary.variables.len);
+    for (summary.edges) |edge| {
+        try testing.expectEqual(summary.variables.len, edge.next_state.len);
+    }
+}
+
+test "loop production gate checks zero iterations and blocks invalid invariant evidence" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const zero_out = try pathFromTmpAlloc(allocator, tmp, "zero");
+    defer allocator.free(zero_out);
+    const zero_result = try runProcessWithLeanPath(allocator, &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=smt-report,bytecode",
+        "--out-dir",
+        zero_out,
+        "--lean-proofs",
+        "tests/formal/scalar_loop_zero_iteration.ora",
+    });
+    defer allocator.free(zero_result.stdout);
+    defer allocator.free(zero_result.stderr);
+    try expectExited(zero_result, 0);
+    try testing.expect(std.mem.containsAtLeast(u8, zero_result.stdout, 1, "certificate-required=1"));
+    try testing.expect(std.mem.containsAtLeast(u8, zero_result.stdout, 1, "Lean checker output:\n  exit status: 0"));
+
+    const zero_report_path = try pathFromTmpAlloc(
+        allocator,
+        tmp,
+        "zero/scalar_loop_zero_iteration.smt.report.json",
+    );
+    defer allocator.free(zero_report_path);
+    const zero_report = try readFileAllocForTest(allocator, zero_report_path);
+    defer allocator.free(zero_report);
+    try testing.expect(std.mem.containsAtLeast(u8, zero_report, 1, "\"kind\": \"loop_invariant_step\""));
+    try testing.expect(!std.mem.containsAtLeast(u8, zero_report, 1, "\"vacuous\": true"));
+
+    const zero_certificate_path = try pathFromTmpAlloc(
+        allocator,
+        tmp,
+        "zero/scalar_loop_zero_iteration.lean.proof.json",
+    );
+    defer allocator.free(zero_certificate_path);
+    const zero_certificate = try readFileAllocForTest(allocator, zero_certificate_path);
+    defer allocator.free(zero_certificate);
+    try testing.expect(std.mem.containsAtLeast(u8, zero_certificate, 1, "\"proof_count\": 1"));
+    try testing.expect(std.mem.containsAtLeast(u8, zero_certificate, 1, "\"loop_vc_sha256\": \""));
+    try testing.expect(!std.mem.containsAtLeast(u8, zero_certificate, 1, "sorryAx"));
+
+    const zero_index_path = try pathFromTmpAlloc(
+        allocator,
+        tmp,
+        "zero/scalar_loop_zero_iteration.formal.artifacts.json",
+    );
+    defer allocator.free(zero_index_path);
+    const zero_index = try readFileAllocForTest(allocator, zero_index_path);
+    defer allocator.free(zero_index);
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        zero_index,
+        1,
+        "\"final_artifact_authorization\": \"allowed\"",
+    ));
+    try testing.expect(std.mem.containsAtLeast(u8, zero_index, 1, "\"id\": \"lean_proof_certificate\""));
+    try testing.expect(std.mem.containsAtLeast(u8, zero_index, 1, "\"sha256\": \""));
+    try tmp.dir.access(std.testing.io, "zero/scalar_loop_zero_iteration.hex", .{});
+
+    const negative_cases = [_]struct {
+        stem: []const u8,
+        source: []const u8,
+        diagnostic: []const u8,
+    }{
+        .{
+            .stem = "false_loop_invariant",
+            .source =
+            \\contract FalseLoopInvariant {
+            \\    pub fn run(limit: u256) -> u256 {
+            \\        var value: u256 = 0;
+            \\        while (value < limit)
+            \\            invariant value > limit
+            \\        {
+            \\            value = value + 1;
+            \\        }
+            \\        return value;
+            \\    }
+            \\}
+            ,
+            .diagnostic = "[invariant]",
+        },
+        .{
+            .stem = "missing_loop_invariant",
+            .source =
+            \\contract MissingLoopInvariant {
+            \\    pub fn run(limit: u256) -> u256 {
+            \\        var value: u256 = 0;
+            \\        while (value < limit) {
+            \\            value = value + 1;
+            \\        }
+            \\        return value;
+            \\    }
+            \\}
+            ,
+            .diagnostic = "loop_invariant_missing",
+        },
+        .{
+            .stem = "insufficient_loop_safety",
+            .source =
+            \\contract InsufficientLoopSafety {
+            \\    pub fn run(limit: u256) -> u256 {
+            \\        var value: u256 = 0;
+            \\        while (value <= limit)
+            \\            invariant value <= limit
+            \\        {
+            \\            value = value + 1;
+            \\        }
+            \\        return value;
+            \\    }
+            \\}
+            ,
+            .diagnostic = "checked addition overflow",
+        },
+    };
+
+    for (negative_cases, 0..) |case, index| {
+        const source_name = try std.fmt.allocPrint(allocator, "{s}.ora", .{case.stem});
+        defer allocator.free(source_name);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = source_name, .data = case.source });
+        const source_path = try pathFromTmpAlloc(allocator, tmp, source_name);
+        defer allocator.free(source_path);
+        const output_sub_path = try std.fmt.allocPrint(allocator, "negative-{d}", .{index});
+        defer allocator.free(output_sub_path);
+        const output_path = try pathFromTmpAlloc(allocator, tmp, output_sub_path);
+        defer allocator.free(output_path);
+
+        const result = try runProcessWithLeanPath(allocator, &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=smt-report,bytecode",
+            "--out-dir",
+            output_path,
+            "--lean-proofs",
+            source_path,
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try expectExited(result, 1);
+        try testing.expect(
+            std.mem.containsAtLeast(u8, result.stdout, 1, case.diagnostic) or
+                std.mem.containsAtLeast(u8, result.stderr, 1, case.diagnostic),
+        );
+
+        const bytecode_sub_path = try std.fmt.allocPrint(
+            allocator,
+            "{s}/{s}.hex",
+            .{ output_sub_path, case.stem },
+        );
+        defer allocator.free(bytecode_sub_path);
+        try testing.expectError(
+            error.FileNotFound,
+            tmp.dir.access(std.testing.io, bytecode_sub_path, .{}),
+        );
+
+        if (std.mem.eql(u8, case.stem, "missing_loop_invariant")) {
+            const manifest_output_path = try pathFromTmpAlloc(allocator, tmp, "missing-invariant-manifest");
+            defer allocator.free(manifest_output_path);
+            const nonexistent_manifest = try pathFromTmpAlloc(allocator, tmp, "does-not-exist.json");
+            defer allocator.free(nonexistent_manifest);
+            const manifest_result = try runProcessWithLeanPath(allocator, &.{
+                ORA_BINARY_REL,
+                "emit",
+                "--emit=smt-report,bytecode",
+                "--out-dir",
+                manifest_output_path,
+                "--lean-proofs",
+                nonexistent_manifest,
+                source_path,
+            });
+            defer allocator.free(manifest_result.stdout);
+            defer allocator.free(manifest_result.stderr);
+            try expectExited(manifest_result, 1);
+            try testing.expect(
+                std.mem.containsAtLeast(u8, manifest_result.stdout, 1, "loop_invariant_missing") or
+                    std.mem.containsAtLeast(u8, manifest_result.stderr, 1, "loop_invariant_missing"),
+            );
+            try testing.expect(!std.mem.containsAtLeast(u8, manifest_result.stdout, 1, "FileNotFound"));
+            try testing.expect(!std.mem.containsAtLeast(u8, manifest_result.stderr, 1, "FileNotFound"));
+            try testing.expectError(
+                error.FileNotFound,
+                tmp.dir.access(std.testing.io, "missing-invariant-manifest/missing_loop_invariant.hex", .{}),
+            );
+        }
+    }
+}
+
+test "unsupported automatic loop fragment is named and points to proof manifest" {
     std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
@@ -2806,7 +2678,7 @@ test "automatic scalar loop synthesis failure is parsed and points to proof mani
         u8,
         result.stdout,
         1,
-        "generated tactics did not discharge every certificate-required obligation",
+        "Automatic Lean loop proof unavailable: automatic_nonlinear_arithmetic",
     ));
     try testing.expect(std.mem.containsAtLeast(
         u8,
@@ -2814,8 +2686,114 @@ test "automatic scalar loop synthesis failure is parsed and points to proof mani
         1,
         "pass the proof manifest with `--lean-proofs <proofs.json>`",
     ));
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "inline_source=true"));
     try testing.expect(!std.mem.containsAtLeast(u8, result.stdout, 1, "unexpected token"));
     try testing.expect(!std.mem.containsAtLeast(u8, result.stderr, 1, "unexpected token"));
+}
+
+test "external user proof certifies nonlinear loop through the real CLI" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    const source_path = "tests/formal/scalar_loop_manual_proof_required.ora";
+    const manifest_path = "tests/formal/scalar_loop_manual_proof_required.proofs.json";
+    const theorem_name = "Ora.UserProof.ScalarLoopManual.Query_12.discharge_q12";
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const valid_out = try pathFromTmpAlloc(allocator, tmp, "external-valid");
+    defer allocator.free(valid_out);
+    const valid = try runProcessWithLeanPath(allocator, &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=smt-report,bytecode",
+        "--out-dir",
+        valid_out,
+        "--lean-proofs",
+        manifest_path,
+        source_path,
+    });
+    defer allocator.free(valid.stdout);
+    defer allocator.free(valid.stderr);
+    try expectExited(valid, 0);
+    try testing.expect(!std.mem.containsAtLeast(u8, valid.stdout, 1, "Automatic Lean loop proof unavailable"));
+    try testing.expect(!std.mem.containsAtLeast(u8, valid.stderr, 1, "AutoProofScratch"));
+
+    const certificate_path = try pathFromTmpAlloc(
+        allocator,
+        tmp,
+        "external-valid/scalar_loop_manual_proof_required.lean.proof.json",
+    );
+    defer allocator.free(certificate_path);
+    const certificate = try readFileAllocForTest(allocator, certificate_path);
+    defer allocator.free(certificate);
+    try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"proof_count\": 1"));
+    try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, theorem_name));
+    try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"inline_source\": true"));
+    try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"content_sha256\": \""));
+    try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"loop_vc_sha256\": \""));
+    try testing.expect(!std.mem.containsAtLeast(u8, certificate, 1, "sorryAx"));
+    try testing.expect(!std.mem.containsAtLeast(u8, certificate, 1, "AutoProofScratch"));
+    try testing.expect(!std.mem.containsAtLeast(u8, certificate, 1, "CompilerAutomaticProof"));
+
+    const bytecode_path = try pathFromTmpAlloc(
+        allocator,
+        tmp,
+        "external-valid/scalar_loop_manual_proof_required.hex",
+    );
+    defer allocator.free(bytecode_path);
+    const bytecode = try readFileAllocForTest(allocator, bytecode_path);
+    defer allocator.free(bytecode);
+    try testing.expect(bytecode.len != 0);
+
+    const stale_manifest_path = try pathFromTmpAlloc(allocator, tmp, "stale.proofs.json");
+    defer allocator.free(stale_manifest_path);
+    var stale_manifest = std.Io.Writer.Allocating.init(allocator);
+    defer stale_manifest.deinit();
+    try stale_manifest.writer.writeAll(
+        "{\n  \"schema_version\": 1,\n  \"proofs\": [\n    {\n" ++
+            "      \"query_id\": 12,\n      \"obligation_ids\": [],\n" ++
+            "      \"assumption_ids\": [],\n      \"module_name\": \"Ora.UserProof.ScalarLoopManual\",\n" ++
+            "      \"theorem_name\": \"Ora.UserProof.ScalarLoopManual.Query_12.discharge_q12\",\n" ++
+            "      \"path\": \"tests/formal/scalar_loop_manual_proof_required.lean\",\n" ++
+            "      \"content_sha256\": \"0000000000000000000000000000000000000000000000000000000000000000\",\n" ++
+            "      \"inline_source\": true\n    }\n  ]\n}\n",
+    );
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = stale_manifest_path,
+        .data = stale_manifest.written(),
+    });
+
+    const stale_out = try pathFromTmpAlloc(allocator, tmp, "external-stale");
+    defer allocator.free(stale_out);
+    const stale = try runProcessWithLeanPath(allocator, &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=smt-report,bytecode",
+        "--out-dir",
+        stale_out,
+        "--lean-proofs",
+        stale_manifest_path,
+        source_path,
+    });
+    defer allocator.free(stale.stdout);
+    defer allocator.free(stale.stderr);
+    try expectExited(stale, 1);
+    try testing.expect(
+        std.mem.containsAtLeast(u8, stale.stdout, 1, "ProofRowDigestMismatch") or
+            std.mem.containsAtLeast(u8, stale.stderr, 1, "ProofRowDigestMismatch"),
+    );
+    try testing.expectError(
+        error.FileNotFound,
+        tmp.dir.access(
+            std.testing.io,
+            "external-stale/scalar_loop_manual_proof_required.hex",
+            .{},
+        ),
+    );
 }
 
 test "L4 scalar loop induction proof unblocks only artifacts" {
@@ -2828,86 +2806,10 @@ test "L4 scalar loop induction proof unblocks only artifacts" {
     defer allocator.free(fail_out);
     const valid_out = try pathFromTmpAlloc(allocator, tmp, "valid");
     defer allocator.free(valid_out);
-    const sorry_out = try pathFromTmpAlloc(allocator, tmp, "sorry");
-    defer allocator.free(sorry_out);
     const reference_out = try pathFromTmpAlloc(allocator, tmp, "reference");
     defer allocator.free(reference_out);
     const vacuous_out = try pathFromTmpAlloc(allocator, tmp, "vacuous");
     defer allocator.free(vacuous_out);
-
-    var formal_result = try collectPackageObligations(allocator, source_path);
-    defer formal_result.deinit();
-    const loop_query = try findLoopInductionQuery(formal_result.set);
-    switch (obligation_to_lean.querySemanticSupport(formal_result.set, loop_query)) {
-        .supported => {},
-        .unsupported => return error.TestUnexpectedResult,
-    }
-
-    const generated_namespace = try leanProofGeneratedNamespaceForTest(allocator, source_path);
-    defer allocator.free(generated_namespace);
-    var obligations_source_out = std.Io.Writer.Allocating.init(allocator);
-    defer obligations_source_out.deinit();
-    try obligation_to_lean.writeModule(&obligations_source_out.writer, formal_result.set, .{
-        .namespace = generated_namespace,
-        .proof_surface = true,
-    });
-    const obligations_source = obligations_source_out.written();
-
-    const module_suffix = try moduleSuffixFromTmp(allocator, tmp);
-    defer allocator.free(module_suffix);
-    const fixture_dir = try std.fmt.allocPrint(allocator, "formal/Ora/LoopFixture/{s}", .{module_suffix});
-    defer allocator.free(fixture_dir);
-    try std.Io.Dir.cwd().createDirPath(std.testing.io, fixture_dir);
-    defer std.Io.Dir.cwd().deleteTree(std.testing.io, fixture_dir) catch {};
-    defer std.Io.Dir.cwd().deleteDir(std.testing.io, "formal/Ora/LoopFixture") catch {};
-
-    const valid_module = try std.fmt.allocPrint(allocator, "Ora.LoopFixture.{s}.Valid", .{module_suffix});
-    defer allocator.free(valid_module);
-    const sorry_module = try std.fmt.allocPrint(allocator, "Ora.LoopFixture.{s}.Sorry", .{module_suffix});
-    defer allocator.free(sorry_module);
-    const valid_theorem = try std.fmt.allocPrint(allocator, "{s}.discharge", .{valid_module});
-    defer allocator.free(valid_theorem);
-    const sorry_theorem = try std.fmt.allocPrint(allocator, "{s}.discharge", .{sorry_module});
-    defer allocator.free(sorry_theorem);
-    const valid_proof_path = try std.fmt.allocPrint(allocator, "{s}/Valid.lean", .{fixture_dir});
-    defer allocator.free(valid_proof_path);
-    const sorry_proof_path = try std.fmt.allocPrint(allocator, "{s}/Sorry.lean", .{fixture_dir});
-    defer allocator.free(sorry_proof_path);
-
-    const valid_proof = try loopProofModuleFromGeneratedObligations(
-        allocator,
-        obligations_source,
-        valid_module,
-        loop_query.id,
-        loop_query.loop_summary_id.?,
-        false,
-    );
-    defer allocator.free(valid_proof);
-    const sorry_proof = try loopProofModuleFromGeneratedObligations(
-        allocator,
-        obligations_source,
-        sorry_module,
-        loop_query.id,
-        loop_query.loop_summary_id.?,
-        true,
-    );
-    defer allocator.free(sorry_proof);
-    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = valid_proof_path, .data = valid_proof });
-    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = sorry_proof_path, .data = sorry_proof });
-
-    {
-        const result = try runLeanFileForTest(allocator, valid_proof_path);
-        defer allocator.free(result.stdout);
-        defer allocator.free(result.stderr);
-        try expectExited(result, 0);
-    }
-
-    const valid_manifest = try pathFromTmpAlloc(allocator, tmp, "valid-proofs.json");
-    defer allocator.free(valid_manifest);
-    const sorry_manifest = try pathFromTmpAlloc(allocator, tmp, "sorry-proofs.json");
-    defer allocator.free(sorry_manifest);
-    try writeProofManifestForTest(allocator, valid_manifest, valid_module, valid_theorem, valid_proof_path, loop_query);
-    try writeProofManifestForTest(allocator, sorry_manifest, sorry_module, sorry_theorem, sorry_proof_path, loop_query);
 
     {
         const result = try runOraWithForcedUnknown(allocator, "loop_invariant_post:8", &.{
@@ -2934,7 +2836,6 @@ test "L4 scalar loop induction proof unblocks only artifacts" {
             "--out-dir",
             valid_out,
             "--lean-proofs",
-            valid_manifest,
             source_path,
         });
         defer allocator.free(result.stdout);
@@ -2967,7 +2868,6 @@ test "L4 scalar loop induction proof unblocks only artifacts" {
             "--out-dir",
             reference_out,
             "--lean-proofs",
-            valid_manifest,
             source_path,
         });
         defer allocator.free(result.stdout);
@@ -2984,25 +2884,6 @@ test "L4 scalar loop induction proof unblocks only artifacts" {
     defer allocator.free(reference_hex);
     try testing.expectEqualStrings(reference_sir, valid_sir);
     try testing.expectEqualStrings(reference_hex, valid_hex);
-
-    {
-        const result = try runProcessWithLeanPath(allocator, &.{
-            ORA_BINARY_REL,
-            "emit",
-            "--emit=smt-report,sir-text,bytecode",
-            "--out-dir",
-            sorry_out,
-            "--lean-proofs",
-            sorry_manifest,
-            source_path,
-        });
-        defer allocator.free(result.stdout);
-        defer allocator.free(result.stderr);
-        try expectExited(result, 1);
-        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "sorryAx") or
-            std.mem.containsAtLeast(u8, result.stderr, 1, "sorryAx"));
-    }
-    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "sorry/scalar_loop_post.hex", .{}));
 
     // Contradictory source assumptions are rejected before any Lean proof can
     // authorize artifacts. The loop proposition independently carries a
@@ -4225,7 +4106,9 @@ test "B6 div rem Lean proof unblocks source-level unknown" {
     try testing.expect(std.mem.containsAtLeast(u8, obligations_source, 1, ".compilerTypeId 6"));
 
     {
-        const result = try runOraWithForcedUnknown(allocator, "obligation:2", &.{
+        // The base row and two source-owned divisor-safety rows precede
+        // `ensures`; each checked division has its own safety obligation.
+        const result = try runOraWithForcedUnknown(allocator, "obligation:4", &.{
             ORA_BINARY_REL,
             "emit",
             "--emit=smt-report,bytecode",
@@ -4264,7 +4147,7 @@ test "B6 div rem Lean proof unblocks source-level unknown" {
     try writeProofManifestForTest(allocator, valid_manifest, valid_module, valid_theorem, valid_proof_path, ensures_query);
 
     {
-        const result = try runOraWithForcedUnknown(allocator, "obligation:2", &.{
+        const result = try runOraWithForcedUnknown(allocator, "obligation:4", &.{
             ORA_BINARY_REL,
             "emit",
             "--emit=smt-report,bytecode",
@@ -5059,7 +4942,10 @@ test "B5 unknown diagnostic reports Lean projection coverage when no recipe is a
     const out_dir = try pathFromTmpAlloc(allocator, tmp, "b5-out");
     defer allocator.free(out_dir);
 
-    const result = try runOraWithForcedUnknown(allocator, "obligation:3", &.{
+    // The first obligation is the source-level assert. It intentionally has
+    // no Lean-dischargeable query; later arithmetic-safety rows are now
+    // identity-bound and therefore are not valid coverage-gap probes.
+    const result = try runOraWithForcedUnknown(allocator, "obligation:2", &.{
         ORA_BINARY_REL,
         "emit",
         "--emit=smt-report",
@@ -5090,7 +4976,9 @@ test "formal query vocabulary matches Z3 prepared query vocabulary" {
 
     inline for (std.meta.fields(obligation.VerificationQueryKind)) |field| {
         const formal_kind: obligation.VerificationQueryKind = @enumFromInt(field.value);
-        if (comptime formal_kind == .loop_induction) continue;
+        // These are constructed from the canonical LoopVC after the legacy Z3
+        // verifier has returned; neither is part of its prepared-query enum.
+        if (comptime formal_kind == .loop_base or formal_kind == .loop_induction) continue;
         var found = false;
         inline for (std.meta.fields(z3_verification.QueryKind)) |z3_field| {
             const z3_kind: z3_verification.QueryKind = @enumFromInt(z3_field.value);
@@ -6376,6 +6264,10 @@ test "formal obligation MLIR adapter classifies arithmetic safety producers" {
     try testing.expect(!result.set.hasBlockingDiagnostic());
     try testing.expectEqual(@as(usize, 7), result.set.obligations.len);
     try testing.expectEqual(@as(usize, 8), result.set.queries.len);
+    try testing.expectEqual(@as(usize, 7), result.query_bindings.len);
+    for (result.query_bindings) |binding| {
+        try testing.expectEqual(obligation.LogicalRole.arithmetic_safety, binding.logical_role orelse return error.TestUnexpectedResult);
+    }
     try testing.expectEqual(@as(usize, 1), countQuery(result.set, .base));
     try testing.expectEqual(@as(usize, 7), countQuery(result.set, .obligation));
     try testing.expectEqual(@as(usize, 1), countArithmeticSafety(result.set, .addition_overflow));
@@ -9359,26 +9251,59 @@ test "formal loop summary rows are source-owner scoped scalar data" {
     try testing.expectEqual(@as(u32, 16), row.source.line);
     try testing.expectEqual(@as(usize, 2), row.variables.len);
     try testing.expectEqual(@as(usize, 2), row.init_formulas.len);
-    try testing.expect(row.guard_formula != null);
     try testing.expectEqual(@as(usize, 3), row.invariant_formulas.len);
-    try testing.expectEqual(@as(usize, 2), row.step_assignments.len);
-    try testing.expect(row.body_safety_formulas.len > 0);
+    try testing.expectEqual(@as(usize, 2), row.edges.len);
+    try testing.expectEqual(@as(u32, 0), row.edges[0].id);
+    try testing.expectEqual(obligation.LoopControlTarget.backedge, row.edges[0].target.?);
+    try testing.expectEqual(@as(usize, 1), row.edges[0].path_formulas.len);
+    try testing.expectEqual(@as(usize, 2), row.edges[0].next_state.len);
+    try testing.expect(row.edges[0].safety_formulas.len > 0);
+    try testing.expectEqual(@as(u32, 1), row.edges[1].id);
+    try testing.expectEqual(obligation.LoopControlTarget.successor, row.edges[1].target.?);
+    try testing.expectEqual(@as(usize, 1), row.edges[1].path_formulas.len);
+    try testing.expectEqual(@as(usize, 2), row.edges[1].next_state.len);
+    try testing.expectEqual(@as(usize, 0), row.edges[1].safety_formulas.len);
+    for (row.edges) |edge| {
+        for (edge.next_state, row.variables, 0..) |binding, variable, index| {
+            try testing.expectEqual(@as(u32, @intCast(index)), binding.variable_index);
+            try testing.expect(obligation.freeVarIdEql(variable.id.?, binding.target.?));
+        }
+    }
     try testing.expect(!loopSummaryHasReason(row, .loop_formula_unsupported));
     try testing.expect(row.projectionSupported());
     try testing.expectEqual(@as(usize, 1), row.context_variables.len);
     try testing.expectEqual(@as(usize, 0), row.post_formulas.len);
-    try testing.expectEqual(@as(usize, 0), row.query_ids.post.len);
+    try testing.expectEqual(@as(usize, 1), row.query_ids.base.len);
+    try testing.expectEqual(@as(usize, 1), row.query_ids.step.len);
+    try testing.expectEqual(@as(usize, 2), row.query_ids.body_safety.len);
+    try testing.expectEqual(@as(usize, 1), row.query_ids.post.len);
     try testing.expectEqual(@as(usize, 1), row.query_ids.induction.len);
+    const induction_query = obligation.findById(result.set.queries, row.query_ids.induction[0]) orelse
+        return error.TestUnexpectedResult;
+    try testing.expect(induction_query.loop_vc_sha256 != null);
 
     const report = try dumpManifestToOwnedString(testing.allocator, result.set);
     defer testing.allocator.free(report);
+    const repeated_report = try dumpManifestToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(repeated_report);
+    try testing.expectEqualStrings(report, repeated_report);
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"loop_summary_coverage\",\"schema_version\":8"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"loop_summary\",\"schema_version\":8"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"edges\":[{\"id\":0"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"target\":\"backedge\""));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"target\":\"successor\""));
 
     var loop_report = std.Io.Writer.Allocating.init(testing.allocator);
     defer loop_report.deinit();
     try obligation_dump.writeLoopInductionReport(&loop_report.writer, result.set);
     try testing.expect(std.mem.containsAtLeast(u8, loop_report.written(), 1, "\"schema_version\":1"));
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        loop_report.written(),
+        1,
+        "\"verification_boundary\":\"verifier_input_ora_mlir\"",
+    ));
+    try testing.expect(std.mem.containsAtLeast(u8, loop_report.written(), 1, "\"loop_source_op_id\":4"));
     try testing.expect(std.mem.containsAtLeast(u8, loop_report.written(), 1, "\"status\":\"lean_certificate_required\""));
 
     var storage_loop: ?obligation.LoopSummaryRow = null;
@@ -9402,6 +9327,105 @@ test "formal loop summary rows are source-owner scoped scalar data" {
     try testing.expect(!nested.projectionSupported());
 }
 
+test "canonical LoopVC Z3 checks consume the shared edge rows" {
+    var result = try collectPackageObligations(testing.allocator, "ora-example/smt/verification/loop_invariants.ora");
+    defer result.deinit();
+
+    var summary: ?obligation.LoopSummaryRow = null;
+    for (result.set.loop_summaries) |row| {
+        if (row.owner == .statement and
+            std.mem.eql(u8, row.owner.statement.function_name, "sumToN") and
+            row.owner.statement.ordinal == 4)
+        {
+            summary = row;
+            break;
+        }
+    }
+    const loop = summary orelse return error.TestUnexpectedResult;
+    var z3_context = try z3_verification.Z3Context.init(testing.allocator);
+    defer z3_context.deinit();
+    var adapter = obligation_to_z3.Adapter.init(&z3_context, testing.allocator, result.set);
+
+    var checked_count: usize = 0;
+    for (result.set.queries) |query| {
+        if (query.loop_summary_id != loop.id or query.loop_vc_sha256 == null or query.backend != .z3) continue;
+        const checked = try adapter.checkLoopQueryForRow(query);
+        try testing.expectEqual(obligation_to_z3.CheckStatus.proved, checked.status);
+        try testing.expect(checked.query_hash.constraint_count > 0);
+        checked_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 5), checked_count);
+
+    var summary_index: usize = 0;
+    while (summary_index < result.set.loop_summaries.len and result.set.loop_summaries[summary_index].id != loop.id) {
+        summary_index += 1;
+    }
+    try testing.expect(summary_index < result.set.loop_summaries.len);
+    var changed_summaries = try testing.allocator.dupe(obligation.LoopSummaryRow, result.set.loop_summaries);
+    defer testing.allocator.free(changed_summaries);
+    changed_summaries[summary_index].query_ids.base = &.{std.math.maxInt(obligation.Id)};
+    var changed_set = result.set;
+    changed_set.loop_summaries = changed_summaries;
+    try testing.expectError(error.InvalidDependency, changed_set.validateIdReferences());
+
+    const safety_ids = loop.query_ids.body_safety;
+    try testing.expectEqual(@as(usize, 2), safety_ids.len);
+    const reversed_safety_ids = [_]obligation.Id{ safety_ids[1], safety_ids[0] };
+    changed_summaries[summary_index] = loop;
+    changed_summaries[summary_index].query_ids.body_safety = &reversed_safety_ids;
+    try testing.expectError(error.InvalidDependency, changed_set.validateIdReferences());
+
+    const changed_queries = try testing.allocator.dupe(obligation.VerificationQuery, result.set.queries);
+    defer testing.allocator.free(changed_queries);
+    for (changed_queries) |*query| {
+        if (query.loop_summary_id != loop.id or query.loop_vc_sha256 == null) continue;
+        query.loop_vc_sha256.?[0] ^= 1;
+        break;
+    }
+    changed_summaries[summary_index] = loop;
+    changed_set.queries = changed_queries;
+    try testing.expectError(error.InvalidDependency, changed_set.validateIdReferences());
+
+    @memcpy(changed_queries, result.set.queries);
+    var changed_assumptions = false;
+    for (changed_queries) |*query| {
+        if (query.id != loop.query_ids.base[0]) continue;
+        try testing.expect(query.assumption_ids.len > 0);
+        query.assumption_ids = &.{};
+        changed_assumptions = true;
+        break;
+    }
+    try testing.expect(changed_assumptions);
+    try testing.expectError(error.InvalidDependency, changed_set.validateIdReferences());
+
+    @memcpy(changed_queries, result.set.queries);
+    var changed_backend = false;
+    for (changed_queries) |*query| {
+        if (query.id != loop.query_ids.base[0]) continue;
+        query.backend = .unspecified;
+        changed_backend = true;
+        break;
+    }
+    try testing.expect(changed_backend);
+    try testing.expectError(error.InvalidDependency, changed_set.validateIdReferences());
+
+    changed_set = result.set;
+    changed_summaries[summary_index] = loop;
+    changed_summaries[summary_index].invariant_formulas = loop.edges[0].path_formulas;
+    changed_set.loop_summaries = changed_summaries;
+    var stale_overlay = try obligation_from_z3.overlayPreparedQueryResults(testing.allocator, changed_set, &.{});
+    defer stale_overlay.deinit();
+    var saw_stale_digest = false;
+    for (stale_overlay.set.diagnostics) |diagnostic| {
+        if (std.mem.indexOf(u8, diagnostic.message, "loop_vc_sha256_mismatch") != null) {
+            saw_stale_digest = true;
+            break;
+        }
+    }
+    try testing.expect(saw_stale_digest);
+    try testing.expect(!stale_overlay.set.artifactDecision().isAllowed());
+}
+
 test "scalar loop induction query projects into Lean with first-class identity" {
     var result = try collectPackageObligations(testing.allocator, "tests/formal/scalar_loop_post.ora");
     defer result.deinit();
@@ -9414,7 +9438,7 @@ test "scalar loop induction query projects into Lean with first-class identity" 
     try testing.expect(row.projectionSupported());
     try testing.expectEqual(@as(usize, 1), row.context_variables.len);
     try testing.expectEqual(@as(usize, 1), row.variables.len);
-    try testing.expect(row.body_safety_formulas.len > 0);
+    try testing.expect(row.edges[0].safety_formulas.len > 0);
     try testing.expectEqual(@as(usize, 1), row.post_formulas.len);
     try testing.expectEqual(obligation.ProofRequirement.lean_certificate, query.proof_requirement);
     try testing.expectEqualSlices(obligation.Id, &.{query.id}, row.query_ids.induction);
@@ -9434,9 +9458,229 @@ test "scalar loop induction query projects into Lean with first-class identity" 
     const query_name = try std.fmt.allocPrint(testing.allocator, "def emittedQuery_{d} : Prop :=", .{query.id});
     defer testing.allocator.free(query_name);
     try testing.expect(std.mem.containsAtLeast(u8, lean.written(), 1, query_name));
-    try testing.expect(std.mem.containsAtLeast(u8, lean.written(), 1, "Ora.Loop.loopInductionProofFromAssumptions"));
+    try testing.expect(std.mem.containsAtLeast(u8, lean.written(), 1, "Ora.Loop.loopProofAuthorizationFromAssumptions"));
     try testing.expect(std.mem.containsAtLeast(u8, lean.written(), 1, "Ora.Loop.loopVerifiedFromAssumptions"));
-    try testing.expect(std.mem.containsAtLeast(u8, lean.written(), 1, "Ora.Loop.loop_induction_proof_sound"));
+    try testing.expect(std.mem.containsAtLeast(u8, lean.written(), 1, "Ora.Loop.loop_authorization_sound"));
+}
+
+test "loop induction query cannot bind a different source owner" {
+    var result = try collectPackageObligations(testing.allocator, "tests/formal/scalar_loop_post.ora");
+    defer result.deinit();
+
+    var mismatched = try findLoopInductionQuery(result.set);
+    try testing.expect(mismatched.owner == .function);
+    mismatched.owner.function.name = "different_owner";
+
+    switch (obligation_to_lean.querySemanticSupport(result.set, mismatched)) {
+        .supported => return error.TestUnexpectedResult,
+        .unsupported => |reason| try testing.expectEqual(
+            obligation_to_lean.SemanticUnsupportedReason.loop_summary_query_mismatch,
+            reason,
+        ),
+    }
+}
+
+test "canonical loop edges reject missing duplicate unresolved and foreign state data" {
+    var result = try collectPackageObligations(testing.allocator, "tests/formal/scalar_loop_post.ora");
+    defer result.deinit();
+
+    const query = try findLoopInductionQuery(result.set);
+    const summary_id = query.loop_summary_id orelse return error.TestUnexpectedResult;
+    const original = obligation.findById(result.set.loop_summaries, summary_id) orelse
+        return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 2), original.edges.len);
+    try testing.expectEqual(@as(usize, 1), original.variables.len);
+
+    var missing_edge = original;
+    missing_edge.edges = &.{};
+    try expectLoopSummaryRejected(result.set, query, missing_edge, .loop_edge_missing);
+
+    var duplicate_edges = [_]obligation.LoopEdgeRow{ original.edges[0], original.edges[1] };
+    duplicate_edges[1].id = 0;
+    var duplicate_edge = original;
+    duplicate_edge.edges = &duplicate_edges;
+    try expectLoopSummaryRejected(result.set, query, duplicate_edge, .loop_duplicate_edge_identity);
+
+    var unresolved_edges = [_]obligation.LoopEdgeRow{ original.edges[0], original.edges[1] };
+    unresolved_edges[0].target = null;
+    var unresolved_target = original;
+    unresolved_target.edges = &unresolved_edges;
+    try expectLoopSummaryRejected(result.set, query, unresolved_target, .loop_edge_target_unresolved);
+
+    const deferred_control_targets = [_]obligation.LoopControlTarget{
+        .function_return,
+        .error_return,
+        .explicit_revert,
+    };
+    for (deferred_control_targets) |target| {
+        var target_edges = [_]obligation.LoopEdgeRow{
+            original.edges[0],
+            original.edges[1],
+            original.edges[1],
+        };
+        target_edges[2].id = 2;
+        target_edges[2].target = target;
+        var deferred_target = original;
+        deferred_target.edges = &target_edges;
+        try expectLoopSummaryRejected(
+            result.set,
+            query,
+            deferred_target,
+            .loop_control_target_unsupported,
+        );
+    }
+
+    var missing_binding_edges = [_]obligation.LoopEdgeRow{ original.edges[0], original.edges[1] };
+    missing_binding_edges[0].next_state = &.{};
+    var missing_binding = original;
+    missing_binding.edges = &missing_binding_edges;
+    try expectLoopSummaryRejected(result.set, query, missing_binding, .loop_state_binding_missing);
+
+    var extra_bindings = [_]obligation.LoopStepAssignment{
+        original.edges[0].next_state[0],
+        original.edges[0].next_state[0],
+    };
+    extra_bindings[1].variable_index = 1;
+    var extra_binding_edges = [_]obligation.LoopEdgeRow{ original.edges[0], original.edges[1] };
+    extra_binding_edges[0].next_state = &extra_bindings;
+    var extra_binding = original;
+    extra_binding.edges = &extra_binding_edges;
+    try expectLoopSummaryRejected(result.set, query, extra_binding, .loop_state_binding_extra);
+
+    var foreign_bindings = [_]obligation.LoopStepAssignment{original.edges[0].next_state[0]};
+    foreign_bindings[0].target.?.pattern_id +%= 1;
+    var foreign_binding_edges = [_]obligation.LoopEdgeRow{ original.edges[0], original.edges[1] };
+    foreign_binding_edges[0].next_state = &foreign_bindings;
+    var foreign_binding = original;
+    foreign_binding.edges = &foreign_binding_edges;
+    try expectLoopSummaryRejected(result.set, query, foreign_binding, .loop_state_binding_foreign);
+
+    var empty_state = original;
+    empty_state.variables = &.{};
+    try expectLoopSummaryRejected(result.set, query, empty_state, .loop_state_empty);
+
+    var typed_terms = try testing.allocator.alloc(obligation.Term, result.set.terms.len + 3);
+    defer testing.allocator.free(typed_terms);
+    @memcpy(typed_terms[0..result.set.terms.len], result.set.terms);
+    typed_terms[result.set.terms.len] = .{ .int_lit = .{ .value = "0", .ty = .{ .spelling = "not-an-integer" } } };
+    typed_terms[result.set.terms.len + 1] = .{ .int_lit = .{ .value = "0", .ty = .{ .compiler_type_id = 1 } } };
+    typed_terms[result.set.terms.len + 2] = .{ .int_lit = .{ .value = "0", .ty = .{ .compiler_type_id = 12 } } };
+    var typed_set = result.set;
+    typed_set.terms = typed_terms;
+    const typed_reasons = [_]obligation.LoopUnsupportedReason{
+        .loop_value_type_unresolved,
+        .loop_value_width_mismatch,
+        .loop_value_signedness_mismatch,
+    };
+    for (typed_reasons, 0..) |reason, index| {
+        var typed_bindings = [_]obligation.LoopStepAssignment{original.edges[0].next_state[0]};
+        typed_bindings[0].value = .{ .term = @intCast(result.set.terms.len + index) };
+        var typed_edges = [_]obligation.LoopEdgeRow{ original.edges[0], original.edges[1] };
+        typed_edges[0].next_state = &typed_bindings;
+        var typed_row = original;
+        typed_row.edges = &typed_edges;
+        try expectLoopSummaryRejected(typed_set, query, typed_row, reason);
+    }
+}
+
+test "canonical loop edges reject duplicate state bindings" {
+    var result = try collectPackageObligations(testing.allocator, "ora-example/smt/verification/loop_invariants.ora");
+    defer result.deinit();
+
+    var query: ?obligation.VerificationQuery = null;
+    var original: ?obligation.LoopSummaryRow = null;
+    for (result.set.loop_summaries) |row| {
+        if (row.variables.len != 2 or row.query_ids.induction.len != 1) continue;
+        original = row;
+        query = obligation.findById(result.set.queries, row.query_ids.induction[0]);
+        break;
+    }
+    const row = original orelse return error.TestUnexpectedResult;
+    const induction = query orelse return error.TestUnexpectedResult;
+    var duplicate_bindings = [_]obligation.LoopStepAssignment{
+        row.edges[0].next_state[0],
+        row.edges[0].next_state[1],
+    };
+    duplicate_bindings[1].target = duplicate_bindings[0].target;
+    var edges = [_]obligation.LoopEdgeRow{ row.edges[0], row.edges[1] };
+    edges[0].next_state = &duplicate_bindings;
+    var mutated = row;
+    mutated.edges = &edges;
+    try expectLoopSummaryRejected(result.set, induction, mutated, .loop_state_binding_duplicate);
+}
+
+test "canonical LoopVC reports every remaining structural schema failure by name" {
+    var scalar_result = try collectPackageObligations(testing.allocator, "tests/formal/scalar_loop_post.ora");
+    defer scalar_result.deinit();
+    const scalar_query = try findLoopInductionQuery(scalar_result.set);
+    const scalar = obligation.findById(
+        scalar_result.set.loop_summaries,
+        scalar_query.loop_summary_id.?,
+    ) orelse return error.TestUnexpectedResult;
+
+    var edges = [_]obligation.LoopEdgeRow{ scalar.edges[0], scalar.edges[1] };
+    edges[0].id = 7;
+    var mutated = scalar;
+    mutated.edges = &edges;
+    try expectLoopSummaryRejected(scalar_result.set, scalar_query, mutated, .loop_edge_order_invalid);
+
+    edges = .{ scalar.edges[0], scalar.edges[1] };
+    edges[0].path_formulas = &.{};
+    mutated = scalar;
+    mutated.edges = &edges;
+    try expectLoopSummaryRejected(scalar_result.set, scalar_query, mutated, .loop_edge_path_missing);
+
+    edges = .{ scalar.edges[0], scalar.edges[1] };
+    edges[0].target = .successor;
+    mutated = scalar;
+    mutated.edges = &edges;
+    try expectLoopSummaryRejected(scalar_result.set, scalar_query, mutated, .loop_backedge_missing);
+
+    edges = .{ scalar.edges[0], scalar.edges[1] };
+    edges[1].target = .backedge;
+    mutated = scalar;
+    mutated.edges = &edges;
+    try expectLoopSummaryRejected(scalar_result.set, scalar_query, mutated, .loop_exit_edge_missing);
+
+    var bindings = [_]obligation.LoopStepAssignment{scalar.edges[0].next_state[0]};
+    bindings[0].variable_index = 1;
+    edges = .{ scalar.edges[0], scalar.edges[1] };
+    edges[0].next_state = &bindings;
+    mutated = scalar;
+    mutated.edges = &edges;
+    try expectLoopSummaryRejected(scalar_result.set, scalar_query, mutated, .loop_state_binding_invalid);
+
+    var multi_result = try collectPackageObligations(
+        testing.allocator,
+        "ora-example/smt/verification/loop_invariants.ora",
+    );
+    defer multi_result.deinit();
+    var multi: ?obligation.LoopSummaryRow = null;
+    var multi_query: ?obligation.VerificationQuery = null;
+    for (multi_result.set.loop_summaries) |summary| {
+        if (summary.variables.len != 2 or summary.query_ids.induction.len != 1) continue;
+        multi = summary;
+        multi_query = obligation.findById(
+            multi_result.set.queries,
+            summary.query_ids.induction[0],
+        );
+        break;
+    }
+    const two_variable = multi orelse return error.TestUnexpectedResult;
+    const two_variable_query = multi_query orelse return error.TestUnexpectedResult;
+    var variables = [_]obligation.LoopVariable{
+        two_variable.variables[0],
+        two_variable.variables[1],
+    };
+    variables[1].id = variables[0].id;
+    var duplicate_state = two_variable;
+    duplicate_state.variables = &variables;
+    try expectLoopSummaryRejected(
+        multi_result.set,
+        two_variable_query,
+        duplicate_state,
+        .loop_duplicate_state_identity,
+    );
 }
 
 test "source accounting accepts concretely checked folded countThree invariants" {
@@ -9983,7 +10227,7 @@ test "HIR formal operations retain structural source-fact and runtime-owner iden
             .formal_query_id = query.id,
             .kind = switch (query.kind) {
                 .base, .obligation => .obligation,
-                .loop_induction => .other,
+                .loop_base, .loop_induction => .other,
                 .loop_invariant_step => .loop_invariant_step,
                 .loop_body_safety => .loop_body_safety,
                 .loop_invariant_post => .loop_invariant_post,

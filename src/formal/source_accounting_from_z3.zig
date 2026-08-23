@@ -448,7 +448,7 @@ fn queryKind(kind: obligation.VerificationQueryKind) accounting.QueryKind {
         .base, .obligation => .obligation,
         // This compiler-owned Lean target has no prepared Z3 producer and
         // therefore must never authorize a source-formal use.
-        .loop_induction => .other,
+        .loop_base, .loop_induction => .other,
         .loop_invariant_step => .loop_invariant_step,
         .loop_body_safety => .loop_body_safety,
         .loop_invariant_post => .loop_invariant_post,

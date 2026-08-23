@@ -151,6 +151,7 @@ pub const Z3_get_quantifier_num_bound = c.Z3_get_quantifier_num_bound;
 pub const Z3_get_quantifier_bound_name = c.Z3_get_quantifier_bound_name;
 pub const Z3_get_quantifier_bound_sort = c.Z3_get_quantifier_bound_sort;
 pub const Z3_substitute_vars = c.Z3_substitute_vars;
+pub const Z3_substitute = c.Z3_substitute;
 pub const Z3_get_pattern_num_terms = c.Z3_get_pattern_num_terms;
 pub const Z3_get_pattern = c.Z3_get_pattern;
 pub const Z3_ast_vector_inc_ref = c.Z3_ast_vector_inc_ref;

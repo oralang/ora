@@ -55,8 +55,23 @@ def baseVariable : VariableRow := {
   index := 0, id := loopId, name := "i", ty := .compilerTypeId 6
 }
 
-def baseAssignment : StepAssignmentRow := {
+def baseBinding : StateBindingRow := {
   variableIndex := 0, target := loopId, value := .term 0
+}
+
+def baseBackedge : EdgeRow := {
+  id := 0
+  path := [.term 1]
+  safety := [.term 1]
+  nextState := [baseBinding]
+  target := .backedge
+}
+
+def baseExit : EdgeRow := {
+  id := 1
+  path := [.term 1]
+  nextState := [baseBinding]
+  target := .successor
 }
 
 def baseSummary : SummaryRow := {
@@ -65,10 +80,8 @@ def baseSummary : SummaryRow := {
   kind := .scfWhile
   variables := [baseVariable]
   init := [.term 0]
-  guard := some (.term 1)
   invariants := [.term 1]
-  step := [baseAssignment]
-  bodySafety := [.term 1]
+  edges := [baseBackedge, baseExit]
   post := [.term 1]
 }
 
@@ -95,15 +108,26 @@ def summaryForMutation : String → SummaryRow
   | "error_control_flow" => { baseSummary with unsupportedReasons := ["loop_has_error_control_flow"] }
   | "nested_loop" => { baseSummary with unsupportedReasons := ["loop_has_nested_loop"] }
   | "branching_body" => { baseSummary with unsupportedReasons := ["loop_has_branching_body"] }
-  | "missing_guard" => { baseSummary with guard := none, unsupportedReasons := ["loop_guard_missing"] }
+  | "missing_guard" =>
+      { baseSummary with
+        edges := [{ baseBackedge with path := [] }, baseExit]
+        unsupportedReasons := ["loop_guard_missing"] }
   | "missing_invariant" => { baseSummary with invariants := [], unsupportedReasons := ["loop_invariant_missing"] }
-  | "missing_body_safety" => { baseSummary with bodySafety := [], unsupportedReasons := ["loop_body_safety_missing"] }
+  | "missing_body_safety" =>
+      { baseSummary with
+        edges := [{ baseBackedge with safety := [] }, baseExit]
+        unsupportedReasons := ["loop_body_safety_missing"] }
   | "unsupported_kind" => { baseSummary with kind := .other, unsupportedReasons := ["loop_kind_unsupported"] }
   | "unregistered_integer_variable" =>
       { baseSummary with variables := [{ baseVariable with ty := .compilerTypeId 999 }] }
   | "bad_update_target" =>
-      { baseSummary with step := [{ baseAssignment with target := otherId }] }
-  | "unsupported_formula" => { baseSummary with guard := some (.term 0) }
+      { baseSummary with
+        edges := [
+          { baseBackedge with nextState := [{ baseBinding with target := otherId }] },
+          baseExit
+        ] }
+  | "unsupported_formula" =>
+      { baseSummary with edges := [{ baseBackedge with path := [.term 0] }, baseExit] }
   | "identity_collision" => { baseSummary with contextVariables := [baseVariable] }
   | _ => baseSummary
 
@@ -135,7 +159,7 @@ def expectedReason : String → String
   | "missing_body_safety" => "loop_body_safety_missing"
   | "unsupported_kind" => "loop_kind_unsupported"
   | "unregistered_integer_variable" => "loop_variable_not_registered_integer"
-  | "bad_update_target" => "loop_update_target_not_loop_variable"
+  | "bad_update_target" => "loop_state_binding_foreign"
   | "unsupported_formula" => "loop_formula_unsupported"
   | "identity_collision" => "loop_identity_missing"
   | "query_owner_mismatch" | "query_id_mismatch" => "loop_summary_query_mismatch"

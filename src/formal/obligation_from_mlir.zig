@@ -132,6 +132,9 @@ const assert_safety_map = std.StaticStringMap(obligation.ArithmeticSafetyKind).i
     .{ "checked multiplication overflow", .multiplication_overflow },
     .{ "checked power overflow", .power_overflow },
     .{ "checked negation overflow", .negation_overflow },
+    .{ "checked division by zero", .division_by_zero },
+    .{ "checked remainder by zero", .division_by_zero },
+    .{ "checked division overflow", .signed_division_overflow },
     .{ "checked shift amount out of range", .shift_amount_bounds },
 });
 
@@ -283,8 +286,16 @@ fn armLeanLoopCertificateRequirements(collector: *Collector) !void {
         if (query.kind != .loop_induction) continue;
         switch (obligation_to_lean.querySemanticSupport(view, query.*)) {
             .supported => {
-                query.artifact_policy = .blocks_verified_artifacts;
-                query.proof_requirement = .lean_certificate;
+                const summary_id = query.loop_summary_id orelse return error.InvalidLoopSummary;
+                const digest = try obligation_to_lean.loopVcSha256(view, summary_id);
+                for (collector.queries.items) |*loop_query| {
+                    if (loop_query.loop_summary_id != summary_id) continue;
+                    loop_query.loop_vc_sha256 = digest;
+                    loop_query.artifact_policy = .blocks_verified_artifacts;
+                    if (loop_query.kind == .loop_induction) {
+                        loop_query.proof_requirement = .lean_certificate;
+                    }
+                }
             },
             .unsupported => |reason| {
                 query.artifact_policy = .diagnostic_only;
@@ -318,6 +329,12 @@ fn loopUnsupportedReasonForSemantic(
     };
 }
 
+const LoopSummaryDraft = struct {
+    guard_formula: ?obligation.FormulaRef = null,
+    step_assignments: []const obligation.LoopStepAssignment = &.{},
+    body_safety_formulas: []const obligation.FormulaRef = &.{},
+};
+
 const Collector = struct {
     allocator: std.mem.Allocator,
     options: CollectOptions,
@@ -326,7 +343,7 @@ const Collector = struct {
     assumptions: std.ArrayList(obligation.Assumption) = .empty,
     queries: std.ArrayList(obligation.VerificationQuery) = .empty,
     loop_summaries: std.ArrayList(obligation.LoopSummaryRow) = .empty,
-    loop_operation_bindings: std.ArrayList(LoopOperationBinding) = .empty,
+    loop_summary_drafts: std.ArrayList(LoopSummaryDraft) = .empty,
     active_loop_summary_indices: std.ArrayList(usize) = .empty,
     query_bindings: std.ArrayList(obligation.FormalQueryBinding) = .empty,
     source_fact_bindings: std.ArrayList(SourceFactOpBinding) = .empty,
@@ -373,11 +390,6 @@ const Collector = struct {
         variable: obligation.LoopVariable,
     };
 
-    const LoopOperationBinding = struct {
-        summary_id: obligation.Id,
-        source_op_id: usize,
-    };
-
     const ResourcePlaces = struct {
         source: ?obligation.PlaceRef = null,
         destination: ?obligation.PlaceRef = null,
@@ -419,7 +431,6 @@ const Collector = struct {
         const previous_contract_source_owner_key = self.contract_source_owner_key;
         const previous_binder_len = self.active_binders.items.len;
         const previous_loop_value_binding_len = self.loop_value_bindings.items.len;
-        const previous_loop_operation_binding_len = self.loop_operation_bindings.items.len;
         const previous_active_loop_summary_len = self.active_loop_summary_indices.items.len;
         const is_function = std.mem.eql(u8, op_name, "func.func");
         const is_contract = std.mem.eql(u8, op_name, "ora.contract");
@@ -483,14 +494,12 @@ const Collector = struct {
             }
             self.active_binders.shrinkRetainingCapacity(previous_binder_len);
             self.loop_value_bindings.shrinkRetainingCapacity(previous_loop_value_binding_len);
-            self.loop_operation_bindings.shrinkRetainingCapacity(previous_loop_operation_binding_len);
             self.active_loop_summary_indices.shrinkRetainingCapacity(previous_active_loop_summary_len);
         }
         defer {
             if (is_function) {
                 self.active_binders.shrinkRetainingCapacity(previous_binder_len);
                 self.loop_value_bindings.shrinkRetainingCapacity(previous_loop_value_binding_len);
-                self.loop_operation_bindings.shrinkRetainingCapacity(previous_loop_operation_binding_len);
                 self.active_loop_summary_indices.shrinkRetainingCapacity(previous_active_loop_summary_len);
                 self.function_param_types = previous_param_types;
                 self.function_param_binding_ids = previous_param_binding_ids;
@@ -521,8 +530,10 @@ const Collector = struct {
         if (op_kind_map.get(op_name)) |kind| {
             try self.collectOperation(op, kind, op_name, symbol, ordinal);
         } else if (arithmetic_op_map.get(op_name)) |safety| {
-            if (!self.operationFeedsOnlyFormalFormula(op)) {
-                try self.addArithmeticSafetyOp(op_name, symbol, ordinal, safety, null, try self.sourceForOperation(op));
+            if (!self.operationFeedsOnlyFormalFormula(op) and
+                !hasAttr(op, "ora.arithmetic_safety_asserted"))
+            {
+                try self.addArithmeticSafetyOp(op, op_name, symbol, ordinal, safety, null, try self.sourceForOperation(op));
             }
         }
         try self.recordSourceFactBinding(
@@ -641,12 +652,6 @@ const Collector = struct {
 
         const id = self.next_loop_summary_id;
         self.next_loop_summary_id += 1;
-        if (sourceOpId(op)) |source_op_id| {
-            try self.loop_operation_bindings.append(self.allocator, .{
-                .summary_id = id,
-                .source_op_id = source_op_id,
-            });
-        }
         try self.loop_summaries.append(self.allocator, .{
             .id = id,
             .owner = owner,
@@ -658,12 +663,13 @@ const Collector = struct {
             .context_variables = context_variables,
             .variables = variables,
             .init_formulas = init_formulas,
-            .guard_formula = guard_formula,
             .invariant_formulas = invariant_formulas,
-            .step_assignments = step_assignments,
-            .body_safety_formulas = &.{},
             .query_ids = .{},
             .unsupported_reasons = try reasons.toOwnedSlice(self.allocator),
+        });
+        try self.loop_summary_drafts.append(self.allocator, .{
+            .guard_formula = guard_formula,
+            .step_assignments = step_assignments,
         });
     }
 
@@ -674,7 +680,8 @@ const Collector = struct {
         if (self.active_loop_summary_indices.items.len == 0) return;
         const summary_index = self.active_loop_summary_indices.items[self.active_loop_summary_indices.items.len - 1];
         const summary = &self.loop_summaries.items[summary_index];
-        summary.body_safety_formulas = try appendFormula(self.allocator, summary.body_safety_formulas, formula);
+        const draft = &self.loop_summary_drafts.items[summary_index];
+        draft.body_safety_formulas = try appendFormula(self.allocator, draft.body_safety_formulas, formula);
         if (formula == .origin_value) try self.appendLoopSummaryReason(summary, .loop_formula_unsupported);
     }
 
@@ -694,10 +701,65 @@ const Collector = struct {
         if (self.active_loop_summary_indices.items.len == 0) return error.MissingActiveLoopSummary;
         const summary_index = self.active_loop_summary_indices.items[self.active_loop_summary_indices.items.len - 1];
         const summary = &self.loop_summaries.items[summary_index];
-        if (self.stepAssignmentsRequireSafety(summary.step_assignments) and summary.body_safety_formulas.len == 0) {
+        const draft = self.loop_summary_drafts.items[summary_index];
+        if (self.stepAssignmentsRequireSafety(draft.step_assignments) and draft.body_safety_formulas.len == 0) {
             try self.appendLoopSummaryReason(summary, .loop_body_safety_missing);
         }
+        try self.buildCanonicalLoopEdges(summary, draft);
+        if (summary.validationReason()) |reason| try self.appendLoopSummaryReason(summary, reason);
         try self.addLoopInductionQuery(summary);
+    }
+
+    fn buildCanonicalLoopEdges(
+        self: *Collector,
+        summary: *obligation.LoopSummaryRow,
+        draft: LoopSummaryDraft,
+    ) !void {
+        const guard = draft.guard_formula orelse return;
+        if (summary.variables.len == 0 or draft.step_assignments.len != summary.variables.len) return;
+
+        const exit_bindings = try self.allocator.alloc(obligation.LoopStepAssignment, summary.variables.len);
+        for (summary.variables, exit_bindings) |variable, *binding| {
+            const id = variable.id orelse return;
+            const value = try self.addTerm(.{ .variable = .{ .free = .{
+                .id = id,
+                .name = variable.name orelse "",
+                .ty = variable.ty,
+            } } });
+            binding.* = .{
+                .variable_index = variable.index,
+                .target = id,
+                .value = .{ .term = value },
+            };
+        }
+
+        const negated_guard: obligation.FormulaRef = switch (guard) {
+            .term => |term| .{ .term = try self.addTerm(.{ .unary = .{
+                .op = .not,
+                .operand = term,
+            } }) },
+            .origin_value => guard,
+        };
+        const backedge_path = try self.allocator.alloc(obligation.FormulaRef, 1);
+        backedge_path[0] = guard;
+        const exit_path = try self.allocator.alloc(obligation.FormulaRef, 1);
+        exit_path[0] = negated_guard;
+
+        const edges = try self.allocator.alloc(obligation.LoopEdgeRow, 2);
+        edges[0] = .{
+            .id = 0,
+            .path_formulas = backedge_path,
+            .safety_formulas = draft.body_safety_formulas,
+            .next_state = draft.step_assignments,
+            .target = .backedge,
+        };
+        edges[1] = .{
+            .id = 1,
+            .path_formulas = exit_path,
+            .next_state = exit_bindings,
+            .target = .successor,
+        };
+        summary.edges = edges;
     }
 
     fn addLoopInductionQuery(
@@ -708,6 +770,73 @@ const Collector = struct {
         const owner: obligation.Owner = .{ .function = .{
             .name = summary.owner.statement.function_name,
         } };
+        const assumption_ids = try self.assumptionIdsForOwner(owner);
+
+        const base_query_id = self.nextId();
+        try self.queries.append(self.allocator, .{
+            .id = base_query_id,
+            .owner = owner,
+            .source = summary.source,
+            .phase = .report,
+            .origin = summary.origin,
+            .artifact_policy = .diagnostic_only,
+            .backend = .z3,
+            .kind = .loop_base,
+            .logical_role = .invariant,
+            .assumption_ids = assumption_ids,
+            .loop_summary_id = summary.id,
+        });
+        summary.query_ids.base = try appendId(self.allocator, summary.query_ids.base, base_query_id);
+
+        for (summary.edges) |edge| {
+            const safety_query_id = self.nextId();
+            try self.queries.append(self.allocator, .{
+                .id = safety_query_id,
+                .owner = owner,
+                .source = summary.source,
+                .phase = .report,
+                .origin = summary.origin,
+                .artifact_policy = .diagnostic_only,
+                .backend = .z3,
+                .kind = .loop_body_safety,
+                .logical_role = .invariant,
+                .assumption_ids = assumption_ids,
+                .loop_summary_id = summary.id,
+                .loop_edge_id = edge.id,
+            });
+            summary.query_ids.body_safety = try appendId(
+                self.allocator,
+                summary.query_ids.body_safety,
+                safety_query_id,
+            );
+
+            const target_kind: obligation.VerificationQueryKind = switch (edge.target orelse
+                return error.InvalidLoopEdgeTarget) {
+                .backedge => .loop_invariant_step,
+                else => .loop_invariant_post,
+            };
+            const target_query_id = self.nextId();
+            try self.queries.append(self.allocator, .{
+                .id = target_query_id,
+                .owner = owner,
+                .source = summary.source,
+                .phase = .report,
+                .origin = summary.origin,
+                .artifact_policy = .diagnostic_only,
+                .backend = .z3,
+                .kind = target_kind,
+                .logical_role = if (target_kind == .loop_invariant_step) .invariant else .ensures,
+                .assumption_ids = assumption_ids,
+                .loop_summary_id = summary.id,
+                .loop_edge_id = edge.id,
+            });
+            if (target_kind == .loop_invariant_step) {
+                summary.query_ids.step = try appendId(self.allocator, summary.query_ids.step, target_query_id);
+            } else {
+                summary.query_ids.post = try appendId(self.allocator, summary.query_ids.post, target_query_id);
+            }
+        }
+
         const query_id = self.nextId();
         try self.queries.append(self.allocator, .{
             .id = query_id,
@@ -721,7 +850,7 @@ const Collector = struct {
             .artifact_policy = .diagnostic_only,
             .kind = .loop_induction,
             .logical_role = .invariant,
-            .assumption_ids = try self.assumptionIdsForOwner(owner),
+            .assumption_ids = assumption_ids,
             .loop_summary_id = summary.id,
         });
         summary.query_ids.induction = try appendId(
@@ -1442,7 +1571,7 @@ const Collector = struct {
                     };
                     try self.appendActiveLoopBodySafetyFormula(body_formula);
                 }
-                try self.addArithmeticSafetyOp(op_name, symbol, ordinal, safety, formula, try self.sourceForOperation(op));
+                try self.addArithmeticSafetyOp(op, op_name, symbol, ordinal, safety, formula, try self.sourceForOperation(op));
                 return;
             }
             try self.addLogicalOp(op, op_name, symbol, ordinal, default_role);
@@ -1581,14 +1710,7 @@ const Collector = struct {
         });
         try self.addQueryForOperation(.obligation, role, null, id, owner, origin, source, op);
         if (loop_post_formula) |post_formula| {
-            try self.attachLoopPostQueries(
-                op,
-                id,
-                owner,
-                origin,
-                source,
-                post_formula,
-            );
+            try self.attachLoopPostFormulas(owner, post_formula);
         }
     }
 
@@ -1601,58 +1723,18 @@ const Collector = struct {
         return false;
     }
 
-    fn attachLoopPostQueries(
+    fn attachLoopPostFormulas(
         self: *Collector,
-        ensures_op: mlir.MlirOperation,
-        obligation_id: obligation.Id,
         owner: obligation.Owner,
-        origin: obligation.Origin,
-        source: obligation.SourceRef,
         post_formula: obligation.FormulaRef,
     ) !void {
         if (owner != .function) return;
-        const ensures_source_op_id = sourceOpId(ensures_op) orelse return;
         for (self.loop_summaries.items) |*summary| {
             if (summary.owner != .statement or
                 !std.mem.eql(u8, summary.owner.statement.function_name, owner.function.name)) continue;
-            const loop_source_op_id = self.loopOperationSourceId(summary.id) orelse continue;
             summary.post_formulas = try appendFormula(self.allocator, summary.post_formulas, post_formula);
             if (post_formula == .origin_value) try self.appendLoopSummaryReason(summary, .loop_formula_unsupported);
-
-            const assumption_ids = try self.assumptionIdsForOwner(owner);
-            const obligation_ids = try self.allocator.alloc(obligation.Id, 1);
-            obligation_ids[0] = obligation_id;
-            const query_id = self.nextId();
-            try self.queries.append(self.allocator, .{
-                .id = query_id,
-                .owner = owner,
-                .source = source,
-                .phase = .report,
-                .origin = origin,
-                .kind = .loop_invariant_post,
-                .logical_role = .ensures,
-                .obligation_ids = obligation_ids,
-                .assumption_ids = assumption_ids,
-                .loop_summary_id = summary.id,
-            });
-            summary.query_ids.post = try appendId(self.allocator, summary.query_ids.post, query_id);
-            try self.query_bindings.append(self.allocator, .{
-                .source_op_id = ensures_source_op_id,
-                .loop_source_op_id = loop_source_op_id,
-                .kind = .loop_invariant_post,
-                .logical_role = .ensures,
-                .query_id = query_id,
-                .assumption_ids = assumption_ids,
-                .obligation_ids = obligation_ids,
-            });
         }
-    }
-
-    fn loopOperationSourceId(self: *Collector, summary_id: obligation.Id) ?usize {
-        for (self.loop_operation_bindings.items) |binding| {
-            if (binding.summary_id == summary_id) return binding.source_op_id;
-        }
-        return null;
     }
 
     fn addAssumptionOp(
@@ -2049,6 +2131,7 @@ const Collector = struct {
 
     fn addArithmeticSafetyOp(
         self: *Collector,
+        op: mlir.MlirOperation,
         op_name: []const u8,
         symbol: ?[]const u8,
         ordinal: u32,
@@ -2075,7 +2158,7 @@ const Collector = struct {
             else
                 .blocks_verified_artifacts,
         });
-        try self.addQuery(.obligation, .arithmetic_safety, null, id, owner, origin, source);
+        try self.addQueryForOperation(.obligation, .arithmetic_safety, null, id, owner, origin, source, op);
     }
 
     fn addQuery(
@@ -2293,11 +2376,20 @@ const Collector = struct {
         if (mlir.oraValueIsNull(value)) return null;
 
         if (self.use_loop_value_bindings) if (self.loopVariableForValue(value)) |variable| {
-            return try self.addTerm(.{ .variable = .{ .free = .{
-                .id = variable.id orelse return null,
-                .name = variable.name orelse "loop_var",
-                .ty = try self.typeRefFromValueWithIntegerSignedness(value, signed_override),
-            } } });
+            return try self.addTerm(.{
+                .variable = .{
+                    .free = .{
+                        .id = variable.id orelse return null,
+                        .name = variable.name orelse "loop_var",
+                        // Canonical MLIR integer carriers are frequently signless.  A
+                        // relation such as equality therefore carries no predicate
+                        // signedness from which to recover the Ora type.  Preserve
+                        // the compiler-owned loop-variable type unless an operation
+                        // explicitly supplies a signedness interpretation.
+                        .ty = try self.canonicalTypeRefForValue(value, signed_override),
+                    },
+                },
+            });
         };
 
         if (mlir.mlirValueIsABlockArgument(value)) {
@@ -2306,13 +2398,18 @@ const Collector = struct {
                 self.function_param_names[arg_number]
             else
                 try std.fmt.allocPrint(self.allocator, "arg#{d}", .{arg_number});
-            return try self.addTerm(.{ .variable = .{
-                .free = .{
-                    .id = self.freeVarIdForFunctionParam(arg_number),
-                    .name = name,
-                    .ty = try self.typeRefFromValueWithIntegerSignedness(value, signed_override),
+            return try self.addTerm(.{
+                .variable = .{
+                    .free = .{
+                        .id = self.freeVarIdForFunctionParam(arg_number),
+                        .name = name,
+                        // Function parameter metadata owns Ora signedness.  The
+                        // MLIR block argument alone cannot distinguish iN from
+                        // uN when the consuming operation is signedness-neutral.
+                        .ty = try self.canonicalTypeRefForValue(value, signed_override),
+                    },
                 },
-            } });
+            });
         }
 
         if (!mlir.oraValueIsAOpResult(value)) return null;
@@ -2730,6 +2827,27 @@ const Collector = struct {
         return self.typeRefFromMlirType(mlir.oraValueGetType(value));
     }
 
+    fn canonicalTypeRefForValue(
+        self: *Collector,
+        value: mlir.MlirValue,
+        signed_override: ?bool,
+    ) !obligation.TypeRef {
+        if (signed_override != null) {
+            return self.typeRefFromValueWithIntegerSignedness(value, signed_override);
+        }
+        if (self.use_loop_value_bindings) if (self.loopVariableForValue(value)) |variable| {
+            return variable.ty;
+        };
+        if (mlir.mlirValueIsABlockArgument(value)) {
+            if (self.functionEntryBlockArgumentNumber(value)) |arg_number| {
+                if (arg_number < self.function_param_types.len) {
+                    return self.function_param_types[arg_number];
+                }
+            }
+        }
+        return self.typeRefFromValue(value);
+    }
+
     fn typeRefFromValueWithIntegerSignedness(
         self: *Collector,
         value: mlir.MlirValue,
@@ -2852,14 +2970,22 @@ const Collector = struct {
         type_source: BinaryTypeSource,
     ) !?obligation.TypeRef {
         if (mlir.oraOperationGetNumOperands(op) < 1) return null;
-        const lhs_type = mlir.oraValueGetType(mlir.oraOperationGetOperand(op, 0));
+        const lhs = mlir.oraOperationGetOperand(op, 0);
+        const lhs_type = mlir.oraValueGetType(lhs);
         const width = integerTypeWidth(lhs_type) orelse return null;
-        const signed = switch (type_source) {
+        const signed_override = switch (type_source) {
             .operand_signedness => mlirIntegerTypeIsSigned(lhs_type),
-            .predicate_signedness => binaryOpSignedness(binary_op) orelse mlirIntegerTypeIsSigned(lhs_type),
+            .predicate_signedness => binaryOpSignedness(binary_op),
             .explicit_signedness => |value| value,
         };
-        return try self.integerTypeRef(width, signed);
+        const preserve_compiler_identity = switch (type_source) {
+            .predicate_signedness => signed_override == null,
+            else => false,
+        };
+        if (preserve_compiler_identity) {
+            return try self.canonicalTypeRefForValue(lhs, null);
+        }
+        return try self.integerTypeRef(width, signed_override orelse mlirIntegerTypeIsSigned(lhs_type));
     }
 
     fn validateOraCmpPredicateTypes(
@@ -3919,7 +4045,7 @@ fn loopStepAssignmentsAreScalar(
     assignments: []const obligation.LoopStepAssignment,
 ) bool {
     if (variables.len == 0) return assignments.len == 0;
-    if (assignments.len != variables.len and assignments.len + 1 != variables.len) return false;
+    if (assignments.len != variables.len) return false;
     var previous_index: ?u32 = null;
     for (assignments) |assignment| {
         if (assignment.variable_index >= variables.len) return false;

@@ -35,6 +35,11 @@ pub const QueryHash = struct {
     smtlib_hash: u64,
 };
 
+pub const LoopQueryCheck = struct {
+    status: CheckStatus,
+    query_hash: QueryHash,
+};
+
 pub const CanonicalSupport = union(enum) {
     supported,
     unsupported: CanonicalUnsupportedReason,
@@ -138,6 +143,9 @@ pub const EncodeError = std.mem.Allocator.Error || error{
     UnsupportedType,
     BoundVariableOutOfScope,
     MissingCanonicalQueryState,
+    InvalidLoopQuery,
+    UnknownLoopSummary,
+    UnknownLoopEdge,
     UnsupportedBoundVariableType,
     Z3ApiError,
 };

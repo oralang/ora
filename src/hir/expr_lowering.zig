@@ -1118,6 +1118,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             switch (binary.op) {
                 .shl, .shr => try FunctionLowerer.emitCheckedShiftAmountAssert(self, lhs, rhs, binary.range),
+                .div, .mod => try FunctionLowerer.emitCheckedDivRemSafetyAsserts(
+                    self,
+                    binary.op == .div,
+                    is_signed_int_op,
+                    lhs,
+                    rhs,
+                    binary.range,
+                ),
                 else => {},
             }
 
@@ -1185,6 +1193,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     op,
                     strRef("ora.integer_checked"),
                     mlir.oraBoolAttrCreate(self.parent.context, false),
+                );
+            }
+            if (binary.op == .div or binary.op == .mod) {
+                mlir.oraOperationSetAttributeByName(
+                    op,
+                    strRef("ora.arithmetic_safety_asserted"),
+                    mlir.oraBoolAttrCreate(self.parent.context, true),
                 );
             }
             const value = appendValueOp(self.block, op);

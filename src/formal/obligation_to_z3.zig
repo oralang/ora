@@ -9,6 +9,7 @@ const canonical_encode = @import("canonical_encode.zig");
 
 pub const CheckStatus = canonical_types.CheckStatus;
 pub const QueryHash = canonical_types.QueryHash;
+pub const LoopQueryCheck = canonical_types.LoopQueryCheck;
 pub const CanonicalSupport = canonical_types.CanonicalSupport;
 pub const CanonicalUnsupportedReason = canonical_types.CanonicalUnsupportedReason;
 pub const CanonicalPromotionShape = canonical_types.CanonicalPromotionShape;
