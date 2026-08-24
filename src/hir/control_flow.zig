@@ -600,7 +600,19 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const break_flag_clear = appendValueOp(before_block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
                 const loop_enabled = before_lowerer.createCompareOp(loc, "eq", break_flag_value, break_flag_clear);
                 if (mlir.oraOperationIsNull(loop_enabled)) return error.MlirOperationCreationFailed;
-                condition = appendValueOp(before_block, mlir.oraArithAndIOpCreate(self.parent.context, loc, appendValueOp(before_block, loop_enabled), condition));
+                const guarded_condition = mlir.oraArithAndIOpCreate(
+                    self.parent.context,
+                    loc,
+                    appendValueOp(before_block, loop_enabled),
+                    condition,
+                );
+                if (mlir.oraOperationIsNull(guarded_condition)) return error.MlirOperationCreationFailed;
+                mlir.oraOperationSetAttributeByName(
+                    guarded_condition,
+                    strRef("ora.loop_source_guard_operand"),
+                    mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.parent.context), 1),
+                );
+                condition = appendValueOp(before_block, guarded_condition);
             }
             if (has_return) {
                 const return_flag = self.deferred_return_flag.?;
@@ -612,7 +624,19 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const return_flag_clear = appendValueOp(before_block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
                 const return_enabled = before_lowerer.createCompareOp(loc, "eq", return_flag_value, return_flag_clear);
                 if (mlir.oraOperationIsNull(return_enabled)) return error.MlirOperationCreationFailed;
-                condition = appendValueOp(before_block, mlir.oraArithAndIOpCreate(self.parent.context, loc, appendValueOp(before_block, return_enabled), condition));
+                const guarded_condition = mlir.oraArithAndIOpCreate(
+                    self.parent.context,
+                    loc,
+                    appendValueOp(before_block, return_enabled),
+                    condition,
+                );
+                if (mlir.oraOperationIsNull(guarded_condition)) return error.MlirOperationCreationFailed;
+                mlir.oraOperationSetAttributeByName(
+                    guarded_condition,
+                    strRef("ora.loop_source_guard_operand"),
+                    mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.parent.context), 1),
+                );
+                condition = appendValueOp(before_block, guarded_condition);
             }
 
             var condition_values: std.ArrayList(mlir.MlirValue) = .empty;
@@ -637,12 +661,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 body_lowerer.deferred_return_kind = .scf_yield;
                 body_lowerer.deferred_return_carried_locals = carried_locals.items;
             }
+            var control_manifest: std.ArrayList(support.LoopControlManifestEntry) = .empty;
             var loop_context = LoopContext{
                 .parent = self.loop_context,
                 .label = while_stmt.label,
+                .source_statement_id = @intCast(statement_id.index()),
                 .break_flag = break_flag,
                 .continue_flag = continue_flag,
                 .carried_locals = carried_locals.items,
+                .control_manifest = &control_manifest,
             };
             body_lowerer.loop_context = &loop_context;
             var body_locals = try self.cloneLocals(locals);
@@ -660,6 +687,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (!blockEndsWithTerminator(after_block)) {
                 try body_lowerer.appendScfYieldFromLocals(after_block, while_stmt.range, &body_locals, carried_locals.items);
             }
+
+            try self.attachLoopControlManifest(while_op, control_manifest.items);
 
             try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, while_op);
             FunctionLowerer.annotateCarriedLocalResults(self, carried_locals.items, while_op);

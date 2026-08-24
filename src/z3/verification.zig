@@ -2763,9 +2763,49 @@ pub const VerificationPass = struct {
         else
             loop_name_ref.data[0..loop_name_ref.length];
 
-        if (!std.mem.eql(u8, loop_name, "scf.while")) {
-            return &[_]z3.Z3_ast{};
+        if (std.mem.eql(u8, loop_name, "scf.for")) {
+            const body_block = mlir.oraScfForOpGetBodyBlock(loop_op);
+            const num_operands = mlir.oraOperationGetNumOperands(loop_op);
+            const num_body_args = if (mlir.oraBlockIsNull(body_block))
+                0
+            else
+                mlir.oraBlockGetNumArguments(body_block);
+            if (num_operands < 3 or num_body_args != num_operands - 2) {
+                self.encoder.noteSoundnessLossAtOp(
+                    .missing_control_flow_summary,
+                    loop_op,
+                    "scf.for entry state does not cover every induction and carried argument",
+                );
+                return error.UnsupportedOperation;
+            }
+
+            var constraints = ManagedArrayList(z3.Z3_ast).init(self.allocator);
+            defer constraints.deinit();
+
+            const induction_var = mlir.oraBlockGetArgument(body_block, 0);
+            const lower_bound = mlir.oraOperationGetOperand(loop_op, 0);
+            const induction_ast = try self.encoder.encodeValue(induction_var);
+            const lower_bound_ast = try self.encoder.encodeValue(lower_bound);
+            const pending = try self.encoder.takeConstraints(self.allocator);
+            defer if (pending.len > 0) self.allocator.free(pending);
+            try addConstraintSlice(&constraints, pending);
+            try constraints.append(z3.Z3_mk_eq(self.context.ctx, induction_ast, lower_bound_ast));
+
+            var body_arg_index: usize = 1;
+            while (body_arg_index < num_body_args) : (body_arg_index += 1) {
+                const body_arg = mlir.oraBlockGetArgument(body_block, body_arg_index);
+                const init_operand = mlir.oraOperationGetOperand(loop_op, body_arg_index + 2);
+                const body_arg_ast = try self.encoder.encodeValue(body_arg);
+                const init_operand_ast = try self.encoder.encodeValue(init_operand);
+                const carried_pending = try self.encoder.takeConstraints(self.allocator);
+                defer if (carried_pending.len > 0) self.allocator.free(carried_pending);
+                try addConstraintSlice(&constraints, carried_pending);
+                try constraints.append(z3.Z3_mk_eq(self.context.ctx, body_arg_ast, init_operand_ast));
+            }
+            return try constraints.toOwnedSlice();
         }
+
+        if (!std.mem.eql(u8, loop_name, "scf.while")) return &[_]z3.Z3_ast{};
 
         const before_block = mlir.oraScfWhileOpGetBeforeBlock(loop_op);
         if (mlir.oraBlockIsNull(before_block)) return &[_]z3.Z3_ast{};
@@ -9554,22 +9594,26 @@ fn buildForInvariantModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
 
     const index_ty = mlir.oraIndexTypeCreate(mlir_ctx);
     const i1_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 1);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
 
     const c0_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 0);
     const c4_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 4);
     const c1_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 1);
+    const carried_init_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 7);
     const c0_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c0_attr);
     const c4_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c4_attr);
     const c1_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c1_attr);
+    const carried_init_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, carried_init_attr);
     mlir.oraBlockAppendOwnedOperation(func_body, c0_op);
     mlir.oraBlockAppendOwnedOperation(func_body, c4_op);
     mlir.oraBlockAppendOwnedOperation(func_body, c1_op);
+    mlir.oraBlockAppendOwnedOperation(func_body, carried_init_op);
 
     const lb = mlir.oraOperationGetResult(c0_op, 0);
     const ub = mlir.oraOperationGetResult(c4_op, 0);
     const step = mlir.oraOperationGetResult(c1_op, 0);
-    const empty_init_args = [_]mlir.MlirValue{};
-    const for_op = mlir.oraScfForOpCreate(mlir_ctx, loc, lb, ub, step, &empty_init_args, empty_init_args.len, false);
+    const init_args = [_]mlir.MlirValue{mlir.oraOperationGetResult(carried_init_op, 0)};
+    const for_op = mlir.oraScfForOpCreate(mlir_ctx, loc, lb, ub, step, &init_args, init_args.len, false);
     mlir.oraBlockAppendOwnedOperation(func_body, for_op);
 
     const for_body = mlir.oraScfForOpGetBodyBlock(for_op);
@@ -9581,6 +9625,12 @@ fn buildForInvariantModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     if (mlir.oraOperationIsNull(for_term)) {
         mlir.oraBlockAppendOwnedOperation(for_body, inv_cond_op);
         mlir.oraBlockAppendOwnedOperation(for_body, inv_op);
+        const carried_arg = mlir.oraBlockGetArgument(for_body, 1);
+        const yield_values = [_]mlir.MlirValue{carried_arg};
+        mlir.oraBlockAppendOwnedOperation(
+            for_body,
+            mlir.oraScfYieldOpCreate(mlir_ctx, loc, &yield_values, yield_values.len),
+        );
     } else {
         mlir.oraBlockInsertOwnedOperationBefore(for_body, inv_cond_op, for_term);
         mlir.oraBlockInsertOwnedOperationBefore(for_body, inv_op, for_term);
@@ -11530,6 +11580,39 @@ test "scf.for loop invariants capture loop exit conditions" {
         loop_inv_count += 1;
         try testing.expect(ann.loop_step_condition != null);
         try testing.expect(ann.loop_exit_condition != null);
+        try testing.expect(ann.loop_entry_extra_constraints.len > 0);
+
+        const source_op = ann.source_op orelse return error.TestUnexpectedResult;
+        const for_op = pass.findEnclosingLoopOp(source_op) orelse return error.TestUnexpectedResult;
+        const body_block = mlir.oraScfForOpGetBodyBlock(for_op);
+        const induction_var = mlir.oraBlockGetArgument(body_block, 0);
+        const carried_arg = mlir.oraBlockGetArgument(body_block, 1);
+        const lower_bound = mlir.oraOperationGetOperand(for_op, 0);
+        const carried_init = mlir.oraOperationGetOperand(for_op, 3);
+        const induction_ast = try pass.encoder.encodeValue(induction_var);
+        const carried_ast = try pass.encoder.encodeValue(carried_arg);
+        const lower_bound_ast = try pass.encoder.encodeValue(lower_bound);
+        const carried_init_ast = try pass.encoder.encodeValue(carried_init);
+        const pending = try pass.encoder.takeConstraints(testing.allocator);
+        defer if (pending.len > 0) testing.allocator.free(pending);
+
+        pass.solver.reset();
+        try assertPreparedQueryConstraints(&pass.solver, ann.loop_entry_extra_constraints);
+        try assertPreparedQueryConstraints(&pass.solver, pending);
+        try pass.solver.assertChecked(z3.Z3_mk_not(
+            pass.context.ctx,
+            z3.Z3_mk_eq(pass.context.ctx, induction_ast, lower_bound_ast),
+        ));
+        try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), pass.solver.check());
+
+        pass.solver.reset();
+        try assertPreparedQueryConstraints(&pass.solver, ann.loop_entry_extra_constraints);
+        try assertPreparedQueryConstraints(&pass.solver, pending);
+        try pass.solver.assertChecked(z3.Z3_mk_not(
+            pass.context.ctx,
+            z3.Z3_mk_eq(pass.context.ctx, carried_ast, carried_init_ast),
+        ));
+        try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), pass.solver.check());
     }
     try testing.expectEqual(@as(usize, 1), loop_inv_count);
 }

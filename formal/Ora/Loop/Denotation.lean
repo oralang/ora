@@ -37,11 +37,13 @@ structure VariableRow where
 structure StateBindingRow where
   variableIndex : Nat
   target : FreeVarId
+  sourceKey : String := ""
   value : FormulaRef
   deriving Repr, BEq, DecidableEq
 
 structure EdgeRow where
   id : Nat
+  structuralKey : String := ""
   path : List FormulaRef := []
   safety : List FormulaRef := []
   nextState : List StateBindingRow := []
@@ -57,6 +59,7 @@ structure SummaryRow where
   init : List FormulaRef := []
   invariants : List FormulaRef := []
   edges : List EdgeRow := []
+  projectionComplete : Bool := false
   post : List FormulaRef := []
   unsupportedReasons : List String := []
   deriving Repr, BEq, DecidableEq
@@ -80,12 +83,17 @@ def bindingsMatchVariables : List VariableRow → List StateBindingRow → Bool
   | loopVar :: variables, binding :: bindings =>
       binding.variableIndex == loopVar.index &&
         binding.target == loopVar.id &&
+        !binding.sourceKey.isEmpty &&
         bindingsMatchVariables variables bindings
   | _, _ => false
 
 def edgesIndexedFrom : Nat → List EdgeRow → Bool
   | _, [] => true
   | expected, edge :: rest => edge.id == expected && edgesIndexedFrom (expected + 1) rest
+
+def edgeStructuralKeysValid (edges : List EdgeRow) : Bool :=
+  edges.all (fun edge => !edge.structuralKey.isEmpty) &&
+    decide (edges.map EdgeRow.structuralKey).Nodup
 
 def edgeTargetSupported : ControlTargetRow → Bool
   | .backedge | .successor => true
@@ -125,7 +133,8 @@ def edgeFormulasDenotable (manifest : Manifest) (env : Env) (edge : EdgeRow) : B
     edge.nextState.all (fun binding => valueDenotable manifest env binding.value)
 
 def SummaryRow.shapeSupported (row : SummaryRow) : Bool :=
-  row.unsupportedReasons.isEmpty &&
+  row.projectionComplete &&
+    row.unsupportedReasons.isEmpty &&
     (row.kind == .scfWhile || row.kind == .scfFor) &&
     !row.variables.isEmpty &&
     row.init.length == row.variables.length &&
@@ -138,6 +147,7 @@ def SummaryRow.shapeSupported (row : SummaryRow) : Bool :=
     variablesAreIntegers row.contextVariables &&
     variableSetsDisjoint row.variables row.contextVariables &&
     edgesIndexedFrom 0 row.edges &&
+    edgeStructuralKeysValid row.edges &&
     row.edges.all (edgeShapeSupported row.variables) &&
     hasBackedge row.edges && hasSuccessor row.edges
 

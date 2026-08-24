@@ -117,6 +117,21 @@ extern "C"
     MLIR_CAPI_EXPORTED MlirLocation oraOperationGetLocation(MlirOperation op);
     MLIR_CAPI_EXPORTED MlirRegion oraOperationGetRegion(MlirOperation op, size_t index);
 
+    typedef enum OraOperationMemoryEffectKind
+    {
+        ORA_OPERATION_MEMORY_EFFECT_UNKNOWN = 0,
+        ORA_OPERATION_MEMORY_EFFECT_NONE = 1,
+        ORA_OPERATION_MEMORY_EFFECT_READ = 2,
+        ORA_OPERATION_MEMORY_EFFECT_WRITE = 3,
+        ORA_OPERATION_MEMORY_EFFECT_RECURSIVE = 4,
+    } OraOperationMemoryEffectKind;
+
+    /// Classify the operation's direct MLIR memory-effect contract. Operations
+    /// with RecursiveMemoryEffects are reported separately so callers can walk
+    /// their regions without double-counting nested effects. Missing or unknown
+    /// interfaces fail closed as UNKNOWN.
+    MLIR_CAPI_EXPORTED OraOperationMemoryEffectKind oraOperationGetMemoryEffectKind(MlirOperation op);
+
     MLIR_CAPI_EXPORTED MlirType oraValueGetType(MlirValue value);
     MLIR_CAPI_EXPORTED bool oraValueIsNull(MlirValue value);
     MLIR_CAPI_EXPORTED bool oraValueIsAOpResult(MlirValue value);
@@ -134,6 +149,8 @@ extern "C"
     MLIR_CAPI_EXPORTED MlirAttribute oraArrayAttrGetElement(MlirAttribute attr, size_t index);
     MLIR_CAPI_EXPORTED size_t oraDenseI32ArrayAttrGetNumElements(MlirAttribute attr);
     MLIR_CAPI_EXPORTED int32_t oraDenseI32ArrayAttrGetElement(MlirAttribute attr, size_t index);
+    MLIR_CAPI_EXPORTED size_t oraDenseI64ArrayAttrGetNumElements(MlirAttribute attr);
+    MLIR_CAPI_EXPORTED int64_t oraDenseI64ArrayAttrGetElement(MlirAttribute attr, size_t index);
     /// Returns the integer value as an unsigned decimal string preserving full APInt width.
     /// Returns a newly allocated string; caller must free with oraStringRefFree.
     MLIR_CAPI_EXPORTED MlirStringRef oraIntegerAttrGetValueString(MlirAttribute attr);
@@ -667,6 +684,16 @@ extern "C"
         MlirLocation loc,
         MlirValue measure);
 
+    /// Create a verification-only ora.loop_control operation.
+    MLIR_CAPI_EXPORTED MlirOperation oraLoopControlOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirStringRef kind,
+        uint32_t targetLoopSourceId,
+        uint32_t sourceControlId,
+        const MlirValue *state,
+        size_t stateCount);
+
     /// Create an ora.assume operation using the registered dialect
     MLIR_CAPI_EXPORTED MlirOperation oraAssumeOpCreate(
         MlirContext ctx,
@@ -1038,6 +1065,12 @@ extern "C"
         bool unsignedCmp);
 
     MLIR_CAPI_EXPORTED MlirBlock oraScfForOpGetBodyBlock(MlirOperation forOp);
+
+    /// Read the canonical scf.for comparison mode. Returns false when the
+    /// operation is not an scf.for; otherwise writes the mode and returns true.
+    MLIR_CAPI_EXPORTED bool oraScfForOpGetUnsignedCmp(
+        MlirOperation forOp,
+        bool *unsignedCmp);
 
     /// Create a scf.execute_region operation
     MLIR_CAPI_EXPORTED MlirOperation oraScfExecuteRegionOpCreate(

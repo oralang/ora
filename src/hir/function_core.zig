@@ -3,6 +3,7 @@ const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
 const ora_types = @import("ora_types");
+const type_builtin = ora_types.builtin;
 const integer_constants = ora_types.integer_constants;
 const refinements = ora_types.refinement_semantics;
 const type_descriptors = @import("../sema/type_descriptors.zig");
@@ -35,6 +36,8 @@ const LocalIdList = hir_locals.LocalIdList;
 const LocalIdSet = hir_locals.LocalIdSet;
 const BlockContext = support.BlockContext;
 const LoopContext = support.LoopContext;
+const LoopControlKind = support.LoopControlKind;
+const LoopControlManifestEntry = support.LoopControlManifestEntry;
 const SwitchContext = support.SwitchContext;
 const UnrolledLoopContext = support.UnrolledLoopContext;
 const UnrolledLoopSignal = support.UnrolledLoopSignal;
@@ -1157,8 +1160,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             while (index < statements.len) : (index += 1) {
                 const statement_id = statements[index];
                 if (self.loop_context) |loop_context| {
-                    if (loop_context.continue_flag.ptr != null and self.current_scf_carried_locals == null and seen_loop_control and !analysis.stmtContainsLoopControl(self.parent.file, statement_id)) {
-                        return try @This().lowerBodySuffixGuardedOnLoopContinue(self, statements[index..], locals, loop_context);
+                    if (loop_context.continue_flag.ptr != null and seen_loop_control) {
+                        return try @This().lowerBodySuffixGuardedOnLoopControl(self, statements[index..], locals, loop_context);
                     } else if (self.deferred_return_flag != null and self.deferred_return_kind != .none and seen_potential_return) {
                         return try @This().lowerBodySuffixGuardedOnDeferredReturn(self, statements[index..], locals);
                     } else {
@@ -1257,7 +1260,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return terminated;
         }
 
-        fn lowerBodySuffixGuardedOnLoopContinue(
+        fn lowerBodySuffixGuardedOnLoopControl(
             self: *FunctionLowerer,
             statements: []const ast.StmtId,
             locals: *LocalEnv,
@@ -1271,8 +1274,22 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (mlir.oraOperationIsNull(load)) return error.MlirOperationCreationFailed;
                 break :blk load;
             });
+            const break_value = appendValueOp(self.block, blk: {
+                const load = mlir.oraMemrefLoadOpCreate(self.parent.context, loc, loop_context.break_flag, null, 0, boolType(self.parent.context));
+                if (mlir.oraOperationIsNull(load)) return error.MlirOperationCreationFailed;
+                break :blk load;
+            });
             const false_value = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
-            const should_run = self.createCompareOp(loc, "eq", continue_value, false_value);
+            const continue_clear = self.createCompareOp(loc, "eq", continue_value, false_value);
+            if (mlir.oraOperationIsNull(continue_clear)) return error.MlirOperationCreationFailed;
+            const break_clear = self.createCompareOp(loc, "eq", break_value, false_value);
+            if (mlir.oraOperationIsNull(break_clear)) return error.MlirOperationCreationFailed;
+            const should_run = mlir.oraArithAndIOpCreate(
+                self.parent.context,
+                loc,
+                appendValueOp(self.block, continue_clear),
+                appendValueOp(self.block, break_clear),
+            );
             if (mlir.oraOperationIsNull(should_run)) return error.MlirOperationCreationFailed;
 
             const result_types = if (loop_context.carried_locals.len == 0)
@@ -1289,6 +1306,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 true,
             );
             if (mlir.oraOperationIsNull(if_op)) return error.MlirOperationCreationFailed;
+            mlir.oraOperationSetAttributeByName(
+                if_op,
+                strRef("ora.loop_control_runtime_guard"),
+                namedBoolAttr(self.parent.context, "ora.loop_control_runtime_guard", true).attribute,
+            );
             appendOp(self.block, if_op);
 
             const then_block = mlir.oraScfIfOpGetThenBlock(if_op);
@@ -1936,6 +1958,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             self.deferred_return_carried_locals
                         else
                             loop_context.carried_locals;
+                        try @This().appendLoopControlMarker(
+                            self,
+                            statement_id,
+                            jump.range,
+                            locals,
+                            loop_context,
+                            .break_loop,
+                        );
                         try self.appendScfYieldFromLocals(self.block, jump.range, locals, carried_locals);
                         return true;
                     }
@@ -2065,6 +2095,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             self.deferred_return_carried_locals
                         else
                             loop_context.carried_locals;
+                        try @This().appendLoopControlMarker(
+                            self,
+                            statement_id,
+                            jump.range,
+                            locals,
+                            loop_context,
+                            .continue_loop,
+                        );
                         try self.appendScfYieldFromLocals(self.block, jump.range, locals, carried_locals);
                         return true;
                     }
@@ -3624,6 +3662,24 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 appendOp(self.block, clear_break);
                 break :blk flag;
             } else std.mem.zeroes(mlir.MlirValue);
+            const continue_flag = if (has_loop_control) blk: {
+                const continue_flag_alloc = mlir.oraMemrefAllocaOpCreate(
+                    self.parent.context,
+                    loc,
+                    support.memRefType(self.parent.context, boolType(self.parent.context)),
+                );
+                if (mlir.oraOperationIsNull(continue_flag_alloc)) return error.MlirOperationCreationFailed;
+                const flag = appendValueOp(self.block, continue_flag_alloc);
+
+                const continue_flag_zero = appendValueOp(
+                    self.block,
+                    createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0),
+                );
+                const clear_continue = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, continue_flag_zero, flag, null, 0);
+                if (mlir.oraOperationIsNull(clear_continue)) return error.MlirOperationCreationFailed;
+                appendOp(self.block, clear_continue);
+                break :blk flag;
+            } else std.mem.zeroes(mlir.MlirValue);
 
             var carried_locals: LocalIdList = .empty;
             var carried_seen = LocalIdSet.init(self.parent.allocator);
@@ -3670,6 +3726,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             };
             const step = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, index_type, 1));
 
+            // Ora source `for` induction and index bindings are u256.  SCF
+            // lowers the carrier to MLIR `index`, so retain the source-owned
+            // semantic identity explicitly for formal projection.
+            const induction_type_id = type_builtin.lookupBuiltinById(.u256).comptime_type_id;
+
             const for_op = mlir.oraScfForOpCreate(
                 self.parent.context,
                 loc,
@@ -3678,14 +3739,32 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 step,
                 if (init_operands.items.len == 0) null else init_operands.items.ptr,
                 init_operands.items.len,
-                false,
+                true,
             );
             if (mlir.oraOperationIsNull(for_op)) return error.MlirOperationCreationFailed;
+            mlir.oraOperationSetAttributeByName(
+                for_op,
+                strRef("ora.induction_compiler_type_id"),
+                mlir.oraIntegerAttrCreateI64FromType(
+                    reprIntegerType(self.parent.context),
+                    @intCast(induction_type_id),
+                ),
+            );
             appendOp(self.block, for_op);
 
             const body_block = mlir.oraScfForOpGetBodyBlock(for_op);
             if (mlir.oraBlockIsNull(body_block)) return error.MlirOperationCreationFailed;
             clearKnownTerminator(body_block);
+
+            if (has_loop_control) {
+                const continue_flag_zero = appendValueOp(
+                    body_block,
+                    createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0),
+                );
+                const clear_continue = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, continue_flag_zero, continue_flag, null, 0);
+                if (mlir.oraOperationIsNull(clear_continue)) return error.MlirOperationCreationFailed;
+                appendOp(body_block, clear_continue);
+            }
 
             const induction_var = mlir.oraBlockGetArgument(body_block, 0);
             const current_value_op = mlir.oraArithIndexCastUIOpCreate(
@@ -3732,11 +3811,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             var body_lowerer = self.*;
             body_lowerer.block = body_block;
+            var control_manifest: std.ArrayList(LoopControlManifestEntry) = .empty;
             var loop_context = LoopContext{
                 .parent = self.loop_context,
                 .label = for_stmt.label,
+                .source_statement_id = @intCast(statement_id.index()),
                 .break_flag = break_flag,
+                .continue_flag = continue_flag,
+                .induction_value = current_value,
                 .carried_locals = carried_locals.items,
+                .control_manifest = &control_manifest,
             };
             if (has_loop_control) {
                 body_lowerer.loop_context = &loop_context;
@@ -3805,6 +3889,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     true,
                 );
                 if (mlir.oraOperationIsNull(if_op)) return error.MlirOperationCreationFailed;
+                if (has_loop_control) {
+                    mlir.oraOperationSetAttributeByName(
+                        if_op,
+                        strRef("ora.loop_control_runtime_guard"),
+                        namedBoolAttr(self.parent.context, "ora.loop_control_runtime_guard", true).attribute,
+                    );
+                }
                 appendOp(body_block, if_op);
 
                 const then_block = mlir.oraScfIfOpGetThenBlock(if_op);
@@ -3843,6 +3934,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (!support.blockEndsWithTerminator(body_block)) {
                 try body_lowerer.appendScfYieldFromLocals(body_block, for_stmt.range, &body_locals, carried_locals.items);
             }
+            try @This().attachLoopControlManifest(self, for_op, control_manifest.items);
             try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, for_op);
             @This().annotateCarriedLocalResults(self, carried_locals.items, for_op);
             if (has_return and self.deferred_return_flag != null) {
@@ -3874,6 +3966,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn lowerUnrolledFiniteForStmt(self: *FunctionLowerer, for_stmt: ast.ForStmt, locals: *LocalEnv) anyerror!?bool {
             if (for_stmt.invariants.len != 0) return null;
+            // Loop-control decisions may depend on runtime values. Lowering
+            // their bodies while unrolling would commit a break/continue from
+            // one syntactic branch as though that branch were taken.
+            if (bodyContainsLoopControl(self.parent.file, for_stmt.body)) return null;
 
             const finite_range = @This().finiteForRange(self, for_stmt, locals) orelse return null;
             if (finite_range.trip_count > runtime_loop_unroll_limit) return null;
@@ -4259,6 +4355,70 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 result_type,
             );
             return appendValueOp(self.block, op);
+        }
+
+        fn appendLoopControlMarker(
+            self: *FunctionLowerer,
+            statement_id: ast.StmtId,
+            range: source.TextRange,
+            locals: *const LocalEnv,
+            loop_context: *const LoopContext,
+            kind: LoopControlKind,
+        ) anyerror!void {
+            var state: std.ArrayList(mlir.MlirValue) = .empty;
+            if (loop_context.induction_value.ptr != null) {
+                try state.append(self.parent.allocator, loop_context.induction_value);
+            }
+            for (loop_context.carried_locals) |local_id| {
+                try state.append(
+                    self.parent.allocator,
+                    try self.materializeCarriedLocalValue(locals, local_id),
+                );
+            }
+
+            const op = mlir.oraLoopControlOpCreate(
+                self.parent.context,
+                self.parent.location(range),
+                strRef(if (kind == .break_loop) "break" else "continue"),
+                loop_context.source_statement_id,
+                @intCast(statement_id.index()),
+                if (state.items.len == 0) null else state.items.ptr,
+                state.items.len,
+            );
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, op);
+            try loop_context.control_manifest.append(self.parent.allocator, .{
+                .source_statement_id = @intCast(statement_id.index()),
+                .kind = kind,
+            });
+        }
+
+        pub fn attachLoopControlManifest(
+            self: *FunctionLowerer,
+            loop_op: mlir.MlirOperation,
+            entries: []const LoopControlManifestEntry,
+        ) !void {
+            const attrs = try self.parent.allocator.alloc(mlir.MlirAttribute, entries.len);
+            for (entries, attrs) |entry, *attr| {
+                const value = try std.fmt.allocPrint(
+                    self.parent.allocator,
+                    "{s}:{d}",
+                    .{
+                        if (entry.kind == .break_loop) "break" else "continue",
+                        entry.source_statement_id,
+                    },
+                );
+                attr.* = mlir.oraStringAttrCreate(self.parent.context, strRef(value));
+            }
+            mlir.oraOperationSetAttributeByName(
+                loop_op,
+                strRef("ora.loop_control_manifest"),
+                mlir.oraArrayAttrCreate(
+                    self.parent.context,
+                    @intCast(attrs.len),
+                    if (attrs.len == 0) null else attrs.ptr,
+                ),
+            );
         }
 
         fn lowerPatternType(self: *FunctionLowerer, pattern_id: ast.PatternId) anyerror!?mlir.MlirType {

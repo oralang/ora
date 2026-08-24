@@ -1,0 +1,12 @@
+contract LoopForTypes {
+    pub fn countRange() -> u256 {
+        var count: u256 = 0;
+        for (0..4) |i, _|
+            invariant i <= 4
+            invariant count == i
+        {
+            count = count +% 1;
+        }
+        return count;
+    }
+}

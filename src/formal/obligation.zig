@@ -789,6 +789,10 @@ pub const LoopSummaryRow = struct {
     /// safety, state transition, and control outcome. Ordering is part of the
     /// certificate identity and must already be canonical.
     edges: []const LoopEdgeRow = &.{},
+    /// Result of comparing the independently collected structured-control
+    /// inventory with the semantic edge projection.  A proof target cannot be
+    /// armed unless the two inventories agree exactly.
+    projection_completeness: LoopProjectionCompleteness = .unavailable,
     post_formulas: []const FormulaRef = &.{},
     query_ids: LoopQueryIds = .{},
     unsupported_reasons: []const LoopUnsupportedReason = &.{},
@@ -798,6 +802,22 @@ pub const LoopSummaryRow = struct {
     }
 
     pub fn validationReason(self: LoopSummaryRow) ?LoopUnsupportedReason {
+        switch (self.projection_completeness) {
+            .complete => {},
+            .unavailable => return .loop_projection_inventory_missing,
+            .control_manifest_missing => return .loop_control_manifest_missing,
+            .control_marker_missing => return .loop_control_marker_missing,
+            .control_marker_malformed => return .loop_control_marker_malformed,
+            .control_marker_duplicate => return .loop_control_marker_duplicate,
+            .control_marker_target_mismatch => return .loop_control_marker_target_mismatch,
+            .path_mismatch => return .loop_projection_path_mismatch,
+            .effect_mismatch => return .loop_projection_effect_mismatch,
+            .binding_mismatch => return .loop_projection_binding_mismatch,
+            .ambiguous_identity => return .loop_projection_identity_ambiguous,
+            .unsupported_control_flow => return .loop_projection_control_flow_unsupported,
+            .unsupported_effect => return .loop_projection_effect_unsupported,
+            .path_limit_exceeded => return .loop_projection_path_limit_exceeded,
+        }
         if (self.variables.len == 0) return .loop_state_empty;
         if (self.edges.len == 0) return .loop_edge_missing;
 
@@ -817,6 +837,12 @@ pub const LoopSummaryRow = struct {
                 if (previous.id == edge.id) return .loop_duplicate_edge_identity;
             }
             if (edge.id != edge_index) return .loop_edge_order_invalid;
+            if (edge.structural_key.len == 0) return .loop_projection_identity_missing;
+            for (self.edges[0..edge_index]) |previous| {
+                if (std.mem.eql(u8, previous.structural_key, edge.structural_key)) {
+                    return .loop_projection_identity_ambiguous;
+                }
+            }
             if (edge.path_formulas.len == 0) return .loop_edge_path_missing;
             const target = edge.target orelse return .loop_edge_target_unresolved;
             switch (target) {
@@ -830,6 +856,7 @@ pub const LoopSummaryRow = struct {
                 if (binding.variable_index != binding_index or binding.target == null) {
                     return .loop_state_binding_invalid;
                 }
+                if (binding.source_key.len == 0) return .loop_state_binding_source_missing;
                 for (edge.next_state[0..binding_index]) |previous| {
                     if (previous.target != null and freeVarIdEql(previous.target.?, binding.target.?)) {
                         return .loop_state_binding_duplicate;
@@ -867,6 +894,9 @@ pub const LoopVariable = struct {
 pub const LoopStepAssignment = struct {
     variable_index: u32,
     target: ?FreeVarId = null,
+    /// Deterministic identity of the verifier-input MLIR value supplying this
+    /// post-state component on the containing structural path.
+    source_key: []const u8 = "",
     value: FormulaRef,
 };
 
@@ -878,13 +908,96 @@ pub const LoopControlTarget = enum(u8) {
     explicit_revert,
 };
 
+pub const LoopProjectionCompleteness = enum(u8) {
+    unavailable,
+    complete,
+    control_manifest_missing,
+    control_marker_missing,
+    control_marker_malformed,
+    control_marker_duplicate,
+    control_marker_target_mismatch,
+    path_mismatch,
+    effect_mismatch,
+    binding_mismatch,
+    ambiguous_identity,
+    unsupported_control_flow,
+    unsupported_effect,
+    path_limit_exceeded,
+};
+
 pub const LoopEdgeRow = struct {
     id: u32,
+    /// Deterministic identity of the verifier-input MLIR path ending at this
+    /// edge.  It is proof-relevant certificate data, not a display label.
+    structural_key: []const u8 = "",
     path_formulas: []const FormulaRef = &.{},
     safety_formulas: []const FormulaRef = &.{},
     next_state: []const LoopStepAssignment = &.{},
     target: ?LoopControlTarget = null,
 };
+
+test "loop projection completeness and structural identities fail closed" {
+    const loop_id: FreeVarId = .{ .file_id = 1, .pattern_id = 2 };
+    const variables = [_]LoopVariable{.{
+        .index = 0,
+        .id = loop_id,
+        .ty = .{ .spelling = "u256" },
+    }};
+    const bindings = [_]LoopStepAssignment{.{
+        .variable_index = 0,
+        .target = loop_id,
+        .source_key = "loop-state:0",
+        .value = .{ .term = 0 },
+    }};
+    const path = [_]FormulaRef{.{ .term = 0 }};
+    const canonical_edges = [_]LoopEdgeRow{
+        .{
+            .id = 0,
+            .structural_key = "body/straight-line-yield",
+            .path_formulas = &path,
+            .next_state = &bindings,
+            .target = .backedge,
+        },
+        .{
+            .id = 1,
+            .structural_key = "guard/false-successor",
+            .path_formulas = &path,
+            .next_state = &bindings,
+            .target = .successor,
+        },
+    };
+    var row: LoopSummaryRow = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "run" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .loop_source_op_id = 0,
+        .loop_kind = .scf_while,
+        .variables = &variables,
+        .edges = &canonical_edges,
+    };
+
+    try std.testing.expectEqual(LoopUnsupportedReason.loop_projection_inventory_missing, row.validationReason().?);
+    row.projection_completeness = .complete;
+    try std.testing.expectEqual(@as(?LoopUnsupportedReason, null), row.validationReason());
+
+    var missing_key_edges = canonical_edges;
+    missing_key_edges[0].structural_key = "";
+    row.edges = &missing_key_edges;
+    try std.testing.expectEqual(LoopUnsupportedReason.loop_projection_identity_missing, row.validationReason().?);
+
+    var duplicate_key_edges = canonical_edges;
+    duplicate_key_edges[1].structural_key = duplicate_key_edges[0].structural_key;
+    row.edges = &duplicate_key_edges;
+    try std.testing.expectEqual(LoopUnsupportedReason.loop_projection_identity_ambiguous, row.validationReason().?);
+
+    row.edges = &canonical_edges;
+    row.projection_completeness = .effect_mismatch;
+    try std.testing.expectEqual(LoopUnsupportedReason.loop_projection_effect_mismatch, row.validationReason().?);
+    row.projection_completeness = .unsupported_effect;
+    try std.testing.expectEqual(LoopUnsupportedReason.loop_projection_effect_unsupported, row.validationReason().?);
+}
 
 pub const LoopQueryIds = struct {
     induction: []const Id = &.{},
@@ -929,7 +1042,22 @@ pub const LoopUnsupportedReason = enum(u8) {
     loop_state_binding_extra,
     loop_state_binding_duplicate,
     loop_state_binding_invalid,
+    loop_state_binding_source_missing,
     loop_state_binding_foreign,
+    loop_projection_inventory_missing,
+    loop_control_manifest_missing,
+    loop_control_marker_missing,
+    loop_control_marker_malformed,
+    loop_control_marker_duplicate,
+    loop_control_marker_target_mismatch,
+    loop_projection_path_mismatch,
+    loop_projection_effect_mismatch,
+    loop_projection_binding_mismatch,
+    loop_projection_identity_missing,
+    loop_projection_identity_ambiguous,
+    loop_projection_control_flow_unsupported,
+    loop_projection_effect_unsupported,
+    loop_projection_path_limit_exceeded,
     loop_value_type_unresolved,
     loop_value_width_mismatch,
     loop_value_signedness_mismatch,

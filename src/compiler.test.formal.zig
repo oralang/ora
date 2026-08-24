@@ -114,6 +114,32 @@ fn loopSummaryHasReason(
     return false;
 }
 
+fn loopSummaryByFunction(
+    set: obligation.ObligationSet,
+    function_name: []const u8,
+) ?obligation.LoopSummaryRow {
+    for (set.loop_summaries) |row| {
+        if (row.owner == .statement and
+            std.mem.eql(u8, row.owner.statement.function_name, function_name)) return row;
+    }
+    return null;
+}
+
+fn expectOneLoopProjectionFailure(
+    set: obligation.ObligationSet,
+    status: obligation.LoopProjectionCompleteness,
+    reason: obligation.LoopUnsupportedReason,
+) !void {
+    var matches: usize = 0;
+    for (set.loop_summaries) |row| {
+        if (row.projection_completeness != status) continue;
+        try testing.expect(loopSummaryHasReason(row, reason));
+        try testing.expect(!row.projectionSupported());
+        matches += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), matches);
+}
+
 fn expectLoopSummaryRejected(
     set: obligation.ObligationSet,
     query: obligation.VerificationQuery,
@@ -2289,7 +2315,7 @@ test "canonical invariant-only loop activates Lean induction in the real CLI" {
     try testing.expect(!std.mem.containsAtLeast(u8, certificate, 1, "sorryAx"));
 }
 
-test "automatic scalar loop induction parses and proves literal and context bounds" {
+test "automatic scalar while and for LoopVC induction parses and proves bounds" {
     std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
@@ -2298,14 +2324,27 @@ test "automatic scalar loop induction parses and proves literal and context boun
     const cases = [_]struct {
         source_path: []const u8,
         stem: []const u8,
+        proof_count: usize,
     }{
         .{
             .source_path = "tests/formal/scalar_loop_induction.ora",
             .stem = "scalar_loop_induction",
+            .proof_count = 1,
         },
         .{
             .source_path = "tests/formal/scalar_loop_post.ora",
             .stem = "scalar_loop_post",
+            .proof_count = 1,
+        },
+        .{
+            .source_path = "tests/formal/loop_for_types.ora",
+            .stem = "loop_for_types",
+            .proof_count = 1,
+        },
+        .{
+            .source_path = "tests/formal/loop_control_targets.ora",
+            .stem = "loop_control_targets",
+            .proof_count = 4,
         },
     };
 
@@ -2331,7 +2370,13 @@ test "automatic scalar loop induction parses and proves literal and context boun
         defer allocator.free(result.stdout);
         defer allocator.free(result.stderr);
         try expectExited(result, 0);
-        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "certificate-required=1"));
+        const certificate_required = try std.fmt.allocPrint(
+            allocator,
+            "certificate-required={d}",
+            .{case.proof_count},
+        );
+        defer allocator.free(certificate_required);
+        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, certificate_required));
         try testing.expect(!std.mem.containsAtLeast(u8, result.stdout, 1, "Automatic Lean proof gate failed"));
         try testing.expect(!std.mem.containsAtLeast(u8, result.stderr, 1, "unexpected token"));
 
@@ -2345,7 +2390,13 @@ test "automatic scalar loop induction parses and proves literal and context boun
         defer allocator.free(certificate_path);
         const certificate = try readFileAllocForTest(allocator, certificate_path);
         defer allocator.free(certificate);
-        try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"proof_count\": 1"));
+        const proof_count = try std.fmt.allocPrint(
+            allocator,
+            "\"proof_count\": {d}",
+            .{case.proof_count},
+        );
+        defer allocator.free(proof_count);
+        try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, proof_count));
         try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"loop_summary_id\":"));
         try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"loop_vc_sha256\": \""));
         try testing.expect(!std.mem.containsAtLeast(u8, certificate, 1, "sorryAx"));
@@ -9327,6 +9378,381 @@ test "formal loop summary rows are source-owner scoped scalar data" {
     try testing.expect(!nested.projectionSupported());
 }
 
+test "structured loop paths preserve branch-local safety and state sources" {
+    var result = try collectPackageObligations(testing.allocator, "tests/formal/loop_structured_paths.ora");
+    defer result.deinit();
+
+    var branch_loop: ?obligation.LoopSummaryRow = null;
+    var switch_loop: ?obligation.LoopSummaryRow = null;
+    var nested_branch_loop: ?obligation.LoopSummaryRow = null;
+    var no_default_switch_loop: ?obligation.LoopSummaryRow = null;
+    for (result.set.loop_summaries) |row| {
+        if (row.owner != .statement) continue;
+        if (std.mem.eql(u8, row.owner.statement.function_name, "branchUpdate")) branch_loop = row;
+        if (std.mem.eql(u8, row.owner.statement.function_name, "switchUpdate")) switch_loop = row;
+        if (std.mem.eql(u8, row.owner.statement.function_name, "nestedBranch")) nested_branch_loop = row;
+        if (std.mem.eql(u8, row.owner.statement.function_name, "switchNoDefault")) no_default_switch_loop = row;
+    }
+
+    const branch = branch_loop orelse return error.TestUnexpectedResult;
+    try testing.expect(branch.projectionSupported());
+    try testing.expectEqual(obligation.LoopProjectionCompleteness.complete, branch.projection_completeness);
+    try testing.expectEqual(@as(usize, 3), branch.edges.len);
+    try testing.expectEqual(obligation.LoopControlTarget.backedge, branch.edges[0].target.?);
+    try testing.expectEqual(obligation.LoopControlTarget.backedge, branch.edges[1].target.?);
+    try testing.expectEqual(obligation.LoopControlTarget.successor, branch.edges[2].target.?);
+    try testing.expect(std.mem.indexOf(u8, branch.edges[0].structural_key, "/then/") != null);
+    try testing.expect(std.mem.indexOf(u8, branch.edges[1].structural_key, "/else/") != null);
+    try testing.expectEqual(@as(usize, 2), branch.edges[0].path_formulas.len);
+    try testing.expectEqual(@as(usize, 2), branch.edges[1].path_formulas.len);
+    try testing.expectEqual(@as(usize, 2), branch.edges[0].safety_formulas.len);
+    try testing.expectEqual(@as(usize, 2), branch.edges[1].safety_formulas.len);
+    try testing.expect(!std.mem.eql(
+        u8,
+        branch.edges[0].next_state[0].source_key,
+        branch.edges[1].next_state[0].source_key,
+    ));
+    try testing.expectEqualStrings(
+        branch.edges[0].next_state[1].source_key,
+        branch.edges[1].next_state[1].source_key,
+    );
+
+    const switched = switch_loop orelse return error.TestUnexpectedResult;
+    try testing.expect(switched.projectionSupported());
+    try testing.expectEqual(obligation.LoopProjectionCompleteness.complete, switched.projection_completeness);
+    try testing.expectEqual(@as(usize, 4), switched.edges.len);
+    try testing.expectEqual(@as(usize, 2), switched.edges[0].path_formulas.len);
+    try testing.expectEqual(@as(usize, 3), switched.edges[1].path_formulas.len);
+    try testing.expectEqual(@as(usize, 3), switched.edges[2].path_formulas.len);
+    for (switched.edges[0..3], 0..) |edge, index| {
+        try testing.expectEqual(obligation.LoopControlTarget.backedge, edge.target.?);
+        try testing.expect(std.mem.indexOf(u8, edge.structural_key, "/case:") != null);
+        try testing.expectEqual(@as(usize, 2), edge.safety_formulas.len);
+        for (switched.edges[0..index]) |previous| {
+            try testing.expect(!std.mem.eql(u8, previous.next_state[0].source_key, edge.next_state[0].source_key));
+        }
+    }
+    try testing.expectEqual(obligation.LoopControlTarget.successor, switched.edges[3].target.?);
+
+    const nested = nested_branch_loop orelse return error.TestUnexpectedResult;
+    try testing.expect(nested.projectionSupported());
+    try testing.expectEqual(@as(usize, 4), nested.edges.len);
+    try testing.expect(std.mem.count(u8, nested.edges[0].structural_key, "/op:") >= 2);
+    try testing.expect(std.mem.count(u8, nested.edges[1].structural_key, "/op:") >= 2);
+    try testing.expect(std.mem.count(u8, nested.edges[2].structural_key, "/op:") >= 1);
+    for (nested.edges[0..3], 0..) |edge, index| {
+        try testing.expectEqual(obligation.LoopControlTarget.backedge, edge.target.?);
+        for (nested.edges[0..index]) |previous| {
+            try testing.expect(!std.mem.eql(u8, previous.structural_key, edge.structural_key));
+        }
+    }
+
+    var bounded_result = try collectPackageObligations(testing.allocator, "tests/formal/loop_path_limit.ora");
+    defer bounded_result.deinit();
+    var bounded_path_loop: ?obligation.LoopSummaryRow = null;
+    for (bounded_result.set.loop_summaries) |row| {
+        if (row.owner == .statement and
+            std.mem.eql(u8, row.owner.statement.function_name, "boundedPathLimit"))
+        {
+            bounded_path_loop = row;
+        }
+    }
+    const bounded = bounded_path_loop orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(
+        obligation.LoopProjectionCompleteness.path_limit_exceeded,
+        bounded.projection_completeness,
+    );
+    try testing.expect(loopSummaryHasReason(bounded, .loop_projection_path_limit_exceeded));
+    try testing.expect(!bounded.projectionSupported());
+    try testing.expectEqual(@as(usize, 0), bounded.edges.len);
+
+    const no_default = no_default_switch_loop orelse return error.TestUnexpectedResult;
+    try testing.expect(no_default.projectionSupported());
+    try testing.expectEqual(@as(usize, 3), no_default.edges.len);
+    try testing.expect(std.mem.indexOf(u8, no_default.edges[0].structural_key, "/case:0/") != null);
+    try testing.expect(std.mem.indexOf(u8, no_default.edges[1].structural_key, "/no-match/") != null);
+    try testing.expectEqual(@as(usize, 2), no_default.edges[0].safety_formulas.len);
+    try testing.expectEqual(@as(usize, 1), no_default.edges[1].safety_formulas.len);
+    try testing.expectEqual(@as(usize, 0), no_default.edges[2].safety_formulas.len);
+
+    const report = try dumpManifestToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(report);
+    const repeated = try dumpManifestToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(repeated);
+    try testing.expectEqualStrings(report, repeated);
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"source_key\":\"module-op:"));
+}
+
+test "break and continue project as complete source-owned LoopVC edges" {
+    var result = try collectPackageObligations(testing.allocator, "tests/formal/loop_control_targets.ora");
+    defer result.deinit();
+
+    const cases = [_]struct {
+        function_name: []const u8,
+        kind: obligation.LoopKind,
+        backedges: usize,
+        successors: usize,
+        control_kind: []const u8,
+    }{
+        .{ .function_name = "whileBreak", .kind = .scf_while, .backedges = 1, .successors = 2, .control_kind = "break" },
+        .{ .function_name = "whileContinue", .kind = .scf_while, .backedges = 2, .successors = 1, .control_kind = "continue" },
+        .{ .function_name = "forBreak", .kind = .scf_for, .backedges = 1, .successors = 2, .control_kind = "break" },
+        .{ .function_name = "forContinue", .kind = .scf_for, .backedges = 2, .successors = 1, .control_kind = "continue" },
+    };
+
+    try testing.expectEqual(cases.len, result.set.loop_summaries.len);
+    for (cases) |case| {
+        const summary = loopSummaryByFunction(result.set, case.function_name) orelse
+            return error.TestUnexpectedResult;
+        try testing.expectEqual(case.kind, summary.loop_kind);
+        try testing.expectEqual(obligation.LoopProjectionCompleteness.complete, summary.projection_completeness);
+        try testing.expect(summary.projectionSupported());
+        try testing.expectEqual(@as(usize, 3), summary.edges.len);
+
+        var backedges: usize = 0;
+        var successors: usize = 0;
+        var control_edges: usize = 0;
+        for (summary.edges) |edge| {
+            try testing.expectEqual(summary.variables.len, edge.next_state.len);
+            switch (edge.target orelse return error.TestUnexpectedResult) {
+                .backedge => backedges += 1,
+                .successor => successors += 1,
+                else => return error.TestUnexpectedResult,
+            }
+            const control_fragment = try std.fmt.allocPrint(
+                testing.allocator,
+                "/control:{s}:",
+                .{case.control_kind},
+            );
+            defer testing.allocator.free(control_fragment);
+            if (std.mem.indexOf(u8, edge.structural_key, control_fragment) != null) {
+                control_edges += 1;
+                if (case.kind == .scf_for and std.mem.eql(u8, case.control_kind, "continue")) {
+                    try testing.expect(std.mem.startsWith(
+                        u8,
+                        edge.next_state[0].source_key,
+                        "for/control-induction-step:",
+                    ));
+                }
+            }
+        }
+        try testing.expectEqual(case.backedges, backedges);
+        try testing.expectEqual(case.successors, successors);
+        try testing.expectEqual(@as(usize, 1), control_edges);
+
+        try testing.expectEqual(@as(usize, 1), summary.query_ids.induction.len);
+        const query = obligation.findById(result.set.queries, summary.query_ids.induction[0]) orelse
+            return error.TestUnexpectedResult;
+        try testing.expectEqual(obligation.ProofRequirement.lean_certificate, query.proof_requirement);
+    }
+}
+
+test "loop control provenance mutations fail closed by name" {
+    {
+        var compilation = try compilePackage("tests/formal/loop_control_targets.ora");
+        defer compilation.deinit();
+        const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir_result.diagnostics.isEmpty());
+        const loop_op = findFirstOpByName(hir_result.module.raw_module, "scf.while") orelse
+            return error.TestUnexpectedResult;
+        try testing.expect(mlir.mlirOperationRemoveAttributeByName(
+            loop_op,
+            strRef("ora.loop_control_manifest"),
+        ));
+        var mutated = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+        defer mutated.deinit();
+        try expectOneLoopProjectionFailure(
+            mutated.set,
+            .control_manifest_missing,
+            .loop_control_manifest_missing,
+        );
+    }
+
+    {
+        var compilation = try compilePackage("tests/formal/loop_control_targets.ora");
+        defer compilation.deinit();
+        const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir_result.diagnostics.isEmpty());
+        const marker = findFirstOpByName(hir_result.module.raw_module, "ora.loop_control") orelse
+            return error.TestUnexpectedResult;
+        mlir.mlirOperationRemoveFromParent(marker);
+        defer mlir.mlirOperationDestroy(marker);
+        var mutated = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+        defer mutated.deinit();
+        try expectOneLoopProjectionFailure(
+            mutated.set,
+            .control_marker_missing,
+            .loop_control_marker_missing,
+        );
+    }
+
+    {
+        var compilation = try compilePackage("tests/formal/loop_control_targets.ora");
+        defer compilation.deinit();
+        const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir_result.diagnostics.isEmpty());
+        const marker = findFirstOpByName(hir_result.module.raw_module, "ora.loop_control") orelse
+            return error.TestUnexpectedResult;
+        const context = mlir.mlirOperationGetContext(marker);
+        mlir.oraOperationSetAttributeByName(
+            marker,
+            strRef("target_loop_source_id"),
+            mlir.oraIntegerAttrCreateI64FromType(mlir.oraIntegerTypeCreate(context, 64), 999_999),
+        );
+        var mutated = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+        defer mutated.deinit();
+        try expectOneLoopProjectionFailure(
+            mutated.set,
+            .control_marker_target_mismatch,
+            .loop_control_marker_target_mismatch,
+        );
+    }
+
+    {
+        var compilation = try compilePackage("tests/formal/loop_control_targets.ora");
+        defer compilation.deinit();
+        const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir_result.diagnostics.isEmpty());
+        const marker = findFirstOpByName(hir_result.module.raw_module, "ora.loop_control") orelse
+            return error.TestUnexpectedResult;
+        mlir.mlirOperationSetOperands(marker, 0, null);
+        var mutated = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+        defer mutated.deinit();
+        try expectOneLoopProjectionFailure(
+            mutated.set,
+            .control_marker_malformed,
+            .loop_control_marker_malformed,
+        );
+    }
+
+    {
+        var compilation = try compilePackage("tests/formal/loop_control_targets.ora");
+        defer compilation.deinit();
+        const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir_result.diagnostics.isEmpty());
+        const loop_op = findFirstOpByName(hir_result.module.raw_module, "scf.while") orelse
+            return error.TestUnexpectedResult;
+        const manifest_name = strRef("ora.loop_control_manifest");
+        const manifest = mlir.oraOperationGetAttributeByName(loop_op, manifest_name);
+        try testing.expect(!mlir.oraAttributeIsNull(manifest));
+        try testing.expectEqual(@as(usize, 1), mlir.oraArrayAttrGetNumElements(manifest));
+        const item = mlir.oraArrayAttrGetElement(manifest, 0);
+        const duplicated = [_]mlir.MlirAttribute{ item, item };
+        mlir.oraOperationSetAttributeByName(
+            loop_op,
+            manifest_name,
+            mlir.oraArrayAttrCreate(mlir.mlirOperationGetContext(loop_op), duplicated.len, &duplicated),
+        );
+        var mutated = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+        defer mutated.deinit();
+        try expectOneLoopProjectionFailure(
+            mutated.set,
+            .control_marker_duplicate,
+            .loop_control_marker_duplicate,
+        );
+    }
+}
+
+test "for LoopVC retains and validates the source u256 induction type" {
+    var result = try collectPackageObligations(testing.allocator, "tests/formal/loop_for_types.ora");
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 1), result.set.loop_summaries.len);
+    const summary = result.set.loop_summaries[0];
+    try testing.expectEqual(obligation.LoopKind.scf_for, summary.loop_kind);
+    try testing.expect(summary.projectionSupported());
+    try testing.expectEqual(obligation.LoopProjectionCompleteness.complete, summary.projection_completeness);
+    try testing.expectEqual(@as(usize, 2), summary.variables.len);
+    try testing.expectEqual(
+        type_builtin.lookupBuiltinById(.u256).comptime_type_id,
+        summary.variables[0].ty.compiler_type_id,
+    );
+    try testing.expectEqual(@as(usize, 2), summary.edges.len);
+    try testing.expectEqual(obligation.LoopControlTarget.backedge, summary.edges[0].target.?);
+    try testing.expectEqual(obligation.LoopControlTarget.successor, summary.edges[1].target.?);
+
+    const query = try findLoopInductionQuery(result.set);
+    try testing.expectEqual(obligation.ProofRequirement.lean_certificate, query.proof_requirement);
+}
+
+test "for LoopVC rejects missing and non-u256 induction metadata" {
+    var compilation = try compilePackage("tests/formal/loop_for_types.ora");
+    defer compilation.deinit();
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+
+    const for_op = findFirstOpByName(hir_result.module.raw_module, "scf.for") orelse
+        return error.TestUnexpectedResult;
+    var unsigned_cmp = false;
+    try testing.expect(mlir.oraScfForOpGetUnsignedCmp(for_op, &unsigned_cmp));
+    try testing.expect(unsigned_cmp);
+
+    const attr_name = strRef("ora.induction_compiler_type_id");
+    try testing.expect(mlir.mlirOperationRemoveAttributeByName(for_op, attr_name));
+
+    var missing = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+    defer missing.deinit();
+    try testing.expectEqual(@as(usize, 1), missing.set.loop_summaries.len);
+    try testing.expect(loopSummaryHasReason(missing.set.loop_summaries[0], .loop_value_type_unresolved));
+    try testing.expect(!missing.set.loop_summaries[0].projectionSupported());
+
+    const context = mlir.mlirOperationGetContext(for_op);
+    mlir.oraOperationSetAttributeByName(
+        for_op,
+        attr_name,
+        mlir.oraIntegerAttrCreateI64FromType(
+            mlir.oraIntegerTypeCreate(context, 256),
+            type_builtin.lookupBuiltinById(.u8).comptime_type_id,
+        ),
+    );
+    var wrong_width = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+    defer wrong_width.deinit();
+    try testing.expectEqual(@as(usize, 1), wrong_width.set.loop_summaries.len);
+    try testing.expect(loopSummaryHasReason(wrong_width.set.loop_summaries[0], .loop_value_type_unresolved));
+    try testing.expect(!wrong_width.set.loop_summaries[0].projectionSupported());
+}
+
+test "structured loop certificates arm the real CLI and missing proofs block artifacts" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output_path = try pathFromTmpAlloc(allocator, tmp, "structured-loop-blocked");
+    defer allocator.free(output_path);
+    const empty_manifest = try pathFromTmpAlloc(allocator, tmp, "empty-proofs.json");
+    defer allocator.free(empty_manifest);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = empty_manifest,
+        .data = "{\"schema_version\":1,\"proofs\":[]}",
+    });
+
+    const result = try runProcessWithLeanPath(allocator, &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=smt-report,sir-text,bytecode",
+        "--out-dir",
+        output_path,
+        "--lean-proofs",
+        empty_manifest,
+        "tests/formal/loop_structured_cli.ora",
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try expectExited(result, 1);
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "certificate-required=1"));
+    try testing.expect(
+        std.mem.containsAtLeast(u8, result.stdout, 1, "lean_required_failure") or
+            std.mem.containsAtLeast(u8, result.stderr, 1, "lean_required_failure"),
+    );
+    const artifact_path = try std.fs.path.join(allocator, &.{ output_path, "loop_structured_cli.hex" });
+    defer allocator.free(artifact_path);
+    try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.testing.io, artifact_path, .{}));
+}
+
 test "canonical LoopVC Z3 checks consume the shared edge rows" {
     var result = try collectPackageObligations(testing.allocator, "ora-example/smt/verification/loop_invariants.ora");
     defer result.deinit();
@@ -9495,6 +9921,29 @@ test "canonical loop edges reject missing duplicate unresolved and foreign state
     missing_edge.edges = &.{};
     try expectLoopSummaryRejected(result.set, query, missing_edge, .loop_edge_missing);
 
+    const incomplete_projections = [_]struct {
+        status: obligation.LoopProjectionCompleteness,
+        reason: obligation.LoopUnsupportedReason,
+    }{
+        .{ .status = .path_mismatch, .reason = .loop_projection_path_mismatch },
+        .{ .status = .effect_mismatch, .reason = .loop_projection_effect_mismatch },
+        .{ .status = .binding_mismatch, .reason = .loop_projection_binding_mismatch },
+        .{ .status = .ambiguous_identity, .reason = .loop_projection_identity_ambiguous },
+        .{ .status = .unsupported_control_flow, .reason = .loop_projection_control_flow_unsupported },
+        .{ .status = .unsupported_effect, .reason = .loop_projection_effect_unsupported },
+        .{ .status = .path_limit_exceeded, .reason = .loop_projection_path_limit_exceeded },
+        .{ .status = .control_manifest_missing, .reason = .loop_control_manifest_missing },
+        .{ .status = .control_marker_missing, .reason = .loop_control_marker_missing },
+        .{ .status = .control_marker_malformed, .reason = .loop_control_marker_malformed },
+        .{ .status = .control_marker_duplicate, .reason = .loop_control_marker_duplicate },
+        .{ .status = .control_marker_target_mismatch, .reason = .loop_control_marker_target_mismatch },
+    };
+    for (incomplete_projections) |failure| {
+        var incomplete = original;
+        incomplete.projection_completeness = failure.status;
+        try expectLoopSummaryRejected(result.set, query, incomplete, failure.reason);
+    }
+
     var duplicate_edges = [_]obligation.LoopEdgeRow{ original.edges[0], original.edges[1] };
     duplicate_edges[1].id = 0;
     var duplicate_edge = original;
@@ -9519,6 +9968,7 @@ test "canonical loop edges reject missing duplicate unresolved and foreign state
             original.edges[1],
         };
         target_edges[2].id = 2;
+        target_edges[2].structural_key = "body/deferred-control";
         target_edges[2].target = target;
         var deferred_target = original;
         deferred_target.edges = &target_edges;
@@ -9535,6 +9985,14 @@ test "canonical loop edges reject missing duplicate unresolved and foreign state
     var missing_binding = original;
     missing_binding.edges = &missing_binding_edges;
     try expectLoopSummaryRejected(result.set, query, missing_binding, .loop_state_binding_missing);
+
+    var missing_source_bindings = [_]obligation.LoopStepAssignment{original.edges[0].next_state[0]};
+    missing_source_bindings[0].source_key = "";
+    var missing_source_edges = [_]obligation.LoopEdgeRow{ original.edges[0], original.edges[1] };
+    missing_source_edges[0].next_state = &missing_source_bindings;
+    var missing_source = original;
+    missing_source.edges = &missing_source_edges;
+    try expectLoopSummaryRejected(result.set, query, missing_source, .loop_state_binding_source_missing);
 
     var extra_bindings = [_]obligation.LoopStepAssignment{
         original.edges[0].next_state[0],

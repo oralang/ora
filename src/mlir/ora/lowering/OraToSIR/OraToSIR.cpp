@@ -1455,6 +1455,7 @@ public:
         patterns.add<ConvertAssumeOp>(typeConverter, ctx);
         patterns.add<ConvertDecreasesOp>(typeConverter, ctx);
         patterns.add<ConvertIncreasesOp>(typeConverter, ctx);
+        patterns.add<ConvertLoopControlOp>(typeConverter, ctx);
         patterns.add<ConvertHavocOp>(typeConverter, ctx);
         patterns.add<ConvertQuantifiedOp>(typeConverter, ctx);
 

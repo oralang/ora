@@ -1152,6 +1152,15 @@ LogicalResult ConvertIncreasesOp::matchAndRewrite(
     return success();
 }
 
+LogicalResult ConvertLoopControlOp::matchAndRewrite(
+    ora::LoopControlOp op,
+    typename ora::LoopControlOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    rewriter.eraseOp(op);
+    return success();
+}
+
 LogicalResult ConvertHavocOp::matchAndRewrite(
     ora::HavocOp op,
     typename ora::HavocOp::Adaptor adaptor,

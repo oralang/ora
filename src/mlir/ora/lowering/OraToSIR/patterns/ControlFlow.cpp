@@ -5413,7 +5413,11 @@ LogicalResult ConvertScfForOp::matchAndRewrite(
         // Avoid trailing ops after a newly inserted terminator by splitting the block.
         auto *tailBlock = rewriter.splitBlock(yBlock, std::next(Block::iterator(y)));
         rewriter.setInsertionPointToEnd(yBlock);
-        Value bodyIv = yBlock->getNumArguments() > 0 ? yBlock->getArgument(0) : bodyBlock->getArgument(0);
+        // scf.if lowering can move the yield into a merge block whose first
+        // argument is an iter_arg result, not the for induction variable.  The
+        // original body entry induction argument dominates every loop-body CFG
+        // block and is the only authoritative value to advance.
+        Value bodyIv = bodyBlock->getArgument(0);
         Value next = rewriter.create<sir::AddOp>(loc, u256Type, coerceToU256(rewriter, loc, bodyIv), coerceToU256(rewriter, loc, step));
         SmallVector<Value, 4> nextState;
         nextState.push_back(next);
@@ -5457,7 +5461,7 @@ LogicalResult ConvertScfForOp::matchAndRewrite(
         // Split to avoid trailing ops after the new terminator.
         auto *tailBlock = rewriter.splitBlock(cBlock, std::next(Block::iterator(cont)));
         rewriter.setInsertionPointToEnd(cBlock);
-        Value bodyIv = cBlock->getNumArguments() > 0 ? cBlock->getArgument(0) : bodyBlock->getArgument(0);
+        Value bodyIv = bodyBlock->getArgument(0);
         Value next = rewriter.create<sir::AddOp>(loc, u256Type, coerceToU256(rewriter, loc, bodyIv), coerceToU256(rewriter, loc, step));
         SmallVector<Value, 4> nextState;
         nextState.push_back(next);
@@ -5487,7 +5491,7 @@ LogicalResult ConvertScfForOp::matchAndRewrite(
             if (b->getNumArguments() == 0)
                 continue;
             rewriter.setInsertionPointToEnd(b);
-            Value next = rewriter.create<sir::AddOp>(loc, u256Type, coerceToU256(rewriter, loc, b->getArgument(0)), coerceToU256(rewriter, loc, step));
+            Value next = rewriter.create<sir::AddOp>(loc, u256Type, coerceToU256(rewriter, loc, bodyBlock->getArgument(0)), coerceToU256(rewriter, loc, step));
             SmallVector<Value, 4> nextState;
             nextState.push_back(next);
             for (unsigned i = 1; i < b->getNumArguments(); ++i)

@@ -1,0 +1,24 @@
+contract LoopPathLimit {
+    pub fn boundedPathLimit() -> u256 {
+        var i: u256 = 0;
+        var acc: u256 = 0;
+
+        while (i < 1)
+            invariant i <= 1
+            invariant acc <= 18
+        {
+            if (i < 1) { acc = acc + 1; } else { acc = acc + 2; }
+            if (i < 1) { acc = acc + 1; } else { acc = acc + 2; }
+            if (i < 1) { acc = acc + 1; } else { acc = acc + 2; }
+            if (i < 1) { acc = acc + 1; } else { acc = acc + 2; }
+            if (i < 1) { acc = acc + 1; } else { acc = acc + 2; }
+            if (i < 1) { acc = acc + 1; } else { acc = acc + 2; }
+            if (i < 1) { acc = acc + 1; } else { acc = acc + 2; }
+            if (i < 1) { acc = acc + 1; } else { acc = acc + 2; }
+            if (i < 1) { acc = acc + 1; } else { acc = acc + 2; }
+            i = i + 1;
+        }
+
+        return acc;
+    }
+}

@@ -214,11 +214,13 @@ fn supportFor(mutation: Mutation) obligation_to_lean.SemanticSupport {
     const assignments = [_]obligation.LoopStepAssignment{.{
         .variable_index = 0,
         .target = if (mutation == .bad_update_target) other_id else loop_id,
+        .source_key = "body/straight-line-yield/operand:0",
         .value = .{ .term = 0 },
     }};
     const exit_assignments = [_]obligation.LoopStepAssignment{.{
         .variable_index = 0,
         .target = loop_id,
+        .source_key = "loop-state:0",
         .value = .{ .term = 0 },
     }};
     const backedge_path: []const obligation.FormulaRef = if (mutation == .missing_guard)
@@ -234,6 +236,7 @@ fn supportFor(mutation: Mutation) obligation_to_lean.SemanticSupport {
     const edges = [_]obligation.LoopEdgeRow{
         .{
             .id = 0,
+            .structural_key = "body/straight-line-yield",
             .path_formulas = backedge_path,
             .safety_formulas = safety_formulas,
             .next_state = assignments[0..],
@@ -241,6 +244,7 @@ fn supportFor(mutation: Mutation) obligation_to_lean.SemanticSupport {
         },
         .{
             .id = 1,
+            .structural_key = "guard/false-successor",
             .path_formulas = &invariant_formulas,
             .next_state = exit_assignments[0..],
             .target = .successor,
@@ -265,6 +269,7 @@ fn supportFor(mutation: Mutation) obligation_to_lean.SemanticSupport {
         .init_formulas = &init_formulas,
         .invariant_formulas = if (mutation == .missing_invariant) &.{} else &invariant_formulas,
         .edges = &edges,
+        .projection_completeness = .complete,
         .post_formulas = &post_formulas,
         .query_ids = .{ .induction = if (mutation == .query_id_mismatch) &.{} else &induction_query_ids },
         .unsupported_reasons = reason_slice,

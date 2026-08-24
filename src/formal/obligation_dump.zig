@@ -38,6 +38,7 @@ pub fn writeJsonLines(writer: anytype, set: obligation.ObligationSet) !void {
         try writeFormulaListField(writer, "init_formulas", item.init_formulas);
         try writeFormulaListField(writer, "invariant_formulas", item.invariant_formulas);
         try writeLoopEdgeListField(writer, item.edges);
+        try writeStringField(writer, "projection_completeness", @tagName(item.projection_completeness));
         try writeFormulaListField(writer, "post_formulas", item.post_formulas);
         try writeLoopQueryIdsField(writer, item.query_ids);
         try writeBoolField(writer, "projection_supported", item.projectionSupported());
@@ -187,6 +188,7 @@ pub fn writeLoopInductionReport(writer: anytype, set: obligation.ObligationSet) 
         try writeSourceField(writer, summary.source);
         try writeOptionalNumberField(writer, "loop_source_op_id", summary.loop_source_op_id);
         try writeStringField(writer, "loop_kind", @tagName(summary.loop_kind));
+        try writeStringField(writer, "projection_completeness", @tagName(summary.projection_completeness));
         try writeStringField(writer, "status", if (certificate_required) "lean_certificate_required" else "excluded");
         try writeBoolField(writer, "certificate_required", certificate_required);
         try writeOptionalNumberField(writer, "induction_query_id", if (query) |item| item.id else null);
@@ -798,6 +800,7 @@ fn writeLoopStepAssignments(
         } else {
             try writer.writeAll("null");
         }
+        try writeStringField(writer, "source_key", assignment.source_key);
         try writeFormulaFieldNamed(writer, "value", assignment.value);
         try writer.writeByte('}');
     }
@@ -814,6 +817,7 @@ fn writeLoopEdgeListField(
         if (index != 0) try writer.writeByte(',');
         try writer.writeAll("{\"id\":");
         try writer.print("{d}", .{edge.id});
+        try writeStringField(writer, "structural_key", edge.structural_key);
         try writeFormulaListField(writer, "path_formulas", edge.path_formulas);
         try writeFormulaListField(writer, "safety_formulas", edge.safety_formulas);
         try writeLoopStepAssignmentListField(writer, edge.next_state);

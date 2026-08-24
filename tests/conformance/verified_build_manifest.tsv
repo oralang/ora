@@ -45,6 +45,7 @@ same-bytecode	falsification_map_frame.spec.toml	-
 same-bytecode	falsification_storage_branch.spec.toml	-
 same-bytecode	generic_instantiation.spec.toml	-
 same-bytecode	lock_guard_revert.spec.toml	-
+same-bytecode	loop_control_suffix.spec.toml	-
 unverifiable	reentrancy_lock_guard.spec.toml	contract_invariant_unproved
 same-bytecode	refinement_guard_revert.spec.toml	-
 unverifiable	resource_app_token.spec.toml	contract_invariant_unproved

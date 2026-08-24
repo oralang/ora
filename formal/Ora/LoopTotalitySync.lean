@@ -56,11 +56,12 @@ def baseVariable : VariableRow := {
 }
 
 def baseBinding : StateBindingRow := {
-  variableIndex := 0, target := loopId, value := .term 0
+  variableIndex := 0, target := loopId, sourceKey := "loop-state:0", value := .term 0
 }
 
 def baseBackedge : EdgeRow := {
   id := 0
+  structuralKey := "body/straight-line-yield"
   path := [.term 1]
   safety := [.term 1]
   nextState := [baseBinding]
@@ -69,6 +70,7 @@ def baseBackedge : EdgeRow := {
 
 def baseExit : EdgeRow := {
   id := 1
+  structuralKey := "guard/false-successor"
   path := [.term 1]
   nextState := [baseBinding]
   target := .successor
@@ -82,6 +84,7 @@ def baseSummary : SummaryRow := {
   init := [.term 0]
   invariants := [.term 1]
   edges := [baseBackedge, baseExit]
+  projectionComplete := true
   post := [.term 1]
 }
 

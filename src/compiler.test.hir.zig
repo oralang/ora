@@ -1837,26 +1837,49 @@ test "compiler lowers real HIR for loops with break and continue" {
 
 test "compiler lowers integer range for loops with break and continue" {
     const source_text =
-        \\pub fn run() {
+        \\pub fn run() -> u256 {
+        \\    var total: u256 = 0;
         \\    for (0..20) |i, _| {
         \\        if (i > 10) {
         \\            break;
         \\        }
+        \\        total = total + i;
         \\    }
         \\    for (0..10) |i, _| {
         \\        if (i % 2 == 0) {
         \\            continue;
         \\        }
+        \\        total = total + i;
         \\    }
+        \\    return total;
         \\}
     ;
 
-    const hir_text = try renderHirTextForSource(source_text);
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "scf.for"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.if"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 4, "memref.alloca"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "arith.andi"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "\"ora.loop_control\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "kind = \"break\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "kind = \"continue\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "source_control_id = "));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "target_loop_source_id = "));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.loop_control_manifest = [\"break:"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.loop_control_manifest = [\"continue:"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.induction_compiler_type_id = 6"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, ": (i256, i256) -> ()"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
+
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    const sir_text = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(sir_text);
+    try testing.expect(!std.mem.containsAtLeast(u8, sir_text, 1, "ora.loop_control"));
 }
 
 test "compiler preserves signed integer range loop item type" {

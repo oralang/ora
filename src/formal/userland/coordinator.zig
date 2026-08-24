@@ -844,8 +844,6 @@ const AutomaticLoopProofReason = enum {
 
 const AutomaticLoopPlan = struct {
     summary: obligation.LoopSummaryRow,
-    backedge_index: usize,
-    successor_index: usize,
 };
 
 const AutomaticLoopPlanResult = union(enum) {
@@ -1058,30 +1056,23 @@ fn automaticLoopPlan(
     }
     const summary = obligation.findById(set.loop_summaries, query.loop_summary_id.?) orelse
         return .{ .unsupported = .automatic_query_shape_unsupported };
-    if (!summary.projectionSupported() or summary.edges.len != 2) {
+    if (!summary.projectionSupported() or summary.edges.len < 2) {
         return .{ .unsupported = .automatic_control_shape_unsupported };
     }
     if (summary.variables.len == 0 or summary.init_formulas.len != summary.variables.len) {
         return .{ .unsupported = .automatic_control_shape_unsupported };
     }
-    var backedge_index: ?usize = null;
-    var successor_index: ?usize = null;
-    for (summary.edges, 0..) |edge, index| switch (edge.target orelse
+    var has_backedge = false;
+    var has_successor = false;
+    for (summary.edges) |edge| switch (edge.target orelse
         return .{ .unsupported = .automatic_control_shape_unsupported }) {
-        .backedge => {
-            if (backedge_index != null) {
-                return .{ .unsupported = .automatic_control_shape_unsupported };
-            }
-            backedge_index = index;
-        },
-        .successor => {
-            if (successor_index != null) {
-                return .{ .unsupported = .automatic_control_shape_unsupported };
-            }
-            successor_index = index;
-        },
+        .backedge => has_backedge = true,
+        .successor => has_successor = true,
         else => return .{ .unsupported = .automatic_control_shape_unsupported },
     };
+    if (!has_backedge or !has_successor) {
+        return .{ .unsupported = .automatic_control_shape_unsupported };
+    }
     for (summary.variables) |variable| {
         if (automaticIntegerShape(variable.ty) == null) {
             return .{ .unsupported = .automatic_integer_type_unsupported };
@@ -1134,13 +1125,7 @@ fn automaticLoopPlan(
     for (summary.post_formulas) |formula| if (automaticFormulaReason(set, summary, formula, 256)) |reason| {
         return .{ .unsupported = reason };
     };
-    return .{ .supported = .{
-        .summary = summary,
-        .backedge_index = backedge_index orelse
-            return .{ .unsupported = .automatic_control_shape_unsupported },
-        .successor_index = successor_index orelse
-            return .{ .unsupported = .automatic_control_shape_unsupported },
-    } };
+    return .{ .supported = .{ .summary = summary } };
 }
 
 fn writeAutomaticLeanShape(writer: anytype, shape: AutomaticIntegerShape) !void {
@@ -1310,6 +1295,16 @@ fn writeAutomaticFormulaExpression(
 
 fn writeAutomaticIndent(writer: anytype, count: usize) !void {
     try writer.splatByteAll(' ', count);
+}
+
+fn writeAutomaticEdgeMembershipCases(writer: anytype, edge_count: usize) !void {
+    if (edge_count == 0) return error.InvalidDependency;
+    try writer.writeAll("      rcases hMember with ");
+    for (0..edge_count) |edge_index| {
+        if (edge_index != 0) try writer.writeAll(" | ");
+        try writer.print("hMember_{d}", .{edge_index});
+    }
+    try writer.writeByte('\n');
 }
 
 fn writeAutomaticTermLookupItems(
@@ -2057,12 +2052,12 @@ fn writeAutomaticLoopProof(
     // Backedge preservation.
     try writer.writeAll(
         "    · intro edge current following hMember hTarget hInvariant hPath hSafe hNext\n" ++
-            "      simp at hMember\n" ++
-            "      rcases hMember with hMember | hMember\n",
+            "      simp at hMember\n",
     );
+    try writeAutomaticEdgeMembershipCases(writer, summary.edges.len);
     for (summary.edges, 0..) |edge, edge_index| {
         try writer.writeAll("      · subst edge\n");
-        if (edge_index != plan.backedge_index) {
+        if (edge.target != .backedge) {
             try writer.writeAll("        dsimp at hTarget\n        simp at hTarget\n");
             continue;
         }
@@ -2142,9 +2137,9 @@ fn writeAutomaticLoopProof(
     // Per-edge safety.
     try writer.writeAll(
         "    · intro edge state hMember hInvariant hPath\n" ++
-            "      simp at hMember\n" ++
-            "      rcases hMember with hMember | hMember\n",
+            "      simp at hMember\n",
     );
+    try writeAutomaticEdgeMembershipCases(writer, summary.edges.len);
     for (summary.edges) |edge| {
         try writer.writeAll("      · subst edge\n        dsimp at hInvariant hPath ⊢\n");
         if (edge.safety_formulas.len == 0) {
@@ -2199,12 +2194,12 @@ fn writeAutomaticLoopProof(
     // Exit target assertions.
     try writer.writeAll(
         "    · intro edge current following hMember hTarget hInvariant hPath hSafe hNext\n" ++
-            "      simp at hMember\n" ++
-            "      rcases hMember with hMember | hMember\n",
+            "      simp at hMember\n",
     );
-    for (summary.edges, 0..) |edge, edge_index| {
+    try writeAutomaticEdgeMembershipCases(writer, summary.edges.len);
+    for (summary.edges) |edge| {
         try writer.writeAll("      · subst edge\n");
-        if (edge_index != plan.successor_index) {
+        if (edge.target != .successor) {
             try writer.writeAll("        dsimp at hTarget\n        simp at hTarget\n");
             continue;
         }
@@ -2646,18 +2641,21 @@ test "runtime loop certificate coverage accepts no loops and one exact target" {
     const next_state = [_]obligation.LoopStepAssignment{.{
         .variable_index = 0,
         .target = loop_id,
+        .source_key = "loop-state:0",
         .value = .{ .term = 0 },
     }};
     const path = [_]obligation.FormulaRef{.{ .term = 0 }};
     const edges = [_]obligation.LoopEdgeRow{
         .{
             .id = 0,
+            .structural_key = "body/straight-line-yield",
             .path_formulas = &path,
             .next_state = &next_state,
             .target = .backedge,
         },
         .{
             .id = 1,
+            .structural_key = "guard/false-successor",
             .path_formulas = &path,
             .next_state = &next_state,
             .target = .successor,
@@ -2674,6 +2672,7 @@ test "runtime loop certificate coverage accepts no loops and one exact target" {
         .loop_kind = .scf_while,
         .variables = &variables,
         .edges = &edges,
+        .projection_completeness = .complete,
         .query_ids = .{ .induction = &induction_ids },
     }};
     const queries = [_]obligation.VerificationQuery{.{
@@ -2705,18 +2704,21 @@ test "runtime loop certificate coverage rejects named exclusions and missing tar
     const next_state = [_]obligation.LoopStepAssignment{.{
         .variable_index = 0,
         .target = loop_id,
+        .source_key = "loop-state:0",
         .value = .{ .term = 0 },
     }};
     const path = [_]obligation.FormulaRef{.{ .term = 0 }};
     const edges = [_]obligation.LoopEdgeRow{
         .{
             .id = 0,
+            .structural_key = "body/straight-line-yield",
             .path_formulas = &path,
             .next_state = &next_state,
             .target = .backedge,
         },
         .{
             .id = 1,
+            .structural_key = "guard/false-successor",
             .path_formulas = &path,
             .next_state = &next_state,
             .target = .successor,
@@ -2759,6 +2761,7 @@ test "runtime loop certificate coverage rejects named exclusions and missing tar
         .loop_kind = .scf_while,
         .variables = &variables,
         .edges = &edges,
+        .projection_completeness = .complete,
         .query_ids = .{ .induction = &induction_ids },
     }};
     try std.testing.expect(!try runtimeLoopCertificateTargetsComplete(

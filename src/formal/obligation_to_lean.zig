@@ -264,6 +264,8 @@ fn writeLoopSummaryRow(writer: anytype, row: obligation.LoopSummaryRow) !void {
     try writeFormulaList(writer, row.invariant_formulas);
     try writer.writeAll(", edges := ");
     try writeLoopEdges(writer, row.edges);
+    try writer.writeAll(", projectionComplete := ");
+    try writer.writeAll(if (row.projection_completeness == .complete) "true" else "false");
     try writer.writeAll(", post := ");
     try writeFormulaList(writer, row.post_formulas);
     try writer.writeAll(", unsupportedReasons := []");
@@ -305,6 +307,8 @@ fn writeLoopStepAssignments(
         try writer.writeAll("{ variableIndex := ");
         try writer.print("{d}, target := ", .{assignment.variable_index});
         try writeFreeVarId(writer, assignment.target orelse return error.UnsupportedLoopIdentity);
+        try writer.writeAll(", sourceKey := ");
+        try writeLeanString(writer, assignment.source_key);
         try writer.writeAll(", value := ");
         try writeFormula(writer, assignment.value);
         try writer.writeAll(" }");
@@ -317,7 +321,9 @@ fn writeLoopEdges(writer: anytype, edges: []const obligation.LoopEdgeRow) !void 
     for (edges, 0..) |edge, index| {
         if (index != 0) try writer.writeAll(", ");
         try writer.writeAll("{ id := ");
-        try writer.print("{d}, path := ", .{edge.id});
+        try writer.print("{d}, structuralKey := ", .{edge.id});
+        try writeLeanString(writer, edge.structural_key);
+        try writer.writeAll(", path := ");
         try writeFormulaList(writer, edge.path_formulas);
         try writer.writeAll(", safety := ");
         try writeFormulaList(writer, edge.safety_formulas);
@@ -2353,16 +2359,18 @@ test "LoopVC digest covers every certificate-authority component class" {
     const backedge_bindings = [_]obligation.LoopStepAssignment{.{
         .variable_index = 0,
         .target = loop_id,
+        .source_key = "body/straight-line-yield/operand:0",
         .value = .{ .term = 7 },
     }};
     const exit_bindings = [_]obligation.LoopStepAssignment{.{
         .variable_index = 0,
         .target = loop_id,
+        .source_key = "loop-state:0",
         .value = .{ .term = 0 },
     }};
     const edges = [_]obligation.LoopEdgeRow{
-        .{ .id = 0, .path_formulas = &.{.{ .term = 5 }}, .safety_formulas = &.{.{ .term = 6 }}, .next_state = &backedge_bindings, .target = .backedge },
-        .{ .id = 1, .path_formulas = &.{.{ .term = 8 }}, .next_state = &exit_bindings, .target = .successor },
+        .{ .id = 0, .structural_key = "body/straight-line-yield", .path_formulas = &.{.{ .term = 5 }}, .safety_formulas = &.{.{ .term = 6 }}, .next_state = &backedge_bindings, .target = .backedge },
+        .{ .id = 1, .structural_key = "guard/false-successor", .path_formulas = &.{.{ .term = 8 }}, .next_state = &exit_bindings, .target = .successor },
     };
     const summary: obligation.LoopSummaryRow = .{
         .id = 1,
@@ -2376,6 +2384,7 @@ test "LoopVC digest covers every certificate-authority component class" {
         .init_formulas = &.{.{ .term = 1 }},
         .invariant_formulas = &.{.{ .term = 4 }},
         .edges = &edges,
+        .projection_completeness = .complete,
         .post_formulas = &.{.{ .term = 9 }},
         .query_ids = .{ .induction = &.{60} },
     };

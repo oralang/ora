@@ -1681,6 +1681,7 @@ const FunctionLowerer = struct {
     pub const filterCarriedLocals = FunctionCore.filterCarriedLocals;
     pub const buildCarriedResultTypes = FunctionCore.buildCarriedResultTypes;
     pub const materializeCarriedLocalValue = FunctionCore.materializeCarriedLocalValue;
+    pub const attachLoopControlManifest = FunctionCore.attachLoopControlManifest;
     pub const evalKnownIntExpr = FunctionCore.evalKnownIntExpr;
     pub const evalKnownBoolExpr = FunctionCore.evalKnownBoolExpr;
     pub const evalKnownExprValue = FunctionCore.evalKnownExprValue;

@@ -1,0 +1,55 @@
+contract LoopControlSuffix {
+    pub fn forBreakSkipsSuffix(stop: u256) -> u256 {
+        var last: u256 = 0;
+        for (0..20) |i, _| {
+            if (i == stop) {
+                break;
+            }
+            last = i +% 1;
+        }
+        return last;
+    }
+
+    pub fn forContinueSkipsSuffix(skip: u256, stop: u256) -> u256 {
+        var sum: u256 = 0;
+        for (0..6) |i, _| {
+            if (i == skip) {
+                continue;
+            }
+            if (i == stop) {
+                break;
+            }
+            sum = sum +% i;
+        }
+        return sum;
+    }
+
+    pub fn whileBreakSkipsSuffix(stop: u256, limit: u256) -> u256 {
+        var i: u256 = 0;
+        var sum: u256 = 0;
+        while (i < limit) {
+            i = i +% 1;
+            if (i == stop) {
+                break;
+            }
+            sum = sum +% i;
+        }
+        return sum;
+    }
+
+    pub fn whileContinueSkipsSuffix(skip: u256, stop: u256, limit: u256) -> u256 {
+        var i: u256 = 0;
+        var sum: u256 = 0;
+        while (i < limit) {
+            i = i +% 1;
+            if (i == skip) {
+                continue;
+            }
+            if (i == stop) {
+                break;
+            }
+            sum = sum +% i;
+        }
+        return sum;
+    }
+}

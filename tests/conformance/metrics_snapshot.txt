@@ -6,12 +6,12 @@ adt_payload_match::c0:empty_path()	485
 adt_payload_match::c1:value_path(uint256)	478
 adt_payload_match::c2:pair_path(uint256,uint256)	592
 adt_payload_match::c3:named_path(uint256,uint256)	616
-adversarial_calldata::__bytecode_bytes	7646
-adversarial_calldata::__deploy_gas	1525732
+adversarial_calldata::__bytecode_bytes	7659
+adversarial_calldata::__deploy_gas	1528332
 adversarial_calldata::c0:calldata	692
 adversarial_calldata::c10:tuple_tag((bytes4,string))	9860
 adversarial_calldata::c11:tuple_sum((uint256[],string))	10397
-adversarial_calldata::c12:tuple_count_flags((bool[],string))	11566
+adversarial_calldata::c12:tuple_count_flags((bool[],string))	11837
 adversarial_calldata::c13:calldata	336
 adversarial_calldata::c14:calldata	371
 adversarial_calldata::c15:calldata	371
@@ -36,7 +36,7 @@ adversarial_calldata::c31:calldata	437
 adversarial_calldata::c32:calldata	581
 adversarial_calldata::c3:tag(bytes4)	534
 adversarial_calldata::c4:signed(int16)	559
-adversarial_calldata::c5:count_flags(bool[])	2204
+adversarial_calldata::c5:count_flags(bool[])	2451
 adversarial_calldata::c6:first_address(address[])	1359
 adversarial_calldata::c7:count_tags(bytes4[])	1783
 adversarial_calldata::c8:tuple_flag((bool,string))	9899
@@ -479,6 +479,12 @@ lock_guard_revert::c0:safe_other_slot(address,address,uint256)	23837
 lock_guard_revert::c1:balance_of(address)	2760
 lock_guard_revert::c2:conflict_same_slot(address,uint256)	1150
 lock_guard_revert::c3:balance_of(address)	2760
+loop_control_suffix::__bytecode_bytes	1590
+loop_control_suffix::__deploy_gas	312714
+loop_control_suffix::c0:forBreakSkipsSuffix(uint256)	6557
+loop_control_suffix::c1:forContinueSkipsSuffix(uint256,uint256)	3658
+loop_control_suffix::c2:whileBreakSkipsSuffix(uint256,uint256)	2237
+loop_control_suffix::c3:whileContinueSkipsSuffix(uint256,uint256,uint256)	3284
 reentrancy_lock_guard::__bytecode_bytes	982
 reentrancy_lock_guard::__deploy_gas	190940
 reentrancy_lock_guard::__deploy_gas:attacker	299380

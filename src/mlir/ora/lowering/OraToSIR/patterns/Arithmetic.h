@@ -260,6 +260,17 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertLoopControlOp : public OpConversionPattern<ora::LoopControlOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::LoopControlOp op,
+                typename ora::LoopControlOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertHavocOp : public OpConversionPattern<ora::HavocOp>
         {
         public:

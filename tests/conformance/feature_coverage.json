@@ -731,9 +731,10 @@
     {
       "id": "control_flow.runtime_loop",
       "area": "control_flow",
-      "behavior": "Runtime-bound loop over slice executes correct iteration count",
+      "behavior": "Runtime loops execute correct iteration counts and suppress every remaining body statement after break or continue in while and for forms",
       "specs": [
-        "tests/conformance/properties.zig#sum_slice"
+        "tests/conformance/properties.zig#sum_slice",
+        "tests/conformance/loop_control_suffix.spec.toml"
       ]
     },
     {
