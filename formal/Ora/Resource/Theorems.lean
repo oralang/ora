@@ -68,8 +68,8 @@ theorem move_source_sufficient_self_insufficient_counterexample :
 theorem source_sufficient_of_move
     (s : State P) (source destination : P) (x : Carrier)
     (hGuard : moveSourceSufficient s source destination x) :
-    sourceSufficient s source x := by
-  exact hGuard
+    sourceSufficient s source x :=
+  hGuard
 
 theorem destination_no_overflow_of_move_distinct
     (s : State P) (source destination : P) (x : Carrier)

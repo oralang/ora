@@ -172,11 +172,9 @@ theorem safety_holds_on_reachable_edges
 theorem verified_of_induction
     (vc : LoopVC State)
     (proof : vc.InductionObligations) :
-    vc.Verified := by
-  exact ⟨
-    targets_hold_on_reachable_edges vc proof.base proof.backedge proof.exit,
-    safety_holds_on_reachable_edges vc proof.base proof.backedge proof.edgeSafety
-  ⟩
+    vc.Verified :=
+  ⟨targets_hold_on_reachable_edges vc proof.base proof.backedge proof.exit,
+    safety_holds_on_reachable_edges vc proof.base proof.backedge proof.edgeSafety⟩
 
 /-- A certified loop relation preserves the assertion attached to its exact
 control target.  This is the compositional seam for nested loops: consumers

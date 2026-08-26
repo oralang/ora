@@ -661,8 +661,8 @@ theorem safety_checkpoint_after_nonterminating_dependency
     (hNever : ∀ following, ¬ relation.holds before following) :
     safetyCheckpointHolds manifest base variables current [relation] checkpoint := by
   intro actualBefore checkpointEnv hActualBound hProduce
-  have hBefore : actualBefore = before := by
-    exact Option.some.inj (hActualBound.symm.trans hBound)
+  have hBefore : actualBefore = before :=
+    Option.some.inj (hActualBound.symm.trans hBound)
   subst actualBefore
   rw [hStage] at hProduce
   simp only [List.take, environmentRelationsProduce] at hProduce

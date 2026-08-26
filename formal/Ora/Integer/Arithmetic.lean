@@ -175,8 +175,8 @@ theorem signedLe_iff_toInt_le
 @[simp] theorem unsignedLe_refl
     {shape : IntegerShape}
     (value : Carrier shape) :
-    unsignedLe value value := by
-  exact Nat.le_refl _
+    unsignedLe value value :=
+  Nat.le_refl _
 
 @[simp] theorem signedLe_refl
     {shape : IntegerShape}
@@ -320,8 +320,8 @@ def Value.relation? (shape : IntegerShape)
     Value.binary? (.unsigned .w256) op
       { shape := .unsigned .w256, bits := lhs }
       { shape := .unsigned .w256, bits := rhs } =
-      some { shape := .unsigned .w256, bits := op lhs rhs } := by
-  exact Value.binary_sameShape (.unsigned .w256) op lhs rhs
+      some { shape := .unsigned .w256, bits := op lhs rhs } :=
+  Value.binary_sameShape (.unsigned .w256) op lhs rhs
 
 @[simp] theorem Value.relation_u256
     (relation : Carrier (.unsigned .w256) → Carrier (.unsigned .w256) → Prop)
@@ -329,8 +329,8 @@ def Value.relation? (shape : IntegerShape)
     Value.relation? (.unsigned .w256) relation
       { shape := .unsigned .w256, bits := lhs }
       { shape := .unsigned .w256, bits := rhs } =
-      some (relation lhs rhs) := by
-  exact Value.relation_sameShape (.unsigned .w256) relation lhs rhs
+      some (relation lhs rhs) :=
+  Value.relation_sameShape (.unsigned .w256) relation lhs rhs
 
 def checkedSafe
     (shape : IntegerShape)
