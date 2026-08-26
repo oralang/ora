@@ -62,6 +62,26 @@ def expected_noncompile_reason(source_name: str) -> str | None:
     return None
 
 
+def abnormal_process_failure(returncode: int) -> dict | None:
+    """Describe abnormal child termination as a measurement failure.
+
+    >>> abnormal_process_failure(-signal.SIGABRT)
+    {'measurement_failed': True, 'failure': 'census_tool_signal:SIGABRT'}
+    >>> abnormal_process_failure(1) is None
+    True
+    """
+    if returncode >= 0:
+        return None
+    try:
+        signal_name = signal.Signals(-returncode).name
+    except ValueError:
+        signal_name = str(-returncode)
+    return {
+        "measurement_failed": True,
+        "failure": f"census_tool_signal:{signal_name}",
+    }
+
+
 def run_source(tool: Path, source: Path, timeout: int) -> dict:
     try:
         proc = subprocess.run(
@@ -83,20 +103,9 @@ def run_source(tool: Path, source: Path, timeout: int) -> dict:
             "failure": f"census_tool_error:{exc}",
         }
     if proc.returncode != 0:
-        if proc.returncode < 0:
-            try:
-                signal_name = signal.Signals(-proc.returncode).name
-            except ValueError:
-                signal_name = str(-proc.returncode)
-            return {
-                "schema": "ora.loop_census.file.v2",
-                "schema_version": 2,
-                "source_file": str(source.resolve()),
-                "compiling": False,
-                "first_diagnostic": f"compiler_process_signal:{signal_name}",
-                "measurement_errors": [],
-                "loops": [],
-            }
+        abnormal = abnormal_process_failure(proc.returncode)
+        if abnormal is not None:
+            return abnormal
         return {
             "measurement_failed": True,
             "failure": f"census_tool_exit_{proc.returncode}",
@@ -320,6 +329,13 @@ def finalize_stratum(data: dict) -> None:
 
 
 def add_file(data: dict, source_name: str, result: dict, activation: dict | None) -> None:
+    """Add one result without allowing path conventions to hide tool failure.
+
+    >>> data = empty_stratum()
+    >>> add_file(data, "ora-example/negative/fail_probe.ora", {"measurement_failed": True, "failure": "census_tool_signal:SIGABRT"}, None)
+    >>> (data["summary"]["files_unmeasured"], data["summary"]["files_expected_noncompiling"], data["tool_failures"][0]["failure"])
+    (1, 0, 'census_tool_signal:SIGABRT')
+    """
     summary = data["summary"]
     summary["files_total"] += 1
     if result.get("measurement_failed", False):

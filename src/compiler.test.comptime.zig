@@ -149,6 +149,37 @@ test "compiler rejects conflicting inferred generic type arguments" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "could not infer generic type arguments"));
 }
 
+test "compiler rejects nested generic type parameter arguments without recursive HIR lowering" {
+    const source_text =
+        \\contract Test {
+        \\    fn id(comptime T: type, x: T) -> T {
+        \\        return x;
+        \\    }
+        \\
+        \\    fn passthrough(comptime T: type, x: T) -> T {
+        \\        return id(T, x);
+        \\    }
+        \\
+        \\    pub fn run(x: u256) -> u256 {
+        \\        return passthrough(u256, x);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 1), typecheck.diagnostics.items.items.len);
+    try testing.expect(diagnosticMessagesContain(
+        &typecheck.diagnostics,
+        "generic type parameter 'T' cannot be used as an explicit nested generic type argument",
+    ));
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.type_fallback_count > 0);
+}
+
 test "compiler rejects bounded generic calls for types without impl" {
     const source_text =
         \\trait Marker {

@@ -589,14 +589,31 @@ const Lowerer = struct {
     }
 
     pub fn substitutedType(self: *const Lowerer, name: []const u8) ?sema.Type {
-        for (self.active_type_bindings) |binding| {
-            if (!std.mem.eql(u8, binding.name, name)) continue;
-            switch (binding.value) {
-                .ty => |ty| return ty,
-                .integer => {},
+        var current_name = name;
+        var followed_binding = false;
+        var steps: usize = 0;
+        while (steps < self.active_type_bindings.len) : (steps += 1) {
+            var matched_type: ?sema.Type = null;
+            for (self.active_type_bindings) |binding| {
+                if (!std.mem.eql(u8, binding.name, current_name)) continue;
+                matched_type = switch (binding.value) {
+                    .ty => |ty| ty,
+                    .integer => return if (followed_binding) .{ .unknown = {} } else null,
+                };
+                break;
             }
+            const substituted = matched_type orelse return if (followed_binding)
+                .{ .named = .{ .name = current_name } }
+            else
+                null;
+            followed_binding = true;
+            if (substituted != .named) return substituted;
+            current_name = substituted.named.name;
         }
-        return null;
+        // A type-substitution chain may visit at most one entry per active
+        // binding. Reaching the bound means the chain is cyclic; preserve the
+        // fail-closed HIR fallback instead of recursing in lowerSemaType.
+        return if (followed_binding) .{ .unknown = {} } else null;
     }
 
     pub fn substitutedInteger(self: *const Lowerer, name: []const u8) ?[]const u8 {

@@ -1694,6 +1694,12 @@ pub fn build(b: *std.Build) void {
 
     // zig build measure-loop-census
     const loop_census_report_path = "zig-out/loop-census/report.json";
+    const loop_census_doctest_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "-m",
+        "doctest",
+        "scripts/measure-loop-census.py",
+    });
     const loop_census_cmd = b.addSystemCommand(&[_][]const u8{
         "python3",
         "scripts/measure-loop-census.py",
@@ -1711,6 +1717,7 @@ pub fn build(b: *std.Build) void {
         "zig-out/loop-census/formal-activation",
         "ora-example",
     });
+    loop_census_cmd.step.dependOn(&loop_census_doctest_cmd.step);
     const loop_census_step = b.step("measure-loop-census", "Measure all source loops and prepared loop queries");
     loop_census_step.dependOn(&loop_census_cmd.step);
 

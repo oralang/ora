@@ -3544,6 +3544,10 @@ const TypeChecker = struct {
 
                 try self.visitExpr(call.callee);
                 for (call.args) |arg| try self.visitExpr(arg);
+                if (try self.rejectUnsupportedNestedGenericTypeArgument(call)) {
+                    self.expr_types[expr_id.index()] = .{ .unknown = {} };
+                    return;
+                }
                 if (try self.stdStorageDeriveCall(call)) {
                     self.expr_types[expr_id.index()] = .{ .storage_slot = {} };
                     try self.checkStorageDeriveCallArguments(self.exprRange(expr_id), call.args, "std.storage.derive");
@@ -9986,6 +9990,36 @@ const TypeChecker = struct {
             } else null,
             else => null,
         };
+    }
+
+    fn rejectUnsupportedNestedGenericTypeArgument(self: *TypeChecker, call: ast.CallExpr) !bool {
+        const enclosing_item_id = self.current_function_item orelse return false;
+        const enclosing_function = switch (self.file.item(enclosing_item_id).*) {
+            .Function => |function| function,
+            else => return false,
+        };
+        if (!enclosing_function.is_generic) return false;
+
+        const callee_item_id = self.calleeFunctionItem(call.callee) orelse return false;
+        const callee_function = switch (self.file.item(callee_item_id).*) {
+            .Function => |function| function,
+            else => return false,
+        };
+        if (!callee_function.is_generic) return false;
+
+        const method_receiver_supplied = self.callSuppliesMethodReceiver(call.callee) and self.functionHasRuntimeSelf(callee_function);
+        var iter = generic_call_args.iterator(callee_function, call, .{ .skip_first_runtime_parameter = method_receiver_supplied });
+        while ((iter.next() catch return false)) |entry| {
+            if (entry.comptime_index == null or !self.isGenericTypeParameter(entry.parameter)) continue;
+            const parameter_name = self.genericTypeParameterNameForExpr(entry.arg) orelse continue;
+            try self.emitExprError(
+                entry.arg,
+                "generic type parameter '{s}' cannot be used as an explicit nested generic type argument",
+                .{parameter_name},
+            );
+            return true;
+        }
+        return false;
     }
 
     fn concreteTypeNameForExpr(self: *const TypeChecker, expr_id: ast.ExprId) ?[]const u8 {
