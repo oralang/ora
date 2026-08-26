@@ -557,8 +557,10 @@ def denoteControlTarget? : ControlTargetRow → Option ControlTarget
   | .successor => some .successor
   | .functionReturn => some .functionReturn
   | .errorReturn => some .errorReturn
-  | .explicitRevert => some .explicitRevert
-  | .unresolved => none
+  | .explicitRevert | .unresolved => none
+
+theorem explicit_revert_target_fails_closed :
+    denoteControlTarget? .explicitRevert = none := rfl
 
 abbrev SummaryResolver := Env → SummaryRow → Option (LoopVC ScalarLoopState)
 

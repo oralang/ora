@@ -10,7 +10,9 @@ const obligation_to_z3 = @import("obligation_to_z3.zig");
 const z3_verification = @import("ora_z3_verification");
 
 const shape_count = std.meta.fields(obligation_to_z3.CanonicalPromotionShape).len;
-const unpromoted_index = shape_count;
+const loop_vc_post_index = shape_count;
+const unpromoted_index = shape_count + 1;
+const bucket_count = shape_count + 2;
 
 const Bucket = struct {
     total: u32 = 0,
@@ -73,12 +75,32 @@ const HashErrorCounts = struct {
     }
 };
 
-fn shapeName(shape: ?obligation_to_z3.CanonicalPromotionShape) []const u8 {
+fn promotionShapeName(shape: ?obligation_to_z3.CanonicalPromotionShape) []const u8 {
     return if (shape) |value| @tagName(value) else "unpromoted";
 }
 
-fn bucketIndex(shape: ?obligation_to_z3.CanonicalPromotionShape) usize {
+fn promotionBucketIndex(shape: ?obligation_to_z3.CanonicalPromotionShape) usize {
     return if (shape) |value| @intFromEnum(value) else unpromoted_index;
+}
+
+fn measurementShapeName(
+    query: obligation.VerificationQuery,
+    shape: ?obligation_to_z3.CanonicalPromotionShape,
+) []const u8 {
+    return if (obligation_to_z3.queryIsCanonicalLoopPost(query))
+        "loop_vc_post"
+    else
+        promotionShapeName(shape);
+}
+
+fn measurementBucketIndex(
+    query: obligation.VerificationQuery,
+    shape: ?obligation_to_z3.CanonicalPromotionShape,
+) usize {
+    return if (obligation_to_z3.queryIsCanonicalLoopPost(query))
+        loop_vc_post_index
+    else
+        promotionBucketIndex(shape);
 }
 
 fn writeJsonString(writer: anytype, value: []const u8) !void {
@@ -126,29 +148,32 @@ fn writeSummary(writer: anytype, summary: Summary) !void {
 
 fn bumpUnavailable(
     summary: *Summary,
-    buckets: *[shape_count + 1]Bucket,
+    buckets: *[bucket_count]Bucket,
+    query: obligation.VerificationQuery,
     shape: ?obligation_to_z3.CanonicalPromotionShape,
 ) void {
     summary.unavailable +|= 1;
-    buckets[bucketIndex(shape)].unavailable +|= 1;
+    buckets[measurementBucketIndex(query, shape)].unavailable +|= 1;
 }
 
 fn bumpNoLiveRow(
     summary: *Summary,
-    buckets: *[shape_count + 1]Bucket,
+    buckets: *[bucket_count]Bucket,
+    query: obligation.VerificationQuery,
     shape: ?obligation_to_z3.CanonicalPromotionShape,
 ) void {
     summary.no_live_row +|= 1;
-    buckets[bucketIndex(shape)].no_live_row +|= 1;
+    buckets[measurementBucketIndex(query, shape)].no_live_row +|= 1;
 }
 
 fn bumpNotAnnotationPure(
     summary: *Summary,
-    buckets: *[shape_count + 1]Bucket,
+    buckets: *[bucket_count]Bucket,
+    query: obligation.VerificationQuery,
     shape: ?obligation_to_z3.CanonicalPromotionShape,
 ) void {
     summary.not_annotation_pure +|= 1;
-    buckets[bucketIndex(shape)].not_annotation_pure +|= 1;
+    buckets[measurementBucketIndex(query, shape)].not_annotation_pure +|= 1;
 }
 
 pub fn writeJson(
@@ -158,7 +183,7 @@ pub fn writeJson(
     set: obligation.ObligationSet,
 ) !void {
     var summary: Summary = .{};
-    var buckets: [shape_count + 1]Bucket = .{Bucket{}} ** (shape_count + 1);
+    var buckets: [bucket_count]Bucket = .{Bucket{}} ** bucket_count;
     var unsupported_reasons: UnsupportedReasonCounts = .{0} ** std.meta.fields(obligation_to_z3.CanonicalUnsupportedReason).len;
     var hash_errors = HashErrorCounts{ .allocator = allocator };
     defer hash_errors.deinit();
@@ -173,14 +198,17 @@ pub fn writeJson(
     var first_query = true;
     for (set.queries) |query| {
         const shape = obligation_to_z3.queryCanonicalPromotionShape(set, query);
-        const index = bucketIndex(shape);
-        const required = obligation_to_z3.queryCanonicalRequiredModePromoted(set, query);
+        const index = measurementBucketIndex(query, shape);
+        const shape_name = measurementShapeName(query, shape);
+        const required = obligation_to_z3.queryCanonicalMeasurementRequired(query) or
+            obligation_to_z3.queryCanonicalRequiredModePromoted(set, query);
 
         summary.queries +|= 1;
         buckets[index].total +|= 1;
         if (shape != null) summary.promoted +|= 1;
         if (required) summary.required +|= 1;
 
+        const is_loop_post = obligation_to_z3.queryIsCanonicalLoopPost(query);
         const has_live_row = query.smtlib_hash != null;
         if (has_live_row) {
             summary.live_rows +|= 1;
@@ -192,16 +220,59 @@ pub fn writeJson(
         var canonical_hash: ?u64 = null;
         var canonical_constraint_count: ?u32 = null;
 
-        switch (obligation_to_z3.queryCanonicalSupport(set, query)) {
+        if (is_loop_post) {
+            if (!has_live_row) {
+                outcome = "no_live_row";
+                reason = "missing_live_prepared_row";
+                bumpNoLiveRow(&summary, &buckets, query, shape);
+            } else {
+                if (canonical_context == null) {
+                    canonical_context = try z3_verification.Z3Context.init(allocator);
+                }
+                var adapter = obligation_to_z3.Adapter.init(&canonical_context.?, allocator, set);
+                const canonical = adapter.loopQueryHashForRow(query) catch |err| {
+                    outcome = "unavailable";
+                    reason = @errorName(err);
+                    try hash_errors.add(reason.?);
+                    bumpUnavailable(&summary, &buckets, query, shape);
+                    if (!first_query) try writer.writeByte(',');
+                    first_query = false;
+                    try writeQueryRecord(
+                        writer,
+                        query,
+                        shape_name,
+                        required,
+                        outcome,
+                        reason,
+                        null,
+                        null,
+                    );
+                    continue;
+                };
+                canonical_hash = canonical.smtlib_hash;
+                canonical_constraint_count = canonical.constraint_count;
+                if (canonical.constraint_count == query.constraint_count and
+                    canonical.smtlib_hash == query.smtlib_hash.?)
+                {
+                    outcome = "match";
+                    summary.matched +|= 1;
+                    buckets[index].matched +|= 1;
+                } else {
+                    outcome = "mismatch";
+                    summary.mismatched +|= 1;
+                    buckets[index].mismatched +|= 1;
+                }
+            }
+        } else switch (obligation_to_z3.queryCanonicalSupport(set, query)) {
             .supported => {
                 if (!has_live_row) {
                     outcome = "no_live_row";
                     reason = "missing_live_prepared_row";
-                    bumpNoLiveRow(&summary, &buckets, shape);
+                    bumpNoLiveRow(&summary, &buckets, query, shape);
                 } else if (!query.canonical_smt_annotation_pure) {
                     outcome = "not_annotation_pure";
                     reason = "live_row_has_ambient_context";
-                    bumpNotAnnotationPure(&summary, &buckets, shape);
+                    bumpNotAnnotationPure(&summary, &buckets, query, shape);
                 } else {
                     if (canonical_context == null) {
                         canonical_context = try z3_verification.Z3Context.init(allocator);
@@ -211,13 +282,13 @@ pub fn writeJson(
                         outcome = "unavailable";
                         reason = @errorName(err);
                         try hash_errors.add(reason.?);
-                        bumpUnavailable(&summary, &buckets, shape);
+                        bumpUnavailable(&summary, &buckets, query, shape);
                         if (!first_query) try writer.writeByte(',');
                         first_query = false;
                         try writeQueryRecord(
                             writer,
                             query,
-                            shape,
+                            shape_name,
                             required,
                             outcome,
                             reason,
@@ -242,7 +313,7 @@ pub fn writeJson(
             .unsupported => |unsupported| {
                 reason = @tagName(unsupported);
                 unsupported_reasons[@intFromEnum(unsupported)] +|= 1;
-                bumpUnavailable(&summary, &buckets, shape);
+                bumpUnavailable(&summary, &buckets, query, shape);
             },
         }
 
@@ -251,7 +322,7 @@ pub fn writeJson(
         try writeQueryRecord(
             writer,
             query,
-            shape,
+            shape_name,
             required,
             outcome,
             reason,
@@ -273,6 +344,10 @@ pub fn writeJson(
         try writeBucket(writer, buckets[i]);
     }
     if (shape_count != 0) try writer.writeByte(',');
+    try writeJsonString(writer, "loop_vc_post");
+    try writer.writeByte(':');
+    try writeBucket(writer, buckets[loop_vc_post_index]);
+    try writer.writeByte(',');
     try writeJsonString(writer, "unpromoted");
     try writer.writeByte(':');
     try writeBucket(writer, buckets[unpromoted_index]);
@@ -298,7 +373,7 @@ pub fn writeJson(
 fn writeQueryRecord(
     writer: anytype,
     query: obligation.VerificationQuery,
-    shape: ?obligation_to_z3.CanonicalPromotionShape,
+    shape_name: []const u8,
     required: bool,
     outcome: []const u8,
     reason: ?[]const u8,
@@ -308,7 +383,7 @@ fn writeQueryRecord(
     try writer.print("{{\"id\":{d},\"kind\":", .{query.id});
     try writeJsonString(writer, @tagName(query.kind));
     try writer.writeAll(",\"shape\":");
-    try writeJsonString(writer, shapeName(shape));
+    try writeJsonString(writer, shape_name);
     try writer.print(",\"required\":{},\"outcome\":", .{required});
     try writeJsonString(writer, outcome);
     try writer.writeAll(",\"annotation_pure\":");
@@ -351,6 +426,30 @@ test "canonical Z3 measurement writes empty report" {
     try std.testing.expect(std.mem.indexOf(u8, actual, "\"schema\":\"ora.canonical_z3.measure.v1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, actual, "\"queries\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, actual, "\"unpromoted\"") != null);
+}
+
+test "canonical Z3 measurement pins required LoopVC post class" {
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "count" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .backend = .z3,
+        .kind = .loop_invariant_post,
+        .loop_summary_id = 7,
+    }};
+
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    try writeJson(&out.writer, std.testing.allocator, "loop.ora", .{ .queries = &queries });
+    const actual = try out.toOwnedSlice();
+    defer std.testing.allocator.free(actual);
+
+    try std.testing.expect(std.mem.indexOf(u8, actual, "\"kind\":\"loop_invariant_post\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, actual, "\"shape\":\"loop_vc_post\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, actual, "\"required\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, actual, "\"outcome\":\"no_live_row\"") != null);
 }
 
 test "canonical Z3 measurement reports non annotation pure live rows" {

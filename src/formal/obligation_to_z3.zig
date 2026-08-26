@@ -23,6 +23,8 @@ pub const queryCanonicalSupport = canonical_support.queryCanonicalSupport;
 pub const queryCanonicalPromotionShape = canonical_support.queryCanonicalPromotionShape;
 pub const queryCanonicalRequiredModePromoted = canonical_support.queryCanonicalRequiredModePromoted;
 pub const queryCanonicalCrosscheckRequiredByPolicy = canonical_support.queryCanonicalCrosscheckRequiredByPolicy;
+pub const queryIsCanonicalLoopPost = canonical_support.queryIsCanonicalLoopPost;
+pub const queryCanonicalMeasurementRequired = canonical_support.queryCanonicalMeasurementRequired;
 
 comptime {
     _ = canonical_types;

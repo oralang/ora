@@ -1734,10 +1734,13 @@ pub fn build(b: *std.Build) void {
         "--fail-required",
         "--min-required",
         "10",
+        "--require-kind",
+        "loop_invariant_post",
         "--ora",
     });
     canonical_z3_required_cmd.addArtifactArg(exe);
     canonical_z3_required_cmd.addArg("ora-example/formal");
+    canonical_z3_required_cmd.addArg("tests/formal/scalar_loop_post.ora");
     const check_canonical_z3_required_step = b.step("check-canonical-z3-required", "Gate required canonical SMT hash rows on the formal corpus");
     check_canonical_z3_required_step.dependOn(&canonical_z3_required_cmd.step);
 

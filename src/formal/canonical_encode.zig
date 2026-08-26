@@ -97,6 +97,19 @@ pub const Adapter = struct {
     /// Checks one of the canonical LoopVC obligations. These constraints are
     /// built from `LoopSummaryRow`; they do not reconstruct loop semantics from
     /// verifier annotations or source syntax.
+    pub fn loopQueryHashForRow(
+        self: *Adapter,
+        query: obligation.VerificationQuery,
+    ) EncodeError!QueryHash {
+        try self.set.validateTermReferences();
+        try self.set.validateIdReferences();
+
+        var constraints: std.ArrayList(z3.Z3_ast) = .empty;
+        defer constraints.deinit(self.allocator);
+        try self.appendLoopQueryConstraints(&constraints, query);
+        return self.loopQueryHash(constraints.items, query.solver_logic);
+    }
+
     pub fn checkLoopQueryForRow(
         self: *Adapter,
         query: obligation.VerificationQuery,
@@ -108,10 +121,7 @@ pub const Adapter = struct {
         defer constraints.deinit(self.allocator);
         try self.appendLoopQueryConstraints(&constraints, query);
 
-        const query_hash: QueryHash = .{
-            .constraint_count = std.math.cast(u32, constraints.items.len) orelse return error.Overflow,
-            .smtlib_hash = try self.hashConstraints(constraints.items, query.solver_logic),
-        };
+        const query_hash = try self.loopQueryHash(constraints.items, query.solver_logic);
         var solver = try Solver.init(self.context, self.allocator);
         defer solver.deinit();
         for (constraints.items) |constraint| try solver.assertChecked(constraint);
@@ -121,6 +131,17 @@ pub const Adapter = struct {
             else => .unknown,
         };
         return .{ .status = status, .query_hash = query_hash };
+    }
+
+    fn loopQueryHash(
+        self: *Adapter,
+        constraints: []const z3.Z3_ast,
+        solver_logic: obligation.VerificationSolverLogic,
+    ) EncodeError!QueryHash {
+        return .{
+            .constraint_count = std.math.cast(u32, constraints.len) orelse return error.Overflow,
+            .smtlib_hash = try self.hashConstraints(constraints, solver_logic),
+        };
     }
 
     fn checkQueryRow(self: *Adapter, query: obligation.VerificationQuery) EncodeError!CheckStatus {
@@ -216,7 +237,7 @@ pub const Adapter = struct {
                 try self.appendFormulaPremises(constraints, edge.path_formulas);
 
                 if (query.kind == .loop_body_safety) {
-                    const goal = try self.encodeLoopSafetyCheckpoints(constraints, edge);
+                    const goal = try self.encodeLoopSafetyCheckpoints(edge);
                     try self.appendNegatedGoal(constraints, goal);
                     return;
                 }
@@ -389,7 +410,6 @@ pub const Adapter = struct {
 
     fn encodeLoopSafetyCheckpoints(
         self: *Adapter,
-        constraints: *std.ArrayList(z3.Z3_ast),
         edge: obligation.LoopEdgeRow,
     ) EncodeError!z3.Z3_ast {
         var result = z3.Z3_mk_true(self.context.ctx);
@@ -444,7 +464,6 @@ pub const Adapter = struct {
             );
             try self.context.checkNoError();
         }
-        _ = constraints;
         return result;
     }
 

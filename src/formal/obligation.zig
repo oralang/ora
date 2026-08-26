@@ -64,7 +64,8 @@ pub const ObligationSet = struct {
                     return .{ .blocked = .lean_required_failure };
                 }
             } else {
-                if (self.hasSuccessfulLeanProofForQuery(query)) continue;
+                const is_loop_owned_z3 = query.backend == .z3 and query.loop_summary_id != null;
+                if (!is_loop_owned_z3 and self.hasSuccessfulLeanProofForQuery(query)) continue;
                 return .{ .blocked = if (query.backend == .lean or query.proof_requirement == .lean_certificate)
                     .lean_required_failure
                 else
@@ -2642,6 +2643,16 @@ test "loop induction certificate is independent and cannot override a failed Z3 
         .loop_summaries = &summaries,
         .proof_artifacts = &artifacts,
         .queries = &.{ induction_target, unknown_z3_query, lean_query, forged_lean_override },
+    }).artifactDecision());
+
+    var missing_z3_query = z3_query;
+    missing_z3_query.result = null;
+    try expectArtifactBlocked(.missing_proof, (ObligationSet{
+        .terms = &.{.{ .bool_lit = true }},
+        .obligations = &obligations,
+        .loop_summaries = &summaries,
+        .proof_artifacts = &artifacts,
+        .queries = &.{ induction_target, missing_z3_query, lean_query, forged_lean_override },
     }).artifactDecision());
 
     var degraded_z3_query = unknown_z3_query;

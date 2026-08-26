@@ -105,6 +105,8 @@ def aggregate_measurement(aggregate: dict, source: Path, data: dict, returncode:
     for query in data.get("queries", []):
         outcome = query.get("outcome", "unknown")
         aggregate["outcomes"][outcome] += 1
+        if query.get("required") is True:
+            aggregate["required_by_kind"][query.get("kind", "unknown")] += 1
         if query.get("required") is True and outcome != "match":
             aggregate["required_failures"].append({
                 "source": str(source),
@@ -123,6 +125,9 @@ def print_summary(aggregate: dict) -> None:
     print(f"  failed without measure:   {len(aggregate['failures'])}")
     print(f"  queries measured:         {aggregate['queries']}")
     print(f"  required rows:            {aggregate['required']}")
+    if aggregate["required_by_kind"]:
+        for kind, count in sorted(aggregate["required_by_kind"].items()):
+            print(f"    {kind:<24} {count}")
     print()
 
     print("per-shape counts")
@@ -181,6 +186,12 @@ def main() -> int:
     parser.add_argument("--limit", type=int, help="limit number of sources for smoke runs")
     parser.add_argument("--fail-required", action="store_true", help="fail if any required canonical row does not match")
     parser.add_argument("--min-required", type=int, default=0, help="minimum required rows expected when --fail-required is set")
+    parser.add_argument(
+        "--require-kind",
+        action="append",
+        default=[],
+        help="require at least one required row of this query kind (repeatable)",
+    )
     args = parser.parse_args()
 
     ora = Path(args.ora)
@@ -205,6 +216,7 @@ def main() -> int:
         "measured_after_failure": 0,
         "queries": 0,
         "required": 0,
+        "required_by_kind": Counter(),
         "shapes": defaultdict(zero_counts),
         "unsupported_reasons": Counter(),
         "hash_errors": Counter(),
@@ -241,6 +253,7 @@ def main() -> int:
         "unsupported_reasons": dict(aggregate["unsupported_reasons"]),
         "hash_errors": dict(aggregate["hash_errors"]),
         "outcomes": dict(aggregate["outcomes"]),
+        "required_by_kind": dict(aggregate["required_by_kind"]),
     }
     print_summary(serializable)
 
@@ -262,6 +275,10 @@ def main() -> int:
                 file=sys.stderr,
             )
             failed = True
+        for kind in args.require_kind:
+            if serializable["required_by_kind"].get(kind, 0) == 0:
+                print(f"error: no required canonical rows of kind {kind}", file=sys.stderr)
+                failed = True
         if serializable["required_failures"]:
             print(
                 f"error: {len(serializable['required_failures'])} required canonical rows did not match",

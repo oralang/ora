@@ -74,6 +74,20 @@ pub fn queryCanonicalCrosscheckRequiredByPolicy(
     return policy.required_mode and policy.rollout_enabled;
 }
 
+/// Canonical LoopVC post rows are compiler-owned Z3 queries, not annotation
+/// promotion candidates. They have a separate required measurement class so
+/// they cannot silently disappear behind `unsupported_query_kind`.
+pub fn queryIsCanonicalLoopPost(query: obligation.VerificationQuery) bool {
+    return query.backend == .z3 and
+        query.kind == .loop_invariant_post and
+        query.loop_summary_id != null;
+}
+
+pub fn queryCanonicalMeasurementRequired(query: obligation.VerificationQuery) bool {
+    return queryIsCanonicalLoopPost(query) and
+        query.artifact_policy == .blocks_verified_artifacts;
+}
+
 const PromotionFeatures = struct {
     formula_count: u32 = 0,
     result_terms: u32 = 0,
@@ -864,4 +878,29 @@ test "canonical Z3 required promotion table covers every shape exactly once" {
     }
     for (seen) |item| try std.testing.expect(item);
     try std.testing.expectEqual(@as(usize, 1), rollout_count);
+}
+
+test "canonical LoopVC post rows are a distinct required measurement class" {
+    const base: obligation.VerificationQuery = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "count" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .backend = .z3,
+        .kind = .loop_invariant_post,
+        .loop_summary_id = 7,
+    };
+    try std.testing.expect(queryIsCanonicalLoopPost(base));
+    try std.testing.expect(queryCanonicalMeasurementRequired(base));
+
+    var diagnostic = base;
+    diagnostic.artifact_policy = .diagnostic_only;
+    try std.testing.expect(queryIsCanonicalLoopPost(diagnostic));
+    try std.testing.expect(!queryCanonicalMeasurementRequired(diagnostic));
+
+    var ordinary = base;
+    ordinary.kind = .obligation;
+    try std.testing.expect(!queryIsCanonicalLoopPost(ordinary));
+    try std.testing.expect(!queryCanonicalMeasurementRequired(ordinary));
 }
