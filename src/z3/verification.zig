@@ -1962,6 +1962,7 @@ pub const VerificationPass = struct {
                 self.encoded_annotations.items[annotation_index].verification_context = try self.getStringAttr(op, "ora.verification_context", &self.guard_id_storage);
             }
         } else if (std.mem.eql(u8, op_name, "ora.ensures")) {
+            if (self.sourceOpHasCanonicalLoopPostBinding(op)) return null;
             // extract ensures condition
             const num_operands = mlir.oraOperationGetNumOperands(op);
             if (num_operands >= 1) {
@@ -2026,7 +2027,9 @@ pub const VerificationPass = struct {
                 }
                 const ensures_attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate("ora.ensures", 11));
                 if (!mlir.oraAttributeIsNull(ensures_attr)) {
-                    _ = try self.recordEncodedAnnotation(op, .Ensures, condition_value, null);
+                    if (!self.sourceOpHasCanonicalLoopPostBinding(op)) {
+                        _ = try self.recordEncodedAnnotation(op, .Ensures, condition_value, null);
+                    }
                     tagged_assert = true;
                 }
                 if (!tagged_assert and self.verify_mode == .Full) {
@@ -2049,6 +2052,20 @@ pub const VerificationPass = struct {
             }
         }
         return null;
+    }
+
+    fn sourceOpHasCanonicalLoopPostBinding(
+        self: *const VerificationPass,
+        op: mlir.MlirOperation,
+    ) bool {
+        const source_op_id = sourceOpId(op) orelse return false;
+        for (self.formal_query_bindings) |binding| {
+            if (binding.source_op_id != source_op_id or binding.loop_source_op_id == null) continue;
+            if (!std.mem.eql(u8, binding.kind, "loop_invariant_post")) continue;
+            if (!optionalStringEqual(binding.logical_role, "ensures")) continue;
+            return true;
+        }
+        return false;
     }
 
     fn preserveControlConditionObligations(

@@ -102,6 +102,7 @@ pub const Adapter = struct {
         query: obligation.VerificationQuery,
     ) EncodeError!LoopQueryCheck {
         try self.set.validateTermReferences();
+        try self.set.validateIdReferences();
 
         var constraints: std.ArrayList(z3.Z3_ast) = .empty;
         defer constraints.deinit(self.allocator);
@@ -215,21 +216,26 @@ pub const Adapter = struct {
                 try self.appendFormulaPremises(constraints, edge.path_formulas);
 
                 if (query.kind == .loop_body_safety) {
-                    const goal = try self.encodeFormulaConjunction(constraints, edge.safety_formulas);
+                    const goal = try self.encodeLoopSafetyCheckpoints(constraints, edge);
                     try self.appendNegatedGoal(constraints, goal);
                     return;
                 }
 
-                try self.appendFormulaPremises(constraints, edge.safety_formulas);
-                const expected_target: obligation.LoopControlTarget = if (query.kind == .loop_invariant_step)
-                    .backedge
-                else
-                    .successor;
-                if (edge.target != expected_target) return error.InvalidLoopQuery;
-                const goal_formulas = if (query.kind == .loop_invariant_step)
-                    summary.invariant_formulas
-                else
-                    summary.post_formulas;
+                try self.appendLoopSummaryDependencyPremises(
+                    constraints,
+                    edge,
+                    edge.summary_dependencies.len,
+                );
+                try self.appendLoopSafetyCheckpointPremises(constraints, edge.safety_checkpoints);
+                const target = edge.target orelse return error.InvalidLoopQuery;
+                const goal_formulas = if (query.kind == .loop_invariant_step) blk: {
+                    if (target != .backedge) return error.InvalidLoopQuery;
+                    break :blk summary.invariant_formulas;
+                } else switch (target) {
+                    .successor => summary.post_formulas,
+                    .function_return, .error_return => edge.target_formulas,
+                    .backedge, .explicit_revert => return error.InvalidLoopQuery,
+                };
                 const goal = try self.encodeFormulaConjunction(constraints, goal_formulas);
                 const replacements = try self.encodeBindingValues(constraints, summary.variables, edge.next_state);
                 defer self.allocator.free(replacements);
@@ -237,6 +243,103 @@ pub const Adapter = struct {
                 try self.appendNegatedGoal(constraints, following_goal);
             },
             else => return error.InvalidLoopQuery,
+        }
+    }
+
+    fn appendLoopSummaryDependencyPremises(
+        self: *Adapter,
+        constraints: *std.ArrayList(z3.Z3_ast),
+        parent_edge: obligation.LoopEdgeRow,
+        dependency_count: usize,
+    ) EncodeError!void {
+        if (dependency_count > parent_edge.summary_dependencies.len) return error.InvalidLoopQuery;
+        for (parent_edge.summary_dependencies[0..dependency_count]) |dependency| {
+            const inner = obligation.findById(self.set.loop_summaries, dependency.summary_id) orelse
+                return error.UnknownLoopSummary;
+            if (!inner.projectionSupported()) return error.InvalidLoopQuery;
+            const exit_edge = uniqueLoopEdgeForTarget(inner, dependency.target) orelse
+                return error.InvalidLoopQuery;
+
+            // `initial` is existential in CertifiedControlRelation. Evaluating
+            // the exact init values retains their typing and checked-operation
+            // side conditions without inventing a relation to the exit state.
+            const initial_values = try self.encodeFormulaValues(constraints, inner.init_formulas);
+            self.allocator.free(initial_values);
+
+            const current_values = try self.allocator.alloc(z3.Z3_ast, inner.variables.len);
+            defer self.allocator.free(current_values);
+            for (inner.variables, current_values, 0..) |variable, *value, variable_index| {
+                const name = try std.fmt.allocPrint(
+                    self.allocator,
+                    "$ora.loop.dep.s{d}.d{d}.e{d}.v{d}.current",
+                    .{ dependency.summary_id, dependency.id, parent_edge.id, variable_index },
+                );
+                defer self.allocator.free(name);
+                value.* = try self.namedConst(
+                    name,
+                    try self.sortForType(try typeInfo(variable.ty)),
+                );
+            }
+
+            try self.appendSubstitutedLoopPremises(
+                constraints,
+                inner.variables,
+                current_values,
+                inner.invariant_formulas,
+            );
+            try self.appendSubstitutedLoopPremises(
+                constraints,
+                inner.variables,
+                current_values,
+                exit_edge.path_formulas,
+            );
+            try self.appendLoopSummaryDependencyPremises(
+                constraints,
+                exit_edge,
+                exit_edge.summary_dependencies.len,
+            );
+            try self.appendSubstitutedLoopSafetyCheckpointPremises(
+                constraints,
+                inner.variables,
+                current_values,
+                exit_edge.safety_checkpoints,
+            );
+
+            const raw_following = try self.encodeBindingValues(
+                constraints,
+                inner.variables,
+                exit_edge.next_state,
+            );
+            defer self.allocator.free(raw_following);
+            for (inner.variables, raw_following) |variable, raw_value| {
+                const following_value = try self.encodeFreeVariableIdentity(
+                    variable.id orelse return error.InvalidLoopQuery,
+                    variable.ty,
+                );
+                const substituted = try self.substituteLoopVariables(
+                    raw_value,
+                    inner.variables,
+                    current_values,
+                );
+                const equality = z3.Z3_mk_eq(self.context.ctx, following_value, substituted);
+                try self.context.checkNoError();
+                try constraints.append(self.allocator, equality);
+            }
+        }
+    }
+
+    fn appendSubstitutedLoopPremises(
+        self: *Adapter,
+        constraints: *std.ArrayList(z3.Z3_ast),
+        variables: []const obligation.LoopVariable,
+        replacements: []const z3.Z3_ast,
+        formulas: []const obligation.FormulaRef,
+    ) EncodeError!void {
+        for (formulas) |formula| {
+            const raw = try self.encodeFormula(formula);
+            try self.appendSideConstraints(constraints);
+            const substituted = try self.substituteLoopVariables(raw, variables, replacements);
+            try constraints.append(self.allocator, substituted);
         }
     }
 
@@ -282,6 +385,94 @@ pub const Adapter = struct {
             try self.context.checkNoError();
         }
         return result;
+    }
+
+    fn encodeLoopSafetyCheckpoints(
+        self: *Adapter,
+        constraints: *std.ArrayList(z3.Z3_ast),
+        edge: obligation.LoopEdgeRow,
+    ) EncodeError!z3.Z3_ast {
+        var result = z3.Z3_mk_true(self.context.ctx);
+        try self.context.checkNoError();
+        for (edge.safety_checkpoints) |checkpoint| {
+            const dependency_count = std.math.cast(usize, checkpoint.after_dependency_count) orelse
+                return error.Overflow;
+            var dependency_constraints: std.ArrayList(z3.Z3_ast) = .empty;
+            defer dependency_constraints.deinit(self.allocator);
+            try self.appendLoopSummaryDependencyPremises(
+                &dependency_constraints,
+                edge,
+                dependency_count,
+            );
+
+            var safety_side_constraints: std.ArrayList(z3.Z3_ast) = .empty;
+            defer safety_side_constraints.deinit(self.allocator);
+            const formula_goal = try self.encodeFormulaConjunction(
+                &safety_side_constraints,
+                checkpoint.formulas,
+            );
+            var checkpoint_goal = formula_goal;
+            for (safety_side_constraints.items) |side_constraint| {
+                checkpoint_goal = z3.Z3_mk_and(
+                    self.context.ctx,
+                    2,
+                    &[_]z3.Z3_ast{ checkpoint_goal, side_constraint },
+                );
+                try self.context.checkNoError();
+            }
+
+            var dependency_premise = z3.Z3_mk_true(self.context.ctx);
+            try self.context.checkNoError();
+            for (dependency_constraints.items) |premise| {
+                dependency_premise = z3.Z3_mk_and(
+                    self.context.ctx,
+                    2,
+                    &[_]z3.Z3_ast{ dependency_premise, premise },
+                );
+                try self.context.checkNoError();
+            }
+            const staged_goal = z3.Z3_mk_implies(
+                self.context.ctx,
+                dependency_premise,
+                checkpoint_goal,
+            );
+            try self.context.checkNoError();
+            result = z3.Z3_mk_and(
+                self.context.ctx,
+                2,
+                &[_]z3.Z3_ast{ result, staged_goal },
+            );
+            try self.context.checkNoError();
+        }
+        _ = constraints;
+        return result;
+    }
+
+    fn appendLoopSafetyCheckpointPremises(
+        self: *Adapter,
+        constraints: *std.ArrayList(z3.Z3_ast),
+        checkpoints: []const obligation.LoopSafetyCheckpoint,
+    ) EncodeError!void {
+        for (checkpoints) |checkpoint| {
+            try self.appendFormulaPremises(constraints, checkpoint.formulas);
+        }
+    }
+
+    fn appendSubstitutedLoopSafetyCheckpointPremises(
+        self: *Adapter,
+        constraints: *std.ArrayList(z3.Z3_ast),
+        variables: []const obligation.LoopVariable,
+        replacements: []const z3.Z3_ast,
+        checkpoints: []const obligation.LoopSafetyCheckpoint,
+    ) EncodeError!void {
+        for (checkpoints) |checkpoint| {
+            try self.appendSubstitutedLoopPremises(
+                constraints,
+                variables,
+                replacements,
+                checkpoint.formulas,
+            );
+        }
     }
 
     fn encodeFormulaValues(
@@ -1180,6 +1371,19 @@ fn findLoopEdge(
 ) ?obligation.LoopEdgeRow {
     for (summary.edges) |edge| if (edge.id == edge_id) return edge;
     return null;
+}
+
+fn uniqueLoopEdgeForTarget(
+    summary: obligation.LoopSummaryRow,
+    target: obligation.LoopControlTarget,
+) ?obligation.LoopEdgeRow {
+    var matched: ?obligation.LoopEdgeRow = null;
+    for (summary.edges) |edge| {
+        if (edge.target != target) continue;
+        if (matched != null) return null;
+        matched = edge;
+    }
+    return matched;
 }
 
 fn expectCanonicalSupported(set: obligation.ObligationSet, query: obligation.VerificationQuery) !void {

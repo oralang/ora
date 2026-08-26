@@ -251,6 +251,7 @@ pub fn collect(
     try collector.walkOperation(mlir.oraModuleGetOperation(module), null);
     try collector.addBaseQueriesForFunctionOwners();
     try collector.verifyResourceGoalCompleteness();
+    try bindLoopSummaryDependencyDigests(&collector);
     try armLeanLoopCertificateRequirements(&collector);
 
     const set: obligation.ObligationSet = .{
@@ -296,6 +297,7 @@ fn armLeanLoopCertificateRequirements(collector: *Collector) !void {
                         loop_query.proof_requirement = .lean_certificate;
                     }
                 }
+                try collector.armCanonicalLoopPostBindings(summary_id);
             },
             .unsupported => |reason| {
                 query.artifact_policy = .diagnostic_only;
@@ -310,11 +312,97 @@ fn armLeanLoopCertificateRequirements(collector: *Collector) !void {
     }
 }
 
+fn bindLoopSummaryDependencyDigests(collector: *Collector) !void {
+    // Parent summaries are collected before their nested children. Walking in
+    // reverse therefore binds the deepest summaries first and makes every
+    // parent digest include already-final child digests.
+    var summary_index = collector.loop_summaries.items.len;
+    while (summary_index > 0) {
+        summary_index -= 1;
+        const inner = collector.loop_summaries.items[summary_index];
+        if (!inner.projectionSupported()) continue;
+        const view: obligation.ObligationSet = .{
+            .terms = collector.terms.items,
+            .obligations = collector.obligations.items,
+            .assumptions = collector.assumptions.items,
+            .queries = collector.queries.items,
+            .loop_summaries = collector.loop_summaries.items,
+            .diagnostics = collector.diagnostics.items,
+        };
+        const digest = try obligation_to_lean.loopVcSha256(view, inner.id);
+        for (collector.loop_summaries.items[0..summary_index]) |*outer| {
+            var binds_inner = false;
+            for (outer.edges) |edge| for (edge.summary_dependencies) |dependency| {
+                if (dependency.summary_id == inner.id) binds_inner = true;
+            };
+            if (!binds_inner) continue;
+
+            const rebound_edges = try collector.allocator.dupe(obligation.LoopEdgeRow, outer.edges);
+            for (outer.edges, rebound_edges) |edge, *rebound_edge| {
+                var edge_binds_inner = false;
+                for (edge.summary_dependencies) |dependency| {
+                    if (dependency.summary_id == inner.id) edge_binds_inner = true;
+                }
+                if (!edge_binds_inner) continue;
+                const rebound_dependencies = try collector.allocator.dupe(
+                    obligation.LoopSummaryDependency,
+                    edge.summary_dependencies,
+                );
+                for (rebound_dependencies) |*dependency| {
+                    if (dependency.summary_id == inner.id) dependency.loop_vc_sha256 = digest;
+                }
+                rebound_edge.summary_dependencies = rebound_dependencies;
+            }
+            outer.edges = rebound_edges;
+        }
+    }
+}
+
 fn loopSummaryByIdMut(
     rows: []obligation.LoopSummaryRow,
     id: obligation.Id,
 ) ?*obligation.LoopSummaryRow {
     for (rows) |*row| if (row.id == id) return row;
+    return null;
+}
+
+fn verificationQueryByIdMut(
+    rows: []obligation.VerificationQuery,
+    id: obligation.Id,
+) ?*obligation.VerificationQuery {
+    for (rows) |*row| if (row.id == id) return row;
+    return null;
+}
+
+fn loopUniqueEdgeIdForTarget(
+    summary: obligation.LoopSummaryRow,
+    target: obligation.LoopControlTarget,
+) ?u32 {
+    var match: ?u32 = null;
+    for (summary.edges) |edge| {
+        if (edge.target != target) continue;
+        if (match != null) return null;
+        match = edge.id;
+    }
+    return match;
+}
+
+fn loopPostQueryForEdge(
+    queries: []const obligation.VerificationQuery,
+    summary: obligation.LoopSummaryRow,
+    edge_id: u32,
+) ?obligation.Id {
+    var post_index: usize = 0;
+    for (summary.edges) |edge| {
+        if (edge.target == .backedge) continue;
+        if (post_index >= summary.query_ids.post.len) return null;
+        const query_id = summary.query_ids.post[post_index];
+        post_index += 1;
+        if (edge.id != edge_id) continue;
+        const query = obligation.findById(queries, query_id) orelse return null;
+        if (query.kind != .loop_invariant_post or query.loop_edge_id != edge.id) return null;
+        return query_id;
+    }
     return null;
 }
 
@@ -337,10 +425,25 @@ const LoopSummaryDraft = struct {
     ordinal: u32 = 0,
     guard_formula: ?obligation.FormulaRef = null,
     safety_sites: []const LoopSafetySite = &.{},
+    target_sites: []const LoopTargetSite = &.{},
 };
 
 const LoopSafetySite = struct {
     op_id: usize,
+};
+
+const LoopTargetSite = struct {
+    op_id: usize,
+    structural_key: []const u8,
+    obligation_id: obligation.Id,
+};
+
+const CanonicalLoopPostBindingDraft = struct {
+    summary_id: obligation.Id,
+    edge_id: u32,
+    query_id: ?obligation.Id = null,
+    source_op_id: usize,
+    obligation_id: obligation.Id,
 };
 
 const max_loop_projection_paths: usize = 256;
@@ -356,8 +459,11 @@ const SemanticLoopPath = struct {
     formula_overrides: []const Collector.LoopFormulaOverride = &.{},
     source_overrides: []const LoopValueSource = &.{},
     state_source_keys: []const []const u8 = &.{},
-    safety_formulas: []const obligation.FormulaRef = &.{},
-    safety_keys: []const []const u8 = &.{},
+    safety_checkpoints: []const obligation.LoopSafetyCheckpoint = &.{},
+    target_formulas: []const obligation.FormulaRef = &.{},
+    target_keys: []const []const u8 = &.{},
+    summary_dependencies: []const obligation.LoopSummaryDependency = &.{},
+    summary_dependency_keys: []const []const u8 = &.{},
     effect_keys: []const []const u8 = &.{},
 };
 
@@ -365,11 +471,13 @@ const InventoryLoopPath = struct {
     key: []const u8,
     source_overrides: []const LoopValueSource = &.{},
     state_source_keys: []const []const u8 = &.{},
-    safety_keys: []const []const u8 = &.{},
+    safety_checkpoints: []const LoopSafetyCheckpointKey = &.{},
+    target_keys: []const []const u8 = &.{},
+    summary_dependency_keys: []const []const u8 = &.{},
     effect_keys: []const []const u8 = &.{},
 };
 
-const LoopControlKind = enum { break_loop, continue_loop };
+const LoopControlKind = enum { break_loop, continue_loop, function_return, error_return };
 
 const LoopControlMarker = struct {
     kind: LoopControlKind,
@@ -395,7 +503,9 @@ const InventoryLoopTerminal = struct {
 const ProjectedLoopEdge = struct {
     edge: obligation.LoopEdgeRow,
     terminator_key: []const u8,
-    safety_keys: []const []const u8,
+    safety_checkpoints: []const LoopSafetyCheckpointKey,
+    target_keys: []const []const u8 = &.{},
+    summary_dependency_keys: []const []const u8 = &.{},
     effect_keys: []const []const u8,
     state_source_keys: []const []const u8,
 };
@@ -405,9 +515,16 @@ const InventoryLoopEdge = struct {
     target: obligation.LoopControlTarget,
     terminator_key: []const u8,
     binding_source_keys: []const []const u8,
-    safety_keys: []const []const u8,
+    safety_checkpoints: []const LoopSafetyCheckpointKey,
+    target_keys: []const []const u8 = &.{},
+    summary_dependency_keys: []const []const u8 = &.{},
     effect_keys: []const []const u8,
     state_source_keys: []const []const u8,
+};
+
+const LoopSafetyCheckpointKey = struct {
+    structural_key: []const u8,
+    after_dependency_count: u32,
 };
 
 const Collector = struct {
@@ -422,6 +539,7 @@ const Collector = struct {
     active_loop_summary_indices: std.ArrayList(usize) = .empty,
     query_bindings: std.ArrayList(obligation.FormalQueryBinding) = .empty,
     source_fact_bindings: std.ArrayList(SourceFactOpBinding) = .empty,
+    canonical_loop_post_binding_drafts: std.ArrayList(CanonicalLoopPostBindingDraft) = .empty,
     runtime_owner_bindings: std.ArrayList(RuntimeOwnerBinding) = .empty,
     runtime_check_producers: std.ArrayList(RuntimeCheckProducer) = .empty,
     state_effect_producers: std.ArrayList(StateEffectProducer) = .empty,
@@ -730,7 +848,6 @@ const Collector = struct {
         if (body_facts.has_resource_operation) try appendLoopReason(&reasons, self.allocator, .loop_has_resource_operation);
         if (body_facts.has_break_or_continue) try appendLoopReason(&reasons, self.allocator, .loop_has_break_or_continue);
         if (body_facts.has_error_control_flow) try appendLoopReason(&reasons, self.allocator, .loop_has_error_control_flow);
-        if (body_facts.has_nested_loop) try appendLoopReason(&reasons, self.allocator, .loop_has_nested_loop);
 
         const id = self.next_loop_summary_id;
         self.next_loop_summary_id += 1;
@@ -776,6 +893,27 @@ const Collector = struct {
         if (formula == .origin_value) try self.appendLoopSummaryReason(summary, .loop_formula_unsupported);
     }
 
+    fn recordActiveLoopTargetSite(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        formula: obligation.FormulaRef,
+        obligation_id: obligation.Id,
+    ) !void {
+        if (self.active_loop_summary_indices.items.len == 0) return;
+        const summary_index = self.active_loop_summary_indices.items[self.active_loop_summary_indices.items.len - 1];
+        const summary = &self.loop_summaries.items[summary_index];
+        const draft = &self.loop_summary_drafts.items[summary_index];
+        const sites = try self.allocator.alloc(LoopTargetSite, draft.target_sites.len + 1);
+        @memcpy(sites[0..draft.target_sites.len], draft.target_sites);
+        sites[sites.len - 1] = .{
+            .op_id = @intFromPtr(op.ptr),
+            .structural_key = try self.operationStructuralKey(op, operationName(op)),
+            .obligation_id = obligation_id,
+        };
+        draft.target_sites = sites;
+        if (formula == .origin_value) try self.appendLoopSummaryReason(summary, .loop_formula_unsupported);
+    }
+
     fn appendLoopSummaryReason(
         self: *Collector,
         summary: *obligation.LoopSummaryRow,
@@ -786,6 +924,70 @@ const Collector = struct {
         @memcpy(reasons[0..summary.unsupported_reasons.len], summary.unsupported_reasons);
         reasons[reasons.len - 1] = reason;
         summary.unsupported_reasons = reasons;
+    }
+
+    fn armCanonicalLoopPostBindings(
+        self: *Collector,
+        summary_id: obligation.Id,
+    ) !void {
+        const summary = loopSummaryByIdMut(self.loop_summaries.items, summary_id) orelse
+            return error.InvalidLoopSummary;
+        const loop_source_op_id: usize = summary.loop_source_op_id orelse
+            return error.InvalidLoopSummary;
+
+        for (self.canonical_loop_post_binding_drafts.items) |draft| {
+            if (draft.summary_id != summary_id) continue;
+            const query_id = draft.query_id orelse loopPostQueryForEdge(
+                self.queries.items,
+                summary.*,
+                draft.edge_id,
+            ) orelse return error.MissingLoopPostQuery;
+            const query = verificationQueryByIdMut(self.queries.items, query_id) orelse
+                return error.MissingLoopPostQuery;
+            if (query.kind != .loop_invariant_post or query.loop_summary_id != summary_id) {
+                return error.InvalidLoopPostQuery;
+            }
+            query.obligation_ids = try appendIdUnique(
+                self.allocator,
+                query.obligation_ids,
+                draft.obligation_id,
+            );
+
+            const binding_obligation_ids = try self.allocator.alloc(obligation.Id, 1);
+            binding_obligation_ids[0] = draft.obligation_id;
+            try self.query_bindings.append(self.allocator, .{
+                .source_op_id = draft.source_op_id,
+                .loop_source_op_id = loop_source_op_id,
+                .kind = .loop_invariant_post,
+                .logical_role = .ensures,
+                .query_id = query_id,
+                .assumption_ids = query.assumption_ids,
+                .obligation_ids = binding_obligation_ids,
+            });
+
+            for (self.query_bindings.items) |binding| {
+                if (binding.source_op_id != draft.source_op_id or
+                    binding.kind != .obligation or
+                    binding.logical_role != .ensures) continue;
+                const generic_query = verificationQueryByIdMut(self.queries.items, binding.query_id) orelse
+                    return error.InvalidLoopPostQuery;
+                generic_query.artifact_policy = .diagnostic_only;
+            }
+
+            var source_binding_found = false;
+            for (self.source_fact_bindings.items) |*source_binding| {
+                if (source_binding.source_op_id != draft.source_op_id) continue;
+                if (source_binding_found) return error.DuplicateLoopPostSourceBinding;
+                source_binding_found = true;
+                source_binding.query_ids = try replaceGenericEnsuresQueryWithCanonical(
+                    self.allocator,
+                    self.queries.items,
+                    source_binding.query_ids,
+                    query_id,
+                );
+            }
+            if (!source_binding_found) return error.MissingLoopPostSourceBinding;
+        }
     }
 
     fn finalizeActiveLoopSummary(self: *Collector) !void {
@@ -848,6 +1050,10 @@ const Collector = struct {
                 summary.projection_completeness = .unsupported_effect;
                 return;
             },
+            error.LoopTargetFormulaTargetMismatch => {
+                summary.projection_completeness = .target_mismatch;
+                return;
+            },
             else => return err,
         };
         self.validateSemanticLoopControlManifest(control_manifest, semantic_terminals.items) catch |err| {
@@ -882,6 +1088,10 @@ const Collector = struct {
                 summary.projection_completeness = .unsupported_effect;
                 return;
             },
+            error.LoopTargetFormulaTargetMismatch => {
+                summary.projection_completeness = .target_mismatch;
+                return;
+            },
             else => return err,
         };
         self.validateInventoryLoopControlManifest(control_manifest, inventory_terminals.items) catch |err| {
@@ -892,13 +1102,27 @@ const Collector = struct {
         var projected: std.ArrayList(ProjectedLoopEdge) = .empty;
         defer projected.deinit(self.allocator);
         for (semantic_terminals.items) |terminal| {
-            try projected.append(self.allocator, try self.projectedTerminalEdge(summary, draft, terminal));
+            const edge = self.projectedTerminalEdge(summary, draft, terminal) catch |err| switch (err) {
+                error.LoopTargetFormulaTargetMismatch => {
+                    summary.projection_completeness = .target_mismatch;
+                    return;
+                },
+                else => return err,
+            };
+            try projected.append(self.allocator, edge);
         }
 
         var inventory: std.ArrayList(InventoryLoopEdge) = .empty;
         defer inventory.deinit(self.allocator);
         for (inventory_terminals.items) |terminal| {
-            try inventory.append(self.allocator, try self.inventoryTerminalEdge(summary, draft, terminal));
+            const edge = self.inventoryTerminalEdge(summary, draft, terminal) catch |err| switch (err) {
+                error.LoopTargetFormulaTargetMismatch => {
+                    summary.projection_completeness = .target_mismatch;
+                    return;
+                },
+                else => return err,
+            };
+            try inventory.append(self.allocator, edge);
         }
 
         const exit_bindings = try self.allocator.alloc(obligation.LoopStepAssignment, summary.variables.len);
@@ -936,7 +1160,8 @@ const Collector = struct {
                 .target = .successor,
             },
             .terminator_key = "guard/false-successor",
-            .safety_keys = &.{},
+            .safety_checkpoints = &.{},
+            .target_keys = &.{},
             .effect_keys = &.{},
             .state_source_keys = &.{},
         });
@@ -947,7 +1172,8 @@ const Collector = struct {
             .target = .successor,
             .terminator_key = "guard/false-successor",
             .binding_source_keys = exit_source_keys,
-            .safety_keys = &.{},
+            .safety_checkpoints = &.{},
+            .target_keys = &.{},
             .effect_keys = &.{},
             .state_source_keys = &.{},
         });
@@ -959,8 +1185,27 @@ const Collector = struct {
         for (projected.items, edges, 0..) |item, *edge, index| {
             edge.* = item.edge;
             edge.id = @intCast(index);
+            if (edge.target == .function_return or edge.target == .error_return) {
+                if (edge.target_formulas.len != item.target_keys.len) {
+                    summary.projection_completeness = .target_mismatch;
+                    return;
+                }
+                for (item.target_keys) |target_key| {
+                    const site = loopTargetSiteForStructuralKey(draft, target_key) orelse {
+                        summary.projection_completeness = .target_mismatch;
+                        return;
+                    };
+                    try self.canonical_loop_post_binding_drafts.append(self.allocator, .{
+                        .summary_id = summary.id,
+                        .edge_id = edge.id,
+                        .source_op_id = site.op_id,
+                        .obligation_id = site.obligation_id,
+                    });
+                }
+            }
             if (formulasContainOriginValue(edge.path_formulas) or
-                formulasContainOriginValue(edge.safety_formulas) or
+                safetyCheckpointsContainOriginValue(edge.safety_checkpoints) or
+                formulasContainOriginValue(edge.target_formulas) or
                 stepAssignmentsContainOriginValue(edge.next_state))
             {
                 try self.appendLoopSummaryReason(summary, .loop_formula_unsupported);
@@ -970,7 +1215,7 @@ const Collector = struct {
             }
             if (edge.target == .backedge and
                 self.stepAssignmentsRequireSafety(edge.next_state) and
-                edge.safety_formulas.len == 0)
+                loopSafetyFormulaCount(edge.safety_checkpoints) == 0)
             {
                 try self.appendLoopSummaryReason(summary, .loop_body_safety_missing);
             }
@@ -1016,7 +1261,8 @@ const Collector = struct {
                 return;
             }
             if (std.mem.eql(u8, name, "scf.while") or std.mem.eql(u8, name, "scf.for")) {
-                return error.UnsupportedLoopControlFlow;
+                path = try self.bindSemanticNestedLoop(op, path);
+                continue;
             }
             if (mlir.oraOperationGetNumRegions(op) != 0 or mlir.mlirOperationGetNumSuccessors(op) != 0) {
                 return error.UnsupportedLoopControlFlow;
@@ -1033,7 +1279,6 @@ const Collector = struct {
                 => return error.LoopProjectionEffectUnsupported,
                 else => return error.LoopProjectionEffectUnsupported,
             }
-
             if (draftHasSafetySite(draft, op)) {
                 if (mlir.oraOperationGetNumOperands(op) == 0) return error.LoopProjectionEffectUnsupported;
                 const formula = try self.loopFormulaFromValueWithOverrides(
@@ -1044,8 +1289,29 @@ const Collector = struct {
                     draft.ordinal,
                     0,
                 );
-                path.safety_formulas = try appendFormula(self.allocator, path.safety_formulas, formula);
-                path.safety_keys = try appendString(self.allocator, path.safety_keys, effect_key);
+                path.safety_checkpoints = try appendLoopSafetyCheckpoint(
+                    self.allocator,
+                    path.safety_checkpoints,
+                    .{
+                        .id = @intCast(path.safety_checkpoints.len),
+                        .structural_key = effect_key,
+                        .after_dependency_count = @intCast(path.summary_dependencies.len),
+                        .formulas = try self.allocator.dupe(obligation.FormulaRef, &.{formula}),
+                    },
+                );
+            }
+            if (draftHasTargetSite(draft, op)) {
+                if (mlir.oraOperationGetNumOperands(op) == 0) return error.LoopProjectionEffectUnsupported;
+                const formula = try self.loopFormulaFromValueWithOverrides(
+                    mlir.oraOperationGetOperand(op, 0),
+                    path.formula_overrides,
+                    name,
+                    draft.symbol,
+                    draft.ordinal,
+                    0,
+                );
+                path.target_formulas = try appendFormula(self.allocator, path.target_formulas, formula);
+                path.target_keys = try appendString(self.allocator, path.target_keys, effect_key);
             }
         }
         return error.UnsupportedLoopControlFlow;
@@ -1089,7 +1355,8 @@ const Collector = struct {
                 return;
             }
             if (std.mem.eql(u8, name, "scf.while") or std.mem.eql(u8, name, "scf.for")) {
-                return error.UnsupportedLoopControlFlow;
+                path = try self.bindInventoryNestedLoop(op, path);
+                continue;
             }
             if (mlir.oraOperationGetNumRegions(op) != 0 or mlir.mlirOperationGetNumSuccessors(op) != 0) {
                 return error.UnsupportedLoopControlFlow;
@@ -1107,7 +1374,17 @@ const Collector = struct {
                 else => return error.LoopProjectionEffectUnsupported,
             }
             if (isLoopSafetyOperation(op, name)) {
-                path.safety_keys = try appendString(self.allocator, path.safety_keys, effect_key);
+                path.safety_checkpoints = try appendLoopSafetyCheckpointKey(
+                    self.allocator,
+                    path.safety_checkpoints,
+                    .{
+                        .structural_key = effect_key,
+                        .after_dependency_count = @intCast(path.summary_dependency_keys.len),
+                    },
+                );
+            }
+            if (isLoopTargetOperation(op, name)) {
+                path.target_keys = try appendString(self.allocator, path.target_keys, effect_key);
             }
         }
         return error.UnsupportedLoopControlFlow;
@@ -1125,11 +1402,7 @@ const Collector = struct {
             const kind_text = parts.next() orelse return error.LoopControlMarkerMalformed;
             const source_text = parts.next() orelse return error.LoopControlMarkerMalformed;
             if (parts.next() != null or source_text.len == 0) return error.LoopControlMarkerMalformed;
-            const kind: LoopControlKind = if (std.mem.eql(u8, kind_text, "break"))
-                .break_loop
-            else if (std.mem.eql(u8, kind_text, "continue"))
-                .continue_loop
-            else
+            const kind: LoopControlKind = loopControlKindFromText(kind_text) orelse
                 return error.LoopControlMarkerMalformed;
             const source_id = std.fmt.parseInt(u32, source_text, 10) catch
                 return error.LoopControlMarkerMalformed;
@@ -1141,7 +1414,7 @@ const Collector = struct {
             entry.* = .{
                 .kind = kind,
                 .source_statement_id = source_id,
-                .target = if (kind == .break_loop) .successor else .backedge,
+                .target = loopControlTarget(kind),
                 .marker_key = "",
             };
         }
@@ -1158,11 +1431,7 @@ const Collector = struct {
     ) !void {
         if (terminals.items.len >= max_loop_projection_paths) return error.LoopProjectionPathLimitExceeded;
         const kind_text = (try self.stringAttr(op, "kind")) orelse return error.LoopControlMarkerMalformed;
-        const kind: LoopControlKind = if (std.mem.eql(u8, kind_text, "break"))
-            .break_loop
-        else if (std.mem.eql(u8, kind_text, "continue"))
-            .continue_loop
-        else
+        const kind: LoopControlKind = loopControlKindFromText(kind_text) orelse
             return error.LoopControlMarkerMalformed;
         const source_id = self.u32Attr(op, "source_control_id") catch
             return error.LoopControlMarkerMalformed;
@@ -1193,7 +1462,7 @@ const Collector = struct {
             .control = .{
                 .kind = kind,
                 .source_statement_id = source_statement_id,
-                .target = if (kind == .break_loop) .successor else .backedge,
+                .target = loopControlTarget(kind),
                 .marker_key = marker_key,
             },
         });
@@ -1209,11 +1478,7 @@ const Collector = struct {
     ) !void {
         if (terminals.items.len >= max_loop_projection_paths) return error.LoopProjectionPathLimitExceeded;
         const kind_view = stringAttrView(op, "kind") orelse return error.LoopControlMarkerMalformed;
-        const kind: LoopControlKind = if (std.mem.eql(u8, kind_view.slice(), "break"))
-            .break_loop
-        else if (std.mem.eql(u8, kind_view.slice(), "continue"))
-            .continue_loop
-        else
+        const kind: LoopControlKind = loopControlKindFromText(kind_view.slice()) orelse
             return error.LoopControlMarkerMalformed;
         const source_attr = mlir.oraOperationGetAttributeByName(op, strRef("source_control_id"));
         const target_attr = mlir.oraOperationGetAttributeByName(op, strRef("target_loop_source_id"));
@@ -1252,7 +1517,7 @@ const Collector = struct {
             .control = .{
                 .kind = kind,
                 .source_statement_id = source_statement_id,
-                .target = if (kind == .break_loop) .successor else .backedge,
+                .target = loopControlTarget(kind),
                 .marker_key = marker_key,
             },
         });
@@ -1648,6 +1913,137 @@ const Collector = struct {
         return path;
     }
 
+    fn nestedLoopSummaryForOperation(
+        self: *Collector,
+        op: mlir.MlirOperation,
+    ) ?obligation.LoopSummaryRow {
+        for (self.loop_summary_drafts.items, self.loop_summaries.items) |candidate, summary| {
+            if (candidate.loop_op.ptr == op.ptr) return summary;
+        }
+        return null;
+    }
+
+    fn nestedLoopHasOnlySuccessorExit(summary: obligation.LoopSummaryRow) bool {
+        var successor_count: usize = 0;
+        for (summary.edges) |edge| switch (edge.target orelse return false) {
+            .backedge => {},
+            .successor => successor_count += 1,
+            .function_return, .error_return, .explicit_revert => return false,
+        };
+        return successor_count == 1;
+    }
+
+    fn bindSemanticNestedLoop(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        initial: SemanticLoopPath,
+    ) !SemanticLoopPath {
+        const inner = self.nestedLoopSummaryForOperation(op) orelse
+            return error.UnsupportedLoopControlFlow;
+        if (!inner.projectionSupported() or !nestedLoopHasOnlySuccessorExit(inner)) {
+            return error.UnsupportedLoopControlFlow;
+        }
+        const result_count: usize = @intCast(mlir.oraOperationGetNumResults(op));
+        const variable_start: usize = @intFromBool(inner.loop_kind == .scf_for);
+        if (result_count + variable_start != inner.variables.len) {
+            return error.UnsupportedLoopControlFlow;
+        }
+
+        var path = initial;
+        const dependency_key = try self.operationStructuralKey(op, operationName(op));
+        path.summary_dependencies = try appendLoopSummaryDependency(
+            self.allocator,
+            path.summary_dependencies,
+            .{
+                .id = @intCast(path.summary_dependencies.len),
+                .structural_key = dependency_key,
+                .summary_id = inner.id,
+                .loop_vc_sha256 = [_]u8{0} ** 32,
+                .target = .successor,
+            },
+        );
+        path.summary_dependency_keys = try appendString(
+            self.allocator,
+            path.summary_dependency_keys,
+            dependency_key,
+        );
+        for (0..result_count) |result_index| {
+            const result = mlir.oraOperationGetResult(op, result_index);
+            const variable = inner.variables[variable_start + result_index];
+            const variable_id = variable.id orelse return error.UnsupportedLoopControlFlow;
+            const result_key = try self.directOperationResultKey(result);
+            const source_key = try std.fmt.allocPrint(
+                self.allocator,
+                "{s}/final-variable:{d}",
+                .{ dependency_key, variable.index },
+            );
+            path.state_source_keys = try appendString(
+                self.allocator,
+                path.state_source_keys,
+                try std.fmt.allocPrint(self.allocator, "{s}<-{s}", .{ result_key, source_key }),
+            );
+            path.source_overrides = try appendValueSource(self.allocator, path.source_overrides, .{
+                .value_id = @intFromPtr(result.ptr),
+                .key = source_key,
+            });
+            const variable_term = try self.addTerm(.{ .variable = .{ .free = .{
+                .id = variable_id,
+                .name = variable.name orelse "nested_loop_result",
+                .ty = variable.ty,
+            } } });
+            path.formula_overrides = try appendFormulaOverride(self.allocator, path.formula_overrides, .{
+                .value_id = @intFromPtr(result.ptr),
+                .formula = .{ .term = variable_term },
+            });
+        }
+        return path;
+    }
+
+    fn bindInventoryNestedLoop(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        initial: InventoryLoopPath,
+    ) !InventoryLoopPath {
+        const inner = self.nestedLoopSummaryForOperation(op) orelse
+            return error.UnsupportedLoopControlFlow;
+        if (!inner.projectionSupported() or !nestedLoopHasOnlySuccessorExit(inner)) {
+            return error.UnsupportedLoopControlFlow;
+        }
+        const result_count: usize = @intCast(mlir.oraOperationGetNumResults(op));
+        const variable_start: usize = @intFromBool(inner.loop_kind == .scf_for);
+        if (result_count + variable_start != inner.variables.len) {
+            return error.UnsupportedLoopControlFlow;
+        }
+
+        var path = initial;
+        const dependency_key = try self.operationStructuralKey(op, operationName(op));
+        path.summary_dependency_keys = try appendString(
+            self.allocator,
+            path.summary_dependency_keys,
+            dependency_key,
+        );
+        for (0..result_count) |result_index| {
+            const result = mlir.oraOperationGetResult(op, result_index);
+            const variable = inner.variables[variable_start + result_index];
+            const result_key = try self.directOperationResultKey(result);
+            const source_key = try std.fmt.allocPrint(
+                self.allocator,
+                "{s}/final-variable:{d}",
+                .{ dependency_key, variable.index },
+            );
+            path.state_source_keys = try appendString(
+                self.allocator,
+                path.state_source_keys,
+                try std.fmt.allocPrint(self.allocator, "{s}<-{s}", .{ result_key, source_key }),
+            );
+            path.source_overrides = try appendValueSource(self.allocator, path.source_overrides, .{
+                .value_id = @intFromPtr(result.ptr),
+                .key = source_key,
+            });
+        }
+        return path;
+    }
+
     fn projectedTerminalEdge(
         self: *Collector,
         summary: *const obligation.LoopSummaryRow,
@@ -1655,6 +2051,10 @@ const Collector = struct {
         terminal: SemanticLoopTerminal,
     ) !ProjectedLoopEdge {
         const target = if (terminal.control) |control| control.target else obligation.LoopControlTarget.backedge;
+        const is_return_target = target == .function_return or target == .error_return;
+        if (!is_return_target and terminal.path.target_keys.len != 0) {
+            return error.LoopTargetFormulaTargetMismatch;
+        }
         const complete_control_state = terminal.control != null;
         const implicit_induction_count: usize = @intFromBool(
             draft.loop_kind == .scf_for and !complete_control_state,
@@ -1736,7 +2136,7 @@ const Collector = struct {
                 "{s}/control:{s}:{d}",
                 .{
                     terminal.path.key,
-                    if (control.kind == .break_loop) "break" else "continue",
+                    loopControlKindText(control.kind),
                     control.source_statement_id,
                 },
             )
@@ -1749,12 +2149,19 @@ const Collector = struct {
                 .id = 0,
                 .structural_key = structural_key,
                 .path_formulas = terminal.path.path_formulas,
-                .safety_formulas = terminal.path.safety_formulas,
+                .safety_checkpoints = terminal.path.safety_checkpoints,
+                .summary_dependencies = terminal.path.summary_dependencies,
                 .next_state = assignments,
                 .target = target,
+                .target_formulas = if (is_return_target) terminal.path.target_formulas else &.{},
             },
             .terminator_key = terminal.terminator_key,
-            .safety_keys = terminal.path.safety_keys,
+            .safety_checkpoints = try safetyCheckpointKeysFromRows(
+                self.allocator,
+                terminal.path.safety_checkpoints,
+            ),
+            .target_keys = terminal.path.target_keys,
+            .summary_dependency_keys = terminal.path.summary_dependency_keys,
             .effect_keys = terminal.path.effect_keys,
             .state_source_keys = terminal.path.state_source_keys,
         };
@@ -1797,6 +2204,10 @@ const Collector = struct {
         terminal: InventoryLoopTerminal,
     ) !InventoryLoopEdge {
         const target = if (terminal.control) |control| control.target else obligation.LoopControlTarget.backedge;
+        const is_return_target = target == .function_return or target == .error_return;
+        if (!is_return_target and terminal.path.target_keys.len != 0) {
+            return error.LoopTargetFormulaTargetMismatch;
+        }
         const complete_control_state = terminal.control != null;
         const implicit_induction_count: usize = @intFromBool(
             draft.loop_kind == .scf_for and !complete_control_state,
@@ -1839,7 +2250,7 @@ const Collector = struct {
                 "{s}/control:{s}:{d}",
                 .{
                     terminal.path.key,
-                    if (control.kind == .break_loop) "break" else "continue",
+                    loopControlKindText(control.kind),
                     control.source_statement_id,
                 },
             )
@@ -1852,7 +2263,9 @@ const Collector = struct {
             .target = target,
             .terminator_key = terminal.terminator_key,
             .binding_source_keys = source_keys,
-            .safety_keys = terminal.path.safety_keys,
+            .safety_checkpoints = terminal.path.safety_checkpoints,
+            .target_keys = terminal.path.target_keys,
+            .summary_dependency_keys = terminal.path.summary_dependency_keys,
             .effect_keys = terminal.path.effect_keys,
             .state_source_keys = terminal.path.state_source_keys,
         };
@@ -2094,7 +2507,7 @@ const Collector = struct {
         const owner: obligation.Owner = .{ .function = .{
             .name = summary.owner.statement.function_name,
         } };
-        const assumption_ids = try self.assumptionIdsForOwner(owner);
+        const assumption_ids = try self.assumptionIdsForLoopOwner(owner);
 
         const base_query_id = self.nextId();
         try self.queries.append(self.allocator, .{
@@ -2965,7 +3378,8 @@ const Collector = struct {
             try self.addMissingFormulaDiagnostic(op_name, symbol, ordinal);
             return;
         };
-        const loop_post_formula = if (role == .ensures and self.functionHasLoopSummary(symbol)) blk: {
+        const is_loop_return_target = role == .ensures and self.active_loop_summary_indices.items.len != 0;
+        const loop_post_formula = if (role == .ensures and !is_loop_return_target and self.functionHasLoopSummary(symbol)) blk: {
             const previous_loop_projection = self.use_loop_value_bindings;
             self.use_loop_value_bindings = true;
             defer self.use_loop_value_bindings = previous_loop_projection;
@@ -2976,13 +3390,6 @@ const Collector = struct {
         const owner = self.ownerFor(symbol);
         const id = self.nextId();
         const source = try self.sourceForOperation(op);
-        if (role != .invariant and self.active_loop_summary_indices.items.len != 0) {
-            const body_formula = (try self.valueOperand(op, op_name, symbol, ordinal, 0)) orelse {
-                try self.addMissingFormulaDiagnostic(op_name, symbol, ordinal);
-                return;
-            };
-            try self.recordActiveLoopBodySafetySite(op, body_formula);
-        }
 
         try self.obligations.append(self.allocator, .{
             .id = id,
@@ -3003,9 +3410,25 @@ const Collector = struct {
             else
                 .blocks_verified_artifacts,
         });
+        if (role != .invariant and self.active_loop_summary_indices.items.len != 0) {
+            const body_formula = (try self.valueOperand(op, op_name, symbol, ordinal, 0)) orelse {
+                try self.addMissingFormulaDiagnostic(op_name, symbol, ordinal);
+                return;
+            };
+            if (role == .ensures) {
+                try self.recordActiveLoopTargetSite(op, body_formula, id);
+            } else {
+                try self.recordActiveLoopBodySafetySite(op, body_formula);
+            }
+        }
         try self.addQueryForOperation(.obligation, role, null, id, owner, origin, source, op);
         if (loop_post_formula) |post_formula| {
-            try self.attachLoopPostFormulas(owner, post_formula);
+            try self.attachLoopPostFormulas(
+                owner,
+                post_formula,
+                sourceOpId(op) orelse return error.MissingLoopPostSourceBinding,
+                id,
+            );
         }
     }
 
@@ -3022,6 +3445,8 @@ const Collector = struct {
         self: *Collector,
         owner: obligation.Owner,
         post_formula: obligation.FormulaRef,
+        source_op_id: usize,
+        obligation_id: obligation.Id,
     ) !void {
         if (owner != .function) return;
         for (self.loop_summaries.items) |*summary| {
@@ -3029,6 +3454,24 @@ const Collector = struct {
                 !std.mem.eql(u8, summary.owner.statement.function_name, owner.function.name)) continue;
             summary.post_formulas = try appendFormula(self.allocator, summary.post_formulas, post_formula);
             if (post_formula == .origin_value) try self.appendLoopSummaryReason(summary, .loop_formula_unsupported);
+            // Canonical post-query ownership is armed only for a complete,
+            // supported projection. Unsupported loops retain their generic
+            // postcondition query and their precise projection failure.
+            if (!summary.projectionSupported()) continue;
+            const successor_edge_id = loopUniqueEdgeIdForTarget(summary.*, .successor) orelse
+                return error.MissingLoopPostQuery;
+            const successor_query_id = loopPostQueryForEdge(
+                self.queries.items,
+                summary.*,
+                successor_edge_id,
+            ) orelse return error.MissingLoopPostQuery;
+            try self.canonical_loop_post_binding_drafts.append(self.allocator, .{
+                .summary_id = summary.id,
+                .edge_id = successor_edge_id,
+                .query_id = successor_query_id,
+                .source_op_id = source_op_id,
+                .obligation_id = obligation_id,
+            });
         }
     }
 
@@ -3576,6 +4019,23 @@ const Collector = struct {
         var index: usize = 0;
         for (self.assumptions.items) |item| {
             if (!ownerEqual(item.owner, owner)) continue;
+            ids[index] = item.id;
+            index += 1;
+        }
+        return ids;
+    }
+
+    fn assumptionIdsForLoopOwner(self: *Collector, owner: obligation.Owner) ![]const obligation.Id {
+        var count: usize = 0;
+        for (self.assumptions.items) |item| {
+            if (item.kind != .path_assume and ownerEqual(item.owner, owner)) count += 1;
+        }
+        if (count == 0) return &.{};
+
+        const ids = try self.allocator.alloc(obligation.Id, count);
+        var index: usize = 0;
+        for (self.assumptions.items) |item| {
+            if (item.kind == .path_assume or !ownerEqual(item.owner, owner)) continue;
             ids[index] = item.id;
             index += 1;
         }
@@ -5272,7 +5732,7 @@ fn collectLoopBodyFactsInBlock(block: mlir.MlirBlock, facts: *LoopBodyFacts) voi
     var child = mlir.oraBlockGetFirstOperation(block);
     while (!mlir.oraOperationIsNull(child)) : (child = mlir.oraOperationGetNextInBlock(child)) {
         const name = operationName(child);
-        if (std.mem.eql(u8, name, "ora.sstore") or std.mem.eql(u8, name, "ora.tstore")) facts.has_storage_write = true;
+        if (inventoryPersistentWriteOperation(child, name)) facts.has_storage_write = true;
         if (std.mem.eql(u8, name, "ora.sload") or std.mem.eql(u8, name, "ora.tload")) facts.has_storage_read = true;
         if (std.mem.eql(u8, name, "func.call") or std.mem.eql(u8, name, "ora.external_call")) facts.has_call = true;
         if (std.mem.eql(u8, name, "ora.external_call") or hasAttr(child, "ora.trusted_extern_frame")) facts.has_external_call = true;
@@ -5358,6 +5818,53 @@ fn appendFormulaOverride(
     return result;
 }
 
+fn appendLoopSummaryDependency(
+    allocator: std.mem.Allocator,
+    existing: []const obligation.LoopSummaryDependency,
+    value: obligation.LoopSummaryDependency,
+) ![]const obligation.LoopSummaryDependency {
+    const result = try allocator.alloc(obligation.LoopSummaryDependency, existing.len + 1);
+    @memcpy(result[0..existing.len], existing);
+    result[result.len - 1] = value;
+    return result;
+}
+
+fn appendLoopSafetyCheckpoint(
+    allocator: std.mem.Allocator,
+    existing: []const obligation.LoopSafetyCheckpoint,
+    value: obligation.LoopSafetyCheckpoint,
+) ![]const obligation.LoopSafetyCheckpoint {
+    const result = try allocator.alloc(obligation.LoopSafetyCheckpoint, existing.len + 1);
+    @memcpy(result[0..existing.len], existing);
+    result[result.len - 1] = value;
+    return result;
+}
+
+fn appendLoopSafetyCheckpointKey(
+    allocator: std.mem.Allocator,
+    existing: []const LoopSafetyCheckpointKey,
+    value: LoopSafetyCheckpointKey,
+) ![]const LoopSafetyCheckpointKey {
+    const result = try allocator.alloc(LoopSafetyCheckpointKey, existing.len + 1);
+    @memcpy(result[0..existing.len], existing);
+    result[result.len - 1] = value;
+    return result;
+}
+
+fn safetyCheckpointKeysFromRows(
+    allocator: std.mem.Allocator,
+    checkpoints: []const obligation.LoopSafetyCheckpoint,
+) ![]const LoopSafetyCheckpointKey {
+    const keys = try allocator.alloc(LoopSafetyCheckpointKey, checkpoints.len);
+    for (checkpoints, keys) |checkpoint, *key| {
+        key.* = .{
+            .structural_key = checkpoint.structural_key,
+            .after_dependency_count = checkpoint.after_dependency_count,
+        };
+    }
+    return keys;
+}
+
 fn compareLoopProjection(
     projected: []const ProjectedLoopEdge,
     inventory: []const InventoryLoopEdge,
@@ -5393,10 +5900,22 @@ fn compareLoopProjection(
         if (!stringSlicesEql(semantic.state_source_keys, structural.state_source_keys)) {
             return .binding_mismatch;
         }
-        if (!stringSlicesEql(semantic.safety_keys, structural.safety_keys) or
-            !stringSlicesEql(semantic.effect_keys, structural.effect_keys))
-        {
+        if (!safetyCheckpointKeysEql(
+            semantic.safety_checkpoints,
+            structural.safety_checkpoints,
+        ) or !stringSlicesEql(semantic.effect_keys, structural.effect_keys)) {
             return .effect_mismatch;
+        }
+        if (!stringSlicesEql(semantic.target_keys, structural.target_keys)) {
+            return .target_mismatch;
+        }
+        if (!stringSlicesEql(semantic.summary_dependency_keys, structural.summary_dependency_keys) or
+            semantic.edge.summary_dependencies.len != structural.summary_dependency_keys.len)
+        {
+            return .path_mismatch;
+        }
+        for (semantic.edge.summary_dependencies, structural.summary_dependency_keys) |dependency, key| {
+            if (!std.mem.eql(u8, dependency.structural_key, key)) return .path_mismatch;
         }
     }
     return .complete;
@@ -5480,13 +5999,61 @@ fn draftHasSafetySite(draft: LoopSummaryDraft, op: mlir.MlirOperation) bool {
     return false;
 }
 
+fn draftHasTargetSite(draft: LoopSummaryDraft, op: mlir.MlirOperation) bool {
+    const op_id = @intFromPtr(op.ptr);
+    for (draft.target_sites) |site| if (site.op_id == op_id) return true;
+    return false;
+}
+
+fn loopTargetSiteForStructuralKey(
+    draft: LoopSummaryDraft,
+    structural_key: []const u8,
+) ?LoopTargetSite {
+    for (draft.target_sites) |site| {
+        if (std.mem.eql(u8, site.structural_key, structural_key)) return site;
+    }
+    return null;
+}
+
+fn loopControlKindFromText(text: []const u8) ?LoopControlKind {
+    if (std.mem.eql(u8, text, "break")) return .break_loop;
+    if (std.mem.eql(u8, text, "continue")) return .continue_loop;
+    if (std.mem.eql(u8, text, "function_return")) return .function_return;
+    if (std.mem.eql(u8, text, "error_return")) return .error_return;
+    return null;
+}
+
+fn loopControlKindText(kind: LoopControlKind) []const u8 {
+    return switch (kind) {
+        .break_loop => "break",
+        .continue_loop => "continue",
+        .function_return => "function_return",
+        .error_return => "error_return",
+    };
+}
+
+fn loopControlTarget(kind: LoopControlKind) obligation.LoopControlTarget {
+    return switch (kind) {
+        .break_loop => .successor,
+        .continue_loop => .backedge,
+        .function_return => .function_return,
+        .error_return => .error_return,
+    };
+}
+
 fn isLoopSafetyOperation(op: mlir.MlirOperation, name: []const u8) bool {
     _ = op;
     const kind = op_kind_map.get(name) orelse return false;
     return switch (kind) {
-        .ensures, .assert, .cf_assert, .refinement_guard => true,
+        .assert, .cf_assert, .refinement_guard => true,
+        .ensures => false,
         .requires, .invariant, .assume, .resource_move, .resource_create, .resource_destroy, .quantifier => false,
     };
+}
+
+fn isLoopTargetOperation(op: mlir.MlirOperation, name: []const u8) bool {
+    _ = op;
+    return op_kind_map.get(name) == .ensures;
 }
 
 fn isRegionYield(name: []const u8) bool {
@@ -5560,9 +6127,83 @@ fn appendId(
     return result;
 }
 
+fn appendIdUnique(
+    allocator: std.mem.Allocator,
+    existing: []const obligation.Id,
+    value: obligation.Id,
+) ![]const obligation.Id {
+    for (existing) |item| if (item == value) return existing;
+    return appendId(allocator, existing, value);
+}
+
+fn replaceGenericEnsuresQueryWithCanonical(
+    allocator: std.mem.Allocator,
+    queries: []const obligation.VerificationQuery,
+    existing: []const obligation.Id,
+    canonical_query_id: obligation.Id,
+) ![]const obligation.Id {
+    var retained_count: usize = 0;
+    var canonical_present = false;
+    for (existing) |query_id| {
+        if (query_id == canonical_query_id) {
+            canonical_present = true;
+            retained_count += 1;
+            continue;
+        }
+        const query = obligation.findById(queries, query_id) orelse return error.InvalidLoopPostQuery;
+        if (query.kind == .obligation and query.logical_role == .ensures) continue;
+        retained_count += 1;
+    }
+    const result = try allocator.alloc(
+        obligation.Id,
+        retained_count + @intFromBool(!canonical_present),
+    );
+    var index: usize = 0;
+    for (existing) |query_id| {
+        if (query_id != canonical_query_id) {
+            const query = obligation.findById(queries, query_id) orelse return error.InvalidLoopPostQuery;
+            if (query.kind == .obligation and query.logical_role == .ensures) continue;
+        }
+        result[index] = query_id;
+        index += 1;
+    }
+    if (!canonical_present) result[index] = canonical_query_id;
+    return result;
+}
+
 fn formulasContainOriginValue(formulas: []const obligation.FormulaRef) bool {
     for (formulas) |formula| if (formula == .origin_value) return true;
     return false;
+}
+
+fn safetyCheckpointsContainOriginValue(
+    checkpoints: []const obligation.LoopSafetyCheckpoint,
+) bool {
+    for (checkpoints) |checkpoint| {
+        if (formulasContainOriginValue(checkpoint.formulas)) return true;
+    }
+    return false;
+}
+
+fn loopSafetyFormulaCount(checkpoints: []const obligation.LoopSafetyCheckpoint) usize {
+    var count: usize = 0;
+    for (checkpoints) |checkpoint| count += checkpoint.formulas.len;
+    return count;
+}
+
+fn safetyCheckpointKeysEql(
+    lhs: []const LoopSafetyCheckpointKey,
+    rhs: []const LoopSafetyCheckpointKey,
+) bool {
+    if (lhs.len != rhs.len) return false;
+    for (lhs, rhs) |left, right| {
+        if (left.after_dependency_count != right.after_dependency_count or
+            !std.mem.eql(u8, left.structural_key, right.structural_key))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 fn optionalFormulaIsOriginValue(formula: ?obligation.FormulaRef) bool {
@@ -5728,6 +6369,31 @@ fn placeIsDefinitelyDisjointFromAll(place: obligation.PlaceRef, writes: []const 
 
 fn isTransparentValueOp(op_name: []const u8) bool {
     return transparent_value_ops.has(op_name);
+}
+
+fn inventoryPersistentWriteOperation(op: mlir.MlirOperation, op_name: []const u8) bool {
+    return std.mem.eql(u8, op_name, "ora.sstore") or
+        std.mem.eql(u8, op_name, "ora.tstore") or
+        std.mem.eql(u8, op_name, "ora.map_store") or
+        std.mem.eql(u8, op_name, "ora.storage.word_store") or
+        (std.mem.eql(u8, op_name, "memref.store") and inventoryMemrefStoreTargetsPersistentRoot(op));
+}
+
+fn inventoryMemrefStoreTargetsPersistentRoot(op: mlir.MlirOperation) bool {
+    if (mlir.oraOperationGetNumOperands(op) < 2) return false;
+    var current = mlir.oraOperationGetOperand(op, 1);
+    var depth: u32 = 0;
+    while (depth <= 32) : (depth += 1) {
+        if (!mlir.oraValueIsAOpResult(current)) return false;
+        const owner = mlir.oraOpResultGetOwner(current);
+        if (mlir.oraOperationIsNull(owner)) return false;
+        const owner_name = operationName(owner);
+        if (std.mem.eql(u8, owner_name, "ora.sload")) return true;
+        if (!isTransparentValueOp(owner_name)) return false;
+        if (mlir.oraOperationGetNumOperands(owner) < 1) return false;
+        current = mlir.oraOperationGetOperand(owner, 0);
+    }
+    return false;
 }
 
 fn storageMapSourceOwner(value: mlir.MlirValue) ?mlir.MlirOperation {
@@ -5981,6 +6647,10 @@ test "independent loop inventory comparison fails closed by witness class" {
         .source_key = "module-op:7/result:0",
         .value = .{ .term = 0 },
     };
+    const safety_checkpoint = LoopSafetyCheckpointKey{
+        .structural_key = "op:6/ora.assert",
+        .after_dependency_count = 0,
+    };
     const semantic = ProjectedLoopEdge{
         .edge = .{
             .id = 0,
@@ -5989,7 +6659,7 @@ test "independent loop inventory comparison fails closed by witness class" {
             .target = .backedge,
         },
         .terminator_key = "op:8/scf.yield",
-        .safety_keys = &.{"op:6/ora.assert"},
+        .safety_checkpoints = &.{safety_checkpoint},
         .effect_keys = &.{"op:5/ora.sload"},
         .state_source_keys = &.{"module-op:4/result:0<-module-op:3/result:0"},
     };
@@ -5998,7 +6668,7 @@ test "independent loop inventory comparison fails closed by witness class" {
         .target = .backedge,
         .terminator_key = "op:8/scf.yield",
         .binding_source_keys = &.{"module-op:7/result:0"},
-        .safety_keys = &.{"op:6/ora.assert"},
+        .safety_checkpoints = &.{safety_checkpoint},
         .effect_keys = &.{"op:5/ora.sload"},
         .state_source_keys = &.{"module-op:4/result:0<-module-op:3/result:0"},
     };
@@ -6027,6 +6697,16 @@ test "independent loop inventory comparison fails closed by witness class" {
     try std.testing.expectEqual(
         obligation.LoopProjectionCompleteness.effect_mismatch,
         compareLoopProjection(&.{semantic}, &.{wrong_effect}),
+    );
+
+    var wrong_safety_stage = inventory;
+    wrong_safety_stage.safety_checkpoints = &.{.{
+        .structural_key = "op:6/ora.assert",
+        .after_dependency_count = 1,
+    }};
+    try std.testing.expectEqual(
+        obligation.LoopProjectionCompleteness.effect_mismatch,
+        compareLoopProjection(&.{semantic}, &.{wrong_safety_stage}),
     );
 
     var wrong_path = inventory;

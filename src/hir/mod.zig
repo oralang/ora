@@ -1714,6 +1714,7 @@ const FunctionLowerer = struct {
     pub const lowerLabeledBlockStmt = ControlFlow.lowerLabeledBlockStmt;
     pub const lowerTryStmt = ControlFlow.lowerTryStmt;
     pub const lowerWhileStmt = ControlFlow.lowerWhileStmt;
+    pub const simulateUnrolledBody = ControlFlow.simulateUnrolledBody;
     pub const lowerSwitchStmt = ControlFlow.lowerSwitchStmt;
     pub const buildSwitchPatternData = ControlFlow.buildSwitchPatternData;
     pub const buildSwitchExprPatternData = ControlFlow.buildSwitchExprPatternData;

@@ -63,7 +63,12 @@ def baseBackedge : EdgeRow := {
   id := 0
   structuralKey := "body/straight-line-yield"
   path := [.term 1]
-  safety := [.term 1]
+  safetyCheckpoints := [{
+    id := 0
+    structuralKey := "body/ora.assert:0"
+    afterDependencyCount := 0
+    formulas := [.term 1]
+  }]
   nextState := [baseBinding]
   target := .backedge
 }
@@ -118,7 +123,7 @@ def summaryForMutation : String → SummaryRow
   | "missing_invariant" => { baseSummary with invariants := [], unsupportedReasons := ["loop_invariant_missing"] }
   | "missing_body_safety" =>
       { baseSummary with
-        edges := [{ baseBackedge with safety := [] }, baseExit]
+        edges := [{ baseBackedge with safetyCheckpoints := [] }, baseExit]
         unsupportedReasons := ["loop_body_safety_missing"] }
   | "unsupported_kind" => { baseSummary with kind := .other, unsupportedReasons := ["loop_kind_unsupported"] }
   | "unregistered_integer_variable" =>

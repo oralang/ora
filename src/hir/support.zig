@@ -23,7 +23,7 @@ pub const LoopContext = struct {
     control_manifest: *std.ArrayList(LoopControlManifestEntry),
 };
 
-pub const LoopControlKind = enum { break_loop, continue_loop };
+pub const LoopControlKind = enum { break_loop, continue_loop, function_return, error_return };
 
 pub const LoopControlManifestEntry = struct {
     source_statement_id: u32,

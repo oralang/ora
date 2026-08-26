@@ -669,7 +669,7 @@ fn runLeanCommandCapture(
         .exited => |code| if (code == 0) {
             const lean_stdout = std.mem.trim(u8, result.stdout, " \t\r\n");
             const lean_stderr = std.mem.trim(u8, result.stderr, " \t\r\n");
-            try stdout.writeAll("Lean checker output:\n  exit status: 0\n");
+            try stdout.writeAll("Lean dispatcher checker output:\n  exit status: 0\n");
             if (lean_stdout.len == 0 and lean_stderr.len == 0) {
                 try stdout.writeAll("  diagnostics: none\n");
             } else {

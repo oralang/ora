@@ -11,6 +11,8 @@ const proof_manifest = @import("proof_manifest.zig");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const max_proof_artifact_bytes = 4 * 1024 * 1024;
+const canonical_obligations_module = "Ora.ProofCheckCanonical.Obligations";
+const canonical_agreement_module = "Ora.ProofCheckCanonical.Agreement";
 
 pub const LeanProofFailure = error{
     LeanProofParseError,
@@ -264,7 +266,15 @@ fn applyRows(
     for (certificate_rows.items, proof_check.axiom_audits) |*row, audit| {
         row.axioms = audit.axioms;
     }
-    const certificate_json = try buildCertificateJson(arena_allocator, generated_namespace, obligations_source, proof_check.source, proof_check.agreement_source, certificate_rows.items, process_environ);
+    const certificate_json = try buildCertificateJson(
+        arena_allocator,
+        generated_namespace,
+        obligations_source,
+        proof_check.canonical_source,
+        proof_check.canonical_agreement_source,
+        certificate_rows.items,
+        process_environ,
+    );
 
     var merged = set;
     merged.proof_artifacts = try concat(obligation.ProofArtifact, arena_allocator, set.proof_artifacts, artifacts.items);
@@ -274,7 +284,7 @@ fn applyRows(
         .arena = arena,
         .set = merged,
         .applied_count = checker_rows.items.len,
-        .proof_check_source = proof_check.source,
+        .proof_check_source = proof_check.checked_source,
         .certificate_json = certificate_json,
     };
 }
@@ -375,8 +385,9 @@ const CheckedProofRow = struct {
 };
 
 const LeanCheckResult = struct {
-    source: []const u8,
-    agreement_source: []const u8,
+    checked_source: []const u8,
+    canonical_source: []const u8,
+    canonical_agreement_source: []const u8,
     axiom_audits: []const AxiomAuditRow,
 };
 
@@ -447,7 +458,7 @@ fn buildCertificateJsonWithLeanVersion(
 
     try writer.writeAll("{\n  \"schema_version\": ");
     try writer.print("{d}", .{obligation.proof_certificate_schema_version});
-    try writer.writeAll(",\n  \"status\": \"checked\",\n  \"checker\": \"lean\",\n  \"hash_algorithm\": \"sha256\",\n  \"lean_version\": ");
+    try writer.writeAll(",\n  \"status\": \"checked\",\n  \"checker\": \"lean\",\n  \"hash_algorithm\": \"sha256\",\n  \"checker_source_identity\": \"canonical_scratch_modules\",\n  \"lean_version\": ");
     try writeJsonString(writer, lean_version);
     try writer.writeAll(",\n  \"generated_namespace\": ");
     try writeJsonString(writer, generated_namespace);
@@ -491,6 +502,20 @@ fn buildCertificateJsonWithLeanVersion(
         } else {
             try writer.writeAll("null");
         }
+        try writer.writeAll(",\n      \"authorization_claim\": ");
+        try writeJsonString(
+            writer,
+            if (row.loop_summary_id != null)
+                "loop_induction_and_nonvacuity"
+            else
+                "query_proof",
+        );
+        try writer.writeAll(",\n      \"lean_status\": \"checked\"");
+        try writer.writeAll(",\n      \"anti_vacuity_status\": ");
+        try writeJsonString(
+            writer,
+            if (row.loop_summary_id != null) "proved" else "not_applicable",
+        );
         try writer.writeAll(",\n      \"module_name\": ");
         try writeJsonString(writer, row.module_name);
         try writer.writeAll(",\n      \"theorem_name\": ");
@@ -578,6 +603,40 @@ fn writeJsonString(writer: anytype, value: []const u8) !void {
     try writer.writeByte('"');
 }
 
+const CertificateBindingSources = struct {
+    proof_check: []const u8,
+    agreement: []const u8,
+};
+
+/// Scratch module names are randomized only to isolate concurrent Lean runs.
+/// Certificate identity rebuilds the same generated sources with fixed module
+/// aliases; the imported obligation, agreement, and proof contents are hashed
+/// independently in the certificate.
+fn buildCertificateBindingSources(
+    allocator: std.mem.Allocator,
+    generated_namespace: []const u8,
+    rows: []const CheckedProofRow,
+    inline_proof_source: ?[]const u8,
+) !CertificateBindingSources {
+    const agreement = try buildLeanAgreementSource(
+        allocator,
+        generated_namespace,
+        canonical_obligations_module,
+        rows,
+        .{},
+    );
+    errdefer allocator.free(agreement);
+    const proof_check = try buildLeanCheckerSourceWithInlineProofs(
+        allocator,
+        generated_namespace,
+        canonical_obligations_module,
+        canonical_agreement_module,
+        rows,
+        inline_proof_source,
+    );
+    return .{ .proof_check = proof_check, .agreement = agreement };
+}
+
 fn runLeanChecker(
     allocator: std.mem.Allocator,
     generated_namespace: []const u8,
@@ -643,6 +702,12 @@ fn runLeanChecker(
         inline_proof_source,
     );
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = checker_rel, .data = checker_source });
+    const certificate_sources = try buildCertificateBindingSources(
+        result_allocator,
+        generated_namespace,
+        rows,
+        inline_proof_source,
+    );
 
     try runLeanCommand(allocator, &.{ "lake", "build", obligations_module }, process_environ, stdout, quiet);
     try runLeanCommand(allocator, &.{ "lake", "build", agreement_module }, process_environ, stdout, quiet);
@@ -655,8 +720,9 @@ fn runLeanChecker(
     defer allocator.free(checker_output.stderr);
 
     return .{
-        .source = checker_source,
-        .agreement_source = agreement_source,
+        .checked_source = checker_source,
+        .canonical_source = certificate_sources.proof_check,
+        .canonical_agreement_source = certificate_sources.agreement,
         .axiom_audits = try parseLeanAxiomAuditOutput(result_allocator, checker_output.stdout, rows),
     };
 }
@@ -1554,12 +1620,16 @@ test "proof certificate JSON exposes stable schema fields" {
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"schema_version\": 2") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"version\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"hash_algorithm\": \"sha256\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"checker_source_identity\": \"canonical_scratch_modules\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"lean_version\": \"Lean test version\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"agreement_check_sha256\": ") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"proof_count\": 1") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"target_query_id\": 11") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"lean_query_id\": 12") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"loop_summary_id\": 4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"authorization_claim\": \"loop_induction_and_nonvacuity\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"lean_status\": \"checked\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"anti_vacuity_status\": \"proved\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"content_sha256\": \"0000000000000000000000000000000000000000000000000000000000000000\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"inline_source\": false") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"axioms\": [\"propext\", \"Quot.sound\"]") != null);
@@ -1752,6 +1822,70 @@ test "loop checker audits the kernel-derived verified theorem" {
         1,
         "Ora.Generated.Obligations.Count.emittedQuery_17_sound Ora.Proofs.Count.induction",
     ));
+}
+
+test "certificate checker identity excludes randomized scratch module names" {
+    const allocator = std.testing.allocator;
+    const rows = [_]CheckedProofRow{.{
+        .query_id = 17,
+        .module_name = "Ora.Proofs.Count",
+        .theorem_name = "Ora.Proofs.Count.induction",
+        .loop_summary_id = 4,
+    }};
+    const first_checked = try buildLeanCheckerSource(
+        allocator,
+        "Ora.Generated.Obligations.Count",
+        "Ora.ProofCheckScratch.Run_first.Obligations",
+        "Ora.ProofCheckScratch.Run_first.Agreement",
+        &rows,
+    );
+    defer allocator.free(first_checked);
+    const second_checked = try buildLeanCheckerSource(
+        allocator,
+        "Ora.Generated.Obligations.Count",
+        "Ora.ProofCheckScratch.Run_second.Obligations",
+        "Ora.ProofCheckScratch.Run_second.Agreement",
+        &rows,
+    );
+    defer allocator.free(second_checked);
+    try std.testing.expect(!std.mem.eql(u8, first_checked, second_checked));
+
+    const first = try buildCertificateBindingSources(
+        allocator,
+        "Ora.Generated.Obligations.Count",
+        &rows,
+        null,
+    );
+    defer allocator.free(first.proof_check);
+    defer allocator.free(first.agreement);
+    const second = try buildCertificateBindingSources(
+        allocator,
+        "Ora.Generated.Obligations.Count",
+        &rows,
+        null,
+    );
+    defer allocator.free(second.proof_check);
+    defer allocator.free(second.agreement);
+    try std.testing.expectEqualStrings(first.proof_check, second.proof_check);
+    try std.testing.expectEqualStrings(first.agreement, second.agreement);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        first.proof_check,
+        canonical_obligations_module,
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, first.proof_check, "Run_first") == null);
+
+    var changed_rows = rows;
+    changed_rows[0].theorem_name = "Ora.Proofs.Count.changed_induction";
+    const changed = try buildCertificateBindingSources(
+        allocator,
+        "Ora.Generated.Obligations.Count",
+        &changed_rows,
+        null,
+    );
+    defer allocator.free(changed.proof_check);
+    defer allocator.free(changed.agreement);
+    try std.testing.expect(!std.mem.eql(u8, first.proof_check, changed.proof_check));
 }
 
 test "agreement checker rejects empty rows for accepted proof targets" {

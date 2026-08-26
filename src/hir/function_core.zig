@@ -1371,6 +1371,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 true,
             );
             if (mlir.oraOperationIsNull(if_op)) return error.MlirOperationCreationFailed;
+            mlir.oraOperationSetAttributeByName(
+                if_op,
+                strRef("ora.loop_control_runtime_guard"),
+                namedBoolAttr(self.parent.context, "ora.loop_control_runtime_guard", true).attribute,
+            );
             appendOp(self.block, if_op);
 
             const then_block = mlir.oraScfIfOpGetThenBlock(if_op);
@@ -1547,8 +1552,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             }
                             return true;
                         }
+                        var return_control_kind: LoopControlKind = .function_return;
                         if (ret.value) |expr_id| {
                             const is_error_return = @This().returnExprIsErrorShaped(self, expr_id);
+                            if (is_error_return) return_control_kind = .error_return;
                             const raw_value = try @This().lowerReturnExprValue(self, expr_id, is_error_return, locals);
                             const ok_result = if (is_error_return) null else try @This().successResultValueForPostcondition(self, raw_value, ret.range);
                             const value = if (is_error_return)
@@ -1571,6 +1578,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         const set_flag = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, true_value, return_flag, null, 0);
                         if (mlir.oraOperationIsNull(set_flag)) return error.MlirOperationCreationFailed;
                         appendOp(self.block, set_flag);
+                        if (self.loop_context) |loop_context| {
+                            try @This().appendLoopControlMarker(
+                                self,
+                                statement_id,
+                                ret.range,
+                                locals,
+                                loop_context,
+                                return_control_kind,
+                            );
+                        }
                         try self.appendDeferredReturnTerminator(ret.range, locals);
                         return true;
                     }
@@ -3822,7 +3839,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .carried_locals = carried_locals.items,
                 .control_manifest = &control_manifest,
             };
-            if (has_loop_control) {
+            if (has_loop_control or has_return) {
                 body_lowerer.loop_context = &loop_context;
             }
             var body_locals = try self.cloneLocals(locals);
@@ -3889,7 +3906,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     true,
                 );
                 if (mlir.oraOperationIsNull(if_op)) return error.MlirOperationCreationFailed;
-                if (has_loop_control) {
+                if (has_execution_guard) {
                     mlir.oraOperationSetAttributeByName(
                         if_op,
                         strRef("ora.loop_control_runtime_guard"),
@@ -3966,14 +3983,45 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn lowerUnrolledFiniteForStmt(self: *FunctionLowerer, for_stmt: ast.ForStmt, locals: *LocalEnv) anyerror!?bool {
             if (for_stmt.invariants.len != 0) return null;
-            // Loop-control decisions may depend on runtime values. Lowering
-            // their bodies while unrolling would commit a break/continue from
-            // one syntactic branch as though that branch were taken.
-            if (bodyContainsLoopControl(self.parent.file, for_stmt.body)) return null;
+            // The unrolled-loop signal is compile-time control, so only
+            // structurally guardable break/continue sites may enter this path.
+            // The branch lowerer separately requires every such guard to have
+            // a known value for the current synthetic iteration.
+            if (bodyContainsLoopControl(self.parent.file, for_stmt.body) and
+                !@This().bodyLoopControlHasStaticGuardShape(self.parent.file, for_stmt.body, for_stmt.label)) return null;
 
             const finite_range = @This().finiteForRange(self, for_stmt, locals) orelse return null;
             if (finite_range.trip_count > runtime_loop_unroll_limit) return null;
+            if (finite_range.trip_count == 0) return false;
             if (self.unroll_multiplier > runtime_total_unroll_budget / finite_range.trip_count) return null;
+
+            if (bodyContainsLoopControl(self.parent.file, for_stmt.body)) {
+                var simulated_locals = try locals.clone();
+                try simulated_locals.bindPatternWithoutValue(self.parent.file, for_stmt.item_pattern);
+                if (for_stmt.index_pattern) |index_pattern| {
+                    try simulated_locals.bindPatternWithoutValue(self.parent.file, index_pattern);
+                }
+
+                var simulated_iteration: u64 = 0;
+                var simulated_current = finite_range.start;
+                while (simulated_iteration < finite_range.trip_count) : (simulated_iteration += 1) {
+                    try simulated_locals.setPatternKnownInt(self.parent.file, for_stmt.item_pattern, simulated_current);
+                    if (for_stmt.index_pattern) |index_pattern| {
+                        try simulated_locals.setPatternKnownInt(self.parent.file, index_pattern, @intCast(simulated_iteration));
+                    }
+                    const signal = try FunctionLowerer.simulateUnrolledBody(
+                        self,
+                        for_stmt.body,
+                        &simulated_locals,
+                        for_stmt.label,
+                    ) orelse return null;
+                    switch (signal) {
+                        .none, .continue_loop => {},
+                        .break_loop => break,
+                    }
+                    simulated_current += 1;
+                }
+            }
 
             var unrolled_loop_context = UnrolledLoopContext{
                 .parent = self.unrolled_loop_context,
@@ -4025,6 +4073,36 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             return false;
+        }
+
+        fn bodyLoopControlHasStaticGuardShape(
+            file: *const ast.AstFile,
+            body_id: ast.BodyId,
+            loop_label: ?[]const u8,
+        ) bool {
+            const body = file.body(body_id).*;
+            for (body.statements) |statement_id| {
+                if (!@This().statementLoopControlHasStaticGuardShape(file, statement_id, loop_label)) return false;
+            }
+            return true;
+        }
+
+        fn statementLoopControlHasStaticGuardShape(
+            file: *const ast.AstFile,
+            statement_id: ast.StmtId,
+            loop_label: ?[]const u8,
+        ) bool {
+            return switch (file.statement(statement_id).*) {
+                .Break, .Continue => |jump| if (jump.label) |target|
+                    loop_label != null and std.mem.eql(u8, target, loop_label.?)
+                else
+                    true,
+                .If => |if_stmt| @This().bodyLoopControlHasStaticGuardShape(file, if_stmt.then_body, loop_label) and
+                    (if_stmt.else_body == null or @This().bodyLoopControlHasStaticGuardShape(file, if_stmt.else_body.?, loop_label)),
+                .Block => |block_stmt| @This().bodyLoopControlHasStaticGuardShape(file, block_stmt.body, loop_label),
+                .LabeledBlock => |block_stmt| @This().bodyLoopControlHasStaticGuardShape(file, block_stmt.body, loop_label),
+                else => !analysis.stmtContainsLoopControl(file, statement_id),
+            };
         }
 
         const FiniteForRange = struct {
@@ -4379,7 +4457,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const op = mlir.oraLoopControlOpCreate(
                 self.parent.context,
                 self.parent.location(range),
-                strRef(if (kind == .break_loop) "break" else "continue"),
+                strRef(switch (kind) {
+                    .break_loop => "break",
+                    .continue_loop => "continue",
+                    .function_return => "function_return",
+                    .error_return => "error_return",
+                }),
                 loop_context.source_statement_id,
                 @intCast(statement_id.index()),
                 if (state.items.len == 0) null else state.items.ptr,
@@ -4404,7 +4487,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     self.parent.allocator,
                     "{s}:{d}",
                     .{
-                        if (entry.kind == .break_loop) "break" else "continue",
+                        switch (entry.kind) {
+                            .break_loop => "break",
+                            .continue_loop => "continue",
+                            .function_return => "function_return",
+                            .error_return => "error_return",
+                        },
                         entry.source_statement_id,
                     },
                 );

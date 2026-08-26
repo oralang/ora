@@ -5162,7 +5162,18 @@ fn runMlirEmitAdvanced(
     var prepared_source_identity: ?formal_source_accounting_from_z3.PreparedIdentity = null;
     defer if (prepared_source_identity) |*identity| identity.deinit(allocator);
     if (source_prepared_query_manifest) |manifest| {
-        prepared_source_identity = try formal_source_accounting_from_z3.collectPreparedIdentity(allocator, manifest.source_accounting_rows);
+        var identity = try formal_source_accounting_from_z3.collectPreparedIdentity(
+            allocator,
+            manifest.source_accounting_rows,
+        );
+        errdefer identity.deinit(allocator);
+        try formal_source_accounting_from_z3.includeCanonicalLoopPostQueries(
+            allocator,
+            &identity,
+            manifest.source_accounting_rows.len,
+            formal_result_for_smt_report.?.set,
+        );
+        prepared_source_identity = identity;
     }
     if (!mlir_options.verify_z3 or prepared_source_identity != null) {
         const accounting_mode = try sourceAccountingMode(mlir_options);

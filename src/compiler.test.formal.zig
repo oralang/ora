@@ -12,6 +12,7 @@ const obligation_from_mlir = @import("formal/obligation_from_mlir.zig");
 const obligation_from_z3 = @import("formal/obligation_from_z3.zig");
 const obligation_to_lean = @import("formal/obligation_to_lean.zig");
 const obligation_to_z3 = @import("formal/obligation_to_z3.zig");
+const artifact_catalog = @import("formal/shared/artifact_catalog.zig");
 const source_accounting = @import("formal/shared/source_accounting.zig");
 const source_accounting_gate = @import("formal/kernel/source_accounting_gate.zig");
 const source_accounting_from_syntax = @import("formal/source_accounting_from_syntax.zig");
@@ -747,6 +748,20 @@ fn readFileAllocForTest(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
         allocator,
         std.Io.Limit.limited(1024 * 1024),
     );
+}
+
+fn expectNoFormalArtifactsInRepoRoot(
+    allocator: std.mem.Allocator,
+    stem: []const u8,
+) !void {
+    for (artifact_catalog.suffixes) |suffix| {
+        const name = try std.fmt.allocPrint(allocator, "{s}{s}", .{ stem, suffix });
+        defer allocator.free(name);
+        try testing.expectError(
+            error.FileNotFound,
+            std.Io.Dir.cwd().access(std.testing.io, name, .{}),
+        );
+    }
 }
 
 fn leanProofGeneratedNamespaceForTest(allocator: std.mem.Allocator, file_path: []const u8) ![]const u8 {
@@ -1920,7 +1935,7 @@ test "wrapping scalar loop steps do not invent arithmetic safety requirements" {
 
     try testing.expectEqual(@as(usize, 1), result.set.loop_summaries.len);
     const summary = result.set.loop_summaries[0];
-    try testing.expectEqual(@as(usize, 0), summary.edges[0].safety_formulas.len);
+    try testing.expectEqual(@as(usize, 0), summary.edges[0].safetyFormulaCount());
     try testing.expect(!loopSummaryHasReason(summary, .loop_body_safety_missing));
     try testing.expect(summary.projectionSupported());
 
@@ -2003,7 +2018,7 @@ test "narrow checked scalar arithmetic safety formulas activate certification" {
 
     for (result.set.loop_summaries) |summary| {
         try testing.expect(summary.projectionSupported());
-        try testing.expect(summary.edges[0].safety_formulas.len > 0);
+        try testing.expect(summary.edges[0].safetyFormulaCount() > 0);
         try testing.expect(!loopSummaryHasReason(summary, .loop_formula_unsupported));
     }
     var induction_count: usize = 0;
@@ -2076,8 +2091,8 @@ test "div rem loop safety comes from canonical source assertions" {
             summary.owner.statement.function_name,
             "signed_div_loop",
         )) 2 else 1;
-        try testing.expectEqual(expected_safety_count, summary.edges[0].safety_formulas.len);
-        try testing.expectEqual(@as(usize, 0), summary.edges[1].safety_formulas.len);
+        try testing.expectEqual(expected_safety_count, summary.edges[0].safetyFormulaCount());
+        try testing.expectEqual(@as(usize, 0), summary.edges[1].safetyFormulaCount());
         for (summary.query_ids.body_safety) |query_id| {
             const query = obligation.findById(result.set.queries, query_id) orelse
                 return error.TestUnexpectedResult;
@@ -2287,7 +2302,7 @@ test "canonical invariant-only loop activates Lean induction in the real CLI" {
         defer allocator.free(result.stderr);
         try expectExited(result, 0);
         try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "certificate-required=1"));
-        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean checker output:\n  exit status: 0"));
+        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean loop proof gate accepted:\n  kernel-checked certificates: 1"));
     }
 
     const report_path = try pathFromTmpAlloc(allocator, tmp, "accepted/scalar_loop_induction.formal.loops.json");
@@ -2345,6 +2360,11 @@ test "automatic scalar while and for LoopVC induction parses and proves bounds" 
             .source_path = "tests/formal/loop_control_targets.ora",
             .stem = "loop_control_targets",
             .proof_count = 4,
+        },
+        .{
+            .source_path = "tests/formal/loop_return_targets.ora",
+            .stem = "loop_return_targets",
+            .proof_count = 2,
         },
     };
 
@@ -2456,7 +2476,13 @@ test "automatic loop proofs certify all integer widths and multiple carried vari
         );
         defer allocator.free(required);
         try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, required));
-        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean checker output:\n  exit status: 0"));
+        const accepted = try std.fmt.allocPrint(
+            allocator,
+            "Lean loop proof gate accepted:\n  kernel-checked certificates: {d}",
+            .{case.proof_count},
+        );
+        defer allocator.free(accepted);
+        try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, accepted));
         try testing.expect(!std.mem.containsAtLeast(u8, result.stdout, 1, "Automatic Lean proof gate failed"));
         try testing.expect(!std.mem.containsAtLeast(u8, result.stdout, 1, "AutoProofScratch"));
 
@@ -2531,7 +2557,7 @@ test "loop production gate checks zero iterations and blocks invalid invariant e
     defer allocator.free(zero_result.stderr);
     try expectExited(zero_result, 0);
     try testing.expect(std.mem.containsAtLeast(u8, zero_result.stdout, 1, "certificate-required=1"));
-    try testing.expect(std.mem.containsAtLeast(u8, zero_result.stdout, 1, "Lean checker output:\n  exit status: 0"));
+    try testing.expect(std.mem.containsAtLeast(u8, zero_result.stdout, 1, "Lean loop proof gate accepted:\n  kernel-checked certificates: 1"));
 
     const zero_report_path = try pathFromTmpAlloc(
         allocator,
@@ -2850,6 +2876,39 @@ test "external user proof certifies nonlinear loop through the real CLI" {
 test "L4 scalar loop induction proof unblocks only artifacts" {
     const allocator = testing.allocator;
     const source_path = "tests/formal/scalar_loop_post.ora";
+    var compilation = try compilePackage(source_path);
+    defer compilation.deinit();
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    var formal_result = try obligation_from_mlir.collect(allocator, hir_result.module.raw_module, .{});
+    defer formal_result.deinit();
+    const induction_query = try findLoopInductionQuery(formal_result.set);
+    const summary_id = induction_query.loop_summary_id orelse return error.TestUnexpectedResult;
+    const summary = obligation.findById(formal_result.set.loop_summaries, summary_id) orelse
+        return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), summary.query_ids.step.len);
+    var pass = try z3_verification.VerificationPass.init(allocator);
+    defer pass.deinit();
+    const z3_bindings = try test_helpers.z3FormalQueryBindingsFromFormalForTest(
+        allocator,
+        formal_result.query_bindings,
+    );
+    defer allocator.free(z3_bindings);
+    pass.setFormalQueryBindings(z3_bindings);
+    var prepared_manifest = try pass.collectPreparedQueryManifest(hir_result.module.raw_module);
+    defer prepared_manifest.deinit();
+    var prepared_step_index: ?usize = null;
+    for (prepared_manifest.rows, 0..) |row, index| {
+        if (row.kind != .LoopInvariantStep) continue;
+        if (prepared_step_index != null) return error.TestUnexpectedResult;
+        prepared_step_index = index;
+    }
+    const forced_step_query = try std.fmt.allocPrint(
+        allocator,
+        "loop_invariant_step:{d}",
+        .{(prepared_step_index orelse return error.TestUnexpectedResult) + 1},
+    );
+    defer allocator.free(forced_step_query);
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -2863,7 +2922,7 @@ test "L4 scalar loop induction proof unblocks only artifacts" {
     defer allocator.free(vacuous_out);
 
     {
-        const result = try runOraWithForcedUnknown(allocator, "loop_invariant_post:8", &.{
+        const result = try runOraWithForcedUnknown(allocator, forced_step_query, &.{
             ORA_BINARY_REL,
             "emit",
             "--emit=smt-report,sir-text,bytecode",
@@ -4367,7 +4426,7 @@ test "lean proofs run dispatcher table proof before bytecode emission" {
     try expectExited(result, 0);
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean dispatcher userland proof accepted") or
         std.mem.containsAtLeast(u8, result.stderr, 1, "Lean dispatcher userland proof accepted"));
-    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean checker output:"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean dispatcher checker output:"));
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "exit status: 0"));
     try testing.expect(std.mem.containsAtLeast(
         u8,
@@ -9308,12 +9367,12 @@ test "formal loop summary rows are source-owner scoped scalar data" {
     try testing.expectEqual(obligation.LoopControlTarget.backedge, row.edges[0].target.?);
     try testing.expectEqual(@as(usize, 1), row.edges[0].path_formulas.len);
     try testing.expectEqual(@as(usize, 2), row.edges[0].next_state.len);
-    try testing.expect(row.edges[0].safety_formulas.len > 0);
+    try testing.expect(row.edges[0].safetyFormulaCount() > 0);
     try testing.expectEqual(@as(u32, 1), row.edges[1].id);
     try testing.expectEqual(obligation.LoopControlTarget.successor, row.edges[1].target.?);
     try testing.expectEqual(@as(usize, 1), row.edges[1].path_formulas.len);
     try testing.expectEqual(@as(usize, 2), row.edges[1].next_state.len);
-    try testing.expectEqual(@as(usize, 0), row.edges[1].safety_formulas.len);
+    try testing.expectEqual(@as(usize, 0), row.edges[1].safetyFormulaCount());
     for (row.edges) |edge| {
         for (edge.next_state, row.variables, 0..) |binding, variable, index| {
             try testing.expectEqual(@as(u32, @intCast(index)), binding.variable_index);
@@ -9359,15 +9418,18 @@ test "formal loop summary rows are source-owner scoped scalar data" {
 
     var storage_loop: ?obligation.LoopSummaryRow = null;
     var nested_loop: ?obligation.LoopSummaryRow = null;
+    var nested_inner_loop: ?obligation.LoopSummaryRow = null;
     for (result.set.loop_summaries) |candidate| {
         if (candidate.owner != .statement) continue;
         if (std.mem.eql(u8, candidate.owner.statement.function_name, "accumulateToStorage")) {
             storage_loop = candidate;
         }
-        if (std.mem.eql(u8, candidate.owner.statement.function_name, "nestedSum") and
-            loopSummaryHasReason(candidate, .loop_has_nested_loop))
-        {
-            nested_loop = candidate;
+        if (std.mem.eql(u8, candidate.owner.statement.function_name, "nestedSum")) {
+            var has_dependency = false;
+            for (candidate.edges) |edge| {
+                if (edge.summary_dependencies.len != 0) has_dependency = true;
+            }
+            if (has_dependency) nested_loop = candidate else nested_inner_loop = candidate;
         }
     }
     const storage = storage_loop orelse return error.TestUnexpectedResult;
@@ -9375,7 +9437,1012 @@ test "formal loop summary rows are source-owner scoped scalar data" {
     try testing.expect(loopSummaryHasReason(storage, .loop_has_storage_read));
     try testing.expect(!storage.projectionSupported());
     const nested = nested_loop orelse return error.TestUnexpectedResult;
-    try testing.expect(!nested.projectionSupported());
+    try testing.expect(nested.projectionSupported());
+    try testing.expectEqual(obligation.LoopProjectionCompleteness.complete, nested.projection_completeness);
+    try testing.expect(!loopSummaryHasReason(nested, .loop_has_nested_loop));
+    try testing.expectEqual(@as(usize, 1), nested.edges[0].summary_dependencies.len);
+    const dependency = nested.edges[0].summary_dependencies[0];
+    const inner = nested_inner_loop orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(inner.id, dependency.summary_id);
+    try testing.expectEqual(obligation.LoopControlTarget.successor, dependency.target);
+    try testing.expect(dependency.structural_key.len != 0);
+    var inner_query: ?obligation.VerificationQuery = null;
+    for (result.set.queries) |query| {
+        if (query.kind == .loop_induction and query.loop_summary_id == inner.id) inner_query = query;
+    }
+    const certified_inner_query = inner_query orelse return error.TestUnexpectedResult;
+    try testing.expect(certified_inner_query.loop_vc_sha256 != null);
+    try testing.expectEqualSlices(u8, &certified_inner_query.loop_vc_sha256.?, &dependency.loop_vc_sha256);
+
+    const outer_induction = obligation.findById(result.set.queries, nested.query_ids.induction[0]) orelse
+        return error.TestUnexpectedResult;
+    try testing.expectEqual(obligation.ProofRequirement.lean_certificate, outer_induction.proof_requirement);
+    try testing.expect(outer_induction.loop_vc_sha256 != null);
+    switch (obligation_to_lean.querySemanticSupport(result.set, outer_induction)) {
+        .supported => {},
+        .unsupported => return error.TestUnexpectedResult,
+    }
+
+    var nested_z3_context = try z3_verification.Z3Context.init(testing.allocator);
+    defer nested_z3_context.deinit();
+    var nested_adapter = obligation_to_z3.Adapter.init(
+        &nested_z3_context,
+        testing.allocator,
+        result.set,
+    );
+    var nested_canonical_query_count: usize = 0;
+    for (result.set.queries) |query| {
+        if (query.loop_summary_id != nested.id or query.backend != .z3 or
+            query.loop_vc_sha256 == null) continue;
+        const checked = try nested_adapter.checkLoopQueryForRow(query);
+        try testing.expectEqual(obligation_to_z3.CheckStatus.proved, checked.status);
+        nested_canonical_query_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 5), nested_canonical_query_count);
+
+    var nested_lean = std.Io.Writer.Allocating.init(testing.allocator);
+    defer nested_lean.deinit();
+    try obligation_to_lean.writeModule(&nested_lean.writer, result.set, .{
+        .namespace = "Ora.Generated.NestedLoopProjection",
+        .proof_surface = true,
+    });
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        nested_lean.written(),
+        1,
+        "Ora.Loop.loopProofAuthorizationFromAssumptionsIn",
+    ));
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        nested_lean.written(),
+        1,
+        "emittedLoopSummaries",
+    ));
+}
+
+test "nested loop child results are checked in post-dependency safety state" {
+    var result = try collectPackageObligations(
+        testing.allocator,
+        "tests/formal/nested_loop_dependency_safety.ora",
+    );
+    defer result.deinit();
+
+    var parent: ?obligation.LoopSummaryRow = null;
+    for (result.set.loop_summaries) |row| {
+        for (row.edges) |edge| {
+            if (edge.summary_dependencies.len != 0) parent = row;
+        }
+    }
+    const summary = parent orelse return error.TestUnexpectedResult;
+    try testing.expect(summary.projectionSupported());
+    var staged_edge: ?obligation.LoopEdgeRow = null;
+    for (summary.edges) |edge| {
+        if (edge.summary_dependencies.len != 0) staged_edge = edge;
+    }
+    const edge = staged_edge orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), edge.summary_dependencies.len);
+    try testing.expectEqual(@as(usize, 2), edge.safety_checkpoints.len);
+    for (edge.safety_checkpoints) |checkpoint| {
+        try testing.expectEqual(@as(u32, 1), checkpoint.after_dependency_count);
+        try testing.expectEqual(@as(usize, 1), checkpoint.formulas.len);
+    }
+    try testing.expectEqual(@as(usize, 1), summary.query_ids.induction.len);
+    const query = obligation.findById(result.set.queries, summary.query_ids.induction[0]) orelse
+        return error.TestUnexpectedResult;
+    switch (obligation_to_lean.querySemanticSupport(result.set, query)) {
+        .supported => {},
+        .unsupported => return error.TestUnexpectedResult,
+    }
+
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output_path = try pathFromTmpAlloc(testing.allocator, tmp, "dependency-safety");
+    defer testing.allocator.free(output_path);
+    const cli = try runProcessWithLeanPath(testing.allocator, &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=smt-report,bytecode",
+        "--out-dir",
+        output_path,
+        "--lean-proofs",
+        "tests/formal/nested_loop_dependency_safety.ora",
+    });
+    defer testing.allocator.free(cli.stdout);
+    defer testing.allocator.free(cli.stderr);
+    try expectExited(cli, 0);
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        cli.stdout,
+        1,
+        "total=2, certificate-required=2, excluded=0",
+    ));
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        cli.stdout,
+        1,
+        "Lean loop proof gate accepted:\n  kernel-checked certificates: 2",
+    ));
+    try tmp.dir.access(
+        std.testing.io,
+        "dependency-safety/nested_loop_dependency_safety.hex",
+        .{},
+    );
+}
+
+test "unsafe post-dependency arithmetic is disproved before artifact emission" {
+    var result = try collectPackageObligations(
+        testing.allocator,
+        "tests/formal/nested_loop_dependency_safety_unsafe.ora",
+    );
+    defer result.deinit();
+
+    var parent: ?obligation.LoopSummaryRow = null;
+    var staged_edge: ?obligation.LoopEdgeRow = null;
+    for (result.set.loop_summaries) |row| {
+        for (row.edges) |edge| {
+            if (edge.summary_dependencies.len == 0) continue;
+            parent = row;
+            staged_edge = edge;
+        }
+    }
+    const summary = parent orelse return error.TestUnexpectedResult;
+    const edge = staged_edge orelse return error.TestUnexpectedResult;
+    try testing.expect(summary.projectionSupported());
+    try testing.expect(edge.safety_checkpoints.len != 0);
+    for (edge.safety_checkpoints) |checkpoint| {
+        try testing.expectEqual(@as(u32, 1), checkpoint.after_dependency_count);
+    }
+
+    var context = try z3_verification.Z3Context.init(testing.allocator);
+    defer context.deinit();
+    var adapter = obligation_to_z3.Adapter.init(&context, testing.allocator, result.set);
+    var safety_query_found = false;
+    for (result.set.queries) |query| {
+        if (query.loop_summary_id != summary.id or
+            query.loop_edge_id != edge.id or
+            query.kind != .loop_body_safety or
+            query.backend != .z3 or
+            query.loop_vc_sha256 == null) continue;
+        const checked = try adapter.checkLoopQueryForRow(query);
+        try testing.expectEqual(obligation_to_z3.CheckStatus.disproved, checked.status);
+        safety_query_found = true;
+    }
+    try testing.expect(safety_query_found);
+}
+
+test "safety checkpoints preserve before between and after dependency order" {
+    var result = try collectPackageObligations(
+        testing.allocator,
+        "tests/formal/nested_loop_safety_checkpoints.ora",
+    );
+    defer result.deinit();
+
+    var parent: ?obligation.LoopSummaryRow = null;
+    var staged_edge: ?obligation.LoopEdgeRow = null;
+    for (result.set.loop_summaries) |row| {
+        for (row.edges) |edge| {
+            if (edge.summary_dependencies.len != 2) continue;
+            parent = row;
+            staged_edge = edge;
+        }
+    }
+    const summary = parent orelse return error.TestUnexpectedResult;
+    const edge = staged_edge orelse return error.TestUnexpectedResult;
+    try testing.expect(summary.projectionSupported());
+    try testing.expectEqual(@as(usize, 2), edge.summary_dependencies.len);
+    try testing.expectEqual(@as(usize, 4), edge.safety_checkpoints.len);
+    const expected_stages = [_]u32{ 0, 1, 2, 2 };
+    for (edge.safety_checkpoints, expected_stages) |checkpoint, expected_stage| {
+        try testing.expectEqual(expected_stage, checkpoint.after_dependency_count);
+    }
+
+    var context = try z3_verification.Z3Context.init(testing.allocator);
+    defer context.deinit();
+    var adapter = obligation_to_z3.Adapter.init(&context, testing.allocator, result.set);
+    var safety_query_found = false;
+    for (result.set.queries) |query| {
+        if (query.loop_summary_id != summary.id or
+            query.loop_edge_id != edge.id or
+            query.kind != .loop_body_safety or
+            query.backend != .z3 or
+            query.loop_vc_sha256 == null) continue;
+        const checked = try adapter.checkLoopQueryForRow(query);
+        try testing.expectEqual(obligation_to_z3.CheckStatus.proved, checked.status);
+        safety_query_found = true;
+    }
+    try testing.expect(safety_query_found);
+
+    var source = std.Io.Writer.Allocating.init(testing.allocator);
+    defer source.deinit();
+    try obligation_to_lean.writeModule(&source.writer, result.set, .{
+        .namespace = "Ora.Generated.NestedLoopSafetyCheckpoints",
+        .proof_surface = true,
+    });
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try pathFromTmpAlloc(testing.allocator, tmp, "NestedLoopSafetyCheckpoints.lean");
+    defer testing.allocator.free(path);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = path,
+        .data = source.written(),
+    });
+    const parsed = try runLeanFileForTest(testing.allocator, path);
+    defer testing.allocator.free(parsed.stdout);
+    defer testing.allocator.free(parsed.stderr);
+    try expectExited(parsed, 0);
+}
+
+test "generated nested loop relational obligation module parses" {
+    var result = try collectPackageObligations(
+        testing.allocator,
+        "tests/formal/nested_loop_relational.ora",
+    );
+    defer result.deinit();
+
+    var source = std.Io.Writer.Allocating.init(testing.allocator);
+    defer source.deinit();
+    try obligation_to_lean.writeModule(&source.writer, result.set, .{
+        .namespace = "Ora.Generated.NestedLoopRelationalParse",
+        .proof_surface = true,
+    });
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try pathFromTmpAlloc(testing.allocator, tmp, "NestedLoopRelational.lean");
+    defer testing.allocator.free(path);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = source.written() });
+
+    const lean_result = try runLeanFileForTest(testing.allocator, path);
+    defer testing.allocator.free(lean_result.stdout);
+    defer testing.allocator.free(lean_result.stderr);
+    try expectExited(lean_result, 0);
+}
+
+test "nested loop relation explicitly preserves an unchanged child scalar" {
+    const allocator = testing.allocator;
+    const source_path = "tests/formal/nested_loop_preserves_scalar.ora";
+    var formal_result = try collectPackageObligations(allocator, source_path);
+    defer formal_result.deinit();
+
+    var child: ?obligation.LoopSummaryRow = null;
+    for (formal_result.set.loop_summaries) |summary| {
+        var has_dependency = false;
+        for (summary.edges) |edge| {
+            if (edge.summary_dependencies.len != 0) has_dependency = true;
+        }
+        if (!has_dependency and summary.variables.len == 2) child = summary;
+    }
+    const child_summary = child orelse return error.TestUnexpectedResult;
+    try testing.expect(child_summary.projectionSupported());
+
+    const backedge = for (child_summary.edges) |edge| {
+        if (edge.target == .backedge) break edge;
+    } else return error.TestUnexpectedResult;
+    try testing.expectEqual(child_summary.variables.len, backedge.next_state.len);
+    const preserved = backedge.next_state[1];
+    try testing.expectEqual(@as(u32, 1), preserved.variable_index);
+    try testing.expect(obligation.freeVarIdEql(
+        child_summary.variables[1].id orelse return error.TestUnexpectedResult,
+        preserved.target orelse return error.TestUnexpectedResult,
+    ));
+    const preserved_term_id = switch (preserved.value) {
+        .term => |id| id,
+        .origin_value => return error.TestUnexpectedResult,
+    };
+    if (preserved_term_id >= formal_result.set.terms.len) return error.TestUnexpectedResult;
+    const preserved_value_id = switch (formal_result.set.terms[preserved_term_id]) {
+        .variable => |variable| switch (variable) {
+            .free => |free| free.id,
+            .bound => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expect(obligation.freeVarIdEql(
+        preserved.target.?,
+        preserved_value_id,
+    ));
+
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output_path = try pathFromTmpAlloc(allocator, tmp, "nested-preserved");
+    defer allocator.free(output_path);
+    const result = try runProcessWithLeanPath(allocator, &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=smt-report,bytecode",
+        "--out-dir",
+        output_path,
+        "--lean-proofs",
+        source_path,
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try expectExited(result, 0);
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        result.stdout,
+        1,
+        "total=2, certificate-required=2, excluded=0",
+    ));
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        result.stdout,
+        1,
+        "Lean loop proof gate accepted:\n  kernel-checked certificates: 2",
+    ));
+    try tmp.dir.access(
+        std.testing.io,
+        "nested-preserved/nested_loop_preserves_scalar.hex",
+        .{},
+    );
+}
+
+test "nested loop relational certificates authorize the real CLI" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    const source_path = "tests/formal/nested_loop_relational.ora";
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output_path = try pathFromTmpAlloc(allocator, tmp, "nested-accepted");
+    defer allocator.free(output_path);
+
+    const result = try runProcessWithLeanPath(allocator, &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=smt-report,sir-text,bytecode",
+        "--out-dir",
+        output_path,
+        "--lean-proofs",
+        source_path,
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try expectExited(result, 0);
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        result.stdout,
+        1,
+        "total=2, certificate-required=2, excluded=0",
+    ));
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        result.stdout,
+        1,
+        "Lean loop proof gate accepted:\n  kernel-checked certificates: 2",
+    ));
+
+    const certificate_path = try pathFromTmpAlloc(
+        allocator,
+        tmp,
+        "nested-accepted/nested_loop_relational.lean.proof.json",
+    );
+    defer allocator.free(certificate_path);
+    const certificate = try readFileAllocForTest(allocator, certificate_path);
+    defer allocator.free(certificate);
+    try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"proof_count\": 2"));
+    try testing.expect(std.mem.containsAtLeast(u8, certificate, 2, "\"loop_vc_sha256\": \""));
+    try testing.expect(!std.mem.containsAtLeast(u8, certificate, 1, "sorryAx"));
+
+    const loop_report_path = try pathFromTmpAlloc(
+        allocator,
+        tmp,
+        "nested-accepted/nested_loop_relational.formal.loops.json",
+    );
+    defer allocator.free(loop_report_path);
+    const loop_report_source = try readFileAllocForTest(allocator, loop_report_path);
+    defer allocator.free(loop_report_source);
+    var loop_report = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        loop_report_source,
+        .{},
+    );
+    defer loop_report.deinit();
+    const loops = (loop_report.value.object.get("loops") orelse
+        return error.TestUnexpectedResult).array.items;
+    try testing.expectEqual(@as(usize, 2), loops.len);
+
+    var required_queries = std.AutoHashMap(i64, i64).init(allocator);
+    defer required_queries.deinit();
+    for (loops) |loop| {
+        const object = loop.object;
+        try testing.expectEqualStrings(
+            "complete",
+            (object.get("projection_completeness") orelse
+                return error.TestUnexpectedResult).string,
+        );
+        try testing.expect((object.get("certificate_required") orelse
+            return error.TestUnexpectedResult).bool);
+        const summary_id = (object.get("id") orelse
+            return error.TestUnexpectedResult).integer;
+        const query_id = (object.get("induction_query_id") orelse
+            return error.TestUnexpectedResult).integer;
+        try required_queries.put(summary_id, query_id);
+    }
+
+    var proof_certificate = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        certificate,
+        .{},
+    );
+    defer proof_certificate.deinit();
+    try testing.expectEqualStrings(
+        "checked",
+        (proof_certificate.value.object.get("status") orelse
+            return error.TestUnexpectedResult).string,
+    );
+    const proofs = (proof_certificate.value.object.get("proofs") orelse
+        return error.TestUnexpectedResult).array.items;
+    try testing.expectEqual(loops.len, proofs.len);
+    for (proofs) |proof| {
+        const object = proof.object;
+        try testing.expectEqualStrings(
+            "loop_induction_and_nonvacuity",
+            (object.get("authorization_claim") orelse
+                return error.TestUnexpectedResult).string,
+        );
+        try testing.expectEqualStrings(
+            "checked",
+            (object.get("lean_status") orelse
+                return error.TestUnexpectedResult).string,
+        );
+        try testing.expectEqualStrings(
+            "proved",
+            (object.get("anti_vacuity_status") orelse
+                return error.TestUnexpectedResult).string,
+        );
+        const summary_id = (object.get("loop_summary_id") orelse
+            return error.TestUnexpectedResult).integer;
+        const expected_query_id = required_queries.get(summary_id) orelse
+            return error.TestUnexpectedResult;
+        try testing.expectEqual(
+            expected_query_id,
+            (object.get("target_query_id") orelse
+                return error.TestUnexpectedResult).integer,
+        );
+    }
+
+    const smt_report_path = try pathFromTmpAlloc(
+        allocator,
+        tmp,
+        "nested-accepted/nested_loop_relational.smt.report.json",
+    );
+    defer allocator.free(smt_report_path);
+    const smt_report_source = try readFileAllocForTest(allocator, smt_report_path);
+    defer allocator.free(smt_report_source);
+    var smt_report = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        smt_report_source,
+        .{},
+    );
+    defer smt_report.deinit();
+    const smt_root = smt_report.value.object;
+    const verification = (smt_root.get("verification") orelse
+        return error.TestUnexpectedResult).object;
+    try testing.expect((verification.get("success") orelse
+        return error.TestUnexpectedResult).bool);
+    const smt_summary = (smt_root.get("summary") orelse
+        return error.TestUnexpectedResult).object;
+    try testing.expectEqual(
+        @as(i64, 0),
+        (smt_summary.get("vacuous") orelse return error.TestUnexpectedResult).integer,
+    );
+    try testing.expectEqual(
+        @as(i64, 0),
+        (smt_summary.get("vacuity_unknown") orelse return error.TestUnexpectedResult).integer,
+    );
+
+    const index_path = try pathFromTmpAlloc(
+        allocator,
+        tmp,
+        "nested-accepted/nested_loop_relational.formal.artifacts.json",
+    );
+    defer allocator.free(index_path);
+    const artifact_index = try readFileAllocForTest(allocator, index_path);
+    defer allocator.free(artifact_index);
+    var parsed_index = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        artifact_index,
+        .{},
+    );
+    defer parsed_index.deinit();
+    const index_root = parsed_index.value.object;
+    try testing.expectEqualStrings(
+        "allowed",
+        (index_root.get("final_artifact_authorization") orelse
+            return error.TestUnexpectedResult).string,
+    );
+    var z3_accepted = false;
+    var lean_accepted = false;
+    for ((index_root.get("gates") orelse return error.TestUnexpectedResult).array.items) |gate| {
+        const object = gate.object;
+        const id = (object.get("id") orelse return error.TestUnexpectedResult).string;
+        const accepted = std.mem.eql(
+            u8,
+            (object.get("status") orelse return error.TestUnexpectedResult).string,
+            "accepted",
+        );
+        if (std.mem.eql(u8, id, "z3_userland")) z3_accepted = accepted;
+        if (std.mem.eql(u8, id, "lean_userland")) lean_accepted = accepted;
+    }
+    try testing.expect(z3_accepted);
+    try testing.expect(lean_accepted);
+
+    var saw_smt_report = false;
+    var saw_loop_report = false;
+    var saw_lean_certificate = false;
+    for ((index_root.get("artifacts") orelse return error.TestUnexpectedResult).array.items) |artifact| {
+        const object = artifact.object;
+        const id = (object.get("id") orelse return error.TestUnexpectedResult).string;
+        if (std.mem.eql(u8, id, "smt_report_json")) saw_smt_report = true;
+        if (std.mem.eql(u8, id, "loop_induction_report")) saw_loop_report = true;
+        if (std.mem.eql(u8, id, "lean_proof_certificate")) {
+            saw_lean_certificate = true;
+            const digest = (object.get("sha256") orelse
+                return error.TestUnexpectedResult).string;
+            try testing.expectEqual(@as(usize, 64), digest.len);
+        }
+    }
+    try testing.expect(saw_smt_report);
+    try testing.expect(saw_loop_report);
+    try testing.expect(saw_lean_certificate);
+
+    try tmp.dir.access(std.testing.io, "nested-accepted/nested_loop_relational.hex", .{});
+}
+
+test "multiple nested loops on distinct outer paths authorize the real CLI" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    const source_path = "tests/formal/nested_loop_multiple_paths.ora";
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output_path = try pathFromTmpAlloc(allocator, tmp, "nested-paths-accepted");
+    defer allocator.free(output_path);
+
+    const result = try runProcessWithLeanPath(allocator, &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=smt-report,sir-text,bytecode",
+        "--out-dir",
+        output_path,
+        "--lean-proofs",
+        source_path,
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try expectExited(result, 0);
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        result.stdout,
+        1,
+        "total=3, certificate-required=3, excluded=0",
+    ));
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        result.stdout,
+        1,
+        "Lean loop proof gate accepted:\n  kernel-checked certificates: 3",
+    ));
+
+    const certificate_path = try pathFromTmpAlloc(
+        allocator,
+        tmp,
+        "nested-paths-accepted/nested_loop_multiple_paths.lean.proof.json",
+    );
+    defer allocator.free(certificate_path);
+    const certificate = try readFileAllocForTest(allocator, certificate_path);
+    defer allocator.free(certificate);
+    try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"proof_count\": 3"));
+    try testing.expect(std.mem.containsAtLeast(u8, certificate, 3, "\"loop_vc_sha256\": \""));
+    try testing.expect(!std.mem.containsAtLeast(u8, certificate, 1, "sorryAx"));
+
+    const index_path = try pathFromTmpAlloc(
+        allocator,
+        tmp,
+        "nested-paths-accepted/nested_loop_multiple_paths.formal.artifacts.json",
+    );
+    defer allocator.free(index_path);
+    const artifact_index = try readFileAllocForTest(allocator, index_path);
+    defer allocator.free(artifact_index);
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        artifact_index,
+        1,
+        "\"id\": \"lean_userland\", \"domain\": \"userland\", \"phase\": \"proof_artifact\", \"status\": \"accepted\"",
+    ));
+
+    try tmp.dir.access(
+        std.testing.io,
+        "nested-paths-accepted/nested_loop_multiple_paths.hex",
+        .{},
+    );
+}
+
+test "nested loop formal artifacts are byte-identical across real CLI runs" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    const source_path = "tests/formal/nested_loop_relational.ora";
+    const stem = "nested_loop_relational";
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output_paths = [_][]const u8{ "determinism-first", "determinism-second" };
+
+    for (output_paths) |relative_output| {
+        const output_path = try pathFromTmpAlloc(allocator, tmp, relative_output);
+        defer allocator.free(output_path);
+        const result = try runProcessWithLeanPath(allocator, &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=smt-report,bytecode",
+            "--out-dir",
+            output_path,
+            "--lean-proofs",
+            source_path,
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try expectExited(result, 0);
+    }
+
+    const compared_suffixes = [_][]const u8{
+        ".formal.loops.json",
+        ".lean.proof.json",
+        ".formal.artifacts.json",
+    };
+    for (compared_suffixes) |suffix| {
+        const relative_first = try std.fmt.allocPrint(
+            allocator,
+            "{s}/{s}{s}",
+            .{ output_paths[0], stem, suffix },
+        );
+        defer allocator.free(relative_first);
+        const first_path = try pathFromTmpAlloc(allocator, tmp, relative_first);
+        defer allocator.free(first_path);
+        const first = try readFileAllocForTest(allocator, first_path);
+        defer allocator.free(first);
+
+        const relative_second = try std.fmt.allocPrint(
+            allocator,
+            "{s}/{s}{s}",
+            .{ output_paths[1], stem, suffix },
+        );
+        defer allocator.free(relative_second);
+        const second_path = try pathFromTmpAlloc(allocator, tmp, relative_second);
+        defer allocator.free(second_path);
+        const second = try readFileAllocForTest(allocator, second_path);
+        defer allocator.free(second);
+
+        try testing.expectEqualSlices(u8, first, second);
+    }
+    try expectNoFormalArtifactsInRepoRoot(allocator, stem);
+}
+
+test "nested loop artifact authority requires the exact child certificate" {
+    var result = try collectPackageObligations(
+        testing.allocator,
+        "tests/formal/nested_loop_relational.ora",
+    );
+    defer result.deinit();
+
+    var parent: ?obligation.LoopSummaryRow = null;
+    var child: ?obligation.LoopSummaryRow = null;
+    for (result.set.loop_summaries) |row| {
+        var has_dependency = false;
+        for (row.edges) |edge| {
+            if (edge.summary_dependencies.len != 0) has_dependency = true;
+        }
+        if (has_dependency) parent = row else child = row;
+    }
+    const parent_summary = parent orelse return error.TestUnexpectedResult;
+    const child_summary = child orelse return error.TestUnexpectedResult;
+    const parent_target = obligation.findById(
+        result.set.queries,
+        parent_summary.query_ids.induction[0],
+    ) orelse return error.TestUnexpectedResult;
+    const child_target = obligation.findById(
+        result.set.queries,
+        child_summary.query_ids.induction[0],
+    ) orelse return error.TestUnexpectedResult;
+
+    var decided_queries = try testing.allocator.alloc(
+        obligation.VerificationQuery,
+        result.set.queries.len + 2,
+    );
+    defer testing.allocator.free(decided_queries);
+    @memcpy(decided_queries[0..result.set.queries.len], result.set.queries);
+    for (decided_queries[0..result.set.queries.len]) |*query| {
+        query.obligation_ids = &.{};
+        if (query.backend == .z3) {
+            query.result = .{ .status = if (query.kind == .base) .sat else .unsat };
+        } else if (query.kind != .loop_induction) {
+            query.artifact_policy = .diagnostic_only;
+        }
+    }
+
+    const artifacts = [_]obligation.ProofArtifact{
+        .{
+            .id = 100_001,
+            .owner = parent_target.owner,
+            .source = parent_target.source,
+            .module_name = "Ora.Tests.NestedLoop",
+            .theorem_name = "parent",
+        },
+        .{
+            .id = 100_002,
+            .owner = child_target.owner,
+            .source = child_target.source,
+            .module_name = "Ora.Tests.NestedLoop",
+            .theorem_name = "child",
+        },
+    };
+    decided_queries[result.set.queries.len] = .{
+        .id = 100_003,
+        .owner = parent_target.owner,
+        .source = parent_target.source,
+        .phase = .report,
+        .origin = parent_target.origin,
+        .backend = .lean,
+        .kind = .loop_induction,
+        .assumption_ids = parent_target.assumption_ids,
+        .proof_artifact_id = artifacts[0].id,
+        .discharges_query_id = parent_target.id,
+        .loop_summary_id = parent_summary.id,
+        .loop_vc_sha256 = parent_target.loop_vc_sha256,
+        .result = .{ .status = .proved },
+    };
+    decided_queries[result.set.queries.len + 1] = .{
+        .id = 100_004,
+        .owner = child_target.owner,
+        .source = child_target.source,
+        .phase = .report,
+        .origin = child_target.origin,
+        .backend = .lean,
+        .kind = .loop_induction,
+        .assumption_ids = child_target.assumption_ids,
+        .proof_artifact_id = artifacts[1].id,
+        .discharges_query_id = child_target.id,
+        .loop_summary_id = child_summary.id,
+        .loop_vc_sha256 = child_target.loop_vc_sha256,
+        .result = .{ .status = .proved },
+    };
+
+    var decided_set = result.set;
+    decided_set.obligations = &.{};
+    decided_set.queries = decided_queries;
+    decided_set.proof_artifacts = &artifacts;
+    try decided_set.validateTermReferences();
+    try decided_set.validateIdReferences();
+    try testing.expectEqual(
+        obligation.ArtifactDecision.allowed,
+        decided_set.artifactDecision(),
+    );
+
+    decided_set.queries = decided_queries[0 .. decided_queries.len - 1];
+    try testing.expectEqual(
+        obligation.ArtifactBlockReason.lean_required_failure,
+        decided_set.artifactDecision().blocked,
+    );
+
+    const parent_edge_index: usize = for (parent_summary.edges, 0..) |edge, index| {
+        if (edge.summary_dependencies.len != 0) break index;
+    } else return error.TestUnexpectedResult;
+    var changed_summaries = try testing.allocator.dupe(
+        obligation.LoopSummaryRow,
+        result.set.loop_summaries,
+    );
+    defer testing.allocator.free(changed_summaries);
+    const parent_index: usize = for (changed_summaries, 0..) |row, index| {
+        if (row.id == parent_summary.id) break index;
+    } else return error.TestUnexpectedResult;
+    var changed_edges = try testing.allocator.dupe(
+        obligation.LoopEdgeRow,
+        parent_summary.edges,
+    );
+    defer testing.allocator.free(changed_edges);
+    var changed_dependencies = try testing.allocator.dupe(
+        obligation.LoopSummaryDependency,
+        changed_edges[parent_edge_index].summary_dependencies,
+    );
+    defer testing.allocator.free(changed_dependencies);
+    changed_dependencies[0].loop_vc_sha256[0] ^= 1;
+    changed_edges[parent_edge_index].summary_dependencies = changed_dependencies;
+    changed_summaries[parent_index].edges = changed_edges;
+    decided_set.loop_summaries = changed_summaries;
+    decided_set.queries = decided_queries;
+    try testing.expectEqual(
+        obligation.ArtifactBlockReason.invalid_dependency,
+        decided_set.artifactDecision().blocked,
+    );
+
+    changed_dependencies[0] = parent_summary.edges[parent_edge_index].summary_dependencies[0];
+    changed_dependencies[0].summary_id = parent_summary.id;
+    try testing.expectEqual(
+        obligation.ArtifactBlockReason.invalid_dependency,
+        decided_set.artifactDecision().blocked,
+    );
+
+    changed_dependencies[0] = parent_summary.edges[parent_edge_index].summary_dependencies[0];
+    changed_dependencies[0].summary_id = std.math.maxInt(obligation.Id);
+    try testing.expectEqual(
+        obligation.ArtifactBlockReason.invalid_dependency,
+        decided_set.artifactDecision().blocked,
+    );
+
+    changed_dependencies[0] = parent_summary.edges[parent_edge_index].summary_dependencies[0];
+    changed_dependencies[0].target = .backedge;
+    try testing.expectEqual(
+        obligation.ArtifactBlockReason.invalid_dependency,
+        decided_set.artifactDecision().blocked,
+    );
+}
+
+test "unsupported loop effects fail closed through the real CLI" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const source =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract LoopUnsupportedEffects {
+        \\    storage var total: u256 = 0;
+        \\    storage var left: Resource<TokenUnit>;
+        \\    storage var right: Resource<TokenUnit>;
+        \\
+        \\    fn advance(value: u256) -> u256 {
+        \\        return value + 1;
+        \\    }
+        \\
+        \\    pub fn storageLoop() {
+        \\        var i: u256 = 0;
+        \\        while (i < 1)
+        \\            invariant i <= 1
+        \\        {
+        \\            total = total + 1;
+        \\            i = i + 1;
+        \\        }
+        \\    }
+        \\
+        \\    pub fn callLoop() -> u256 {
+        \\        var i: u256 = 0;
+        \\        while (i < 1)
+        \\            invariant i <= 1
+        \\        {
+        \\            i = advance(i);
+        \\        }
+        \\        return i;
+        \\    }
+        \\
+        \\    pub fn resourceLoop(amount: TokenUnit) {
+        \\        var i: u256 = 0;
+        \\        while (i < 1)
+        \\            invariant i <= 1
+        \\        {
+        \\            @move(left, right, amount);
+        \\            i = i + 1;
+        \\        }
+        \\    }
+        \\}
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "loop_unsupported_effects.ora",
+        .data = source,
+    });
+    const source_path = try pathFromTmpAlloc(
+        allocator,
+        tmp,
+        "loop_unsupported_effects.ora",
+    );
+    defer allocator.free(source_path);
+    const output_path = try pathFromTmpAlloc(allocator, tmp, "rejected");
+    defer allocator.free(output_path);
+
+    const result = try runProcessWithLeanPath(allocator, &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=smt-report,bytecode",
+        "--out-dir",
+        output_path,
+        "--lean-proofs",
+        source_path,
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try expectExited(result, 1);
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        result.stdout,
+        1,
+        "(storageLoop) excluded_by=loop_has_storage_write,loop_has_storage_read",
+    ));
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        result.stdout,
+        1,
+        "(callLoop) excluded_by=loop_has_call",
+    ));
+    const resource_prefix = "(resourceLoop) excluded_by=";
+    const resource_start = std.mem.indexOf(u8, result.stdout, resource_prefix) orelse
+        return error.TestUnexpectedResult;
+    const resource_tail = result.stdout[resource_start..];
+    const resource_end = std.mem.indexOfScalar(u8, resource_tail, '\n') orelse resource_tail.len;
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        resource_tail[0..resource_end],
+        1,
+        "loop_has_resource_operation",
+    ));
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        result.stdout,
+        1,
+        "Lean proof gate cannot cover every runtime loop:",
+    ));
+    try testing.expectError(
+        error.FileNotFound,
+        tmp.dir.access(std.testing.io, "rejected/loop_unsupported_effects.hex", .{}),
+    );
+    const index_path = try pathFromTmpAlloc(
+        allocator,
+        tmp,
+        "rejected/loop_unsupported_effects.formal.artifacts.json",
+    );
+    defer allocator.free(index_path);
+    const index = try readFileAllocForTest(allocator, index_path);
+    defer allocator.free(index);
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        index,
+        1,
+        "\"final_artifact_authorization\": \"blocked\"",
+    ));
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        index,
+        1,
+        "\"id\": \"lean_userland\", \"domain\": \"userland\", \"phase\": \"proof_artifact\", \"status\": \"rejected\"",
+    ));
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        index,
+        1,
+        "\"id\": \"loop_induction_report\"",
+    ));
+    try testing.expect(!std.mem.containsAtLeast(u8, index, 1, "\"id\": \"lean_proof_certificate\""));
+    try testing.expect(!std.mem.containsAtLeast(u8, index, 1, "\"id\": \"dispatcher_proof_certificate\""));
+    try tmp.dir.access(
+        std.testing.io,
+        "rejected/loop_unsupported_effects.formal.loops.json",
+        .{},
+    );
+    try expectNoFormalArtifactsInRepoRoot(allocator, "loop_unsupported_effects");
 }
 
 test "structured loop paths preserve branch-local safety and state sources" {
@@ -9405,8 +10472,8 @@ test "structured loop paths preserve branch-local safety and state sources" {
     try testing.expect(std.mem.indexOf(u8, branch.edges[1].structural_key, "/else/") != null);
     try testing.expectEqual(@as(usize, 2), branch.edges[0].path_formulas.len);
     try testing.expectEqual(@as(usize, 2), branch.edges[1].path_formulas.len);
-    try testing.expectEqual(@as(usize, 2), branch.edges[0].safety_formulas.len);
-    try testing.expectEqual(@as(usize, 2), branch.edges[1].safety_formulas.len);
+    try testing.expectEqual(@as(usize, 2), branch.edges[0].safetyFormulaCount());
+    try testing.expectEqual(@as(usize, 2), branch.edges[1].safetyFormulaCount());
     try testing.expect(!std.mem.eql(
         u8,
         branch.edges[0].next_state[0].source_key,
@@ -9427,7 +10494,7 @@ test "structured loop paths preserve branch-local safety and state sources" {
     for (switched.edges[0..3], 0..) |edge, index| {
         try testing.expectEqual(obligation.LoopControlTarget.backedge, edge.target.?);
         try testing.expect(std.mem.indexOf(u8, edge.structural_key, "/case:") != null);
-        try testing.expectEqual(@as(usize, 2), edge.safety_formulas.len);
+        try testing.expectEqual(@as(usize, 2), edge.safetyFormulaCount());
         for (switched.edges[0..index]) |previous| {
             try testing.expect(!std.mem.eql(u8, previous.next_state[0].source_key, edge.next_state[0].source_key));
         }
@@ -9471,9 +10538,9 @@ test "structured loop paths preserve branch-local safety and state sources" {
     try testing.expectEqual(@as(usize, 3), no_default.edges.len);
     try testing.expect(std.mem.indexOf(u8, no_default.edges[0].structural_key, "/case:0/") != null);
     try testing.expect(std.mem.indexOf(u8, no_default.edges[1].structural_key, "/no-match/") != null);
-    try testing.expectEqual(@as(usize, 2), no_default.edges[0].safety_formulas.len);
-    try testing.expectEqual(@as(usize, 1), no_default.edges[1].safety_formulas.len);
-    try testing.expectEqual(@as(usize, 0), no_default.edges[2].safety_formulas.len);
+    try testing.expectEqual(@as(usize, 2), no_default.edges[0].safetyFormulaCount());
+    try testing.expectEqual(@as(usize, 1), no_default.edges[1].safetyFormulaCount());
+    try testing.expectEqual(@as(usize, 0), no_default.edges[2].safetyFormulaCount());
 
     const report = try dumpManifestToOwnedString(testing.allocator, result.set);
     defer testing.allocator.free(report);
@@ -9649,6 +10716,125 @@ test "loop control provenance mutations fail closed by name" {
             mutated.set,
             .control_marker_duplicate,
             .loop_control_marker_duplicate,
+        );
+    }
+}
+
+test "successful and error returns project edge-local LoopVC target assertions" {
+    var result = try collectPackageObligations(testing.allocator, "tests/formal/loop_return_targets.ora");
+    defer result.deinit();
+    var z3_context = try z3_verification.Z3Context.init(testing.allocator);
+    defer z3_context.deinit();
+    var z3_adapter = obligation_to_z3.Adapter.init(&z3_context, testing.allocator, result.set);
+
+    const cases = [_]struct {
+        function_name: []const u8,
+        target: obligation.LoopControlTarget,
+        control_kind: []const u8,
+    }{
+        .{ .function_name = "success", .target = .function_return, .control_kind = "function_return" },
+        .{ .function_name = "failure", .target = .error_return, .control_kind = "error_return" },
+    };
+
+    try testing.expectEqual(cases.len, result.set.loop_summaries.len);
+    for (cases) |case| {
+        const summary = loopSummaryByFunction(result.set, case.function_name) orelse
+            return error.TestUnexpectedResult;
+        try testing.expectEqual(obligation.LoopProjectionCompleteness.complete, summary.projection_completeness);
+        try testing.expect(summary.projectionSupported());
+
+        var matched_return = false;
+        for (summary.edges) |edge| {
+            if (edge.target != case.target) continue;
+            try testing.expect(!matched_return);
+            matched_return = true;
+            try testing.expect(std.mem.indexOf(u8, edge.structural_key, case.control_kind) != null);
+            try testing.expect(edge.target_formulas.len > 0);
+            try testing.expectEqual(@as(usize, 0), edge.safetyFormulaCount());
+        }
+        try testing.expect(matched_return);
+        try testing.expectEqual(@as(usize, 2), summary.query_ids.post.len);
+        var bound_post_count: usize = 0;
+        for (summary.query_ids.post) |query_id| {
+            const post_query = obligation.findById(result.set.queries, query_id) orelse
+                return error.TestUnexpectedResult;
+            try testing.expectEqual(obligation.ArtifactPolicy.blocks_verified_artifacts, post_query.artifact_policy);
+            try testing.expectEqual(@as(usize, 1), post_query.obligation_ids.len);
+            const checked = try z3_adapter.checkLoopQueryForRow(post_query);
+            try testing.expectEqual(obligation_to_z3.CheckStatus.proved, checked.status);
+            for (result.query_bindings) |binding| {
+                if (binding.query_id != query_id or binding.kind != .loop_invariant_post) continue;
+                try testing.expectEqual(@as(?obligation.LogicalRole, .ensures), binding.logical_role);
+                try testing.expectEqual(@as(?usize, summary.loop_source_op_id.?), binding.loop_source_op_id);
+                try testing.expectEqual(@as(usize, 1), binding.obligation_ids.len);
+                bound_post_count += 1;
+            }
+        }
+        try testing.expectEqual(@as(usize, 2), bound_post_count);
+        const induction_query = obligation.findById(result.set.queries, summary.query_ids.induction[0]) orelse
+            return error.TestUnexpectedResult;
+        switch (obligation_to_lean.querySemanticSupport(result.set, induction_query)) {
+            .supported => {},
+            .unsupported => return error.TestUnexpectedResult,
+        }
+    }
+
+    var postcondition_source_binding_count: usize = 0;
+    for (result.source_fact_bindings) |binding| {
+        if (!std.mem.eql(u8, binding.kind, "ensures") and
+            !std.mem.eql(u8, binding.kind, "ensures_ok") and
+            !std.mem.eql(u8, binding.kind, "ensures_err")) continue;
+        postcondition_source_binding_count += 1;
+        try testing.expectEqual(@as(usize, 1), binding.query_ids.len);
+        const query = obligation.findById(result.set.queries, binding.query_ids[0]) orelse
+            return error.TestUnexpectedResult;
+        try testing.expectEqual(obligation.VerificationQueryKind.loop_invariant_post, query.kind);
+    }
+    try testing.expectEqual(@as(usize, 4), postcondition_source_binding_count);
+
+    const report = try dumpManifestToOwnedString(testing.allocator, result.set);
+    defer testing.allocator.free(report);
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"target\":\"function_return\""));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"target\":\"error_return\""));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 2, "\"target_formulas\":["));
+}
+
+test "loop return target provenance and formula inventory mutations fail closed" {
+    {
+        var compilation = try compilePackage("tests/formal/loop_return_targets.ora");
+        defer compilation.deinit();
+        const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir_result.diagnostics.isEmpty());
+        const marker = findFirstOpByName(hir_result.module.raw_module, "ora.loop_control") orelse
+            return error.TestUnexpectedResult;
+        mlir.oraOperationSetAttributeByName(
+            marker,
+            strRef("kind"),
+            mlir.oraStringAttrCreate(mlir.mlirOperationGetContext(marker), strRef("error_return")),
+        );
+        var mutated = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+        defer mutated.deinit();
+        try expectOneLoopProjectionFailure(
+            mutated.set,
+            .control_marker_malformed,
+            .loop_control_marker_malformed,
+        );
+    }
+
+    {
+        var compilation = try compilePackage("tests/formal/loop_return_targets.ora");
+        defer compilation.deinit();
+        const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir_result.diagnostics.isEmpty());
+        const target = findFirstOpByName(hir_result.module.raw_module, "ora.ensures") orelse
+            return error.TestUnexpectedResult;
+        mlir.mlirOperationSetOperands(target, 0, null);
+        var mutated = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+        defer mutated.deinit();
+        try expectOneLoopProjectionFailure(
+            mutated.set,
+            .target_mismatch,
+            .loop_projection_target_mismatch,
         );
     }
 }
@@ -9864,7 +11050,7 @@ test "scalar loop induction query projects into Lean with first-class identity" 
     try testing.expect(row.projectionSupported());
     try testing.expectEqual(@as(usize, 1), row.context_variables.len);
     try testing.expectEqual(@as(usize, 1), row.variables.len);
-    try testing.expect(row.edges[0].safety_formulas.len > 0);
+    try testing.expect(row.edges[0].safetyFormulaCount() > 0);
     try testing.expectEqual(@as(usize, 1), row.post_formulas.len);
     try testing.expectEqual(obligation.ProofRequirement.lean_certificate, query.proof_requirement);
     try testing.expectEqualSlices(obligation.Id, &.{query.id}, row.query_ids.induction);
@@ -9928,6 +11114,7 @@ test "canonical loop edges reject missing duplicate unresolved and foreign state
         .{ .status = .path_mismatch, .reason = .loop_projection_path_mismatch },
         .{ .status = .effect_mismatch, .reason = .loop_projection_effect_mismatch },
         .{ .status = .binding_mismatch, .reason = .loop_projection_binding_mismatch },
+        .{ .status = .target_mismatch, .reason = .loop_projection_target_mismatch },
         .{ .status = .ambiguous_identity, .reason = .loop_projection_identity_ambiguous },
         .{ .status = .unsupported_control_flow, .reason = .loop_projection_control_flow_unsupported },
         .{ .status = .unsupported_effect, .reason = .loop_projection_effect_unsupported },
@@ -9956,29 +11143,22 @@ test "canonical loop edges reject missing duplicate unresolved and foreign state
     unresolved_target.edges = &unresolved_edges;
     try expectLoopSummaryRejected(result.set, query, unresolved_target, .loop_edge_target_unresolved);
 
-    const deferred_control_targets = [_]obligation.LoopControlTarget{
-        .function_return,
-        .error_return,
-        .explicit_revert,
+    var explicit_revert_edges = [_]obligation.LoopEdgeRow{
+        original.edges[0],
+        original.edges[1],
+        original.edges[1],
     };
-    for (deferred_control_targets) |target| {
-        var target_edges = [_]obligation.LoopEdgeRow{
-            original.edges[0],
-            original.edges[1],
-            original.edges[1],
-        };
-        target_edges[2].id = 2;
-        target_edges[2].structural_key = "body/deferred-control";
-        target_edges[2].target = target;
-        var deferred_target = original;
-        deferred_target.edges = &target_edges;
-        try expectLoopSummaryRejected(
-            result.set,
-            query,
-            deferred_target,
-            .loop_control_target_unsupported,
-        );
-    }
+    explicit_revert_edges[2].id = 2;
+    explicit_revert_edges[2].structural_key = "body/explicit-revert";
+    explicit_revert_edges[2].target = .explicit_revert;
+    var explicit_revert = original;
+    explicit_revert.edges = &explicit_revert_edges;
+    try expectLoopSummaryRejected(
+        result.set,
+        query,
+        explicit_revert,
+        .loop_control_target_unsupported,
+    );
 
     var missing_binding_edges = [_]obligation.LoopEdgeRow{ original.edges[0], original.edges[1] };
     missing_binding_edges[0].next_state = &.{};

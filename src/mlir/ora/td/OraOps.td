@@ -1460,9 +1460,10 @@ def Ora_LoopControlOp : Ora_Op<"loop_control",
     [MemoryEffects<[MemWrite]>]> {
   let summary = "Source-owned formal loop-control marker";
   let description = [{
-    Records a source break or continue together with the complete state of its
-    target loop. This operation exists only at the formal-verification boundary;
-    Ora-to-SIR erases it after verification has consumed its provenance.
+    Records a source break, continue, successful return, or error return
+    together with the complete state of its target loop. This operation exists
+    only at the formal-verification boundary; Ora-to-SIR erases it after
+    verification has consumed its provenance.
   }];
 
   let arguments = (ins

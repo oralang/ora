@@ -1919,7 +1919,7 @@ test "compiler unrolls small constant runtime for-count loops" {
         \\contract Sample {
         \\    pub fn run() -> u256 {
         \\        let sum: u256 = 0;
-        \\        for (4) |i| {
+        \\        for (0..4) |i, _| {
         \\            sum += i;
         \\        }
         \\        return sum;
@@ -1994,6 +1994,29 @@ test "compiler unrolls small constant runtime for loops with unlabeled break" {
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.") != null);
 }
 
+test "compiler keeps runtime-dependent loop control structured" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn run(stop: bool) -> u256 {
+        \\        var sum: u256 = 0;
+        \\        for (0..4) |i, _| {
+        \\            if (stop) {
+        \\                break;
+        \\            }
+        \\            sum += i;
+        \\        }
+        \\        return sum;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "scf.for") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.if_placeholder") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.") == null);
+}
+
 test "compiler unrolls small constant runtime for loops with unlabeled continue" {
     const source_text =
         \\contract Sample {
@@ -2063,6 +2086,27 @@ test "compiler unrolls small constant labeled runtime for loops with labeled con
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.continue") == null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.0.4") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.2.4") != null);
+}
+
+test "compiler keeps nested labeled control targeting an outer loop structured" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn run() {
+        \\        outer: for (0..4) |i, _| {
+        \\            inner: for (0..4) |j, _| {
+        \\                if (i * j > 2) {
+        \\                    break :outer;
+        \\                }
+        \\            }
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.count(u8, rendered, "scf.for") >= 2);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.") == null);
 }
 
 test "compiler does not unroll runtime for-count loops above the unroll limit" {

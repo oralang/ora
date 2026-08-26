@@ -229,16 +229,22 @@ fn supportFor(mutation: Mutation) obligation_to_lean.SemanticSupport {
         &init_formulas
     else
         &invariant_formulas;
-    const safety_formulas: []const obligation.FormulaRef = if (mutation == .missing_body_safety)
-        &.{}
-    else
-        &body_safety_formulas;
+    const safety_checkpoints: []const obligation.LoopSafetyCheckpoint =
+        if (mutation == .missing_body_safety)
+            &.{}
+        else
+            &.{.{
+                .id = 0,
+                .structural_key = "body/ora.assert:0",
+                .after_dependency_count = 0,
+                .formulas = &body_safety_formulas,
+            }};
     const edges = [_]obligation.LoopEdgeRow{
         .{
             .id = 0,
             .structural_key = "body/straight-line-yield",
             .path_formulas = backedge_path,
-            .safety_formulas = safety_formulas,
+            .safety_checkpoints = safety_checkpoints,
             .next_state = assignments[0..],
             .target = .backedge,
         },

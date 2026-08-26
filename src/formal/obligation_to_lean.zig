@@ -205,14 +205,26 @@ fn writeModulePreamble(
 }
 
 fn writeLoopSummaryDefinitions(writer: anytype, set: obligation.ObligationSet) !void {
+    var emitted_count: usize = 0;
     for (set.loop_summaries) |row| {
         if (!row.projectionSupported()) continue;
+        emitted_count += 1;
         try writer.print("def emittedLoopSummary_{d} : Ora.Loop.SummaryRow :=\n  ", .{row.id});
         try writeLoopSummaryRow(writer, row);
         const digest = try loopVcSha256(set, row.id);
         const digest_hex = std.fmt.bytesToHex(digest, .lower);
         try writer.print("\n\ndef emittedLoopVcSha256_{d} : String := \"{s}\"\n\n", .{ row.id, &digest_hex });
     }
+    if (emitted_count == 0) return;
+    try writer.writeAll("def emittedLoopSummaries : List Ora.Loop.SummaryRow := [");
+    var emitted_index: usize = 0;
+    for (set.loop_summaries) |row| {
+        if (!row.projectionSupported()) continue;
+        if (emitted_index != 0) try writer.writeAll(", ");
+        try writer.print("emittedLoopSummary_{d}", .{row.id});
+        emitted_index += 1;
+    }
+    try writer.writeAll("]\n\n");
 }
 
 /// Deterministic identity for the exact LoopVC proof input. The complete term
@@ -325,8 +337,12 @@ fn writeLoopEdges(writer: anytype, edges: []const obligation.LoopEdgeRow) !void 
         try writeLeanString(writer, edge.structural_key);
         try writer.writeAll(", path := ");
         try writeFormulaList(writer, edge.path_formulas);
-        try writer.writeAll(", safety := ");
-        try writeFormulaList(writer, edge.safety_formulas);
+        try writer.writeAll(", safetyCheckpoints := ");
+        try writeLoopSafetyCheckpoints(writer, edge.safety_checkpoints);
+        if (edge.summary_dependencies.len != 0) {
+            try writer.writeAll(", summaryDependencies := ");
+            try writeLoopSummaryDependencies(writer, edge.summary_dependencies);
+        }
         try writer.writeAll(", nextState := ");
         try writeLoopStepAssignments(writer, edge.next_state);
         try writer.writeAll(", target := .");
@@ -337,6 +353,53 @@ fn writeLoopEdges(writer: anytype, edges: []const obligation.LoopEdgeRow) !void 
             .error_return => "errorReturn",
             .explicit_revert => "explicitRevert",
         } else "unresolved");
+        try writer.writeAll(", targetFormulas := ");
+        try writeFormulaList(writer, edge.target_formulas);
+        try writer.writeAll(" }");
+    }
+    try writer.writeByte(']');
+}
+
+fn writeLoopSafetyCheckpoints(
+    writer: anytype,
+    checkpoints: []const obligation.LoopSafetyCheckpoint,
+) !void {
+    try writer.writeByte('[');
+    for (checkpoints, 0..) |checkpoint, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writer.writeAll("{ id := ");
+        try writer.print("{d}, structuralKey := ", .{checkpoint.id});
+        try writeLeanString(writer, checkpoint.structural_key);
+        try writer.print(", afterDependencyCount := {d}, formulas := ", .{
+            checkpoint.after_dependency_count,
+        });
+        try writeFormulaList(writer, checkpoint.formulas);
+        try writer.writeAll(" }");
+    }
+    try writer.writeByte(']');
+}
+
+fn writeLoopSummaryDependencies(
+    writer: anytype,
+    dependencies: []const obligation.LoopSummaryDependency,
+) !void {
+    try writer.writeByte('[');
+    for (dependencies, 0..) |dependency, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writer.writeAll("{ id := ");
+        try writer.print("{d}, structuralKey := ", .{dependency.id});
+        try writeLeanString(writer, dependency.structural_key);
+        try writer.print(", summaryId := {d}, loopVcSha256 := \"", .{dependency.summary_id});
+        const digest_hex = std.fmt.bytesToHex(dependency.loop_vc_sha256, .lower);
+        try writer.writeAll(&digest_hex);
+        try writer.writeAll("\", target := .");
+        try writer.writeAll(switch (dependency.target) {
+            .backedge => "backedge",
+            .successor => "successor",
+            .function_return => "functionReturn",
+            .error_return => "errorReturn",
+            .explicit_revert => "explicitRevert",
+        });
         try writer.writeAll(" }");
     }
     try writer.writeByte(']');
@@ -569,12 +632,23 @@ fn writeSemanticDefinitions(writer: anytype, set: obligation.ObligationSet, proo
         try writer.writeAll(" : Prop :=\n");
         if (query.kind == .loop_induction) {
             const summary_id = query.loop_summary_id orelse return error.InvalidDependency;
-            try writer.writeAll("  Ora.Loop.loopProofAuthorizationFromAssumptions emittedManifest\n    ");
+            const summary = obligation.findById(set.loop_summaries, summary_id) orelse
+                return error.InvalidDependency;
+            const has_dependencies = loopSummaryHasDependencies(summary);
+            try writer.writeAll(if (has_dependencies)
+                "  Ora.Loop.loopProofAuthorizationFromAssumptionsIn emittedManifest\n    "
+            else
+                "  Ora.Loop.loopProofAuthorizationFromAssumptions emittedManifest\n    ");
             try writeAssumptionRowsByIds(writer, set, query.assumption_ids);
+            if (has_dependencies) try writer.writeAll("\n    emittedLoopSummaries");
             try writer.print("\n    emittedLoopSummary_{d}\n\n", .{summary_id});
             try writer.print("def emittedVerifiedQuery_{d} : Prop :=\n", .{query.id});
-            try writer.writeAll("  Ora.Loop.loopVerifiedFromAssumptions emittedManifest\n    ");
+            try writer.writeAll(if (has_dependencies)
+                "  Ora.Loop.loopVerifiedFromAssumptionsIn emittedManifest\n    "
+            else
+                "  Ora.Loop.loopVerifiedFromAssumptions emittedManifest\n    ");
             try writeAssumptionRowsByIds(writer, set, query.assumption_ids);
+            if (has_dependencies) try writer.writeAll("\n    emittedLoopSummaries");
             try writer.print("\n    emittedLoopSummary_{d}\n\n", .{summary_id});
             if (set.terms.len > lean_term_chunk_size) {
                 try writer.writeAll(
@@ -588,10 +662,16 @@ fn writeSemanticDefinitions(writer: anytype, set: obligation.ObligationSet, proo
             try writer.print(
                 "theorem emittedQuery_{d}_sound : emittedQuery_{d} -> emittedVerifiedQuery_{d} := by\n" ++
                     "  intro proof\n" ++
-                    "  exact Ora.Loop.loop_authorization_sound emittedManifest ",
-                .{ query.id, query.id, query.id },
+                    "  exact Ora.Loop.{s} emittedManifest ",
+                .{
+                    query.id,
+                    query.id,
+                    query.id,
+                    if (has_dependencies) "loop_authorization_sound_in" else "loop_authorization_sound",
+                },
             );
             try writeAssumptionRowsByIds(writer, set, query.assumption_ids);
+            if (has_dependencies) try writer.writeAll(" emittedLoopSummaries");
             try writer.print(" emittedLoopSummary_{d} proof\n\n", .{summary_id});
             if (set.terms.len > lean_term_chunk_size) try writer.writeAll("end\n\n");
             continue;
@@ -606,6 +686,11 @@ fn writeSemanticDefinitions(writer: anytype, set: obligation.ObligationSet, proo
         }
         try writer.writeAll("\n\n");
     }
+}
+
+fn loopSummaryHasDependencies(summary: obligation.LoopSummaryRow) bool {
+    for (summary.edges) |edge| if (edge.summary_dependencies.len != 0) return true;
+    return false;
 }
 
 fn writeRowDefinitions(writer: anytype, set: obligation.ObligationSet, proof_surface: bool) !void {
@@ -724,36 +809,287 @@ fn loopInductionQuerySemanticSupport(
         .supported => {},
         .unsupported => |reason| return .{ .unsupported = .{ .unsupported_loop_summary = loopValueUnsupportedReason(reason) } },
     };
-    for (summary.invariant_formulas) |formula| switch (formulaSemanticSupport(set, formula)) {
-        .supported => {},
-        .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
+    for (summary.init_formulas) |formula| if (formulaReferencesSummaryDependencyVariable(set, summary, formula)) {
+        return .{ .unsupported = .{ .unsupported_loop_summary = .loop_summary_dependency_value_out_of_scope } };
     };
+    for (summary.invariant_formulas) |formula| {
+        if (formulaReferencesSummaryDependencyVariable(set, summary, formula)) {
+            return .{ .unsupported = .{ .unsupported_loop_summary = .loop_summary_dependency_value_out_of_scope } };
+        }
+        switch (formulaSemanticSupport(set, formula)) {
+            .supported => {},
+            .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
+        }
+    }
     for (summary.edges) |edge| {
         switch (edge.target orelse
             return .{ .unsupported = .{ .unsupported_loop_summary = .loop_edge_target_unresolved } }) {
-            .backedge, .successor => {},
-            .function_return, .error_return, .explicit_revert => return .{
+            .backedge, .successor => if (edge.target_formulas.len != 0) return .{
+                .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported },
+            },
+            .function_return, .error_return => {},
+            .explicit_revert => return .{
                 .unsupported = .{ .unsupported_loop_summary = .loop_control_target_unsupported },
             },
         }
-        for (edge.path_formulas) |formula| switch (formulaSemanticSupport(set, formula)) {
-            .supported => {},
-            .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
-        };
-        for (edge.safety_formulas) |formula| switch (formulaSemanticSupport(set, formula)) {
-            .supported => {},
-            .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
-        };
+        for (edge.path_formulas) |formula| {
+            if (formulaReferencesSummaryDependencyVariable(set, summary, formula)) {
+                return .{ .unsupported = .{ .unsupported_loop_summary = .loop_summary_dependency_value_out_of_scope } };
+            }
+            switch (formulaSemanticSupport(set, formula)) {
+                .supported => {},
+                .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
+            }
+        }
+        for (edge.safety_checkpoints) |checkpoint| {
+            for (checkpoint.formulas) |formula| {
+                if (formulaReferencesUnavailableCheckpointDependency(
+                    set,
+                    summary,
+                    edge,
+                    checkpoint.after_dependency_count,
+                    formula,
+                )) {
+                    return .{ .unsupported = .{ .unsupported_loop_summary = .loop_summary_dependency_value_out_of_scope } };
+                }
+                switch (formulaSemanticSupport(set, formula)) {
+                    .supported => {},
+                    .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
+                }
+            }
+        }
+        for (edge.target_formulas) |formula| {
+            if (formulaReferencesSummaryDependencyVariable(set, summary, formula)) {
+                return .{ .unsupported = .{ .unsupported_loop_summary = .loop_summary_dependency_value_out_of_scope } };
+            }
+            switch (formulaSemanticSupport(set, formula)) {
+                .supported => {},
+                .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
+            }
+        }
         for (edge.next_state, summary.variables) |binding, variable| switch (valueFormulaSemanticSupportForType(set, binding.value, variable.ty)) {
             .supported => {},
             .unsupported => |reason| return .{ .unsupported = .{ .unsupported_loop_summary = loopValueUnsupportedReason(reason) } },
         };
     }
-    for (summary.post_formulas) |formula| switch (formulaSemanticSupport(set, formula)) {
-        .supported => {},
-        .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
-    };
+    for (summary.post_formulas) |formula| {
+        if (formulaReferencesSummaryDependencyVariable(set, summary, formula)) {
+            return .{ .unsupported = .{ .unsupported_loop_summary = .loop_summary_dependency_value_out_of_scope } };
+        }
+        switch (formulaSemanticSupport(set, formula)) {
+            .supported => {},
+            .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
+        }
+    }
     return .supported;
+}
+
+fn formulaReferencesSummaryDependencyVariable(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    formula: obligation.FormulaRef,
+) bool {
+    return switch (formula) {
+        .term => |id| termReferencesSummaryDependencyVariable(set, summary, id, set.terms.len + 1),
+        .origin_value => false,
+    };
+}
+
+fn formulaReferencesUnavailableCheckpointDependency(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    edge: obligation.LoopEdgeRow,
+    after_dependency_count: u32,
+    formula: obligation.FormulaRef,
+) bool {
+    return switch (formula) {
+        .term => |id| termReferencesUnavailableCheckpointDependency(
+            set,
+            summary,
+            edge,
+            after_dependency_count,
+            id,
+            set.terms.len + 1,
+        ),
+        .origin_value => false,
+    };
+}
+
+fn termReferencesUnavailableCheckpointDependency(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    edge: obligation.LoopEdgeRow,
+    after_dependency_count: u32,
+    id: obligation.TermId,
+    fuel: usize,
+) bool {
+    if (fuel == 0) return true;
+    const term = termById(set, id) orelse return true;
+    return switch (term) {
+        .variable => |variable| switch (variable) {
+            .free => |free| !summaryDependencyVariableAvailableAtCheckpoint(
+                set,
+                summary,
+                edge,
+                after_dependency_count,
+                free.id,
+            ),
+            .bound => false,
+        },
+        .old => |operand| termReferencesUnavailableCheckpointDependency(
+            set,
+            summary,
+            edge,
+            after_dependency_count,
+            operand,
+            fuel - 1,
+        ),
+        .unary => |unary| termReferencesUnavailableCheckpointDependency(
+            set,
+            summary,
+            edge,
+            after_dependency_count,
+            unary.operand,
+            fuel - 1,
+        ),
+        .binary => |binary| termReferencesUnavailableCheckpointDependency(
+            set,
+            summary,
+            edge,
+            after_dependency_count,
+            binary.lhs,
+            fuel - 1,
+        ) or termReferencesUnavailableCheckpointDependency(
+            set,
+            summary,
+            edge,
+            after_dependency_count,
+            binary.rhs,
+            fuel - 1,
+        ),
+        .refinement_predicate => |predicate| blk: {
+            if (termReferencesUnavailableCheckpointDependency(
+                set,
+                summary,
+                edge,
+                after_dependency_count,
+                predicate.value,
+                fuel - 1,
+            )) break :blk true;
+            for (predicate.args) |arg| {
+                if (termReferencesUnavailableCheckpointDependency(
+                    set,
+                    summary,
+                    edge,
+                    after_dependency_count,
+                    arg,
+                    fuel - 1,
+                )) break :blk true;
+            }
+            break :blk false;
+        },
+        .quantified => |quantified| blk: {
+            if (quantified.condition) |condition| {
+                if (termReferencesUnavailableCheckpointDependency(
+                    set,
+                    summary,
+                    edge,
+                    after_dependency_count,
+                    condition,
+                    fuel - 1,
+                )) break :blk true;
+            }
+            break :blk termReferencesUnavailableCheckpointDependency(
+                set,
+                summary,
+                edge,
+                after_dependency_count,
+                quantified.body,
+                fuel - 1,
+            );
+        },
+        .bool_lit,
+        .int_lit,
+        .result,
+        .place_read,
+        => false,
+    };
+}
+
+fn summaryDependencyVariableAvailableAtCheckpoint(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    edge: obligation.LoopEdgeRow,
+    after_dependency_count: u32,
+    id: obligation.FreeVarId,
+) bool {
+    var owned_by_dependency = false;
+    for (summary.edges) |candidate_edge| {
+        for (candidate_edge.summary_dependencies, 0..) |dependency, dependency_index| {
+            const inner = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
+                return false;
+            for (inner.variables) |variable| {
+                if (variable.id == null or !obligation.freeVarIdEql(variable.id.?, id)) continue;
+                owned_by_dependency = true;
+                if (candidate_edge.id == edge.id and dependency_index < after_dependency_count) {
+                    return true;
+                }
+            }
+        }
+    }
+    return !owned_by_dependency;
+}
+
+fn termReferencesSummaryDependencyVariable(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    id: obligation.TermId,
+    fuel: usize,
+) bool {
+    if (fuel == 0) return true;
+    const term = termById(set, id) orelse return true;
+    return switch (term) {
+        .variable => |variable| switch (variable) {
+            .free => |free| summaryDependencyOwnsFreeVariable(set, summary, free.id),
+            .bound => false,
+        },
+        .old => |operand| termReferencesSummaryDependencyVariable(set, summary, operand, fuel - 1),
+        .unary => |unary| termReferencesSummaryDependencyVariable(set, summary, unary.operand, fuel - 1),
+        .binary => |binary| termReferencesSummaryDependencyVariable(set, summary, binary.lhs, fuel - 1) or
+            termReferencesSummaryDependencyVariable(set, summary, binary.rhs, fuel - 1),
+        .refinement_predicate => |predicate| blk: {
+            if (termReferencesSummaryDependencyVariable(set, summary, predicate.value, fuel - 1)) break :blk true;
+            for (predicate.args) |arg| {
+                if (termReferencesSummaryDependencyVariable(set, summary, arg, fuel - 1)) break :blk true;
+            }
+            break :blk false;
+        },
+        .quantified => |quantified| blk: {
+            if (quantified.condition) |condition| {
+                if (termReferencesSummaryDependencyVariable(set, summary, condition, fuel - 1)) break :blk true;
+            }
+            break :blk termReferencesSummaryDependencyVariable(set, summary, quantified.body, fuel - 1);
+        },
+        .bool_lit,
+        .int_lit,
+        .result,
+        .place_read,
+        => false,
+    };
+}
+
+fn summaryDependencyOwnsFreeVariable(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    id: obligation.FreeVarId,
+) bool {
+    for (summary.edges) |edge| for (edge.summary_dependencies) |dependency| {
+        const inner = obligation.findById(set.loop_summaries, dependency.summary_id) orelse return true;
+        for (inner.variables) |variable| {
+            if (variable.id != null and obligation.freeVarIdEql(variable.id.?, id)) return true;
+        }
+    };
+    return false;
 }
 
 fn loopValueUnsupportedReason(reason: SemanticUnsupportedReason) obligation.LoopUnsupportedReason {
@@ -2368,8 +2704,14 @@ test "LoopVC digest covers every certificate-authority component class" {
         .source_key = "loop-state:0",
         .value = .{ .term = 0 },
     }};
+    const safety_checkpoints = [_]obligation.LoopSafetyCheckpoint{.{
+        .id = 0,
+        .structural_key = "body/ora.assert:0",
+        .after_dependency_count = 0,
+        .formulas = &.{.{ .term = 6 }},
+    }};
     const edges = [_]obligation.LoopEdgeRow{
-        .{ .id = 0, .structural_key = "body/straight-line-yield", .path_formulas = &.{.{ .term = 5 }}, .safety_formulas = &.{.{ .term = 6 }}, .next_state = &backedge_bindings, .target = .backedge },
+        .{ .id = 0, .structural_key = "body/straight-line-yield", .path_formulas = &.{.{ .term = 5 }}, .safety_checkpoints = &safety_checkpoints, .next_state = &backedge_bindings, .target = .backedge },
         .{ .id = 1, .structural_key = "guard/false-successor", .path_formulas = &.{.{ .term = 8 }}, .next_state = &exit_bindings, .target = .successor },
     };
     const summary: obligation.LoopSummaryRow = .{
@@ -2459,7 +2801,37 @@ test "LoopVC digest covers every certificate-authority component class" {
     }, 1))));
 
     changed_edges = edges;
-    changed_edges[0].safety_formulas = &.{.{ .term = 4 }};
+    var changed_safety_checkpoints = safety_checkpoints;
+    changed_safety_checkpoints[0].formulas = &.{.{ .term = 4 }};
+    changed_edges[0].safety_checkpoints = &changed_safety_checkpoints;
+    changed_summary = summary;
+    changed_summary.edges = &changed_edges;
+    changed_summaries[0] = changed_summary;
+    try std.testing.expect(!std.mem.eql(u8, &baseline, &(try loopVcSha256(.{
+        .terms = &terms,
+        .assumptions = &assumptions,
+        .queries = &queries,
+        .loop_summaries = &changed_summaries,
+    }, 1))));
+
+    changed_edges = edges;
+    changed_safety_checkpoints = safety_checkpoints;
+    changed_safety_checkpoints[0].after_dependency_count = 1;
+    changed_edges[0].safety_checkpoints = &changed_safety_checkpoints;
+    changed_summary = summary;
+    changed_summary.edges = &changed_edges;
+    changed_summaries[0] = changed_summary;
+    try std.testing.expect(!std.mem.eql(u8, &baseline, &(try loopVcSha256(.{
+        .terms = &terms,
+        .assumptions = &assumptions,
+        .queries = &queries,
+        .loop_summaries = &changed_summaries,
+    }, 1))));
+
+    changed_edges = edges;
+    changed_safety_checkpoints = safety_checkpoints;
+    changed_safety_checkpoints[0].structural_key = "body/ora.assert:changed";
+    changed_edges[0].safety_checkpoints = &changed_safety_checkpoints;
     changed_summary = summary;
     changed_summary.edges = &changed_edges;
     changed_summaries[0] = changed_summary;
@@ -2490,6 +2862,45 @@ test "LoopVC digest covers every certificate-authority component class" {
     changed_summary.edges = &changed_edges;
     changed_summaries[0] = changed_summary;
     try std.testing.expect(!std.mem.eql(u8, &baseline, &(try loopVcSha256(.{
+        .terms = &terms,
+        .assumptions = &assumptions,
+        .queries = &queries,
+        .loop_summaries = &changed_summaries,
+    }, 1))));
+
+    const dependency: obligation.LoopSummaryDependency = .{
+        .id = 0,
+        .structural_key = "body/op:4/scf.while",
+        .summary_id = 2,
+        .loop_vc_sha256 = [_]u8{9} ** 32,
+        .target = .successor,
+    };
+    changed_edges = edges;
+    changed_edges[0].summary_dependencies = &.{dependency};
+    changed_summary = summary;
+    changed_summary.edges = &changed_edges;
+    changed_summaries[0] = changed_summary;
+    try std.testing.expect(!std.mem.eql(u8, &baseline, &(try loopVcSha256(.{
+        .terms = &terms,
+        .assumptions = &assumptions,
+        .queries = &queries,
+        .loop_summaries = &changed_summaries,
+    }, 1))));
+
+    changed_edges = edges;
+    changed_edges[1].target = .function_return;
+    changed_edges[1].target_formulas = &.{.{ .term = 9 }};
+    changed_summary = summary;
+    changed_summary.edges = &changed_edges;
+    changed_summaries[0] = changed_summary;
+    const return_target_baseline = try loopVcSha256(.{
+        .terms = &terms,
+        .assumptions = &assumptions,
+        .queries = &queries,
+        .loop_summaries = &changed_summaries,
+    }, 1);
+    changed_edges[1].target_formulas = &.{.{ .term = 6 }};
+    try std.testing.expect(!std.mem.eql(u8, &return_target_baseline, &(try loopVcSha256(.{
         .terms = &terms,
         .assumptions = &assumptions,
         .queries = &queries,

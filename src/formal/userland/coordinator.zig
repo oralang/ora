@@ -279,12 +279,16 @@ fn coordinateManifest(
         try writeCertificate(allocator, file_path, options, result.certificate_json, stdout);
         certificate_emitted = true;
     }
+    const artifact_emission_authorized = try reportDecision(
+        stdout,
+        "Lean proof gate",
+        decided_set,
+    );
+    if (artifact_emission_authorized and applied != null) {
+        try printAcceptedLoopCertificates(stdout, decided_set, parsed_manifest.rows);
+    }
     return .{
-        .artifact_emission_authorized = try reportDecision(
-            stdout,
-            "Lean proof gate",
-            decided_set,
-        ),
+        .artifact_emission_authorized = artifact_emission_authorized,
         .certificate_emitted = certificate_emitted,
     };
 }
@@ -302,6 +306,33 @@ fn reportDecision(
             break :blk false;
         },
     };
+}
+
+fn printAcceptedLoopCertificates(
+    stdout: anytype,
+    set: obligation.ObligationSet,
+    rows: []const proof_check.ProofRow,
+) !void {
+    var count: usize = 0;
+    for (rows) |row| {
+        const query = obligation.findById(set.queries, row.query_id) orelse continue;
+        if (query.kind == .loop_induction) count += 1;
+    }
+    if (count == 0) return;
+
+    try stdout.print(
+        "Lean loop proof gate accepted:\n  kernel-checked certificates: {d}\n  query ids: ",
+        .{count},
+    );
+    var written: usize = 0;
+    for (rows) |row| {
+        const query = obligation.findById(set.queries, row.query_id) orelse continue;
+        if (query.kind != .loop_induction) continue;
+        if (written != 0) try stdout.writeAll(", ");
+        try stdout.print("{d}", .{row.query_id});
+        written += 1;
+    }
+    try stdout.writeByte('\n');
 }
 
 fn writeCertificate(
@@ -375,6 +406,10 @@ fn generatedNamespace(allocator: std.mem.Allocator, file_path: []const u8) ![]co
 fn isPlainUnknownTarget(query: obligation.VerificationQuery) bool {
     if (query.artifact_policy == .diagnostic_only) return false;
     if (query.backend != .z3 or query.obligation_ids.len == 0) return false;
+    // LoopVC policy requires an independent conclusive Z3 result. Sending a
+    // loop-owned UNKNOWN row to Lean would create evidence that cannot and
+    // must not authorize artifacts.
+    if (query.loop_summary_id != null) return false;
     const result = query.result orelse return false;
     return result.status == .unknown and
         !result.degraded and
@@ -559,12 +594,16 @@ fn coordinateAutomatic(
     }
 
     try writeCertificate(allocator, file_path, options, applied.?.certificate_json, stdout);
+    const artifact_emission_authorized = try reportDecision(
+        stdout,
+        "Automatic Lean proof gate",
+        applied.?.set,
+    );
+    if (artifact_emission_authorized) {
+        try printAcceptedLoopCertificates(stdout, applied.?.set, rows);
+    }
     return .{
-        .artifact_emission_authorized = try reportDecision(
-            stdout,
-            "Automatic Lean proof gate",
-            applied.?.set,
-        ),
+        .artifact_emission_authorized = artifact_emission_authorized,
         .certificate_emitted = true,
     };
 }
@@ -688,6 +727,32 @@ fn collectFormulaFreeVars(
     }
 }
 
+fn collectLoopSummaryFreeVars(
+    allocator: std.mem.Allocator,
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    ids: *std.ArrayList(obligation.FreeVarId),
+    fuel: usize,
+) !void {
+    if (fuel == 0) return error.InvalidDependency;
+    for (summary.init_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, ids);
+    for (summary.invariant_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, ids);
+    for (summary.edges) |edge| {
+        for (edge.path_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, ids);
+        for (edge.safety_checkpoints) |checkpoint| {
+            for (checkpoint.formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, ids);
+        }
+        for (edge.target_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, ids);
+        for (edge.next_state) |binding| try collectFormulaFreeVars(allocator, set, binding.value, ids);
+        for (edge.summary_dependencies) |dependency| {
+            const child = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
+                return error.InvalidDependency;
+            try collectLoopSummaryFreeVars(allocator, set, child, ids, fuel - 1);
+        }
+    }
+    for (summary.post_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, ids);
+}
+
 fn collectQueryFreeVars(
     allocator: std.mem.Allocator,
     set: obligation.ObligationSet,
@@ -707,14 +772,13 @@ fn collectQueryFreeVars(
         const summary_id = query.loop_summary_id orelse return error.InvalidDependency;
         const loop_summary = obligation.findById(set.loop_summaries, summary_id) orelse
             return error.InvalidDependency;
-        for (loop_summary.init_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, &ids);
-        for (loop_summary.invariant_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, &ids);
-        for (loop_summary.edges) |edge| {
-            for (edge.path_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, &ids);
-            for (edge.safety_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, &ids);
-            for (edge.next_state) |binding| try collectFormulaFreeVars(allocator, set, binding.value, &ids);
-        }
-        for (loop_summary.post_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, &ids);
+        try collectLoopSummaryFreeVars(
+            allocator,
+            set,
+            loop_summary,
+            &ids,
+            set.loop_summaries.len + 1,
+        );
     }
     return try ids.toOwnedSlice(allocator);
 }
@@ -831,6 +895,7 @@ const AutomaticIntegerShape = struct {
 const AutomaticLoopProofReason = enum {
     automatic_query_shape_unsupported,
     automatic_assumptions_require_external_certificate,
+    automatic_nested_summary_requires_external_certificate,
     automatic_control_shape_unsupported,
     automatic_formula_reference_unsupported,
     automatic_term_kind_unsupported,
@@ -853,6 +918,45 @@ const AutomaticLoopPlanResult = union(enum) {
 
 fn automaticLoopProofReasonName(reason: AutomaticLoopProofReason) []const u8 {
     return @tagName(reason);
+}
+
+fn loopSummaryHasDependencies(summary: obligation.LoopSummaryRow) bool {
+    for (summary.edges) |edge| if (edge.summary_dependencies.len != 0) return true;
+    return false;
+}
+
+fn appendAutomaticSummaryClosure(
+    allocator: std.mem.Allocator,
+    set: obligation.ObligationSet,
+    rows: *std.ArrayList(obligation.LoopSummaryRow),
+    summary: obligation.LoopSummaryRow,
+    fuel: usize,
+) !void {
+    if (fuel == 0) return error.InvalidDependency;
+    for (rows.items) |existing| if (existing.id == summary.id) return;
+    try rows.append(allocator, summary);
+    for (summary.edges) |edge| for (edge.summary_dependencies) |dependency| {
+        const child = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
+            return error.InvalidDependency;
+        try appendAutomaticSummaryClosure(allocator, set, rows, child, fuel - 1);
+    };
+}
+
+fn automaticSummaryClosure(
+    allocator: std.mem.Allocator,
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+) ![]obligation.LoopSummaryRow {
+    var rows: std.ArrayList(obligation.LoopSummaryRow) = .empty;
+    errdefer rows.deinit(allocator);
+    try appendAutomaticSummaryClosure(
+        allocator,
+        set,
+        &rows,
+        summary,
+        set.loop_summaries.len + 1,
+    );
+    return rows.toOwnedSlice(allocator);
 }
 
 fn automaticIntegerShape(ty: obligation.TypeRef) ?AutomaticIntegerShape {
@@ -892,12 +996,44 @@ fn automaticVariableKnown(
     return false;
 }
 
-fn automaticValueShape(
+fn automaticDependencyVariable(
+    set: obligation.ObligationSet,
+    edge: obligation.LoopEdgeRow,
+    id: obligation.FreeVarId,
+) ?obligation.LoopVariable {
+    for (edge.summary_dependencies) |dependency| {
+        const child = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
+            continue;
+        for (child.variables) |variable| {
+            const candidate = variable.id orelse continue;
+            if (obligation.freeVarIdEql(candidate, id)) return variable;
+        }
+    }
+    return null;
+}
+
+fn automaticVariableKnownOnEdge(
     set: obligation.ObligationSet,
     summary: obligation.LoopSummaryRow,
+    edge: ?obligation.LoopEdgeRow,
+    id: obligation.FreeVarId,
+) bool {
+    if (automaticVariableKnown(summary, id)) return true;
+    return if (edge) |row| automaticDependencyVariable(set, row, id) != null else false;
+}
+
+const AutomaticValueShapeResult = union(enum) {
+    supported: AutomaticIntegerShape,
+    unsupported: AutomaticLoopProofReason,
+};
+
+fn automaticValueShapeInScope(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    edge: ?obligation.LoopEdgeRow,
     term_id: obligation.TermId,
     fuel: u32,
-) union(enum) { supported: AutomaticIntegerShape, unsupported: AutomaticLoopProofReason } {
+) AutomaticValueShapeResult {
     if (fuel == 0) return .{ .unsupported = .automatic_term_kind_unsupported };
     const term = termAt(set, term_id) orelse
         return .{ .unsupported = .automatic_formula_reference_unsupported };
@@ -915,7 +1051,7 @@ fn automaticValueShape(
         .variable => |variable| switch (variable) {
             .bound => return .{ .unsupported = .automatic_term_kind_unsupported },
             .free => |free| {
-                if (!automaticVariableKnown(summary, free.id)) {
+                if (!automaticVariableKnownOnEdge(set, summary, edge, free.id)) {
                     return .{ .unsupported = .automatic_foreign_variable };
                 }
                 const ty = free.ty orelse
@@ -937,12 +1073,12 @@ fn automaticValueShape(
                 return .{ .unsupported = .automatic_integer_type_missing };
             const result_shape = automaticIntegerShape(ty) orelse
                 return .{ .unsupported = .automatic_integer_type_unsupported };
-            const lhs = automaticValueShape(set, summary, binary.lhs, fuel - 1);
+            const lhs = automaticValueShapeInScope(set, summary, edge, binary.lhs, fuel - 1);
             const lhs_shape = switch (lhs) {
                 .supported => |shape| shape,
                 .unsupported => |reason| return .{ .unsupported = reason },
             };
-            const rhs = automaticValueShape(set, summary, binary.rhs, fuel - 1);
+            const rhs = automaticValueShapeInScope(set, summary, edge, binary.rhs, fuel - 1);
             const rhs_shape = switch (rhs) {
                 .supported => |shape| shape,
                 .unsupported => |reason| return .{ .unsupported = reason },
@@ -956,9 +1092,19 @@ fn automaticValueShape(
     }
 }
 
-fn automaticFormulaReason(
+fn automaticValueShape(
     set: obligation.ObligationSet,
     summary: obligation.LoopSummaryRow,
+    term_id: obligation.TermId,
+    fuel: u32,
+) AutomaticValueShapeResult {
+    return automaticValueShapeInScope(set, summary, null, term_id, fuel);
+}
+
+fn automaticFormulaReasonInScope(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    edge: ?obligation.LoopEdgeRow,
     formula: obligation.FormulaRef,
     fuel: u32,
 ) ?AutomaticLoopProofReason {
@@ -968,17 +1114,35 @@ fn automaticFormulaReason(
     return switch (term) {
         .bool_lit => null,
         .unary => |unary| if (unary.op == .not)
-            automaticFormulaReason(set, summary, .{ .term = unary.operand }, fuel - 1)
+            automaticFormulaReasonInScope(
+                set,
+                summary,
+                edge,
+                .{ .term = unary.operand },
+                fuel - 1,
+            )
         else
             .automatic_term_kind_unsupported,
         .binary => |binary| switch (binary.op) {
             .eq, .ne, .lt, .le, .gt, .ge, .slt, .sle, .sgt, .sge => blk: {
-                const lhs = automaticValueShape(set, summary, binary.lhs, fuel - 1);
+                const lhs = automaticValueShapeInScope(
+                    set,
+                    summary,
+                    edge,
+                    binary.lhs,
+                    fuel - 1,
+                );
                 const lhs_shape = switch (lhs) {
                     .supported => |shape| shape,
                     .unsupported => |reason| break :blk reason,
                 };
-                const rhs = automaticValueShape(set, summary, binary.rhs, fuel - 1);
+                const rhs = automaticValueShapeInScope(
+                    set,
+                    summary,
+                    edge,
+                    binary.rhs,
+                    fuel - 1,
+                );
                 const rhs_shape = switch (rhs) {
                     .supported => |shape| shape,
                     .unsupported => |reason| break :blk reason,
@@ -986,14 +1150,16 @@ fn automaticFormulaReason(
                 if (!lhs_shape.eql(rhs_shape)) break :blk .automatic_mixed_integer_shapes;
                 break :blk null;
             },
-            .and_, .or_, .implies => automaticFormulaReason(
+            .and_, .or_, .implies => automaticFormulaReasonInScope(
                 set,
                 summary,
+                edge,
                 .{ .term = binary.lhs },
                 fuel - 1,
-            ) orelse automaticFormulaReason(
+            ) orelse automaticFormulaReasonInScope(
                 set,
                 summary,
+                edge,
                 .{ .term = binary.rhs },
                 fuel - 1,
             ),
@@ -1003,6 +1169,15 @@ fn automaticFormulaReason(
     };
 }
 
+fn automaticFormulaReason(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    formula: obligation.FormulaRef,
+    fuel: u32,
+) ?AutomaticLoopProofReason {
+    return automaticFormulaReasonInScope(set, summary, null, formula, fuel);
+}
+
 fn automaticValueReason(
     set: obligation.ObligationSet,
     summary: obligation.LoopSummaryRow,
@@ -1010,6 +1185,19 @@ fn automaticValueReason(
 ) ?AutomaticLoopProofReason {
     const term_id = formulaTermId(formula) orelse return .automatic_formula_reference_unsupported;
     return switch (automaticValueShape(set, summary, term_id, 256)) {
+        .supported => null,
+        .unsupported => |reason| reason,
+    };
+}
+
+fn automaticValueReasonOnEdge(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    edge: obligation.LoopEdgeRow,
+    formula: obligation.FormulaRef,
+) ?AutomaticLoopProofReason {
+    const term_id = formulaTermId(formula) orelse return .automatic_formula_reference_unsupported;
+    return switch (automaticValueShapeInScope(set, summary, edge, term_id, 256)) {
         .supported => null,
         .unsupported => |reason| reason,
     };
@@ -1063,14 +1251,14 @@ fn automaticLoopPlan(
         return .{ .unsupported = .automatic_control_shape_unsupported };
     }
     var has_backedge = false;
-    var has_successor = false;
+    var has_exit = false;
     for (summary.edges) |edge| switch (edge.target orelse
         return .{ .unsupported = .automatic_control_shape_unsupported }) {
         .backedge => has_backedge = true,
-        .successor => has_successor = true,
-        else => return .{ .unsupported = .automatic_control_shape_unsupported },
+        .successor, .function_return, .error_return => has_exit = true,
+        .explicit_revert => return .{ .unsupported = .automatic_control_shape_unsupported },
     };
-    if (!has_backedge or !has_successor) {
+    if (!has_backedge or !has_exit) {
         return .{ .unsupported = .automatic_control_shape_unsupported };
     }
     for (summary.variables) |variable| {
@@ -1097,6 +1285,31 @@ fn automaticLoopPlan(
         return .{ .unsupported = reason };
     };
     for (summary.edges) |edge| {
+        if (edge.summary_dependencies.len > 1) {
+            return .{ .unsupported = .automatic_nested_summary_requires_external_certificate };
+        }
+        for (edge.summary_dependencies) |dependency| {
+            const child = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
+                return .{ .unsupported = .automatic_nested_summary_requires_external_certificate };
+            if (!child.projectionSupported()) {
+                return .{ .unsupported = .automatic_nested_summary_requires_external_certificate };
+            }
+            for (child.variables) |variable| {
+                if (variable.id == null or automaticIntegerShape(variable.ty) == null) {
+                    return .{ .unsupported = .automatic_nested_summary_requires_external_certificate };
+                }
+            }
+            if (loopSummaryHasDependencies(child)) {
+                return .{ .unsupported = .automatic_nested_summary_requires_external_certificate };
+            }
+            var matching_targets: usize = 0;
+            for (child.edges) |child_edge| {
+                if (child_edge.target == dependency.target) matching_targets += 1;
+            }
+            if (matching_targets != 1) {
+                return .{ .unsupported = .automatic_nested_summary_requires_external_certificate };
+            }
+        }
         if (edge.next_state.len != summary.variables.len) {
             return .{ .unsupported = .automatic_control_shape_unsupported };
         }
@@ -1115,10 +1328,21 @@ fn automaticLoopPlan(
         for (edge.path_formulas) |formula| if (automaticFormulaReason(set, summary, formula, 256)) |reason| {
             return .{ .unsupported = reason };
         };
-        for (edge.safety_formulas) |formula| if (automaticFormulaReason(set, summary, formula, 256)) |reason| {
+        for (edge.safety_checkpoints) |checkpoint| {
+            for (checkpoint.formulas) |formula| if (automaticFormulaReasonInScope(
+                set,
+                summary,
+                edge,
+                formula,
+                256,
+            )) |reason| {
+                return .{ .unsupported = reason };
+            };
+        }
+        for (edge.target_formulas) |formula| if (automaticFormulaReason(set, summary, formula, 256)) |reason| {
             return .{ .unsupported = reason };
         };
-        for (edge.next_state) |binding| if (automaticValueReason(set, summary, binding.value)) |reason| {
+        for (edge.next_state) |binding| if (automaticValueReasonOnEdge(set, summary, edge, binding.value)) |reason| {
             return .{ .unsupported = reason };
         };
     }
@@ -1146,23 +1370,47 @@ fn automaticVariableIndex(
 const AutomaticStateView = enum {
     current,
     following,
+    dependency_current,
+    dependency_following,
 };
 
 fn writeAutomaticStateBits(
     writer: anytype,
     view: AutomaticStateView,
     index: usize,
+    id: obligation.FreeVarId,
+) !void {
+    switch (view) {
+        .current, .following => try writer.print(
+            "auto_{s}_bits_{d}",
+            .{ if (view == .current) "state" else "following", index },
+        ),
+        .dependency_current, .dependency_following => try writer.print(
+            "auto_dependency_{s}bits_{d}_{d}",
+            .{
+                if (view == .dependency_current) "current_" else "",
+                id.file_id,
+                id.pattern_id,
+            },
+        ),
+    }
+}
+
+fn writeAutomaticDependencyBits(
+    writer: anytype,
+    id: obligation.FreeVarId,
 ) !void {
     try writer.print(
-        "auto_{s}_bits_{d}",
-        .{ if (view == .current) "state" else "following", index },
+        "auto_dependency_bits_{d}_{d}",
+        .{ id.file_id, id.pattern_id },
     );
 }
 
-fn writeAutomaticValueExpression(
+fn writeAutomaticValueExpressionInScope(
     writer: anytype,
     set: obligation.ObligationSet,
     summary: obligation.LoopSummaryRow,
+    edge: ?obligation.LoopEdgeRow,
     term_id: obligation.TermId,
     fuel: u32,
     state_view: AutomaticStateView,
@@ -1179,9 +1427,13 @@ fn writeAutomaticValueExpression(
             .bound => return error.InvalidDependency,
             .free => |free| {
                 if (automaticVariableIndex(summary.variables, free.id)) |index| {
-                    try writeAutomaticStateBits(writer, state_view, index);
+                    try writeAutomaticStateBits(writer, state_view, index, free.id);
                 } else if (automaticVariableIndex(summary.context_variables, free.id)) |index| {
                     try writer.print("auto_context_bits_{d}", .{index});
+                } else if (edge != null and
+                    automaticDependencyVariable(set, edge.?, free.id) != null)
+                {
+                    try writeAutomaticDependencyBits(writer, free.id);
                 } else return error.InvalidDependency;
             },
         },
@@ -1204,19 +1456,55 @@ fn writeAutomaticValueExpression(
                 },
                 else => return error.InvalidDependency,
             }
-            try writeAutomaticValueExpression(writer, set, summary, binary.lhs, fuel - 1, state_view);
+            try writeAutomaticValueExpressionInScope(
+                writer,
+                set,
+                summary,
+                edge,
+                binary.lhs,
+                fuel - 1,
+                state_view,
+            );
             try writer.writeByte(' ');
-            try writeAutomaticValueExpression(writer, set, summary, binary.rhs, fuel - 1, state_view);
+            try writeAutomaticValueExpressionInScope(
+                writer,
+                set,
+                summary,
+                edge,
+                binary.rhs,
+                fuel - 1,
+                state_view,
+            );
             try writer.writeByte(')');
         },
         else => return error.InvalidDependency,
     }
 }
 
-fn writeAutomaticFormulaExpression(
+fn writeAutomaticValueExpression(
     writer: anytype,
     set: obligation.ObligationSet,
     summary: obligation.LoopSummaryRow,
+    term_id: obligation.TermId,
+    fuel: u32,
+    state_view: AutomaticStateView,
+) !void {
+    return writeAutomaticValueExpressionInScope(
+        writer,
+        set,
+        summary,
+        null,
+        term_id,
+        fuel,
+        state_view,
+    );
+}
+
+fn writeAutomaticFormulaExpressionInScope(
+    writer: anytype,
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    edge: ?obligation.LoopEdgeRow,
     formula: obligation.FormulaRef,
     fuel: u32,
     state_view: AutomaticStateView,
@@ -1229,28 +1517,68 @@ fn writeAutomaticFormulaExpression(
         .unary => |unary| {
             if (unary.op != .not) return error.InvalidDependency;
             try writer.writeAll("(¬ ");
-            try writeAutomaticFormulaExpression(writer, set, summary, .{ .term = unary.operand }, fuel - 1, state_view);
+            try writeAutomaticFormulaExpressionInScope(
+                writer,
+                set,
+                summary,
+                edge,
+                .{ .term = unary.operand },
+                fuel - 1,
+                state_view,
+            );
             try writer.writeByte(')');
         },
         .binary => |binary| switch (binary.op) {
             .and_, .or_, .implies => {
                 try writer.writeByte('(');
-                try writeAutomaticFormulaExpression(writer, set, summary, .{ .term = binary.lhs }, fuel - 1, state_view);
+                try writeAutomaticFormulaExpressionInScope(
+                    writer,
+                    set,
+                    summary,
+                    edge,
+                    .{ .term = binary.lhs },
+                    fuel - 1,
+                    state_view,
+                );
                 try writer.writeAll(switch (binary.op) {
                     .and_ => " ∧ ",
                     .or_ => " ∨ ",
                     .implies => " → ",
                     else => unreachable,
                 });
-                try writeAutomaticFormulaExpression(writer, set, summary, .{ .term = binary.rhs }, fuel - 1, state_view);
+                try writeAutomaticFormulaExpressionInScope(
+                    writer,
+                    set,
+                    summary,
+                    edge,
+                    .{ .term = binary.rhs },
+                    fuel - 1,
+                    state_view,
+                );
                 try writer.writeByte(')');
             },
             .eq, .ne => {
                 try writer.writeByte('(');
                 if (binary.op == .ne) try writer.writeAll("¬ ");
-                try writeAutomaticValueExpression(writer, set, summary, binary.lhs, fuel - 1, state_view);
+                try writeAutomaticValueExpressionInScope(
+                    writer,
+                    set,
+                    summary,
+                    edge,
+                    binary.lhs,
+                    fuel - 1,
+                    state_view,
+                );
                 try writer.writeAll(" = ");
-                try writeAutomaticValueExpression(writer, set, summary, binary.rhs, fuel - 1, state_view);
+                try writeAutomaticValueExpressionInScope(
+                    writer,
+                    set,
+                    summary,
+                    edge,
+                    binary.rhs,
+                    fuel - 1,
+                    state_view,
+                );
                 try writer.writeByte(')');
             },
             .lt, .le, .gt, .ge, .slt, .sle, .sgt, .sge => {
@@ -1268,19 +1596,21 @@ fn writeAutomaticFormulaExpression(
                 try writer.writeAll(") ");
                 const reverse = binary.op == .gt or binary.op == .ge or
                     binary.op == .sgt or binary.op == .sge;
-                try writeAutomaticValueExpression(
+                try writeAutomaticValueExpressionInScope(
                     writer,
                     set,
                     summary,
+                    edge,
                     if (reverse) binary.rhs else binary.lhs,
                     fuel - 1,
                     state_view,
                 );
                 try writer.writeByte(' ');
-                try writeAutomaticValueExpression(
+                try writeAutomaticValueExpressionInScope(
                     writer,
                     set,
                     summary,
+                    edge,
                     if (reverse) binary.lhs else binary.rhs,
                     fuel - 1,
                     state_view,
@@ -1291,6 +1621,25 @@ fn writeAutomaticFormulaExpression(
         },
         else => return error.InvalidDependency,
     }
+}
+
+fn writeAutomaticFormulaExpression(
+    writer: anytype,
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    formula: obligation.FormulaRef,
+    fuel: u32,
+    state_view: AutomaticStateView,
+) !void {
+    return writeAutomaticFormulaExpressionInScope(
+        writer,
+        set,
+        summary,
+        null,
+        formula,
+        fuel,
+        state_view,
+    );
 }
 
 fn writeAutomaticIndent(writer: anytype, count: usize) !void {
@@ -1340,24 +1689,64 @@ fn writeAutomaticIntegerShapeItems(writer: anytype) !void {
     );
 }
 
-fn writeAutomaticFormulaReduction(
+fn writeAutomaticSummaryItems(
+    writer: anytype,
+    rows: []const obligation.LoopSummaryRow,
+) !void {
+    try writer.writeAll("emittedLoopSummaries");
+    for (rows) |row| try writer.print(", emittedLoopSummary_{d}", .{row.id});
+}
+
+fn writeAutomaticSupportedItems(
+    writer: anytype,
+    rows: []const obligation.LoopSummaryRow,
+) !void {
+    for (rows) |row| try writer.print(", hSupported_{d}", .{row.id});
+}
+
+fn writeAutomaticDenotationItems(
+    writer: anytype,
+    root: obligation.LoopSummaryRow,
+    rows: []const obligation.LoopSummaryRow,
+) !void {
+    for (rows) |row| {
+        if (row.id == root.id) continue;
+        try writer.print(", hFind_{d}, hDenotes_{d}", .{ row.id, row.id });
+    }
+}
+
+fn writeAutomaticFormulaReductionInScope(
     writer: anytype,
     set: obligation.ObligationSet,
     plan: AutomaticLoopPlan,
+    edge: ?obligation.LoopEdgeRow,
     formula: obligation.FormulaRef,
     term_ids: []const obligation.TermId,
     free_var_count: usize,
     state_view: AutomaticStateView,
+    in_env: bool,
     hypothesis: ?[]const u8,
     indent: usize,
 ) !void {
     if (hypothesis) |name| {
         try writeAutomaticIndent(writer, indent);
         try writer.print("have {s}_denoted : ", .{name});
-        try writeAutomaticFormulaExpression(writer, set, plan.summary, formula, 256, state_view);
+        try writeAutomaticFormulaExpressionInScope(
+            writer,
+            set,
+            plan.summary,
+            edge,
+            formula,
+            256,
+            state_view,
+        );
         try writer.writeAll(" := by\n");
         try writeAutomaticIndent(writer, indent + 2);
-        try writer.writeAll("simpa only [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState?, ");
+        try writer.writeAll("simpa only [");
+        try writer.writeAll(if (in_env)
+            "Ora.Loop.formulaHoldsInEnv, "
+        else
+            "Ora.Loop.formulaHoldsInState, Ora.Loop.bindState?, ");
         try writeAutomaticIntegerShapeItems(writer);
         try writeAutomaticFreeEqualityItems(writer, free_var_count);
         try writer.writeAll(
@@ -1379,7 +1768,11 @@ fn writeAutomaticFormulaReduction(
     }
 
     try writeAutomaticIndent(writer, indent);
-    try writer.writeAll("simp only [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState?, ");
+    try writer.writeAll("simp only [");
+    try writer.writeAll(if (in_env)
+        "Ora.Loop.formulaHoldsInEnv, "
+    else
+        "Ora.Loop.formulaHoldsInState, Ora.Loop.bindState?, ");
     try writeAutomaticIntegerShapeItems(writer);
     try writeAutomaticFreeEqualityItems(writer, free_var_count);
     try writer.writeAll(", if_pos]");
@@ -1403,10 +1796,49 @@ fn writeAutomaticFormulaReduction(
     try writer.writeAll(", if_pos, if_false, Bool.false_eq_true]");
     try writer.writeByte('\n');
 
+    // The semantic simplifier closes a literal-true formula directly. Do not
+    // emit a subsequent `change True` or arithmetic closer after the goal is
+    // already gone.
+    if (automaticFormulaIsTrue(set, formula)) return;
+
     try writeAutomaticIndent(writer, indent);
     try writer.writeAll("change ");
-    try writeAutomaticFormulaExpression(writer, set, plan.summary, formula, 256, state_view);
+    try writeAutomaticFormulaExpressionInScope(
+        writer,
+        set,
+        plan.summary,
+        edge,
+        formula,
+        256,
+        state_view,
+    );
     try writer.writeByte('\n');
+}
+
+fn writeAutomaticFormulaReduction(
+    writer: anytype,
+    set: obligation.ObligationSet,
+    plan: AutomaticLoopPlan,
+    formula: obligation.FormulaRef,
+    term_ids: []const obligation.TermId,
+    free_var_count: usize,
+    state_view: AutomaticStateView,
+    hypothesis: ?[]const u8,
+    indent: usize,
+) !void {
+    return writeAutomaticFormulaReductionInScope(
+        writer,
+        set,
+        plan,
+        null,
+        formula,
+        term_ids,
+        free_var_count,
+        state_view,
+        false,
+        hypothesis,
+        indent,
+    );
 }
 
 fn writeAutomaticValueList(
@@ -1464,7 +1896,8 @@ fn writeAutomaticInitializationReduction(
             "Ora.Integer.Value.ofNat, Ora.Integer.Value.binary?, " ++
             "Ora.Integer.Value.bitsFor?, Ora.Integer.wrappingResult, " ++
             "Ora.Integer.bitAndResult, Ora.Integer.bitXorResult, " ++
-            "Env.setFree, Env.lookupVar, Env.lookupFree, lookupFreeBinding, ",
+            "Env.setFree, Env.lookupVar, Env.lookupFree, " ++
+            "lookupFreeBinding, ",
     );
     try writeAutomaticIntegerShapeItems(writer);
     try writer.writeAll(", ");
@@ -1486,7 +1919,9 @@ fn writeAutomaticBindingValueList(
     writer: anytype,
     set: obligation.ObligationSet,
     summary: obligation.LoopSummaryRow,
+    edge: obligation.LoopEdgeRow,
     bindings: []const obligation.LoopStepAssignment,
+    state_view: AutomaticStateView,
 ) !void {
     try writer.writeByte('[');
     for (bindings, 0..) |binding, index| {
@@ -1497,9 +1932,465 @@ fn writeAutomaticBindingValueList(
         try writer.writeAll("Ora.Integer.Value.mk ");
         try writeAutomaticLeanShape(writer, shape);
         try writer.writeByte(' ');
-        try writeAutomaticValueExpression(writer, set, summary, term_id, 256, .current);
+        try writeAutomaticValueExpressionInScope(
+            writer,
+            set,
+            summary,
+            edge,
+            term_id,
+            256,
+            state_view,
+        );
     }
     try writer.writeByte(']');
+}
+
+fn writeAutomaticBindingEvaluationSimp(
+    writer: anytype,
+    plan: AutomaticLoopPlan,
+    term_ids: []const obligation.TermId,
+    free_var_count: usize,
+    hypothesis: []const u8,
+    indent: usize,
+) !void {
+    try writeAutomaticIndent(writer, indent);
+    try writer.writeAll(
+        "simp only [formulaValue?, denoteValue?, IntegerLiteralTerm.asInteger?, " ++
+            "Ora.Integer.Value.ofNat, Ora.Integer.Value.binary?, " ++
+            "Ora.Integer.Value.bitsFor?, Ora.Integer.wrappingResult, " ++
+            "Ora.Integer.bitAndResult, Ora.Integer.bitXorResult, " ++
+            "Env.setFree, Env.lookupVar, Env.lookupFree, " ++
+            "lookupFreeBinding, ",
+    );
+    try writeAutomaticIntegerShapeItems(writer);
+    try writer.writeAll(", ");
+    try writeAutomaticTermLookupItems(writer, term_ids);
+    try writeAutomaticFreeEqualityItems(writer, free_var_count);
+    try writeAutomaticContextLookupItems(writer, plan.summary.context_variables.len);
+    try writer.print(", if_pos, if_false, Bool.false_eq_true] at {s}\n", .{hypothesis});
+}
+
+fn writeAutomaticApplyBindingsInEnvReduction(
+    writer: anytype,
+    set: obligation.ObligationSet,
+    plan: AutomaticLoopPlan,
+    edge: obligation.LoopEdgeRow,
+    term_ids: []const obligation.TermId,
+    free_var_count: usize,
+    hypothesis: []const u8,
+    following_name: []const u8,
+    indent: usize,
+) !void {
+    try writeAutomaticIndent(writer, indent);
+    try writer.print(
+        "simp only [Ora.Loop.applyStateBindingsInEnv?, " ++
+            "Ora.Loop.bindingsMatchVariables, Ora.Loop.bindingFormulas, " ++
+            "Ora.Loop.evaluateIntegerFormulas?, Ora.Loop.integerFormulaValue?, " ++
+            "Ora.Loop.valuesMatchVariables] at {s}\n",
+        .{hypothesis},
+    );
+    try writeAutomaticBindingEvaluationSimp(
+        writer,
+        plan,
+        term_ids,
+        free_var_count,
+        hypothesis,
+        indent,
+    );
+    try writeAutomaticIndent(writer, indent);
+    try writer.writeAll("change some ");
+    try writeAutomaticBindingValueList(
+        writer,
+        set,
+        plan.summary,
+        edge,
+        edge.next_state,
+        .current,
+    );
+    try writer.print(" = some {s} at {s}\n", .{ following_name, hypothesis });
+    try writeAutomaticIndent(writer, indent);
+    try writer.print("have hFollowing := (Option.some.inj {s}).symm\n", .{hypothesis});
+    try writeAutomaticIndent(writer, indent);
+    try writer.print("subst {s}\n", .{following_name});
+    for (edge.next_state, 0..) |binding, index| {
+        const term_id = formulaTermId(binding.value) orelse return error.InvalidDependency;
+        try writeAutomaticIndent(writer, indent);
+        try writer.print("let auto_following_bits_{d} := ", .{index});
+        try writeAutomaticValueExpressionInScope(
+            writer,
+            set,
+            plan.summary,
+            edge,
+            term_id,
+            256,
+            .current,
+        );
+        try writer.writeByte('\n');
+    }
+}
+
+fn writeAutomaticChildNextStateReduction(
+    writer: anytype,
+    set: obligation.ObligationSet,
+    child_plan: AutomaticLoopPlan,
+    edge: obligation.LoopEdgeRow,
+    term_ids: []const obligation.TermId,
+    free_var_count: usize,
+    indent: usize,
+) !void {
+    try writeAutomaticIndent(writer, indent);
+    try writer.writeAll(
+        "rw [Ora.Loop.stateBindingsProduceAfterNoDependencies_iff] at hChildNext\n",
+    );
+    try writeAutomaticIndent(writer, indent);
+    try writer.writeAll(
+        "simp only [Ora.Loop.stateBindingsProduceState, Ora.Loop.applyStateBindings?, " ++
+            "Ora.Loop.bindingsMatchVariables, Ora.Loop.bindState?, " ++
+            "Ora.Loop.bindingFormulas, Ora.Loop.evaluateIntegerFormulas?, " ++
+            "Ora.Loop.integerFormulaValue?, Ora.Loop.valuesMatchVariables] at hChildNext\n",
+    );
+    try writeAutomaticBindingEvaluationSimp(
+        writer,
+        child_plan,
+        term_ids,
+        free_var_count,
+        "hChildNext",
+        indent,
+    );
+    try writeAutomaticIndent(writer, indent);
+    try writer.writeAll("change some ");
+    try writeAutomaticBindingValueList(
+        writer,
+        set,
+        child_plan.summary,
+        edge,
+        edge.next_state,
+        .dependency_current,
+    );
+    try writer.writeAll(" = some childFinal at hChildNext\n");
+    try writeAutomaticIndent(writer, indent);
+    try writer.writeAll("have hChildFinal := (Option.some.inj hChildNext).symm\n");
+    try writeAutomaticIndent(writer, indent);
+    try writer.writeAll("subst childFinal\n");
+    for (edge.next_state, 0..) |binding, index| {
+        const variable = child_plan.summary.variables[index];
+        const id = variable.id orelse return error.InvalidDependency;
+        const term_id = formulaTermId(binding.value) orelse return error.InvalidDependency;
+        try writeAutomaticIndent(writer, indent);
+        try writer.writeAll("let ");
+        try writeAutomaticDependencyBits(writer, id);
+        try writer.writeAll(" := ");
+        try writeAutomaticValueExpressionInScope(
+            writer,
+            set,
+            child_plan.summary,
+            edge,
+            term_id,
+            256,
+            .dependency_current,
+        );
+        try writer.writeByte('\n');
+    }
+}
+
+fn writeAutomaticBoundStateBindingClosures(
+    writer: anytype,
+    summary: obligation.LoopSummaryRow,
+    state_view: AutomaticStateView,
+) !void {
+    for (summary.variables, 0..) |variable, index| {
+        const id = variable.id orelse return error.InvalidDependency;
+        const shape = automaticIntegerShape(variable.ty) orelse return error.InvalidDependency;
+        try writer.writeByte(' ');
+        try writeFreeVarId(writer, id);
+        try writer.writeAll(" (.integer (Ora.Integer.Value.mk ");
+        try writeAutomaticLeanShape(writer, shape);
+        try writer.writeByte(' ');
+        try writeAutomaticStateBits(writer, state_view, index, id);
+        try writer.writeAll(")))");
+    }
+}
+
+fn writeAutomaticBoundStateEnv(
+    writer: anytype,
+    summary: obligation.LoopSummaryRow,
+    base_name: []const u8,
+    state_view: AutomaticStateView,
+) !void {
+    for (summary.variables) |_| try writer.writeAll("(Env.setFree ");
+    try writer.writeAll(base_name);
+    try writeAutomaticBoundStateBindingClosures(writer, summary, state_view);
+}
+
+fn writeAutomaticBoundStateEnvWithAdditional(
+    writer: anytype,
+    base_name: []const u8,
+    first: obligation.LoopSummaryRow,
+    first_state_view: AutomaticStateView,
+    additional: obligation.LoopSummaryRow,
+    additional_state_view: AutomaticStateView,
+) !void {
+    for (first.variables) |_| try writer.writeAll("(Env.setFree ");
+    for (additional.variables) |_| try writer.writeAll("(Env.setFree ");
+    try writer.writeAll(base_name);
+    try writeAutomaticBoundStateBindingClosures(writer, first, first_state_view);
+    try writeAutomaticBoundStateBindingClosures(writer, additional, additional_state_view);
+}
+
+const AutomaticNextStateReduction = struct {
+    success_indent: usize,
+    dependency_state_case: ?AutomaticStateCase = null,
+    dependency_summary: ?obligation.LoopSummaryRow = null,
+};
+
+fn writeAutomaticDependencyRelationReduction(
+    writer: anytype,
+    set: obligation.ObligationSet,
+    plan: AutomaticLoopPlan,
+    edge: obligation.LoopEdgeRow,
+    term_ids: []const obligation.TermId,
+    free_var_count: usize,
+    indent: usize,
+) !AutomaticNextStateReduction {
+    if (edge.summary_dependencies.len != 1) return error.InvalidDependency;
+    const dependency = edge.summary_dependencies[0];
+    const child = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
+        return error.InvalidDependency;
+    const child_plan: AutomaticLoopPlan = .{ .summary = child };
+
+    try writeAutomaticIndent(writer, indent);
+    try writer.writeAll("unfold Ora.Loop.summaryDependencyHolds at hDependency\n");
+    try writeAutomaticIndent(writer, indent);
+    try writer.print(
+        "cases hChildDenotation : Ora.Loop.denoteLoopSummaryWithFuel? " ++
+            "emittedLoopSummaries.length emittedManifest emittedLoopSummaries ",
+        .{},
+    );
+    try writeAutomaticBoundStateEnv(writer, plan.summary, "env", .current);
+    try writer.print(" emittedLoopSummary_{d} with\n", .{child.id});
+    try writeAutomaticIndent(writer, indent);
+    try writer.writeAll("| none =>\n");
+    try writeAutomaticIndent(writer, indent + 2);
+    try writer.print("have hAvailable := hDenotes_{d} (", .{child.id});
+    try writeAutomaticBoundStateEnv(writer, plan.summary, "env", .current);
+    try writer.writeAll(")\n");
+    try writeAutomaticIndent(writer, indent + 2);
+    try writer.writeAll("rw [hChildDenotation] at hAvailable\n");
+    try writeAutomaticIndent(writer, indent + 2);
+    try writer.writeAll("simp at hAvailable\n");
+    try writeAutomaticIndent(writer, indent);
+    try writer.writeAll("| some childSummary =>\n");
+    const branch_indent = indent + 2;
+    try writeAutomaticIndent(writer, branch_indent);
+    try writer.writeAll("simp only [hChildDenotation] at hDependency\n");
+    try writeAutomaticIndent(writer, branch_indent);
+    try writer.writeAll("rw [hSummaryLength] at hChildDenotation\n");
+    try writeAutomaticIndent(writer, branch_indent);
+    try writer.writeAll("unfold Ora.Loop.denoteLoopSummaryWithFuel? at hChildDenotation\n");
+    try writeAutomaticIndent(writer, branch_indent);
+    try writer.print(
+        "simp only [Ora.Loop.denoteLoopSummaryWithResolver?, hSupported_{d}, " ++
+            "if_true] at hChildDenotation\n",
+        .{child.id},
+    );
+    try writeAutomaticIndent(writer, branch_indent);
+    try writer.print("simp [emittedLoopSummary_{d}, ", .{child.id});
+    try writer.writeAll(
+        "Ora.Loop.denoteEdgesWithResolver?, Ora.Loop.denoteEdgeWithResolver?, " ++
+            "Ora.Loop.denoteSummaryDependencies?, Ora.Loop.denoteSummaryDependency?, " ++
+            "Ora.Loop.findSummaryRow?, Ora.Loop.denoteControlTarget?] at hChildDenotation\n",
+    );
+    try writeAutomaticIndent(writer, branch_indent);
+    try writer.writeAll("subst childSummary\n");
+    try writeAutomaticIndent(writer, branch_indent);
+    try writer.writeAll(
+        "rcases hDependency with ⟨childInitial, childFinal, childBound, " ++
+            "hChildInitial, hChildCertified, hBindChildFinal, hAfterChild⟩\n",
+    );
+    try writeAutomaticIndent(writer, branch_indent);
+    try writer.writeAll(
+        "rcases hChildCertified with ⟨hChildNotBackedge, hChildInitialRelation, " ++
+            "childCurrent, childEdge, hChildInvariant, hChildMember, hChildTarget, " ++
+            "hChildPath, hChildSafe, hChildNext⟩\n",
+    );
+    try writeAutomaticIndent(writer, branch_indent);
+    try writer.writeAll("simp at hChildMember\n");
+    try writeAutomaticIndent(writer, branch_indent);
+    try writer.writeAll("rcases hChildMember with hChildMember_0");
+    for (1..child.edges.len) |index| try writer.print(" | hChildMember_{d}", .{index});
+    try writer.writeByte('\n');
+
+    const target = dependency.target;
+    const target_edge_index: usize = for (child.edges, 0..) |child_edge, index| {
+        if (child_edge.target == target) break index;
+    } else return error.InvalidDependency;
+    for (child.edges, 0..) |child_edge, index| {
+        try writeAutomaticIndent(writer, branch_indent);
+        try writer.writeAll("· subst childEdge\n");
+        if (index != target_edge_index or child_edge.target != target) {
+            try writeAutomaticIndent(writer, branch_indent + 2);
+            try writer.writeAll("dsimp at hChildTarget\n");
+            try writeAutomaticIndent(writer, branch_indent + 2);
+            try writer.writeAll("simp at hChildTarget\n");
+            continue;
+        }
+        const target_indent = branch_indent + 2;
+        try writeAutomaticIndent(writer, target_indent);
+        try writer.writeAll(
+            "dsimp at hChildInvariant hChildPath hChildSafe hChildNext\n",
+        );
+        try writeAutomaticIndent(writer, target_indent);
+        try writer.writeAll(
+            "rcases hChildInvariant with ⟨hChildReady, hChildInvariant⟩\n",
+        );
+        var prefix_buffer: [64]u8 = undefined;
+        const prefix = try std.fmt.bufPrint(
+            &prefix_buffer,
+            "dependency_{d}_current",
+            .{dependency.id},
+        );
+        const child_state_case = try writeAutomaticStateCasesStart(
+            writer,
+            "childCurrent",
+            "hChildReady",
+            prefix,
+            child.variables.len,
+            target_indent,
+        );
+        const success_indent = child_state_case.success_indent;
+        try writeAutomaticStateShapeExtraction(
+            writer,
+            child,
+            "hChildReady",
+            prefix,
+            success_indent,
+        );
+        for (child.variables, 0..) |variable, variable_index| {
+            const id = variable.id orelse return error.InvalidDependency;
+            try writeAutomaticIndent(writer, success_indent);
+            try writer.writeAll("let auto_dependency_current_bits_");
+            try writer.print("{d}_{d} := auto_{s}_bits_{d}\n", .{
+                id.file_id,
+                id.pattern_id,
+                prefix,
+                variable_index,
+            });
+        }
+        try writeAutomaticFormulaHypotheses(
+            writer,
+            set,
+            child_plan,
+            child.invariant_formulas,
+            "hChildInvariant",
+            "h_auto_dependency_invariant",
+            term_ids,
+            free_var_count,
+            .dependency_current,
+            success_indent,
+        );
+        try writeAutomaticFormulaHypotheses(
+            writer,
+            set,
+            child_plan,
+            child_edge.path_formulas,
+            "hChildPath",
+            "h_auto_dependency_path",
+            term_ids,
+            free_var_count,
+            .dependency_current,
+            success_indent,
+        );
+        try writeAutomaticChildNextStateReduction(
+            writer,
+            set,
+            child_plan,
+            child_edge,
+            term_ids,
+            free_var_count,
+            success_indent,
+        );
+        try writeAutomaticIndent(writer, success_indent);
+        try writer.writeAll("change some ");
+        try writeAutomaticBoundStateEnvWithAdditional(
+            writer,
+            "env",
+            plan.summary,
+            .current,
+            child,
+            .dependency_following,
+        );
+        try writer.writeAll(" = some childBound at hBindChildFinal\n");
+        try writeAutomaticIndent(writer, success_indent);
+        try writer.writeAll(
+            "have hChildBound := (Option.some.inj hBindChildFinal).symm\n",
+        );
+        try writeAutomaticIndent(writer, success_indent);
+        try writer.writeAll("subst childBound\n");
+        try writeAutomaticIndent(writer, success_indent);
+        try writer.writeAll("subst afterChild\n");
+        return .{
+            .success_indent = success_indent,
+            .dependency_state_case = child_state_case,
+            .dependency_summary = child,
+        };
+    }
+    return error.InvalidDependency;
+}
+
+fn writeAutomaticDependencyNextStateReduction(
+    writer: anytype,
+    set: obligation.ObligationSet,
+    plan: AutomaticLoopPlan,
+    edge: obligation.LoopEdgeRow,
+    term_ids: []const obligation.TermId,
+    free_var_count: usize,
+    indent: usize,
+) !AutomaticNextStateReduction {
+    try writeAutomaticIndent(writer, indent);
+    try writer.writeAll(
+        "rcases hNext with ⟨beforeDependencies, afterDependencies, " ++
+            "hParentBound, hDependencies, hApply⟩\n",
+    );
+    try writeAutomaticIndent(writer, indent);
+    try writer.writeAll("change some ");
+    try writeAutomaticBoundStateEnv(writer, plan.summary, "env", .current);
+    try writer.writeAll(" = some beforeDependencies at hParentBound\n");
+    try writeAutomaticIndent(writer, indent);
+    try writer.writeAll("have hBeforeDependencies := (Option.some.inj hParentBound).symm\n");
+    try writeAutomaticIndent(writer, indent);
+    try writer.writeAll("subst beforeDependencies\n");
+    try writeAutomaticIndent(writer, indent);
+    try writer.writeAll(
+        "simp only [Ora.Loop.environmentRelationsProduce] at hDependencies\n",
+    );
+    try writeAutomaticIndent(writer, indent);
+    try writer.writeAll(
+        "rcases hDependencies with ⟨afterChild, hDependency, hDependenciesDone⟩\n",
+    );
+    try writeAutomaticIndent(writer, indent);
+    try writer.writeAll("subst afterDependencies\n");
+
+    const reduction = try writeAutomaticDependencyRelationReduction(
+        writer,
+        set,
+        plan,
+        edge,
+        term_ids,
+        free_var_count,
+        indent,
+    );
+    try writeAutomaticApplyBindingsInEnvReduction(
+        writer,
+        set,
+        plan,
+        edge,
+        term_ids,
+        free_var_count,
+        "hApply",
+        "following",
+        reduction.success_indent,
+    );
+    return reduction;
 }
 
 fn writeAutomaticNextStateReduction(
@@ -1510,7 +2401,25 @@ fn writeAutomaticNextStateReduction(
     term_ids: []const obligation.TermId,
     free_var_count: usize,
     indent: usize,
-) !void {
+) !AutomaticNextStateReduction {
+    const nested = loopSummaryHasDependencies(plan.summary);
+    if (nested and edge.summary_dependencies.len != 0) {
+        return writeAutomaticDependencyNextStateReduction(
+            writer,
+            set,
+            plan,
+            edge,
+            term_ids,
+            free_var_count,
+            indent,
+        );
+    }
+    if (nested and edge.summary_dependencies.len == 0) {
+        try writeAutomaticIndent(writer, indent);
+        try writer.writeAll(
+            "rw [Ora.Loop.stateBindingsProduceAfterNoDependencies_iff] at hNext\n",
+        );
+    }
     try writeAutomaticIndent(writer, indent);
     try writer.writeAll(
         "simp only [Ora.Loop.stateBindingsProduceState, Ora.Loop.applyStateBindings?, " ++
@@ -1534,7 +2443,14 @@ fn writeAutomaticNextStateReduction(
     try writer.writeAll(", if_pos, if_false, Bool.false_eq_true] at hNext\n");
     try writeAutomaticIndent(writer, indent);
     try writer.writeAll("change some ");
-    try writeAutomaticBindingValueList(writer, set, plan.summary, edge.next_state);
+    try writeAutomaticBindingValueList(
+        writer,
+        set,
+        plan.summary,
+        edge,
+        edge.next_state,
+        .current,
+    );
     try writer.writeAll(" = some following at hNext\n");
     try writeAutomaticIndent(writer, indent);
     try writer.writeAll("have hFollowing := (Option.some.inj hNext).symm\n");
@@ -1544,16 +2460,18 @@ fn writeAutomaticNextStateReduction(
         const term_id = formulaTermId(binding.value) orelse return error.InvalidDependency;
         try writeAutomaticIndent(writer, indent);
         try writer.print("let auto_following_bits_{d} := ", .{index});
-        try writeAutomaticValueExpression(
+        try writeAutomaticValueExpressionInScope(
             writer,
             set,
             plan.summary,
+            edge,
             term_id,
             256,
             .current,
         );
         try writer.writeByte('\n');
     }
+    return .{ .success_indent = indent };
 }
 
 const AutomaticStateCase = struct {
@@ -1565,6 +2483,7 @@ fn writeAutomaticStateCasesStart(
     writer: anytype,
     state_name: []const u8,
     ready_name: []const u8,
+    prefix: []const u8,
     variable_count: usize,
     indent: usize,
 ) !AutomaticStateCase {
@@ -1573,13 +2492,13 @@ fn writeAutomaticStateCasesStart(
         try writeAutomaticIndent(writer, level);
         if (index == 0) {
             try writer.print(
-                "rcases {s} with _ | ⟨auto_state_value_{d}, auto_state_tail_{d}⟩\n",
-                .{ state_name, index, index },
+                "rcases {s} with _ | ⟨auto_{s}_value_{d}, auto_{s}_tail_{d}⟩\n",
+                .{ state_name, prefix, index, prefix, index },
             );
         } else {
             try writer.print(
-                "rcases auto_state_tail_{d} with _ | ⟨auto_state_value_{d}, auto_state_tail_{d}⟩\n",
-                .{ index - 1, index, index },
+                "rcases auto_{s}_tail_{d} with _ | ⟨auto_{s}_value_{d}, auto_{s}_tail_{d}⟩\n",
+                .{ prefix, index - 1, prefix, index, prefix, index },
             );
         }
         try writeAutomaticIndent(writer, level);
@@ -1594,13 +2513,13 @@ fn writeAutomaticStateCasesStart(
     try writeAutomaticIndent(writer, level);
     if (variable_count == 0) {
         try writer.print(
-            "rcases {s} with _ | ⟨auto_state_extra, auto_state_rest⟩\n",
-            .{state_name},
+            "rcases {s} with _ | ⟨auto_{s}_extra, auto_{s}_rest⟩\n",
+            .{ state_name, prefix, prefix },
         );
     } else {
         try writer.print(
-            "rcases auto_state_tail_{d} with _ | ⟨auto_state_extra, auto_state_rest⟩\n",
-            .{variable_count - 1},
+            "rcases auto_{s}_tail_{d} with _ | ⟨auto_{s}_extra, auto_{s}_rest⟩\n",
+            .{ prefix, variable_count - 1, prefix, prefix },
         );
     }
     try writeAutomaticIndent(writer, level);
@@ -1624,13 +2543,14 @@ fn writeAutomaticStateShapeExtraction(
     writer: anytype,
     summary: obligation.LoopSummaryRow,
     ready_name: []const u8,
+    prefix: []const u8,
     indent: usize,
 ) !void {
     for (summary.variables, 0..) |_, index| {
         try writeAutomaticIndent(writer, indent);
         try writer.print(
-            "rcases auto_state_value_{d} with ⟨auto_state_shape_{d}, auto_state_bits_{d}⟩\n",
-            .{ index, index, index },
+            "rcases auto_{s}_value_{d} with ⟨auto_{s}_shape_{d}, auto_{s}_bits_{d}⟩\n",
+            .{ prefix, index, prefix, index, prefix, index },
         );
     }
     try writeAutomaticIndent(writer, indent);
@@ -1643,13 +2563,13 @@ fn writeAutomaticStateShapeExtraction(
         try writer.print("rcases {s} with ⟨", .{ready_name});
         for (summary.variables, 0..) |_, index| {
             if (index != 0) try writer.writeAll(", ");
-            try writer.print("h_auto_state_shape_{d}", .{index});
+            try writer.print("h_auto_{s}_shape_{d}", .{ prefix, index });
         }
         try writer.writeAll("⟩\n");
     }
     for (summary.variables, 0..) |_, index| {
         try writeAutomaticIndent(writer, indent);
-        try writer.print("subst auto_state_shape_{d}\n", .{index});
+        try writer.print("subst auto_{s}_shape_{d}\n", .{ prefix, index });
     }
 }
 
@@ -1679,7 +2599,10 @@ fn writeAutomaticContextReadyWitness(
 ) !void {
     if (summary.context_variables.len == 0) {
         try writeAutomaticIndent(writer, indent);
-        try writer.writeAll("simp [Ora.Loop.contextReady]\n");
+        try writer.print(
+            "simp [Ora.Loop.contextReady, emittedLoopSummary_{d}]\n",
+            .{summary.id},
+        );
         return;
     }
     try writeAutomaticIndent(writer, indent);
@@ -1720,7 +2643,10 @@ fn writeAutomaticContextExtraction(
         const shape = automaticIntegerShape(variable.ty) orelse return error.InvalidDependency;
         try writeAutomaticIndent(writer, indent);
         try writer.print("rcases hContext (autoSummary).contextVariables[{d}] ", .{index});
-        try writer.print("(by simp) with ⟨auto_context_value_{d}, ", .{index});
+        try writer.print(
+            "(by simp [emittedLoopSummary_{d}]) with ⟨auto_context_value_{d}, ",
+            .{ summary.id, index },
+        );
         try writer.print("h_auto_context_shape_{d}, h_auto_context_lookup_{d}⟩\n", .{ index, index });
         try writeAutomaticIndent(writer, indent);
         try writer.print(
@@ -1748,10 +2674,33 @@ fn writeAutomaticContextExtraction(
     }
 }
 
+fn writeAutomaticFollowingAliasItems(
+    writer: anytype,
+    summary: obligation.LoopSummaryRow,
+    dependency_summary: ?obligation.LoopSummaryRow,
+) !bool {
+    var wrote_item = false;
+    for (summary.variables, 0..) |_, index| {
+        if (wrote_item) try writer.writeAll(", ");
+        try writer.print("auto_following_bits_{d}", .{index});
+        wrote_item = true;
+    }
+    if (dependency_summary) |child| {
+        for (child.variables) |variable| {
+            const id = variable.id orelse return error.InvalidDependency;
+            if (wrote_item) try writer.writeAll(", ");
+            try writeAutomaticDependencyBits(writer, id);
+            wrote_item = true;
+        }
+    }
+    return wrote_item;
+}
+
 fn writeAutomaticArithmeticClose(
     writer: anytype,
     summary: obligation.LoopSummaryRow,
     state_view: AutomaticStateView,
+    dependency_summary: ?obligation.LoopSummaryRow,
     indent: usize,
 ) !void {
     try writeAutomaticIndent(writer, indent);
@@ -1762,10 +2711,7 @@ fn writeAutomaticArithmeticClose(
     try writer.writeAll("| (");
     if (state_view == .following) {
         try writer.writeAll("simp only [");
-        for (summary.variables, 0..) |_, index| {
-            if (index != 0) try writer.writeAll(", ");
-            try writer.print("auto_following_bits_{d}", .{index});
-        }
+        _ = try writeAutomaticFollowingAliasItems(writer, summary, dependency_summary);
         try writer.writeAll("]; ");
     }
     try writer.writeAll("apply Ora.Integer.signed_add_one_le_of_lt; assumption)\n");
@@ -1775,10 +2721,7 @@ fn writeAutomaticArithmeticClose(
     try writer.writeAll("| (");
     if (state_view == .following) {
         try writer.writeAll("simp only [");
-        for (summary.variables, 0..) |_, index| {
-            if (index != 0) try writer.writeAll(", ");
-            try writer.print("auto_following_bits_{d}", .{index});
-        }
+        _ = try writeAutomaticFollowingAliasItems(writer, summary, dependency_summary);
         try writer.writeAll("]; ");
     }
     try writer.writeAll("apply Ora.Integer.wrapping_add_one_le_of_unsigned_lt; simp_all only [])\n");
@@ -1791,18 +2734,14 @@ fn writeAutomaticArithmeticClose(
     if (state_view == .following) {
         try writeAutomaticIndent(writer, indent);
         try writer.writeAll("| (simp_all only [");
-        for (summary.variables, 0..) |_, index| {
-            if (index != 0) try writer.writeAll(", ");
-            try writer.print("auto_following_bits_{d}", .{index});
-        }
+        _ = try writeAutomaticFollowingAliasItems(writer, summary, dependency_summary);
         try writer.writeAll("] <;> done)\n");
     }
     try writeAutomaticIndent(writer, indent);
     try writer.writeAll("| (simp [");
     if (state_view == .following) {
-        for (summary.variables, 0..) |_, index| {
-            try writer.print("auto_following_bits_{d}, ", .{index});
-        }
+        if (try writeAutomaticFollowingAliasItems(writer, summary, dependency_summary))
+            try writer.writeAll(", ");
     }
     try writer.writeAll(
         "Ora.Integer.unsignedLt, Ora.Integer.unsignedLe, " ++
@@ -1820,14 +2759,16 @@ fn writeAutomaticFormulaHypotheses(
     prefix: []const u8,
     term_ids: []const obligation.TermId,
     free_var_count: usize,
+    state_view: AutomaticStateView,
     indent: usize,
 ) !void {
     for (formulas, 0..) |formula, index| {
         const term_id = formulaTermId(formula) orelse return error.InvalidDependency;
         try writeAutomaticIndent(writer, indent);
         try writer.print(
-            "have {s}_{d} := {s} (.term {d}) (by simp)\n",
-            .{ prefix, index, source_name, term_id },
+            "have {s}_{d} := {s} (.term {d}) " ++
+                "(by simp [emittedLoopSummary_{d}])\n",
+            .{ prefix, index, source_name, term_id, plan.summary.id },
         );
         const name = try std.fmt.allocPrint(std.heap.page_allocator, "{s}_{d}", .{ prefix, index });
         defer std.heap.page_allocator.free(name);
@@ -1838,7 +2779,7 @@ fn writeAutomaticFormulaHypotheses(
             formula,
             term_ids,
             free_var_count,
-            .current,
+            state_view,
             name,
             indent,
         );
@@ -1853,17 +2794,21 @@ fn writeAutomaticFormulaGoals(
     term_ids: []const obligation.TermId,
     free_var_count: usize,
     state_view: AutomaticStateView,
+    dependency_summary: ?obligation.LoopSummaryRow,
     indent: usize,
 ) !void {
     if (formulas.len == 0) {
         try writeAutomaticIndent(writer, indent);
-        try writer.writeAll("simp [Ora.Loop.formulasHoldInState]\n");
+        try writer.print(
+            "simp [Ora.Loop.formulasHoldInState, emittedLoopSummary_{d}]\n",
+            .{plan.summary.id},
+        );
         return;
     }
     try writeAutomaticIndent(writer, indent);
     try writer.writeAll("intro formula hFormula\n");
     try writeAutomaticIndent(writer, indent);
-    try writer.writeAll("simp at hFormula\n");
+    try writer.print("simp [emittedLoopSummary_{d}] at hFormula\n", .{plan.summary.id});
     if (formulas.len == 1) {
         try writeAutomaticIndent(writer, indent);
         try writer.writeAll("subst formula\n");
@@ -1878,7 +2823,14 @@ fn writeAutomaticFormulaGoals(
             null,
             indent,
         );
-        try writeAutomaticArithmeticClose(writer, plan.summary, state_view, indent);
+        if (automaticFormulaIsTrue(set, formulas[0])) return;
+        try writeAutomaticArithmeticClose(
+            writer,
+            plan.summary,
+            state_view,
+            dependency_summary,
+            indent,
+        );
         return;
     }
     try writeAutomaticIndent(writer, indent);
@@ -1899,50 +2851,163 @@ fn writeAutomaticFormulaGoals(
             null,
             indent + 2,
         );
-        try writeAutomaticArithmeticClose(writer, plan.summary, state_view, indent + 2);
+        if (automaticFormulaIsTrue(set, formula)) continue;
+        try writeAutomaticArithmeticClose(
+            writer,
+            plan.summary,
+            state_view,
+            dependency_summary,
+            indent + 2,
+        );
     }
 }
 
-fn writeAutomaticLoopProof(
-    allocator: std.mem.Allocator,
+fn writeAutomaticFormulaGoalsInEnv(
     writer: anytype,
     set: obligation.ObligationSet,
-    query: obligation.VerificationQuery,
     plan: AutomaticLoopPlan,
-    free_vars: []const obligation.FreeVarId,
+    edge: obligation.LoopEdgeRow,
+    formulas: []const obligation.FormulaRef,
+    term_ids: []const obligation.TermId,
+    free_var_count: usize,
+    state_view: AutomaticStateView,
+    dependency_summary: ?obligation.LoopSummaryRow,
+    indent: usize,
 ) !void {
-    const term_ids = try automaticLoopTermIds(allocator, set, query);
-    defer allocator.free(term_ids);
-    const summary = plan.summary;
-
-    try writer.writeAll("section\n");
-    try writer.print(
-        "private abbrev autoSummary_q{d} : Ora.Loop.SummaryRow := emittedLoopSummary_{d}\n" ++
-            "local notation \"autoSummary\" => autoSummary_q{d}\n" ++
-            "attribute [local simp] autoSummary_q{d} emittedLoopSummary_{d}\n",
-        .{ query.id, summary.id, query.id, query.id, summary.id },
-    );
-    if (set.terms.len > obligation_to_lean.lean_term_chunk_size) {
-        try writer.writeAll("attribute [local irreducible] emittedManifest\n");
+    if (formulas.len == 0) {
+        try writeAutomaticIndent(writer, indent);
+        try writer.writeAll("simp [Ora.Loop.formulasHoldInEnv]\n");
+        return;
     }
-    try writeTermLookupSimpAttributes(writer, term_ids);
-    try writer.print("theorem discharge_q{d} : emittedQuery_{d} := by\n", .{ query.id, query.id });
+    try writeAutomaticIndent(writer, indent);
+    try writer.writeAll("intro formula hFormula\n");
+    try writeAutomaticIndent(writer, indent);
+    try writer.writeAll("simp at hFormula\n");
+    if (formulas.len == 1) {
+        try writeAutomaticIndent(writer, indent);
+        try writer.writeAll("subst formula\n");
+        try writeAutomaticFormulaReductionInScope(
+            writer,
+            set,
+            plan,
+            edge,
+            formulas[0],
+            term_ids,
+            free_var_count,
+            state_view,
+            true,
+            null,
+            indent,
+        );
+        if (automaticFormulaIsTrue(set, formulas[0])) return;
+        try writeAutomaticArithmeticClose(
+            writer,
+            plan.summary,
+            state_view,
+            dependency_summary,
+            indent,
+        );
+        return;
+    }
+    try writeAutomaticIndent(writer, indent);
+    try writer.writeAll("rcases hFormula with hFormula");
+    for (1..formulas.len) |_| try writer.writeAll(" | hFormula");
+    try writer.writeAll(" <;> subst formula\n");
+    for (formulas) |formula| {
+        try writeAutomaticIndent(writer, indent);
+        try writer.writeAll("·\n");
+        try writeAutomaticFormulaReductionInScope(
+            writer,
+            set,
+            plan,
+            edge,
+            formula,
+            term_ids,
+            free_var_count,
+            state_view,
+            true,
+            null,
+            indent + 2,
+        );
+        if (automaticFormulaIsTrue(set, formula)) continue;
+        try writeAutomaticArithmeticClose(
+            writer,
+            plan.summary,
+            state_view,
+            dependency_summary,
+            indent + 2,
+        );
+    }
+}
+
+fn automaticFormulaIsTrue(
+    set: obligation.ObligationSet,
+    formula: obligation.FormulaRef,
+) bool {
+    const term_id = formulaTermId(formula) orelse return false;
+    const term = termAt(set, term_id) orelse return false;
+    return term == .bool_lit and term.bool_lit;
+}
+
+fn writeAutomaticSupportedFact(
+    writer: anytype,
+    row: obligation.LoopSummaryRow,
+    rows: []const obligation.LoopSummaryRow,
+    term_ids: []const obligation.TermId,
+    free_var_count: usize,
+    nested: bool,
+) !void {
+    if (nested) {
+        try writer.print(
+            "  have hSupported_{d} : emittedLoopSummary_{d}.supportedIn " ++
+                "emittedManifest emittedLoopSummaries = true := by\n" ++
+                "    have hShape : emittedLoopSummary_{d}.shapeSupportedIn " ++
+                "emittedLoopSummaries = true := by rfl\n",
+            .{ row.id, row.id, row.id },
+        );
+        try writer.print(
+            "    have hFormulas : emittedLoopSummary_{d}.formulasDenotableIn " ++
+                "emittedManifest emittedLoopSummaries = true := by\n",
+            .{row.id},
+        );
+        try writer.writeAll(
+            "      simp only [Ora.Loop.SummaryRow.formulasDenotableIn,\n" ++
+                "        Ora.Loop.SummaryRow.supportEnv, Ora.Loop.SummaryRow.supportEnvIn,\n" ++
+                "        Ora.Loop.dependencyVariables, Ora.Loop.dependencyVariablesFor,\n" ++
+                "        Ora.Loop.safetyCheckpointDenotable, List.take,\n" ++
+                "        Ora.Loop.bindSupportVariable,\n" ++
+                "        Ora.Loop.valueForTy, Ora.Loop.edgeControlFormulasDenotable,\n" ++
+                "        Ora.Loop.edgeBindingsDenotable, Ora.Loop.formulaDenotable,\n" ++
+                "        Ora.Loop.valueDenotable, Ora.Loop.findSummaryRow?, List.all,\n",
+        );
+        try writeAutomaticSummaryItems(writer, rows);
+        try writer.writeAll(", ");
+        try writeAutomaticIntegerShapeItems(writer);
+        try writeAutomaticFreeEqualityItems(writer, free_var_count);
+        try writer.writeAll(
+            ", Env.setFree, Env.lookupFree, lookupFreeBinding, if_pos, if_false,\n" ++
+                "        formulaDenotes?, formulaValue?, denoteFormula?, denoteValue?,\n" ++
+                "        IntegerLiteralTerm.asInteger?, Ora.Integer.Value.ofNat,\n" ++
+                "        Ora.Integer.Value.relation?, Ora.Integer.Value.binary?,\n" ++
+                "        Ora.Integer.Value.bitsFor?, Ora.Integer.wrappingResult,\n" ++
+                "        Ora.Integer.bitAndResult, Ora.Integer.bitXorResult,\n" ++
+                "        Ora.Spec.IntegerShape.isSigned, Env.lookupVar, ",
+        );
+        try writeAutomaticTermLookupItems(writer, term_ids);
+        try writer.writeAll(
+            ", Bool.false_eq_true]\n" ++
+                "      decide\n" ++
+                "    simp only [Ora.Loop.SummaryRow.supportedIn, emitted_manifest_wf,\n" ++
+                "      emitted_terms_topological, hShape, hFormulas, Bool.true_and]\n",
+        );
+        return;
+    }
+
     try writer.print(
-        "  unfold emittedQuery_{d} Ora.Loop.loopProofAuthorizationFromAssumptions\n",
-        .{query.id},
-    );
-    try writeFreeVarEqualityFacts(writer, free_vars);
-    try writer.print(
-        "  have hSupported : emittedLoopSummary_{d}.supported emittedManifest = true := by\n",
-        .{summary.id},
-    );
-    try writer.print(
-        "    have hShape : emittedLoopSummary_{d}.shapeSupported = true := by decide\n",
-        .{summary.id},
-    );
-    try writer.print(
-        "    have hFormulas : emittedLoopSummary_{d}.formulasDenotable emittedManifest = true := by\n",
-        .{summary.id},
+        "  have hSupported : emittedLoopSummary_{d}.supported emittedManifest = true := by\n" ++
+            "    have hShape : emittedLoopSummary_{d}.shapeSupported = true := by decide\n" ++
+            "    have hFormulas : emittedLoopSummary_{d}.formulasDenotable emittedManifest = true := by\n",
+        .{ row.id, row.id, row.id },
     );
     try writer.writeAll(
         "      simp only [Ora.Loop.SummaryRow.formulasDenotable,\n" ++
@@ -1950,9 +3015,9 @@ fn writeAutomaticLoopProof(
             "        Ora.Loop.valueForTy, Ora.Loop.edgeFormulasDenotable,\n" ++
             "        Ora.Loop.formulaDenotable, Ora.Loop.valueDenotable, List.all,\n",
     );
-    try writer.print("        emittedLoopSummary_{d}, ", .{summary.id});
+    try writer.print("        emittedLoopSummary_{d}, ", .{row.id});
     try writeAutomaticIntegerShapeItems(writer);
-    try writeAutomaticFreeEqualityItems(writer, free_vars.len);
+    try writeAutomaticFreeEqualityItems(writer, free_var_count);
     try writer.writeAll(
         ", Env.setFree, Env.lookupFree, lookupFreeBinding, if_pos, if_false,\n" ++
             "        formulaDenotes?, formulaValue?, denoteFormula?, denoteValue?,\n" ++
@@ -1968,6 +3033,96 @@ fn writeAutomaticLoopProof(
             "      decide\n" ++
             "    simp only [Ora.Loop.SummaryRow.supported, emitted_manifest_wf,\n" ++
             "      emitted_terms_topological, hShape, hFormulas, Bool.true_and]\n",
+    );
+}
+
+fn writeAutomaticChildDenotationFacts(
+    writer: anytype,
+    root: obligation.LoopSummaryRow,
+    rows: []const obligation.LoopSummaryRow,
+) !void {
+    try writer.print(
+        "  have hSummaryLength : emittedLoopSummaries.length = {d} := by rfl\n",
+        .{rows.len},
+    );
+    for (rows) |row| {
+        if (row.id == root.id) continue;
+        try writer.print(
+            "  have hFind_{d} : Ora.Loop.findSummaryRow? emittedLoopSummaries {d} =\n" ++
+                "      some emittedLoopSummary_{d} := by rfl\n",
+            .{ row.id, row.id, row.id },
+        );
+        try writer.print(
+            "  have hDenotes_{d} (base : Env) :\n" ++
+                "      (Ora.Loop.denoteLoopSummaryWithFuel? emittedLoopSummaries.length\n" ++
+                "        emittedManifest emittedLoopSummaries base emittedLoopSummary_{d}).isSome = true := by\n" ++
+                "    rw [hSummaryLength]\n" ++
+                "    unfold Ora.Loop.denoteLoopSummaryWithFuel?\n" ++
+                "    simp only [Ora.Loop.denoteLoopSummaryWithResolver?, hSupported_{d}, if_true]\n" ++
+                "    simp [emittedLoopSummary_{d},\n" ++
+                "      Ora.Loop.denoteEdgesWithResolver?, Ora.Loop.denoteEdgeWithResolver?,\n" ++
+                "      Ora.Loop.denoteSummaryDependencies?, Ora.Loop.denoteSummaryDependency?,\n" ++
+                "      Ora.Loop.findSummaryRow?, Ora.Loop.denoteControlTarget?]\n",
+            .{ row.id, row.id, row.id, row.id },
+        );
+    }
+}
+
+fn writeAutomaticLoopProof(
+    allocator: std.mem.Allocator,
+    writer: anytype,
+    set: obligation.ObligationSet,
+    query: obligation.VerificationQuery,
+    plan: AutomaticLoopPlan,
+    free_vars: []const obligation.FreeVarId,
+) !void {
+    const term_ids = try automaticLoopTermIds(allocator, set, query);
+    defer allocator.free(term_ids);
+    const summary = plan.summary;
+    const nested = loopSummaryHasDependencies(summary);
+    const summary_rows = try automaticSummaryClosure(allocator, set, summary);
+    defer allocator.free(summary_rows);
+
+    try writer.writeAll("section\n");
+    try writer.print(
+        "private abbrev autoSummary_q{d} : Ora.Loop.SummaryRow := emittedLoopSummary_{d}\n" ++
+            "local notation \"autoSummary\" => autoSummary_q{d}\n" ++
+            "attribute [local simp] autoSummary_q{d}",
+        .{ query.id, summary.id, query.id, query.id },
+    );
+    if (!nested) try writer.print(" emittedLoopSummary_{d}", .{summary.id});
+    try writer.writeByte('\n');
+    if (set.terms.len > obligation_to_lean.lean_term_chunk_size) {
+        try writer.writeAll("attribute [local irreducible] emittedManifest\n");
+    }
+    try writeTermLookupSimpAttributes(writer, term_ids);
+    try writer.print("theorem discharge_q{d} : emittedQuery_{d} := by\n", .{ query.id, query.id });
+    try writer.print("  unfold emittedQuery_{d} Ora.Loop.{s}\n", .{
+        query.id,
+        if (nested)
+            "loopProofAuthorizationFromAssumptionsIn"
+        else
+            "loopProofAuthorizationFromAssumptions",
+    });
+    try writeFreeVarEqualityFacts(writer, free_vars);
+    if (nested) {
+        for (summary_rows) |row| try writeAutomaticSupportedFact(
+            writer,
+            row,
+            summary_rows,
+            term_ids,
+            free_vars.len,
+            true,
+        );
+        try writeAutomaticChildDenotationFacts(writer, summary, summary_rows);
+        try writer.print("  have hSupported := hSupported_{d}\n", .{summary.id});
+    } else try writeAutomaticSupportedFact(
+        writer,
+        summary,
+        summary_rows,
+        term_ids,
+        free_vars.len,
+        false,
     );
     try writer.writeAll("  constructor\n");
     try writer.writeAll("  · let autoWitnessEnv : Env := ");
@@ -2008,7 +3163,31 @@ fn writeAutomaticLoopProof(
             "        ·\n",
     );
     try writeAutomaticContextReadyWitness(writer, summary, 10);
-    try writer.writeAll(
+    if (nested) {
+        try writer.writeAll(
+            "        · simpa [Ora.Loop.loopInitialPremisesIn,\n" ++
+                "            Ora.Loop.denoteLoopSummaryIn?, Ora.Loop.denoteLoopSummaryWithFuel?,\n" ++
+                "            Ora.Loop.denoteLoopSummaryWithResolver?,\n" ++
+                "            Ora.Loop.denoteEdgesWithResolver?, Ora.Loop.denoteEdgeWithResolver?,\n" ++
+                "            Ora.Loop.denoteSummaryDependencies?, Ora.Loop.denoteSummaryDependency?,\n" ++
+                "            Ora.Loop.denoteControlTarget?",
+        );
+        try writeAutomaticSupportedItems(writer, summary_rows);
+        try writeAutomaticDenotationItems(writer, summary, summary_rows);
+        try writer.writeAll("] using hInitial\n");
+        try writer.writeAll(
+            "  · intro env hAssumptions hContext\n" ++
+                "    simp [Ora.Loop.loopInductionObligationsAtEnvIn,\n" ++
+                "      Ora.Loop.denoteLoopSummaryIn?, Ora.Loop.denoteLoopSummaryWithFuel?,\n" ++
+                "      Ora.Loop.denoteLoopSummaryWithResolver?,\n" ++
+                "      Ora.Loop.denoteEdgesWithResolver?, Ora.Loop.denoteEdgeWithResolver?,\n" ++
+                "      Ora.Loop.denoteSummaryDependencies?, Ora.Loop.denoteSummaryDependency?,\n" ++
+                "      Ora.Loop.denoteControlTarget?",
+        );
+        try writeAutomaticSupportedItems(writer, summary_rows);
+        try writeAutomaticDenotationItems(writer, summary, summary_rows);
+        try writer.writeAll("]\n");
+    } else try writer.writeAll(
         "        · simp only [Ora.Loop.loopInitialPremises,\n" ++
             "            Ora.Loop.denoteLoopSummary?, hSupported, Ora.Loop.denoteEdges?,\n" ++
             "            Ora.Loop.denoteEdge?, Ora.Loop.denoteControlTarget?]\n" ++
@@ -2046,6 +3225,7 @@ fn writeAutomaticLoopProof(
         term_ids,
         free_vars.len,
         .following,
+        null,
         6,
     );
 
@@ -2063,20 +3243,30 @@ fn writeAutomaticLoopProof(
         }
         try writer.writeAll(
             "        dsimp at hTarget hInvariant hPath hSafe hNext ⊢\n" ++
-                "        rcases hInvariant with ⟨hReady, hInvariant⟩\n" ++
-                "        have hFollowingReady := Ora.Loop.bound_state_ready emittedManifest env\n" ++
-                "          (autoSummary).variables current following\n",
+                "        rcases hInvariant with ⟨hReady, hInvariant⟩\n",
         );
-        try writer.print("          (autoSummary).edges[{d}].nextState hNext\n", .{edge_index});
+        if (nested) {
+            try writer.writeAll(
+                "        have hFollowingReady := Ora.Loop.bound_state_after_dependencies_ready\n" ++
+                    "          emittedManifest env (autoSummary).variables current _ _ following hNext\n",
+            );
+        } else {
+            try writer.writeAll(
+                "        have hFollowingReady := Ora.Loop.bound_state_ready emittedManifest env\n" ++
+                    "          (autoSummary).variables current following\n",
+            );
+            try writer.print("          (autoSummary).edges[{d}].nextState hNext\n", .{edge_index});
+        }
         const state_case = try writeAutomaticStateCasesStart(
             writer,
             "current",
             "hReady",
+            "state",
             summary.variables.len,
             8,
         );
         const indent = state_case.success_indent;
-        try writeAutomaticStateShapeExtraction(writer, summary, "hReady", indent);
+        try writeAutomaticStateShapeExtraction(writer, summary, "hReady", "state", indent);
         try writeAutomaticFormulaHypotheses(
             writer,
             set,
@@ -2086,6 +3276,7 @@ fn writeAutomaticLoopProof(
             "h_auto_invariant",
             term_ids,
             free_vars.len,
+            .current,
             indent,
         );
         try writeAutomaticFormulaHypotheses(
@@ -2097,20 +3288,10 @@ fn writeAutomaticLoopProof(
             "h_auto_path",
             term_ids,
             free_vars.len,
+            .current,
             indent,
         );
-        try writeAutomaticFormulaHypotheses(
-            writer,
-            set,
-            plan,
-            edge.safety_formulas,
-            "hSafe",
-            "h_auto_safe",
-            term_ids,
-            free_vars.len,
-            indent,
-        );
-        try writeAutomaticNextStateReduction(
+        const next_reduction = try writeAutomaticNextStateReduction(
             writer,
             set,
             plan,
@@ -2119,7 +3300,8 @@ fn writeAutomaticLoopProof(
             free_vars.len,
             indent,
         );
-        try writeAutomaticIndent(writer, indent);
+        const goal_indent = next_reduction.success_indent;
+        try writeAutomaticIndent(writer, goal_indent);
         try writer.writeAll("refine ⟨hFollowingReady, ?_⟩\n");
         try writeAutomaticFormulaGoals(
             writer,
@@ -2129,8 +3311,16 @@ fn writeAutomaticLoopProof(
             term_ids,
             free_vars.len,
             .following,
-            indent,
+            next_reduction.dependency_summary,
+            goal_indent,
         );
+        if (next_reduction.dependency_state_case) |dependency_state_case| {
+            try writeAutomaticStateCasesEnd(
+                writer,
+                "hChildReady",
+                dependency_state_case,
+            );
+        }
         try writeAutomaticStateCasesEnd(writer, "hReady", state_case);
     }
 
@@ -2142,8 +3332,8 @@ fn writeAutomaticLoopProof(
     try writeAutomaticEdgeMembershipCases(writer, summary.edges.len);
     for (summary.edges) |edge| {
         try writer.writeAll("      · subst edge\n        dsimp at hInvariant hPath ⊢\n");
-        if (edge.safety_formulas.len == 0) {
-            try writer.writeAll("        simp [Ora.Loop.formulasHoldInState]\n");
+        if (edge.safety_checkpoints.len == 0) {
+            try writer.writeAll("        simp [Ora.Loop.safetyCheckpointsHold]\n");
             continue;
         }
         try writer.writeAll("        rcases hInvariant with ⟨hReady, hInvariant⟩\n");
@@ -2151,11 +3341,12 @@ fn writeAutomaticLoopProof(
             writer,
             "state",
             "hReady",
+            "state",
             summary.variables.len,
             8,
         );
         const indent = state_case.success_indent;
-        try writeAutomaticStateShapeExtraction(writer, summary, "hReady", indent);
+        try writeAutomaticStateShapeExtraction(writer, summary, "hReady", "state", indent);
         try writeAutomaticFormulaHypotheses(
             writer,
             set,
@@ -2165,6 +3356,7 @@ fn writeAutomaticLoopProof(
             "h_auto_invariant",
             term_ids,
             free_vars.len,
+            .current,
             indent,
         );
         try writeAutomaticFormulaHypotheses(
@@ -2176,18 +3368,102 @@ fn writeAutomaticLoopProof(
             "h_auto_path",
             term_ids,
             free_vars.len,
-            indent,
-        );
-        try writeAutomaticFormulaGoals(
-            writer,
-            set,
-            plan,
-            edge.safety_formulas,
-            term_ids,
-            free_vars.len,
             .current,
             indent,
         );
+        try writeAutomaticIndent(writer, indent);
+        try writer.writeAll("intro checkpoint hCheckpoint\n");
+        try writeAutomaticIndent(writer, indent);
+        try writer.print("simp [emittedLoopSummary_{d}] at hCheckpoint\n", .{summary.id});
+        try writeAutomaticIndent(writer, indent);
+        try writer.writeAll("rcases hCheckpoint with hCheckpoint_0");
+        for (1..edge.safety_checkpoints.len) |checkpoint_index| {
+            try writer.print(" | hCheckpoint_{d}", .{checkpoint_index});
+        }
+        try writer.writeByte('\n');
+        for (edge.safety_checkpoints, 0..) |checkpoint, checkpoint_index| {
+            try writeAutomaticIndent(writer, indent);
+            try writer.writeAll("· subst checkpoint\n");
+            const checkpoint_indent = indent + 2;
+            try writeAutomaticIndent(writer, checkpoint_indent);
+            try writer.writeAll(
+                "unfold Ora.Loop.safetyCheckpointHolds\n" ++
+                    "",
+            );
+            try writeAutomaticIndent(writer, checkpoint_indent);
+            try writer.writeAll(
+                "intro beforeDependencies checkpointEnv hParentBound hDependencies\n",
+            );
+            try writeAutomaticIndent(writer, checkpoint_indent);
+            try writer.writeAll("change some ");
+            try writeAutomaticBoundStateEnv(writer, plan.summary, "env", .current);
+            try writer.writeAll(" = some beforeDependencies at hParentBound\n");
+            try writeAutomaticIndent(writer, checkpoint_indent);
+            try writer.writeAll(
+                "have hBeforeDependencies := (Option.some.inj hParentBound).symm\n",
+            );
+            try writeAutomaticIndent(writer, checkpoint_indent);
+            try writer.writeAll("rw [hBeforeDependencies] at hDependencies\n");
+            try writeAutomaticIndent(writer, checkpoint_indent);
+            try writer.writeAll(
+                "simp only [List.take, Ora.Loop.environmentRelationsProduce] at hDependencies\n",
+            );
+            if (checkpoint.after_dependency_count == 0) {
+                try writeAutomaticIndent(writer, checkpoint_indent);
+                try writer.writeAll("subst checkpointEnv\n");
+                try writeAutomaticFormulaGoalsInEnv(
+                    writer,
+                    set,
+                    plan,
+                    edge,
+                    checkpoint.formulas,
+                    term_ids,
+                    free_vars.len,
+                    .current,
+                    null,
+                    checkpoint_indent,
+                );
+                continue;
+            }
+            if (checkpoint.after_dependency_count != 1 or edge.summary_dependencies.len != 1) {
+                return error.InvalidDependency;
+            }
+            try writeAutomaticIndent(writer, checkpoint_indent);
+            try writer.writeAll(
+                "rcases hDependencies with ⟨afterChild, hDependency, hDependenciesDone⟩\n",
+            );
+            try writeAutomaticIndent(writer, checkpoint_indent);
+            try writer.writeAll("subst checkpointEnv\n");
+            const reduction = try writeAutomaticDependencyRelationReduction(
+                writer,
+                set,
+                plan,
+                edge,
+                term_ids,
+                free_vars.len,
+                checkpoint_indent,
+            );
+            try writeAutomaticFormulaGoalsInEnv(
+                writer,
+                set,
+                plan,
+                edge,
+                checkpoint.formulas,
+                term_ids,
+                free_vars.len,
+                .current,
+                reduction.dependency_summary,
+                reduction.success_indent,
+            );
+            if (reduction.dependency_state_case) |dependency_state_case| {
+                try writeAutomaticStateCasesEnd(
+                    writer,
+                    "hChildReady",
+                    dependency_state_case,
+                );
+            }
+            _ = checkpoint_index;
+        }
         try writeAutomaticStateCasesEnd(writer, "hReady", state_case);
     }
 
@@ -2199,10 +3475,11 @@ fn writeAutomaticLoopProof(
     try writeAutomaticEdgeMembershipCases(writer, summary.edges.len);
     for (summary.edges) |edge| {
         try writer.writeAll("      · subst edge\n");
-        if (edge.target != .successor) {
+        if (edge.target == .backedge) {
             try writer.writeAll("        dsimp at hTarget\n        simp at hTarget\n");
             continue;
         }
+        if (edge.target == .explicit_revert or edge.target == null) return error.InvalidDependency;
         try writer.writeAll(
             "        dsimp at hTarget hInvariant hPath hSafe hNext ⊢\n" ++
                 "        rcases hInvariant with ⟨hReady, hInvariant⟩\n",
@@ -2211,11 +3488,12 @@ fn writeAutomaticLoopProof(
             writer,
             "current",
             "hReady",
+            "state",
             summary.variables.len,
             8,
         );
         const indent = state_case.success_indent;
-        try writeAutomaticStateShapeExtraction(writer, summary, "hReady", indent);
+        try writeAutomaticStateShapeExtraction(writer, summary, "hReady", "state", indent);
         try writeAutomaticFormulaHypotheses(
             writer,
             set,
@@ -2225,6 +3503,7 @@ fn writeAutomaticLoopProof(
             "h_auto_invariant",
             term_ids,
             free_vars.len,
+            .current,
             indent,
         );
         try writeAutomaticFormulaHypotheses(
@@ -2236,20 +3515,10 @@ fn writeAutomaticLoopProof(
             "h_auto_path",
             term_ids,
             free_vars.len,
+            .current,
             indent,
         );
-        try writeAutomaticFormulaHypotheses(
-            writer,
-            set,
-            plan,
-            edge.safety_formulas,
-            "hSafe",
-            "h_auto_safe",
-            term_ids,
-            free_vars.len,
-            indent,
-        );
-        try writeAutomaticNextStateReduction(
+        const next_reduction = try writeAutomaticNextStateReduction(
             writer,
             set,
             plan,
@@ -2258,16 +3527,29 @@ fn writeAutomaticLoopProof(
             free_vars.len,
             indent,
         );
+        const goal_indent = next_reduction.success_indent;
+        const target_formulas = if (edge.target == .successor)
+            summary.post_formulas
+        else
+            edge.target_formulas;
         try writeAutomaticFormulaGoals(
             writer,
             set,
             plan,
-            summary.post_formulas,
+            target_formulas,
             term_ids,
             free_vars.len,
             .following,
-            indent,
+            next_reduction.dependency_summary,
+            goal_indent,
         );
+        if (next_reduction.dependency_state_case) |dependency_state_case| {
+            try writeAutomaticStateCasesEnd(
+                writer,
+                "hChildReady",
+                dependency_state_case,
+            );
+        }
         try writeAutomaticStateCasesEnd(writer, "hReady", state_case);
     }
     try writer.writeAll("end\n");
@@ -2316,6 +3598,31 @@ fn markAutomaticFormulaClosure(
     }
 }
 
+fn markAutomaticSummaryClosure(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    marked: []bool,
+    fuel: usize,
+) !void {
+    if (fuel == 0) return error.InvalidDependency;
+    for (summary.init_formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
+    for (summary.invariant_formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
+    for (summary.edges) |edge| {
+        for (edge.path_formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
+        for (edge.safety_checkpoints) |checkpoint| {
+            for (checkpoint.formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
+        }
+        for (edge.target_formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
+        for (edge.next_state) |binding| try markAutomaticFormulaClosure(set, binding.value, marked);
+        for (edge.summary_dependencies) |dependency| {
+            const child = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
+                return error.InvalidDependency;
+            try markAutomaticSummaryClosure(set, child, marked, fuel - 1);
+        }
+    }
+    for (summary.post_formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
+}
+
 fn automaticLoopTermIds(
     allocator: std.mem.Allocator,
     set: obligation.ObligationSet,
@@ -2333,14 +3640,7 @@ fn automaticLoopTermIds(
             return error.InvalidDependency;
         if (assumption.formula) |formula| try markAutomaticFormulaClosure(set, formula, marked);
     }
-    for (summary.init_formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
-    for (summary.invariant_formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
-    for (summary.edges) |edge| {
-        for (edge.path_formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
-        for (edge.safety_formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
-        for (edge.next_state) |binding| try markAutomaticFormulaClosure(set, binding.value, marked);
-    }
-    for (summary.post_formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
+    try markAutomaticSummaryClosure(set, summary, marked, set.loop_summaries.len + 1);
 
     var count: usize = 0;
     for (marked) |is_marked| if (is_marked) {
@@ -2459,7 +3759,10 @@ fn projectionForQuery(set: obligation.ObligationSet, query: obligation.Verificat
         for (loop_summary.invariant_formulas) |formula| summary.addFormula(formula);
         for (loop_summary.edges) |edge| {
             for (edge.path_formulas) |formula| summary.addFormula(formula);
-            for (edge.safety_formulas) |formula| summary.addFormula(formula);
+            for (edge.safety_checkpoints) |checkpoint| {
+                for (checkpoint.formulas) |formula| summary.addFormula(formula);
+            }
+            for (edge.target_formulas) |formula| summary.addFormula(formula);
             for (edge.next_state) |binding| summary.addFormula(binding.value);
         }
         for (loop_summary.post_formulas) |formula| summary.addFormula(formula);
@@ -2596,6 +3899,80 @@ test "automatic proof failures retain stable named diagnostics" {
     }
 }
 
+test "automatic dependency variables are scoped to their declaring edge" {
+    const parent_id: obligation.FreeVarId = .{ .file_id = 1, .pattern_id = 1 };
+    const child_id: obligation.FreeVarId = .{ .file_id = 1, .pattern_id = 2 };
+    const parent_variables = [_]obligation.LoopVariable{.{
+        .index = 0,
+        .id = parent_id,
+        .ty = .{ .spelling = "u256" },
+    }};
+    const child_variables = [_]obligation.LoopVariable{.{
+        .index = 0,
+        .id = child_id,
+        .ty = .{ .spelling = "u256" },
+    }};
+    const dependency: obligation.LoopSummaryDependency = .{
+        .id = 0,
+        .structural_key = "op:2/scf.while",
+        .summary_id = 2,
+        .loop_vc_sha256 = [_]u8{0} ** 32,
+        .target = .successor,
+    };
+    const dependencies = [_]obligation.LoopSummaryDependency{dependency};
+    const edge: obligation.LoopEdgeRow = .{
+        .id = 0,
+        .structural_key = "body/straight-line-yield",
+        .summary_dependencies = &dependencies,
+    };
+    const summaries = [_]obligation.LoopSummaryRow{
+        .{
+            .id = 1,
+            .owner = .{ .function = .{ .name = "run" } },
+            .source = .{},
+            .phase = .ora_mlir,
+            .origin = .source,
+            .loop_source_op_id = 1,
+            .loop_kind = .scf_while,
+            .variables = &parent_variables,
+        },
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "run" } },
+            .source = .{},
+            .phase = .ora_mlir,
+            .origin = .source,
+            .loop_source_op_id = 2,
+            .loop_kind = .scf_while,
+            .variables = &child_variables,
+        },
+    };
+    const terms = [_]obligation.Term{.{ .variable = .{ .free = .{
+        .id = child_id,
+        .name = "inner",
+        .ty = .{ .spelling = "u256" },
+    } } }};
+    const set: obligation.ObligationSet = .{
+        .terms = &terms,
+        .loop_summaries = &summaries,
+    };
+
+    switch (automaticValueShape(set, summaries[0], 0, 16)) {
+        .supported => return error.TestUnexpectedResult,
+        .unsupported => |reason| try std.testing.expectEqual(
+            AutomaticLoopProofReason.automatic_foreign_variable,
+            reason,
+        ),
+    }
+    switch (automaticValueShapeInScope(set, summaries[0], edge, 0, 16)) {
+        .unsupported => return error.TestUnexpectedResult,
+        .supported => |shape| try std.testing.expect(shape.eql(.{
+            .width = 256,
+            .signed = false,
+        })),
+    }
+}
+
 test "coordinator outcome cannot authorize runtime-check erasure" {
     try std.testing.expect(@hasField(Outcome, "artifact_emission_authorized"));
     try std.testing.expect(!@hasField(Outcome, "proven_guard_ids"));
@@ -2616,6 +3993,9 @@ test "Lean targets reject vacuous and inconclusive Z3 rows" {
         .result = .{ .status = .unknown },
     };
     try std.testing.expect(isPlainUnknownTarget(base));
+    var loop_owned = base;
+    loop_owned.loop_summary_id = 7;
+    try std.testing.expect(!isPlainUnknownTarget(loop_owned));
     var vacuous = base;
     vacuous.result.?.vacuous = true;
     try std.testing.expect(!isPlainUnknownTarget(vacuous));
