@@ -432,6 +432,19 @@ fn effectSlotEql(lhs: EffectSlot, rhs: EffectSlot) bool {
         keyPathsEql(lhs.key_path, rhs.key_path);
 }
 
+fn unprojectedStorageRootCoversWrite(declared: EffectSlot, actual: EffectSlot) bool {
+    if (declared.region != .storage or actual.region != .storage) return false;
+    if (!std.mem.eql(u8, declared.name, actual.name)) return false;
+    if (std.mem.eql(u8, declared.name, computed_storage_effect_root)) return false;
+    if (declared.field_path) |fields| {
+        if (fields.len != 0) return false;
+    }
+    if (declared.key_path) |keys| {
+        if (keys.len != 0) return false;
+    }
+    return true;
+}
+
 fn effectSlotIsStorage(slot: EffectSlot) bool {
     return slot.region == .storage;
 }
@@ -513,6 +526,30 @@ test "effect slot aliasing distinguishes parameters and constants" {
     try std.testing.expect(keyPathsMayAlias(unknown.key_path, same_param.key_path));
     try std.testing.expect(!fieldPathsMayAlias(owner_field.field_path, admin_field.field_path));
     try std.testing.expect(fieldPathsMayAlias(config_root.field_path, owner_field.field_path));
+}
+
+test "unprojected storage roots cover only descendants of the same root" {
+    const dynamic_key = [_]KeySegment{.{ .unknown = {} }};
+    const constant_key = [_]KeySegment{.{ .constant = "1" }};
+    const owner_field = [_][]const u8{"owner"};
+    const items_root: EffectSlot = .{ .name = "items", .region = .storage };
+    const dynamic_item: EffectSlot = .{ .name = "items", .region = .storage, .key_path = &dynamic_key };
+    const constant_item: EffectSlot = .{ .name = "items", .region = .storage, .key_path = &constant_key };
+    const projected_item: EffectSlot = .{ .name = "items", .region = .storage, .key_path = &constant_key };
+    const other_item: EffectSlot = .{ .name = "other", .region = .storage, .key_path = &dynamic_key };
+    const transient_item: EffectSlot = .{ .name = "items", .region = .transient, .key_path = &dynamic_key };
+    const config_root: EffectSlot = .{ .name = "config", .region = .storage };
+    const config_owner: EffectSlot = .{ .name = "config", .region = .storage, .field_path = &owner_field };
+    const computed_root: EffectSlot = .{ .name = computed_storage_effect_root, .region = .storage };
+    const computed_write: EffectSlot = .{ .name = computed_storage_effect_root, .region = .storage, .key_path = &constant_key };
+
+    try std.testing.expect(unprojectedStorageRootCoversWrite(items_root, dynamic_item));
+    try std.testing.expect(unprojectedStorageRootCoversWrite(items_root, constant_item));
+    try std.testing.expect(unprojectedStorageRootCoversWrite(config_root, config_owner));
+    try std.testing.expect(!unprojectedStorageRootCoversWrite(projected_item, dynamic_item));
+    try std.testing.expect(!unprojectedStorageRootCoversWrite(items_root, other_item));
+    try std.testing.expect(!unprojectedStorageRootCoversWrite(items_root, transient_item));
+    try std.testing.expect(!unprojectedStorageRootCoversWrite(computed_root, computed_write));
 }
 
 test "buildEffect preserves external marker across slot summaries" {
@@ -4425,6 +4462,7 @@ const TypeChecker = struct {
         for (declared_slots) |declared_slot| {
             if (effectSlotEql(declared_slot, write_slot)) return true;
             if (self.computedStorageRangeCoversWrite(declared_slot, write_slot)) return true;
+            if (unprojectedStorageRootCoversWrite(declared_slot, write_slot)) return true;
         }
         return false;
     }

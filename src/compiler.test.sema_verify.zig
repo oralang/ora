@@ -309,6 +309,34 @@ test "compiler enforces modifies declarations against storage writes" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to 'config.admin' is not covered by this function's `modifies` clause"));
 }
 
+test "compiler accepts aggregate modifies roots for fixed-array elements" {
+    const source_text =
+        \\contract Arrays {
+        \\    storage var values: [u256; 4];
+        \\    storage var balances: [u256; 4];
+        \\
+        \\    pub fn update(index: u256, value: u256)
+        \\        modifies values
+        \\    {
+        \\        values[index] = value;
+        \\    }
+        \\
+        \\    pub fn wrongRoot(index: u256, value: u256)
+        \\        modifies values
+        \\    {
+        \\        balances[index] = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 1), typecheck.diagnostics.items.items.len);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to 'balances[index]' is not covered by this function's `modifies` clause"));
+}
+
 test "compiler matches modifies environment keys through direct uses and stable let or const local aliases" {
     const source_text =
         \\contract Vault {
