@@ -64,6 +64,7 @@ import Ora.Obligation.Theorems
 import Ora.Obligation.Agreement
 import Ora.Loop.Core
 import Ora.Loop.Denotation
+import Ora.Loop.Auto
 import Ora.Generated.LoopTotalitySnapshot
 import Ora.LoopTotalitySync
 import Ora.Resource.Model

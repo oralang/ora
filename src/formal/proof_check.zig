@@ -913,6 +913,7 @@ fn buildLeanCheckerSourceWithInlineProofs(
         \\import Lean
         \\import Lean.Util.CollectAxioms
         \\import Std.Tactic.BVDecide
+        \\import Ora.Loop.Auto
         \\
     );
     try writer.print("import {s}\n", .{obligations_module});

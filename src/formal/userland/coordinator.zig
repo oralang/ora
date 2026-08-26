@@ -800,14 +800,32 @@ fn writeWitnessEnv(writer: anytype, free_vars: []const obligation.FreeVarId) !vo
     }
 }
 
-fn writeFreeVarEqualityFacts(writer: anytype, free_vars: []const obligation.FreeVarId) !void {
+const FreeVarEqualityForm = enum {
+    local_haves,
+    attributed_theorems,
+};
+
+fn writeFreeVarEqualityFacts(
+    writer: anytype,
+    free_vars: []const obligation.FreeVarId,
+    form: FreeVarEqualityForm,
+) !void {
     for (free_vars, 0..) |lhs, lhs_index| for (free_vars, 0..) |rhs, rhs_index| {
-        try writer.print("  have h_auto_free_{d}_{d} : ((", .{ lhs_index, rhs_index });
+        switch (form) {
+            .local_haves => try writer.print("  have h_auto_free_{d}_{d} : ((", .{ lhs_index, rhs_index }),
+            .attributed_theorems => try writer.print("private theorem auto_free_{d}_{d} : ((", .{ lhs_index, rhs_index }),
+        }
         try writeFreeVarId(writer, lhs);
         try writer.writeAll(" : FreeVarId) == ");
         try writeFreeVarId(writer, rhs);
         try writer.print(") = {s} := by rfl\n", .{if (freeVarIdsEqual(lhs, rhs)) "true" else "false"});
     };
+    if (form == .local_haves) return;
+    try writer.writeAll("attribute [local ora_loop_data]");
+    for (free_vars, 0..) |_, lhs| for (free_vars, 0..) |_, rhs| {
+        try writer.print(" auto_free_{d}_{d}", .{ lhs, rhs });
+    };
+    try writer.writeByte('\n');
 }
 
 fn writeAutomaticSimpSet(writer: anytype, free_var_count: usize) !void {
@@ -1350,6 +1368,197 @@ fn automaticLoopPlan(
         return .{ .unsupported = reason };
     };
     return .{ .supported = .{ .summary = summary } };
+}
+
+fn repositoryLoopTermIsU256(ty: ?obligation.TypeRef) bool {
+    const shape = automaticIntegerShape(ty orelse return false) orelse return false;
+    return !shape.signed and shape.width == 256;
+}
+
+fn repositoryLoopTermIsVariable(
+    set: obligation.ObligationSet,
+    term_id: obligation.TermId,
+    id: obligation.FreeVarId,
+) bool {
+    const term = termAt(set, term_id) orelse return false;
+    return switch (term) {
+        .variable => |variable| switch (variable) {
+            .free => |free| obligation.freeVarIdEql(free.id, id) and
+                repositoryLoopTermIsU256(free.ty),
+            .bound => false,
+        },
+        else => false,
+    };
+}
+
+fn repositoryLoopTermIsLiteral(
+    set: obligation.ObligationSet,
+    term_id: obligation.TermId,
+    value: []const u8,
+) bool {
+    const term = termAt(set, term_id) orelse return false;
+    return switch (term) {
+        .int_lit => |literal| std.mem.eql(u8, literal.value, value) and
+            repositoryLoopTermIsU256(literal.ty),
+        else => false,
+    };
+}
+
+fn repositoryLoopFormulaIsVariable(
+    set: obligation.ObligationSet,
+    formula: obligation.FormulaRef,
+    id: obligation.FreeVarId,
+) bool {
+    return repositoryLoopTermIsVariable(set, formulaTermId(formula) orelse return false, id);
+}
+
+fn repositoryLoopFormulaIsLiteral(
+    set: obligation.ObligationSet,
+    formula: obligation.FormulaRef,
+    value: []const u8,
+) bool {
+    return repositoryLoopTermIsLiteral(set, formulaTermId(formula) orelse return false, value);
+}
+
+fn repositoryLoopFormulaIsVariableRelation(
+    set: obligation.ObligationSet,
+    formula: obligation.FormulaRef,
+    op: obligation.BinaryOp,
+    lhs: obligation.FreeVarId,
+    rhs: obligation.FreeVarId,
+) bool {
+    const term = termAt(set, formulaTermId(formula) orelse return false) orelse return false;
+    return switch (term) {
+        .binary => |binary| binary.op == op and repositoryLoopTermIsU256(binary.ty) and
+            repositoryLoopTermIsVariable(set, binary.lhs, lhs) and
+            repositoryLoopTermIsVariable(set, binary.rhs, rhs),
+        else => false,
+    };
+}
+
+fn repositoryLoopTermIsAddOne(
+    set: obligation.ObligationSet,
+    term_id: obligation.TermId,
+    variable: obligation.FreeVarId,
+) bool {
+    const term = termAt(set, term_id) orelse return false;
+    return switch (term) {
+        .binary => |binary| binary.op == .add and repositoryLoopTermIsU256(binary.ty) and
+            repositoryLoopTermIsVariable(set, binary.lhs, variable) and
+            repositoryLoopTermIsLiteral(set, binary.rhs, "1"),
+        else => false,
+    };
+}
+
+fn repositoryLoopFormulaIsAddOne(
+    set: obligation.ObligationSet,
+    formula: obligation.FormulaRef,
+    variable: obligation.FreeVarId,
+) bool {
+    return repositoryLoopTermIsAddOne(set, formulaTermId(formula) orelse return false, variable);
+}
+
+fn repositoryLoopFormulaIsNegationOf(
+    set: obligation.ObligationSet,
+    formula: obligation.FormulaRef,
+    operand: obligation.FormulaRef,
+) bool {
+    const term = termAt(set, formulaTermId(formula) orelse return false) orelse return false;
+    return switch (term) {
+        .unary => |unary| unary.op == .not and
+            unary.operand == (formulaTermId(operand) orelse return false),
+        else => false,
+    };
+}
+
+fn repositoryLoopFormulaIsAddOneSafety(
+    set: obligation.ObligationSet,
+    formula: obligation.FormulaRef,
+    variable: obligation.FreeVarId,
+) bool {
+    const outer = termAt(set, formulaTermId(formula) orelse return false) orelse return false;
+    const comparison_id = switch (outer) {
+        .unary => |unary| if (unary.op == .not) unary.operand else return false,
+        else => return false,
+    };
+    const comparison = termAt(set, comparison_id) orelse return false;
+    return switch (comparison) {
+        .binary => |binary| binary.op == .lt and repositoryLoopTermIsU256(binary.ty) and
+            repositoryLoopTermIsAddOne(set, binary.lhs, variable) and
+            repositoryLoopTermIsVariable(set, binary.rhs, variable),
+        else => false,
+    };
+}
+
+fn repositoryLoopTacticCompatible(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+) bool {
+    if (loopSummaryHasDependencies(summary) or
+        summary.variables.len != 1 or summary.context_variables.len != 1 or
+        summary.init_formulas.len != 1 or summary.invariant_formulas.len != 1 or
+        summary.post_formulas.len != 1 or summary.edges.len != 2)
+    {
+        return false;
+    }
+    const variable_shape = automaticIntegerShape(summary.variables[0].ty) orelse return false;
+    const context_shape = automaticIntegerShape(summary.context_variables[0].ty) orelse return false;
+    if (variable_shape.signed or variable_shape.width != 256 or
+        context_shape.signed or context_shape.width != 256)
+    {
+        return false;
+    }
+    const variable_id = summary.variables[0].id orelse return false;
+    const context_id = summary.context_variables[0].id orelse return false;
+    const backedge = summary.edges[0];
+    const exit_edge = summary.edges[1];
+    if (backedge.safety_checkpoints.len != 1 or
+        backedge.safety_checkpoints[0].formulas.len != 1 or
+        backedge.safety_checkpoints[0].after_dependency_count != 0 or
+        backedge.summary_dependencies.len != 0 or backedge.target_formulas.len != 0 or
+        exit_edge.safety_checkpoints.len != 0 or exit_edge.summary_dependencies.len != 0 or
+        exit_edge.target_formulas.len != 0)
+    {
+        return false;
+    }
+    return backedge.target == .backedge and
+        summary.edges[1].target == .successor and
+        backedge.path_formulas.len == 1 and exit_edge.path_formulas.len == 1 and
+        backedge.next_state.len == 1 and exit_edge.next_state.len == 1 and
+        repositoryLoopFormulaIsLiteral(set, summary.init_formulas[0], "0") and
+        repositoryLoopFormulaIsVariableRelation(
+            set,
+            summary.invariant_formulas[0],
+            .le,
+            variable_id,
+            context_id,
+        ) and
+        repositoryLoopFormulaIsVariableRelation(
+            set,
+            summary.post_formulas[0],
+            .le,
+            variable_id,
+            context_id,
+        ) and
+        repositoryLoopFormulaIsVariableRelation(
+            set,
+            backedge.path_formulas[0],
+            .lt,
+            variable_id,
+            context_id,
+        ) and
+        repositoryLoopFormulaIsAddOne(set, backedge.next_state[0].value, variable_id) and
+        repositoryLoopFormulaIsAddOneSafety(
+            set,
+            backedge.safety_checkpoints[0].formulas[0],
+            variable_id,
+        ) and
+        repositoryLoopFormulaIsNegationOf(
+            set,
+            exit_edge.path_formulas[0],
+            backedge.path_formulas[0],
+        ) and
+        repositoryLoopFormulaIsVariable(set, exit_edge.next_state[0].value, variable_id);
 }
 
 fn writeAutomaticLeanShape(writer: anytype, shape: AutomaticIntegerShape) !void {
@@ -3080,6 +3289,35 @@ fn writeAutomaticLoopProof(
     defer allocator.free(term_ids);
     const summary = plan.summary;
     const nested = loopSummaryHasDependencies(summary);
+
+    if (repositoryLoopTacticCompatible(set, summary)) {
+        try writer.writeAll("section\n");
+        try writer.print(
+            "private abbrev autoSummary : Ora.Loop.SummaryRow := emittedLoopSummary_{d}\n" ++
+                "attribute [local ora_loop_row] autoSummary emittedLoopSummary_{d}\n",
+            .{ summary.id, summary.id },
+        );
+        if (set.terms.len > obligation_to_lean.lean_term_chunk_size) {
+            try writer.writeAll("attribute [local irreducible] emittedManifest\n");
+        }
+        try writer.writeAll(
+            "attribute [local ora_loop_manifest] emitted_manifest_wf emitted_terms_topological\n",
+        );
+        try writeTermLookupAttributes(writer, "ora_loop_data", term_ids, false);
+        try writeFreeVarEqualityFacts(writer, free_vars, .attributed_theorems);
+        try writer.print(
+            "private theorem autoSummarySupported : " ++
+                "emittedLoopSummary_{d}.supported emittedManifest = true := by\n" ++
+                "  change autoSummary.supported emittedManifest = true\n" ++
+                "  ora_loop_support\n" ++
+                "attribute [local ora_loop_supported] autoSummarySupported\n" ++
+                "theorem discharge_q{d} : emittedQuery_{d} := by ora_loop_auto\n" ++
+                "end\n",
+            .{ summary.id, query.id, query.id },
+        );
+        return;
+    }
+
     const summary_rows = try automaticSummaryClosure(allocator, set, summary);
     defer allocator.free(summary_rows);
 
@@ -3104,7 +3342,7 @@ fn writeAutomaticLoopProof(
         else
             "loopProofAuthorizationFromAssumptions",
     });
-    try writeFreeVarEqualityFacts(writer, free_vars);
+    try writeFreeVarEqualityFacts(writer, free_vars, .local_haves);
     if (nested) {
         for (summary_rows) |row| try writeAutomaticSupportedFact(
             writer,
@@ -3660,9 +3898,24 @@ fn writeTermLookupSimpAttributes(
     writer: anytype,
     term_ids: []const obligation.TermId,
 ) !void {
+    return writeTermLookupAttributes(writer, "simp", term_ids, true);
+}
+
+fn writeTermLookupAttributes(
+    writer: anytype,
+    attribute_name: []const u8,
+    term_ids: []const obligation.TermId,
+    include_manifest_facts: bool,
+) !void {
     try writer.writeAll(
-        "attribute [local simp] emitted_manifest_wf emitted_terms_topological emitted_terms_length",
+        "attribute [local ",
     );
+    try writer.writeAll(attribute_name);
+    try writer.writeAll("]");
+    if (include_manifest_facts) {
+        try writer.writeAll(" emitted_manifest_wf emitted_terms_topological");
+    }
+    try writer.writeAll(" emitted_terms_length");
     for (term_ids) |term_id| {
         try writer.print(" emitted_term_{d}_lookup", .{term_id});
     }
@@ -3695,7 +3948,7 @@ fn buildAutomaticProofSource(
             continue;
         }
         try writer.print("theorem discharge_q{d} : emittedQuery_{d} := by\n", .{ query.id, query.id });
-        try writeFreeVarEqualityFacts(writer, free_vars);
+        try writeFreeVarEqualityFacts(writer, free_vars, .local_haves);
         try writer.print("  unfold emittedQuery_{d} obligationFollowsFromAssumptions\n", .{query.id});
         try writer.writeAll("  constructor\n  · refine ⟨");
         try writeWitnessEnv(writer, free_vars);
@@ -3897,6 +4150,139 @@ test "automatic proof failures retain stable named diagnostics" {
         try std.testing.expect(std.mem.indexOf(u8, output.written(), case.detail) != null);
         try std.testing.expect(std.mem.indexOf(u8, output.written(), "artifact emission remains blocked") != null);
     }
+}
+
+test "canonical counter proof source delegates to repository loop tactic deterministically" {
+    const u256_ty: obligation.TypeRef = .{ .compiler_type_id = 6 };
+    const loop_id: obligation.FreeVarId = .{ .file_id = 1, .pattern_id = 1 };
+    const context_id: obligation.FreeVarId = .{ .file_id = 1, .pattern_id = 2 };
+    const terms = [_]obligation.Term{
+        .{ .int_lit = .{ .value = "0", .ty = u256_ty } },
+        .{ .variable = .{ .free = .{ .id = loop_id, .name = "i", .ty = u256_ty } } },
+        .{ .variable = .{ .free = .{ .id = context_id, .name = "n", .ty = u256_ty } } },
+        .{ .binary = .{ .op = .lt, .lhs = 1, .rhs = 2, .ty = u256_ty } },
+        .{ .binary = .{ .op = .le, .lhs = 1, .rhs = 2, .ty = u256_ty } },
+        .{ .int_lit = .{ .value = "1", .ty = u256_ty } },
+        .{ .binary = .{ .op = .add, .lhs = 1, .rhs = 5, .ty = u256_ty } },
+        .{ .binary = .{ .op = .lt, .lhs = 6, .rhs = 1, .ty = u256_ty } },
+        .{ .unary = .{ .op = .not, .operand = 7 } },
+        .{ .unary = .{ .op = .not, .operand = 3 } },
+    };
+    const variables = [_]obligation.LoopVariable{.{
+        .index = 0,
+        .id = loop_id,
+        .name = "i",
+        .ty = u256_ty,
+    }};
+    const context_variables = [_]obligation.LoopVariable{.{
+        .index = 0,
+        .id = context_id,
+        .name = "n",
+        .ty = u256_ty,
+    }};
+    const safety_formulas = [_]obligation.FormulaRef{.{ .term = 8 }};
+    const checkpoints = [_]obligation.LoopSafetyCheckpoint{.{
+        .id = 0,
+        .structural_key = "op:checked-add",
+        .after_dependency_count = 0,
+        .formulas = &safety_formulas,
+    }};
+    const backedge_bindings = [_]obligation.LoopStepAssignment{.{
+        .variable_index = 0,
+        .target = loop_id,
+        .source_key = "loop:add-one",
+        .value = .{ .term = 6 },
+    }};
+    const exit_bindings = [_]obligation.LoopStepAssignment{.{
+        .variable_index = 0,
+        .target = loop_id,
+        .source_key = "loop:identity",
+        .value = .{ .term = 1 },
+    }};
+    const edges = [_]obligation.LoopEdgeRow{
+        .{
+            .id = 0,
+            .structural_key = "loop:backedge",
+            .path_formulas = &.{.{ .term = 3 }},
+            .safety_checkpoints = &checkpoints,
+            .next_state = &backedge_bindings,
+            .target = .backedge,
+        },
+        .{
+            .id = 1,
+            .structural_key = "loop:exit",
+            .path_formulas = &.{.{ .term = 9 }},
+            .next_state = &exit_bindings,
+            .target = .successor,
+        },
+    };
+    const summaries = [_]obligation.LoopSummaryRow{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "countTo" } },
+        .source = .{},
+        .phase = .ora_mlir,
+        .origin = .source,
+        .loop_source_op_id = 1,
+        .loop_kind = .scf_while,
+        .context_variables = &context_variables,
+        .variables = &variables,
+        .init_formulas = &.{.{ .term = 0 }},
+        .invariant_formulas = &.{.{ .term = 4 }},
+        .edges = &edges,
+        .projection_completeness = .complete,
+        .post_formulas = &.{.{ .term = 4 }},
+    }};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 10,
+        .owner = .{ .function = .{ .name = "countTo" } },
+        .source = .{},
+        .phase = .ora_mlir,
+        .origin = .source,
+        .proof_requirement = .lean_certificate,
+        .backend = .lean,
+        .kind = .loop_induction,
+        .loop_summary_id = 1,
+    }};
+    const set: obligation.ObligationSet = .{
+        .terms = &terms,
+        .queries = &queries,
+        .loop_summaries = &summaries,
+    };
+
+    try std.testing.expect(repositoryLoopTacticCompatible(set, summaries[0]));
+    const first = try buildAutomaticProofSource(
+        std.testing.allocator,
+        "Ora.Generated.Test",
+        set,
+        &queries,
+    );
+    defer std.testing.allocator.free(first);
+    const second = try buildAutomaticProofSource(
+        std.testing.allocator,
+        "Ora.Generated.Test",
+        set,
+        &queries,
+    );
+    defer std.testing.allocator.free(second);
+    try std.testing.expectEqualStrings(first, second);
+    try std.testing.expect(std.mem.containsAtLeast(
+        u8,
+        first,
+        1,
+        "theorem discharge_q10 : emittedQuery_10 := by ora_loop_auto",
+    ));
+    try std.testing.expect(!std.mem.containsAtLeast(
+        u8,
+        first,
+        1,
+        "Ora.Loop.bound_state_ready",
+    ));
+
+    var wrong_terms = terms;
+    wrong_terms[4] = .{ .binary = .{ .op = .ge, .lhs = 1, .rhs = 2, .ty = u256_ty } };
+    var wrong_set = set;
+    wrong_set.terms = &wrong_terms;
+    try std.testing.expect(!repositoryLoopTacticCompatible(wrong_set, summaries[0]));
 }
 
 test "automatic dependency variables are scoped to their declaring edge" {

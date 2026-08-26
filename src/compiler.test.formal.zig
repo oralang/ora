@@ -2259,6 +2259,8 @@ test "canonical invariant-only loop activates Lean induction in the real CLI" {
     defer allocator.free(blocked_out);
     const accepted_out = try pathFromTmpAlloc(allocator, tmp, "accepted");
     defer allocator.free(accepted_out);
+    const accepted_repeat_out = try pathFromTmpAlloc(allocator, tmp, "accepted-repeat");
+    defer allocator.free(accepted_repeat_out);
     const empty_manifest = try pathFromTmpAlloc(allocator, tmp, "empty-proofs.json");
     defer allocator.free(empty_manifest);
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{
@@ -2328,6 +2330,30 @@ test "canonical invariant-only loop activates Lean induction in the real CLI" {
     try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"loop_summary_id\":"));
     try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"loop_vc_sha256\": \""));
     try testing.expect(!std.mem.containsAtLeast(u8, certificate, 1, "sorryAx"));
+
+    {
+        const result = try runProcessWithLeanPath(allocator, &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=smt-report,sir-text,bytecode",
+            "--out-dir",
+            accepted_repeat_out,
+            "--lean-proofs",
+            source_path,
+        });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        try expectExited(result, 0);
+    }
+    const repeat_certificate_path = try pathFromTmpAlloc(
+        allocator,
+        tmp,
+        "accepted-repeat/scalar_loop_induction.lean.proof.json",
+    );
+    defer allocator.free(repeat_certificate_path);
+    const repeat_certificate = try readFileAllocForTest(allocator, repeat_certificate_path);
+    defer allocator.free(repeat_certificate);
+    try testing.expectEqualStrings(certificate, repeat_certificate);
 }
 
 test "automatic scalar while and for LoopVC induction parses and proves bounds" {
