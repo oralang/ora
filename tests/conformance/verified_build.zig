@@ -71,9 +71,9 @@ test "verified conformance manifest pins all three build classes" {
         }
     }
 
-    try testing.expectEqual(@as(usize, 61), counts[@intFromEnum(runner.VerifiedBuildClass.same_bytecode)]);
+    try testing.expectEqual(@as(usize, 62), counts[@intFromEnum(runner.VerifiedBuildClass.same_bytecode)]);
     try testing.expectEqual(@as(usize, 11), counts[@intFromEnum(runner.VerifiedBuildClass.rewritten)]);
-    try testing.expectEqual(@as(usize, 24), counts[@intFromEnum(runner.VerifiedBuildClass.unverifiable)]);
+    try testing.expectEqual(@as(usize, 23), counts[@intFromEnum(runner.VerifiedBuildClass.unverifiable)]);
 }
 
 test "resource rewrite executes with proved runtime checks kept" {

@@ -7713,7 +7713,7 @@ pub const Encoder = struct {
             return z3.Z3_mk_app(self.context.ctx, variant.ctor, 1, &[_]z3.Z3_ast{err_val});
         }
 
-        const result_sort = try self.encodeMLIRType(result_type);
+        const result_sort = try self.errorVariantPayloadSort(result_type);
         const maybe_product = self.getProductSort(result_type) catch |err| switch (err) {
             error.UnsupportedOperation => null,
             else => return err,

@@ -220,6 +220,45 @@ test "error_union uses distinct constructors for declared error payload types" {
     try testing.expect(!encoder.isDegraded());
 }
 
+test "payloadless named error return uses registered error id without opaque product fallback" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const text =
+        \\module {
+        \\  "ora.error.decl"() <{sym_name = "Failure"}> {ora.error_decl = true, ora.error_id = 7 : i256} : () -> ()
+        \\  func.func @f() -> !ora.struct<"Failure"> {
+        \\    %err = ora.error.return "Failure" : !ora.struct<"Failure">
+        \\    func.return %err : !ora.struct<"Failure">
+        \\  }
+        \\}
+    ;
+    const module = mlir.oraModuleCreateParse(mlir_ctx, stringRef(text));
+    defer mlir.oraModuleDestroy(module);
+    try testing.expect(!mlir.oraModuleIsNull(module));
+
+    const module_body = mlir.oraModuleGetBody(module);
+    const error_decl = mlir.oraBlockGetFirstOperation(module_body);
+    try encoder.registerErrorDeclOperation(error_decl);
+    const func_op = mlir.oraOperationGetNextInBlock(error_decl);
+    const func_region = mlir.oraOperationGetRegion(func_op, 0);
+    const func_block = mlir.oraRegionGetFirstBlock(func_region);
+    const error_return = mlir.oraBlockGetFirstOperation(func_block);
+
+    const encoded = try encoder.encodeOperation(error_return);
+    const expected = try encoder.encodeIntegerConstant(7, 256);
+    try expectAstEquivalent(&z3_ctx, encoded, expected);
+    try testing.expect(!encoder.isDegraded());
+}
+
 test "ora.bytes.constant encodes canonical hex string" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

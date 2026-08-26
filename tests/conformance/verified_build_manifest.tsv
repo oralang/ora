@@ -29,7 +29,7 @@ same-bytecode	dispatcher_dynamic_return_aggregates.spec.toml	-
 unverifiable	dispatcher_dynamic_tuple_arg.spec.toml	contract_invariant_unproved
 same-bytecode	dispatcher_error_union_revert.spec.toml	-
 unverifiable	dispatcher_hot_prefix.spec.toml	contract_invariant_unproved
-unverifiable	dispatcher_narrow_error_union_return.spec.toml	verification_encoding_degraded
+same-bytecode	dispatcher_narrow_error_union_return.spec.toml	-
 same-bytecode	dispatcher_string_arg.spec.toml	-
 same-bytecode	enum_storage_roundtrip.spec.toml	-
 same-bytecode	environment_log.spec.toml	-
