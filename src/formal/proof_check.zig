@@ -10,6 +10,7 @@ const obligation_to_lean = @import("obligation_to_lean.zig");
 const proof_manifest = @import("proof_manifest.zig");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const proof_check_scratch_root = "formal/Ora/ProofCheckScratch";
 const max_proof_artifact_bytes = 4 * 1024 * 1024;
 const canonical_obligations_module = "Ora.ProofCheckCanonical.Obligations";
 const canonical_agreement_module = "Ora.ProofCheckCanonical.Agreement";
@@ -657,10 +658,20 @@ fn runLeanChecker(
     defer allocator.free(scratch_segment);
 
     const io = std.Io.Threaded.global_single_threaded.io();
-    const scratch_rel = try std.fmt.allocPrint(allocator, "formal/Ora/ProofCheckScratch/{s}", .{scratch_segment});
+    try sweepProofCheckScratchRoot(allocator, std.Io.Dir.cwd(), io, proof_check_scratch_root);
+    defer std.Io.Dir.cwd().deleteDir(io, proof_check_scratch_root) catch {};
+
+    const scratch_rel = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ proof_check_scratch_root, scratch_segment });
     defer allocator.free(scratch_rel);
     try std.Io.Dir.cwd().createDirPath(io, scratch_rel);
     defer std.Io.Dir.cwd().deleteTree(io, scratch_rel) catch {};
+
+    const lease_rel = try std.fmt.allocPrint(allocator, "{s}/.lease", .{scratch_rel});
+    defer allocator.free(lease_rel);
+    var lease = try std.Io.Dir.cwd().createFile(io, lease_rel, .{ .truncate = false });
+    defer lease.close(io);
+    try lease.lock(io, .exclusive);
+    defer lease.unlock(io);
 
     const obligations_rel = try std.fmt.allocPrint(allocator, "{s}/Obligations.lean", .{scratch_rel});
     defer allocator.free(obligations_rel);
@@ -725,6 +736,39 @@ fn runLeanChecker(
         .canonical_agreement_source = certificate_sources.agreement,
         .axiom_audits = try parseLeanAxiomAuditOutput(result_allocator, checker_output.stdout, rows),
     };
+}
+
+fn sweepProofCheckScratchRoot(
+    allocator: std.mem.Allocator,
+    dir: std.Io.Dir,
+    io: std.Io,
+    root: []const u8,
+) !void {
+    try dir.createDirPath(io, root);
+    var scratch = try dir.openDir(io, root, .{ .iterate = true });
+    defer scratch.close(io);
+
+    var entries = scratch.iterate();
+    while (try entries.next(io)) |entry| {
+        if (entry.kind != .directory or !std.mem.startsWith(u8, entry.name, "Run_")) continue;
+
+        const lease_path = try std.fmt.allocPrint(allocator, "{s}/.lease", .{entry.name});
+        defer allocator.free(lease_path);
+        var lease = scratch.openFile(io, lease_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                try scratch.deleteTree(io, entry.name);
+                continue;
+            },
+            else => return err,
+        };
+        if (!try lease.tryLock(io, .exclusive)) {
+            lease.close(io);
+            continue;
+        }
+        lease.unlock(io);
+        lease.close(io);
+        try scratch.deleteTree(io, entry.name);
+    }
 }
 
 const AgreementSourceOptions = struct {
@@ -1344,6 +1388,42 @@ fn proofCheckScratchSegment(
     const nonce = random_source.interface().int(u64);
 
     return try std.fmt.allocPrint(allocator, "Run_{s}_{x}", .{ digest_hex[0..16], nonce });
+}
+
+test "proof checker startup removes abandoned runs and preserves active leases" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const root = "ProofCheckScratch";
+    try tmp.dir.createDirPath(std.testing.io, root ++ "/Run_abandoned");
+    try tmp.dir.createDirPath(std.testing.io, root ++ "/Run_active");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = root ++ "/Run_abandoned/Checker.lean",
+        .data = "stale",
+    });
+    var active_lease = try tmp.dir.createFile(
+        std.testing.io,
+        root ++ "/Run_active/.lease",
+        .{ .truncate = false },
+    );
+    try active_lease.lock(std.testing.io, .exclusive);
+
+    try sweepProofCheckScratchRoot(std.testing.allocator, tmp.dir, std.testing.io, root);
+
+    try tmp.dir.access(std.testing.io, root, .{});
+    try tmp.dir.access(std.testing.io, root ++ "/Run_active/.lease", .{});
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.access(std.testing.io, root ++ "/Run_abandoned/Checker.lean", .{}),
+    );
+
+    active_lease.unlock(std.testing.io);
+    active_lease.close(std.testing.io);
+    try sweepProofCheckScratchRoot(std.testing.allocator, tmp.dir, std.testing.io, root);
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.access(std.testing.io, root ++ "/Run_active/.lease", .{}),
+    );
 }
 
 fn sha256HexAlloc(allocator: std.mem.Allocator, data: []const u8) ![]const u8 {

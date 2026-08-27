@@ -1440,6 +1440,19 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             };
             if (self.ghostDeclarationContextName(item_id)) |context| @This().attachGhostAttrs(self, op, context);
 
+            if (field.storage_class == .storage) {
+                const base_type = support.unwrapRefinementSemaType(self.typecheck.item_types[item_id.index()]);
+                const compiler_type_id: u32 = switch (base_type) {
+                    .integer => |integer| if (integer.builtinSpec()) |spec| spec.comptime_type_id else 0,
+                    else => 0,
+                };
+                if (compiler_type_id != 0) mlir.oraOperationSetAttributeByName(
+                    op,
+                    strRef("ora.compiler_type_id"),
+                    mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.context), @intCast(compiler_type_id)),
+                );
+            }
+
             if (field.type_expr) |_| {
                 try self.attachBitfieldOpMetadataForType(op, self.typecheck.item_types[item_id.index()]);
             }

@@ -9459,8 +9459,19 @@ test "formal loop summary rows are source-owner scoped scalar data" {
         }
     }
     const storage = storage_loop orelse return error.TestUnexpectedResult;
-    try testing.expect(loopSummaryHasReason(storage, .loop_has_storage_write));
-    try testing.expect(loopSummaryHasReason(storage, .loop_has_storage_read));
+    try testing.expect(!loopSummaryHasReason(storage, .loop_has_storage_write));
+    try testing.expect(!loopSummaryHasReason(storage, .loop_has_storage_read));
+    try testing.expect(loopSummaryHasReason(storage, .loop_formula_unsupported));
+    try testing.expectEqual(obligation.LoopProjectionCompleteness.complete, storage.projection_completeness);
+    var storage_reads: usize = 0;
+    var storage_writes: usize = 0;
+    for (storage.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
+        .storage_read => storage_reads += 1,
+        .storage_write => storage_writes += 1,
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 3), storage_reads);
+    try testing.expectEqual(@as(usize, 1), storage_writes);
     try testing.expect(!storage.projectionSupported());
     const nested = nested_loop orelse return error.TestUnexpectedResult;
     try testing.expect(nested.projectionSupported());
@@ -9524,6 +9535,177 @@ test "formal loop summary rows are source-owner scoped scalar data" {
         1,
         "emittedLoopSummaries",
     ));
+}
+
+test "formal direct-root storage loops preserve verifier-input event order" {
+    var result = try collectPackageObligations(testing.allocator, "tests/formal/storage_loop_projection.ora");
+    defer result.deinit();
+
+    const Expected = struct {
+        function_name: []const u8,
+        paths: []const []const obligation.LoopTimelineEventTag,
+    };
+    const expected = [_]Expected{
+        .{ .function_name = "readThenWrite", .paths = &.{&.{ .storage_read, .safety_checkpoint, .storage_write, .safety_checkpoint }} },
+        .{ .function_name = "divideFromStorage", .paths = &.{&.{ .storage_read, .safety_checkpoint, .storage_write, .safety_checkpoint }} },
+        .{ .function_name = "writeThenRead", .paths = &.{&.{ .storage_write, .storage_read, .storage_write, .safety_checkpoint }} },
+        .{ .function_name = "repeatedWrite", .paths = &.{&.{ .storage_write, .safety_checkpoint, .storage_write }} },
+        .{ .function_name = "branchWrite", .paths = &.{ &.{ .path_assumption, .storage_write, .safety_checkpoint }, &.{ .path_assumption, .storage_write, .safety_checkpoint } } },
+        .{ .function_name = "zeroIteration", .paths = &.{&.{ .storage_write, .safety_checkpoint }} },
+        .{ .function_name = "signedWrite", .paths = &.{&.{ .storage_write, .safety_checkpoint }} },
+    };
+
+    for (expected) |want| {
+        var matched: ?obligation.LoopSummaryRow = null;
+        for (result.set.loop_summaries) |summary| {
+            if (summary.owner == .statement and
+                std.mem.eql(u8, summary.owner.statement.function_name, want.function_name)) matched = summary;
+        }
+        const summary = matched orelse return error.TestUnexpectedResult;
+        try testing.expect(summary.projectionSupported());
+        try testing.expectEqual(obligation.LoopProjectionCompleteness.complete, summary.projection_completeness);
+        var path_index: usize = 0;
+        for (summary.edges) |edge| {
+            if (edge.target != .backedge) continue;
+            if (path_index >= want.paths.len) return error.TestUnexpectedResult;
+            var observed: std.ArrayList(obligation.LoopTimelineEventTag) = .empty;
+            defer observed.deinit(testing.allocator);
+            var first_read: ?obligation.FreeVarId = null;
+            for (edge.timeline, 0..) |event, event_index| {
+                try testing.expectEqual(@as(u32, @intCast(event_index)), event.id);
+                const tag = std.meta.activeTag(event.payload);
+                switch (event.payload) {
+                    .storage_read => |read| first_read = read.result,
+                    .storage_write => |write| {
+                        if (std.mem.eql(u8, want.function_name, "signedWrite")) try testing.expectEqual(
+                            type_builtin.lookupBuiltinById(.i8).comptime_type_id,
+                            write.location.value_ty.compiler_type_id,
+                        );
+                        if (std.mem.eql(u8, want.function_name, "branchWrite")) try testing.expectEqualStrings(
+                            if (path_index == 0) "left" else "right",
+                            write.location.root,
+                        );
+                    },
+                    .safety_checkpoint => |checkpoint| {
+                        if ((std.mem.eql(u8, want.function_name, "readThenWrite") or
+                            std.mem.eql(u8, want.function_name, "divideFromStorage")) and first_read != null)
+                        {
+                            try testing.expectEqual(@as(usize, 1), checkpoint.formulas.len);
+                            try testing.expectEqual(@as(usize, 1), checkpoint.formulas[0].read_results.len);
+                            try testing.expect(obligation.freeVarIdEql(
+                                first_read.?,
+                                checkpoint.formulas[0].read_results[0],
+                            ));
+                            first_read = null;
+                        }
+                    },
+                    else => {},
+                }
+                if (event_index == 0 and tag == .path_assumption) continue;
+                try observed.append(testing.allocator, tag);
+            }
+            try testing.expectEqualSlices(obligation.LoopTimelineEventTag, want.paths[path_index], observed.items);
+            path_index += 1;
+        }
+        try testing.expectEqual(want.paths.len, path_index);
+    }
+
+    var lean = std.Io.Writer.Allocating.init(testing.allocator);
+    defer lean.deinit();
+    try obligation_to_lean.writeModule(&lean.writer, result.set, .{
+        .namespace = "Ora.Generated.StorageLoopProjection",
+        .proof_surface = true,
+    });
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try pathFromTmpAlloc(testing.allocator, tmp, "StorageLoopProjection.lean");
+    defer testing.allocator.free(path);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = lean.written() });
+    const parsed = try runLeanFileForTest(testing.allocator, path);
+    defer testing.allocator.free(parsed.stdout);
+    defer testing.allocator.free(parsed.stderr);
+    try expectExited(parsed, 0);
+}
+
+test "formal direct-root storage loop requires compiler-owned storage type metadata" {
+    var compilation = try compilePackage("tests/formal/storage_loop_projection.ora");
+    defer compilation.deinit();
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    const global = findFirstOpByName(hir_result.module.raw_module, "ora.global") orelse
+        return error.TestUnexpectedResult;
+    try testing.expect(mlir.mlirOperationRemoveAttributeByName(
+        global,
+        strRef("ora.compiler_type_id"),
+    ));
+
+    var result = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+    defer result.deinit();
+    for (result.set.loop_summaries) |summary| {
+        if (summary.owner != .statement or
+            !std.mem.eql(u8, summary.owner.statement.function_name, "readThenWrite")) continue;
+        try testing.expect(loopSummaryHasReason(summary, .loop_storage_type_invalid));
+        try testing.expect(!summary.projectionSupported());
+        return;
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "formal direct-root storage loop requires a complete compiler write inventory" {
+    var compilation = try compilePackage("tests/formal/storage_loop_projection.ora");
+    defer compilation.deinit();
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    const function = findFirstOpByName(hir_result.module.raw_module, "func.func") orelse
+        return error.TestUnexpectedResult;
+    try testing.expect(mlir.mlirOperationRemoveAttributeByName(
+        function,
+        strRef("ora.write_slots_complete"),
+    ));
+
+    var result = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+    defer result.deinit();
+    for (result.set.loop_summaries) |summary| {
+        if (summary.owner != .statement or
+            !std.mem.eql(u8, summary.owner.statement.function_name, "readThenWrite")) continue;
+        try testing.expect(loopSummaryHasReason(summary, .loop_has_storage_write));
+        try testing.expect(!summary.projectionSupported());
+        return;
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "formal direct-root projection retains uncovered modifies as an effect-frame obligation" {
+    var compilation = try compilePackage("tests/formal/storage_loop_projection.ora");
+    defer compilation.deinit();
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    const function = findFirstOpByName(hir_result.module.raw_module, "func.func") orelse
+        return error.TestUnexpectedResult;
+    try testing.expect(mlir.mlirOperationRemoveAttributeByName(function, strRef("ora.modifies_slots")));
+
+    var result = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
+    defer result.deinit();
+    var projected = false;
+    for (result.set.loop_summaries) |summary| {
+        if (summary.owner == .statement and
+            std.mem.eql(u8, summary.owner.statement.function_name, "readThenWrite"))
+        {
+            projected = summary.projectionSupported();
+        }
+    }
+    try testing.expect(projected);
+    for (result.set.obligations) |item| {
+        if (item.owner != .function or
+            !std.mem.eql(u8, item.owner.function.name, "readThenWrite") or
+            item.kind != .effect_frame or
+            item.kind.effect_frame.relation != .write_covered_by_modifies) continue;
+        try testing.expectEqual(@as(usize, 0), item.kind.effect_frame.declared.len);
+        try testing.expectEqual(@as(usize, 1), item.kind.effect_frame.actual.len);
+        try testing.expectEqualStrings("counter", item.kind.effect_frame.actual[0].root);
+        return;
+    }
+    return error.TestUnexpectedResult;
 }
 
 test "nested loop child results are checked in post-dependency safety state" {
@@ -10406,7 +10588,7 @@ test "unsupported loop effects fail closed through the real CLI" {
         u8,
         result.stdout,
         1,
-        "(storageLoop) excluded_by=loop_has_storage_write,loop_has_storage_read",
+        "(storageLoop) lean_certificate query=",
     ));
     try testing.expect(std.mem.containsAtLeast(
         u8,

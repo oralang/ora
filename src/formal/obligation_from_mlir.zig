@@ -352,6 +352,17 @@ fn bindLoopSummaryDependencyDigests(collector: *Collector) !void {
                     if (dependency.summary_id == inner.id) dependency.loop_vc_sha256 = digest;
                 }
                 rebound_edge.summary_dependencies = rebound_dependencies;
+                const rebound_timeline = try collector.allocator.dupe(
+                    obligation.LoopTimelineEvent,
+                    edge.timeline,
+                );
+                for (rebound_timeline) |*event| switch (event.payload) {
+                    .summary_dependency => |*dependency| {
+                        if (dependency.summary_id == inner.id) dependency.loop_vc_sha256 = digest;
+                    },
+                    else => {},
+                };
+                rebound_edge.timeline = rebound_timeline;
             }
             outer.edges = rebound_edges;
         }
@@ -465,6 +476,8 @@ const SemanticLoopPath = struct {
     summary_dependencies: []const obligation.LoopSummaryDependency = &.{},
     summary_dependency_keys: []const []const u8 = &.{},
     effect_keys: []const []const u8 = &.{},
+    timeline: []const obligation.LoopTimelineEvent = &.{},
+    timeline_inventory: []const LoopTimelineInventoryEvent = &.{},
 };
 
 const InventoryLoopPath = struct {
@@ -475,6 +488,17 @@ const InventoryLoopPath = struct {
     target_keys: []const []const u8 = &.{},
     summary_dependency_keys: []const []const u8 = &.{},
     effect_keys: []const []const u8 = &.{},
+    timeline_inventory: []const LoopTimelineInventoryEvent = &.{},
+};
+
+const LoopTimelineInventoryEvent = struct {
+    structural_key: []const u8,
+    tag: obligation.LoopTimelineEventTag,
+    storage_root: ?[]const u8 = null,
+    storage_result: ?obligation.FreeVarId = null,
+    storage_value_source: ?[]const u8 = null,
+    storage_ty: ?obligation.TypeRef = null,
+    summary_dependency: ?obligation.LoopSummaryDependency = null,
 };
 
 const LoopControlKind = enum { break_loop, continue_loop, function_return, error_return };
@@ -508,6 +532,7 @@ const ProjectedLoopEdge = struct {
     summary_dependency_keys: []const []const u8 = &.{},
     effect_keys: []const []const u8,
     state_source_keys: []const []const u8,
+    timeline_inventory: []const LoopTimelineInventoryEvent = &.{},
 };
 
 const InventoryLoopEdge = struct {
@@ -520,6 +545,7 @@ const InventoryLoopEdge = struct {
     summary_dependency_keys: []const []const u8 = &.{},
     effect_keys: []const []const u8,
     state_source_keys: []const []const u8,
+    timeline_inventory: []const LoopTimelineInventoryEvent = &.{},
 };
 
 const LoopSafetyCheckpointKey = struct {
@@ -548,6 +574,7 @@ const Collector = struct {
     active_binders: std.ArrayList(BinderFrame) = .empty,
     loop_value_bindings: std.ArrayList(LoopValueBinding) = .empty,
     operation_ordinals: std.AutoHashMapUnmanaged(usize, u32) = .empty,
+    storage_global_types: std.StringHashMapUnmanaged(obligation.TypeRef) = .empty,
     active_loop_formula_overrides: []const LoopFormulaOverride = &.{},
     arithmetic_safety_terms: std.AutoHashMapUnmanaged(obligation.TermId, void) = .empty,
     next_id: obligation.Id = 1,
@@ -573,6 +600,7 @@ const Collector = struct {
     contract_source_owner_key: ?[]const u8 = null,
 
     const synthetic_file_id = std.math.maxInt(u32);
+    const storage_read_file_id = synthetic_file_id - 2;
 
     const BinderFrame = struct {
         name: []const u8,
@@ -615,6 +643,15 @@ const Collector = struct {
         try self.operation_ordinals.put(self.allocator, @intFromPtr(op.ptr), ordinal);
         const op_name = operationName(op);
         const symbol = try self.symbolForOperation(op, op_name, inherited_symbol);
+        if (std.mem.eql(u8, op_name, "ora.global")) {
+            const root = (try self.stringAttr(op, "sym_name")) orelse "";
+            const type_id = (try self.u32Attr(op, "ora.compiler_type_id")) orelse 0;
+            if (root.len != 0) try self.storage_global_types.put(
+                self.allocator,
+                root,
+                .{ .compiler_type_id = type_id },
+            );
+        }
         const previous_param_names = self.function_param_names;
         const previous_param_binding_ids = self.function_param_binding_ids;
         const previous_param_types = self.function_param_types;
@@ -926,6 +963,24 @@ const Collector = struct {
         summary.unsupported_reasons = reasons;
     }
 
+    fn removeLoopSummaryReason(
+        self: *Collector,
+        summary: *obligation.LoopSummaryRow,
+        reason: obligation.LoopUnsupportedReason,
+    ) !void {
+        var count: usize = 0;
+        for (summary.unsupported_reasons) |existing| count += @intFromBool(existing != reason);
+        if (count == summary.unsupported_reasons.len) return;
+        const reasons = try self.allocator.alloc(obligation.LoopUnsupportedReason, count);
+        var index: usize = 0;
+        for (summary.unsupported_reasons) |existing| {
+            if (existing == reason) continue;
+            reasons[index] = existing;
+            index += 1;
+        }
+        summary.unsupported_reasons = reasons;
+    }
+
     fn armCanonicalLoopPostBindings(
         self: *Collector,
         summary_id: obligation.Id,
@@ -1021,9 +1076,18 @@ const Collector = struct {
 
         var semantic_terminals: std.ArrayList(SemanticLoopTerminal) = .empty;
         defer semantic_terminals.deinit(self.allocator);
+        const initial_path_key = "body/path";
         const semantic_path: SemanticLoopPath = .{
             .key = "body",
             .path_formulas = try appendFormula(self.allocator, &.{}, guard),
+            .timeline = try appendLoopTimelineEvent(
+                self.allocator,
+                &.{},
+                .{ .path_assumption = .{
+                    .formulas = try loopFormulaExprs(self.allocator, &.{guard}),
+                } },
+                initial_path_key,
+            ),
         };
         self.projectSemanticLoopSequence(
             mlir.oraBlockGetFirstOperation(draft.body),
@@ -1065,7 +1129,13 @@ const Collector = struct {
         defer inventory_terminals.deinit(self.allocator);
         self.inventoryLoopSequence(
             mlir.oraBlockGetFirstOperation(draft.body),
-            .{ .key = "body" },
+            .{
+                .key = "body",
+                .timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, &.{}, .{
+                    .structural_key = initial_path_key,
+                    .tag = .path_assumption,
+                }),
+            },
             draft,
             summary,
             &inventory_terminals,
@@ -1180,11 +1250,22 @@ const Collector = struct {
 
         summary.projection_completeness = compareLoopProjection(projected.items, inventory.items);
         if (summary.projection_completeness != .complete) return;
+        var has_storage_event = false;
+        for (projected.items) |item| has_storage_event = has_storage_event or
+            timelineInventoryHasStorageEvent(item.timeline_inventory);
+        if (has_storage_event and self.function_write_slots_complete) {
+            try self.removeLoopSummaryReason(summary, .loop_has_storage_read);
+            try self.removeLoopSummaryReason(summary, .loop_has_storage_write);
+        }
 
         const edges = try self.allocator.alloc(obligation.LoopEdgeRow, projected.items.len);
         for (projected.items, edges, 0..) |item, *edge, index| {
             edge.* = item.edge;
             edge.id = @intCast(index);
+            edge.timeline = if (timelineInventoryHasStorageEvent(item.timeline_inventory))
+                item.edge.timeline
+            else
+                try buildLegacyLoopTimeline(self.allocator, edge.*);
             if (edge.target == .function_return or edge.target == .error_return) {
                 if (edge.target_formulas.len != item.target_keys.len) {
                     summary.projection_completeness = .target_mismatch;
@@ -1205,6 +1286,7 @@ const Collector = struct {
             }
             if (formulasContainOriginValue(edge.path_formulas) or
                 safetyCheckpointsContainOriginValue(edge.safety_checkpoints) or
+                loopTimelineContainsOriginValue(edge.timeline) or
                 formulasContainOriginValue(edge.target_formulas) or
                 stepAssignmentsContainOriginValue(edge.next_state))
             {
@@ -1221,6 +1303,20 @@ const Collector = struct {
             }
         }
         summary.edges = edges;
+        if (!formulasContainOriginValue(summary.init_formulas) and
+            !formulasContainOriginValue(summary.invariant_formulas) and
+            !formulasContainOriginValue(summary.post_formulas))
+        {
+            var edges_supported = true;
+            for (edges) |edge| {
+                if (formulasContainOriginValue(edge.path_formulas) or
+                    safetyCheckpointsContainOriginValue(edge.safety_checkpoints) or
+                    loopTimelineContainsOriginValue(edge.timeline) or
+                    formulasContainOriginValue(edge.target_formulas) or
+                    stepAssignmentsContainOriginValue(edge.next_state)) edges_supported = false;
+            }
+            if (edges_supported) try self.removeLoopSummaryReason(summary, .loop_formula_unsupported);
+        }
     }
 
     fn projectSemanticLoopSequence(
@@ -1269,7 +1365,8 @@ const Collector = struct {
             }
 
             const effect_key = try self.operationStructuralKey(op, name);
-            switch (mlir.oraOperationGetMemoryEffectKind(op)) {
+            const effect_kind = mlir.oraOperationGetMemoryEffectKind(op);
+            switch (effect_kind) {
                 mlir.ORA_OPERATION_MEMORY_EFFECT_NONE => {},
                 mlir.ORA_OPERATION_MEMORY_EFFECT_READ,
                 mlir.ORA_OPERATION_MEMORY_EFFECT_WRITE,
@@ -1278,6 +1375,64 @@ const Collector = struct {
                 mlir.ORA_OPERATION_MEMORY_EFFECT_UNKNOWN,
                 => return error.LoopProjectionEffectUnsupported,
                 else => return error.LoopProjectionEffectUnsupported,
+            }
+            if (!directRootLoopEffectSupported(op, name, effect_kind)) {
+                return error.LoopProjectionEffectUnsupported;
+            }
+            if (std.mem.eql(u8, name, "ora.sload")) {
+                if (effect_kind != mlir.ORA_OPERATION_MEMORY_EFFECT_READ or
+                    mlir.oraOperationGetNumResults(op) != 1) return error.LoopProjectionEffectUnsupported;
+                const result = mlir.oraOperationGetResult(op, 0);
+                const location = try self.directStorageLocation(op, result);
+                const read_id = try self.storageReadId(op);
+                const read_term = try self.addTerm(.{ .variable = .{ .free = .{
+                    .id = read_id,
+                    .name = location.root,
+                    .ty = location.value_ty,
+                } } });
+                path.formula_overrides = try appendFormulaOverride(self.allocator, path.formula_overrides, .{
+                    .value_id = @intFromPtr(result.ptr),
+                    .formula = .{ .term = read_term },
+                });
+                path.timeline = try appendLoopTimelineEvent(self.allocator, path.timeline, .{
+                    .storage_read = .{ .result = read_id, .location = location },
+                }, effect_key);
+                path.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, path.timeline_inventory, .{
+                    .structural_key = effect_key,
+                    .tag = .storage_read,
+                    .storage_root = location.root,
+                    .storage_result = read_id,
+                    .storage_ty = location.value_ty,
+                });
+            } else if (std.mem.eql(u8, name, "ora.sstore")) {
+                if (effect_kind != mlir.ORA_OPERATION_MEMORY_EFFECT_WRITE or
+                    mlir.oraOperationGetNumOperands(op) != 1) return error.LoopProjectionEffectUnsupported;
+                const value = mlir.oraOperationGetOperand(op, 0);
+                const location = try self.directStorageLocation(op, value);
+                const formula = try self.loopFormulaFromValueWithOverrides(
+                    value,
+                    path.formula_overrides,
+                    name,
+                    draft.symbol,
+                    draft.ordinal,
+                    0,
+                );
+                path.timeline = try appendLoopTimelineEvent(self.allocator, path.timeline, .{
+                    .storage_write = .{
+                        .location = location,
+                        .value = .{
+                            .formula = formula,
+                            .read_results = try self.readResultsForFormula(formula, path.timeline),
+                        },
+                    },
+                }, effect_key);
+                path.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, path.timeline_inventory, .{
+                    .structural_key = effect_key,
+                    .tag = .storage_write,
+                    .storage_root = location.root,
+                    .storage_value_source = try self.sourceKeyForValue(value, path.source_overrides),
+                    .storage_ty = location.value_ty,
+                });
             }
             if (draftHasSafetySite(draft, op)) {
                 if (mlir.oraOperationGetNumOperands(op) == 0) return error.LoopProjectionEffectUnsupported;
@@ -1299,6 +1454,12 @@ const Collector = struct {
                         .formulas = try self.allocator.dupe(obligation.FormulaRef, &.{formula}),
                     },
                 );
+                path.timeline = try appendLoopTimelineEvent(self.allocator, path.timeline, .{
+                    .safety_checkpoint = .{ .formulas = try self.loopFormulaExprsWithReads(
+                        &.{formula},
+                        path.timeline,
+                    ) },
+                }, effect_key);
             }
             if (draftHasTargetSite(draft, op)) {
                 if (mlir.oraOperationGetNumOperands(op) == 0) return error.LoopProjectionEffectUnsupported;
@@ -1363,7 +1524,8 @@ const Collector = struct {
             }
 
             const effect_key = try self.operationStructuralKey(op, name);
-            switch (mlir.oraOperationGetMemoryEffectKind(op)) {
+            const effect_kind = mlir.oraOperationGetMemoryEffectKind(op);
+            switch (effect_kind) {
                 mlir.ORA_OPERATION_MEMORY_EFFECT_NONE => {},
                 mlir.ORA_OPERATION_MEMORY_EFFECT_READ,
                 mlir.ORA_OPERATION_MEMORY_EFFECT_WRITE,
@@ -1372,6 +1534,34 @@ const Collector = struct {
                 mlir.ORA_OPERATION_MEMORY_EFFECT_UNKNOWN,
                 => return error.LoopProjectionEffectUnsupported,
                 else => return error.LoopProjectionEffectUnsupported,
+            }
+            if (!directRootLoopEffectSupported(op, name, effect_kind)) {
+                return error.LoopProjectionEffectUnsupported;
+            }
+            if (std.mem.eql(u8, name, "ora.sload")) {
+                if (effect_kind != mlir.ORA_OPERATION_MEMORY_EFFECT_READ or
+                    mlir.oraOperationGetNumResults(op) != 1) return error.LoopProjectionEffectUnsupported;
+                const result = mlir.oraOperationGetResult(op, 0);
+                const location = try self.directStorageLocation(op, result);
+                path.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, path.timeline_inventory, .{
+                    .structural_key = effect_key,
+                    .tag = .storage_read,
+                    .storage_root = location.root,
+                    .storage_result = try self.storageReadId(op),
+                    .storage_ty = location.value_ty,
+                });
+            } else if (std.mem.eql(u8, name, "ora.sstore")) {
+                if (effect_kind != mlir.ORA_OPERATION_MEMORY_EFFECT_WRITE or
+                    mlir.oraOperationGetNumOperands(op) != 1) return error.LoopProjectionEffectUnsupported;
+                const value = mlir.oraOperationGetOperand(op, 0);
+                const location = try self.directStorageLocation(op, value);
+                path.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, path.timeline_inventory, .{
+                    .structural_key = effect_key,
+                    .tag = .storage_write,
+                    .storage_root = location.root,
+                    .storage_value_source = try self.sourceKeyForValue(value, path.source_overrides),
+                    .storage_ty = location.value_ty,
+                });
             }
             if (isLoopSafetyOperation(op, name)) {
                 path.safety_checkpoints = try appendLoopSafetyCheckpointKey(
@@ -1382,6 +1572,10 @@ const Collector = struct {
                         .after_dependency_count = @intCast(path.summary_dependency_keys.len),
                     },
                 );
+                path.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, path.timeline_inventory, .{
+                    .structural_key = effect_key,
+                    .tag = .safety_checkpoint,
+                });
             }
             if (isLoopTargetOperation(op, name)) {
                 path.target_keys = try appendString(self.allocator, path.target_keys, effect_key);
@@ -1646,6 +1840,14 @@ const Collector = struct {
                 branch_path.path_formulas,
                 if (branch_index == 0) condition else try self.negateFormula(condition),
             );
+            const branch_formula = branch_path.path_formulas[branch_path.path_formulas.len - 1];
+            const branch_path_key = try std.fmt.allocPrint(self.allocator, "{s}/path", .{branch_path.key});
+            branch_path.timeline = try appendLoopTimelineEvent(self.allocator, branch_path.timeline, .{
+                .path_assumption = .{ .formulas = try self.loopFormulaExprsWithReads(
+                    &.{branch_formula},
+                    branch_path.timeline,
+                ) },
+            }, branch_path_key);
             const block = singleRegionBlock(op, branch_index) orelse return error.UnsupportedLoopControlFlow;
             var branch_terminals: std.ArrayList(SemanticLoopTerminal) = .empty;
             defer branch_terminals.deinit(self.allocator);
@@ -1670,6 +1872,14 @@ const Collector = struct {
                 false_path.path_formulas,
                 try self.negateFormula(condition),
             );
+            const false_formula = false_path.path_formulas[false_path.path_formulas.len - 1];
+            const false_path_key = try std.fmt.allocPrint(self.allocator, "{s}/path", .{false_path.key});
+            false_path.timeline = try appendLoopTimelineEvent(self.allocator, false_path.timeline, .{
+                .path_assumption = .{ .formulas = try self.loopFormulaExprsWithReads(
+                    &.{false_formula},
+                    false_path.timeline,
+                ) },
+            }, false_path_key);
             try self.projectSemanticLoopSequence(mlir.oraOperationGetNextInBlock(op), false_path, draft, summary, terminals);
         }
     }
@@ -1694,6 +1904,11 @@ const Collector = struct {
                 "{s}/{s}/{s}",
                 .{ path.key, op_key, if (branch_index == 0) "then" else "else" },
             );
+            const branch_path_key = try std.fmt.allocPrint(self.allocator, "{s}/path", .{branch_path.key});
+            branch_path.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, branch_path.timeline_inventory, .{
+                .structural_key = branch_path_key,
+                .tag = .path_assumption,
+            });
             const block = singleRegionBlock(op, branch_index) orelse return error.UnsupportedLoopControlFlow;
             var branch_terminals: std.ArrayList(InventoryLoopTerminal) = .empty;
             defer branch_terminals.deinit(self.allocator);
@@ -1712,6 +1927,10 @@ const Collector = struct {
             if (mlir.oraOperationGetNumResults(op) != 0) return error.UnsupportedLoopControlFlow;
             var false_path = path;
             false_path.key = try std.fmt.allocPrint(self.allocator, "{s}/{s}/else-implicit", .{ path.key, op_key });
+            false_path.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, false_path.timeline_inventory, .{
+                .structural_key = try std.fmt.allocPrint(self.allocator, "{s}/path", .{false_path.key}),
+                .tag = .path_assumption,
+            });
             try self.inventoryLoopSequence(mlir.oraOperationGetNextInBlock(op), false_path, draft, summary, terminals);
         }
     }
@@ -1755,6 +1974,7 @@ const Collector = struct {
                 "{s}/{s}/case:{d}",
                 .{ path.key, op_key, region_index },
             );
+            const path_formula_start = branch_path.path_formulas.len;
             for (raw_by_region, 0..) |maybe_predicate, predicate_index| {
                 const predicate = maybe_predicate orelse continue;
                 if (!is_default and predicate_index >= region_index) continue;
@@ -1769,7 +1989,13 @@ const Collector = struct {
                 branch_path.path_formulas,
                 raw_by_region[region_index].?,
             );
-
+            const branch_path_key = try std.fmt.allocPrint(self.allocator, "{s}/path", .{branch_path.key});
+            branch_path.timeline = try appendLoopTimelineEvent(self.allocator, branch_path.timeline, .{
+                .path_assumption = .{ .formulas = try self.loopFormulaExprsWithReads(
+                    branch_path.path_formulas[path_formula_start..],
+                    branch_path.timeline,
+                ) },
+            }, branch_path_key);
             const block = singleRegionBlock(op, region_index) orelse return error.UnsupportedLoopControlFlow;
             var branch_terminals: std.ArrayList(SemanticLoopTerminal) = .empty;
             defer branch_terminals.deinit(self.allocator);
@@ -1789,6 +2015,7 @@ const Collector = struct {
             if (mlir.oraOperationGetNumResults(op) != 0) return error.UnsupportedLoopControlFlow;
             var no_match = path;
             no_match.key = try std.fmt.allocPrint(self.allocator, "{s}/{s}/no-match", .{ path.key, op_key });
+            const path_formula_start = no_match.path_formulas.len;
             for (raw_by_region) |maybe_predicate| {
                 const predicate = maybe_predicate orelse continue;
                 no_match.path_formulas = try appendFormula(
@@ -1797,6 +2024,13 @@ const Collector = struct {
                     try self.negateFormula(predicate),
                 );
             }
+            const no_match_path_key = try std.fmt.allocPrint(self.allocator, "{s}/path", .{no_match.key});
+            no_match.timeline = try appendLoopTimelineEvent(self.allocator, no_match.timeline, .{
+                .path_assumption = .{ .formulas = try self.loopFormulaExprsWithReads(
+                    no_match.path_formulas[path_formula_start..],
+                    no_match.timeline,
+                ) },
+            }, no_match_path_key);
             try self.projectSemanticLoopSequence(mlir.oraOperationGetNextInBlock(op), no_match, draft, summary, terminals);
         }
     }
@@ -1829,6 +2063,10 @@ const Collector = struct {
                 "{s}/{s}/case:{d}",
                 .{ path.key, op_key, region_index },
             );
+            branch_path.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, branch_path.timeline_inventory, .{
+                .structural_key = try std.fmt.allocPrint(self.allocator, "{s}/path", .{branch_path.key}),
+                .tag = .path_assumption,
+            });
             const block = singleRegionBlock(op, region_index) orelse return error.UnsupportedLoopControlFlow;
             var branch_terminals: std.ArrayList(InventoryLoopTerminal) = .empty;
             defer branch_terminals.deinit(self.allocator);
@@ -1847,6 +2085,10 @@ const Collector = struct {
             if (mlir.oraOperationGetNumResults(op) != 0) return error.UnsupportedLoopControlFlow;
             var no_match = path;
             no_match.key = try std.fmt.allocPrint(self.allocator, "{s}/{s}/no-match", .{ path.key, op_key });
+            no_match.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, no_match.timeline_inventory, .{
+                .structural_key = try std.fmt.allocPrint(self.allocator, "{s}/path", .{no_match.key}),
+                .tag = .path_assumption,
+            });
             try self.inventoryLoopSequence(mlir.oraOperationGetNextInBlock(op), no_match, draft, summary, terminals);
         }
     }
@@ -1959,12 +2201,20 @@ const Collector = struct {
                 .structural_key = dependency_key,
                 .summary_id = inner.id,
                 .loop_vc_sha256 = [_]u8{0} ** 32,
+                .write_footprint_complete = true,
                 .target = .successor,
             },
         );
         path.summary_dependency_keys = try appendString(
             self.allocator,
             path.summary_dependency_keys,
+            dependency_key,
+        );
+        const dependency = path.summary_dependencies[path.summary_dependencies.len - 1];
+        path.timeline = try appendLoopTimelineEvent(
+            self.allocator,
+            path.timeline,
+            .{ .summary_dependency = dependency },
             dependency_key,
         );
         for (0..result_count) |result_index| {
@@ -2017,11 +2267,24 @@ const Collector = struct {
 
         var path = initial;
         const dependency_key = try self.operationStructuralKey(op, operationName(op));
+        const dependency: obligation.LoopSummaryDependency = .{
+            .id = @intCast(path.summary_dependency_keys.len),
+            .structural_key = dependency_key,
+            .summary_id = inner.id,
+            .loop_vc_sha256 = [_]u8{0} ** 32,
+            .write_footprint_complete = true,
+            .target = .successor,
+        };
         path.summary_dependency_keys = try appendString(
             self.allocator,
             path.summary_dependency_keys,
             dependency_key,
         );
+        path.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, path.timeline_inventory, .{
+            .structural_key = dependency_key,
+            .tag = .summary_dependency,
+            .summary_dependency = dependency,
+        });
         for (0..result_count) |result_index| {
             const result = mlir.oraOperationGetResult(op, result_index);
             const variable = inner.variables[variable_start + result_index];
@@ -2084,6 +2347,12 @@ const Collector = struct {
                 signed_override,
                 terminal.path.formula_overrides,
             )) orelse return error.UnsupportedLoopControlFlow;
+            const induction_formula: obligation.FormulaRef = .{ .term = try self.addTerm(.{ .binary = .{
+                .op = .add,
+                .lhs = induction_term,
+                .rhs = step_term,
+                .ty = induction_ty,
+            } }) };
             assignments[0] = .{
                 .variable_index = 0,
                 .target = summary.variables[0].id,
@@ -2102,12 +2371,8 @@ const Collector = struct {
                         "for/induction-step:{s}",
                         .{try self.sourceKeyForValue(step, terminal.path.source_overrides)},
                     ),
-                .value = .{ .term = try self.addTerm(.{ .binary = .{
-                    .op = .add,
-                    .lhs = induction_term,
-                    .rhs = step_term,
-                    .ty = induction_ty,
-                } }) },
+                .value = induction_formula,
+                .read_results = try self.readResultsForFormula(induction_formula, terminal.path.timeline),
             };
         }
         const yielded_start: usize = @intFromBool(advances_for_induction and complete_control_state);
@@ -2115,19 +2380,21 @@ const Collector = struct {
         for (terminal.yielded[yielded_start..], variable_start..) |value, variable_index| {
             const variable = summary.variables[variable_index];
             const signed_override = if (typeRefIntegerInfo(variable.ty)) |info| info.signed else null;
+            const value_formula = try self.loopFormulaFromValueWithIntegerSignednessAndOverrides(
+                value,
+                signed_override,
+                terminal.path.formula_overrides,
+                operationName(mlir.oraBlockGetTerminator(draft.body)),
+                draft.symbol,
+                draft.ordinal,
+                @intCast(variable_index),
+            );
             assignments[variable_index] = .{
                 .variable_index = @intCast(variable_index),
                 .target = variable.id,
                 .source_key = try self.sourceKeyForValue(value, terminal.path.source_overrides),
-                .value = try self.loopFormulaFromValueWithIntegerSignednessAndOverrides(
-                    value,
-                    signed_override,
-                    terminal.path.formula_overrides,
-                    operationName(mlir.oraBlockGetTerminator(draft.body)),
-                    draft.symbol,
-                    draft.ordinal,
-                    @intCast(variable_index),
-                ),
+                .value = value_formula,
+                .read_results = try self.readResultsForFormula(value_formula, terminal.path.timeline),
             };
         }
         const structural_key = if (terminal.control) |control|
@@ -2148,6 +2415,7 @@ const Collector = struct {
             .edge = .{
                 .id = 0,
                 .structural_key = structural_key,
+                .timeline = terminal.path.timeline,
                 .path_formulas = terminal.path.path_formulas,
                 .safety_checkpoints = terminal.path.safety_checkpoints,
                 .summary_dependencies = terminal.path.summary_dependencies,
@@ -2164,6 +2432,7 @@ const Collector = struct {
             .summary_dependency_keys = terminal.path.summary_dependency_keys,
             .effect_keys = terminal.path.effect_keys,
             .state_source_keys = terminal.path.state_source_keys,
+            .timeline_inventory = terminal.path.timeline_inventory,
         };
     }
 
@@ -2268,6 +2537,7 @@ const Collector = struct {
             .summary_dependency_keys = terminal.path.summary_dependency_keys,
             .effect_keys = terminal.path.effect_keys,
             .state_source_keys = terminal.path.state_source_keys,
+            .timeline_inventory = terminal.path.timeline_inventory,
         };
     }
 
@@ -2360,6 +2630,59 @@ const Collector = struct {
     ) ![]const u8 {
         const ordinal = self.operationOrdinal(op) orelse return error.UnsupportedLoopControlFlow;
         return try std.fmt.allocPrint(self.allocator, "op:{d}/{s}", .{ ordinal, name });
+    }
+
+    fn storageReadId(self: *const Collector, op: mlir.MlirOperation) !obligation.FreeVarId {
+        return .{
+            .file_id = storage_read_file_id,
+            .pattern_id = self.operationOrdinal(op) orelse return error.UnsupportedLoopControlFlow,
+        };
+    }
+
+    fn directStorageLocation(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        value: mlir.MlirValue,
+    ) !obligation.LoopStorageLocationExpr {
+        const root = (try self.stringAttr(op, "global")) orelse
+            return error.LoopProjectionEffectUnsupported;
+        const ty = self.storage_global_types.get(root) orelse obligation.TypeRef{ .compiler_type_id = 0 };
+        const width = integerTypeWidth(mlir.oraValueGetType(value)) orelse
+            return error.LoopProjectionEffectUnsupported;
+        if (typeRefIntegerInfo(ty)) |info| {
+            if (info.width != width) return error.LoopProjectionEffectUnsupported;
+        }
+        return .{ .root = root, .value_ty = ty };
+    }
+
+    fn readResultsForFormula(
+        self: *Collector,
+        formula: obligation.FormulaRef,
+        timeline: []const obligation.LoopTimelineEvent,
+    ) ![]const obligation.FreeVarId {
+        var results: std.ArrayList(obligation.FreeVarId) = .empty;
+        defer results.deinit(self.allocator);
+        const set: obligation.ObligationSet = .{ .terms = self.terms.items };
+        for (timeline) |event| switch (event.payload) {
+            .storage_read => |read| if (set.formulaReferencesFreeVar(formula, read.result)) {
+                try results.append(self.allocator, read.result);
+            },
+            else => {},
+        };
+        return results.toOwnedSlice(self.allocator);
+    }
+
+    fn loopFormulaExprsWithReads(
+        self: *Collector,
+        formulas: []const obligation.FormulaRef,
+        timeline: []const obligation.LoopTimelineEvent,
+    ) ![]const obligation.LoopFormulaExpr {
+        const expressions = try self.allocator.alloc(obligation.LoopFormulaExpr, formulas.len);
+        for (formulas, expressions) |formula, *expression| expression.* = .{
+            .formula = formula,
+            .read_results = try self.readResultsForFormula(formula, timeline),
+        };
+        return expressions;
     }
 
     fn operationOrdinal(self: *const Collector, op: mlir.MlirOperation) ?u32 {
@@ -5785,6 +6108,66 @@ fn appendFormula(
     return result;
 }
 
+fn loopFormulaExprs(
+    allocator: std.mem.Allocator,
+    formulas: []const obligation.FormulaRef,
+) ![]const obligation.LoopFormulaExpr {
+    const result = try allocator.alloc(obligation.LoopFormulaExpr, formulas.len);
+    for (formulas, result) |formula, *expression| expression.* = .{ .formula = formula };
+    return result;
+}
+
+/// Transitional construction of the unified timeline for the already-closed
+/// local/nested loop lane. Task 3 replaces storage exclusions with exact
+/// action events; the legacy views remain parity inputs until migration ends.
+fn buildLegacyLoopTimeline(
+    allocator: std.mem.Allocator,
+    edge: obligation.LoopEdgeRow,
+) ![]const obligation.LoopTimelineEvent {
+    const event_count = 1 + edge.safety_checkpoints.len + edge.summary_dependencies.len;
+    const events = try allocator.alloc(obligation.LoopTimelineEvent, event_count);
+    var event_index: usize = 0;
+    events[event_index] = .{
+        .id = @intCast(event_index),
+        .structural_key = try std.fmt.allocPrint(allocator, "{s}/path", .{edge.structural_key}),
+        .payload = .{ .path_assumption = .{
+            .formulas = try loopFormulaExprs(allocator, edge.path_formulas),
+        } },
+    };
+    event_index += 1;
+
+    var checkpoint_index: usize = 0;
+    var dependency_index: usize = 0;
+    while (dependency_index <= edge.summary_dependencies.len) : (dependency_index += 1) {
+        while (checkpoint_index < edge.safety_checkpoints.len and
+            edge.safety_checkpoints[checkpoint_index].after_dependency_count == dependency_index)
+        {
+            const checkpoint = edge.safety_checkpoints[checkpoint_index];
+            events[event_index] = .{
+                .id = @intCast(event_index),
+                .structural_key = checkpoint.structural_key,
+                .payload = .{ .safety_checkpoint = .{
+                    .formulas = try loopFormulaExprs(allocator, checkpoint.formulas),
+                } },
+            };
+            event_index += 1;
+            checkpoint_index += 1;
+        }
+        if (dependency_index == edge.summary_dependencies.len) break;
+        const dependency = edge.summary_dependencies[dependency_index];
+        events[event_index] = .{
+            .id = @intCast(event_index),
+            .structural_key = dependency.structural_key,
+            .payload = .{ .summary_dependency = dependency },
+        };
+        event_index += 1;
+    }
+    if (event_index != events.len or checkpoint_index != edge.safety_checkpoints.len) {
+        return error.InvalidLoopTimelineStage;
+    }
+    return events;
+}
+
 fn appendString(
     allocator: std.mem.Allocator,
     existing: []const []const u8,
@@ -5846,6 +6229,33 @@ fn appendLoopSafetyCheckpointKey(
     value: LoopSafetyCheckpointKey,
 ) ![]const LoopSafetyCheckpointKey {
     const result = try allocator.alloc(LoopSafetyCheckpointKey, existing.len + 1);
+    @memcpy(result[0..existing.len], existing);
+    result[result.len - 1] = value;
+    return result;
+}
+
+fn appendLoopTimelineEvent(
+    allocator: std.mem.Allocator,
+    existing: []const obligation.LoopTimelineEvent,
+    payload: obligation.LoopTimelineEventPayload,
+    structural_key: []const u8,
+) ![]const obligation.LoopTimelineEvent {
+    const result = try allocator.alloc(obligation.LoopTimelineEvent, existing.len + 1);
+    @memcpy(result[0..existing.len], existing);
+    result[result.len - 1] = .{
+        .id = @intCast(existing.len),
+        .structural_key = structural_key,
+        .payload = payload,
+    };
+    return result;
+}
+
+fn appendLoopTimelineInventoryEvent(
+    allocator: std.mem.Allocator,
+    existing: []const LoopTimelineInventoryEvent,
+    value: LoopTimelineInventoryEvent,
+) ![]const LoopTimelineInventoryEvent {
+    const result = try allocator.alloc(LoopTimelineInventoryEvent, existing.len + 1);
     @memcpy(result[0..existing.len], existing);
     result[result.len - 1] = value;
     return result;
@@ -5917,8 +6327,105 @@ fn compareLoopProjection(
         for (semantic.edge.summary_dependencies, structural.summary_dependency_keys) |dependency, key| {
             if (!std.mem.eql(u8, dependency.structural_key, key)) return .path_mismatch;
         }
+        if (!storageTimelineInventoryEql(semantic.timeline_inventory, structural.timeline_inventory) or
+            !timelineMatchesInventory(semantic.edge.timeline, structural.timeline_inventory))
+        {
+            return .effect_mismatch;
+        }
     }
     return .complete;
+}
+
+fn storageTimelineInventoryEql(
+    semantic: []const LoopTimelineInventoryEvent,
+    structural: []const LoopTimelineInventoryEvent,
+) bool {
+    var semantic_index: usize = 0;
+    for (structural) |right| {
+        if (right.tag != .storage_read and right.tag != .storage_write) continue;
+        if (semantic_index >= semantic.len) return false;
+        const left = semantic[semantic_index];
+        if (!std.mem.eql(u8, left.structural_key, right.structural_key) or left.tag != right.tag or
+            !optionalStringEql(left.storage_root, right.storage_root) or
+            !optionalFreeVarEql(left.storage_result, right.storage_result) or
+            !optionalStringEql(left.storage_value_source, right.storage_value_source) or
+            !optionalIntegerTypeEql(left.storage_ty, right.storage_ty) or
+            !optionalDependencyEql(left.summary_dependency, right.summary_dependency)) return false;
+        semantic_index += 1;
+    }
+    return semantic_index == semantic.len;
+}
+
+fn timelineInventoryHasStorageEvent(inventory: []const LoopTimelineInventoryEvent) bool {
+    for (inventory) |item| switch (item.tag) {
+        .storage_read, .storage_write => return true,
+        else => {},
+    };
+    return false;
+}
+
+fn timelineMatchesInventory(
+    timeline: []const obligation.LoopTimelineEvent,
+    inventory: []const LoopTimelineInventoryEvent,
+) bool {
+    if (timeline.len != inventory.len) return false;
+    for (timeline, inventory, 0..) |event, item, index| {
+        if (event.id != index or !std.mem.eql(u8, event.structural_key, item.structural_key) or
+            std.meta.activeTag(event.payload) != item.tag) return false;
+        switch (event.payload) {
+            .storage_read => |read| if (!optionalStringEql(read.location.root, item.storage_root) or
+                !optionalFreeVarEql(read.result, item.storage_result) or
+                !optionalIntegerTypeEql(read.location.value_ty, item.storage_ty)) return false,
+            .storage_write => |write| if (!optionalStringEql(write.location.root, item.storage_root) or
+                !optionalIntegerTypeEql(write.location.value_ty, item.storage_ty) or
+                item.storage_value_source == null) return false,
+            .summary_dependency => |dependency| if (!optionalDependencyEql(dependency, item.summary_dependency)) return false,
+            .path_assumption, .safety_checkpoint => {},
+        }
+    }
+    return true;
+}
+
+fn optionalStringEql(lhs: ?[]const u8, rhs: ?[]const u8) bool {
+    if (lhs == null or rhs == null) return lhs == null and rhs == null;
+    return std.mem.eql(u8, lhs.?, rhs.?);
+}
+
+fn optionalFreeVarEql(lhs: ?obligation.FreeVarId, rhs: ?obligation.FreeVarId) bool {
+    if (lhs == null or rhs == null) return lhs == null and rhs == null;
+    return obligation.freeVarIdEql(lhs.?, rhs.?);
+}
+
+fn optionalIntegerTypeEql(lhs: ?obligation.TypeRef, rhs: ?obligation.TypeRef) bool {
+    if (lhs == null or rhs == null) return lhs == null and rhs == null;
+    return switch (lhs.?) {
+        .compiler_type_id => |left| switch (rhs.?) {
+            .compiler_type_id => |right| left == right,
+            else => false,
+        },
+        .spelling => |left| switch (rhs.?) {
+            .spelling => |right| std.mem.eql(u8, left, right),
+            else => false,
+        },
+    };
+}
+
+fn optionalDependencyEql(
+    lhs: ?obligation.LoopSummaryDependency,
+    rhs: ?obligation.LoopSummaryDependency,
+) bool {
+    if (lhs == null or rhs == null) return lhs == null and rhs == null;
+    const left = lhs.?;
+    const right = rhs.?;
+    if (left.id != right.id or left.summary_id != right.summary_id or left.target != right.target or
+        left.write_footprint_complete != right.write_footprint_complete or
+        !std.mem.eql(u8, left.structural_key, right.structural_key) or
+        !std.mem.eql(u8, &left.loop_vc_sha256, &right.loop_vc_sha256) or
+        left.write_footprint.len != right.write_footprint.len) return false;
+    for (left.write_footprint, right.write_footprint) |left_place, right_place| {
+        if (!obligation.placeRefEql(left_place, right_place)) return false;
+    }
+    return true;
 }
 
 fn loopControlProjectionFailure(err: anyerror) ?obligation.LoopProjectionCompleteness {
@@ -6185,6 +6692,20 @@ fn safetyCheckpointsContainOriginValue(
     return false;
 }
 
+fn loopTimelineContainsOriginValue(timeline: []const obligation.LoopTimelineEvent) bool {
+    for (timeline) |event| switch (event.payload) {
+        .path_assumption => |path| for (path.formulas) |formula| {
+            if (formula.formula == .origin_value) return true;
+        },
+        .safety_checkpoint => |checkpoint| for (checkpoint.formulas) |formula| {
+            if (formula.formula == .origin_value) return true;
+        },
+        .storage_write => |write| if (write.value.formula == .origin_value) return true,
+        .storage_read, .summary_dependency => {},
+    };
+    return false;
+}
+
 fn loopSafetyFormulaCount(checkpoints: []const obligation.LoopSafetyCheckpoint) usize {
     var count: usize = 0;
     for (checkpoints) |checkpoint| count += checkpoint.formulas.len;
@@ -6377,6 +6898,21 @@ fn inventoryPersistentWriteOperation(op: mlir.MlirOperation, op_name: []const u8
         std.mem.eql(u8, op_name, "ora.map_store") or
         std.mem.eql(u8, op_name, "ora.storage.word_store") or
         (std.mem.eql(u8, op_name, "memref.store") and inventoryMemrefStoreTargetsPersistentRoot(op));
+}
+
+fn directRootLoopEffectSupported(
+    op: mlir.MlirOperation,
+    op_name: []const u8,
+    effect_kind: mlir.OraOperationMemoryEffectKind,
+) bool {
+    if (effect_kind == mlir.ORA_OPERATION_MEMORY_EFFECT_NONE) return true;
+    if (std.mem.eql(u8, op_name, "ora.sload") or std.mem.eql(u8, op_name, "ora.sstore") or
+        op_kind_map.has(op_name) or std.mem.eql(u8, op_name, "ora.decreases") or
+        std.mem.eql(u8, op_name, "ora.increases") or std.mem.eql(u8, op_name, "ora.mload") or
+        std.mem.eql(u8, op_name, "ora.mload8") or std.mem.eql(u8, op_name, "ora.mstore") or
+        std.mem.eql(u8, op_name, "ora.mstore8")) return true;
+    if (std.mem.eql(u8, op_name, "memref.load")) return true;
+    return std.mem.eql(u8, op_name, "memref.store") and !inventoryMemrefStoreTargetsPersistentRoot(op);
 }
 
 fn inventoryMemrefStoreTargetsPersistentRoot(op: mlir.MlirOperation) bool {
@@ -6724,6 +7260,141 @@ test "independent loop inventory comparison fails closed by witness class" {
         obligation.LoopProjectionCompleteness.ambiguous_identity,
         compareLoopProjection(&.{ semantic, semantic }, &.{ inventory, inventory }),
     );
+}
+
+test "direct-root timeline inventory compares every storage event field" {
+    const ty: obligation.TypeRef = .{ .compiler_type_id = 6 };
+    const read_id: obligation.FreeVarId = .{ .file_id = Collector.storage_read_file_id, .pattern_id = 7 };
+    const footprint = [_]obligation.PlaceRef{.{ .root = "counter", .region = .storage }};
+    const dependency: obligation.LoopSummaryDependency = .{
+        .id = 0,
+        .structural_key = "op:10/scf.while",
+        .summary_id = 99,
+        .loop_vc_sha256 = [_]u8{1} ** 32,
+        .write_footprint = &footprint,
+        .write_footprint_complete = true,
+        .target = .successor,
+    };
+    const path_formulas = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
+    const timeline = [_]obligation.LoopTimelineEvent{
+        .{ .id = 0, .structural_key = "body/path", .payload = .{
+            .path_assumption = .{ .formulas = &path_formulas },
+        } },
+        .{ .id = 1, .structural_key = "op:7/ora.sload", .payload = .{ .storage_read = .{
+            .result = read_id,
+            .location = .{ .root = "counter", .value_ty = ty },
+        } } },
+        .{ .id = 2, .structural_key = "op:9/ora.sstore", .payload = .{ .storage_write = .{
+            .location = .{ .root = "counter", .value_ty = ty },
+            .value = .{ .formula = .{ .term = 1 }, .read_results = &.{read_id} },
+        } } },
+        .{ .id = 3, .structural_key = dependency.structural_key, .payload = .{ .summary_dependency = dependency } },
+    };
+    const rows = [_]LoopTimelineInventoryEvent{
+        .{ .structural_key = "body/path", .tag = .path_assumption },
+        .{
+            .structural_key = "op:7/ora.sload",
+            .tag = .storage_read,
+            .storage_root = "counter",
+            .storage_result = read_id,
+            .storage_ty = ty,
+        },
+        .{
+            .structural_key = "op:9/ora.sstore",
+            .tag = .storage_write,
+            .storage_root = "counter",
+            .storage_value_source = "module-op:8/result:0(module-op:7/result:0)",
+            .storage_ty = ty,
+        },
+        .{
+            .structural_key = dependency.structural_key,
+            .tag = .summary_dependency,
+            .summary_dependency = dependency,
+        },
+    };
+    const semantic: ProjectedLoopEdge = .{
+        .edge = .{ .id = 0, .structural_key = "body/yield", .timeline = &timeline, .target = .backedge },
+        .terminator_key = "op:10/scf.yield",
+        .safety_checkpoints = &.{},
+        .effect_keys = &.{ "op:7/ora.sload", "op:9/ora.sstore" },
+        .state_source_keys = &.{},
+        .timeline_inventory = rows[1..3],
+    };
+    const inventory: InventoryLoopEdge = .{
+        .structural_key = "body/yield",
+        .target = .backedge,
+        .terminator_key = "op:10/scf.yield",
+        .binding_source_keys = &.{},
+        .safety_checkpoints = &.{},
+        .effect_keys = &.{ "op:7/ora.sload", "op:9/ora.sstore" },
+        .state_source_keys = &.{},
+        .timeline_inventory = &rows,
+    };
+    try std.testing.expectEqual(
+        obligation.LoopProjectionCompleteness.complete,
+        compareLoopProjection(&.{semantic}, &.{inventory}),
+    );
+
+    var wrong_path_rows = rows;
+    wrong_path_rows[0].structural_key = "wrong-path";
+    var wrong_path = inventory;
+    wrong_path.timeline_inventory = &wrong_path_rows;
+    try std.testing.expectEqual(.effect_mismatch, compareLoopProjection(&.{semantic}, &.{wrong_path}));
+
+    inline for (.{
+        .{ .field = "structural_key", .value = "wrong" },
+        .{ .field = "storage_root", .value = "other" },
+        .{ .field = "storage_value_source", .value = "wrong-source" },
+    }) |mutation| {
+        var mutated_rows = rows;
+        @field(mutated_rows[2], mutation.field) = mutation.value;
+        var mutated = inventory;
+        mutated.timeline_inventory = &mutated_rows;
+        try std.testing.expectEqual(
+            obligation.LoopProjectionCompleteness.effect_mismatch,
+            compareLoopProjection(&.{semantic}, &.{mutated}),
+        );
+    }
+
+    var wrong_result_rows = rows;
+    wrong_result_rows[1].storage_result = .{ .file_id = Collector.storage_read_file_id, .pattern_id = 8 };
+    var wrong_result = inventory;
+    wrong_result.timeline_inventory = &wrong_result_rows;
+    try std.testing.expectEqual(.effect_mismatch, compareLoopProjection(&.{semantic}, &.{wrong_result}));
+
+    var wrong_type_rows = rows;
+    wrong_type_rows[1].storage_ty = .{ .compiler_type_id = 4 };
+    var wrong_type = inventory;
+    wrong_type.timeline_inventory = &wrong_type_rows;
+    try std.testing.expectEqual(.effect_mismatch, compareLoopProjection(&.{semantic}, &.{wrong_type}));
+
+    var wrong_kind_rows = rows;
+    wrong_kind_rows[1].tag = .storage_write;
+    var wrong_kind = inventory;
+    wrong_kind.timeline_inventory = &wrong_kind_rows;
+    try std.testing.expectEqual(.effect_mismatch, compareLoopProjection(&.{semantic}, &.{wrong_kind}));
+
+    var reordered_rows = [_]LoopTimelineInventoryEvent{ rows[0], rows[2], rows[1], rows[3] };
+    var reordered = inventory;
+    reordered.timeline_inventory = &reordered_rows;
+    try std.testing.expectEqual(.effect_mismatch, compareLoopProjection(&.{semantic}, &.{reordered}));
+
+    var missing = inventory;
+    missing.timeline_inventory = rows[0..3];
+    try std.testing.expectEqual(.effect_mismatch, compareLoopProjection(&.{semantic}, &.{missing}));
+    const duplicated_rows = [_]LoopTimelineInventoryEvent{ rows[0], rows[1], rows[1], rows[2], rows[3] };
+    var duplicated = inventory;
+    duplicated.timeline_inventory = &duplicated_rows;
+    try std.testing.expectEqual(.effect_mismatch, compareLoopProjection(&.{semantic}, &.{duplicated}));
+
+    const wrong_footprint = [_]obligation.PlaceRef{.{ .root = "other", .region = .storage }};
+    var wrong_dependency_value = dependency;
+    wrong_dependency_value.write_footprint = &wrong_footprint;
+    var wrong_dependency_rows = rows;
+    wrong_dependency_rows[3].summary_dependency = wrong_dependency_value;
+    var wrong_dependency = inventory;
+    wrong_dependency.timeline_inventory = &wrong_dependency_rows;
+    try std.testing.expectEqual(.effect_mismatch, compareLoopProjection(&.{semantic}, &.{wrong_dependency}));
 }
 
 fn classifyQuantifierBinder(type_text: []const u8) QuantifierBinderClassification {

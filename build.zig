@@ -1692,6 +1692,25 @@ pub fn build(b: *std.Build) void {
     const check_formal_sync_step = b.step("check-formal-sync", "Regenerate formal snapshots and run Lean verification checks");
     check_formal_sync_step.dependOn(&formal_sync_cmd.step);
 
+    // zig build check-loop-storage-operation-inventory
+    const loop_storage_inventory_self_test_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/check-loop-storage-operation-inventory.py",
+        "--self-test",
+    });
+    const loop_storage_inventory_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/check-loop-storage-operation-inventory.py",
+    });
+    loop_storage_inventory_cmd.step.dependOn(&loop_storage_inventory_self_test_cmd.step);
+    if (mlir_step) |ms| loop_storage_inventory_cmd.step.dependOn(ms);
+    const check_loop_storage_inventory_step = b.step(
+        "check-loop-storage-operation-inventory",
+        "Gate loop storage-effect classifications against expanded Ora TableGen records",
+    );
+    check_loop_storage_inventory_step.dependOn(&loop_storage_inventory_cmd.step);
+    test_step.dependOn(&loop_storage_inventory_cmd.step);
+
     // zig build measure-loop-census
     const loop_census_report_path = "zig-out/loop-census/report.json";
     const loop_census_doctest_cmd = b.addSystemCommand(&[_][]const u8{
