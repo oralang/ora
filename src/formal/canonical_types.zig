@@ -122,6 +122,7 @@ pub const EncodeError = std.mem.Allocator.Error || error{
     InvalidDependency,
     InvalidRefinementArity,
     InvalidTermReference,
+    InvalidTimelineReadReference,
     MissingFormula,
     MissingType,
     Overflow,

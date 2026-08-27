@@ -5,8 +5,7 @@ The compiler emits only data. Unsupported identities, types, references, edge
 targets, or incomplete state bindings make `denoteLoopSummary?` return `none`.
 -/
 
-import Ora.Loop.Core
-import Ora.Obligation.Semantics
+import Ora.Loop.StorageDenotation
 
 namespace Ora.Loop
 
@@ -39,6 +38,7 @@ structure StateBindingRow where
   target : FreeVarId
   sourceKey : String := ""
   value : FormulaRef
+  readResults : List FreeVarId := []
   deriving Repr, BEq, DecidableEq
 
 structure SummaryDependencyRow where
@@ -47,7 +47,203 @@ structure SummaryDependencyRow where
   summaryId : Nat
   loopVcSha256 : String
   target : ControlTargetRow
+  writeFootprint : List PlaceRef := []
+  writeFootprintComplete : Bool := false
   deriving Repr, BEq, DecidableEq
+
+structure FormulaExprRow where
+  formula : FormulaRef
+  readResults : List FreeVarId := []
+  deriving Repr, BEq, DecidableEq
+
+structure TypedFormulaRow where
+  value : FormulaExprRow
+  ty : TyRef
+  deriving Repr, BEq, DecidableEq
+
+inductive StorageProjectionRow where
+  | field : String → StorageProjectionRow
+  | fixedIndex : TypedFormulaRow → StorageProjectionRow
+  | mappingKey : TypedFormulaRow → StorageProjectionRow
+  deriving Repr, BEq, DecidableEq
+
+structure StorageLocationExprRow where
+  root : String
+  projections : List StorageProjectionRow := []
+  valueTy : TyRef
+  deriving Repr, BEq, DecidableEq
+
+structure TimelineFormulaEventRow where
+  formulas : List FormulaExprRow
+  deriving Repr, BEq, DecidableEq
+
+structure StorageReadEventRow where
+  result : FreeVarId
+  location : StorageLocationExprRow
+  deriving Repr, BEq, DecidableEq
+
+structure StorageWriteEventRow where
+  location : StorageLocationExprRow
+  value : FormulaExprRow
+  deriving Repr, BEq, DecidableEq
+
+inductive TimelineEventPayloadRow where
+  | pathAssumption : TimelineFormulaEventRow → TimelineEventPayloadRow
+  | safetyCheckpoint : TimelineFormulaEventRow → TimelineEventPayloadRow
+  | storageRead : StorageReadEventRow → TimelineEventPayloadRow
+  | storageWrite : StorageWriteEventRow → TimelineEventPayloadRow
+  | summaryDependency : SummaryDependencyRow → TimelineEventPayloadRow
+  deriving Repr, BEq, DecidableEq
+
+structure TimelineEventRow where
+  id : Nat
+  structuralKey : String
+  payload : TimelineEventPayloadRow
+  deriving Repr, BEq, DecidableEq
+
+inductive TimelineShapeReason where
+  | timelineMissing
+  | eventOrderInvalid
+  | eventIdentityMissing
+  | eventIdentityDuplicate
+  | pathMissing
+  | viewMismatch
+  | storageRootMissing
+  | storageProjectionInvalid
+  | storageTypeInvalid
+  | readIdentityDuplicate
+  | readIdentityForeign
+  | readIdentityForward
+  | childFootprintMissing
+  | dependencyOrderInvalid
+  | dependencyTargetUnsupported
+  | bodySafetyMissing
+  deriving Repr, BEq, DecidableEq
+
+def TimelineShapeReason.name : TimelineShapeReason → String
+  | .timelineMissing => "loop_timeline_missing"
+  | .eventOrderInvalid => "loop_timeline_event_order_invalid"
+  | .eventIdentityMissing => "loop_timeline_event_identity_missing"
+  | .eventIdentityDuplicate => "loop_timeline_event_identity_duplicate"
+  | .pathMissing => "loop_timeline_path_missing"
+  | .viewMismatch => "loop_timeline_view_mismatch"
+  | .storageRootMissing => "loop_storage_root_missing"
+  | .storageProjectionInvalid => "loop_storage_projection_invalid"
+  | .storageTypeInvalid => "loop_storage_type_invalid"
+  | .readIdentityDuplicate => "loop_storage_read_identity_duplicate"
+  | .readIdentityForeign => "loop_storage_read_identity_foreign"
+  | .readIdentityForward => "loop_storage_read_identity_forward"
+  | .childFootprintMissing => "loop_storage_child_footprint_missing"
+  | .dependencyOrderInvalid => "loop_summary_dependency_order_invalid"
+  | .dependencyTargetUnsupported => "loop_summary_dependency_target_unsupported"
+  | .bodySafetyMissing => "loop_body_safety_missing"
+
+def timelineReadIds (events : List TimelineEventRow) : List FreeVarId :=
+  events.filterMap fun event => match event.payload with
+    | .storageRead read => some read.result
+    | _ => none
+
+def timelineReadReferencesReason?
+    (events : List TimelineEventRow)
+    (eventIndex : Nat)
+    (references : List FreeVarId) : Option TimelineShapeReason :=
+  if !(decide references.Nodup) then some .readIdentityDuplicate
+  else
+    references.findSome? fun reference =>
+      if (timelineReadIds (events.take eventIndex)).contains reference then none
+      else if (timelineReadIds (events.drop eventIndex)).contains reference then
+        some .readIdentityForward
+      else some .readIdentityForeign
+
+def storageTyExplicit : TyRef → Bool
+  | .spelling name => !name.isEmpty
+  | .compilerTypeId id => id != 0
+
+def storageProjectionReason?
+    (events : List TimelineEventRow)
+    (eventIndex : Nat) : StorageProjectionRow → Option TimelineShapeReason
+  | .field name => if name.isEmpty then some .storageProjectionInvalid else none
+  | .fixedIndex value =>
+      if !storageTyExplicit value.ty then some .storageTypeInvalid
+      else timelineReadReferencesReason? events eventIndex value.value.readResults
+  | .mappingKey value =>
+      if !storageTyExplicit value.ty then some .storageTypeInvalid
+      else timelineReadReferencesReason? events eventIndex value.value.readResults
+
+def storageLocationReason?
+    (events : List TimelineEventRow)
+    (eventIndex : Nat)
+    (location : StorageLocationExprRow) : Option TimelineShapeReason :=
+  if location.root.isEmpty then some .storageRootMissing
+  else if !storageTyExplicit location.valueTy then some .storageTypeInvalid
+  else location.projections.findSome? (storageProjectionReason? events eventIndex)
+
+def timelineFormulaEventReason?
+    (events : List TimelineEventRow)
+    (eventIndex : Nat)
+    (formulas : List FormulaExprRow)
+    (missing : TimelineShapeReason) : Option TimelineShapeReason :=
+  if formulas.isEmpty then some missing
+  else formulas.findSome? fun formula =>
+    timelineReadReferencesReason? events eventIndex formula.readResults
+
+def dependencyTargetSupported : ControlTargetRow → Bool
+  | .successor | .functionReturn | .errorReturn => true
+  | .backedge | .explicitRevert | .unresolved => false
+
+def footprintPlaceSupported (place : PlaceRef) : Bool :=
+  place.region == .storage && !place.root.isEmpty
+
+def timelineEventsReason?
+    (events : List TimelineEventRow)
+    (variableIds : List FreeVarId) : Option TimelineShapeReason :=
+  let rec visit : Nat → Nat → Bool → List String → List TimelineEventRow →
+      Option TimelineShapeReason
+    | _, _, hasPath, _, [] => if hasPath then none else some .pathMissing
+    | expected, dependencyIndex, hasPath, keys, event :: rest =>
+        if event.id != expected then some .eventOrderInvalid
+        else if event.structuralKey.isEmpty then some .eventIdentityMissing
+        else if keys.contains event.structuralKey then some .eventIdentityDuplicate
+        else
+          let next := visit (expected + 1) dependencyIndex hasPath
+            (keys ++ [event.structuralKey]) rest
+          match event.payload with
+          | .pathAssumption path =>
+              match timelineFormulaEventReason? events expected path.formulas .pathMissing with
+              | some reason => some reason
+              | none => visit (expected + 1) dependencyIndex true
+                  (keys ++ [event.structuralKey]) rest
+          | .safetyCheckpoint checkpoint =>
+              match timelineFormulaEventReason? events expected checkpoint.formulas
+                  .bodySafetyMissing with
+              | some reason => some reason
+              | none => next
+          | .storageRead read =>
+              match storageLocationReason? events expected read.location with
+              | some reason => some reason
+              | none =>
+                  if variableIds.contains read.result ||
+                      (timelineReadIds (events.take expected)).contains read.result then
+                    some .readIdentityDuplicate
+                  else next
+          | .storageWrite write =>
+              match storageLocationReason? events expected write.location with
+              | some reason => some reason
+              | none =>
+                  match timelineReadReferencesReason? events expected write.value.readResults with
+                  | some reason => some reason
+                  | none => next
+          | .summaryDependency dependency =>
+              if dependency.id != dependencyIndex then some .dependencyOrderInvalid
+              else if !dependencyTargetSupported dependency.target then
+                some .dependencyTargetUnsupported
+              else if !dependency.writeFootprintComplete ||
+                  !dependency.writeFootprint.all footprintPlaceSupported then
+                some .childFootprintMissing
+              else visit (expected + 1) (dependencyIndex + 1) hasPath
+                (keys ++ [event.structuralKey]) rest
+  if events.isEmpty then some .timelineMissing
+  else visit 0 0 false [] events
 
 structure SafetyCheckpointRow where
   id : Nat
@@ -59,6 +255,7 @@ structure SafetyCheckpointRow where
 structure EdgeRow where
   id : Nat
   structuralKey : String := ""
+  timeline : List TimelineEventRow := []
   path : List FormulaRef := []
   safetyCheckpoints : List SafetyCheckpointRow := []
   summaryDependencies : List SummaryDependencyRow := []
@@ -66,6 +263,54 @@ structure EdgeRow where
   target : ControlTargetRow := .unresolved
   targetFormulas : List FormulaRef := []
   deriving Repr, BEq, DecidableEq
+
+def timelinePathView (events : List TimelineEventRow) : List FormulaRef :=
+  events.flatMap fun event => match event.payload with
+    | .pathAssumption path => path.formulas.map FormulaExprRow.formula
+    | _ => []
+
+def timelineDependencyView (events : List TimelineEventRow) : List SummaryDependencyRow :=
+  events.filterMap fun event => match event.payload with
+    | .summaryDependency dependency => some dependency
+    | _ => none
+
+def timelineSafetyView (events : List TimelineEventRow) : List SafetyCheckpointRow :=
+  let rec collect : Nat → Nat → List TimelineEventRow → List SafetyCheckpointRow
+    | _, _, [] => []
+    | dependencyCount, checkpointId, event :: rest =>
+        match event.payload with
+        | .summaryDependency _ => collect (dependencyCount + 1) checkpointId rest
+        | .safetyCheckpoint checkpoint =>
+            {
+              id := checkpointId
+              structuralKey := event.structuralKey
+              afterDependencyCount := dependencyCount
+              formulas := checkpoint.formulas.map FormulaExprRow.formula
+            } :: collect dependencyCount (checkpointId + 1) rest
+        | _ => collect dependencyCount checkpointId rest
+  collect 0 0 events
+
+def timelineViewsMatch (edge : EdgeRow) : Bool :=
+  timelinePathView edge.timeline == edge.path &&
+    timelineSafetyView edge.timeline == edge.safetyCheckpoints &&
+    timelineDependencyView edge.timeline == edge.summaryDependencies
+
+def edgeTimelineReason?
+    (variableIds : List FreeVarId)
+    (edge : EdgeRow) : Option TimelineShapeReason :=
+  match timelineEventsReason? edge.timeline variableIds with
+  | some reason => some reason
+  | none =>
+      match edge.nextState.findSome? fun binding =>
+          timelineReadReferencesReason? edge.timeline edge.timeline.length
+            binding.readResults with
+      | some reason => some reason
+      | none => if timelineViewsMatch edge then none else some .viewMismatch
+
+def edgeTimelineShapeSupported
+    (variableIds : List FreeVarId)
+    (edge : EdgeRow) : Bool :=
+  (edgeTimelineReason? variableIds edge).isNone
 
 structure SummaryRow where
   id : Nat
@@ -142,14 +387,21 @@ def safetyCheckpointsShapeSupported (edge : EdgeRow) : Bool :=
       edge.safetyCheckpoints &&
     safetyCheckpointStructuralKeysValid edge.safetyCheckpoints
 
-def edgeBaseShapeSupported (variables : List VariableRow) (edge : EdgeRow) : Bool :=
+def edgeBaseShapeSupported
+    (contextVariables variables : List VariableRow)
+    (edge : EdgeRow) : Bool :=
   !edge.path.isEmpty && edgeTargetSupported edge.target &&
     edgeTargetFormulasValid edge &&
     safetyCheckpointsShapeSupported edge &&
-    bindingsMatchVariables variables edge.nextState
+    bindingsMatchVariables variables edge.nextState &&
+    edgeTimelineShapeSupported
+      ((contextVariables ++ variables).map VariableRow.id) edge
 
-def edgeShapeSupported (variables : List VariableRow) (edge : EdgeRow) : Bool :=
-  edgeBaseShapeSupported variables edge && edge.summaryDependencies.isEmpty
+def edgeShapeSupported
+    (contextVariables variables : List VariableRow)
+    (edge : EdgeRow) : Bool :=
+  edgeBaseShapeSupported contextVariables variables edge &&
+    edge.summaryDependencies.isEmpty
 
 def lowerHexDigit (value : Char) : Bool :=
   "0123456789abcdef".contains value
@@ -304,13 +556,14 @@ def SummaryRow.baseShapeSupported (row : SummaryRow) : Bool :=
     hasBackedge row.edges && hasExit row.edges
 
 def SummaryRow.shapeSupported (row : SummaryRow) : Bool :=
-  row.baseShapeSupported && row.edges.all (edgeShapeSupported row.variables)
+  row.baseShapeSupported &&
+    row.edges.all (edgeShapeSupported row.contextVariables row.variables)
 
 def SummaryRow.shapeSupportedIn (rows : List SummaryRow) (row : SummaryRow) : Bool :=
   summaryIdsUnique rows &&
     row.baseShapeSupported &&
     row.edges.all (fun edge =>
-      edgeBaseShapeSupported row.variables edge &&
+      edgeBaseShapeSupported row.contextVariables row.variables edge &&
         edgeDependenciesSupported rows row edge)
 
 def SummaryRow.formulasDenotable (manifest : Manifest) (row : SummaryRow) : Bool :=

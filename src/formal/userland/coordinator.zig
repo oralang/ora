@@ -1885,10 +1885,31 @@ test "automatic loop proof source delegates to repository tactic deterministical
         .source_key = "loop:identity",
         .value = .{ .term = 1 },
     }};
+    const backedge_path_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 3 } }};
+    const exit_path_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 9 } }};
+    const safety_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 8 } }};
+    const backedge_timeline = [_]obligation.LoopTimelineEvent{
+        .{
+            .id = 0,
+            .structural_key = "loop:backedge/path",
+            .payload = .{ .path_assumption = .{ .formulas = &backedge_path_exprs } },
+        },
+        .{
+            .id = 1,
+            .structural_key = "op:checked-add",
+            .payload = .{ .safety_checkpoint = .{ .formulas = &safety_exprs } },
+        },
+    };
+    const exit_timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "loop:exit/path",
+        .payload = .{ .path_assumption = .{ .formulas = &exit_path_exprs } },
+    }};
     const edges = [_]obligation.LoopEdgeRow{
         .{
             .id = 0,
             .structural_key = "loop:backedge",
+            .timeline = &backedge_timeline,
             .path_formulas = &.{.{ .term = 3 }},
             .safety_checkpoints = &checkpoints,
             .next_state = &backedge_bindings,
@@ -1897,6 +1918,7 @@ test "automatic loop proof source delegates to repository tactic deterministical
         .{
             .id = 1,
             .structural_key = "loop:exit",
+            .timeline = &exit_timeline,
             .path_formulas = &.{.{ .term = 9 }},
             .next_state = &exit_bindings,
             .target = .successor,
@@ -2090,10 +2112,22 @@ test "runtime loop certificate coverage accepts no loops and one exact target" {
         .value = .{ .term = 0 },
     }};
     const path = [_]obligation.FormulaRef{.{ .term = 0 }};
+    const path_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
+    const backedge_timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "body/straight-line-yield/path",
+        .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+    }};
+    const exit_timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "guard/false-successor/path",
+        .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+    }};
     const edges = [_]obligation.LoopEdgeRow{
         .{
             .id = 0,
             .structural_key = "body/straight-line-yield",
+            .timeline = &backedge_timeline,
             .path_formulas = &path,
             .next_state = &next_state,
             .target = .backedge,
@@ -2101,6 +2135,7 @@ test "runtime loop certificate coverage accepts no loops and one exact target" {
         .{
             .id = 1,
             .structural_key = "guard/false-successor",
+            .timeline = &exit_timeline,
             .path_formulas = &path,
             .next_state = &next_state,
             .target = .successor,
@@ -2153,10 +2188,22 @@ test "runtime loop certificate coverage rejects named exclusions and missing tar
         .value = .{ .term = 0 },
     }};
     const path = [_]obligation.FormulaRef{.{ .term = 0 }};
+    const path_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
+    const backedge_timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "body/straight-line-yield/path",
+        .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+    }};
+    const exit_timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "guard/false-successor/path",
+        .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+    }};
     const edges = [_]obligation.LoopEdgeRow{
         .{
             .id = 0,
             .structural_key = "body/straight-line-yield",
+            .timeline = &backedge_timeline,
             .path_formulas = &path,
             .next_state = &next_state,
             .target = .backedge,
@@ -2164,6 +2211,7 @@ test "runtime loop certificate coverage rejects named exclusions and missing tar
         .{
             .id = 1,
             .structural_key = "guard/false-successor",
+            .timeline = &exit_timeline,
             .path_formulas = &path,
             .next_state = &next_state,
             .target = .successor,

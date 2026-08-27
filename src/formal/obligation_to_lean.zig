@@ -232,6 +232,14 @@ fn writeLoopSummaryDefinitions(writer: anytype, set: obligation.ObligationSet) !
 /// an unrelated term changes, but it cannot retain a certificate after a
 /// referenced term changes.
 pub fn loopVcSha256(set: obligation.ObligationSet, summary_id: obligation.Id) ![32]u8 {
+    return loopVcSha256InDomain(set, summary_id, "ora-loop-vc-v2\n");
+}
+
+fn loopVcSha256InDomain(
+    set: obligation.ObligationSet,
+    summary_id: obligation.Id,
+    domain: []const u8,
+) ![32]u8 {
     const summary = obligation.findById(set.loop_summaries, summary_id) orelse
         return error.InvalidDependency;
     var induction_query: ?obligation.VerificationQuery = null;
@@ -244,7 +252,7 @@ pub fn loopVcSha256(set: obligation.ObligationSet, summary_id: obligation.Id) ![
 
     var canonical = std.Io.Writer.Allocating.init(std.heap.page_allocator);
     defer canonical.deinit();
-    try canonical.writer.writeAll("ora-loop-vc-v1\n");
+    try canonical.writer.writeAll(domain);
     try writeCanonicalTerms(&canonical.writer, set.terms);
     try writeAssumptionRowsByIds(&canonical.writer, set, query.assumption_ids);
     try canonical.writer.writeByte('\n');
@@ -323,6 +331,8 @@ fn writeLoopStepAssignments(
         try writeLeanString(writer, assignment.source_key);
         try writer.writeAll(", value := ");
         try writeFormula(writer, assignment.value);
+        try writer.writeAll(", readResults := ");
+        try writeFreeVarIdList(writer, assignment.read_results);
         try writer.writeAll(" }");
     }
     try writer.writeByte(']');
@@ -335,6 +345,8 @@ fn writeLoopEdges(writer: anytype, edges: []const obligation.LoopEdgeRow) !void 
         try writer.writeAll("{ id := ");
         try writer.print("{d}, structuralKey := ", .{edge.id});
         try writeLeanString(writer, edge.structural_key);
+        try writer.writeAll(", timeline := ");
+        try writeLoopTimeline(writer, edge.timeline);
         try writer.writeAll(", path := ");
         try writeFormulaList(writer, edge.path_formulas);
         try writer.writeAll(", safetyCheckpoints := ");
@@ -386,20 +398,140 @@ fn writeLoopSummaryDependencies(
     try writer.writeByte('[');
     for (dependencies, 0..) |dependency, index| {
         if (index != 0) try writer.writeAll(", ");
+        try writeLoopSummaryDependency(writer, dependency);
+    }
+    try writer.writeByte(']');
+}
+
+fn writeFreeVarIdList(writer: anytype, ids: []const obligation.FreeVarId) !void {
+    try writer.writeByte('[');
+    for (ids, 0..) |id, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writeFreeVarId(writer, id);
+    }
+    try writer.writeByte(']');
+}
+
+fn writeLoopFormulaExprRow(writer: anytype, expression: obligation.LoopFormulaExpr) !void {
+    try writer.writeAll("{ formula := ");
+    try writeFormula(writer, expression.formula);
+    try writer.writeAll(", readResults := ");
+    try writeFreeVarIdList(writer, expression.read_results);
+    try writer.writeAll(" }");
+}
+
+fn writeLoopFormulaExprRowList(
+    writer: anytype,
+    expressions: []const obligation.LoopFormulaExpr,
+) !void {
+    try writer.writeByte('[');
+    for (expressions, 0..) |expression, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writeLoopFormulaExprRow(writer, expression);
+    }
+    try writer.writeByte(']');
+}
+
+fn writeLoopTypedFormulaRow(writer: anytype, expression: obligation.LoopTypedFormula) !void {
+    try writer.writeAll("{ value := ");
+    try writeLoopFormulaExprRow(writer, expression.value);
+    try writer.writeAll(", ty := ");
+    try writeTypeRef(writer, expression.ty);
+    try writer.writeAll(" }");
+}
+
+fn writeLoopStorageLocationRow(
+    writer: anytype,
+    location: obligation.LoopStorageLocationExpr,
+) !void {
+    try writer.writeAll("{ root := ");
+    try writeLeanString(writer, location.root);
+    try writer.writeAll(", projections := [");
+    for (location.projections, 0..) |projection, index| {
+        if (index != 0) try writer.writeAll(", ");
+        switch (projection) {
+            .field => |field| {
+                try writer.writeAll(".field ");
+                try writeLeanString(writer, field);
+            },
+            .fixed_index => |value| {
+                try writer.writeAll(".fixedIndex ");
+                try writeLoopTypedFormulaRow(writer, value);
+            },
+            .mapping_key => |value| {
+                try writer.writeAll(".mappingKey ");
+                try writeLoopTypedFormulaRow(writer, value);
+            },
+        }
+    }
+    try writer.writeAll("], valueTy := ");
+    try writeTypeRef(writer, location.value_ty);
+    try writer.writeAll(" }");
+}
+
+fn writeLoopSummaryDependency(
+    writer: anytype,
+    dependency: obligation.LoopSummaryDependency,
+) !void {
+    try writer.writeAll("{ id := ");
+    try writer.print("{d}, structuralKey := ", .{dependency.id});
+    try writeLeanString(writer, dependency.structural_key);
+    try writer.print(", summaryId := {d}, loopVcSha256 := \"", .{dependency.summary_id});
+    const digest_hex = std.fmt.bytesToHex(dependency.loop_vc_sha256, .lower);
+    try writer.writeAll(&digest_hex);
+    try writer.writeAll("\", target := .");
+    try writer.writeAll(switch (dependency.target) {
+        .backedge => "backedge",
+        .successor => "successor",
+        .function_return => "functionReturn",
+        .error_return => "errorReturn",
+        .explicit_revert => "explicitRevert",
+    });
+    try writer.writeAll(", writeFootprint := ");
+    try writePlaceRefList(writer, dependency.write_footprint);
+    try writer.writeAll(", writeFootprintComplete := ");
+    try writer.writeAll(if (dependency.write_footprint_complete) "true" else "false");
+    try writer.writeAll(" }");
+}
+
+fn writeLoopTimeline(writer: anytype, events: []const obligation.LoopTimelineEvent) !void {
+    try writer.writeByte('[');
+    for (events, 0..) |event, index| {
+        if (index != 0) try writer.writeAll(", ");
         try writer.writeAll("{ id := ");
-        try writer.print("{d}, structuralKey := ", .{dependency.id});
-        try writeLeanString(writer, dependency.structural_key);
-        try writer.print(", summaryId := {d}, loopVcSha256 := \"", .{dependency.summary_id});
-        const digest_hex = std.fmt.bytesToHex(dependency.loop_vc_sha256, .lower);
-        try writer.writeAll(&digest_hex);
-        try writer.writeAll("\", target := .");
-        try writer.writeAll(switch (dependency.target) {
-            .backedge => "backedge",
-            .successor => "successor",
-            .function_return => "functionReturn",
-            .error_return => "errorReturn",
-            .explicit_revert => "explicitRevert",
-        });
+        try writer.print("{d}, structuralKey := ", .{event.id});
+        try writeLeanString(writer, event.structural_key);
+        try writer.writeAll(", payload := .");
+        switch (event.payload) {
+            .path_assumption => |path| {
+                try writer.writeAll("pathAssumption { formulas := ");
+                try writeLoopFormulaExprRowList(writer, path.formulas);
+                try writer.writeAll(" }");
+            },
+            .safety_checkpoint => |checkpoint| {
+                try writer.writeAll("safetyCheckpoint { formulas := ");
+                try writeLoopFormulaExprRowList(writer, checkpoint.formulas);
+                try writer.writeAll(" }");
+            },
+            .storage_read => |read| {
+                try writer.writeAll("storageRead { result := ");
+                try writeFreeVarId(writer, read.result);
+                try writer.writeAll(", location := ");
+                try writeLoopStorageLocationRow(writer, read.location);
+                try writer.writeAll(" }");
+            },
+            .storage_write => |write| {
+                try writer.writeAll("storageWrite { location := ");
+                try writeLoopStorageLocationRow(writer, write.location);
+                try writer.writeAll(", value := ");
+                try writeLoopFormulaExprRow(writer, write.value);
+                try writer.writeAll(" }");
+            },
+            .summary_dependency => |dependency| {
+                try writer.writeAll("summaryDependency ");
+                try writeLoopSummaryDependency(writer, dependency);
+            },
+        }
         try writer.writeAll(" }");
     }
     try writer.writeByte(']');
@@ -2679,6 +2811,7 @@ test "Lean emitter writes effect frame obligations" {
 test "LoopVC digest covers every certificate-authority component class" {
     const int_ty: obligation.TypeRef = .{ .spelling = "u256" };
     const loop_id: obligation.FreeVarId = .{ .file_id = 1, .pattern_id = 1 };
+    const read_id: obligation.FreeVarId = .{ .file_id = 1, .pattern_id = 2 };
     const terms = [_]obligation.Term{
         .{ .variable = .{ .free = .{ .id = loop_id, .name = "i", .ty = int_ty } } },
         .{ .int_lit = .{ .value = "0", .ty = int_ty } },
@@ -2690,6 +2823,7 @@ test "LoopVC digest covers every certificate-authority component class" {
         .{ .binary = .{ .op = .add, .lhs = 0, .rhs = 2, .ty = int_ty } },
         .{ .unary = .{ .op = .not, .operand = 5 } },
         .{ .binary = .{ .op = .eq, .lhs = 0, .rhs = 3, .ty = int_ty } },
+        .{ .variable = .{ .free = .{ .id = read_id, .name = "read_result", .ty = int_ty } } },
     };
     const variables = [_]obligation.LoopVariable{.{ .index = 0, .id = loop_id, .name = "i", .ty = int_ty }};
     const backedge_bindings = [_]obligation.LoopStepAssignment{.{
@@ -2710,9 +2844,33 @@ test "LoopVC digest covers every certificate-authority component class" {
         .after_dependency_count = 0,
         .formulas = &.{.{ .term = 6 }},
     }};
+    const path_expr = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 5 } }};
+    const exit_path_expr = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 8 } }};
+    const safety_expr = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 6 } }};
+    const read_refs = [_]obligation.FreeVarId{read_id};
+    const index_projection = [_]obligation.LoopStorageProjection{.{
+        .fixed_index = .{ .value = .{ .formula = .{ .term = 2 } }, .ty = int_ty },
+    }};
+    const location: obligation.LoopStorageLocationExpr = .{
+        .root = "values",
+        .projections = &index_projection,
+        .value_ty = int_ty,
+    };
+    const backedge_timeline = [_]obligation.LoopTimelineEvent{
+        .{ .id = 0, .structural_key = "body/path", .payload = .{ .path_assumption = .{ .formulas = &path_expr } } },
+        .{ .id = 1, .structural_key = "body/read", .payload = .{ .storage_read = .{ .result = read_id, .location = location } } },
+        .{ .id = 2, .structural_key = "body/write", .payload = .{ .storage_write = .{
+            .location = location,
+            .value = .{ .formula = .{ .term = 10 }, .read_results = &read_refs },
+        } } },
+        .{ .id = 3, .structural_key = "body/ora.assert:0", .payload = .{ .safety_checkpoint = .{ .formulas = &safety_expr } } },
+    };
+    const exit_timeline = [_]obligation.LoopTimelineEvent{
+        .{ .id = 0, .structural_key = "guard/false", .payload = .{ .path_assumption = .{ .formulas = &exit_path_expr } } },
+    };
     const edges = [_]obligation.LoopEdgeRow{
-        .{ .id = 0, .structural_key = "body/straight-line-yield", .path_formulas = &.{.{ .term = 5 }}, .safety_checkpoints = &safety_checkpoints, .next_state = &backedge_bindings, .target = .backedge },
-        .{ .id = 1, .structural_key = "guard/false-successor", .path_formulas = &.{.{ .term = 8 }}, .next_state = &exit_bindings, .target = .successor },
+        .{ .id = 0, .structural_key = "body/straight-line-yield", .timeline = &backedge_timeline, .path_formulas = &.{.{ .term = 5 }}, .safety_checkpoints = &safety_checkpoints, .next_state = &backedge_bindings, .target = .backedge },
+        .{ .id = 1, .structural_key = "guard/false-successor", .timeline = &exit_timeline, .path_formulas = &.{.{ .term = 8 }}, .next_state = &exit_bindings, .target = .successor },
     };
     const summary: obligation.LoopSummaryRow = .{
         .id = 1,
@@ -2757,6 +2915,100 @@ test "LoopVC digest covers every certificate-authority component class" {
         .loop_summaries = &summaries,
     };
     const baseline = try loopVcSha256(set, 1);
+    const old_domain_digest = try loopVcSha256InDomain(set, 1, "ora-loop-vc-v1\n");
+    try std.testing.expect(!std.mem.eql(u8, &baseline, &old_domain_digest));
+
+    const DigestCheck = struct {
+        fn differs(
+            expected: [32]u8,
+            term_rows: []const obligation.Term,
+            assumption_rows: []const obligation.Assumption,
+            query_rows: []const obligation.VerificationQuery,
+            changed: obligation.LoopSummaryRow,
+        ) !void {
+            const rows = [_]obligation.LoopSummaryRow{changed};
+            const actual = try loopVcSha256(.{
+                .terms = term_rows,
+                .assumptions = assumption_rows,
+                .queries = query_rows,
+                .loop_summaries = &rows,
+            }, changed.id);
+            try std.testing.expect(!std.mem.eql(u8, &expected, &actual));
+        }
+    };
+
+    var timeline_mutation = backedge_timeline;
+    timeline_mutation[1].structural_key = "body/read:changed";
+    var timeline_edges = edges;
+    timeline_edges[0].timeline = &timeline_mutation;
+    var timeline_summary = summary;
+    timeline_summary.edges = &timeline_edges;
+    try DigestCheck.differs(baseline, &terms, &assumptions, &queries, timeline_summary);
+
+    timeline_mutation = backedge_timeline;
+    timeline_mutation[1].id = 7;
+    timeline_edges = edges;
+    timeline_edges[0].timeline = &timeline_mutation;
+    timeline_summary = summary;
+    timeline_summary.edges = &timeline_edges;
+    try DigestCheck.differs(baseline, &terms, &assumptions, &queries, timeline_summary);
+
+    timeline_mutation = backedge_timeline;
+    timeline_mutation[1].payload = .{ .storage_read = .{
+        .result = .{ .file_id = 1, .pattern_id = 3 },
+        .location = location,
+    } };
+    timeline_edges = edges;
+    timeline_edges[0].timeline = &timeline_mutation;
+    timeline_summary = summary;
+    timeline_summary.edges = &timeline_edges;
+    try DigestCheck.differs(baseline, &terms, &assumptions, &queries, timeline_summary);
+
+    var changed_location = location;
+    changed_location.root = "other_values";
+    timeline_mutation = backedge_timeline;
+    timeline_mutation[1].payload = .{ .storage_read = .{ .result = read_id, .location = changed_location } };
+    timeline_edges = edges;
+    timeline_edges[0].timeline = &timeline_mutation;
+    timeline_summary = summary;
+    timeline_summary.edges = &timeline_edges;
+    try DigestCheck.differs(baseline, &terms, &assumptions, &queries, timeline_summary);
+
+    var changed_projection = index_projection;
+    changed_projection[0] = .{ .mapping_key = .{
+        .value = .{ .formula = .{ .term = 2 } },
+        .ty = .{ .spelling = "u128" },
+    } };
+    changed_location = location;
+    changed_location.projections = &changed_projection;
+    changed_location.value_ty = .{ .spelling = "u128" };
+    timeline_mutation = backedge_timeline;
+    timeline_mutation[1].payload = .{ .storage_read = .{ .result = read_id, .location = changed_location } };
+    timeline_edges = edges;
+    timeline_edges[0].timeline = &timeline_mutation;
+    timeline_summary = summary;
+    timeline_summary.edges = &timeline_edges;
+    try DigestCheck.differs(baseline, &terms, &assumptions, &queries, timeline_summary);
+
+    const no_read_refs = [_]obligation.FreeVarId{};
+    timeline_mutation = backedge_timeline;
+    timeline_mutation[2].payload = .{ .storage_write = .{
+        .location = location,
+        .value = .{ .formula = .{ .term = 2 }, .read_results = &no_read_refs },
+    } };
+    timeline_edges = edges;
+    timeline_edges[0].timeline = &timeline_mutation;
+    timeline_summary = summary;
+    timeline_summary.edges = &timeline_edges;
+    try DigestCheck.differs(baseline, &terms, &assumptions, &queries, timeline_summary);
+
+    var read_binding = backedge_bindings;
+    read_binding[0].read_results = &read_refs;
+    timeline_edges = edges;
+    timeline_edges[0].next_state = &read_binding;
+    timeline_summary = summary;
+    timeline_summary.edges = &timeline_edges;
+    try DigestCheck.differs(baseline, &terms, &assumptions, &queries, timeline_summary);
 
     var changed_summary = summary;
     changed_summary.invariant_formulas = &.{.{ .term = 6 }};
@@ -2868,11 +3120,14 @@ test "LoopVC digest covers every certificate-authority component class" {
         .loop_summaries = &changed_summaries,
     }, 1))));
 
+    const footprint = [_]obligation.PlaceRef{.{ .root = "values", .region = .storage }};
     const dependency: obligation.LoopSummaryDependency = .{
         .id = 0,
         .structural_key = "body/op:4/scf.while",
         .summary_id = 2,
         .loop_vc_sha256 = [_]u8{9} ** 32,
+        .write_footprint = &footprint,
+        .write_footprint_complete = true,
         .target = .successor,
     };
     changed_edges = edges;
@@ -2880,7 +3135,33 @@ test "LoopVC digest covers every certificate-authority component class" {
     changed_summary = summary;
     changed_summary.edges = &changed_edges;
     changed_summaries[0] = changed_summary;
-    try std.testing.expect(!std.mem.eql(u8, &baseline, &(try loopVcSha256(.{
+    const dependency_baseline = try loopVcSha256(.{
+        .terms = &terms,
+        .assumptions = &assumptions,
+        .queries = &queries,
+        .loop_summaries = &changed_summaries,
+    }, 1);
+    try std.testing.expect(!std.mem.eql(u8, &baseline, &dependency_baseline));
+
+    var changed_dependency = dependency;
+    changed_dependency.write_footprint_complete = false;
+    changed_edges[0].summary_dependencies = &.{changed_dependency};
+    changed_summary.edges = &changed_edges;
+    changed_summaries[0] = changed_summary;
+    try std.testing.expect(!std.mem.eql(u8, &dependency_baseline, &(try loopVcSha256(.{
+        .terms = &terms,
+        .assumptions = &assumptions,
+        .queries = &queries,
+        .loop_summaries = &changed_summaries,
+    }, 1))));
+
+    const other_footprint = [_]obligation.PlaceRef{.{ .root = "other", .region = .storage }};
+    changed_dependency = dependency;
+    changed_dependency.write_footprint = &other_footprint;
+    changed_edges[0].summary_dependencies = &.{changed_dependency};
+    changed_summary.edges = &changed_edges;
+    changed_summaries[0] = changed_summary;
+    try std.testing.expect(!std.mem.eql(u8, &dependency_baseline, &(try loopVcSha256(.{
         .terms = &terms,
         .assumptions = &assumptions,
         .queries = &queries,

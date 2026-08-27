@@ -42,4 +42,28 @@ def loopTotalityRows : List (String × String × Bool × String × Bool) := [
   ("query_id_mismatch", "query_id_mismatch", false, "loop_summary_query_mismatch", true)
 ]
 
+def loopTimelineEventTags : List String := ["path_assumption", "safety_checkpoint", "storage_read", "storage_write", "summary_dependency"]
+
+def loopStorageProjectionTags : List String := ["field", "fixed_index", "mapping_key"]
+
+def loopTimelineValidationRows : List (String × String) := [
+  ("supported", ""),
+  ("timeline_missing", "loop_timeline_missing"),
+  ("event_order_invalid", "loop_timeline_event_order_invalid"),
+  ("event_identity_missing", "loop_timeline_event_identity_missing"),
+  ("event_identity_duplicate", "loop_timeline_event_identity_duplicate"),
+  ("path_missing", "loop_timeline_path_missing"),
+  ("view_mismatch", "loop_timeline_view_mismatch"),
+  ("storage_root_missing", "loop_storage_root_missing"),
+  ("storage_projection_invalid", "loop_storage_projection_invalid"),
+  ("storage_type_invalid", "loop_storage_type_invalid"),
+  ("read_identity_duplicate", "loop_storage_read_identity_duplicate"),
+  ("read_identity_foreign", "loop_storage_read_identity_foreign"),
+  ("read_identity_forward", "loop_storage_read_identity_forward"),
+  ("child_footprint_missing", "loop_storage_child_footprint_missing"),
+  ("dependency_order_invalid", "loop_summary_dependency_order_invalid"),
+  ("dependency_target_unsupported", "loop_summary_dependency_target_unsupported"),
+  ("body_safety_missing", "loop_body_safety_missing")
+]
+
 end Ora.Generated

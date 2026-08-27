@@ -80,6 +80,28 @@ const cases = [_]Mutation{
     .query_id_mismatch,
 };
 
+const TimelineMutation = enum {
+    supported,
+    timeline_missing,
+    event_order_invalid,
+    event_identity_missing,
+    event_identity_duplicate,
+    path_missing,
+    view_mismatch,
+    storage_root_missing,
+    storage_projection_invalid,
+    storage_type_invalid,
+    read_identity_duplicate,
+    read_identity_foreign,
+    read_identity_forward,
+    child_footprint_missing,
+    dependency_order_invalid,
+    dependency_target_unsupported,
+    body_safety_missing,
+};
+
+const timeline_cases = std.meta.tags(TimelineMutation);
+
 const ty_u256: obligation.TypeRef = .{
     .compiler_type_id = builtin.lookupBuiltinById(.u256).comptime_type_id,
 };
@@ -120,6 +142,15 @@ fn writeLeanString(writer: anytype, value: []const u8) !void {
         else => try writer.writeByte(byte),
     };
     try writer.writeByte('"');
+}
+
+fn writeTagNames(writer: anytype, comptime T: type) !void {
+    try writer.writeByte('[');
+    inline for (std.meta.tags(T), 0..) |tag, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writeLeanString(writer, @tagName(tag));
+    }
+    try writer.writeByte(']');
 }
 
 fn reasonName(support: obligation_to_lean.SemanticSupport) []const u8 {
@@ -229,6 +260,15 @@ fn supportFor(mutation: Mutation) obligation_to_lean.SemanticSupport {
         &init_formulas
     else
         &invariant_formulas;
+    const invariant_path_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 1 } }};
+    const unsupported_path_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
+    const backedge_path_exprs: []const obligation.LoopFormulaExpr = if (mutation == .missing_guard)
+        &.{}
+    else if (mutation == .unsupported_formula)
+        &unsupported_path_exprs
+    else
+        &invariant_path_exprs;
+    const safety_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 1 } }};
     const safety_checkpoints: []const obligation.LoopSafetyCheckpoint =
         if (mutation == .missing_body_safety)
             &.{}
@@ -239,10 +279,37 @@ fn supportFor(mutation: Mutation) obligation_to_lean.SemanticSupport {
                 .after_dependency_count = 0,
                 .formulas = &body_safety_formulas,
             }};
+    const backedge_timeline_with_safety = [_]obligation.LoopTimelineEvent{
+        .{
+            .id = 0,
+            .structural_key = "body/straight-line-yield/path",
+            .payload = .{ .path_assumption = .{ .formulas = backedge_path_exprs } },
+        },
+        .{
+            .id = 1,
+            .structural_key = "body/ora.assert:0",
+            .payload = .{ .safety_checkpoint = .{ .formulas = &safety_exprs } },
+        },
+    };
+    const backedge_timeline_without_safety = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "body/straight-line-yield/path",
+        .payload = .{ .path_assumption = .{ .formulas = backedge_path_exprs } },
+    }};
+    const backedge_timeline: []const obligation.LoopTimelineEvent = if (mutation == .missing_body_safety)
+        &backedge_timeline_without_safety
+    else
+        &backedge_timeline_with_safety;
+    const exit_timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "guard/false-successor/path",
+        .payload = .{ .path_assumption = .{ .formulas = &invariant_path_exprs } },
+    }};
     const edges = [_]obligation.LoopEdgeRow{
         .{
             .id = 0,
             .structural_key = "body/straight-line-yield",
+            .timeline = backedge_timeline,
             .path_formulas = backedge_path,
             .safety_checkpoints = safety_checkpoints,
             .next_state = assignments[0..],
@@ -251,6 +318,7 @@ fn supportFor(mutation: Mutation) obligation_to_lean.SemanticSupport {
         .{
             .id = 1,
             .structural_key = "guard/false-successor",
+            .timeline = &exit_timeline,
             .path_formulas = &invariant_formulas,
             .next_state = exit_assignments[0..],
             .target = .successor,
@@ -300,6 +368,165 @@ fn supportFor(mutation: Mutation) obligation_to_lean.SemanticSupport {
     return obligation_to_lean.querySemanticSupport(set, query);
 }
 
+fn timelineReason(mutation: TimelineMutation) ?obligation.LoopUnsupportedReason {
+    const path = [_]obligation.FormulaRef{.{ .term = 0 }};
+    const changed_path = [_]obligation.FormulaRef{.{ .term = 1 }};
+    const path_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
+    const safety = [_]obligation.LoopSafetyCheckpoint{.{
+        .id = 0,
+        .structural_key = "body/safety",
+        .after_dependency_count = 0,
+        .formulas = &path,
+    }};
+    const dependency: obligation.LoopSummaryDependency = .{
+        .id = 0,
+        .structural_key = "body/child",
+        .summary_id = 2,
+        .loop_vc_sha256 = [_]u8{0} ** 32,
+        .write_footprint_complete = true,
+        .target = .successor,
+    };
+    const read_id: obligation.FreeVarId = .{ .file_id = 10, .pattern_id = 90 };
+    const foreign_id: obligation.FreeVarId = .{ .file_id = 10, .pattern_id = 91 };
+    const read_refs = [_]obligation.FreeVarId{read_id};
+    const foreign_refs = [_]obligation.FreeVarId{foreign_id};
+    const location: obligation.LoopStorageLocationExpr = .{ .root = "counter", .value_ty = ty_u256 };
+    const path_event: obligation.LoopTimelineEvent = .{
+        .id = 0,
+        .structural_key = "body/path",
+        .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+    };
+    const read_event: obligation.LoopTimelineEvent = .{
+        .id = 1,
+        .structural_key = "body/read",
+        .payload = .{ .storage_read = .{ .result = read_id, .location = location } },
+    };
+    const write_event: obligation.LoopTimelineEvent = .{
+        .id = 2,
+        .structural_key = "body/write",
+        .payload = .{ .storage_write = .{
+            .location = location,
+            .value = .{ .formula = .{ .term = 0 }, .read_results = &read_refs },
+        } },
+    };
+    const safety_event: obligation.LoopTimelineEvent = .{
+        .id = 3,
+        .structural_key = "body/safety",
+        .payload = .{ .safety_checkpoint = .{ .formulas = &path_exprs } },
+    };
+    const dependency_event: obligation.LoopTimelineEvent = .{
+        .id = 4,
+        .structural_key = "body/child",
+        .payload = .{ .summary_dependency = dependency },
+    };
+    var timeline = [_]obligation.LoopTimelineEvent{
+        path_event,
+        read_event,
+        write_event,
+        safety_event,
+        dependency_event,
+    };
+    const no_path_timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "body/safety",
+        .payload = .{ .safety_checkpoint = .{ .formulas = &path_exprs } },
+    }};
+    const forward_timeline = [_]obligation.LoopTimelineEvent{
+        path_event,
+        .{
+            .id = 1,
+            .structural_key = "body/write",
+            .payload = write_event.payload,
+        },
+        .{
+            .id = 2,
+            .structural_key = "body/read",
+            .payload = read_event.payload,
+        },
+        safety_event,
+        dependency_event,
+    };
+    var timeline_slice: []const obligation.LoopTimelineEvent = &timeline;
+    var edge_path: []const obligation.FormulaRef = &path;
+
+    switch (mutation) {
+        .supported => {},
+        .timeline_missing => timeline_slice = &.{},
+        .event_order_invalid => timeline[1].id = 7,
+        .event_identity_missing => timeline[1].structural_key = "",
+        .event_identity_duplicate => timeline[1].structural_key = timeline[0].structural_key,
+        .path_missing => timeline_slice = &no_path_timeline,
+        .view_mismatch => edge_path = &changed_path,
+        .storage_root_missing => timeline[1].payload.storage_read.location.root = "",
+        .storage_projection_invalid => timeline[1].payload.storage_read.location.projections = &.{.{ .field = "" }},
+        .storage_type_invalid => timeline[1].payload.storage_read.location.value_ty = .{ .compiler_type_id = 0 },
+        .read_identity_duplicate => timeline[1].payload.storage_read.result = loop_id,
+        .read_identity_foreign => timeline[2].payload.storage_write.value.read_results = &foreign_refs,
+        .read_identity_forward => timeline_slice = &forward_timeline,
+        .child_footprint_missing => timeline[4].payload.summary_dependency.write_footprint_complete = false,
+        .dependency_order_invalid => timeline[4].payload.summary_dependency.id = 1,
+        .dependency_target_unsupported => timeline[4].payload.summary_dependency.target = .backedge,
+        .body_safety_missing => timeline[3].payload.safety_checkpoint.formulas = &.{},
+    }
+
+    const binding = [_]obligation.LoopStepAssignment{.{
+        .variable_index = 0,
+        .target = loop_id,
+        .source_key = "loop-state:0",
+        .value = .{ .term = 0 },
+        .read_results = &read_refs,
+    }};
+    const exit_timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "exit/path",
+        .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+    }};
+    const edges = [_]obligation.LoopEdgeRow{
+        .{
+            .id = 0,
+            .structural_key = "body",
+            .timeline = timeline_slice,
+            .path_formulas = edge_path,
+            .safety_checkpoints = &safety,
+            .summary_dependencies = &.{dependency},
+            .next_state = &binding,
+            .target = .backedge,
+        },
+        .{
+            .id = 1,
+            .structural_key = "exit",
+            .timeline = &exit_timeline,
+            .path_formulas = &path,
+            .next_state = &.{.{
+                .variable_index = 0,
+                .target = loop_id,
+                .source_key = "loop-state:0",
+                .value = .{ .term = 0 },
+            }},
+            .target = .successor,
+        },
+    };
+    const variables = [_]obligation.LoopVariable{.{
+        .index = 0,
+        .id = loop_id,
+        .name = "i",
+        .ty = ty_u256,
+    }};
+    const summary: obligation.LoopSummaryRow = .{
+        .id = summary_id,
+        .owner = .{ .statement = .{ .function_name = "run", .ordinal = 0 } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .loop_source_op_id = 0,
+        .loop_kind = .scf_while,
+        .variables = &variables,
+        .edges = &edges,
+        .projection_completeness = .complete,
+    };
+    return summary.validationReason();
+}
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     var stdout_buffer: [4096]u8 = undefined;
@@ -328,6 +555,23 @@ pub fn main(init: std.process.Init) !void {
         try writeLeanString(writer, reasonName(support));
         try writer.writeAll(if (leanDenotable(mutation)) ", true)" else ", false)");
         try writer.writeAll(if (index + 1 == cases.len) "\n" else ",\n");
+    }
+    try writer.writeAll("]\n\n");
+    try writer.writeAll("def loopTimelineEventTags : List String := ");
+    try writeTagNames(writer, obligation.LoopTimelineEventTag);
+    try writer.writeAll("\n\ndef loopStorageProjectionTags : List String := ");
+    try writeTagNames(writer, obligation.LoopStorageProjectionTag);
+    try writer.writeAll("\n\ndef loopTimelineValidationRows : List (String × String) := [\n");
+    for (timeline_cases, 0..) |mutation, index| {
+        try writer.writeAll("  (");
+        try writeLeanString(writer, @tagName(mutation));
+        try writer.writeAll(", ");
+        if (timelineReason(mutation)) |reason| {
+            try writeLeanString(writer, @tagName(reason));
+        } else {
+            try writeLeanString(writer, "");
+        }
+        try writer.writeAll(if (index + 1 == timeline_cases.len) ")\n" else "),\n");
     }
     try writer.writeAll("]\n\nend Ora.Generated\n");
     try writer.flush();

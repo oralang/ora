@@ -111,6 +111,26 @@ pub const ObligationSet = struct {
                 }
                 for (edge.target_formulas) |formula| try self.validateFormulaRef(formula);
                 for (edge.next_state) |binding| try self.validateFormulaRef(binding.value);
+                for (edge.timeline, 0..) |event, event_index| switch (event.payload) {
+                    .path_assumption => |path| for (path.formulas) |formula| {
+                        try self.validateLoopFormulaExpr(edge, event_index, formula);
+                    },
+                    .safety_checkpoint => |checkpoint| for (checkpoint.formulas) |formula| {
+                        try self.validateLoopFormulaExpr(edge, event_index, formula);
+                    },
+                    .storage_read => |read| try self.validateLoopStorageLocation(edge, event_index, read.location),
+                    .storage_write => |write| {
+                        try self.validateLoopStorageLocation(edge, event_index, write.location);
+                        try self.validateLoopFormulaExpr(edge, event_index, write.value);
+                    },
+                    .summary_dependency => {},
+                };
+                for (edge.next_state) |binding| {
+                    try self.validateLoopFormulaExpr(edge, edge.timeline.len, .{
+                        .formula = binding.value,
+                        .read_results = binding.read_results,
+                    });
+                }
             }
             for (summary.post_formulas) |formula| try self.validateFormulaRef(formula);
         }
@@ -137,6 +157,79 @@ pub const ObligationSet = struct {
             .origin_value => {},
             .term => |id| try self.validateTermId(id),
         }
+    }
+
+    fn validateLoopStorageLocation(
+        self: ObligationSet,
+        edge: LoopEdgeRow,
+        event_index: usize,
+        location: LoopStorageLocationExpr,
+    ) !void {
+        for (location.projections) |projection| switch (projection) {
+            .field => {},
+            .fixed_index, .mapping_key => |key| {
+                try self.validateLoopFormulaExpr(edge, event_index, key.value);
+            },
+        };
+    }
+
+    fn validateLoopFormulaExpr(
+        self: ObligationSet,
+        edge: LoopEdgeRow,
+        event_index: usize,
+        expression: LoopFormulaExpr,
+    ) !void {
+        try self.validateFormulaRef(expression.formula);
+        for (expression.read_results) |read_id| {
+            if (!self.formulaReferencesFreeVar(expression.formula, read_id)) {
+                return error.InvalidTimelineReadReference;
+            }
+        }
+        for (edge.timeline) |event| switch (event.payload) {
+            .storage_read => |read| {
+                if (!self.formulaReferencesFreeVar(expression.formula, read.result)) continue;
+                if (!freeVarInList(read.result, expression.read_results)) {
+                    return error.InvalidTimelineReadReference;
+                }
+                if (event.id >= event_index) return error.InvalidTimelineReadReference;
+            },
+            else => {},
+        };
+    }
+
+    pub fn formulaReferencesFreeVar(self: ObligationSet, formula: FormulaRef, target: FreeVarId) bool {
+        return switch (formula) {
+            .origin_value => false,
+            .term => |id| self.termReferencesFreeVar(id, target, self.terms.len + 1),
+        };
+    }
+
+    fn termReferencesFreeVar(self: ObligationSet, id: TermId, target: FreeVarId, fuel: usize) bool {
+        if (fuel == 0 or id >= self.terms.len) return false;
+        return switch (self.terms[id]) {
+            .variable => |variable| switch (variable) {
+                .free => |free| freeVarIdEql(free.id, target),
+                .bound => false,
+            },
+            .old => |operand| self.termReferencesFreeVar(operand, target, fuel - 1),
+            .unary => |unary| self.termReferencesFreeVar(unary.operand, target, fuel - 1),
+            .binary => |binary| self.termReferencesFreeVar(binary.lhs, target, fuel - 1) or
+                self.termReferencesFreeVar(binary.rhs, target, fuel - 1),
+            .refinement_predicate => |predicate| blk: {
+                if (self.termReferencesFreeVar(predicate.value, target, fuel - 1)) break :blk true;
+                for (predicate.args) |arg| {
+                    if (self.termReferencesFreeVar(arg, target, fuel - 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .quantified => |quantified| blk: {
+                if (quantified.condition) |condition| {
+                    if (self.termReferencesFreeVar(condition, target, fuel - 1)) break :blk true;
+                }
+                break :blk self.termReferencesFreeVar(quantified.body, target, fuel - 1);
+            },
+            .bool_lit, .int_lit, .result, .place_read => false,
+        };
     }
 
     fn validateTerm(self: ObligationSet, term: Term) !void {
@@ -895,6 +988,7 @@ pub const LoopSummaryRow = struct {
                 }
             }
             if (edge.path_formulas.len == 0) return .loop_edge_path_missing;
+            if (edge.timeline.len == 0) return .loop_timeline_missing;
             for (edge.safety_checkpoints, 0..) |checkpoint, checkpoint_index| {
                 if (checkpoint.id != checkpoint_index) {
                     return .loop_safety_checkpoint_order_invalid;
@@ -965,6 +1059,7 @@ pub const LoopSummaryRow = struct {
                     return .loop_state_binding_foreign;
                 }
             }
+            if (validateLoopTimeline(self, edge)) |reason| return reason;
         }
         if (!has_backedge) return .loop_backedge_missing;
         if (!has_exit) return .loop_exit_edge_missing;
@@ -997,6 +1092,7 @@ pub const LoopStepAssignment = struct {
     /// post-state component on the containing structural path.
     source_key: []const u8 = "",
     value: FormulaRef,
+    read_results: []const FreeVarId = &.{},
 };
 
 pub const LoopControlTarget = enum(u8) {
@@ -1025,11 +1121,86 @@ pub const LoopProjectionCompleteness = enum(u8) {
     path_limit_exceeded,
 };
 
+pub const LoopStorageProjectionTag = enum(u8) {
+    field,
+    fixed_index,
+    mapping_key,
+};
+
+pub const LoopFormulaExpr = struct {
+    formula: FormulaRef,
+    /// Read-result identities referenced by this expression. The manifest
+    /// validator checks these declarations against the term DAG and rejects
+    /// foreign or forward identities.
+    read_results: []const FreeVarId = &.{},
+};
+
+pub const LoopTypedFormula = struct {
+    value: LoopFormulaExpr,
+    ty: TypeRef,
+};
+
+/// One ordered projection from a persistent storage root. Keeping field and
+/// key projections in one sequence distinguishes `array[i].field` from
+/// `field.array[i]` and keeps fixed-array and mapping domains distinct.
+pub const LoopStorageProjection = union(LoopStorageProjectionTag) {
+    field: []const u8,
+    fixed_index: LoopTypedFormula,
+    mapping_key: LoopTypedFormula,
+};
+
+pub const LoopStorageLocationExpr = struct {
+    root: []const u8,
+    projections: []const LoopStorageProjection = &.{},
+    value_ty: TypeRef,
+};
+
+pub const LoopTimelineFormulaEvent = struct {
+    formulas: []const LoopFormulaExpr,
+};
+
+pub const LoopStorageReadEvent = struct {
+    result: FreeVarId,
+    location: LoopStorageLocationExpr,
+};
+
+pub const LoopStorageWriteEvent = struct {
+    location: LoopStorageLocationExpr,
+    value: LoopFormulaExpr,
+};
+
+pub const LoopTimelineEventTag = enum(u8) {
+    path_assumption,
+    safety_checkpoint,
+    storage_read,
+    storage_write,
+    summary_dependency,
+};
+
+pub const LoopTimelineEventPayload = union(LoopTimelineEventTag) {
+    path_assumption: LoopTimelineFormulaEvent,
+    safety_checkpoint: LoopTimelineFormulaEvent,
+    storage_read: LoopStorageReadEvent,
+    storage_write: LoopStorageWriteEvent,
+    summary_dependency: LoopSummaryDependency,
+};
+
+pub const LoopTimelineEvent = struct {
+    id: u32,
+    structural_key: []const u8,
+    payload: LoopTimelineEventPayload,
+};
+
 pub const LoopEdgeRow = struct {
     id: u32,
     /// Deterministic identity of the verifier-input MLIR path ending at this
     /// edge.  It is proof-relevant certificate data, not a display label.
     structural_key: []const u8 = "",
+    /// Single proof-relevant execution order for assumptions, safety checks,
+    /// storage actions, and certified child summaries. During schema migration
+    /// the legacy views below are retained only for exact parity checking; they
+    /// are not an independent execution authority.
+    timeline: []const LoopTimelineEvent = &.{},
     path_formulas: []const FormulaRef = &.{},
     /// Safety assertions in verifier-input execution order. Stage zero is
     /// before every nested-loop dependency; stage `k` is after the first `k`
@@ -1053,6 +1224,218 @@ pub const LoopEdgeRow = struct {
     }
 };
 
+fn typeRefExplicit(ty: TypeRef) bool {
+    return switch (ty) {
+        .spelling => |spelling| spelling.len != 0,
+        .compiler_type_id => |id| id != 0,
+    };
+}
+
+fn freeVarInList(id: FreeVarId, values: []const FreeVarId) bool {
+    for (values) |candidate| if (freeVarIdEql(id, candidate)) return true;
+    return false;
+}
+
+fn timelineContainsReadIdentity(events: []const LoopTimelineEvent, id: FreeVarId) bool {
+    for (events) |event| switch (event.payload) {
+        .storage_read => |read| if (freeVarIdEql(read.result, id)) return true,
+        else => {},
+    };
+    return false;
+}
+
+fn timelineReadReferencesReason(
+    events: []const LoopTimelineEvent,
+    event_index: usize,
+    references: []const FreeVarId,
+) ?LoopUnsupportedReason {
+    for (references, 0..) |reference, index| {
+        for (references[0..index]) |previous| {
+            if (freeVarIdEql(previous, reference)) return .loop_storage_read_identity_duplicate;
+        }
+        var found_before = false;
+        for (events[0..event_index]) |event| switch (event.payload) {
+            .storage_read => |read| if (freeVarIdEql(read.result, reference)) {
+                found_before = true;
+                break;
+            },
+            else => {},
+        };
+        if (found_before) continue;
+        if (timelineContainsReadIdentity(events[event_index..], reference)) {
+            return .loop_storage_read_identity_forward;
+        }
+        return .loop_storage_read_identity_foreign;
+    }
+    return null;
+}
+
+fn storageLocationReason(
+    events: []const LoopTimelineEvent,
+    event_index: usize,
+    location: LoopStorageLocationExpr,
+) ?LoopUnsupportedReason {
+    if (location.root.len == 0) return .loop_storage_root_missing;
+    if (!typeRefExplicit(location.value_ty)) return .loop_storage_type_invalid;
+    for (location.projections) |projection| switch (projection) {
+        .field => |field| if (field.len == 0) return .loop_storage_projection_invalid,
+        .fixed_index, .mapping_key => |key| {
+            if (!typeRefExplicit(key.ty)) return .loop_storage_type_invalid;
+            if (timelineReadReferencesReason(events, event_index, key.value.read_results)) |reason| {
+                return reason;
+            }
+        },
+    };
+    return null;
+}
+
+fn formulaEventReason(
+    events: []const LoopTimelineEvent,
+    event_index: usize,
+    formulas: []const LoopFormulaExpr,
+    missing_reason: LoopUnsupportedReason,
+) ?LoopUnsupportedReason {
+    if (formulas.len == 0) return missing_reason;
+    for (formulas) |formula| {
+        if (timelineReadReferencesReason(events, event_index, formula.read_results)) |reason| return reason;
+    }
+    return null;
+}
+
+fn loopFormulaRefEql(lhs: FormulaRef, rhs: FormulaRef) bool {
+    return switch (lhs) {
+        .term => |left| switch (rhs) {
+            .term => |right| left == right,
+            else => false,
+        },
+        .origin_value => |left| switch (rhs) {
+            .origin_value => |right| std.meta.eql(left, right),
+            else => false,
+        },
+    };
+}
+
+fn loopSummaryDependencyEql(lhs: LoopSummaryDependency, rhs: LoopSummaryDependency) bool {
+    if (lhs.id != rhs.id or
+        !std.mem.eql(u8, lhs.structural_key, rhs.structural_key) or
+        lhs.summary_id != rhs.summary_id or
+        !std.mem.eql(u8, &lhs.loop_vc_sha256, &rhs.loop_vc_sha256) or
+        lhs.target != rhs.target or
+        lhs.write_footprint_complete != rhs.write_footprint_complete or
+        lhs.write_footprint.len != rhs.write_footprint.len)
+    {
+        return false;
+    }
+    for (lhs.write_footprint, rhs.write_footprint) |left, right| {
+        if (!placeRefEql(left, right)) return false;
+    }
+    return true;
+}
+
+fn loopTimelineViewsMatch(edge: LoopEdgeRow) bool {
+    var path_index: usize = 0;
+    var checkpoint_index: usize = 0;
+    var dependency_index: usize = 0;
+    var preceding_dependencies: u32 = 0;
+    for (edge.timeline) |event| switch (event.payload) {
+        .path_assumption => |path| for (path.formulas) |expression| {
+            if (path_index >= edge.path_formulas.len or
+                !loopFormulaRefEql(expression.formula, edge.path_formulas[path_index])) return false;
+            path_index += 1;
+        },
+        .safety_checkpoint => |checkpoint| {
+            if (checkpoint_index >= edge.safety_checkpoints.len) return false;
+            const view = edge.safety_checkpoints[checkpoint_index];
+            const checkpoint_id = std.math.cast(u32, checkpoint_index) orelse return false;
+            if (view.id != checkpoint_id or
+                !std.mem.eql(u8, view.structural_key, event.structural_key) or
+                view.after_dependency_count != preceding_dependencies or
+                view.formulas.len != checkpoint.formulas.len) return false;
+            for (view.formulas, checkpoint.formulas) |left, right| {
+                if (!loopFormulaRefEql(left, right.formula)) return false;
+            }
+            checkpoint_index += 1;
+        },
+        .summary_dependency => |dependency| {
+            if (dependency_index >= edge.summary_dependencies.len or
+                !loopSummaryDependencyEql(dependency, edge.summary_dependencies[dependency_index])) return false;
+            dependency_index += 1;
+            preceding_dependencies += 1;
+        },
+        .storage_read, .storage_write => {},
+    };
+    return path_index == edge.path_formulas.len and
+        checkpoint_index == edge.safety_checkpoints.len and
+        dependency_index == edge.summary_dependencies.len;
+}
+
+fn validateLoopTimeline(summary: LoopSummaryRow, edge: LoopEdgeRow) ?LoopUnsupportedReason {
+    var has_path = false;
+    var dependency_index: u32 = 0;
+    for (edge.timeline, 0..) |event, event_index| {
+        if (event.id != event_index) return .loop_timeline_event_order_invalid;
+        if (event.structural_key.len == 0) return .loop_timeline_event_identity_missing;
+        for (edge.timeline[0..event_index]) |previous| {
+            if (std.mem.eql(u8, previous.structural_key, event.structural_key)) {
+                return .loop_timeline_event_identity_duplicate;
+            }
+        }
+        switch (event.payload) {
+            .path_assumption => |path| {
+                has_path = true;
+                if (formulaEventReason(edge.timeline, event_index, path.formulas, .loop_timeline_path_missing)) |reason| {
+                    return reason;
+                }
+            },
+            .safety_checkpoint => |checkpoint| {
+                if (formulaEventReason(edge.timeline, event_index, checkpoint.formulas, .loop_body_safety_missing)) |reason| {
+                    return reason;
+                }
+            },
+            .storage_read => |read| {
+                if (storageLocationReason(edge.timeline, event_index, read.location)) |reason| return reason;
+                for (summary.context_variables) |variable| if (variable.id) |id| {
+                    if (freeVarIdEql(id, read.result)) return .loop_storage_read_identity_duplicate;
+                };
+                for (summary.variables) |variable| if (variable.id) |id| {
+                    if (freeVarIdEql(id, read.result)) return .loop_storage_read_identity_duplicate;
+                };
+                for (edge.timeline[0..event_index]) |previous| switch (previous.payload) {
+                    .storage_read => |prior_read| if (freeVarIdEql(prior_read.result, read.result)) {
+                        return .loop_storage_read_identity_duplicate;
+                    },
+                    else => {},
+                };
+            },
+            .storage_write => |write| {
+                if (storageLocationReason(edge.timeline, event_index, write.location)) |reason| return reason;
+                if (timelineReadReferencesReason(edge.timeline, event_index, write.value.read_results)) |reason| {
+                    return reason;
+                }
+            },
+            .summary_dependency => |dependency| {
+                if (dependency.id != dependency_index) return .loop_summary_dependency_order_invalid;
+                dependency_index += 1;
+                if (!dependency.targetSupported()) return .loop_summary_dependency_target_unsupported;
+                if (!dependency.write_footprint_complete) return .loop_storage_child_footprint_missing;
+                for (dependency.write_footprint) |place| {
+                    if (place.region != .storage or place.root.len == 0) {
+                        return .loop_storage_projection_invalid;
+                    }
+                }
+            },
+        }
+    }
+    if (!has_path) return .loop_timeline_path_missing;
+    for (edge.next_state) |binding| {
+        if (timelineReadReferencesReason(edge.timeline, edge.timeline.len, binding.read_results)) |reason| {
+            return reason;
+        }
+    }
+    if (!loopTimelineViewsMatch(edge)) return .loop_timeline_view_mismatch;
+    return null;
+}
+
 pub const LoopSafetyCheckpoint = struct {
     id: u32,
     /// Deterministic identity of the verifier-input safety operation.
@@ -1068,6 +1451,10 @@ pub const LoopSummaryDependency = struct {
     structural_key: []const u8,
     summary_id: Id,
     loop_vc_sha256: [32]u8,
+    /// Certified over-approximation of persistent locations the child may
+    /// mutate. The child's certificate binds this list to its LoopVC digest.
+    write_footprint: []const PlaceRef = &.{},
+    write_footprint_complete: bool = false,
     /// Exact terminating control relation consumed from the inner summary.
     target: LoopControlTarget,
 
@@ -1093,10 +1480,22 @@ test "loop projection completeness and structural identities fail closed" {
         .value = .{ .term = 0 },
     }};
     const path = [_]FormulaRef{.{ .term = 0 }};
+    const path_exprs = [_]LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
+    const backedge_timeline = [_]LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "body/straight-line-yield/path",
+        .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+    }};
+    const exit_timeline = [_]LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "guard/false-successor/path",
+        .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+    }};
     const canonical_edges = [_]LoopEdgeRow{
         .{
             .id = 0,
             .structural_key = "body/straight-line-yield",
+            .timeline = &backedge_timeline,
             .path_formulas = &path,
             .next_state = &bindings,
             .target = .backedge,
@@ -1104,6 +1503,7 @@ test "loop projection completeness and structural identities fail closed" {
         .{
             .id = 1,
             .structural_key = "guard/false-successor",
+            .timeline = &exit_timeline,
             .path_formulas = &path,
             .next_state = &bindings,
             .target = .successor,
@@ -1156,18 +1556,38 @@ test "loop summary dependencies are ordered bound and fail closed before denotat
         .value = .{ .term = 0 },
     }};
     const path = [_]FormulaRef{.{ .term = 0 }};
+    const path_exprs = [_]LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
     const digest = [_]u8{7} ** 32;
     const dependency: LoopSummaryDependency = .{
         .id = 0,
         .structural_key = "body/op:4/scf.while",
         .summary_id = 2,
         .loop_vc_sha256 = digest,
+        .write_footprint_complete = true,
         .target = .successor,
     };
+    const outer_timeline = [_]LoopTimelineEvent{
+        .{
+            .id = 0,
+            .structural_key = "body/yield/path",
+            .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+        },
+        .{
+            .id = 1,
+            .structural_key = dependency.structural_key,
+            .payload = .{ .summary_dependency = dependency },
+        },
+    };
+    const outer_exit_timeline = [_]LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "guard/false-successor/path",
+        .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+    }};
     var outer_edges = [_]LoopEdgeRow{
         .{
             .id = 0,
             .structural_key = "body/yield",
+            .timeline = &outer_timeline,
             .path_formulas = &path,
             .summary_dependencies = &.{dependency},
             .next_state = &bindings,
@@ -1176,6 +1596,7 @@ test "loop summary dependencies are ordered bound and fail closed before denotat
         .{
             .id = 1,
             .structural_key = "guard/false-successor",
+            .timeline = &outer_exit_timeline,
             .path_formulas = &path,
             .next_state = &bindings,
             .target = .successor,
@@ -1202,7 +1623,18 @@ test "loop summary dependencies are ordered bound and fail closed before denotat
         .after_dependency_count = 1,
         .formulas = &safety_formulas,
     };
+    const safety_exprs = [_]LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
+    const outer_timeline_with_checkpoint = [_]LoopTimelineEvent{
+        outer_timeline[0],
+        outer_timeline[1],
+        .{
+            .id = 2,
+            .structural_key = checkpoint.structural_key,
+            .payload = .{ .safety_checkpoint = .{ .formulas = &safety_exprs } },
+        },
+    };
     outer_edges[0].safety_checkpoints = &.{checkpoint};
+    outer_edges[0].timeline = &outer_timeline_with_checkpoint;
     try std.testing.expectEqual(@as(?LoopUnsupportedReason, null), outer.validationReason());
 
     var malformed_checkpoint = checkpoint;
@@ -1276,6 +1708,11 @@ test "loop summary dependencies are ordered bound and fail closed before denotat
         .{
             .id = 0,
             .structural_key = "inner/body/yield",
+            .timeline = &.{.{
+                .id = 0,
+                .structural_key = "inner/body/yield/path",
+                .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+            }},
             .path_formulas = &path,
             .next_state = &bindings,
             .target = .backedge,
@@ -1283,6 +1720,11 @@ test "loop summary dependencies are ordered bound and fail closed before denotat
         .{
             .id = 1,
             .structural_key = "inner/guard/false-successor",
+            .timeline = &.{.{
+                .id = 0,
+                .structural_key = "inner/guard/false-successor/path",
+                .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+            }},
             .path_formulas = &path,
             .next_state = &bindings,
             .target = .successor,
@@ -1329,6 +1771,218 @@ test "loop summary dependencies are ordered bound and fail closed before denotat
     var cyclic_outer = outer;
     cyclic_outer.edges = &outer_edges;
     try std.testing.expectError(error.InvalidDependency, set.validateLoopSummaryDependencies(cyclic_outer));
+}
+
+test "ordered loop timeline schema rejects identity order and read-reference mutations" {
+    const loop_id: FreeVarId = .{ .file_id = 1, .pattern_id = 1 };
+    const read_id: FreeVarId = .{ .file_id = 1, .pattern_id = 90 };
+    const foreign_id: FreeVarId = .{ .file_id = 1, .pattern_id = 91 };
+    const ty: TypeRef = .{ .compiler_type_id = 6 };
+    const terms = [_]Term{
+        .{ .bool_lit = true },
+        .{ .variable = .{ .free = .{ .id = read_id, .name = "read", .ty = ty } } },
+        .{ .int_lit = .{ .value = "0", .ty = ty } },
+    };
+    const path_formulas = [_]FormulaRef{.{ .term = 0 }};
+    const path_exprs = [_]LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
+    const read_refs = [_]FreeVarId{read_id};
+    const location: LoopStorageLocationExpr = .{ .root = "counter", .value_ty = ty };
+    const timeline = [_]LoopTimelineEvent{
+        .{
+            .id = 0,
+            .structural_key = "body/path",
+            .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+        },
+        .{
+            .id = 1,
+            .structural_key = "body/read",
+            .payload = .{ .storage_read = .{ .result = read_id, .location = location } },
+        },
+        .{
+            .id = 2,
+            .structural_key = "body/write",
+            .payload = .{ .storage_write = .{
+                .location = location,
+                .value = .{ .formula = .{ .term = 1 }, .read_results = &read_refs },
+            } },
+        },
+    };
+    const variables = [_]LoopVariable{.{
+        .index = 0,
+        .id = loop_id,
+        .ty = ty,
+    }};
+    const bindings = [_]LoopStepAssignment{.{
+        .variable_index = 0,
+        .target = loop_id,
+        .source_key = "loop-state:0",
+        .value = .{ .term = 1 },
+        .read_results = &read_refs,
+    }};
+    const exit_bindings = [_]LoopStepAssignment{.{
+        .variable_index = 0,
+        .target = loop_id,
+        .source_key = "loop-state:0",
+        .value = .{ .term = 2 },
+    }};
+    var edges = [_]LoopEdgeRow{
+        .{
+            .id = 0,
+            .structural_key = "body/yield",
+            .timeline = &timeline,
+            .path_formulas = &path_formulas,
+            .next_state = &bindings,
+            .target = .backedge,
+        },
+        .{
+            .id = 1,
+            .structural_key = "guard/false-successor",
+            .timeline = &.{.{
+                .id = 0,
+                .structural_key = "guard/false-successor/path",
+                .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+            }},
+            .path_formulas = &path_formulas,
+            .next_state = &exit_bindings,
+            .target = .successor,
+        },
+    };
+    var summary: LoopSummaryRow = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "run" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .loop_source_op_id = 0,
+        .loop_kind = .scf_while,
+        .variables = &variables,
+        .edges = &edges,
+        .projection_completeness = .complete,
+    };
+    try std.testing.expectEqual(@as(?LoopUnsupportedReason, null), summary.validationReason());
+    const set: ObligationSet = .{ .terms = &terms, .loop_summaries = &.{summary} };
+    try set.validateTermReferences();
+
+    const path_event = timeline[0];
+    const read_event = timeline[1];
+    const write_first_event: LoopTimelineEvent = .{
+        .id = 1,
+        .structural_key = "body/write",
+        .payload = .{ .storage_write = .{
+            .location = location,
+            .value = .{ .formula = .{ .term = 2 } },
+        } },
+    };
+    const read_second_event: LoopTimelineEvent = .{
+        .id = 2,
+        .structural_key = "body/read",
+        .payload = read_event.payload,
+    };
+    const second_write_event: LoopTimelineEvent = .{
+        .id = 2,
+        .structural_key = "body/write:1",
+        .payload = write_first_event.payload,
+    };
+    const checkpoint: LoopSafetyCheckpoint = .{
+        .id = 0,
+        .structural_key = "body/check",
+        .after_dependency_count = 0,
+        .formulas = &path_formulas,
+    };
+    const checkpoint_event: LoopTimelineEvent = .{
+        .id = 1,
+        .structural_key = checkpoint.structural_key,
+        .payload = .{ .safety_checkpoint = .{ .formulas = &path_exprs } },
+    };
+    const dependency: LoopSummaryDependency = .{
+        .id = 0,
+        .structural_key = "body/child",
+        .summary_id = 2,
+        .loop_vc_sha256 = [_]u8{7} ** 32,
+        .write_footprint_complete = true,
+        .target = .successor,
+    };
+    const dependency_event: LoopTimelineEvent = .{
+        .id = 1,
+        .structural_key = dependency.structural_key,
+        .payload = .{ .summary_dependency = dependency },
+    };
+    const accepted_timelines = [_][]const LoopTimelineEvent{
+        &.{path_event},
+        &.{ path_event, read_event },
+        &.{ path_event, write_first_event },
+        &timeline,
+        &.{ path_event, write_first_event, read_second_event },
+        &.{ path_event, write_first_event, second_write_event },
+    };
+    edges[0].next_state = &exit_bindings;
+    for (accepted_timelines) |accepted| {
+        edges[0].timeline = accepted;
+        try std.testing.expectEqual(@as(?LoopUnsupportedReason, null), summary.validationReason());
+    }
+    edges[0].timeline = &.{ path_event, checkpoint_event };
+    edges[0].safety_checkpoints = &.{checkpoint};
+    try std.testing.expectEqual(@as(?LoopUnsupportedReason, null), summary.validationReason());
+    edges[0].safety_checkpoints = &.{};
+    edges[0].timeline = &.{ path_event, dependency_event };
+    edges[0].summary_dependencies = &.{dependency};
+    try std.testing.expectEqual(@as(?LoopUnsupportedReason, null), summary.validationReason());
+    edges[0].summary_dependencies = &.{};
+    edges[0].next_state = &bindings;
+
+    var malformed_timeline = timeline;
+    malformed_timeline[1].id = 7;
+    edges[0].timeline = &malformed_timeline;
+    try std.testing.expectEqual(
+        LoopUnsupportedReason.loop_timeline_event_order_invalid,
+        summary.validationReason().?,
+    );
+
+    malformed_timeline = timeline;
+    malformed_timeline[1].structural_key = timeline[0].structural_key;
+    edges[0].timeline = &malformed_timeline;
+    try std.testing.expectEqual(
+        LoopUnsupportedReason.loop_timeline_event_identity_duplicate,
+        summary.validationReason().?,
+    );
+
+    const forward_timeline = [_]LoopTimelineEvent{
+        timeline[0],
+        .{
+            .id = 1,
+            .structural_key = "body/write",
+            .payload = timeline[2].payload,
+        },
+        .{
+            .id = 2,
+            .structural_key = "body/read",
+            .payload = timeline[1].payload,
+        },
+    };
+    edges[0].timeline = &forward_timeline;
+    try std.testing.expectEqual(
+        LoopUnsupportedReason.loop_storage_read_identity_forward,
+        summary.validationReason().?,
+    );
+
+    var foreign_refs = [_]FreeVarId{foreign_id};
+    var foreign_write = timeline[2];
+    foreign_write.payload.storage_write.value.read_results = &foreign_refs;
+    const foreign_timeline = [_]LoopTimelineEvent{ timeline[0], timeline[1], foreign_write };
+    edges[0].timeline = &foreign_timeline;
+    try std.testing.expectEqual(
+        LoopUnsupportedReason.loop_storage_read_identity_foreign,
+        summary.validationReason().?,
+    );
+
+    edges[0].timeline = &timeline;
+    var undeclared_binding = bindings;
+    undeclared_binding[0].read_results = &.{};
+    edges[0].next_state = &undeclared_binding;
+    var invalid_summary = summary;
+    invalid_summary.edges = &edges;
+    const invalid_set: ObligationSet = .{ .terms = &terms, .loop_summaries = &.{invalid_summary} };
+    try std.testing.expectError(error.InvalidTimelineReadReference, invalid_set.validateTermReferences());
 }
 
 pub const LoopQueryIds = struct {
@@ -1400,6 +2054,19 @@ pub const LoopUnsupportedReason = enum(u8) {
     loop_safety_checkpoint_identity_missing,
     loop_safety_checkpoint_identity_duplicate,
     loop_safety_checkpoint_stage_invalid,
+    loop_timeline_missing,
+    loop_timeline_event_order_invalid,
+    loop_timeline_event_identity_missing,
+    loop_timeline_event_identity_duplicate,
+    loop_timeline_path_missing,
+    loop_timeline_view_mismatch,
+    loop_storage_root_missing,
+    loop_storage_projection_invalid,
+    loop_storage_type_invalid,
+    loop_storage_read_identity_duplicate,
+    loop_storage_read_identity_foreign,
+    loop_storage_read_identity_forward,
+    loop_storage_child_footprint_missing,
     loop_value_type_unresolved,
     loop_value_width_mismatch,
     loop_value_signedness_mismatch,
@@ -2107,6 +2774,8 @@ test "manifest enum tags stay byte-sized" {
         OwnerTag,
         BackendComponent,
         LoopKind,
+        LoopStorageProjectionTag,
+        LoopTimelineEventTag,
         LoopUnsupportedReason,
         OriginTag,
         EffectAccess,

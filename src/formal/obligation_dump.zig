@@ -705,7 +705,12 @@ fn writeFormulaField(writer: anytype, formula: obligation.FormulaRef) !void {
 }
 
 fn writeFormulaFieldNamed(writer: anytype, comptime name: []const u8, formula: obligation.FormulaRef) !void {
-    try writeTaggedFieldPrefix(writer, name, @tagName(formula));
+    try writeFieldPrefix(writer, name);
+    try writeFormulaObject(writer, formula);
+}
+
+fn writeFormulaObject(writer: anytype, formula: obligation.FormulaRef) !void {
+    try writeTaggedObjectPrefix(writer, @tagName(formula));
     switch (formula) {
         .origin_value => |value| {
             try writeOriginField(writer, value.origin);
@@ -802,6 +807,7 @@ fn writeLoopStepAssignments(
         }
         try writeStringField(writer, "source_key", assignment.source_key);
         try writeFormulaFieldNamed(writer, "value", assignment.value);
+        try writeFreeVarIdListFieldNamed(writer, "read_results", assignment.read_results);
         try writer.writeByte('}');
     }
     try writer.writeByte(']');
@@ -818,6 +824,7 @@ fn writeLoopEdgeListField(
         try writer.writeAll("{\"id\":");
         try writer.print("{d}", .{edge.id});
         try writeStringField(writer, "structural_key", edge.structural_key);
+        try writeLoopTimelineField(writer, edge.timeline);
         try writeFormulaListField(writer, "path_formulas", edge.path_formulas);
         try writeLoopSafetyCheckpointListField(writer, edge.safety_checkpoints);
         try writeLoopSummaryDependencyListField(writer, edge.summary_dependencies);
@@ -859,12 +866,124 @@ fn writeLoopSummaryDependencyListField(
     try writer.writeByte('[');
     for (dependencies, 0..) |dependency, index| {
         if (index != 0) try writer.writeByte(',');
+        try writeLoopSummaryDependencyObject(writer, dependency);
+    }
+    try writer.writeByte(']');
+}
+
+fn writeFreeVarIdListFieldNamed(
+    writer: anytype,
+    comptime name: []const u8,
+    ids: []const obligation.FreeVarId,
+) !void {
+    try writeFieldPrefix(writer, name);
+    try writer.writeByte('[');
+    for (ids, 0..) |id, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writeFreeVarIdObject(writer, id);
+    }
+    try writer.writeByte(']');
+}
+
+fn writeLoopFormulaExprObject(writer: anytype, expression: obligation.LoopFormulaExpr) !void {
+    try writer.writeAll("{\"formula\":");
+    try writeFormulaObject(writer, expression.formula);
+    try writeFreeVarIdListFieldNamed(writer, "read_results", expression.read_results);
+    try writer.writeByte('}');
+}
+
+fn writeLoopFormulaExprListField(
+    writer: anytype,
+    comptime name: []const u8,
+    expressions: []const obligation.LoopFormulaExpr,
+) !void {
+    try writeFieldPrefix(writer, name);
+    try writer.writeByte('[');
+    for (expressions, 0..) |expression, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writeLoopFormulaExprObject(writer, expression);
+    }
+    try writer.writeByte(']');
+}
+
+fn writeLoopTypedFormulaObject(writer: anytype, expression: obligation.LoopTypedFormula) !void {
+    try writer.writeAll("{\"value\":");
+    try writeLoopFormulaExprObject(writer, expression.value);
+    try writeTypeRefField(writer, "ty", expression.ty);
+    try writer.writeByte('}');
+}
+
+fn writeLoopStorageLocationObject(
+    writer: anytype,
+    location: obligation.LoopStorageLocationExpr,
+) !void {
+    try writer.writeAll("{\"root\":");
+    try writeJsonString(writer, location.root);
+    try writer.writeAll(",\"projections\":[");
+    for (location.projections, 0..) |projection, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writeTaggedObjectPrefix(writer, @tagName(projection));
+        switch (projection) {
+            .field => |field| try writeStringField(writer, "field", field),
+            .fixed_index, .mapping_key => |value| {
+                try writeFieldPrefix(writer, "value");
+                try writeLoopTypedFormulaObject(writer, value);
+            },
+        }
+        try writer.writeByte('}');
+    }
+    try writer.writeByte(']');
+    try writeTypeRefField(writer, "value_ty", location.value_ty);
+    try writer.writeByte('}');
+}
+
+fn writeLoopSummaryDependencyObject(
+    writer: anytype,
+    dependency: obligation.LoopSummaryDependency,
+) !void {
+    try writer.writeAll("{\"id\":");
+    try writer.print("{d}", .{dependency.id});
+    try writeStringField(writer, "structural_key", dependency.structural_key);
+    try writeNumberField(writer, "summary_id", dependency.summary_id);
+    try writeOptionalSha256Field(writer, "loop_vc_sha256", dependency.loop_vc_sha256);
+    try writeStringField(writer, "target", @tagName(dependency.target));
+    try writePlaceListField(writer, "write_footprint", dependency.write_footprint);
+    try writeBoolField(writer, "write_footprint_complete", dependency.write_footprint_complete);
+    try writer.writeByte('}');
+}
+
+fn writeLoopTimelineField(
+    writer: anytype,
+    events: []const obligation.LoopTimelineEvent,
+) !void {
+    try writeFieldPrefix(writer, "timeline");
+    try writer.writeByte('[');
+    for (events, 0..) |event, index| {
+        if (index != 0) try writer.writeByte(',');
         try writer.writeAll("{\"id\":");
-        try writer.print("{d}", .{dependency.id});
-        try writeStringField(writer, "structural_key", dependency.structural_key);
-        try writeNumberField(writer, "summary_id", dependency.summary_id);
-        try writeOptionalSha256Field(writer, "loop_vc_sha256", dependency.loop_vc_sha256);
-        try writeStringField(writer, "target", @tagName(dependency.target));
+        try writer.print("{d}", .{event.id});
+        try writeStringField(writer, "structural_key", event.structural_key);
+        try writeStringField(writer, "tag", @tagName(event.payload));
+        switch (event.payload) {
+            .path_assumption, .safety_checkpoint => |formula_event| {
+                try writeLoopFormulaExprListField(writer, "formulas", formula_event.formulas);
+            },
+            .storage_read => |read| {
+                try writeFreeVarIdNamedField(writer, "result", read.result);
+                try writeFieldPrefix(writer, "location");
+                try writeLoopStorageLocationObject(writer, read.location);
+            },
+            .storage_write => |storage_write| {
+                try writeFieldPrefix(writer, "location");
+                try writeLoopStorageLocationObject(writer, storage_write.location);
+                try writeFieldPrefix(writer, "value");
+                try writeLoopFormulaExprObject(writer, storage_write.value);
+            },
+            .summary_dependency => |dependency| {
+                try writeFieldPrefix(writer, "dependency");
+                try writeLoopSummaryDependencyObject(writer, dependency);
+            },
+        }
         try writer.writeByte('}');
     }
     try writer.writeByte(']');
@@ -1570,6 +1689,13 @@ test "json-lines dump pins owner-scoped loop summary schema without authorizing 
     const edge: obligation.LoopEdgeRow = .{
         .id = 0,
         .structural_key = "body/straight-line-yield",
+        .timeline = &.{.{
+            .id = 0,
+            .structural_key = "body/path",
+            .payload = .{ .path_assumption = .{
+                .formulas = &.{.{ .formula = .{ .term = 0 } }},
+            } },
+        }},
         .path_formulas = &.{.{ .term = 0 }},
         .target = .backedge,
     };
@@ -1578,7 +1704,10 @@ test "json-lines dump pins owner-scoped loop summary schema without authorizing 
     try writeLoopEdgeListField(&edge_json.writer, &.{edge});
     try std.testing.expectEqualStrings(
         ",\"edges\":[{\"id\":0,\"structural_key\":\"body/straight-line-yield\"," ++
-            "\"path_formulas\":[{\"tag\":\"term\",\"id\":0}],\"safety_checkpoints\":[]," ++
+            "\"timeline\":[{\"id\":0,\"structural_key\":\"body/path\",\"tag\":\"path_assumption\"," ++
+            "\"formulas\":[{\"formula\":{\"tag\":\"term\",\"id\":0},\"read_results\":[]}]}]," ++
+            "\"path_formulas\":[{\"tag\":\"term\",\"id\":0}]," ++
+            "\"safety_checkpoints\":[]," ++
             "\"summary_dependencies\":[],\"next_state\":[]," ++
             "\"target\":\"backedge\",\"target_formulas\":[]}]",
         edge_json.written(),

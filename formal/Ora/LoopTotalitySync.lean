@@ -59,9 +59,28 @@ def baseBinding : StateBindingRow := {
   variableIndex := 0, target := loopId, sourceKey := "loop-state:0", value := .term 0
 }
 
+def baseSafetyTimelineEvent : TimelineEventRow := {
+  id := 1
+  structuralKey := "body/ora.assert:0"
+  payload := .safetyCheckpoint { formulas := [{ formula := .term 1 }] }
+}
+
+def baseBackedgeTimeline : List TimelineEventRow := [{
+  id := 0
+  structuralKey := "body/straight-line-yield/path"
+  payload := .pathAssumption { formulas := [{ formula := .term 1 }] }
+}, baseSafetyTimelineEvent]
+
+def baseExitTimeline : List TimelineEventRow := [{
+  id := 0
+  structuralKey := "guard/false-successor/path"
+  payload := .pathAssumption { formulas := [{ formula := .term 1 }] }
+}]
+
 def baseBackedge : EdgeRow := {
   id := 0
   structuralKey := "body/straight-line-yield"
+  timeline := baseBackedgeTimeline
   path := [.term 1]
   safetyCheckpoints := [{
     id := 0
@@ -76,6 +95,7 @@ def baseBackedge : EdgeRow := {
 def baseExit : EdgeRow := {
   id := 1
   structuralKey := "guard/false-successor"
+  timeline := baseExitTimeline
   path := [.term 1]
   nextState := [baseBinding]
   target := .successor
@@ -92,6 +112,195 @@ def baseSummary : SummaryRow := {
   projectionComplete := true
   post := [.term 1]
 }
+
+def timelineReadId : FreeVarId := { file_id := 10, pattern_id := 90 }
+def timelineForeignId : FreeVarId := { file_id := 10, pattern_id := 91 }
+
+def timelineLocation : StorageLocationExprRow := {
+  root := "counter", valueTy := .compilerTypeId 6
+}
+
+def timelineDependency : SummaryDependencyRow := {
+  id := 0
+  structuralKey := "body/child"
+  summaryId := 2
+  loopVcSha256 := "0000000000000000000000000000000000000000000000000000000000000000"
+  target := .successor
+  writeFootprintComplete := true
+}
+
+def timelinePathEvent : TimelineEventRow := {
+  id := 0
+  structuralKey := "body/path"
+  payload := .pathAssumption { formulas := [{ formula := .term 0 }] }
+}
+
+def timelineReadEvent : TimelineEventRow := {
+  id := 1
+  structuralKey := "body/read"
+  payload := .storageRead { result := timelineReadId, location := timelineLocation }
+}
+
+def timelineWriteEvent : TimelineEventRow := {
+  id := 2
+  structuralKey := "body/write"
+  payload := .storageWrite {
+    location := timelineLocation
+    value := { formula := .term 0, readResults := [timelineReadId] }
+  }
+}
+
+def timelineSafetyEvent : TimelineEventRow := {
+  id := 3
+  structuralKey := "body/safety"
+  payload := .safetyCheckpoint { formulas := [{ formula := .term 0 }] }
+}
+
+def timelineDependencyEvent : TimelineEventRow := {
+  id := 4
+  structuralKey := "body/child"
+  payload := .summaryDependency timelineDependency
+}
+
+def timelineBaseEdge : EdgeRow := {
+  id := 0
+  structuralKey := "body"
+  timeline := [timelinePathEvent, timelineReadEvent, timelineWriteEvent,
+    timelineSafetyEvent, timelineDependencyEvent]
+  path := [.term 0]
+  safetyCheckpoints := [{
+    id := 0
+    structuralKey := "body/safety"
+    afterDependencyCount := 0
+    formulas := [.term 0]
+  }]
+  summaryDependencies := [timelineDependency]
+  nextState := [{
+    variableIndex := 0
+    target := loopId
+    sourceKey := "loop-state:0"
+    value := .term 0
+    readResults := [timelineReadId]
+  }]
+  target := .backedge
+}
+
+def timelineEdgeForMutation : String → EdgeRow
+  | "timeline_missing" => { timelineBaseEdge with timeline := [] }
+  | "event_order_invalid" =>
+      { timelineBaseEdge with timeline := [timelinePathEvent,
+          { timelineReadEvent with id := 7 }, timelineWriteEvent,
+          timelineSafetyEvent, timelineDependencyEvent] }
+  | "event_identity_missing" =>
+      { timelineBaseEdge with timeline := [timelinePathEvent,
+          { timelineReadEvent with structuralKey := "" }, timelineWriteEvent,
+          timelineSafetyEvent, timelineDependencyEvent] }
+  | "event_identity_duplicate" =>
+      { timelineBaseEdge with timeline := [timelinePathEvent,
+          { timelineReadEvent with structuralKey := timelinePathEvent.structuralKey },
+          timelineWriteEvent, timelineSafetyEvent, timelineDependencyEvent] }
+  | "path_missing" =>
+      { timelineBaseEdge with timeline := [{ timelineSafetyEvent with id := 0 }] }
+  | "view_mismatch" => { timelineBaseEdge with path := [.term 1] }
+  | "storage_root_missing" =>
+      { timelineBaseEdge with timeline := [timelinePathEvent,
+          { timelineReadEvent with payload := .storageRead {
+              result := timelineReadId
+              location := { timelineLocation with root := "" }
+            } },
+          timelineWriteEvent, timelineSafetyEvent, timelineDependencyEvent] }
+  | "storage_projection_invalid" =>
+      { timelineBaseEdge with timeline := [timelinePathEvent,
+          { timelineReadEvent with payload := .storageRead {
+              result := timelineReadId
+              location := { timelineLocation with projections := [.field ""] }
+            } },
+          timelineWriteEvent, timelineSafetyEvent, timelineDependencyEvent] }
+  | "storage_type_invalid" =>
+      { timelineBaseEdge with timeline := [timelinePathEvent,
+          { timelineReadEvent with payload := .storageRead {
+              result := timelineReadId
+              location := { timelineLocation with valueTy := .compilerTypeId 0 }
+            } },
+          timelineWriteEvent, timelineSafetyEvent, timelineDependencyEvent] }
+  | "read_identity_duplicate" =>
+      { timelineBaseEdge with timeline := [timelinePathEvent,
+          { timelineReadEvent with payload := .storageRead {
+              result := loopId, location := timelineLocation
+            } },
+          timelineWriteEvent, timelineSafetyEvent, timelineDependencyEvent] }
+  | "read_identity_foreign" =>
+      { timelineBaseEdge with timeline := [timelinePathEvent, timelineReadEvent,
+          { timelineWriteEvent with payload := .storageWrite {
+              location := timelineLocation
+              value := { formula := .term 0, readResults := [timelineForeignId] }
+            } },
+          timelineSafetyEvent, timelineDependencyEvent] }
+  | "read_identity_forward" =>
+      { timelineBaseEdge with timeline := [timelinePathEvent,
+          { timelineWriteEvent with id := 1 }, { timelineReadEvent with id := 2 },
+          timelineSafetyEvent, timelineDependencyEvent] }
+  | "child_footprint_missing" =>
+      { timelineBaseEdge with timeline := [timelinePathEvent, timelineReadEvent,
+          timelineWriteEvent, timelineSafetyEvent,
+          { timelineDependencyEvent with payload := .summaryDependency {
+              timelineDependency with writeFootprintComplete := false
+            } }] }
+  | "dependency_order_invalid" =>
+      { timelineBaseEdge with timeline := [timelinePathEvent, timelineReadEvent,
+          timelineWriteEvent, timelineSafetyEvent,
+          { timelineDependencyEvent with payload := .summaryDependency {
+              timelineDependency with id := 1
+            } }] }
+  | "dependency_target_unsupported" =>
+      { timelineBaseEdge with timeline := [timelinePathEvent, timelineReadEvent,
+          timelineWriteEvent, timelineSafetyEvent,
+          { timelineDependencyEvent with payload := .summaryDependency {
+              timelineDependency with target := .backedge
+            } }] }
+  | "body_safety_missing" =>
+      { timelineBaseEdge with timeline := [timelinePathEvent, timelineReadEvent,
+          timelineWriteEvent,
+          { timelineSafetyEvent with payload := .safetyCheckpoint { formulas := [] } },
+          timelineDependencyEvent] }
+  | _ => timelineBaseEdge
+
+def timelineMutationNames : List String := [
+  "supported", "timeline_missing", "event_order_invalid",
+  "event_identity_missing", "event_identity_duplicate", "path_missing",
+  "view_mismatch", "storage_root_missing", "storage_projection_invalid",
+  "storage_type_invalid", "read_identity_duplicate", "read_identity_foreign",
+  "read_identity_forward", "child_footprint_missing",
+  "dependency_order_invalid", "dependency_target_unsupported",
+  "body_safety_missing"
+]
+
+def timelineReasonForMutation (mutation : String) : String :=
+  match edgeTimelineReason? [loopId] (timelineEdgeForMutation mutation) with
+  | some reason => reason.name
+  | none => ""
+
+def timelineValidationRowMatches : String × String → Bool
+  | (mutation, compilerReason) =>
+      timelineMutationNames.contains mutation &&
+        compilerReason == timelineReasonForMutation mutation
+
+theorem loop_timeline_event_tags_pinned :
+    loopTimelineEventTags == ["path_assumption", "safety_checkpoint",
+      "storage_read", "storage_write", "summary_dependency"] := by
+  decide
+
+theorem loop_storage_projection_tags_pinned :
+    loopStorageProjectionTags == ["field", "fixed_index", "mapping_key"] := by
+  decide
+
+theorem loop_timeline_validation_mutations_pinned :
+    loopTimelineValidationRows.map Prod.fst == timelineMutationNames := by
+  decide
+
+theorem loop_timeline_validation_matches :
+    loopTimelineValidationRows.all timelineValidationRowMatches = true := by
+  decide
 
 def summaryForMutation : String → SummaryRow
   | "supported_u8" => { baseSummary with variables := [{ baseVariable with ty := .compilerTypeId 1 }] }
@@ -135,7 +344,19 @@ def summaryForMutation : String → SummaryRow
           baseExit
         ] }
   | "unsupported_formula" =>
-      { baseSummary with edges := [{ baseBackedge with path := [.term 0] }, baseExit] }
+      { baseSummary with
+        edges := [
+          { baseBackedge with
+            timeline := [{
+              id := 0
+              structuralKey := "body/straight-line-yield/path"
+              payload := .pathAssumption { formulas := [{ formula := .term 0 }] }
+            }, baseSafetyTimelineEvent]
+            path := [.term 0]
+          },
+          baseExit
+        ]
+      }
   | "identity_collision" => { baseSummary with contextVariables := [baseVariable] }
   | _ => baseSummary
 
