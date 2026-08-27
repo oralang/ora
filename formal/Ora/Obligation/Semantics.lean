@@ -24,7 +24,7 @@ namespace Ora.Obligation
 inductive Value where
   | bool : Bool → Value
   | integer : Ora.Integer.Value → Value
-  deriving Repr
+  deriving Repr, DecidableEq
 
 inductive PlaceBindingKey where
   | stable : PlaceRef → PlaceBindingKey

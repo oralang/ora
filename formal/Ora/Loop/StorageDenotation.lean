@@ -1,0 +1,189 @@
+/-
+Executable manifest-formula views for the storage loop model.
+
+The context owns only binding and semantic-place resolution.  Store selection
+is fixed here: ordinary reads use the current store, `old(place)` uses the
+immutable function-entry store, and timeline read identities are introduced
+only after their read event.
+-/
+
+import Ora.Loop.Timeline
+
+namespace Ora.Loop
+
+open Ora.Obligation
+
+structure StorageFormulaContext where
+  manifest : Manifest
+  entryEnv : Env
+  bindLocals : Env → List Ora.Integer.Value → Option Env
+  resolvePlace : (FreeVarId → Option Value) → PlaceRef → Option StorageLocation
+
+def bindStorageReads (env : Env) (reads : List StorageReadBinding) : Env :=
+  reads.foldl (fun bound read => bound.setFree read.id read.value) env
+
+def StorageFormulaContext.withStoreViews
+    (context : StorageFormulaContext)
+    (bindings : Env)
+    (state : StorageActionState) : Env :=
+  { bindings with placeValue := fun key =>
+      match key with
+      | .stable place =>
+          match context.resolvePlace bindings.lookupFree place with
+          | some location => state.currentValue location
+          | none => bindings.placeValue key
+      | .entry place =>
+          match context.resolvePlace context.entryEnv.lookupFree place with
+          | some location => state.oldValue location
+          | none => bindings.placeValue key }
+
+/-- Check storage-place resolution before constructing the total semantic
+environment consumed by the shared obligation denotation. The fallback in the
+environment constructor is therefore unreachable for every place read
+reachable from the formula being evaluated. -/
+private def StorageFormulaContext.termStorageReady
+    (context : StorageFormulaContext)
+    (bindings : Env) : Nat → TermId → Bool
+  | 0, _ => false
+  | fuel + 1, id =>
+      match context.manifest.terms[id]? with
+      | none => false
+      | some (.placeRead place) =>
+          (context.resolvePlace bindings.lookupFree place).isSome
+      | some (.old operand) =>
+          match context.manifest.terms[operand]? with
+          | some (.placeRead place) =>
+              (context.resolvePlace context.entryEnv.lookupFree place).isSome
+          | _ => false
+      | some (.unary unary) =>
+          context.termStorageReady bindings fuel unary.operand
+      | some (.binary binary) =>
+          context.termStorageReady bindings fuel binary.lhs &&
+            context.termStorageReady bindings fuel binary.rhs
+      | some (.refinementPredicate predicate) =>
+          context.termStorageReady bindings fuel predicate.value &&
+            predicate.args.all (context.termStorageReady bindings fuel)
+      | some (.quantified quantified) =>
+          (match quantified.condition with
+           | none => true
+           | some condition => context.termStorageReady bindings fuel condition) &&
+            context.termStorageReady bindings fuel quantified.body
+      | some (.boolLit _) => true
+      | some (.intLit _) => true
+      | some (.variable _) => true
+      | some .result => true
+
+private def StorageFormulaContext.formulaStorageReady
+    (context : StorageFormulaContext)
+    (bindings : Env) : FormulaRef → Bool
+  | .term id =>
+      context.termStorageReady bindings (context.manifest.terms.length + 1) id
+
+def StorageFormulaContext.preheaderEnv
+    (context : StorageFormulaContext)
+    (entryStorage currentStorage : StorageState) : Env :=
+  context.withStoreViews context.entryEnv {
+    loop := { locals := [], storage := currentStorage }
+    entryStorage := entryStorage
+  }
+
+def StorageFormulaContext.stateEnv?
+    (context : StorageFormulaContext)
+    (state : StorageActionState) : Option Env := do
+  let locals ← context.bindLocals context.entryEnv state.loop.locals
+  pure (context.withStoreViews (bindStorageReads locals state.reads) state)
+
+def StorageFormulaContext.evalPreheaderValue?
+    (context : StorageFormulaContext)
+    (entryStorage currentStorage : StorageState)
+    (formula : FormulaRef) : Option Value := do
+  let state : StorageActionState := {
+    loop := { locals := [], storage := currentStorage }
+    entryStorage := entryStorage
+  }
+  if !context.formulaStorageReady context.entryEnv formula then none else pure ()
+  formulaValue? context.manifest (context.withStoreViews context.entryEnv state) formula
+
+def StorageFormulaContext.evalFormula?
+    (context : StorageFormulaContext)
+    (formula : FormulaRef)
+    (state : StorageActionState) : Option Prop := do
+  let env ← context.stateEnv? state
+  if !context.formulaStorageReady env formula then none else pure ()
+  formulaDenotes? context.manifest env formula
+
+def StorageFormulaContext.evalValue?
+    (context : StorageFormulaContext)
+    (formula : FormulaRef)
+    (state : StorageActionState) : Option Value := do
+  let env ← context.stateEnv? state
+  if !context.formulaStorageReady env formula then none else pure ()
+  formulaValue? context.manifest env formula
+
+def storageValueMatchesTy : Value → TyRef → Bool
+  | .bool _, ty => ty.isBool
+  | .integer value, ty => ty.integerShape? == some value.shape
+
+structure TypedStorageFormula where
+  formula : FormulaRef
+  ty : TyRef
+  deriving Repr, BEq, DecidableEq
+
+inductive StorageProjectionExpr where
+  | field : String → StorageProjectionExpr
+  | fixedIndex : TypedStorageFormula → StorageProjectionExpr
+  | mappingKey : TypedStorageFormula → StorageProjectionExpr
+  deriving Repr, BEq, DecidableEq
+
+structure StorageLocationExpr where
+  root : String
+  projections : List StorageProjectionExpr := []
+  valueTy : TyRef
+  deriving Repr, BEq, DecidableEq
+
+def StorageFormulaContext.evalTypedValue?
+    (context : StorageFormulaContext)
+    (state : StorageActionState)
+    (expression : TypedStorageFormula) : Option Value := do
+  let value ← context.evalValue? expression.formula state
+  if storageValueMatchesTy value expression.ty then some value else none
+
+def StorageFormulaContext.evalProjections?
+    (context : StorageFormulaContext)
+    (state : StorageActionState) :
+    List StorageProjectionExpr → Option (List StorageProjection)
+  | [] => some []
+  | .field name :: rest => do
+      if name.isEmpty then none else pure ()
+      pure (.field name :: (← context.evalProjections? state rest))
+  | .fixedIndex expression :: rest => do
+      let value ← context.evalTypedValue? state expression
+      match value with
+      | .integer index =>
+          if index.shape.isSigned then none
+          else pure (.fixedIndex value :: (← context.evalProjections? state rest))
+      | .bool _ => none
+  | .mappingKey expression :: rest => do
+      let value ← context.evalTypedValue? state expression
+      pure (.mappingKey value :: (← context.evalProjections? state rest))
+
+def StorageFormulaContext.evalLocation?
+    (context : StorageFormulaContext)
+    (expression : StorageLocationExpr)
+    (state : StorageActionState) : Option StorageLocation := do
+  if expression.root.isEmpty then none else pure ()
+  if !(expression.valueTy.isBool || expression.valueTy.integerShape?.isSome) then none else pure ()
+  pure {
+    root := expression.root
+    projections := ← context.evalProjections? state expression.projections
+  }
+
+def StorageFormulaContext.actionSemantics
+    (context : StorageFormulaContext) :
+    StorageActionSemantics StorageLocationExpr FormulaRef := {
+  evalLocation := context.evalLocation?
+  evalValue := context.evalValue?
+  valueMatchesLocation := fun location value => storageValueMatchesTy value location.valueTy
+}
+
+end Ora.Loop

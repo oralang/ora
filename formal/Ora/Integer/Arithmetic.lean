@@ -29,7 +29,7 @@ two integers merely because their underlying bit patterns happen to agree.
 structure Value where
   shape : IntegerShape
   bits : Carrier shape
-  deriving Repr
+  deriving Repr, DecidableEq
 
 def Value.ofNat (shape : IntegerShape) (value : Nat) : Value :=
   { shape, bits := BitVec.ofNat shape.bits value }
