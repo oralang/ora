@@ -489,6 +489,49 @@ theorem toInt_lt_signedUpperBound
     have hValue := value.isLt <;>
     omega
 
+/-- A nonnegative signed addend is safe when the emitted arithmetic facts bound
+the exact result by another value of the same signed type.  The `signedLt`
+hypothesis identifies that formula-owned bound; the proof does not recognize a
+particular increment or literal. -/
+theorem signed_add_checkedSafe_of_nonnegative_bounded_result
+    (width : Ora.Types.SIntWidth)
+    (lhs rhs bound : Carrier (.signed width))
+    (hRhs : 0 ≤ rhs.toInt)
+    (hLt : signedLt lhs bound)
+    (hResultBound : lhs.toInt + rhs.toInt ≤ bound.toInt) :
+    checkedSafe (.signed width) .add lhs rhs := by
+  simp only [checkedSafe, representable, IntegerShape.isSigned, if_true,
+    exactArithmeticResult, mathematicalValue, IntegerShape.bits]
+  constructor
+  · have hLower := BitVec.toInt_intMin_le lhs
+    change (BitVec.intMin (sintBits width)).toInt ≤ lhs.toInt at hLower
+    have hMin : (BitVec.intMin (sintBits width)).toInt =
+        signedLowerBound (sintBits width) := by
+      have hWidth : 0 < sintBits width := by cases width <;> decide
+      simp only [BitVec.toInt_intMin, signedLowerBound]
+      rw [Nat.two_pow_pred_mod_two_pow hWidth]
+      congr 1
+      exact_mod_cast rfl
+    rw [hMin] at hLower
+    omega
+  · have hUpper := toInt_lt_signedUpperBound width bound
+    rw [signedLt_iff_toInt_lt] at hLt
+    omega
+
+/-- Under checked-add safety, the wrapped carrier denotes the exact signed
+sum.  This is the generic bridge used when a formula requires an order fact
+about the emitted next-state expression. -/
+theorem signed_add_le_of_checkedSafe
+    (width : Ora.Types.SIntWidth)
+    (lhs rhs bound : Carrier (.signed width))
+    (hSafe : checkedSafe (.signed width) .add lhs rhs)
+    (hLe : lhs.toInt + rhs.toInt ≤ bound.toInt) :
+    signedLe (wrappingResult (.signed width) .add lhs rhs) bound := by
+  rw [signedLe_iff_toInt_le]
+  simp only [wrappingResult]
+  rw [signed_add_toInt_eq_of_representable width lhs rhs hSafe]
+  exact hLe
+
 theorem signed_add_one_checkedSafe_of_lt
     (width : Ora.Types.SIntWidth)
     (value bound : Carrier (.signed width))
