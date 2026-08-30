@@ -41,6 +41,9 @@ pub const ObligationSet = struct {
         }
         self.validateTermReferences() catch return .{ .blocked = .invalid_dependency };
         self.validateIdReferences() catch return .{ .blocked = .invalid_dependency };
+        if (self.storageArtifactAuthorityBlockReason()) |reason| {
+            return .{ .blocked = reason };
+        }
 
         for (self.queries) |query| {
             if (query.artifact_policy == .diagnostic_only) continue;
@@ -81,6 +84,58 @@ pub const ObligationSet = struct {
         }
 
         return .allowed;
+    }
+
+    fn storageArtifactAuthorityBlockReason(self: ObligationSet) ?ArtifactBlockReason {
+        for (self.loop_summaries) |summary| {
+            if (!self.loopSummaryRequiresLeanCertificate(summary.id)) continue;
+            for (summary.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
+                .storage_read => |read| if (read.location.projections.len != 0) {
+                    return .storage_projection_authority_unreviewed;
+                },
+                .storage_write => |write| if (write.location.projections.len != 0) {
+                    return .storage_projection_authority_unreviewed;
+                },
+                .summary_dependency => |dependency| {
+                    if (self.loopSummaryClosureHasStorageEvents(
+                        dependency.summary_id,
+                        self.loop_summaries.len + 1,
+                    )) {
+                        return .storage_child_frame_authority_unreviewed;
+                    }
+                },
+                .path_assumption, .safety_checkpoint => {},
+            };
+        }
+        return null;
+    }
+
+    fn loopSummaryRequiresLeanCertificate(self: ObligationSet, summary_id: Id) bool {
+        for (self.queries) |query| {
+            if (query.loop_summary_id == summary_id and
+                query.kind == .loop_induction and
+                query.artifact_policy == .blocks_verified_artifacts and
+                query.proof_requirement == .lean_certificate) return true;
+        }
+        return false;
+    }
+
+    fn loopSummaryClosureHasStorageEvents(
+        self: ObligationSet,
+        summary_id: Id,
+        remaining: usize,
+    ) bool {
+        if (remaining == 0) return true;
+        const summary = findById(self.loop_summaries, summary_id) orelse return true;
+        for (summary.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
+            .storage_read, .storage_write => return true,
+            .summary_dependency => |dependency| if (self.loopSummaryClosureHasStorageEvents(
+                dependency.summary_id,
+                remaining - 1,
+            )) return true,
+            .path_assumption, .safety_checkpoint => {},
+        };
+        return false;
     }
 
     pub fn hasLeanCertificateRequirements(self: ObligationSet) bool {
@@ -766,6 +821,8 @@ pub const ArtifactBlockReason = enum(u8) {
     failed_query,
     missing_proof,
     lean_required_failure,
+    storage_projection_authority_unreviewed,
+    storage_child_frame_authority_unreviewed,
     source_accounting_failure,
 };
 
@@ -3676,6 +3733,98 @@ test "obligation can point at MLIR origin without proof term" {
     };
 
     try std.testing.expect(obligation.blocksArtifacts());
+}
+
+test "storage artifact authority is limited to direct roots without storage child frames" {
+    const ty: TypeRef = .{ .spelling = "u256" };
+    const direct_timeline = [_]LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "store/counter",
+        .payload = .{ .storage_write = .{
+            .location = .{ .root = "counter", .value_ty = ty },
+            .value = .{ .formula = .{ .term = 0 } },
+        } },
+    }};
+    const direct_edges = [_]LoopEdgeRow{.{
+        .id = 0,
+        .structural_key = "edge/direct",
+        .timeline = &direct_timeline,
+    }};
+    const direct_summary: LoopSummaryRow = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "direct" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .loop_source_op_id = 1,
+        .loop_kind = .scf_while,
+        .edges = &direct_edges,
+    };
+    const certificate_query: VerificationQuery = .{
+        .id = 2,
+        .owner = direct_summary.owner,
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .proof_requirement = .lean_certificate,
+        .kind = .loop_induction,
+        .loop_summary_id = direct_summary.id,
+    };
+    const direct_set: ObligationSet = .{
+        .queries = &.{certificate_query},
+        .loop_summaries = &.{direct_summary},
+    };
+    try std.testing.expectEqual(
+        @as(?ArtifactBlockReason, null),
+        direct_set.storageArtifactAuthorityBlockReason(),
+    );
+
+    const index_projection = [_]LoopStorageProjection{.{ .fixed_index = .{
+        .value = .{ .formula = .{ .term = 0 } },
+        .ty = ty,
+    } }};
+    var projected_timeline = direct_timeline;
+    projected_timeline[0].payload.storage_write.location.projections = &index_projection;
+    var projected_edges = direct_edges;
+    projected_edges[0].timeline = &projected_timeline;
+    var projected_summary = direct_summary;
+    projected_summary.edges = &projected_edges;
+    try std.testing.expectEqual(
+        ArtifactBlockReason.storage_projection_authority_unreviewed,
+        (ObligationSet{
+            .queries = &.{certificate_query},
+            .loop_summaries = &.{projected_summary},
+        }).storageArtifactAuthorityBlockReason().?,
+    );
+
+    const dependency_timeline = [_]LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "child/direct",
+        .payload = .{ .summary_dependency = .{
+            .id = 0,
+            .structural_key = "child/direct",
+            .summary_id = 2,
+            .loop_vc_sha256 = [_]u8{0} ** 32,
+            .write_footprint_complete = true,
+            .target = .successor,
+        } },
+    }};
+    const dependency_edges = [_]LoopEdgeRow{.{
+        .id = 0,
+        .structural_key = "edge/dependency",
+        .timeline = &dependency_timeline,
+    }};
+    var parent_summary = direct_summary;
+    parent_summary.edges = &dependency_edges;
+    var child_summary = direct_summary;
+    child_summary.id = 2;
+    try std.testing.expectEqual(
+        ArtifactBlockReason.storage_child_frame_authority_unreviewed,
+        (ObligationSet{
+            .queries = &.{certificate_query},
+            .loop_summaries = &.{ parent_summary, child_summary },
+        }).storageArtifactAuthorityBlockReason().?,
+    );
 }
 
 test "diagnostic-only query carries accounting identity without artifact authority" {

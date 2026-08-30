@@ -9811,6 +9811,47 @@ test "external direct-root storage certificate binds canonical Z3 and Lean throu
     defer tmp.cleanup();
     const accepted_paths = [_][]const u8{ "accepted-first", "accepted-second" };
 
+    const empty_manifest = try pathFromTmpAlloc(allocator, tmp, "empty-proofs.json");
+    defer allocator.free(empty_manifest);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = empty_manifest,
+        .data = "{\"schema_version\":1,\"proofs\":[]}",
+    });
+    const blocked_output = try pathFromTmpAlloc(allocator, tmp, "missing-proof");
+    defer allocator.free(blocked_output);
+    const blocked = try runProcessWithLeanPath(allocator, &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=smt-report,bytecode",
+        "--out-dir",
+        blocked_output,
+        "--lean-proofs",
+        empty_manifest,
+        source,
+    });
+    defer allocator.free(blocked.stdout);
+    defer allocator.free(blocked.stderr);
+    try expectExited(blocked, 1);
+    try testing.expect(std.mem.containsAtLeast(u8, blocked.stdout, 1, "lean_required_failure"));
+    try testing.expectError(
+        error.FileNotFound,
+        tmp.dir.access(std.testing.io, "missing-proof/direct_storage_loop_certificate.hex", .{}),
+    );
+    const blocked_index_path = try pathFromTmpAlloc(
+        allocator,
+        tmp,
+        "missing-proof/direct_storage_loop_certificate.formal.artifacts.json",
+    );
+    defer allocator.free(blocked_index_path);
+    const blocked_index = try readFileAllocForTest(allocator, blocked_index_path);
+    defer allocator.free(blocked_index);
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        blocked_index,
+        1,
+        "\"final_artifact_authorization\": \"blocked\"",
+    ));
+
     for (accepted_paths) |relative| {
         const output = try pathFromTmpAlloc(allocator, tmp, relative);
         defer allocator.free(output);
@@ -9957,6 +9998,79 @@ fn expectRepositoryStorageTacticDeterministic(
     try expectNoFormalArtifactsInRepoRoot(allocator, stem);
 }
 
+fn expectRepositoryStorageTacticCheckedButAuthorityBlocked(
+    source: []const u8,
+    stem: []const u8,
+    reason: obligation.ArtifactBlockReason,
+) !void {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const decision_text = try std.fmt.allocPrint(
+        allocator,
+        "Automatic Lean proof gate did not authorize artifact emission: {s}",
+        .{@tagName(reason)},
+    );
+    defer allocator.free(decision_text);
+
+    for ([_][]const u8{ "first", "second" }) |relative| {
+        const output = try pathFromTmpAlloc(allocator, tmp, relative);
+        defer allocator.free(output);
+        const run = try runProcessWithLeanPath(allocator, &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=smt-report,bytecode",
+            "--out-dir",
+            output,
+            "--lean-proofs",
+            source,
+        });
+        defer allocator.free(run.stdout);
+        defer allocator.free(run.stderr);
+        try expectExited(run, 1);
+        try testing.expect(std.mem.containsAtLeast(u8, run.stdout, 1, decision_text));
+        try testing.expect(!std.mem.containsAtLeast(
+            u8,
+            run.stdout,
+            1,
+            "Automatic Lean proof gate failed",
+        ));
+
+        const hex_path = try std.fmt.allocPrint(allocator, "{s}/{s}.hex", .{ relative, stem });
+        defer allocator.free(hex_path);
+        try testing.expectError(
+            error.FileNotFound,
+            tmp.dir.access(std.testing.io, hex_path, .{}),
+        );
+
+        const index_path = try std.fmt.allocPrint(
+            allocator,
+            "{s}/{s}.formal.artifacts.json",
+            .{ relative, stem },
+        );
+        defer allocator.free(index_path);
+        const index = try tmp.dir.readFileAlloc(
+            std.testing.io,
+            index_path,
+            allocator,
+            .limited(1024 * 1024),
+        );
+        defer allocator.free(index);
+        try testing.expect(std.mem.containsAtLeast(
+            u8,
+            index,
+            1,
+            "\"final_artifact_authorization\": \"blocked\"",
+        ));
+    }
+    try expectNoFormalArtifactsInRepoRoot(allocator, stem);
+}
+
 test "repository tactic certifies a direct-root storage loop through the real CLI" {
     try expectRepositoryStorageTacticDeterministic(
         "tests/formal/direct_storage_loop_auto.ora",
@@ -9981,19 +10095,19 @@ test "repository tactic certifies checked arithmetic in a storage timeline" {
     );
 }
 
-test "repository tactic certifies a fixed-array storage loop" {
-    try expectRepositoryStorageTacticDeterministic(
+test "repository tactic checks fixed-array storage but artifact authority remains unreviewed" {
+    try expectRepositoryStorageTacticCheckedButAuthorityBlocked(
         "tests/formal/fixed_storage_loop_auto.ora",
         "fixed_storage_loop_auto",
-        1,
+        .storage_projection_authority_unreviewed,
     );
 }
 
-test "repository tactic certifies a runtime-key mapping storage loop" {
-    try expectRepositoryStorageTacticDeterministic(
+test "repository tactic checks runtime-key mapping storage but artifact authority remains unreviewed" {
+    try expectRepositoryStorageTacticCheckedButAuthorityBlocked(
         "tests/formal/mapping_storage_loop_auto.ora",
         "mapping_storage_loop_auto",
-        1,
+        .storage_projection_authority_unreviewed,
     );
 }
 
@@ -10005,11 +10119,11 @@ test "repository tactic certifies branch-specific storage writes" {
     );
 }
 
-test "repository tactic certifies nested storage-mutating loops" {
-    try expectRepositoryStorageTacticDeterministic(
+test "repository tactic checks nested storage mutation but child frame authority remains unreviewed" {
+    try expectRepositoryStorageTacticCheckedButAuthorityBlocked(
         "tests/formal/nested_storage_loop_auto.ora",
         "nested_storage_loop_auto",
-        2,
+        .storage_child_frame_authority_unreviewed,
     );
 }
 
