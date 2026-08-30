@@ -34,7 +34,24 @@ inductive TyRef where
 structure FreeVarId where
   file_id : Nat
   pattern_id : Nat
-  deriving Repr, BEq, DecidableEq
+  deriving Repr, DecidableEq
+
+instance : BEq FreeVarId where
+  beq lhs rhs :=
+    lhs.file_id == rhs.file_id && lhs.pattern_id == rhs.pattern_id
+
+instance : LawfulBEq FreeVarId where
+  eq_of_beq := by
+    intro lhs rhs hEqual
+    cases lhs
+    cases rhs
+    simp only [BEq.beq, Bool.and_eq_true, decide_eq_true_eq,
+      FreeVarId.mk.injEq] at hEqual ⊢
+    exact hEqual
+  rfl := by
+    intro id
+    cases id
+    simp only [BEq.beq, decide_eq_true_eq, Bool.and_self]
 
 structure FreeVarRef where
   id : FreeVarId

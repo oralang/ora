@@ -639,6 +639,29 @@ def bindState? : Env → List VariableRow → ScalarLoopState → Option Env
         none
   | _, _, _ => none
 
+theorem bindState_some_of_stateReady
+    (base : Env)
+    (variables : List VariableRow)
+    (state : ScalarLoopState)
+    (hReady : stateReady variables state) :
+    ∃ bound, bindState? base variables state = some bound := by
+  induction variables generalizing base state with
+  | nil =>
+      cases state with
+      | nil => exact ⟨base, rfl⟩
+      | cons _ _ => simp [stateReady, valuesMatchVariables] at hReady
+  | cons loopVar rest ih =>
+      cases state with
+      | nil => simp [stateReady, valuesMatchVariables] at hReady
+      | cons value values =>
+          simp only [stateReady, valuesMatchVariables, Bool.and_eq_true,
+            beq_iff_eq] at hReady
+          rcases hReady with ⟨hShape, hRest⟩
+          rcases ih (base.setFree loopVar.id (.integer value)) values hRest with
+            ⟨bound, hBound⟩
+          refine ⟨bound, ?_⟩
+          simp only [bindState?, hShape, hBound, if_pos]
+
 def formulaHoldsInState
     (manifest : Manifest)
     (base : Env)
@@ -912,6 +935,29 @@ def safetyCheckpointsHold
     (checkpoints : List SafetyCheckpointRow) : Prop :=
   ∀ checkpoint ∈ checkpoints,
     safetyCheckpointHolds manifest base variables current dependencies checkpoint
+
+theorem safetyCheckpointsHold_no_dependencies_formula
+    (manifest : Manifest)
+    (base : Env)
+    (variables : List VariableRow)
+    (current : ScalarLoopState)
+    (checkpoints : List SafetyCheckpointRow)
+    (checkpoint : SafetyCheckpointRow)
+    (formula : FormulaRef)
+    (hReady : stateReady variables current)
+    (hChecks : safetyCheckpointsHold manifest base variables current [] checkpoints)
+    (hCheckpoint : checkpoint ∈ checkpoints)
+    (hFormula : formula ∈ checkpoint.formulas) :
+    formulaHoldsInState manifest base variables current formula := by
+  rcases bindState_some_of_stateReady base variables current hReady with
+    ⟨bound, hBound⟩
+  have hCheckpointHolds := hChecks checkpoint hCheckpoint
+  unfold safetyCheckpointHolds at hCheckpointHolds
+  have hFormulas := hCheckpointHolds bound bound hBound (by
+    simp [environmentRelationsProduce])
+  unfold formulaHoldsInState
+  rw [hBound]
+  exact hFormulas formula hFormula
 
 /-- Partial correctness does not demand safety for code following a dependency
 that has no terminating result. If the dependency does terminate, the

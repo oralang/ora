@@ -9887,6 +9887,132 @@ test "external direct-root storage certificate binds canonical Z3 and Lean throu
     try expectNoFormalArtifactsInRepoRoot(allocator, stem);
 }
 
+fn expectRepositoryStorageTacticDeterministic(
+    source: []const u8,
+    stem: []const u8,
+    expected_certificate_count: usize,
+) !void {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const accepted_text = try std.fmt.allocPrint(
+        allocator,
+        "Lean loop proof gate accepted:\n  kernel-checked certificates: {d}",
+        .{expected_certificate_count},
+    );
+    defer allocator.free(accepted_text);
+    for ([_][]const u8{ "first", "second" }) |relative| {
+        const output = try pathFromTmpAlloc(allocator, tmp, relative);
+        defer allocator.free(output);
+        const run = try runProcessWithLeanPath(allocator, &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=smt-report,bytecode",
+            "--out-dir",
+            output,
+            "--lean-proofs",
+            source,
+        });
+        defer allocator.free(run.stdout);
+        defer allocator.free(run.stderr);
+        try expectExited(run, 0);
+        try testing.expect(std.mem.containsAtLeast(
+            u8,
+            run.stdout,
+            1,
+            accepted_text,
+        ));
+        try testing.expect(!std.mem.containsAtLeast(
+            u8,
+            run.stdout,
+            1,
+            "automatic_storage_timeline_requires_external_certificate",
+        ));
+    }
+
+    inline for (.{ ".hex", ".lean.proof.json" }) |suffix| {
+        const first_path = try std.fmt.allocPrint(
+            allocator,
+            "first/{s}{s}",
+            .{ stem, suffix },
+        );
+        defer allocator.free(first_path);
+        const second_path = try std.fmt.allocPrint(
+            allocator,
+            "second/{s}{s}",
+            .{ stem, suffix },
+        );
+        defer allocator.free(second_path);
+        const first = try tmp.dir.readFileAlloc(std.testing.io, first_path, allocator, .limited(16 * 1024 * 1024));
+        defer allocator.free(first);
+        const second = try tmp.dir.readFileAlloc(std.testing.io, second_path, allocator, .limited(16 * 1024 * 1024));
+        defer allocator.free(second);
+        try testing.expectEqualStrings(first, second);
+    }
+    try expectNoFormalArtifactsInRepoRoot(allocator, stem);
+}
+
+test "repository tactic certifies a direct-root storage loop through the real CLI" {
+    try expectRepositoryStorageTacticDeterministic(
+        "tests/formal/direct_storage_loop_auto.ora",
+        "direct_storage_loop_auto",
+        1,
+    );
+}
+
+test "repository tactic certifies an ordered storage read-write timeline" {
+    try expectRepositoryStorageTacticDeterministic(
+        "tests/formal/direct_storage_loop_read_auto.ora",
+        "direct_storage_loop_read_auto",
+        1,
+    );
+}
+
+test "repository tactic certifies checked arithmetic in a storage timeline" {
+    try expectRepositoryStorageTacticDeterministic(
+        "tests/formal/direct_storage_loop_checked_auto.ora",
+        "direct_storage_loop_checked_auto",
+        1,
+    );
+}
+
+test "repository tactic certifies a fixed-array storage loop" {
+    try expectRepositoryStorageTacticDeterministic(
+        "tests/formal/fixed_storage_loop_auto.ora",
+        "fixed_storage_loop_auto",
+        1,
+    );
+}
+
+test "repository tactic certifies a runtime-key mapping storage loop" {
+    try expectRepositoryStorageTacticDeterministic(
+        "tests/formal/mapping_storage_loop_auto.ora",
+        "mapping_storage_loop_auto",
+        1,
+    );
+}
+
+test "repository tactic certifies branch-specific storage writes" {
+    try expectRepositoryStorageTacticDeterministic(
+        "tests/formal/branch_storage_loop_auto.ora",
+        "branch_storage_loop_auto",
+        1,
+    );
+}
+
+test "repository tactic certifies nested storage-mutating loops" {
+    try expectRepositoryStorageTacticDeterministic(
+        "tests/formal/nested_storage_loop_auto.ora",
+        "nested_storage_loop_auto",
+        2,
+    );
+}
+
 test "formal direct-root storage loop requires compiler-owned storage type metadata" {
     var compilation = try compilePackage("tests/formal/storage_loop_projection.ora");
     defer compilation.deinit();

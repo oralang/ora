@@ -438,4 +438,80 @@ example
   simp [constantStorage] at hPreserved
   exact hNe hPreserved.symm
 
+private def refinementControlEdge : Edge Nat where
+  path := fun state => state = 0
+  safe := fun _ => True
+  next := fun current following => current = 0 ∧ following = 1
+  target := .backedge
+  targetAssertion := fun _ => True
+
+private def refinementControlVC : LoopVC Nat where
+  initial := fun state => state = 0
+  invariant := fun state => state = 0 ∨ state = 1
+  edges := [refinementControlEdge]
+
+private def refinementExactEdge : Edge (Nat × Bool) where
+  path := fun _ => True
+  safe := fun _ => True
+  next := fun current following =>
+    current.1 = 0 ∧ following.1 = 1 ∧ following.2 = !current.2
+  target := .backedge
+  targetAssertion := fun _ => True
+
+private def refinementExactVC : LoopVC (Nat × Bool) where
+  initial := fun state => state.1 = 0
+  invariant := fun state => state.1 = 0 ∨ state.1 = 1
+  edges := [refinementExactEdge]
+
+private theorem refinementControlInduction :
+    refinementControlVC.InductionObligations where
+  base := by
+    intro state hInitial
+    exact Or.inl hInitial
+  backedge := by
+    intro edge current following hMember _ _ _ _ hNext
+    simp only [refinementControlVC, List.mem_cons,
+      List.not_mem_nil, or_false] at hMember
+    subst edge
+    exact Or.inr hNext.2
+  edgeSafety := by
+    intro edge _ hMember _ _
+    simp only [refinementControlVC, List.mem_cons,
+      List.not_mem_nil, or_false] at hMember
+    subst edge
+    trivial
+  exit := by
+    intro edge _ _ hMember hNotBackedge
+    simp only [refinementControlVC, List.mem_cons,
+      List.not_mem_nil, or_false] at hMember
+    subst edge
+    exact False.elim (hNotBackedge rfl)
+
+private theorem refinementExactRefinesControl :
+    LoopVC.Refinement refinementControlVC refinementExactVC Prod.fst where
+  initial := by
+    intro state hInitial
+    exact hInitial
+  invariant := by
+    intro state
+    rfl
+  edges := .cons {
+    target := rfl
+    safety := by
+      intro _ _ _ _ _
+      trivial
+    transition := by
+      intro current following _ _ _ hNext
+      exact ⟨hNext.1, hNext.1, hNext.2.1⟩
+    targetAssertion := by
+      intro _ _
+      trivial
+  } .nil
+
+/-- Exact timelines may keep `path = True`: a completed transition recovers
+the abstract control predicate, while safety remains independently required. -/
+example : refinementExactVC.InductionObligations :=
+  induction_obligations_of_refinement refinementControlVC refinementExactVC
+    Prod.fst refinementControlInduction refinementExactRefinesControl
+
 end Ora.Loop

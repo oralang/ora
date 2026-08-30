@@ -134,6 +134,134 @@ structure LoopVC.InductionObligations (vc : LoopVC State) : Prop where
   edgeSafety : vc.EdgeSafetyObligation
   exit : vc.ExitTargetObligation
 
+/-- One exact edge refines its canonical control view. Concrete safety remains
+an independent obligation: a missing transition must never make a reachable
+checkpoint vacuously safe. The transition bridge may use the concrete
+execution because exact timelines execute path assumptions inside `next`,
+while their abstract control view places the same assumptions in `path`. -/
+structure Edge.Refinement
+    (abstractVC : LoopVC AbstractState)
+    (concreteVC : LoopVC ConcreteState)
+    (project : ConcreteState → AbstractState)
+    (abstract : Edge AbstractState)
+    (concrete : Edge ConcreteState) : Prop where
+  target : abstract.target = concrete.target
+  safety : ∀ state,
+    concreteVC.invariant state →
+    concrete.path state →
+    abstractVC.invariant (project state) →
+    (abstract.path (project state) → abstract.safe (project state)) →
+    concrete.safe state
+  transition : ∀ current following,
+    concreteVC.invariant current →
+    concrete.path current →
+    concrete.safe current →
+    concrete.next current following →
+    abstract.path (project current) ∧
+      abstract.next (project current) (project following)
+  targetAssertion : ∀ following,
+    abstract.targetAssertion (project following) →
+    concrete.targetAssertion following
+
+inductive LoopVC.EdgeRefinements
+    (abstract : LoopVC AbstractState)
+    (concrete : LoopVC ConcreteState)
+    (project : ConcreteState → AbstractState) :
+    List (Edge AbstractState) → List (Edge ConcreteState) → Prop where
+  | nil : LoopVC.EdgeRefinements abstract concrete project [] []
+  | cons
+      (pair : Edge.Refinement abstract concrete project abstractEdge concreteEdge)
+      (rest : LoopVC.EdgeRefinements abstract concrete project abstractEdges concreteEdges) :
+      LoopVC.EdgeRefinements abstract concrete project
+        (abstractEdge :: abstractEdges) (concreteEdge :: concreteEdges)
+
+/-- Refinement pairs edges in their canonical deterministic order. This makes
+missing, duplicated, or reordered control edges a malformed refinement rather
+than leaving automation to search for a convenient match. -/
+structure LoopVC.Refinement
+    (abstract : LoopVC AbstractState)
+    (concrete : LoopVC ConcreteState)
+    (project : ConcreteState → AbstractState) : Prop where
+  initial : ∀ state,
+    concrete.initial state → abstract.initial (project state)
+  invariant : ∀ state,
+    concrete.invariant state ↔ abstract.invariant (project state)
+  edges : LoopVC.EdgeRefinements abstract concrete project
+    abstract.edges concrete.edges
+
+private theorem paired_edge_for_member
+    (abstract : LoopVC AbstractState)
+    (concrete : LoopVC ConcreteState)
+    (project : ConcreteState → AbstractState)
+    {abstractEdges : List (Edge AbstractState)}
+    {concreteEdges : List (Edge ConcreteState)}
+    (pairs : LoopVC.EdgeRefinements abstract concrete project
+      abstractEdges concreteEdges)
+    (concreteEdge : Edge ConcreteState)
+    (member : concreteEdge ∈ concreteEdges) :
+    ∃ abstractEdge,
+      abstractEdge ∈ abstractEdges ∧
+      Edge.Refinement abstract concrete project abstractEdge concreteEdge := by
+  induction pairs with
+  | nil => simp at member
+  | @cons abstractEdge concreteHead abstractRest concreteRest pair rest ih =>
+      simp only [List.mem_cons] at member ⊢
+      rcases member with rfl | member
+      · exact ⟨abstractEdge, Or.inl rfl, pair⟩
+      · rcases ih member with ⟨found, foundMember, foundPair⟩
+        exact ⟨found, Or.inr foundMember, foundPair⟩
+
+theorem induction_obligations_of_refinement
+    (abstract : LoopVC AbstractState)
+    (concrete : LoopVC ConcreteState)
+    (project : ConcreteState → AbstractState)
+    (proof : abstract.InductionObligations)
+    (refinement : LoopVC.Refinement abstract concrete project) :
+    concrete.InductionObligations where
+  base := by
+    intro state hInitial
+    exact (refinement.invariant state).mpr
+      (proof.base (project state) (refinement.initial state hInitial))
+  backedge := by
+    intro concreteEdge current following hMember hTarget hInvariant hPath hSafe hNext
+    rcases paired_edge_for_member abstract concrete project refinement.edges
+        concreteEdge hMember with
+      ⟨abstractEdge, hAbstractMember, pair⟩
+    have hAbstractInvariant := (refinement.invariant current).mp hInvariant
+    rcases pair.transition current following hInvariant hPath hSafe hNext with
+      ⟨hAbstractPath, hAbstractNext⟩
+    have hAbstractSafe := proof.edgeSafety abstractEdge (project current)
+      hAbstractMember hAbstractInvariant hAbstractPath
+    apply (refinement.invariant following).mpr
+    exact proof.backedge abstractEdge (project current) (project following)
+      hAbstractMember (pair.target.trans hTarget) hAbstractInvariant
+      hAbstractPath hAbstractSafe hAbstractNext
+  edgeSafety := by
+    intro concreteEdge state hMember hInvariant hPath
+    rcases paired_edge_for_member abstract concrete project refinement.edges
+        concreteEdge hMember with
+      ⟨abstractEdge, hAbstractMember, pair⟩
+    have hAbstractInvariant := (refinement.invariant state).mp hInvariant
+    exact pair.safety state hInvariant hPath hAbstractInvariant
+      (fun hAbstractPath => proof.edgeSafety abstractEdge (project state)
+        hAbstractMember hAbstractInvariant hAbstractPath)
+  exit := by
+    intro concreteEdge current following hMember hNotBackedge hInvariant hPath hSafe hNext
+    rcases paired_edge_for_member abstract concrete project refinement.edges
+        concreteEdge hMember with
+      ⟨abstractEdge, hAbstractMember, pair⟩
+    have hAbstractInvariant := (refinement.invariant current).mp hInvariant
+    rcases pair.transition current following hInvariant hPath hSafe hNext with
+      ⟨hAbstractPath, hAbstractNext⟩
+    have hAbstractSafe := proof.edgeSafety abstractEdge (project current)
+      hAbstractMember hAbstractInvariant hAbstractPath
+    apply pair.targetAssertion following
+    exact proof.exit abstractEdge (project current) (project following)
+      hAbstractMember
+      (fun hBackedge => hNotBackedge (pair.target.symm.trans hBackedge))
+      hAbstractInvariant hAbstractPath hAbstractSafe
+      hAbstractNext
+
 theorem invariant_holds_on_reached_state
     (vc : LoopVC State)
     (hBase : vc.BaseObligation)

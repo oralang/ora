@@ -1,0 +1,13 @@
+contract MappingStorageLoopAuto {
+    storage var values: map<u256, u256>;
+
+    pub fn fill(limit: u256) {
+        var i: u256 = 0;
+        while (i < limit)
+            invariant i <= limit
+        {
+            values[i] = i;
+            i = i +% 1;
+        }
+    }
+}

@@ -40,6 +40,8 @@ const queryCanonicalSupport = support.queryCanonicalSupport;
 
 const LoopStore = struct {
     info: TypeInfo,
+    index_info: TypeInfo,
+    domain: []const u8,
     current: z3.Z3_ast,
     entry: z3.Z3_ast,
 };
@@ -62,6 +64,7 @@ const LoopEncodeState = struct {
     roots: std.ArrayList(LoopRoot) = .empty,
 
     fn deinit(self: *LoopEncodeState, allocator: std.mem.Allocator) void {
+        for (self.stores.items) |store| allocator.free(store.domain);
         self.stores.deinit(allocator);
         self.reads.deinit(allocator);
         self.roots.deinit(allocator);
@@ -866,12 +869,19 @@ pub const Adapter = struct {
         return error.LoopStorageRootUntouched;
     }
 
-    fn loopStore(self: *Adapter, info: TypeInfo) EncodeError!*LoopStore {
+    fn loopStore(
+        self: *Adapter,
+        info: TypeInfo,
+        index_info: TypeInfo,
+        domain: []const u8,
+    ) EncodeError!*LoopStore {
         const state = self.loop_state orelse return error.InvalidLoopQuery;
-        for (state.stores.items) |*store| if (typeInfoEql(store.info, info)) return store;
+        for (state.stores.items) |*store| if (typeInfoEql(store.info, info) and
+            typeInfoEql(store.index_info, index_info) and
+            std.mem.eql(u8, store.domain, domain)) return store;
         const array_sort = z3.Z3_mk_array_sort(
             self.context.ctx,
-            try self.sortForType(u256TypeInfo()),
+            try self.sortForType(index_info),
             try self.sortForType(info),
         );
         try self.context.checkNoError();
@@ -881,22 +891,33 @@ pub const Adapter = struct {
             if (info.signed) "s" else "u",
         });
         defer self.allocator.free(shape);
-        const current_name = try std.fmt.allocPrint(
-            self.allocator,
-            "$ora.loop.store.{s}.current",
-            .{shape},
-        );
+        const direct = std.mem.eql(u8, domain, "direct");
+        const current_name = if (direct)
+            try std.fmt.allocPrint(self.allocator, "$ora.loop.store.{s}.current", .{shape})
+        else
+            try std.fmt.allocPrint(
+                self.allocator,
+                "$ora.loop.store.{s}.{s}.current",
+                .{ domain, shape },
+            );
         defer self.allocator.free(current_name);
-        const entry_name = try std.fmt.allocPrint(
-            self.allocator,
-            "$ora.loop.store.{s}.entry",
-            .{shape},
-        );
+        const entry_name = if (direct)
+            try std.fmt.allocPrint(self.allocator, "$ora.loop.store.{s}.entry", .{shape})
+        else
+            try std.fmt.allocPrint(
+                self.allocator,
+                "$ora.loop.store.{s}.{s}.entry",
+                .{ domain, shape },
+            );
         defer self.allocator.free(entry_name);
         const current = try self.namedConst(current_name, array_sort);
         const entry = try self.namedConst(entry_name, array_sort);
+        const owned_domain = try self.allocator.dupe(u8, domain);
+        errdefer self.allocator.free(owned_domain);
         try state.stores.append(self.allocator, .{
             .info = info,
+            .index_info = index_info,
+            .domain = owned_domain,
             .current = current,
             .entry = entry,
         });
@@ -934,10 +955,76 @@ pub const Adapter = struct {
         info: TypeInfo,
     ) EncodeError!LoopLocationStoreAndKey {
         if (location.root.len == 0) return error.InvalidLoopQuery;
-        if (location.projections.len != 0) return error.InvalidLoopQuery;
-        return .{
-            .store = try self.loopStore(info),
+        if (location.projections.len == 0) return .{
+            .store = try self.loopStore(info, u256TypeInfo(), "direct"),
             .key = try self.loopRootKey(location),
+        };
+        if (location.projections.len != 1) return error.InvalidLoopQuery;
+
+        return switch (location.projections[0]) {
+            .field => |field| blk: {
+                if (field.len == 0) return error.InvalidLoopQuery;
+                const domain = try std.fmt.allocPrint(
+                    self.allocator,
+                    "field.{s}.{s}",
+                    .{ location.root, field },
+                );
+                defer self.allocator.free(domain);
+                break :blk .{
+                    .store = try self.loopStore(info, u256TypeInfo(), domain),
+                    .key = try self.integerLiteralForType("0", u256TypeInfo()),
+                };
+            },
+            .fixed_index => |index| try self.loopProjectedStoreAndKey(
+                location.root,
+                "fixed",
+                index,
+                info,
+                true,
+            ),
+            .mapping_key => |key| try self.loopProjectedStoreAndKey(
+                location.root,
+                "mapping",
+                key,
+                info,
+                false,
+            ),
+        };
+    }
+
+    fn loopProjectedStoreAndKey(
+        self: *Adapter,
+        root: []const u8,
+        tag: []const u8,
+        expression: obligation.LoopTypedFormula,
+        value_info: TypeInfo,
+        require_unsigned: bool,
+    ) EncodeError!LoopLocationStoreAndKey {
+        const key_info = try typeInfo(expression.ty);
+        if (require_unsigned and (key_info.kind != .bitvector or key_info.signed)) {
+            return error.InvalidLoopQuery;
+        }
+        const formula_info = switch (expression.value.formula) {
+            .term => |term| try self.termTypeInfo(term),
+            .origin_value => return error.UnsupportedOriginValue,
+        };
+        if (!typeInfoEql(key_info, formula_info)) return error.TypeMismatch;
+        const key = try self.encodeValueFormula(expression.value.formula);
+        const key_shape = try std.fmt.allocPrint(self.allocator, "{s}{d}{s}", .{
+            if (key_info.kind == .bool) "bool" else "bv",
+            key_info.width,
+            if (key_info.signed) "s" else "u",
+        });
+        defer self.allocator.free(key_shape);
+        const domain = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}.{s}.{s}",
+            .{ tag, root, key_shape },
+        );
+        defer self.allocator.free(domain);
+        return .{
+            .store = try self.loopStore(value_info, key_info, domain),
+            .key = key,
         };
     }
 

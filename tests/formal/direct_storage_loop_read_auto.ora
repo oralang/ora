@@ -1,0 +1,14 @@
+contract DirectStorageLoopReadAuto {
+    storage var counter: u256;
+
+    pub fn copy() {
+        var i: u256 = 0;
+        while (i < 1)
+            invariant i <= 1
+        {
+            let observed: u256 = counter;
+            counter = observed;
+            i = i +% 1;
+        }
+    }
+}

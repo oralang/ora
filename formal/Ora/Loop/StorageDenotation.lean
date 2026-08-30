@@ -22,6 +22,29 @@ structure StorageFormulaContext where
 def bindStorageReads (env : Env) (reads : List StorageReadBinding) : Env :=
   reads.foldl (fun bound read => bound.setFree read.id read.value) env
 
+theorem bindStorageReads_lookupFree_of_not_mem
+    (env : Env)
+    (reads : List StorageReadBinding)
+    (id : FreeVarId)
+    (hFresh : id ∉ reads.map StorageReadBinding.id) :
+    (bindStorageReads env reads).lookupFree id = env.lookupFree id := by
+  induction reads generalizing env with
+  | nil => rfl
+  | cons read rest ih =>
+      simp only [List.map_cons, List.mem_cons, not_or] at hFresh
+      simp only [bindStorageReads, List.foldl_cons]
+      change (bindStorageReads (env.setFree read.id read.value) rest).lookupFree id = _
+      rw [ih (env := env.setFree read.id read.value) hFresh.2]
+      have hDifferent : (read.id == id) = false := by
+        apply Bool.eq_false_iff.mpr
+        intro hEqual
+        exact hFresh.1 (beq_iff_eq.mp hEqual).symm
+      change lookupFreeBinding ((read.id, read.value) :: env.freeBindings) id =
+        lookupFreeBinding env.freeBindings id
+      simp only [lookupFreeBinding]
+      rw [hDifferent]
+      rfl
+
 def StorageFormulaContext.withStoreViews
     (context : StorageFormulaContext)
     (bindings : Env)
@@ -36,6 +59,14 @@ def StorageFormulaContext.withStoreViews
           match context.resolvePlace context.entryEnv.lookupFree place with
           | some location => state.oldValue location
           | none => bindings.placeValue key }
+
+@[simp] theorem StorageFormulaContext.withStoreViews_lookupFree
+    (context : StorageFormulaContext)
+    (bindings : Env)
+    (state : StorageActionState)
+    (id : FreeVarId) :
+    (context.withStoreViews bindings state).lookupFree id =
+      bindings.lookupFree id := rfl
 
 /-- Check storage-place resolution before constructing the total semantic
 environment consumed by the shared obligation denotation. The fallback in the

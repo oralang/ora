@@ -493,10 +493,35 @@ const LoopTimelineInventoryEvent = struct {
     structural_key: []const u8,
     tag: obligation.LoopTimelineEventTag,
     storage_root: ?[]const u8 = null,
+    storage_projections: []const LoopStorageProjectionInventory = &.{},
     storage_result: ?obligation.FreeVarId = null,
     storage_value_source: ?[]const u8 = null,
     storage_ty: ?obligation.TypeRef = null,
     summary_dependency: ?obligation.LoopSummaryDependency = null,
+};
+
+const LoopStorageProjectionInventoryTag = enum {
+    field,
+    fixed_index,
+    mapping_key,
+};
+
+const LoopStorageProjectionInventory = struct {
+    tag: LoopStorageProjectionInventoryTag,
+    source_key: ?[]const u8 = null,
+    field: ?[]const u8 = null,
+    ty: ?obligation.TypeRef = null,
+};
+
+const ProjectedLoopStorageLocation = struct {
+    location: obligation.LoopStorageLocationExpr,
+    inventory: []const LoopStorageProjectionInventory,
+};
+
+const InventoryLoopStorageLocation = struct {
+    root: []const u8,
+    projections: []const LoopStorageProjectionInventory,
+    value_ty: obligation.TypeRef,
 };
 
 const LoopControlKind = enum { break_loop, continue_loop, function_return, error_return };
@@ -1378,6 +1403,7 @@ const Collector = struct {
             if (std.mem.eql(u8, name, "ora.sload")) {
                 if (effect_kind != mlir.ORA_OPERATION_MEMORY_EFFECT_READ or
                     mlir.oraOperationGetNumResults(op) != 1) return error.LoopProjectionEffectUnsupported;
+                if (isAggregateStorageCarrierLoad(op)) continue;
                 const result = mlir.oraOperationGetResult(op, 0);
                 const location = try self.directStorageLocation(op, result);
                 const read_id = try self.storageReadId(op);
@@ -1428,6 +1454,161 @@ const Collector = struct {
                     .storage_root = location.root,
                     .storage_value_source = try self.sourceKeyForValue(value, path.source_overrides),
                     .storage_ty = location.value_ty,
+                });
+            } else if (std.mem.eql(u8, name, "memref.load") and
+                inventoryMemrefLoadTargetsPersistentRoot(op))
+            {
+                if (effect_kind != mlir.ORA_OPERATION_MEMORY_EFFECT_READ or
+                    mlir.oraOperationGetNumResults(op) != 1 or
+                    mlir.oraOperationGetNumOperands(op) < 2) return error.LoopProjectionEffectUnsupported;
+                const result = mlir.oraOperationGetResult(op, 0);
+                const projected = try self.projectedMemrefStorageLocation(
+                    op,
+                    0,
+                    1,
+                    result,
+                    path.formula_overrides,
+                    path.source_overrides,
+                    path.timeline,
+                    draft,
+                );
+                const read_id = try self.storageReadId(op);
+                const read_term = try self.addTerm(.{ .variable = .{ .free = .{
+                    .id = read_id,
+                    .name = projected.location.root,
+                    .ty = projected.location.value_ty,
+                } } });
+                path.formula_overrides = try appendFormulaOverride(self.allocator, path.formula_overrides, .{
+                    .value_id = @intFromPtr(result.ptr),
+                    .formula = .{ .term = read_term },
+                });
+                path.timeline = try appendLoopTimelineEvent(self.allocator, path.timeline, .{
+                    .storage_read = .{ .result = read_id, .location = projected.location },
+                }, effect_key);
+                path.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, path.timeline_inventory, .{
+                    .structural_key = effect_key,
+                    .tag = .storage_read,
+                    .storage_root = projected.location.root,
+                    .storage_projections = projected.inventory,
+                    .storage_result = read_id,
+                    .storage_ty = projected.location.value_ty,
+                });
+            } else if (std.mem.eql(u8, name, "memref.store") and
+                inventoryMemrefStoreTargetsPersistentRoot(op))
+            {
+                if (effect_kind != mlir.ORA_OPERATION_MEMORY_EFFECT_WRITE or
+                    mlir.oraOperationGetNumOperands(op) < 3) return error.LoopProjectionEffectUnsupported;
+                const value = mlir.oraOperationGetOperand(op, 0);
+                const projected = try self.projectedMemrefStorageLocation(
+                    op,
+                    1,
+                    2,
+                    value,
+                    path.formula_overrides,
+                    path.source_overrides,
+                    path.timeline,
+                    draft,
+                );
+                const formula = try self.loopFormulaFromValueWithOverrides(
+                    value,
+                    path.formula_overrides,
+                    name,
+                    draft.symbol,
+                    draft.ordinal,
+                    0,
+                );
+                path.timeline = try appendLoopTimelineEvent(self.allocator, path.timeline, .{
+                    .storage_write = .{
+                        .location = projected.location,
+                        .value = .{
+                            .formula = formula,
+                            .read_results = try self.readResultsForFormula(formula, path.timeline),
+                        },
+                    },
+                }, effect_key);
+                path.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, path.timeline_inventory, .{
+                    .structural_key = effect_key,
+                    .tag = .storage_write,
+                    .storage_root = projected.location.root,
+                    .storage_projections = projected.inventory,
+                    .storage_value_source = try self.sourceKeyForValue(value, path.source_overrides),
+                    .storage_ty = projected.location.value_ty,
+                });
+            } else if (std.mem.eql(u8, name, "ora.map_get")) {
+                if (effect_kind != mlir.ORA_OPERATION_MEMORY_EFFECT_READ or
+                    mlir.oraOperationGetNumResults(op) != 1 or
+                    mlir.oraOperationGetNumOperands(op) != 2) return error.LoopProjectionEffectUnsupported;
+                const result = mlir.oraOperationGetResult(op, 0);
+                if (isAggregateStorageValue(result)) continue;
+                const projected = try self.projectedMapStorageLocation(
+                    op,
+                    mlir.oraOperationGetOperand(op, 0),
+                    mlir.oraOperationGetOperand(op, 1),
+                    result,
+                    path.formula_overrides,
+                    path.source_overrides,
+                    path.timeline,
+                    draft,
+                );
+                const read_id = try self.storageReadId(op);
+                const read_term = try self.addTerm(.{ .variable = .{ .free = .{
+                    .id = read_id,
+                    .name = projected.location.root,
+                    .ty = projected.location.value_ty,
+                } } });
+                path.formula_overrides = try appendFormulaOverride(self.allocator, path.formula_overrides, .{
+                    .value_id = @intFromPtr(result.ptr),
+                    .formula = .{ .term = read_term },
+                });
+                path.timeline = try appendLoopTimelineEvent(self.allocator, path.timeline, .{
+                    .storage_read = .{ .result = read_id, .location = projected.location },
+                }, effect_key);
+                path.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, path.timeline_inventory, .{
+                    .structural_key = effect_key,
+                    .tag = .storage_read,
+                    .storage_root = projected.location.root,
+                    .storage_projections = projected.inventory,
+                    .storage_result = read_id,
+                    .storage_ty = projected.location.value_ty,
+                });
+            } else if (std.mem.eql(u8, name, "ora.map_store")) {
+                if (effect_kind != mlir.ORA_OPERATION_MEMORY_EFFECT_WRITE or
+                    mlir.oraOperationGetNumOperands(op) != 3) return error.LoopProjectionEffectUnsupported;
+                const value = mlir.oraOperationGetOperand(op, 2);
+                const projected = try self.projectedMapStorageLocation(
+                    op,
+                    mlir.oraOperationGetOperand(op, 0),
+                    mlir.oraOperationGetOperand(op, 1),
+                    value,
+                    path.formula_overrides,
+                    path.source_overrides,
+                    path.timeline,
+                    draft,
+                );
+                const formula = try self.loopFormulaFromValueWithOverrides(
+                    value,
+                    path.formula_overrides,
+                    name,
+                    draft.symbol,
+                    draft.ordinal,
+                    2,
+                );
+                path.timeline = try appendLoopTimelineEvent(self.allocator, path.timeline, .{
+                    .storage_write = .{
+                        .location = projected.location,
+                        .value = .{
+                            .formula = formula,
+                            .read_results = try self.readResultsForFormula(formula, path.timeline),
+                        },
+                    },
+                }, effect_key);
+                path.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, path.timeline_inventory, .{
+                    .structural_key = effect_key,
+                    .tag = .storage_write,
+                    .storage_root = projected.location.root,
+                    .storage_projections = projected.inventory,
+                    .storage_value_source = try self.sourceKeyForValue(value, path.source_overrides),
+                    .storage_ty = projected.location.value_ty,
                 });
             }
             if (draftHasSafetySite(draft, op)) {
@@ -1537,6 +1718,7 @@ const Collector = struct {
             if (std.mem.eql(u8, name, "ora.sload")) {
                 if (effect_kind != mlir.ORA_OPERATION_MEMORY_EFFECT_READ or
                     mlir.oraOperationGetNumResults(op) != 1) return error.LoopProjectionEffectUnsupported;
+                if (isAggregateStorageCarrierLoad(op)) continue;
                 const result = mlir.oraOperationGetResult(op, 0);
                 const location = try self.directStorageLocation(op, result);
                 path.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, path.timeline_inventory, .{
@@ -1555,6 +1737,87 @@ const Collector = struct {
                     .structural_key = effect_key,
                     .tag = .storage_write,
                     .storage_root = location.root,
+                    .storage_value_source = try self.sourceKeyForValue(value, path.source_overrides),
+                    .storage_ty = location.value_ty,
+                });
+            } else if (std.mem.eql(u8, name, "memref.load") and
+                inventoryMemrefLoadTargetsPersistentRoot(op))
+            {
+                if (effect_kind != mlir.ORA_OPERATION_MEMORY_EFFECT_READ or
+                    mlir.oraOperationGetNumResults(op) != 1 or
+                    mlir.oraOperationGetNumOperands(op) < 2) return error.LoopProjectionEffectUnsupported;
+                const result = mlir.oraOperationGetResult(op, 0);
+                const location = try self.inventoryMemrefStorageLocation(
+                    op,
+                    0,
+                    1,
+                    result,
+                    path.source_overrides,
+                );
+                path.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, path.timeline_inventory, .{
+                    .structural_key = effect_key,
+                    .tag = .storage_read,
+                    .storage_root = location.root,
+                    .storage_projections = location.projections,
+                    .storage_result = try self.storageReadId(op),
+                    .storage_ty = location.value_ty,
+                });
+            } else if (std.mem.eql(u8, name, "memref.store") and
+                inventoryMemrefStoreTargetsPersistentRoot(op))
+            {
+                if (effect_kind != mlir.ORA_OPERATION_MEMORY_EFFECT_WRITE or
+                    mlir.oraOperationGetNumOperands(op) < 3) return error.LoopProjectionEffectUnsupported;
+                const value = mlir.oraOperationGetOperand(op, 0);
+                const location = try self.inventoryMemrefStorageLocation(
+                    op,
+                    1,
+                    2,
+                    value,
+                    path.source_overrides,
+                );
+                path.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, path.timeline_inventory, .{
+                    .structural_key = effect_key,
+                    .tag = .storage_write,
+                    .storage_root = location.root,
+                    .storage_projections = location.projections,
+                    .storage_value_source = try self.sourceKeyForValue(value, path.source_overrides),
+                    .storage_ty = location.value_ty,
+                });
+            } else if (std.mem.eql(u8, name, "ora.map_get")) {
+                if (effect_kind != mlir.ORA_OPERATION_MEMORY_EFFECT_READ or
+                    mlir.oraOperationGetNumResults(op) != 1 or
+                    mlir.oraOperationGetNumOperands(op) != 2) return error.LoopProjectionEffectUnsupported;
+                const result = mlir.oraOperationGetResult(op, 0);
+                if (isAggregateStorageValue(result)) continue;
+                const location = try self.inventoryMapStorageLocation(
+                    mlir.oraOperationGetOperand(op, 0),
+                    mlir.oraOperationGetOperand(op, 1),
+                    result,
+                    path.source_overrides,
+                );
+                path.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, path.timeline_inventory, .{
+                    .structural_key = effect_key,
+                    .tag = .storage_read,
+                    .storage_root = location.root,
+                    .storage_projections = location.projections,
+                    .storage_result = try self.storageReadId(op),
+                    .storage_ty = location.value_ty,
+                });
+            } else if (std.mem.eql(u8, name, "ora.map_store")) {
+                if (effect_kind != mlir.ORA_OPERATION_MEMORY_EFFECT_WRITE or
+                    mlir.oraOperationGetNumOperands(op) != 3) return error.LoopProjectionEffectUnsupported;
+                const value = mlir.oraOperationGetOperand(op, 2);
+                const location = try self.inventoryMapStorageLocation(
+                    mlir.oraOperationGetOperand(op, 0),
+                    mlir.oraOperationGetOperand(op, 1),
+                    value,
+                    path.source_overrides,
+                );
+                path.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, path.timeline_inventory, .{
+                    .structural_key = effect_key,
+                    .tag = .storage_write,
+                    .storage_root = location.root,
+                    .storage_projections = location.projections,
                     .storage_value_source = try self.sourceKeyForValue(value, path.source_overrides),
                     .storage_ty = location.value_ty,
                 });
@@ -2646,6 +2909,216 @@ const Collector = struct {
             if (info.width != width) return error.LoopProjectionEffectUnsupported;
         }
         return .{ .root = root, .value_ty = ty };
+    }
+
+    fn projectedMemrefStorageLocation(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        memref_operand_index: usize,
+        first_index_operand: usize,
+        value: mlir.MlirValue,
+        formula_overrides: []const LoopFormulaOverride,
+        source_overrides: []const LoopValueSource,
+        timeline: []const obligation.LoopTimelineEvent,
+        draft: LoopSummaryDraft,
+    ) !ProjectedLoopStorageLocation {
+        if (mlir.oraOperationGetNumOperands(op) <= first_index_operand) {
+            return error.LoopProjectionEffectUnsupported;
+        }
+        const root = try persistentStorageRootForCarrier(
+            mlir.oraOperationGetOperand(op, memref_operand_index),
+        );
+        const value_ty = try self.exactLoopIntegerTypeForValue(value);
+        const projection_count: usize = @intCast(mlir.oraOperationGetNumOperands(op) - first_index_operand);
+        const projections = try self.allocator.alloc(obligation.LoopStorageProjection, projection_count);
+        const inventory = try self.allocator.alloc(LoopStorageProjectionInventory, projection_count);
+        for (0..projection_count) |index| {
+            const raw_index = mlir.oraOperationGetOperand(op, first_index_operand + index);
+            const source = fixedIndexSourceValue(raw_index);
+            const formula = try self.loopFormulaFromValueWithOverrides(
+                source,
+                formula_overrides,
+                operationName(op),
+                draft.symbol,
+                draft.ordinal,
+                @intCast(first_index_operand + index),
+            );
+            const ty = try self.exactLoopIntegerTypeForValue(source);
+            projections[index] = .{ .fixed_index = .{
+                .value = .{
+                    .formula = formula,
+                    .read_results = try self.readResultsForFormula(formula, timeline),
+                },
+                .ty = ty,
+            } };
+            inventory[index] = .{
+                .tag = .fixed_index,
+                .source_key = try self.sourceKeyForValue(source, source_overrides),
+                .ty = ty,
+            };
+        }
+        return .{
+            .location = .{ .root = root, .projections = projections, .value_ty = value_ty },
+            .inventory = inventory,
+        };
+    }
+
+    fn projectedMapStorageLocation(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        map_value: mlir.MlirValue,
+        final_key: mlir.MlirValue,
+        value: mlir.MlirValue,
+        formula_overrides: []const LoopFormulaOverride,
+        source_overrides: []const LoopValueSource,
+        timeline: []const obligation.LoopTimelineEvent,
+        draft: LoopSummaryDraft,
+    ) !ProjectedLoopStorageLocation {
+        const inputs = try self.mappingProjectionInputs(map_value, final_key);
+        const projections = try self.allocator.alloc(obligation.LoopStorageProjection, inputs.keys.len);
+        const inventory = try self.allocator.alloc(LoopStorageProjectionInventory, inputs.keys.len);
+        for (inputs.keys, 0..) |key, index| {
+            const formula = try self.loopFormulaFromValueWithOverrides(
+                key,
+                formula_overrides,
+                operationName(op),
+                draft.symbol,
+                draft.ordinal,
+                @intCast(index + 1),
+            );
+            const ty = try self.exactLoopIntegerTypeForValue(key);
+            projections[index] = .{ .mapping_key = .{
+                .value = .{
+                    .formula = formula,
+                    .read_results = try self.readResultsForFormula(formula, timeline),
+                },
+                .ty = ty,
+            } };
+            inventory[index] = .{
+                .tag = .mapping_key,
+                .source_key = try self.sourceKeyForValue(key, source_overrides),
+                .ty = ty,
+            };
+        }
+        return .{
+            .location = .{
+                .root = inputs.root,
+                .projections = projections,
+                .value_ty = try self.exactLoopIntegerTypeForValue(value),
+            },
+            .inventory = inventory,
+        };
+    }
+
+    fn inventoryMemrefStorageLocation(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        memref_operand_index: usize,
+        first_index_operand: usize,
+        value: mlir.MlirValue,
+        source_overrides: []const LoopValueSource,
+    ) !InventoryLoopStorageLocation {
+        if (mlir.oraOperationGetNumOperands(op) <= first_index_operand) {
+            return error.LoopProjectionEffectUnsupported;
+        }
+        const root = try persistentStorageRootForCarrier(
+            mlir.oraOperationGetOperand(op, memref_operand_index),
+        );
+        const projection_count: usize = @intCast(mlir.oraOperationGetNumOperands(op) - first_index_operand);
+        const projections = try self.allocator.alloc(LoopStorageProjectionInventory, projection_count);
+        for (0..projection_count) |index| {
+            const source = fixedIndexSourceValue(
+                mlir.oraOperationGetOperand(op, first_index_operand + index),
+            );
+            projections[index] = .{
+                .tag = .fixed_index,
+                .source_key = try self.sourceKeyForValue(source, source_overrides),
+                .ty = try self.exactLoopIntegerTypeForValue(source),
+            };
+        }
+        return .{
+            .root = root,
+            .projections = projections,
+            .value_ty = try self.exactLoopIntegerTypeForValue(value),
+        };
+    }
+
+    fn inventoryMapStorageLocation(
+        self: *Collector,
+        map_value: mlir.MlirValue,
+        final_key: mlir.MlirValue,
+        value: mlir.MlirValue,
+        source_overrides: []const LoopValueSource,
+    ) !InventoryLoopStorageLocation {
+        const inputs = try self.mappingProjectionInputs(map_value, final_key);
+        const projections = try self.allocator.alloc(LoopStorageProjectionInventory, inputs.keys.len);
+        for (inputs.keys, 0..) |key, index| projections[index] = .{
+            .tag = .mapping_key,
+            .source_key = try self.sourceKeyForValue(key, source_overrides),
+            .ty = try self.exactLoopIntegerTypeForValue(key),
+        };
+        return .{
+            .root = inputs.root,
+            .projections = projections,
+            .value_ty = try self.exactLoopIntegerTypeForValue(value),
+        };
+    }
+
+    const MappingProjectionInputs = struct {
+        root: []const u8,
+        keys: []const mlir.MlirValue,
+    };
+
+    fn mappingProjectionInputs(
+        self: *Collector,
+        map_value: mlir.MlirValue,
+        final_key: mlir.MlirValue,
+    ) !MappingProjectionInputs {
+        var reversed: std.ArrayList(mlir.MlirValue) = .empty;
+        defer reversed.deinit(self.allocator);
+        try reversed.append(self.allocator, final_key);
+
+        var current = map_value;
+        var depth: u32 = 0;
+        while (depth <= 32) : (depth += 1) {
+            const owner = storageMapSourceOwner(current) orelse
+                return error.LoopProjectionEffectUnsupported;
+            const name = operationName(owner);
+            if (std.mem.eql(u8, name, "ora.sload")) {
+                const root = (try self.stringAttr(owner, "global")) orelse
+                    return error.LoopProjectionEffectUnsupported;
+                const keys = try self.allocator.alloc(mlir.MlirValue, reversed.items.len);
+                for (reversed.items, 0..) |key, index| keys[keys.len - 1 - index] = key;
+                return .{ .root = root, .keys = keys };
+            }
+            if (!std.mem.eql(u8, name, "ora.map_get") or
+                mlir.oraOperationGetNumOperands(owner) != 2)
+            {
+                return error.LoopProjectionEffectUnsupported;
+            }
+            try reversed.append(self.allocator, mlir.oraOperationGetOperand(owner, 1));
+            current = mlir.oraOperationGetOperand(owner, 0);
+        }
+        return error.LoopProjectionEffectUnsupported;
+    }
+
+    fn exactLoopIntegerTypeForValue(
+        self: *Collector,
+        value: mlir.MlirValue,
+    ) !obligation.TypeRef {
+        var signed_override: ?bool = null;
+        if (mlir.oraValueIsAOpResult(value)) {
+            const owner = mlir.oraOpResultGetOwner(value);
+            if (!mlir.oraOperationIsNull(owner)) {
+                signed_override = try self.boolAttr(owner, "ora.integer_signed");
+            }
+        }
+        const ty = try self.canonicalTypeRefForValue(value, signed_override);
+        const info = typeRefIntegerInfo(ty) orelse return error.LoopProjectionEffectUnsupported;
+        if (integerTypeWidth(mlir.oraValueGetType(value)) != info.width) {
+            return error.LoopProjectionEffectUnsupported;
+        }
+        return ty;
     }
 
     fn readResultsForFormula(
@@ -6284,6 +6757,7 @@ fn storageTimelineInventoryEql(
         const left = semantic[semantic_index];
         if (!std.mem.eql(u8, left.structural_key, right.structural_key) or left.tag != right.tag or
             !optionalStringEql(left.storage_root, right.storage_root) or
+            !storageProjectionInventoriesEql(left.storage_projections, right.storage_projections) or
             !optionalFreeVarEql(left.storage_result, right.storage_result) or
             !optionalStringEql(left.storage_value_source, right.storage_value_source) or
             !optionalIntegerTypeEql(left.storage_ty, right.storage_ty) or
@@ -6311,15 +6785,47 @@ fn timelineMatchesInventory(
             std.meta.activeTag(event.payload) != item.tag) return false;
         switch (event.payload) {
             .storage_read => |read| if (!optionalStringEql(read.location.root, item.storage_root) or
+                !storageProjectionsMatchInventory(read.location.projections, item.storage_projections) or
                 !optionalFreeVarEql(read.result, item.storage_result) or
                 !optionalIntegerTypeEql(read.location.value_ty, item.storage_ty)) return false,
             .storage_write => |write| if (!optionalStringEql(write.location.root, item.storage_root) or
+                !storageProjectionsMatchInventory(write.location.projections, item.storage_projections) or
                 !optionalIntegerTypeEql(write.location.value_ty, item.storage_ty) or
                 item.storage_value_source == null) return false,
             .summary_dependency => |dependency| if (!optionalDependencyEql(dependency, item.summary_dependency)) return false,
             .path_assumption, .safety_checkpoint => {},
         }
     }
+    return true;
+}
+
+fn storageProjectionInventoriesEql(
+    lhs: []const LoopStorageProjectionInventory,
+    rhs: []const LoopStorageProjectionInventory,
+) bool {
+    if (lhs.len != rhs.len) return false;
+    for (lhs, rhs) |left, right| {
+        if (left.tag != right.tag or
+            !optionalStringEql(left.source_key, right.source_key) or
+            !optionalStringEql(left.field, right.field) or
+            !optionalIntegerTypeEql(left.ty, right.ty)) return false;
+    }
+    return true;
+}
+
+fn storageProjectionsMatchInventory(
+    projections: []const obligation.LoopStorageProjection,
+    inventory: []const LoopStorageProjectionInventory,
+) bool {
+    if (projections.len != inventory.len) return false;
+    for (projections, inventory) |projection, item| switch (projection) {
+        .field => |field| if (item.tag != .field or
+            !optionalStringEql(field, item.field) or item.source_key != null or item.ty != null) return false,
+        .fixed_index => |index| if (item.tag != .fixed_index or
+            item.source_key == null or !optionalIntegerTypeEql(index.ty, item.ty)) return false,
+        .mapping_key => |key| if (item.tag != .mapping_key or
+            item.source_key == null or !optionalIntegerTypeEql(key.ty, item.ty)) return false,
+    };
     return true;
 }
 
@@ -6827,31 +7333,72 @@ fn directRootLoopEffectSupported(
     op_name: []const u8,
     effect_kind: mlir.OraOperationMemoryEffectKind,
 ) bool {
+    _ = op;
     if (effect_kind == mlir.ORA_OPERATION_MEMORY_EFFECT_NONE) return true;
     if (std.mem.eql(u8, op_name, "ora.sload") or std.mem.eql(u8, op_name, "ora.sstore") or
         op_kind_map.has(op_name) or std.mem.eql(u8, op_name, "ora.decreases") or
         std.mem.eql(u8, op_name, "ora.increases") or std.mem.eql(u8, op_name, "ora.mload") or
         std.mem.eql(u8, op_name, "ora.mload8") or std.mem.eql(u8, op_name, "ora.mstore") or
         std.mem.eql(u8, op_name, "ora.mstore8")) return true;
-    if (std.mem.eql(u8, op_name, "memref.load")) return true;
-    return std.mem.eql(u8, op_name, "memref.store") and !inventoryMemrefStoreTargetsPersistentRoot(op);
+    if (std.mem.eql(u8, op_name, "ora.map_get") or std.mem.eql(u8, op_name, "ora.map_store")) return true;
+    if (std.mem.eql(u8, op_name, "memref.load") or std.mem.eql(u8, op_name, "memref.store")) return true;
+    return false;
+}
+
+fn isAggregateStorageCarrierLoad(op: mlir.MlirOperation) bool {
+    if (!std.mem.eql(u8, operationName(op), "ora.sload") or
+        mlir.oraOperationGetNumResults(op) != 1) return false;
+    return isAggregateStorageValue(mlir.oraOperationGetResult(op, 0));
+}
+
+fn isAggregateStorageValue(value: mlir.MlirValue) bool {
+    if (mlir.oraValueIsNull(value)) return false;
+    const ty = mlir.oraValueGetType(value);
+    if (mlir.oraTypeIsAMemRef(ty)) return true;
+    return !mlir.oraTypeIsNull(mlir.oraMapTypeGetValueType(ty));
 }
 
 fn inventoryMemrefStoreTargetsPersistentRoot(op: mlir.MlirOperation) bool {
     if (mlir.oraOperationGetNumOperands(op) < 2) return false;
-    var current = mlir.oraOperationGetOperand(op, 1);
+    _ = persistentStorageRootForCarrier(mlir.oraOperationGetOperand(op, 1)) catch return false;
+    return true;
+}
+
+fn inventoryMemrefLoadTargetsPersistentRoot(op: mlir.MlirOperation) bool {
+    if (mlir.oraOperationGetNumOperands(op) < 1) return false;
+    _ = persistentStorageRootForCarrier(mlir.oraOperationGetOperand(op, 0)) catch return false;
+    return true;
+}
+
+fn persistentStorageRootForCarrier(value: mlir.MlirValue) ![]const u8 {
+    var current = value;
     var depth: u32 = 0;
     while (depth <= 32) : (depth += 1) {
-        if (!mlir.oraValueIsAOpResult(current)) return false;
+        if (!mlir.oraValueIsAOpResult(current)) return error.LoopProjectionEffectUnsupported;
         const owner = mlir.oraOpResultGetOwner(current);
-        if (mlir.oraOperationIsNull(owner)) return false;
+        if (mlir.oraOperationIsNull(owner)) return error.LoopProjectionEffectUnsupported;
         const owner_name = operationName(owner);
-        if (std.mem.eql(u8, owner_name, "ora.sload")) return true;
-        if (!isTransparentValueOp(owner_name)) return false;
-        if (mlir.oraOperationGetNumOperands(owner) < 1) return false;
+        if (std.mem.eql(u8, owner_name, "ora.sload")) {
+            const root = stringAttrView(owner, "global") orelse
+                return error.LoopProjectionEffectUnsupported;
+            return root.slice();
+        }
+        if (!isTransparentValueOp(owner_name)) return error.LoopProjectionEffectUnsupported;
+        if (mlir.oraOperationGetNumOperands(owner) < 1) return error.LoopProjectionEffectUnsupported;
         current = mlir.oraOperationGetOperand(owner, 0);
     }
-    return false;
+    return error.LoopProjectionEffectUnsupported;
+}
+
+fn fixedIndexSourceValue(value: mlir.MlirValue) mlir.MlirValue {
+    if (!mlir.oraValueIsAOpResult(value)) return value;
+    const owner = mlir.oraOpResultGetOwner(value);
+    if (mlir.oraOperationIsNull(owner) or mlir.oraOperationGetNumOperands(owner) != 1) return value;
+    const name = operationName(owner);
+    if (!std.mem.eql(u8, name, "arith.index_cast") and
+        !std.mem.eql(u8, name, "arith.index_castui") and
+        !std.mem.eql(u8, name, "arith.index_castsi")) return value;
+    return mlir.oraOperationGetOperand(owner, 0);
 }
 
 fn storageMapSourceOwner(value: mlir.MlirValue) ?mlir.MlirOperation {
@@ -7257,6 +7804,67 @@ test "direct-root timeline inventory compares every storage event field" {
         compareLoopProjection(&.{semantic}, &.{inventory}),
     );
 
+    const semantic_projection = [_]obligation.LoopStorageProjection{.{
+        .mapping_key = .{
+            .value = .{ .formula = .{ .term = 2 } },
+            .ty = ty,
+        },
+    }};
+    const projection_inventory = [_]LoopStorageProjectionInventory{.{
+        .tag = .mapping_key,
+        .source_key = "module-op:6/result:0",
+        .ty = ty,
+    }};
+    var projected_timeline = timeline;
+    projected_timeline[1].payload.storage_read.location.projections = &semantic_projection;
+    var projected_rows = rows;
+    projected_rows[1].storage_projections = &projection_inventory;
+    var projected_semantic = semantic;
+    projected_semantic.edge.timeline = &projected_timeline;
+    projected_semantic.timeline_inventory = projected_rows[1..3];
+    var projected_inventory = inventory;
+    projected_inventory.timeline_inventory = &projected_rows;
+    try std.testing.expectEqual(
+        obligation.LoopProjectionCompleteness.complete,
+        compareLoopProjection(&.{projected_semantic}, &.{projected_inventory}),
+    );
+
+    const wrong_projection_inventory = [_]LoopStorageProjectionInventory{.{
+        .tag = .fixed_index,
+        .source_key = "module-op:6/result:0",
+        .ty = ty,
+    }};
+    var wrong_projection_rows = projected_rows;
+    wrong_projection_rows[1].storage_projections = &wrong_projection_inventory;
+    var wrong_projection = projected_inventory;
+    wrong_projection.timeline_inventory = &wrong_projection_rows;
+    try std.testing.expectEqual(
+        obligation.LoopProjectionCompleteness.effect_mismatch,
+        compareLoopProjection(&.{projected_semantic}, &.{wrong_projection}),
+    );
+
+    var wrong_projection_source_items = projection_inventory;
+    wrong_projection_source_items[0].source_key = "module-op:5/result:0";
+    var wrong_projection_source_rows = projected_rows;
+    wrong_projection_source_rows[1].storage_projections = &wrong_projection_source_items;
+    var wrong_projection_source = projected_inventory;
+    wrong_projection_source.timeline_inventory = &wrong_projection_source_rows;
+    try std.testing.expectEqual(
+        obligation.LoopProjectionCompleteness.effect_mismatch,
+        compareLoopProjection(&.{projected_semantic}, &.{wrong_projection_source}),
+    );
+
+    var wrong_projection_type_items = projection_inventory;
+    wrong_projection_type_items[0].ty = .{ .compiler_type_id = 12 };
+    var wrong_projection_type_rows = projected_rows;
+    wrong_projection_type_rows[1].storage_projections = &wrong_projection_type_items;
+    var wrong_projection_type = projected_inventory;
+    wrong_projection_type.timeline_inventory = &wrong_projection_type_rows;
+    try std.testing.expectEqual(
+        obligation.LoopProjectionCompleteness.effect_mismatch,
+        compareLoopProjection(&.{projected_semantic}, &.{wrong_projection_type}),
+    );
+
     var wrong_path_rows = rows;
     wrong_path_rows[0].structural_key = "wrong-path";
     var wrong_path = inventory;
@@ -7285,7 +7893,7 @@ test "direct-root timeline inventory compares every storage event field" {
     try std.testing.expectEqual(.effect_mismatch, compareLoopProjection(&.{semantic}, &.{wrong_result}));
 
     var wrong_type_rows = rows;
-    wrong_type_rows[1].storage_ty = .{ .compiler_type_id = 4 };
+    wrong_type_rows[1].storage_ty = .{ .compiler_type_id = 12 };
     var wrong_type = inventory;
     wrong_type.timeline_inventory = &wrong_type_rows;
     try std.testing.expectEqual(.effect_mismatch, compareLoopProjection(&.{semantic}, &.{wrong_type}));

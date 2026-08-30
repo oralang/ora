@@ -727,6 +727,20 @@ fn collectFormulaFreeVars(
     }
 }
 
+fn collectLoopStorageLocationFreeVars(
+    allocator: std.mem.Allocator,
+    set: obligation.ObligationSet,
+    location: obligation.LoopStorageLocationExpr,
+    ids: *std.ArrayList(obligation.FreeVarId),
+) !void {
+    for (location.projections) |projection| switch (projection) {
+        .field => {},
+        .fixed_index, .mapping_key => |typed| {
+            try collectFormulaFreeVars(allocator, set, typed.value.formula, ids);
+        },
+    };
+}
+
 fn collectLoopSummaryFreeVars(
     allocator: std.mem.Allocator,
     set: obligation.ObligationSet,
@@ -747,8 +761,11 @@ fn collectLoopSummaryFreeVars(
                     return error.InvalidDependency;
                 try collectLoopSummaryFreeVars(allocator, set, child, ids, fuel - 1);
             },
-            .storage_read => {},
+            .storage_read => |read| {
+                try collectLoopStorageLocationFreeVars(allocator, set, read.location, ids);
+            },
             .storage_write => |write| {
+                try collectLoopStorageLocationFreeVars(allocator, set, write.location, ids);
                 try collectFormulaFreeVars(allocator, set, write.value.formula, ids);
             },
         };
@@ -947,14 +964,6 @@ fn automaticLoopProofReasonName(reason: AutomaticLoopProofReason) []const u8 {
 fn loopSummaryHasDependencies(summary: obligation.LoopSummaryRow) bool {
     for (summary.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
         .summary_dependency => return true,
-        else => {},
-    };
-    return false;
-}
-
-fn loopSummaryHasStorageTimeline(summary: obligation.LoopSummaryRow) bool {
-    for (summary.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
-        .storage_read, .storage_write => return true,
         else => {},
     };
     return false;
@@ -1304,9 +1313,6 @@ fn automaticLoopPlan(
     }
     const summary = obligation.findById(set.loop_summaries, query.loop_summary_id.?) orelse
         return .{ .unsupported = .automatic_query_shape_unsupported };
-    if (loopSummaryHasStorageTimeline(summary)) {
-        return .{ .unsupported = .automatic_storage_timeline_requires_external_certificate };
-    }
     if (!summary.projectionSupported() or summary.edges.len < 2) {
         return .{ .unsupported = .automatic_control_shape_unsupported };
     }
@@ -2026,6 +2032,68 @@ test "automatic loop proof source delegates to repository tactic deterministical
         1,
         "Ora.Loop.bound_state_ready",
     ));
+}
+
+test "automatic proof environment includes storage projection keys" {
+    const allocator = std.testing.allocator;
+    const u256_ty: obligation.TypeRef = .{ .compiler_type_id = 6 };
+    const key_id: obligation.FreeVarId = .{ .file_id = 7, .pattern_id = 9 };
+    const terms = [_]obligation.Term{
+        .{ .variable = .{ .free = .{ .id = key_id, .name = "key", .ty = u256_ty } } },
+        .{ .int_lit = .{ .value = "0", .ty = u256_ty } },
+    };
+    const projections = [_]obligation.LoopStorageProjection{.{
+        .mapping_key = .{
+            .value = .{ .formula = .{ .term = 0 } },
+            .ty = u256_ty,
+        },
+    }};
+    const timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "op:store",
+        .payload = .{ .storage_write = .{
+            .location = .{
+                .root = "values",
+                .projections = &projections,
+                .value_ty = u256_ty,
+            },
+            .value = .{ .formula = .{ .term = 1 } },
+        } },
+    }};
+    const edges = [_]obligation.LoopEdgeRow{.{
+        .id = 0,
+        .structural_key = "body",
+        .timeline = &timeline,
+    }};
+    const summaries = [_]obligation.LoopSummaryRow{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "storeAt" } },
+        .source = .{},
+        .phase = .ora_mlir,
+        .origin = .source,
+        .loop_source_op_id = 1,
+        .loop_kind = .scf_while,
+        .edges = &edges,
+    }};
+    const query: obligation.VerificationQuery = .{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "storeAt" } },
+        .source = .{},
+        .phase = .ora_mlir,
+        .origin = .source,
+        .kind = .loop_induction,
+        .loop_summary_id = 1,
+    };
+    const set: obligation.ObligationSet = .{
+        .terms = &terms,
+        .queries = &.{query},
+        .loop_summaries = &summaries,
+    };
+
+    const free_vars = try collectQueryFreeVars(allocator, set, query);
+    defer allocator.free(free_vars);
+    try std.testing.expectEqual(@as(usize, 1), free_vars.len);
+    try std.testing.expect(freeVarIdsEqual(key_id, free_vars[0]));
 }
 
 test "automatic dependency variables are scoped to their declaring edge" {

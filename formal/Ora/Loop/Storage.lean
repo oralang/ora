@@ -297,6 +297,112 @@ theorem execStorageAction_preserves_entryStorage
                   subst result
                   rfl
 
+theorem execStorageAction_preserves_locals
+    (semantics : StorageActionSemantics LocationExpr ValueExpr)
+    (action : StorageAction LocationExpr ValueExpr)
+    (initial : StorageActionState)
+    (result : StorageActionResult)
+    (hExec : execStorageAction? semantics action initial = some result) :
+    result.state.loop.locals = initial.loop.locals := by
+  cases action <;>
+    simp only [execStorageAction?, Option.bind_eq_bind,
+      Option.bind_eq_some] at hExec
+  case read =>
+    rcases hExec with ⟨location, _, hExec⟩
+    split at hExec
+    · simp only [Option.none_bind] at hExec
+      cases hExec
+    · simp only [Option.pure_def, Option.some_bind,
+        StorageActionState.bindRead?] at hExec
+      split at hExec
+      · simp only [Option.none_bind] at hExec
+        cases hExec
+      · simp only [Option.some_bind, Option.some.injEq] at hExec
+        subst result
+        rfl
+  case write =>
+    rcases hExec with ⟨location, _, value, _, hExec⟩
+    split at hExec
+    · simp only [Option.none_bind] at hExec
+      cases hExec
+    · simp only [Option.pure_def, Option.some_bind,
+        Option.some.injEq] at hExec
+      subst result
+      rfl
+
+theorem execStorageWrite_preserves_reads
+    (semantics : StorageActionSemantics LocationExpr ValueExpr)
+    (location : LocationExpr)
+    (value : ValueExpr)
+    (initial : StorageActionState)
+    (result : StorageActionResult)
+    (hExec : execStorageAction? semantics (.write location value) initial =
+      some result) :
+    result.state.reads = initial.reads := by
+  simp only [execStorageAction?, Option.bind_eq_bind,
+    Option.bind_eq_some] at hExec
+  rcases hExec with ⟨resolved, _, stored, _, hExec⟩
+  split at hExec
+  · simp only [Option.none_bind] at hExec
+    cases hExec
+  · simp only [Option.pure_def, Option.some_bind,
+      Option.some.injEq] at hExec
+    subst result
+    rfl
+
+theorem execStorageRead_appends_read_id
+    (semantics : StorageActionSemantics LocationExpr ValueExpr)
+    (id : StorageReadId)
+    (location : LocationExpr)
+    (initial : StorageActionState)
+    (result : StorageActionResult)
+    (hExec : execStorageAction? semantics (.read id location) initial =
+      some result) :
+    result.state.reads.map StorageReadBinding.id =
+      initial.reads.map StorageReadBinding.id ++ [id] := by
+  simp only [execStorageAction?, Option.bind_eq_bind,
+    Option.bind_eq_some] at hExec
+  rcases hExec with ⟨resolved, _, hExec⟩
+  split at hExec
+  · simp only [Option.none_bind] at hExec
+    cases hExec
+  · simp only [Option.pure_def, Option.some_bind,
+      StorageActionState.bindRead?] at hExec
+    split at hExec
+    · simp only [Option.none_bind] at hExec
+      cases hExec
+    · simp only [Option.some_bind, Option.some.injEq] at hExec
+      subst result
+      simp only [List.map_append, List.map_singleton,
+        StorageReadBinding.id]
+
+theorem execStorageActions_preserves_locals
+    (semantics : StorageActionSemantics LocationExpr ValueExpr)
+    (actions : List (StorageAction LocationExpr ValueExpr))
+    (initial : StorageActionState)
+    (result : StorageActionResult)
+    (hExec : execStorageActions? semantics actions initial = some result) :
+    result.state.loop.locals = initial.loop.locals := by
+  induction actions generalizing initial result with
+  | nil =>
+      simp only [execStorageActions?] at hExec
+      cases hExec
+      rfl
+  | cons action rest ih =>
+      simp only [execStorageActions?] at hExec
+      cases hAction : execStorageAction? semantics action initial with
+      | none => simp [hAction] at hExec
+      | some actionResult =>
+          simp only [hAction, Option.bind_some] at hExec
+          cases hRest : execStorageActions? semantics rest actionResult.state with
+          | none => simp [hRest] at hExec
+          | some restResult =>
+              simp [hRest] at hExec
+              cases hExec
+              exact (ih actionResult.state restResult hRest).trans
+                (execStorageAction_preserves_locals semantics action initial
+                  actionResult hAction)
+
 theorem execStorageActions_preserves_unwritten
     (semantics : StorageActionSemantics LocationExpr ValueExpr)
     (actions : List (StorageAction LocationExpr ValueExpr))
