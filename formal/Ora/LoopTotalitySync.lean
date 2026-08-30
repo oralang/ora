@@ -81,13 +81,6 @@ def baseBackedge : EdgeRow := {
   id := 0
   structuralKey := "body/straight-line-yield"
   timeline := baseBackedgeTimeline
-  path := [.term 1]
-  safetyCheckpoints := [{
-    id := 0
-    structuralKey := "body/ora.assert:0"
-    afterDependencyCount := 0
-    formulas := [.term 1]
-  }]
   nextState := [baseBinding]
   target := .backedge
 }
@@ -96,7 +89,6 @@ def baseExit : EdgeRow := {
   id := 1
   structuralKey := "guard/false-successor"
   timeline := baseExitTimeline
-  path := [.term 1]
   nextState := [baseBinding]
   target := .successor
 }
@@ -167,14 +159,6 @@ def timelineBaseEdge : EdgeRow := {
   structuralKey := "body"
   timeline := [timelinePathEvent, timelineReadEvent, timelineWriteEvent,
     timelineSafetyEvent, timelineDependencyEvent]
-  path := [.term 0]
-  safetyCheckpoints := [{
-    id := 0
-    structuralKey := "body/safety"
-    afterDependencyCount := 0
-    formulas := [.term 0]
-  }]
-  summaryDependencies := [timelineDependency]
   nextState := [{
     variableIndex := 0
     target := loopId
@@ -201,7 +185,6 @@ def timelineEdgeForMutation : String → EdgeRow
           timelineWriteEvent, timelineSafetyEvent, timelineDependencyEvent] }
   | "path_missing" =>
       { timelineBaseEdge with timeline := [{ timelineSafetyEvent with id := 0 }] }
-  | "view_mismatch" => { timelineBaseEdge with path := [.term 1] }
   | "storage_root_missing" =>
       { timelineBaseEdge with timeline := [timelinePathEvent,
           { timelineReadEvent with payload := .storageRead {
@@ -268,7 +251,7 @@ def timelineEdgeForMutation : String → EdgeRow
 def timelineMutationNames : List String := [
   "supported", "timeline_missing", "event_order_invalid",
   "event_identity_missing", "event_identity_duplicate", "path_missing",
-  "view_mismatch", "storage_root_missing", "storage_projection_invalid",
+  "storage_root_missing", "storage_projection_invalid",
   "storage_type_invalid", "read_identity_duplicate", "read_identity_foreign",
   "read_identity_forward", "child_footprint_missing",
   "dependency_order_invalid", "dependency_target_unsupported",
@@ -327,12 +310,12 @@ def summaryForMutation : String → SummaryRow
   | "branching_body" => { baseSummary with unsupportedReasons := ["loop_has_branching_body"] }
   | "missing_guard" =>
       { baseSummary with
-        edges := [{ baseBackedge with path := [] }, baseExit]
+        edges := [{ baseBackedge with timeline := [baseSafetyTimelineEvent] }, baseExit]
         unsupportedReasons := ["loop_guard_missing"] }
   | "missing_invariant" => { baseSummary with invariants := [], unsupportedReasons := ["loop_invariant_missing"] }
   | "missing_body_safety" =>
       { baseSummary with
-        edges := [{ baseBackedge with safetyCheckpoints := [] }, baseExit]
+        edges := [{ baseBackedge with timeline := baseBackedgeTimeline.take 1 }, baseExit]
         unsupportedReasons := ["loop_body_safety_missing"] }
   | "unsupported_kind" => { baseSummary with kind := .other, unsupportedReasons := ["loop_kind_unsupported"] }
   | "unregistered_integer_variable" =>
@@ -352,7 +335,6 @@ def summaryForMutation : String → SummaryRow
               structuralKey := "body/straight-line-yield/path"
               payload := .pathAssumption { formulas := [{ formula := .term 0 }] }
             }, baseSafetyTimelineEvent]
-            path := [.term 0]
           },
           baseExit
         ]

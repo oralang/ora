@@ -87,7 +87,6 @@ const TimelineMutation = enum {
     event_identity_missing,
     event_identity_duplicate,
     path_missing,
-    view_mismatch,
     storage_root_missing,
     storage_projection_invalid,
     storage_type_invalid,
@@ -254,12 +253,6 @@ fn supportFor(mutation: Mutation) obligation_to_lean.SemanticSupport {
         .source_key = "loop-state:0",
         .value = .{ .term = 0 },
     }};
-    const backedge_path: []const obligation.FormulaRef = if (mutation == .missing_guard)
-        &.{}
-    else if (mutation == .unsupported_formula)
-        &init_formulas
-    else
-        &invariant_formulas;
     const invariant_path_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 1 } }};
     const unsupported_path_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
     const backedge_path_exprs: []const obligation.LoopFormulaExpr = if (mutation == .missing_guard)
@@ -269,16 +262,6 @@ fn supportFor(mutation: Mutation) obligation_to_lean.SemanticSupport {
     else
         &invariant_path_exprs;
     const safety_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 1 } }};
-    const safety_checkpoints: []const obligation.LoopSafetyCheckpoint =
-        if (mutation == .missing_body_safety)
-            &.{}
-        else
-            &.{.{
-                .id = 0,
-                .structural_key = "body/ora.assert:0",
-                .after_dependency_count = 0,
-                .formulas = &body_safety_formulas,
-            }};
     const backedge_timeline_with_safety = [_]obligation.LoopTimelineEvent{
         .{
             .id = 0,
@@ -310,8 +293,6 @@ fn supportFor(mutation: Mutation) obligation_to_lean.SemanticSupport {
             .id = 0,
             .structural_key = "body/straight-line-yield",
             .timeline = backedge_timeline,
-            .path_formulas = backedge_path,
-            .safety_checkpoints = safety_checkpoints,
             .next_state = assignments[0..],
             .target = .backedge,
         },
@@ -319,7 +300,6 @@ fn supportFor(mutation: Mutation) obligation_to_lean.SemanticSupport {
             .id = 1,
             .structural_key = "guard/false-successor",
             .timeline = &exit_timeline,
-            .path_formulas = &invariant_formulas,
             .next_state = exit_assignments[0..],
             .target = .successor,
         },
@@ -369,15 +349,7 @@ fn supportFor(mutation: Mutation) obligation_to_lean.SemanticSupport {
 }
 
 fn timelineReason(mutation: TimelineMutation) ?obligation.LoopUnsupportedReason {
-    const path = [_]obligation.FormulaRef{.{ .term = 0 }};
-    const changed_path = [_]obligation.FormulaRef{.{ .term = 1 }};
     const path_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
-    const safety = [_]obligation.LoopSafetyCheckpoint{.{
-        .id = 0,
-        .structural_key = "body/safety",
-        .after_dependency_count = 0,
-        .formulas = &path,
-    }};
     const dependency: obligation.LoopSummaryDependency = .{
         .id = 0,
         .structural_key = "body/child",
@@ -447,8 +419,6 @@ fn timelineReason(mutation: TimelineMutation) ?obligation.LoopUnsupportedReason 
         dependency_event,
     };
     var timeline_slice: []const obligation.LoopTimelineEvent = &timeline;
-    var edge_path: []const obligation.FormulaRef = &path;
-
     switch (mutation) {
         .supported => {},
         .timeline_missing => timeline_slice = &.{},
@@ -456,7 +426,6 @@ fn timelineReason(mutation: TimelineMutation) ?obligation.LoopUnsupportedReason 
         .event_identity_missing => timeline[1].structural_key = "",
         .event_identity_duplicate => timeline[1].structural_key = timeline[0].structural_key,
         .path_missing => timeline_slice = &no_path_timeline,
-        .view_mismatch => edge_path = &changed_path,
         .storage_root_missing => timeline[1].payload.storage_read.location.root = "",
         .storage_projection_invalid => timeline[1].payload.storage_read.location.projections = &.{.{ .field = "" }},
         .storage_type_invalid => timeline[1].payload.storage_read.location.value_ty = .{ .compiler_type_id = 0 },
@@ -486,9 +455,6 @@ fn timelineReason(mutation: TimelineMutation) ?obligation.LoopUnsupportedReason 
             .id = 0,
             .structural_key = "body",
             .timeline = timeline_slice,
-            .path_formulas = edge_path,
-            .safety_checkpoints = &safety,
-            .summary_dependencies = &.{dependency},
             .next_state = &binding,
             .target = .backedge,
         },
@@ -496,7 +462,6 @@ fn timelineReason(mutation: TimelineMutation) ?obligation.LoopUnsupportedReason 
             .id = 1,
             .structural_key = "exit",
             .timeline = &exit_timeline,
-            .path_formulas = &path,
             .next_state = &.{.{
                 .variable_index = 0,
                 .target = loop_id,

@@ -56,12 +56,20 @@ theorem discharge_q12 : emittedQuery_12 := by
           simp [Ora.Loop.contextReady]
         · simp only [Ora.Loop.loopInitialPremises,
             Ora.Loop.denoteLoopSummary?, hSupported, Ora.Loop.denoteEdges?,
-            Ora.Loop.denoteEdge?, Ora.Loop.denoteControlTarget?]
+            Ora.Loop.denoteEdge?, Ora.Loop.denoteControlTarget?,
+            Ora.Loop.EdgeRow.path_eq_timeline,
+            Ora.Loop.EdgeRow.safety_eq_timeline,
+            Ora.Loop.timelinePathView, Ora.Loop.timelineSafetyView,
+            Ora.Loop.timelineSafetyViewFrom]
           exact hInitial
   · intro env hAssumptions hContext
     simp only [Ora.Loop.loopInductionObligationsAtEnv,
       Ora.Loop.denoteLoopSummary?, hSupported, Ora.Loop.denoteEdges?,
-      Ora.Loop.denoteEdge?, Ora.Loop.denoteControlTarget?]
+      Ora.Loop.denoteEdge?, Ora.Loop.denoteControlTarget?,
+      Ora.Loop.EdgeRow.path_eq_timeline,
+      Ora.Loop.EdgeRow.safety_eq_timeline,
+      Ora.Loop.timelinePathView, Ora.Loop.timelineSafetyView,
+      Ora.Loop.timelineSafetyViewFrom]
     constructor
     · intro state hInitial
       dsimp at hInitial ⊢

@@ -66,6 +66,7 @@ import Ora.Loop.Core
 import Ora.Loop.Storage
 import Ora.Loop.Timeline
 import Ora.Loop.StorageDenotation
+import Ora.Loop.StorageCertificate
 import Ora.Loop.StorageTests
 import Ora.Loop.Denotation
 import Ora.Loop.Auto

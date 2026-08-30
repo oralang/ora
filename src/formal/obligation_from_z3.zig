@@ -217,7 +217,12 @@ fn applyCanonicalLoopQueryResults(
         }
         var adapter = obligation_to_z3.Adapter.init(&canonical_context.*.?, allocator, set);
         const checked = adapter.checkLoopQueryForRow(query.*) catch |err| {
-            try appendCanonicalLoopDiagnostic(allocator, diagnostics, query.*, @errorName(err));
+            try appendCanonicalLoopDiagnostic(
+                allocator,
+                diagnostics,
+                query.*,
+                obligation_to_z3.encodeErrorReason(err),
+            );
             continue;
         };
         query.constraint_count = checked.query_hash.constraint_count;
@@ -256,6 +261,35 @@ fn appendCanonicalLoopDiagnostic(
         .message = message,
         .blocks_artifacts = true,
     });
+}
+
+test "canonical LoopVC diagnostic names an untouched storage root" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var diagnostics: std.ArrayList(obligation.ObligationDiagnostic) = .empty;
+    defer diagnostics.deinit(arena.allocator());
+    const query: obligation.VerificationQuery = .{
+        .id = 7,
+        .owner = .{ .function = .{ .name = "untouchedRoot" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .kind = .loop_body_safety,
+    };
+    try appendCanonicalLoopDiagnostic(
+        arena.allocator(),
+        &diagnostics,
+        query,
+        obligation_to_z3.encodeErrorReason(error.LoopStorageRootUntouched),
+    );
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+    try std.testing.expect(std.mem.containsAtLeast(
+        u8,
+        diagnostics.items[0].message,
+        1,
+        "loop_storage_root_untouched",
+    ));
+    try std.testing.expect(diagnostics.items[0].blocks_artifacts);
 }
 
 fn appendCanonicalSmtCrosscheckDiagnostic(

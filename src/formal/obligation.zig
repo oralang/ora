@@ -105,10 +105,6 @@ pub const ObligationSet = struct {
             for (summary.init_formulas) |formula| try self.validateFormulaRef(formula);
             for (summary.invariant_formulas) |formula| try self.validateFormulaRef(formula);
             for (summary.edges) |edge| {
-                for (edge.path_formulas) |formula| try self.validateFormulaRef(formula);
-                for (edge.safety_checkpoints) |checkpoint| {
-                    for (checkpoint.formulas) |formula| try self.validateFormulaRef(formula);
-                }
                 for (edge.target_formulas) |formula| try self.validateFormulaRef(formula);
                 for (edge.next_state) |binding| try self.validateFormulaRef(binding.value);
                 for (edge.timeline, 0..) |event, event_index| switch (event.payload) {
@@ -332,37 +328,40 @@ pub const ObligationSet = struct {
 
     fn validateLoopSummaryDependencies(self: ObligationSet, summary: LoopSummaryRow) !void {
         for (summary.edges) |edge| {
-            for (edge.summary_dependencies) |dependency| {
-                // Loop summaries are collected outer-before-inner. Requiring a
-                // strict forward reference both pins that ownership order and
-                // makes dependency cycles unrepresentable.
-                if (dependency.summary_id <= summary.id) return error.InvalidDependency;
-                if (!dependency.targetSupported()) return error.InvalidDependency;
-                const inner = findById(self.loop_summaries, dependency.summary_id) orelse
-                    return error.InvalidDependency;
-                if (!inner.projectionSupported()) return error.InvalidDependency;
+            for (edge.timeline) |event| switch (event.payload) {
+                .summary_dependency => |dependency| {
+                    // Loop summaries are collected outer-before-inner. Requiring a
+                    // strict forward reference both pins that ownership order and
+                    // makes dependency cycles unrepresentable.
+                    if (dependency.summary_id <= summary.id) return error.InvalidDependency;
+                    if (!dependency.targetSupported()) return error.InvalidDependency;
+                    const inner = findById(self.loop_summaries, dependency.summary_id) orelse
+                        return error.InvalidDependency;
+                    if (!inner.projectionSupported()) return error.InvalidDependency;
 
-                if (inner.query_ids.induction.len != 1) return error.InvalidDependency;
-                const induction = findById(self.queries, inner.query_ids.induction[0]) orelse
-                    return error.InvalidDependency;
-                if (induction.kind != .loop_induction or induction.loop_summary_id != inner.id) {
-                    return error.InvalidDependency;
-                }
-                const digest = induction.loop_vc_sha256 orelse
-                    return error.InvalidDependency;
-                if (!std.mem.eql(u8, &digest, &dependency.loop_vc_sha256)) {
-                    return error.InvalidDependency;
-                }
-
-                var target_exists = false;
-                for (inner.edges) |inner_edge| {
-                    if (inner_edge.target == dependency.target) {
-                        target_exists = true;
-                        break;
+                    if (inner.query_ids.induction.len != 1) return error.InvalidDependency;
+                    const induction = findById(self.queries, inner.query_ids.induction[0]) orelse
+                        return error.InvalidDependency;
+                    if (induction.kind != .loop_induction or induction.loop_summary_id != inner.id) {
+                        return error.InvalidDependency;
                     }
-                }
-                if (!target_exists) return error.InvalidDependency;
-            }
+                    const digest = induction.loop_vc_sha256 orelse
+                        return error.InvalidDependency;
+                    if (!std.mem.eql(u8, &digest, &dependency.loop_vc_sha256)) {
+                        return error.InvalidDependency;
+                    }
+
+                    var target_exists = false;
+                    for (inner.edges) |inner_edge| {
+                        if (inner_edge.target == dependency.target) {
+                            target_exists = true;
+                            break;
+                        }
+                    }
+                    if (!target_exists) return error.InvalidDependency;
+                },
+                else => {},
+            };
         }
     }
 
@@ -987,49 +986,7 @@ pub const LoopSummaryRow = struct {
                     return .loop_projection_identity_ambiguous;
                 }
             }
-            if (edge.path_formulas.len == 0) return .loop_edge_path_missing;
             if (edge.timeline.len == 0) return .loop_timeline_missing;
-            for (edge.safety_checkpoints, 0..) |checkpoint, checkpoint_index| {
-                if (checkpoint.id != checkpoint_index) {
-                    return .loop_safety_checkpoint_order_invalid;
-                }
-                if (checkpoint.structural_key.len == 0) {
-                    return .loop_safety_checkpoint_identity_missing;
-                }
-                if (checkpoint.formulas.len == 0) {
-                    return .loop_body_safety_missing;
-                }
-                if (checkpoint.after_dependency_count > edge.summary_dependencies.len) {
-                    return .loop_safety_checkpoint_stage_invalid;
-                }
-                if (checkpoint_index != 0 and
-                    checkpoint.after_dependency_count <
-                        edge.safety_checkpoints[checkpoint_index - 1].after_dependency_count)
-                {
-                    return .loop_safety_checkpoint_order_invalid;
-                }
-                for (edge.safety_checkpoints[0..checkpoint_index]) |previous| {
-                    if (std.mem.eql(u8, previous.structural_key, checkpoint.structural_key)) {
-                        return .loop_safety_checkpoint_identity_duplicate;
-                    }
-                }
-            }
-            for (edge.summary_dependencies, 0..) |dependency, dependency_index| {
-                if (dependency.id != dependency_index) {
-                    return .loop_summary_dependency_order_invalid;
-                }
-                if (dependency.structural_key.len == 0) {
-                    return .loop_summary_dependency_identity_missing;
-                }
-                for (edge.summary_dependencies[0..dependency_index]) |previous| {
-                    if (std.mem.eql(u8, previous.structural_key, dependency.structural_key)) {
-                        return .loop_summary_dependency_identity_duplicate;
-                    }
-                }
-                if (!dependency.targetSupported()) {
-                    return .loop_summary_dependency_target_unsupported;
-                }
-            }
             const target = edge.target orelse return .loop_edge_target_unresolved;
             switch (target) {
                 .backedge => {
@@ -1197,20 +1154,8 @@ pub const LoopEdgeRow = struct {
     /// edge.  It is proof-relevant certificate data, not a display label.
     structural_key: []const u8 = "",
     /// Single proof-relevant execution order for assumptions, safety checks,
-    /// storage actions, and certified child summaries. During schema migration
-    /// the legacy views below are retained only for exact parity checking; they
-    /// are not an independent execution authority.
+    /// storage actions, and certified child summaries.
     timeline: []const LoopTimelineEvent = &.{},
-    path_formulas: []const FormulaRef = &.{},
-    /// Safety assertions in verifier-input execution order. Stage zero is
-    /// before every nested-loop dependency; stage `k` is after the first `k`
-    /// dependency relations have terminated. The stage is proof-relevant and
-    /// prevents a child result from being consumed in pre-dependency state.
-    safety_checkpoints: []const LoopSafetyCheckpoint = &.{},
-    /// Ordered, proof-relevant relational summaries executed on this path.
-    /// Each row is bound to the exact inner LoopVC digest. The denotation must
-    /// compose these relations in order; silently ignoring a row is invalid.
-    summary_dependencies: []const LoopSummaryDependency = &.{},
     next_state: []const LoopStepAssignment = &.{},
     target: ?LoopControlTarget = null,
     /// Edge-specific assertion for function and error returns. Ordinary loop
@@ -1219,7 +1164,10 @@ pub const LoopEdgeRow = struct {
 
     pub fn safetyFormulaCount(self: LoopEdgeRow) usize {
         var count: usize = 0;
-        for (self.safety_checkpoints) |checkpoint| count += checkpoint.formulas.len;
+        for (self.timeline) |event| switch (event.payload) {
+            .safety_checkpoint => |checkpoint| count += checkpoint.formulas.len,
+            else => {},
+        };
         return count;
     }
 };
@@ -1302,73 +1250,6 @@ fn formulaEventReason(
     return null;
 }
 
-fn loopFormulaRefEql(lhs: FormulaRef, rhs: FormulaRef) bool {
-    return switch (lhs) {
-        .term => |left| switch (rhs) {
-            .term => |right| left == right,
-            else => false,
-        },
-        .origin_value => |left| switch (rhs) {
-            .origin_value => |right| std.meta.eql(left, right),
-            else => false,
-        },
-    };
-}
-
-fn loopSummaryDependencyEql(lhs: LoopSummaryDependency, rhs: LoopSummaryDependency) bool {
-    if (lhs.id != rhs.id or
-        !std.mem.eql(u8, lhs.structural_key, rhs.structural_key) or
-        lhs.summary_id != rhs.summary_id or
-        !std.mem.eql(u8, &lhs.loop_vc_sha256, &rhs.loop_vc_sha256) or
-        lhs.target != rhs.target or
-        lhs.write_footprint_complete != rhs.write_footprint_complete or
-        lhs.write_footprint.len != rhs.write_footprint.len)
-    {
-        return false;
-    }
-    for (lhs.write_footprint, rhs.write_footprint) |left, right| {
-        if (!placeRefEql(left, right)) return false;
-    }
-    return true;
-}
-
-fn loopTimelineViewsMatch(edge: LoopEdgeRow) bool {
-    var path_index: usize = 0;
-    var checkpoint_index: usize = 0;
-    var dependency_index: usize = 0;
-    var preceding_dependencies: u32 = 0;
-    for (edge.timeline) |event| switch (event.payload) {
-        .path_assumption => |path| for (path.formulas) |expression| {
-            if (path_index >= edge.path_formulas.len or
-                !loopFormulaRefEql(expression.formula, edge.path_formulas[path_index])) return false;
-            path_index += 1;
-        },
-        .safety_checkpoint => |checkpoint| {
-            if (checkpoint_index >= edge.safety_checkpoints.len) return false;
-            const view = edge.safety_checkpoints[checkpoint_index];
-            const checkpoint_id = std.math.cast(u32, checkpoint_index) orelse return false;
-            if (view.id != checkpoint_id or
-                !std.mem.eql(u8, view.structural_key, event.structural_key) or
-                view.after_dependency_count != preceding_dependencies or
-                view.formulas.len != checkpoint.formulas.len) return false;
-            for (view.formulas, checkpoint.formulas) |left, right| {
-                if (!loopFormulaRefEql(left, right.formula)) return false;
-            }
-            checkpoint_index += 1;
-        },
-        .summary_dependency => |dependency| {
-            if (dependency_index >= edge.summary_dependencies.len or
-                !loopSummaryDependencyEql(dependency, edge.summary_dependencies[dependency_index])) return false;
-            dependency_index += 1;
-            preceding_dependencies += 1;
-        },
-        .storage_read, .storage_write => {},
-    };
-    return path_index == edge.path_formulas.len and
-        checkpoint_index == edge.safety_checkpoints.len and
-        dependency_index == edge.summary_dependencies.len;
-}
-
 fn validateLoopTimeline(summary: LoopSummaryRow, edge: LoopEdgeRow) ?LoopUnsupportedReason {
     var has_path = false;
     var dependency_index: u32 = 0;
@@ -1432,7 +1313,6 @@ fn validateLoopTimeline(summary: LoopSummaryRow, edge: LoopEdgeRow) ?LoopUnsuppo
             return reason;
         }
     }
-    if (!loopTimelineViewsMatch(edge)) return .loop_timeline_view_mismatch;
     return null;
 }
 
@@ -1479,7 +1359,6 @@ test "loop projection completeness and structural identities fail closed" {
         .source_key = "loop-state:0",
         .value = .{ .term = 0 },
     }};
-    const path = [_]FormulaRef{.{ .term = 0 }};
     const path_exprs = [_]LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
     const backedge_timeline = [_]LoopTimelineEvent{.{
         .id = 0,
@@ -1496,7 +1375,6 @@ test "loop projection completeness and structural identities fail closed" {
             .id = 0,
             .structural_key = "body/straight-line-yield",
             .timeline = &backedge_timeline,
-            .path_formulas = &path,
             .next_state = &bindings,
             .target = .backedge,
         },
@@ -1504,7 +1382,6 @@ test "loop projection completeness and structural identities fail closed" {
             .id = 1,
             .structural_key = "guard/false-successor",
             .timeline = &exit_timeline,
-            .path_formulas = &path,
             .next_state = &bindings,
             .target = .successor,
         },
@@ -1555,7 +1432,6 @@ test "loop summary dependencies are ordered bound and fail closed before denotat
         .source_key = "loop-state:0",
         .value = .{ .term = 0 },
     }};
-    const path = [_]FormulaRef{.{ .term = 0 }};
     const path_exprs = [_]LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
     const digest = [_]u8{7} ** 32;
     const dependency: LoopSummaryDependency = .{
@@ -1588,8 +1464,6 @@ test "loop summary dependencies are ordered bound and fail closed before denotat
             .id = 0,
             .structural_key = "body/yield",
             .timeline = &outer_timeline,
-            .path_formulas = &path,
-            .summary_dependencies = &.{dependency},
             .next_state = &bindings,
             .target = .backedge,
         },
@@ -1597,7 +1471,6 @@ test "loop summary dependencies are ordered bound and fail closed before denotat
             .id = 1,
             .structural_key = "guard/false-successor",
             .timeline = &outer_exit_timeline,
-            .path_formulas = &path,
             .next_state = &bindings,
             .target = .successor,
         },
@@ -1616,94 +1489,39 @@ test "loop summary dependencies are ordered bound and fail closed before denotat
     };
     try std.testing.expectEqual(@as(?LoopUnsupportedReason, null), outer.validationReason());
 
-    const safety_formulas = [_]FormulaRef{.{ .term = 0 }};
-    const checkpoint: LoopSafetyCheckpoint = .{
-        .id = 0,
-        .structural_key = "body/op:6/ora.assert",
-        .after_dependency_count = 1,
-        .formulas = &safety_formulas,
-    };
     const safety_exprs = [_]LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
     const outer_timeline_with_checkpoint = [_]LoopTimelineEvent{
         outer_timeline[0],
         outer_timeline[1],
         .{
             .id = 2,
-            .structural_key = checkpoint.structural_key,
+            .structural_key = "body/op:6/ora.assert",
             .payload = .{ .safety_checkpoint = .{ .formulas = &safety_exprs } },
         },
     };
-    outer_edges[0].safety_checkpoints = &.{checkpoint};
     outer_edges[0].timeline = &outer_timeline_with_checkpoint;
     try std.testing.expectEqual(@as(?LoopUnsupportedReason, null), outer.validationReason());
 
-    var malformed_checkpoint = checkpoint;
-    malformed_checkpoint.id = 1;
-    outer_edges[0].safety_checkpoints = &.{malformed_checkpoint};
-    try std.testing.expectEqual(
-        LoopUnsupportedReason.loop_safety_checkpoint_order_invalid,
-        outer.validationReason().?,
-    );
-    malformed_checkpoint = checkpoint;
-    malformed_checkpoint.after_dependency_count = 2;
-    outer_edges[0].safety_checkpoints = &.{malformed_checkpoint};
-    try std.testing.expectEqual(
-        LoopUnsupportedReason.loop_safety_checkpoint_stage_invalid,
-        outer.validationReason().?,
-    );
-    malformed_checkpoint = checkpoint;
-    malformed_checkpoint.structural_key = "";
-    outer_edges[0].safety_checkpoints = &.{malformed_checkpoint};
-    try std.testing.expectEqual(
-        LoopUnsupportedReason.loop_safety_checkpoint_identity_missing,
-        outer.validationReason().?,
-    );
-    malformed_checkpoint = checkpoint;
-    malformed_checkpoint.formulas = &.{};
-    outer_edges[0].safety_checkpoints = &.{malformed_checkpoint};
-    try std.testing.expectEqual(
-        LoopUnsupportedReason.loop_body_safety_missing,
-        outer.validationReason().?,
-    );
-    const duplicate_checkpoints = [_]LoopSafetyCheckpoint{
-        checkpoint,
-        .{
-            .id = 1,
-            .structural_key = checkpoint.structural_key,
-            .after_dependency_count = 1,
-            .formulas = &safety_formulas,
-        },
-    };
-    outer_edges[0].safety_checkpoints = &duplicate_checkpoints;
-    try std.testing.expectEqual(
-        LoopUnsupportedReason.loop_safety_checkpoint_identity_duplicate,
-        outer.validationReason().?,
-    );
-    outer_edges[0].safety_checkpoints = &.{checkpoint};
-
     var malformed = dependency;
     malformed.id = 1;
-    outer_edges[0].summary_dependencies = &.{malformed};
+    var malformed_timeline = outer_timeline;
+    malformed_timeline[1].payload.summary_dependency = malformed;
+    outer_edges[0].timeline = &malformed_timeline;
     try std.testing.expectEqual(
         LoopUnsupportedReason.loop_summary_dependency_order_invalid,
         outer.validationReason().?,
     );
     malformed = dependency;
-    malformed.structural_key = "";
-    outer_edges[0].summary_dependencies = &.{malformed};
-    try std.testing.expectEqual(
-        LoopUnsupportedReason.loop_summary_dependency_identity_missing,
-        outer.validationReason().?,
-    );
-    malformed = dependency;
     malformed.target = .backedge;
-    outer_edges[0].summary_dependencies = &.{malformed};
+    malformed_timeline = outer_timeline;
+    malformed_timeline[1].payload.summary_dependency = malformed;
+    outer_edges[0].timeline = &malformed_timeline;
     try std.testing.expectEqual(
         LoopUnsupportedReason.loop_summary_dependency_target_unsupported,
         outer.validationReason().?,
     );
 
-    outer_edges[0].summary_dependencies = &.{dependency};
+    outer_edges[0].timeline = &outer_timeline;
     const inner_edges = [_]LoopEdgeRow{
         .{
             .id = 0,
@@ -1713,7 +1531,6 @@ test "loop summary dependencies are ordered bound and fail closed before denotat
                 .structural_key = "inner/body/yield/path",
                 .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
             }},
-            .path_formulas = &path,
             .next_state = &bindings,
             .target = .backedge,
         },
@@ -1725,7 +1542,6 @@ test "loop summary dependencies are ordered bound and fail closed before denotat
                 .structural_key = "inner/guard/false-successor/path",
                 .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
             }},
-            .path_formulas = &path,
             .next_state = &bindings,
             .target = .successor,
         },
@@ -1760,14 +1576,18 @@ test "loop summary dependencies are ordered bound and fail closed before denotat
 
     var stale = dependency;
     stale.loop_vc_sha256 = [_]u8{8} ** 32;
-    outer_edges[0].summary_dependencies = &.{stale};
+    var stale_timeline = outer_timeline;
+    stale_timeline[1].payload.summary_dependency = stale;
+    outer_edges[0].timeline = &stale_timeline;
     var stale_outer = outer;
     stale_outer.edges = &outer_edges;
     try std.testing.expectError(error.InvalidDependency, set.validateLoopSummaryDependencies(stale_outer));
 
     var cyclic = dependency;
     cyclic.summary_id = outer.id;
-    outer_edges[0].summary_dependencies = &.{cyclic};
+    var cyclic_timeline = outer_timeline;
+    cyclic_timeline[1].payload.summary_dependency = cyclic;
+    outer_edges[0].timeline = &cyclic_timeline;
     var cyclic_outer = outer;
     cyclic_outer.edges = &outer_edges;
     try std.testing.expectError(error.InvalidDependency, set.validateLoopSummaryDependencies(cyclic_outer));
@@ -1783,7 +1603,6 @@ test "ordered loop timeline schema rejects identity order and read-reference mut
         .{ .variable = .{ .free = .{ .id = read_id, .name = "read", .ty = ty } } },
         .{ .int_lit = .{ .value = "0", .ty = ty } },
     };
-    const path_formulas = [_]FormulaRef{.{ .term = 0 }};
     const path_exprs = [_]LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
     const read_refs = [_]FreeVarId{read_id};
     const location: LoopStorageLocationExpr = .{ .root = "counter", .value_ty = ty };
@@ -1830,7 +1649,6 @@ test "ordered loop timeline schema rejects identity order and read-reference mut
             .id = 0,
             .structural_key = "body/yield",
             .timeline = &timeline,
-            .path_formulas = &path_formulas,
             .next_state = &bindings,
             .target = .backedge,
         },
@@ -1842,7 +1660,6 @@ test "ordered loop timeline schema rejects identity order and read-reference mut
                 .structural_key = "guard/false-successor/path",
                 .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
             }},
-            .path_formulas = &path_formulas,
             .next_state = &exit_bindings,
             .target = .successor,
         },
@@ -1883,15 +1700,9 @@ test "ordered loop timeline schema rejects identity order and read-reference mut
         .structural_key = "body/write:1",
         .payload = write_first_event.payload,
     };
-    const checkpoint: LoopSafetyCheckpoint = .{
-        .id = 0,
-        .structural_key = "body/check",
-        .after_dependency_count = 0,
-        .formulas = &path_formulas,
-    };
     const checkpoint_event: LoopTimelineEvent = .{
         .id = 1,
-        .structural_key = checkpoint.structural_key,
+        .structural_key = "body/check",
         .payload = .{ .safety_checkpoint = .{ .formulas = &path_exprs } },
     };
     const dependency: LoopSummaryDependency = .{
@@ -1921,13 +1732,9 @@ test "ordered loop timeline schema rejects identity order and read-reference mut
         try std.testing.expectEqual(@as(?LoopUnsupportedReason, null), summary.validationReason());
     }
     edges[0].timeline = &.{ path_event, checkpoint_event };
-    edges[0].safety_checkpoints = &.{checkpoint};
     try std.testing.expectEqual(@as(?LoopUnsupportedReason, null), summary.validationReason());
-    edges[0].safety_checkpoints = &.{};
     edges[0].timeline = &.{ path_event, dependency_event };
-    edges[0].summary_dependencies = &.{dependency};
     try std.testing.expectEqual(@as(?LoopUnsupportedReason, null), summary.validationReason());
-    edges[0].summary_dependencies = &.{};
     edges[0].next_state = &bindings;
 
     var malformed_timeline = timeline;
@@ -2046,20 +1853,13 @@ pub const LoopUnsupportedReason = enum(u8) {
     loop_projection_effect_unsupported,
     loop_projection_path_limit_exceeded,
     loop_summary_dependency_order_invalid,
-    loop_summary_dependency_identity_missing,
-    loop_summary_dependency_identity_duplicate,
     loop_summary_dependency_target_unsupported,
     loop_summary_dependency_value_out_of_scope,
-    loop_safety_checkpoint_order_invalid,
-    loop_safety_checkpoint_identity_missing,
-    loop_safety_checkpoint_identity_duplicate,
-    loop_safety_checkpoint_stage_invalid,
     loop_timeline_missing,
     loop_timeline_event_order_invalid,
     loop_timeline_event_identity_missing,
     loop_timeline_event_identity_duplicate,
     loop_timeline_path_missing,
-    loop_timeline_view_mismatch,
     loop_storage_root_missing,
     loop_storage_projection_invalid,
     loop_storage_type_invalid,

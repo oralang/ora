@@ -107,7 +107,6 @@ inductive TimelineShapeReason where
   | eventIdentityMissing
   | eventIdentityDuplicate
   | pathMissing
-  | viewMismatch
   | storageRootMissing
   | storageProjectionInvalid
   | storageTypeInvalid
@@ -126,7 +125,6 @@ def TimelineShapeReason.name : TimelineShapeReason → String
   | .eventIdentityMissing => "loop_timeline_event_identity_missing"
   | .eventIdentityDuplicate => "loop_timeline_event_identity_duplicate"
   | .pathMissing => "loop_timeline_path_missing"
-  | .viewMismatch => "loop_timeline_view_mismatch"
   | .storageRootMissing => "loop_storage_root_missing"
   | .storageProjectionInvalid => "loop_storage_projection_invalid"
   | .storageTypeInvalid => "loop_storage_type_invalid"
@@ -256,44 +254,61 @@ structure EdgeRow where
   id : Nat
   structuralKey : String := ""
   timeline : List TimelineEventRow := []
-  path : List FormulaRef := []
-  safetyCheckpoints : List SafetyCheckpointRow := []
-  summaryDependencies : List SummaryDependencyRow := []
   nextState : List StateBindingRow := []
   target : ControlTargetRow := .unresolved
   targetFormulas : List FormulaRef := []
   deriving Repr, BEq, DecidableEq
 
-def timelinePathView (events : List TimelineEventRow) : List FormulaRef :=
-  events.flatMap fun event => match event.payload with
-    | .pathAssumption path => path.formulas.map FormulaExprRow.formula
-    | _ => []
+def timelinePathView : List TimelineEventRow → List FormulaRef
+  | [] => []
+  | event :: rest =>
+      match event.payload with
+      | .pathAssumption path =>
+          path.formulas.map FormulaExprRow.formula ++ timelinePathView rest
+      | _ => timelinePathView rest
 
-def timelineDependencyView (events : List TimelineEventRow) : List SummaryDependencyRow :=
-  events.filterMap fun event => match event.payload with
-    | .summaryDependency dependency => some dependency
-    | _ => none
+def timelineDependencyView : List TimelineEventRow → List SummaryDependencyRow
+  | [] => []
+  | event :: rest =>
+      match event.payload with
+      | .summaryDependency dependency => dependency :: timelineDependencyView rest
+      | _ => timelineDependencyView rest
+
+def timelineSafetyViewFrom : Nat → Nat → List TimelineEventRow → List SafetyCheckpointRow
+  | _, _, [] => []
+  | dependencyCount, checkpointId, event :: rest =>
+      match event.payload with
+      | .summaryDependency _ =>
+          timelineSafetyViewFrom (dependencyCount + 1) checkpointId rest
+      | .safetyCheckpoint checkpoint =>
+          {
+            id := checkpointId
+            structuralKey := event.structuralKey
+            afterDependencyCount := dependencyCount
+            formulas := checkpoint.formulas.map FormulaExprRow.formula
+          } :: timelineSafetyViewFrom dependencyCount (checkpointId + 1) rest
+      | _ => timelineSafetyViewFrom dependencyCount checkpointId rest
 
 def timelineSafetyView (events : List TimelineEventRow) : List SafetyCheckpointRow :=
-  let rec collect : Nat → Nat → List TimelineEventRow → List SafetyCheckpointRow
-    | _, _, [] => []
-    | dependencyCount, checkpointId, event :: rest =>
-        match event.payload with
-        | .summaryDependency _ => collect (dependencyCount + 1) checkpointId rest
-        | .safetyCheckpoint checkpoint =>
-            {
-              id := checkpointId
-              structuralKey := event.structuralKey
-              afterDependencyCount := dependencyCount
-              formulas := checkpoint.formulas.map FormulaExprRow.formula
-            } :: collect dependencyCount (checkpointId + 1) rest
-        | _ => collect dependencyCount checkpointId rest
-  collect 0 0 events
+  timelineSafetyViewFrom 0 0 events
 
-def timelineViewsMatch (edge : EdgeRow) : Bool :=
-  timelinePathView edge.timeline == edge.path &&
-    timelineSafetyView edge.timeline == edge.safetyCheckpoints &&
-    timelineDependencyView edge.timeline == edge.summaryDependencies
+def EdgeRow.path (edge : EdgeRow) : List FormulaRef :=
+  timelinePathView edge.timeline
+
+def EdgeRow.safetyCheckpoints (edge : EdgeRow) : List SafetyCheckpointRow :=
+  timelineSafetyView edge.timeline
+
+def EdgeRow.summaryDependencies (edge : EdgeRow) : List SummaryDependencyRow :=
+  timelineDependencyView edge.timeline
+
+theorem EdgeRow.path_eq_timeline (edge : EdgeRow) :
+    edge.path = timelinePathView edge.timeline := rfl
+
+theorem EdgeRow.safety_eq_timeline (edge : EdgeRow) :
+    edge.safetyCheckpoints = timelineSafetyView edge.timeline := rfl
+
+theorem EdgeRow.dependencies_eq_timeline (edge : EdgeRow) :
+    edge.summaryDependencies = timelineDependencyView edge.timeline := rfl
 
 def edgeTimelineReason?
     (variableIds : List FreeVarId)
@@ -305,7 +320,7 @@ def edgeTimelineReason?
           timelineReadReferencesReason? edge.timeline edge.timeline.length
             binding.readResults with
       | some reason => some reason
-      | none => if timelineViewsMatch edge then none else some .viewMismatch
+      | none => none
 
 def edgeTimelineShapeSupported
     (variableIds : List FreeVarId)

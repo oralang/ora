@@ -38,11 +38,42 @@ const queryCanonicalPromotionShape = support.queryCanonicalPromotionShape;
 const queryCanonicalRequiredModePromoted = support.queryCanonicalRequiredModePromoted;
 const queryCanonicalSupport = support.queryCanonicalSupport;
 
+const LoopStore = struct {
+    info: TypeInfo,
+    current: z3.Z3_ast,
+    entry: z3.Z3_ast,
+};
+
+const LoopRead = struct {
+    id: obligation.FreeVarId,
+    info: TypeInfo,
+    value: z3.Z3_ast,
+};
+
+const LoopRoot = struct {
+    name: []const u8,
+    key: z3.Z3_ast,
+};
+
+const LoopEncodeState = struct {
+    summary: obligation.LoopSummaryRow,
+    stores: std.ArrayList(LoopStore) = .empty,
+    reads: std.ArrayList(LoopRead) = .empty,
+    roots: std.ArrayList(LoopRoot) = .empty,
+
+    fn deinit(self: *LoopEncodeState, allocator: std.mem.Allocator) void {
+        self.stores.deinit(allocator);
+        self.reads.deinit(allocator);
+        self.roots.deinit(allocator);
+    }
+};
+
 pub const Adapter = struct {
     context: *Context,
     allocator: std.mem.Allocator,
     set: obligation.ObligationSet,
     query_state: ?*CanonicalQueryState,
+    loop_state: ?*LoopEncodeState = null,
     use_free_variable_identity_names: bool = false,
 
     pub const EncodeTermState = struct {
@@ -216,6 +247,10 @@ pub const Adapter = struct {
         defer query_state.deinit(self.allocator);
         self.query_state = &query_state;
         defer self.query_state = null;
+        var loop_state: LoopEncodeState = .{ .summary = summary };
+        defer loop_state.deinit(self.allocator);
+        self.loop_state = &loop_state;
+        defer self.loop_state = null;
         self.use_free_variable_identity_names = true;
         defer self.use_free_variable_identity_names = false;
 
@@ -234,20 +269,16 @@ pub const Adapter = struct {
                 const edge = findLoopEdge(summary, query.loop_edge_id orelse return error.InvalidLoopQuery) orelse
                     return error.UnknownLoopEdge;
                 try self.appendFormulaPremises(constraints, summary.invariant_formulas);
-                try self.appendFormulaPremises(constraints, edge.path_formulas);
-
+                const safety_goal = try self.appendLoopTimeline(
+                    constraints,
+                    edge,
+                    query.kind == .loop_body_safety,
+                );
                 if (query.kind == .loop_body_safety) {
-                    const goal = try self.encodeLoopSafetyCheckpoints(edge);
+                    const goal = safety_goal orelse return error.InvalidLoopQuery;
                     try self.appendNegatedGoal(constraints, goal);
                     return;
                 }
-
-                try self.appendLoopSummaryDependencyPremises(
-                    constraints,
-                    edge,
-                    edge.summary_dependencies.len,
-                );
-                try self.appendLoopSafetyCheckpointPremises(constraints, edge.safety_checkpoints);
                 const target = edge.target orelse return error.InvalidLoopQuery;
                 const goal_formulas = if (query.kind == .loop_invariant_step) blk: {
                     if (target != .backedge) return error.InvalidLoopQuery;
@@ -267,85 +298,185 @@ pub const Adapter = struct {
         }
     }
 
-    fn appendLoopSummaryDependencyPremises(
+    fn appendLoopTimeline(
+        self: *Adapter,
+        constraints: *std.ArrayList(z3.Z3_ast),
+        edge: obligation.LoopEdgeRow,
+        collect_safety_goal: bool,
+    ) EncodeError!?z3.Z3_ast {
+        var prefix: std.ArrayList(z3.Z3_ast) = .empty;
+        defer prefix.deinit(self.allocator);
+        const premises = if (collect_safety_goal) &prefix else constraints;
+        var safety = z3.Z3_mk_true(self.context.ctx);
+        try self.context.checkNoError();
+        for (edge.timeline) |event| switch (event.payload) {
+            .path_assumption => |path| for (path.formulas) |expression| {
+                try self.appendFormulaPremises(premises, &.{expression.formula});
+            },
+            .safety_checkpoint => |checkpoint| for (checkpoint.formulas) |expression| {
+                if (collect_safety_goal) {
+                    const formula = try self.encodeFormulaWithSideConstraints(expression.formula);
+                    const staged = try self.implyFromPremises(prefix.items, formula);
+                    safety = z3.Z3_mk_and(
+                        self.context.ctx,
+                        2,
+                        &[_]z3.Z3_ast{ safety, staged },
+                    );
+                    try self.context.checkNoError();
+                    // Reaching a later checkpoint requires this checkpoint to
+                    // have executed successfully, so it becomes part of that
+                    // later checkpoint's prefix and never a global premise.
+                    try prefix.append(self.allocator, formula);
+                } else {
+                    try self.appendFormulaPremises(constraints, &.{expression.formula});
+                }
+            },
+            .storage_read => |read| {
+                try self.applyLoopRead(read);
+                try self.appendSideConstraints(premises);
+            },
+            .storage_write => |write| {
+                try self.applyLoopWrite(write);
+                try self.appendSideConstraints(premises);
+            },
+            .summary_dependency => |dependency| try self.appendLoopSummaryDependencyPremise(
+                premises,
+                edge,
+                dependency,
+            ),
+        };
+        return if (collect_safety_goal) safety else null;
+    }
+
+    fn implyFromPremises(
+        self: *Adapter,
+        premises: []const z3.Z3_ast,
+        goal: z3.Z3_ast,
+    ) EncodeError!z3.Z3_ast {
+        if (premises.len == 0) return goal;
+        var antecedent = premises[0];
+        for (premises[1..]) |premise| {
+            antecedent = z3.Z3_mk_and(
+                self.context.ctx,
+                2,
+                &[_]z3.Z3_ast{ antecedent, premise },
+            );
+            try self.context.checkNoError();
+        }
+        const implication = z3.Z3_mk_implies(self.context.ctx, antecedent, goal);
+        try self.context.checkNoError();
+        return implication;
+    }
+
+    fn encodeFormulaWithSideConstraints(
+        self: *Adapter,
+        formula: obligation.FormulaRef,
+    ) EncodeError!z3.Z3_ast {
+        var result = try self.encodeFormula(formula);
+        const state = try self.canonicalQueryState();
+        for (state.side_constraints.items) |side| {
+            result = z3.Z3_mk_and(
+                self.context.ctx,
+                2,
+                &[_]z3.Z3_ast{ result, side },
+            );
+            try self.context.checkNoError();
+        }
+        state.side_constraints.clearRetainingCapacity();
+        return result;
+    }
+
+    fn applyLoopRead(self: *Adapter, read: obligation.LoopStorageReadEvent) EncodeError!void {
+        const state = self.loop_state orelse return error.InvalidLoopQuery;
+        for (state.reads.items) |binding| {
+            if (obligation.freeVarIdEql(binding.id, read.result)) return error.InvalidTimelineReadReference;
+        }
+        const info = try typeInfo(read.location.value_ty);
+        const value = try self.selectLoopLocation(read.location, info, false);
+        try state.reads.append(self.allocator, .{ .id = read.result, .info = info, .value = value });
+    }
+
+    fn applyLoopWrite(self: *Adapter, write: obligation.LoopStorageWriteEvent) EncodeError!void {
+        const info = try typeInfo(write.location.value_ty);
+        const value = try self.encodeValueFormula(write.value.formula);
+        const resolved = try self.loopLocationStoreAndKey(write.location, info);
+        resolved.store.current = z3.Z3_mk_store(
+            self.context.ctx,
+            resolved.store.current,
+            resolved.key,
+            value,
+        );
+        try self.context.checkNoError();
+    }
+
+    fn appendLoopSummaryDependencyPremise(
         self: *Adapter,
         constraints: *std.ArrayList(z3.Z3_ast),
         parent_edge: obligation.LoopEdgeRow,
-        dependency_count: usize,
+        dependency: obligation.LoopSummaryDependency,
     ) EncodeError!void {
-        if (dependency_count > parent_edge.summary_dependencies.len) return error.InvalidLoopQuery;
-        for (parent_edge.summary_dependencies[0..dependency_count]) |dependency| {
-            const inner = obligation.findById(self.set.loop_summaries, dependency.summary_id) orelse
-                return error.UnknownLoopSummary;
-            if (!inner.projectionSupported()) return error.InvalidLoopQuery;
-            const exit_edge = uniqueLoopEdgeForTarget(inner, dependency.target) orelse
-                return error.InvalidLoopQuery;
+        const inner = obligation.findById(self.set.loop_summaries, dependency.summary_id) orelse
+            return error.UnknownLoopSummary;
+        if (!inner.projectionSupported()) return error.InvalidLoopQuery;
+        const exit_edge = uniqueLoopEdgeForTarget(inner, dependency.target) orelse
+            return error.InvalidLoopQuery;
 
-            // `initial` is existential in CertifiedControlRelation. Evaluating
-            // the exact init values retains their typing and checked-operation
-            // side conditions without inventing a relation to the exit state.
-            const initial_values = try self.encodeFormulaValues(constraints, inner.init_formulas);
-            self.allocator.free(initial_values);
+        // `initial` is existential in CertifiedControlRelation. Evaluating
+        // the exact init values retains their typing and checked-operation
+        // side conditions without inventing a relation to the exit state.
+        const initial_values = try self.encodeFormulaValues(constraints, inner.init_formulas);
+        self.allocator.free(initial_values);
 
-            const current_values = try self.allocator.alloc(z3.Z3_ast, inner.variables.len);
-            defer self.allocator.free(current_values);
-            for (inner.variables, current_values, 0..) |variable, *value, variable_index| {
-                const name = try std.fmt.allocPrint(
-                    self.allocator,
-                    "$ora.loop.dep.s{d}.d{d}.e{d}.v{d}.current",
-                    .{ dependency.summary_id, dependency.id, parent_edge.id, variable_index },
-                );
-                defer self.allocator.free(name);
-                value.* = try self.namedConst(
-                    name,
-                    try self.sortForType(try typeInfo(variable.ty)),
-                );
-            }
+        const current_values = try self.allocator.alloc(z3.Z3_ast, inner.variables.len);
+        defer self.allocator.free(current_values);
+        for (inner.variables, current_values, 0..) |variable, *value, variable_index| {
+            const name = try std.fmt.allocPrint(
+                self.allocator,
+                "$ora.loop.dep.s{d}.d{d}.e{d}.v{d}.current",
+                .{ dependency.summary_id, dependency.id, parent_edge.id, variable_index },
+            );
+            defer self.allocator.free(name);
+            value.* = try self.namedConst(name, try self.sortForType(try typeInfo(variable.ty)));
+        }
 
-            try self.appendSubstitutedLoopPremises(
-                constraints,
-                inner.variables,
-                current_values,
-                inner.invariant_formulas,
-            );
-            try self.appendSubstitutedLoopPremises(
-                constraints,
-                inner.variables,
-                current_values,
-                exit_edge.path_formulas,
-            );
-            try self.appendLoopSummaryDependencyPremises(
-                constraints,
-                exit_edge,
-                exit_edge.summary_dependencies.len,
-            );
-            try self.appendSubstitutedLoopSafetyCheckpointPremises(
-                constraints,
-                inner.variables,
-                current_values,
-                exit_edge.safety_checkpoints,
-            );
-
-            const raw_following = try self.encodeBindingValues(
-                constraints,
-                inner.variables,
-                exit_edge.next_state,
-            );
-            defer self.allocator.free(raw_following);
-            for (inner.variables, raw_following) |variable, raw_value| {
-                const following_value = try self.encodeFreeVariableIdentity(
-                    variable.id orelse return error.InvalidLoopQuery,
-                    variable.ty,
-                );
-                const substituted = try self.substituteLoopVariables(
-                    raw_value,
+        try self.appendSubstitutedLoopPremises(
+            constraints,
+            inner.variables,
+            current_values,
+            inner.invariant_formulas,
+        );
+        for (exit_edge.timeline) |event| switch (event.payload) {
+            .path_assumption, .safety_checkpoint => |formulas| for (formulas.formulas) |formula| {
+                try self.appendSubstitutedLoopPremises(
+                    constraints,
                     inner.variables,
                     current_values,
+                    &.{formula.formula},
                 );
-                const equality = z3.Z3_mk_eq(self.context.ctx, following_value, substituted);
-                try self.context.checkNoError();
-                try constraints.append(self.allocator, equality);
-            }
+            },
+            .summary_dependency => |nested| try self.appendLoopSummaryDependencyPremise(
+                constraints,
+                exit_edge,
+                nested,
+            ),
+            .storage_read, .storage_write => return error.InvalidLoopQuery,
+        };
+
+        const raw_following = try self.encodeBindingValues(
+            constraints,
+            inner.variables,
+            exit_edge.next_state,
+        );
+        defer self.allocator.free(raw_following);
+        for (inner.variables, raw_following) |variable, raw_value| {
+            const following_value = try self.encodeFreeVariableIdentity(
+                variable.id orelse return error.InvalidLoopQuery,
+                variable.ty,
+            );
+            const substituted = try self.substituteLoopVariables(raw_value, inner.variables, current_values);
+            const equality = z3.Z3_mk_eq(self.context.ctx, following_value, substituted);
+            try self.context.checkNoError();
+            try constraints.append(self.allocator, equality);
         }
     }
 
@@ -406,92 +537,6 @@ pub const Adapter = struct {
             try self.context.checkNoError();
         }
         return result;
-    }
-
-    fn encodeLoopSafetyCheckpoints(
-        self: *Adapter,
-        edge: obligation.LoopEdgeRow,
-    ) EncodeError!z3.Z3_ast {
-        var result = z3.Z3_mk_true(self.context.ctx);
-        try self.context.checkNoError();
-        for (edge.safety_checkpoints) |checkpoint| {
-            const dependency_count = std.math.cast(usize, checkpoint.after_dependency_count) orelse
-                return error.Overflow;
-            var dependency_constraints: std.ArrayList(z3.Z3_ast) = .empty;
-            defer dependency_constraints.deinit(self.allocator);
-            try self.appendLoopSummaryDependencyPremises(
-                &dependency_constraints,
-                edge,
-                dependency_count,
-            );
-
-            var safety_side_constraints: std.ArrayList(z3.Z3_ast) = .empty;
-            defer safety_side_constraints.deinit(self.allocator);
-            const formula_goal = try self.encodeFormulaConjunction(
-                &safety_side_constraints,
-                checkpoint.formulas,
-            );
-            var checkpoint_goal = formula_goal;
-            for (safety_side_constraints.items) |side_constraint| {
-                checkpoint_goal = z3.Z3_mk_and(
-                    self.context.ctx,
-                    2,
-                    &[_]z3.Z3_ast{ checkpoint_goal, side_constraint },
-                );
-                try self.context.checkNoError();
-            }
-
-            var dependency_premise = z3.Z3_mk_true(self.context.ctx);
-            try self.context.checkNoError();
-            for (dependency_constraints.items) |premise| {
-                dependency_premise = z3.Z3_mk_and(
-                    self.context.ctx,
-                    2,
-                    &[_]z3.Z3_ast{ dependency_premise, premise },
-                );
-                try self.context.checkNoError();
-            }
-            const staged_goal = z3.Z3_mk_implies(
-                self.context.ctx,
-                dependency_premise,
-                checkpoint_goal,
-            );
-            try self.context.checkNoError();
-            result = z3.Z3_mk_and(
-                self.context.ctx,
-                2,
-                &[_]z3.Z3_ast{ result, staged_goal },
-            );
-            try self.context.checkNoError();
-        }
-        return result;
-    }
-
-    fn appendLoopSafetyCheckpointPremises(
-        self: *Adapter,
-        constraints: *std.ArrayList(z3.Z3_ast),
-        checkpoints: []const obligation.LoopSafetyCheckpoint,
-    ) EncodeError!void {
-        for (checkpoints) |checkpoint| {
-            try self.appendFormulaPremises(constraints, checkpoint.formulas);
-        }
-    }
-
-    fn appendSubstitutedLoopSafetyCheckpointPremises(
-        self: *Adapter,
-        constraints: *std.ArrayList(z3.Z3_ast),
-        variables: []const obligation.LoopVariable,
-        replacements: []const z3.Z3_ast,
-        checkpoints: []const obligation.LoopSafetyCheckpoint,
-    ) EncodeError!void {
-        for (checkpoints) |checkpoint| {
-            try self.appendSubstitutedLoopPremises(
-                constraints,
-                variables,
-                replacements,
-                checkpoint.formulas,
-            );
-        }
     }
 
     fn encodeFormulaValues(
@@ -768,6 +813,10 @@ pub const Adapter = struct {
 
     fn encodePlaceRead(self: *Adapter, place: obligation.PlaceRef) EncodeError!z3.Z3_ast {
         try requireSupportedScalarPlace(place);
+        if (self.loop_state != null) {
+            const ty = try self.loopRootTypeRef(place.root);
+            return self.selectLoopLocation(.{ .root = place.root, .value_ty = ty }, try typeInfo(ty), false);
+        }
         const state = try self.canonicalQueryState();
         const root_state = try state.getOrPutPlaceRoot(self.allocator, place.root);
         const current = root_state.current orelse blk: {
@@ -787,6 +836,11 @@ pub const Adapter = struct {
         };
         requireSupportedScalarPlace(place) catch return error.UnsupportedOldTerm;
 
+        if (self.loop_state != null) {
+            const ty = try self.loopRootTypeRef(place.root);
+            return self.selectLoopLocation(.{ .root = place.root, .value_ty = ty }, try typeInfo(ty), true);
+        }
+
         const state = try self.canonicalQueryState();
         const root_state = try state.getOrPutPlaceRoot(self.allocator, place.root);
         const entry = root_state.entry orelse blk: {
@@ -800,6 +854,108 @@ pub const Adapter = struct {
         try self.context.checkNoError();
         try state.side_constraints.append(self.allocator, linkage);
         return old_ast;
+    }
+
+    fn loopRootTypeRef(self: *Adapter, root: []const u8) EncodeError!obligation.TypeRef {
+        const state = self.loop_state orelse return error.InvalidLoopQuery;
+        for (state.summary.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
+            .storage_read => |read| if (std.mem.eql(u8, read.location.root, root)) return read.location.value_ty,
+            .storage_write => |write| if (std.mem.eql(u8, write.location.root, root)) return write.location.value_ty,
+            else => {},
+        };
+        return error.LoopStorageRootUntouched;
+    }
+
+    fn loopStore(self: *Adapter, info: TypeInfo) EncodeError!*LoopStore {
+        const state = self.loop_state orelse return error.InvalidLoopQuery;
+        for (state.stores.items) |*store| if (typeInfoEql(store.info, info)) return store;
+        const array_sort = z3.Z3_mk_array_sort(
+            self.context.ctx,
+            try self.sortForType(u256TypeInfo()),
+            try self.sortForType(info),
+        );
+        try self.context.checkNoError();
+        const shape = try std.fmt.allocPrint(self.allocator, "{s}{d}{s}", .{
+            if (info.kind == .bool) "bool" else "bv",
+            info.width,
+            if (info.signed) "s" else "u",
+        });
+        defer self.allocator.free(shape);
+        const current_name = try std.fmt.allocPrint(
+            self.allocator,
+            "$ora.loop.store.{s}.current",
+            .{shape},
+        );
+        defer self.allocator.free(current_name);
+        const entry_name = try std.fmt.allocPrint(
+            self.allocator,
+            "$ora.loop.store.{s}.entry",
+            .{shape},
+        );
+        defer self.allocator.free(entry_name);
+        const current = try self.namedConst(current_name, array_sort);
+        const entry = try self.namedConst(entry_name, array_sort);
+        try state.stores.append(self.allocator, .{
+            .info = info,
+            .current = current,
+            .entry = entry,
+        });
+        return &state.stores.items[state.stores.items.len - 1];
+    }
+
+    fn loopRootKey(
+        self: *Adapter,
+        location: obligation.LoopStorageLocationExpr,
+    ) EncodeError!z3.Z3_ast {
+        if (location.root.len == 0) return error.InvalidLoopQuery;
+        const state = self.loop_state orelse return error.InvalidLoopQuery;
+        for (state.roots.items) |root| if (std.mem.eql(u8, root.name, location.root)) return root.key;
+        const name = try std.fmt.allocPrint(self.allocator, "$ora.loop.root.{s}", .{location.root});
+        defer self.allocator.free(name);
+        const key = try self.namedConst(name, try self.sortForType(u256TypeInfo()));
+        const query_state = try self.canonicalQueryState();
+        for (state.roots.items) |root| {
+            const distinct = z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, key, root.key));
+            try self.context.checkNoError();
+            try query_state.side_constraints.append(self.allocator, distinct);
+        }
+        try state.roots.append(self.allocator, .{ .name = location.root, .key = key });
+        return key;
+    }
+
+    const LoopLocationStoreAndKey = struct {
+        store: *LoopStore,
+        key: z3.Z3_ast,
+    };
+
+    fn loopLocationStoreAndKey(
+        self: *Adapter,
+        location: obligation.LoopStorageLocationExpr,
+        info: TypeInfo,
+    ) EncodeError!LoopLocationStoreAndKey {
+        if (location.root.len == 0) return error.InvalidLoopQuery;
+        if (location.projections.len != 0) return error.InvalidLoopQuery;
+        return .{
+            .store = try self.loopStore(info),
+            .key = try self.loopRootKey(location),
+        };
+    }
+
+    fn selectLoopLocation(
+        self: *Adapter,
+        location: obligation.LoopStorageLocationExpr,
+        info: TypeInfo,
+        entry: bool,
+    ) EncodeError!z3.Z3_ast {
+        if (!typeInfoEql(info, try typeInfo(location.value_ty))) return error.TypeMismatch;
+        const resolved = try self.loopLocationStoreAndKey(location, info);
+        const value = z3.Z3_mk_select(
+            self.context.ctx,
+            if (entry) resolved.store.entry else resolved.store.current,
+            resolved.key,
+        );
+        try self.context.checkNoError();
+        return value;
     }
 
     fn appendSideConstraints(
@@ -851,6 +1007,11 @@ pub const Adapter = struct {
             .bound => |bound| return self.encodeBoundVariable(bound),
         };
         const ty = free.ty orelse return error.MissingType;
+        if (self.loop_state) |state| for (state.reads.items) |read| {
+            if (!obligation.freeVarIdEql(read.id, free.id)) continue;
+            if (!typeInfoEql(read.info, try typeInfo(ty))) return error.TypeMismatch;
+            return read.value;
+        };
         if (self.use_free_variable_identity_names) {
             return self.encodeFreeVariableIdentity(free.id, ty);
         }
@@ -1530,6 +1691,159 @@ fn expectCanonicalHashUnsupportedWithAssumption(
     };
 
     try expectCanonicalUnsupported(set, queries[0], expected);
+}
+
+test "canonical LoopVC safety excludes premises after each checkpoint" {
+    var z3_ctx = try z3_verification.Z3Context.init(std.testing.allocator);
+    defer z3_ctx.deinit();
+
+    const loop_id: obligation.FreeVarId = .{ .file_id = 1, .pattern_id = 1 };
+    const u256_ty: obligation.TypeRef = .{ .spelling = "u256" };
+    const terms = [_]obligation.Term{
+        .{ .int_lit = .{ .value = "0", .ty = u256_ty } },
+        .{ .variable = .{ .free = .{ .id = loop_id, .name = "i", .ty = u256_ty } } },
+        .{ .bool_lit = true },
+        .{ .bool_lit = false },
+    };
+    const variables = [_]obligation.LoopVariable{.{
+        .index = 0,
+        .id = loop_id,
+        .name = "i",
+        .ty = u256_ty,
+    }};
+    const bindings = [_]obligation.LoopStepAssignment{.{
+        .variable_index = 0,
+        .target = loop_id,
+        .source_key = "loop:i",
+        .value = .{ .term = 1 },
+    }};
+    const true_formulas = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 2 } }};
+    const false_formulas = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 3 } }};
+    const backedge_timeline = [_]obligation.LoopTimelineEvent{
+        .{
+            .id = 0,
+            .structural_key = "path:before",
+            .payload = .{ .path_assumption = .{ .formulas = &true_formulas } },
+        },
+        .{
+            .id = 1,
+            .structural_key = "check:early",
+            .payload = .{ .safety_checkpoint = .{ .formulas = &false_formulas } },
+        },
+        .{
+            .id = 2,
+            .structural_key = "path:after",
+            .payload = .{ .path_assumption = .{ .formulas = &false_formulas } },
+        },
+    };
+    const exit_timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "path:exit",
+        .payload = .{ .path_assumption = .{ .formulas = &true_formulas } },
+    }};
+    const edges = [_]obligation.LoopEdgeRow{
+        .{
+            .id = 0,
+            .structural_key = "edge:backedge",
+            .timeline = &backedge_timeline,
+            .next_state = &bindings,
+            .target = .backedge,
+        },
+        .{
+            .id = 1,
+            .structural_key = "edge:exit",
+            .timeline = &exit_timeline,
+            .next_state = &bindings,
+            .target = .successor,
+        },
+    };
+    const summaries = [_]obligation.LoopSummaryRow{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "prefixSafety" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .loop_source_op_id = 1,
+        .loop_kind = .scf_while,
+        .variables = &variables,
+        .init_formulas = &.{.{ .term = 0 }},
+        .invariant_formulas = &.{.{ .term = 2 }},
+        .edges = &edges,
+        .projection_completeness = .complete,
+        .post_formulas = &.{.{ .term = 2 }},
+    }};
+    const query: obligation.VerificationQuery = .{
+        .id = 10,
+        .owner = .{ .function = .{ .name = "prefixSafety" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .artifact_policy = .blocks_verified_artifacts,
+        .proof_requirement = .backend_result,
+        .backend = .z3,
+        .kind = .loop_body_safety,
+        .loop_summary_id = 1,
+        .loop_edge_id = 0,
+    };
+    const set: obligation.ObligationSet = .{
+        .terms = &terms,
+        .queries = &.{query},
+        .loop_summaries = &summaries,
+    };
+    try std.testing.expect(summaries[0].projectionSupported());
+
+    var adapter = Adapter.init(&z3_ctx, std.testing.allocator, set);
+    var constraints: std.ArrayList(z3.Z3_ast) = .empty;
+    defer constraints.deinit(std.testing.allocator);
+    try adapter.appendLoopQueryConstraints(&constraints, query);
+    // The invariant remains global and the complete prefix-staged safety
+    // statement is the only goal. The later false path is not a premise.
+    try std.testing.expectEqual(@as(usize, 2), constraints.items.len);
+    var solver = try Solver.init(&z3_ctx, std.testing.allocator);
+    defer solver.deinit();
+    for (constraints.items) |constraint| try solver.assertChecked(constraint);
+    try std.testing.expectEqual(z3.Z3_L_TRUE, try solver.checkChecked());
+}
+
+test "canonical LoopVC untouched storage root has a named failure" {
+    var z3_ctx = try z3_verification.Z3Context.init(std.testing.allocator);
+    defer z3_ctx.deinit();
+
+    const u256_ty: obligation.TypeRef = .{ .spelling = "u256" };
+    const timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "write:counter",
+        .payload = .{ .storage_write = .{
+            .location = .{ .root = "counter", .value_ty = u256_ty },
+            .value = .{ .formula = .{ .term = 0 } },
+        } },
+    }};
+    const edges = [_]obligation.LoopEdgeRow{.{ .id = 0, .timeline = &timeline }};
+    const summary: obligation.LoopSummaryRow = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "untouchedRoot" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .loop_source_op_id = 1,
+        .loop_kind = .scf_while,
+        .edges = &edges,
+    };
+    const set: obligation.ObligationSet = .{};
+    var adapter = Adapter.init(&z3_ctx, std.testing.allocator, set);
+    var loop_state: LoopEncodeState = .{ .summary = summary };
+    defer loop_state.deinit(std.testing.allocator);
+    adapter.loop_state = &loop_state;
+    defer adapter.loop_state = null;
+
+    try std.testing.expectError(
+        error.LoopStorageRootUntouched,
+        adapter.loopRootTypeRef("untouched"),
+    );
+    try std.testing.expectEqualStrings(
+        "loop_storage_root_untouched",
+        ct.encodeErrorReason(error.LoopStorageRootUntouched),
+    );
 }
 
 test "canonical Z3 classifier matrix hashes every supported core formula shape" {

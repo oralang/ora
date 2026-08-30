@@ -87,6 +87,44 @@ fn findFirstOpByNameInOp(op: mlir.MlirOperation, expected: []const u8) ?mlir.Mli
     return null;
 }
 
+fn findFunctionByName(module: mlir.MlirModule, function_name: []const u8) ?mlir.MlirOperation {
+    if (mlir.oraModuleIsNull(module)) return null;
+    return findFunctionByNameInOp(mlir.oraModuleGetOperation(module), function_name);
+}
+
+fn findFunctionByNameInOp(op: mlir.MlirOperation, function_name: []const u8) ?mlir.MlirOperation {
+    if (mlir.oraOperationIsNull(op)) return null;
+
+    const name_ref = mlir.oraOperationGetName(op);
+    if (name_ref.data != null and
+        std.mem.eql(u8, name_ref.data[0..name_ref.length], "func.func"))
+    {
+        const attr = mlir.oraOperationGetAttributeByName(op, strRef("sym_name"));
+        if (!mlir.oraAttributeIsNull(attr)) {
+            const value = mlir.oraStringAttrGetValue(attr);
+            if (value.data != null and
+                std.mem.eql(u8, value.data[0..value.length], function_name)) return op;
+        }
+    }
+
+    const num_regions = mlir.oraOperationGetNumRegions(op);
+    var region_index: usize = 0;
+    while (region_index < num_regions) : (region_index += 1) {
+        const region = mlir.oraOperationGetRegion(op, region_index);
+        if (mlir.oraRegionIsNull(region)) continue;
+
+        var block = mlir.oraRegionGetFirstBlock(region);
+        while (!mlir.oraBlockIsNull(block)) : (block = mlir.oraBlockGetNextInRegion(block)) {
+            var child = mlir.oraBlockGetFirstOperation(block);
+            while (!mlir.oraOperationIsNull(child)) : (child = mlir.oraOperationGetNextInBlock(child)) {
+                if (findFunctionByNameInOp(child, function_name)) |found| return found;
+            }
+        }
+    }
+
+    return null;
+}
+
 fn strRef(text: []const u8) mlir.MlirStringRef {
     return .{ .data = text.ptr, .length = text.len };
 }
@@ -113,6 +151,54 @@ fn loopSummaryHasReason(
 ) bool {
     for (row.unsupported_reasons) |reason| if (reason == expected) return true;
     return false;
+}
+
+fn loopEdgePathFormulaCount(edge: obligation.LoopEdgeRow) usize {
+    var count: usize = 0;
+    for (edge.timeline) |event| switch (event.payload) {
+        .path_assumption => |path| count += path.formulas.len,
+        else => {},
+    };
+    return count;
+}
+
+fn loopEdgeDependencyCount(edge: obligation.LoopEdgeRow) usize {
+    var count: usize = 0;
+    for (edge.timeline) |event| {
+        if (event.payload == .summary_dependency) count += 1;
+    }
+    return count;
+}
+
+fn firstLoopEdgeDependency(edge: obligation.LoopEdgeRow) ?obligation.LoopSummaryDependency {
+    for (edge.timeline) |event| switch (event.payload) {
+        .summary_dependency => |dependency| return dependency,
+        else => {},
+    };
+    return null;
+}
+
+fn loopEdgeSafetyCheckpointCount(edge: obligation.LoopEdgeRow) usize {
+    var count: usize = 0;
+    for (edge.timeline) |event| {
+        if (event.payload == .safety_checkpoint) count += 1;
+    }
+    return count;
+}
+
+fn expectLoopEdgeSafetyStages(edge: obligation.LoopEdgeRow, expected: []const u32) !void {
+    var dependency_count: u32 = 0;
+    var checkpoint_index: usize = 0;
+    for (edge.timeline) |event| switch (event.payload) {
+        .summary_dependency => dependency_count += 1,
+        .safety_checkpoint => {
+            if (checkpoint_index >= expected.len) return error.TestUnexpectedResult;
+            try testing.expectEqual(expected[checkpoint_index], dependency_count);
+            checkpoint_index += 1;
+        },
+        else => {},
+    };
+    try testing.expectEqual(expected.len, checkpoint_index);
 }
 
 fn loopSummaryByFunction(
@@ -1970,7 +2056,8 @@ test "narrow scalar loop comparison retypes compiler generated literal truncatio
     try testing.expectEqual(obligation.BinaryOp.sub, step.op);
     try testing.expectEqual(@as(u32, 1), step.ty.?.compiler_type_id);
 
-    const guard = result.set.terms[summary.edges[0].path_formulas[0].term].binary;
+    const guard_formula = summary.edges[0].timeline[0].payload.path_assumption.formulas[0].formula;
+    const guard = result.set.terms[guard_formula.term].binary;
     const guard_rhs = result.set.terms[guard.rhs].int_lit;
     try testing.expectEqual(obligation.BinaryOp.gt, guard.op);
     try testing.expectEqual(@as(u32, 1), guard.ty.?.compiler_type_id);
@@ -9009,6 +9096,40 @@ test "formal obligation MLIR adapter records effect frame summaries" {
     try testing.expectEqual(obligation.RegionRef.transient, reads.actual[0].region);
 }
 
+test "formal obligation MLIR adapter distinguishes omitted and explicitly empty modifies" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @omitted() attributes {
+        \\    ora.write_slots = ["counter"],
+        \\    ora.write_slots_complete = true
+        \\  } { func.return }
+        \\  func.func @explicit_empty() attributes {
+        \\    ora.modifies_slots = [],
+        \\    ora.write_slots = ["counter"],
+        \\    ora.write_slots_complete = true
+        \\  } { func.return }
+        \\}
+    ;
+
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 1), countEffectFrame(result.set, .write_covered_by_modifies));
+    for (result.set.obligations) |item| {
+        if (item.kind != .effect_frame or
+            item.kind.effect_frame.relation != .write_covered_by_modifies) continue;
+        try testing.expectEqualStrings("explicit_empty", item.owner.function.name);
+        try testing.expectEqual(@as(usize, 0), item.kind.effect_frame.declared.len);
+        try testing.expectEqual(@as(usize, 1), item.kind.effect_frame.actual.len);
+    }
+}
+
 test "formal obligation MLIR adapter records lock and external frame metadata" {
     const h = createContext();
     defer destroyContext(h);
@@ -9391,12 +9512,12 @@ test "formal loop summary rows are source-owner scoped scalar data" {
     try testing.expectEqual(@as(usize, 2), row.edges.len);
     try testing.expectEqual(@as(u32, 0), row.edges[0].id);
     try testing.expectEqual(obligation.LoopControlTarget.backedge, row.edges[0].target.?);
-    try testing.expectEqual(@as(usize, 1), row.edges[0].path_formulas.len);
+    try testing.expectEqual(@as(usize, 1), loopEdgePathFormulaCount(row.edges[0]));
     try testing.expectEqual(@as(usize, 2), row.edges[0].next_state.len);
     try testing.expect(row.edges[0].safetyFormulaCount() > 0);
     try testing.expectEqual(@as(u32, 1), row.edges[1].id);
     try testing.expectEqual(obligation.LoopControlTarget.successor, row.edges[1].target.?);
-    try testing.expectEqual(@as(usize, 1), row.edges[1].path_formulas.len);
+    try testing.expectEqual(@as(usize, 1), loopEdgePathFormulaCount(row.edges[1]));
     try testing.expectEqual(@as(usize, 2), row.edges[1].next_state.len);
     try testing.expectEqual(@as(usize, 0), row.edges[1].safetyFormulaCount());
     for (row.edges) |edge| {
@@ -9453,7 +9574,7 @@ test "formal loop summary rows are source-owner scoped scalar data" {
         if (std.mem.eql(u8, candidate.owner.statement.function_name, "nestedSum")) {
             var has_dependency = false;
             for (candidate.edges) |edge| {
-                if (edge.summary_dependencies.len != 0) has_dependency = true;
+                if (loopEdgeDependencyCount(edge) != 0) has_dependency = true;
             }
             if (has_dependency) nested_loop = candidate else nested_inner_loop = candidate;
         }
@@ -9477,8 +9598,8 @@ test "formal loop summary rows are source-owner scoped scalar data" {
     try testing.expect(nested.projectionSupported());
     try testing.expectEqual(obligation.LoopProjectionCompleteness.complete, nested.projection_completeness);
     try testing.expect(!loopSummaryHasReason(nested, .loop_has_nested_loop));
-    try testing.expectEqual(@as(usize, 1), nested.edges[0].summary_dependencies.len);
-    const dependency = nested.edges[0].summary_dependencies[0];
+    try testing.expectEqual(@as(usize, 1), loopEdgeDependencyCount(nested.edges[0]));
+    const dependency = firstLoopEdgeDependency(nested.edges[0]) orelse return error.TestUnexpectedResult;
     const inner = nested_inner_loop orelse return error.TestUnexpectedResult;
     try testing.expectEqual(inner.id, dependency.summary_id);
     try testing.expectEqual(obligation.LoopControlTarget.successor, dependency.target);
@@ -9627,6 +9748,145 @@ test "formal direct-root storage loops preserve verifier-input event order" {
     try expectExited(parsed, 0);
 }
 
+test "canonical Z3 executes direct-root storage timelines deterministically" {
+    var result = try collectPackageObligations(testing.allocator, "tests/formal/storage_loop_projection.ora");
+    defer result.deinit();
+
+    var first_context = try z3_verification.Z3Context.init(testing.allocator);
+    defer first_context.deinit();
+    var second_context = try z3_verification.Z3Context.init(testing.allocator);
+    defer second_context.deinit();
+    var first = obligation_to_z3.Adapter.init(&first_context, testing.allocator, result.set);
+    var second = obligation_to_z3.Adapter.init(&second_context, testing.allocator, result.set);
+    var checked_count: usize = 0;
+    var saw_read_then_write_failure = false;
+    var saw_divide_from_read_failure = false;
+    var saw_write_then_read_success = false;
+    var saw_signed_success = false;
+
+    for (result.set.queries) |query| {
+        if (query.backend != .z3 or query.loop_summary_id == null or
+            query.loop_vc_sha256 == null) continue;
+        const summary = obligation.findById(result.set.loop_summaries, query.loop_summary_id.?) orelse
+            return error.TestUnexpectedResult;
+        if (summary.owner != .statement) return error.TestUnexpectedResult;
+        const lhs = try first.checkLoopQueryForRow(query);
+        const rhs = try second.checkLoopQueryForRow(query);
+        try testing.expectEqual(lhs.status, rhs.status);
+        try testing.expectEqual(lhs.query_hash.constraint_count, rhs.query_hash.constraint_count);
+        try testing.expectEqual(lhs.query_hash.smtlib_hash, rhs.query_hash.smtlib_hash);
+        try testing.expect(lhs.status != .unknown);
+        try testing.expect(lhs.query_hash.constraint_count != 0 or query.kind == .loop_base);
+        checked_count += 1;
+
+        const name = summary.owner.statement.function_name;
+        if (query.kind == .loop_body_safety and lhs.status == .disproved) {
+            if (std.mem.eql(u8, name, "readThenWrite")) saw_read_then_write_failure = true;
+            if (std.mem.eql(u8, name, "divideFromStorage")) saw_divide_from_read_failure = true;
+        }
+        if (query.kind == .loop_invariant_step and lhs.status == .proved) {
+            if (std.mem.eql(u8, name, "writeThenRead")) saw_write_then_read_success = true;
+            if (std.mem.eql(u8, name, "signedWrite")) saw_signed_success = true;
+        }
+    }
+
+    try testing.expect(checked_count != 0);
+    try testing.expect(saw_read_then_write_failure);
+    try testing.expect(saw_divide_from_read_failure);
+    try testing.expect(saw_write_then_read_success);
+    try testing.expect(saw_signed_success);
+}
+
+test "external direct-root storage certificate binds canonical Z3 and Lean through the real CLI" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    const source = "tests/formal/direct_storage_loop_certificate.ora";
+    const proofs = "tests/formal/direct_storage_loop_certificate.proofs.json";
+    const stem = "direct_storage_loop_certificate";
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const accepted_paths = [_][]const u8{ "accepted-first", "accepted-second" };
+
+    for (accepted_paths) |relative| {
+        const output = try pathFromTmpAlloc(allocator, tmp, relative);
+        defer allocator.free(output);
+        const run = try runProcessWithLeanPath(allocator, &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=smt-report,bytecode",
+            "--out-dir",
+            output,
+            "--lean-proofs",
+            proofs,
+            source,
+        });
+        defer allocator.free(run.stdout);
+        defer allocator.free(run.stderr);
+        try expectExited(run, 0);
+        try testing.expect(std.mem.containsAtLeast(
+            u8,
+            run.stdout,
+            1,
+            "Lean loop proof gate accepted:\n  kernel-checked certificates: 1",
+        ));
+    }
+
+    const first_hex_path = try pathFromTmpAlloc(
+        allocator,
+        tmp,
+        "accepted-first/direct_storage_loop_certificate.hex",
+    );
+    defer allocator.free(first_hex_path);
+    const first_hex = try readFileAllocForTest(allocator, first_hex_path);
+    defer allocator.free(first_hex);
+    const second_hex_path = try pathFromTmpAlloc(
+        allocator,
+        tmp,
+        "accepted-second/direct_storage_loop_certificate.hex",
+    );
+    defer allocator.free(second_hex_path);
+    const second_hex = try readFileAllocForTest(allocator, second_hex_path);
+    defer allocator.free(second_hex);
+    try testing.expectEqualStrings(first_hex, second_hex);
+
+    const first_certificate_path = try pathFromTmpAlloc(
+        allocator,
+        tmp,
+        "accepted-first/direct_storage_loop_certificate.lean.proof.json",
+    );
+    defer allocator.free(first_certificate_path);
+    const second_certificate_path = try pathFromTmpAlloc(
+        allocator,
+        tmp,
+        "accepted-second/direct_storage_loop_certificate.lean.proof.json",
+    );
+    defer allocator.free(second_certificate_path);
+    const first_certificate = try readFileAllocForTest(allocator, first_certificate_path);
+    defer allocator.free(first_certificate);
+    const second_certificate = try readFileAllocForTest(allocator, second_certificate_path);
+    defer allocator.free(second_certificate);
+    try testing.expectEqualStrings(first_certificate, second_certificate);
+
+    const index_path = try pathFromTmpAlloc(
+        allocator,
+        tmp,
+        "accepted-first/direct_storage_loop_certificate.formal.artifacts.json",
+    );
+    defer allocator.free(index_path);
+    const index = try readFileAllocForTest(allocator, index_path);
+    defer allocator.free(index);
+    try testing.expect(std.mem.containsAtLeast(u8, index, 1, "\"final_artifact_authorization\": \"allowed\""));
+    try testing.expect(std.mem.containsAtLeast(u8, index, 1, "\"id\": \"z3_userland\""));
+    try testing.expect(std.mem.containsAtLeast(u8, index, 1, "\"id\": \"lean_userland\""));
+    try testing.expect(std.mem.containsAtLeast(u8, index, 1, "\"id\": \"lean_proof_certificate\""));
+
+    try expectNoFormalArtifactsInRepoRoot(allocator, stem);
+}
+
 test "formal direct-root storage loop requires compiler-owned storage type metadata" {
     var compilation = try compilePackage("tests/formal/storage_loop_projection.ora");
     defer compilation.deinit();
@@ -9656,7 +9916,7 @@ test "formal direct-root storage loop requires a complete compiler write invento
     defer compilation.deinit();
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     try testing.expect(hir_result.diagnostics.isEmpty());
-    const function = findFirstOpByName(hir_result.module.raw_module, "func.func") orelse
+    const function = findFunctionByName(hir_result.module.raw_module, "readThenWrite") orelse
         return error.TestUnexpectedResult;
     try testing.expect(mlir.mlirOperationRemoveAttributeByName(
         function,
@@ -9680,9 +9940,13 @@ test "formal direct-root projection retains uncovered modifies as an effect-fram
     defer compilation.deinit();
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     try testing.expect(hir_result.diagnostics.isEmpty());
-    const function = findFirstOpByName(hir_result.module.raw_module, "func.func") orelse
+    const function = findFunctionByName(hir_result.module.raw_module, "readThenWrite") orelse
         return error.TestUnexpectedResult;
-    try testing.expect(mlir.mlirOperationRemoveAttributeByName(function, strRef("ora.modifies_slots")));
+    mlir.oraOperationSetAttributeByName(
+        function,
+        strRef("ora.modifies_slots"),
+        mlir.oraArrayAttrCreate(mlir.mlirOperationGetContext(function), 0, null),
+    );
 
     var result = try obligation_from_mlir.collect(testing.allocator, hir_result.module.raw_module, .{});
     defer result.deinit();
@@ -9718,22 +9982,23 @@ test "nested loop child results are checked in post-dependency safety state" {
     var parent: ?obligation.LoopSummaryRow = null;
     for (result.set.loop_summaries) |row| {
         for (row.edges) |edge| {
-            if (edge.summary_dependencies.len != 0) parent = row;
+            if (loopEdgeDependencyCount(edge) != 0) parent = row;
         }
     }
     const summary = parent orelse return error.TestUnexpectedResult;
     try testing.expect(summary.projectionSupported());
     var staged_edge: ?obligation.LoopEdgeRow = null;
     for (summary.edges) |edge| {
-        if (edge.summary_dependencies.len != 0) staged_edge = edge;
+        if (loopEdgeDependencyCount(edge) != 0) staged_edge = edge;
     }
     const edge = staged_edge orelse return error.TestUnexpectedResult;
-    try testing.expectEqual(@as(usize, 1), edge.summary_dependencies.len);
-    try testing.expectEqual(@as(usize, 2), edge.safety_checkpoints.len);
-    for (edge.safety_checkpoints) |checkpoint| {
-        try testing.expectEqual(@as(u32, 1), checkpoint.after_dependency_count);
-        try testing.expectEqual(@as(usize, 1), checkpoint.formulas.len);
-    }
+    try testing.expectEqual(@as(usize, 1), loopEdgeDependencyCount(edge));
+    try testing.expectEqual(@as(usize, 2), loopEdgeSafetyCheckpointCount(edge));
+    try expectLoopEdgeSafetyStages(edge, &.{ 1, 1 });
+    for (edge.timeline) |event| switch (event.payload) {
+        .safety_checkpoint => |checkpoint| try testing.expectEqual(@as(usize, 1), checkpoint.formulas.len),
+        else => {},
+    };
     try testing.expectEqual(@as(usize, 1), summary.query_ids.induction.len);
     const query = obligation.findById(result.set.queries, summary.query_ids.induction[0]) orelse
         return error.TestUnexpectedResult;
@@ -9792,7 +10057,7 @@ test "unsafe post-dependency arithmetic is disproved before artifact emission" {
     var staged_edge: ?obligation.LoopEdgeRow = null;
     for (result.set.loop_summaries) |row| {
         for (row.edges) |edge| {
-            if (edge.summary_dependencies.len == 0) continue;
+            if (loopEdgeDependencyCount(edge) == 0) continue;
             parent = row;
             staged_edge = edge;
         }
@@ -9800,10 +10065,8 @@ test "unsafe post-dependency arithmetic is disproved before artifact emission" {
     const summary = parent orelse return error.TestUnexpectedResult;
     const edge = staged_edge orelse return error.TestUnexpectedResult;
     try testing.expect(summary.projectionSupported());
-    try testing.expect(edge.safety_checkpoints.len != 0);
-    for (edge.safety_checkpoints) |checkpoint| {
-        try testing.expectEqual(@as(u32, 1), checkpoint.after_dependency_count);
-    }
+    try testing.expect(loopEdgeSafetyCheckpointCount(edge) != 0);
+    try expectLoopEdgeSafetyStages(edge, &.{ 1, 1 });
 
     var context = try z3_verification.Z3Context.init(testing.allocator);
     defer context.deinit();
@@ -9833,7 +10096,7 @@ test "safety checkpoints preserve before between and after dependency order" {
     var staged_edge: ?obligation.LoopEdgeRow = null;
     for (result.set.loop_summaries) |row| {
         for (row.edges) |edge| {
-            if (edge.summary_dependencies.len != 2) continue;
+            if (loopEdgeDependencyCount(edge) != 2) continue;
             parent = row;
             staged_edge = edge;
         }
@@ -9841,12 +10104,10 @@ test "safety checkpoints preserve before between and after dependency order" {
     const summary = parent orelse return error.TestUnexpectedResult;
     const edge = staged_edge orelse return error.TestUnexpectedResult;
     try testing.expect(summary.projectionSupported());
-    try testing.expectEqual(@as(usize, 2), edge.summary_dependencies.len);
-    try testing.expectEqual(@as(usize, 4), edge.safety_checkpoints.len);
+    try testing.expectEqual(@as(usize, 2), loopEdgeDependencyCount(edge));
+    try testing.expectEqual(@as(usize, 4), loopEdgeSafetyCheckpointCount(edge));
     const expected_stages = [_]u32{ 0, 1, 2, 2 };
-    for (edge.safety_checkpoints, expected_stages) |checkpoint, expected_stage| {
-        try testing.expectEqual(expected_stage, checkpoint.after_dependency_count);
-    }
+    try expectLoopEdgeSafetyStages(edge, &expected_stages);
 
     var context = try z3_verification.Z3Context.init(testing.allocator);
     defer context.deinit();
@@ -9920,7 +10181,7 @@ test "nested loop relation explicitly preserves an unchanged child scalar" {
     for (formal_result.set.loop_summaries) |summary| {
         var has_dependency = false;
         for (summary.edges) |edge| {
-            if (edge.summary_dependencies.len != 0) has_dependency = true;
+            if (loopEdgeDependencyCount(edge) != 0) has_dependency = true;
         }
         if (!has_dependency and summary.variables.len == 2) child = summary;
     }
@@ -10360,7 +10621,7 @@ test "nested loop artifact authority requires the exact child certificate" {
     for (result.set.loop_summaries) |row| {
         var has_dependency = false;
         for (row.edges) |edge| {
-            if (edge.summary_dependencies.len != 0) has_dependency = true;
+            if (loopEdgeDependencyCount(edge) != 0) has_dependency = true;
         }
         if (has_dependency) parent = row else child = row;
     }
@@ -10455,7 +10716,7 @@ test "nested loop artifact authority requires the exact child certificate" {
     );
 
     const parent_edge_index: usize = for (parent_summary.edges, 0..) |edge, index| {
-        if (edge.summary_dependencies.len != 0) break index;
+        if (loopEdgeDependencyCount(edge) != 0) break index;
     } else return error.TestUnexpectedResult;
     var changed_summaries = try testing.allocator.dupe(
         obligation.LoopSummaryRow,
@@ -10470,13 +10731,17 @@ test "nested loop artifact authority requires the exact child certificate" {
         parent_summary.edges,
     );
     defer testing.allocator.free(changed_edges);
-    var changed_dependencies = try testing.allocator.dupe(
-        obligation.LoopSummaryDependency,
-        changed_edges[parent_edge_index].summary_dependencies,
+    var changed_timeline = try testing.allocator.dupe(
+        obligation.LoopTimelineEvent,
+        changed_edges[parent_edge_index].timeline,
     );
-    defer testing.allocator.free(changed_dependencies);
-    changed_dependencies[0].loop_vc_sha256[0] ^= 1;
-    changed_edges[parent_edge_index].summary_dependencies = changed_dependencies;
+    defer testing.allocator.free(changed_timeline);
+    const dependency_event_index: usize = for (changed_timeline, 0..) |event, index| {
+        if (event.payload == .summary_dependency) break index;
+    } else return error.TestUnexpectedResult;
+    const original_dependency = changed_timeline[dependency_event_index].payload.summary_dependency;
+    changed_timeline[dependency_event_index].payload.summary_dependency.loop_vc_sha256[0] ^= 1;
+    changed_edges[parent_edge_index].timeline = changed_timeline;
     changed_summaries[parent_index].edges = changed_edges;
     decided_set.loop_summaries = changed_summaries;
     decided_set.queries = decided_queries;
@@ -10485,22 +10750,22 @@ test "nested loop artifact authority requires the exact child certificate" {
         decided_set.artifactDecision().blocked,
     );
 
-    changed_dependencies[0] = parent_summary.edges[parent_edge_index].summary_dependencies[0];
-    changed_dependencies[0].summary_id = parent_summary.id;
+    changed_timeline[dependency_event_index].payload.summary_dependency = original_dependency;
+    changed_timeline[dependency_event_index].payload.summary_dependency.summary_id = parent_summary.id;
     try testing.expectEqual(
         obligation.ArtifactBlockReason.invalid_dependency,
         decided_set.artifactDecision().blocked,
     );
 
-    changed_dependencies[0] = parent_summary.edges[parent_edge_index].summary_dependencies[0];
-    changed_dependencies[0].summary_id = std.math.maxInt(obligation.Id);
+    changed_timeline[dependency_event_index].payload.summary_dependency = original_dependency;
+    changed_timeline[dependency_event_index].payload.summary_dependency.summary_id = std.math.maxInt(obligation.Id);
     try testing.expectEqual(
         obligation.ArtifactBlockReason.invalid_dependency,
         decided_set.artifactDecision().blocked,
     );
 
-    changed_dependencies[0] = parent_summary.edges[parent_edge_index].summary_dependencies[0];
-    changed_dependencies[0].target = .backedge;
+    changed_timeline[dependency_event_index].payload.summary_dependency = original_dependency;
+    changed_timeline[dependency_event_index].payload.summary_dependency.target = .backedge;
     try testing.expectEqual(
         obligation.ArtifactBlockReason.invalid_dependency,
         decided_set.artifactDecision().blocked,
@@ -10678,8 +10943,8 @@ test "structured loop paths preserve branch-local safety and state sources" {
     try testing.expectEqual(obligation.LoopControlTarget.successor, branch.edges[2].target.?);
     try testing.expect(std.mem.indexOf(u8, branch.edges[0].structural_key, "/then/") != null);
     try testing.expect(std.mem.indexOf(u8, branch.edges[1].structural_key, "/else/") != null);
-    try testing.expectEqual(@as(usize, 2), branch.edges[0].path_formulas.len);
-    try testing.expectEqual(@as(usize, 2), branch.edges[1].path_formulas.len);
+    try testing.expectEqual(@as(usize, 2), loopEdgePathFormulaCount(branch.edges[0]));
+    try testing.expectEqual(@as(usize, 2), loopEdgePathFormulaCount(branch.edges[1]));
     try testing.expectEqual(@as(usize, 2), branch.edges[0].safetyFormulaCount());
     try testing.expectEqual(@as(usize, 2), branch.edges[1].safetyFormulaCount());
     try testing.expect(!std.mem.eql(
@@ -10696,9 +10961,9 @@ test "structured loop paths preserve branch-local safety and state sources" {
     try testing.expect(switched.projectionSupported());
     try testing.expectEqual(obligation.LoopProjectionCompleteness.complete, switched.projection_completeness);
     try testing.expectEqual(@as(usize, 4), switched.edges.len);
-    try testing.expectEqual(@as(usize, 2), switched.edges[0].path_formulas.len);
-    try testing.expectEqual(@as(usize, 3), switched.edges[1].path_formulas.len);
-    try testing.expectEqual(@as(usize, 3), switched.edges[2].path_formulas.len);
+    try testing.expectEqual(@as(usize, 2), loopEdgePathFormulaCount(switched.edges[0]));
+    try testing.expectEqual(@as(usize, 3), loopEdgePathFormulaCount(switched.edges[1]));
+    try testing.expectEqual(@as(usize, 3), loopEdgePathFormulaCount(switched.edges[2]));
     for (switched.edges[0..3], 0..) |edge, index| {
         try testing.expectEqual(obligation.LoopControlTarget.backedge, edge.target.?);
         try testing.expect(std.mem.indexOf(u8, edge.structural_key, "/case:") != null);
@@ -11231,7 +11496,9 @@ test "canonical LoopVC Z3 checks consume the shared edge rows" {
 
     changed_set = result.set;
     changed_summaries[summary_index] = loop;
-    changed_summaries[summary_index].invariant_formulas = loop.edges[0].path_formulas;
+    changed_summaries[summary_index].invariant_formulas = &.{
+        loop.edges[0].timeline[0].payload.path_assumption.formulas[0].formula,
+    };
     changed_set.loop_summaries = changed_summaries;
     var stale_overlay = try obligation_from_z3.overlayPreparedQueryResults(testing.allocator, changed_set, &.{});
     defer stale_overlay.deinit();
@@ -11244,6 +11511,56 @@ test "canonical LoopVC Z3 checks consume the shared edge rows" {
     }
     try testing.expect(saw_stale_digest);
     try testing.expect(!stale_overlay.set.artifactDecision().isAllowed());
+}
+
+test "canonical LoopVC reports untouched storage roots by name" {
+    const source =
+        \\contract UntouchedStorageRoot {
+        \\    storage var counter: u256 = 0;
+        \\    storage var limit: u256 = 0;
+        \\
+        \\    pub fn assign()
+        \\        modifies counter
+        \\        ensures limit <= 10
+        \\    {
+        \\        var i: u256 = 0;
+        \\        while (i < 1)
+        \\            invariant i <= 1
+        \\        {
+        \\            counter = i;
+        \\            i = i +% 1;
+        \\        }
+        \\    }
+        \\}
+    ;
+    var compilation = try compileText(source);
+    defer compilation.deinit();
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    var result = try obligation_from_mlir.collect(
+        testing.allocator,
+        hir_result.module.raw_module,
+        .{},
+    );
+    defer result.deinit();
+    try testing.expectEqual(@as(usize, 1), result.set.loop_summaries.len);
+    try testing.expect(result.set.loop_summaries[0].projectionSupported());
+
+    var overlay = try obligation_from_z3.overlayPreparedQueryResults(
+        testing.allocator,
+        result.set,
+        &.{},
+    );
+    defer overlay.deinit();
+    var named = false;
+    for (overlay.set.diagnostics) |diagnostic| {
+        if (diagnostic.kind != .canonical_z3_unavailable) continue;
+        if (std.mem.indexOf(u8, diagnostic.message, "loop_storage_root_untouched") == null) continue;
+        try testing.expect(diagnostic.blocks_artifacts);
+        named = true;
+    }
+    try testing.expect(named);
+    try testing.expect(!overlay.set.artifactDecision().isAllowed());
 }
 
 test "scalar loop induction query projects into Lean with first-class identity" {
@@ -11470,11 +11787,17 @@ test "canonical LoopVC reports every remaining structural schema failure by name
     mutated.edges = &edges;
     try expectLoopSummaryRejected(scalar_result.set, scalar_query, mutated, .loop_edge_order_invalid);
 
+    const no_path_timeline = try testing.allocator.dupe(
+        obligation.LoopTimelineEvent,
+        scalar.edges[0].timeline[1..],
+    );
+    defer testing.allocator.free(no_path_timeline);
+    for (no_path_timeline, 0..) |*event, index| event.id = @intCast(index);
     edges = .{ scalar.edges[0], scalar.edges[1] };
-    edges[0].path_formulas = &.{};
+    edges[0].timeline = no_path_timeline;
     mutated = scalar;
     mutated.edges = &edges;
-    try expectLoopSummaryRejected(scalar_result.set, scalar_query, mutated, .loop_edge_path_missing);
+    try expectLoopSummaryRejected(scalar_result.set, scalar_query, mutated, .loop_timeline_path_missing);
 
     edges = .{ scalar.edges[0], scalar.edges[1] };
     edges[0].target = .successor;

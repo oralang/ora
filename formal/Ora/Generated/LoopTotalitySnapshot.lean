@@ -53,7 +53,6 @@ def loopTimelineValidationRows : List (String × String) := [
   ("event_identity_missing", "loop_timeline_event_identity_missing"),
   ("event_identity_duplicate", "loop_timeline_event_identity_duplicate"),
   ("path_missing", "loop_timeline_path_missing"),
-  ("view_mismatch", "loop_timeline_view_mismatch"),
   ("storage_root_missing", "loop_storage_root_missing"),
   ("storage_projection_invalid", "loop_storage_projection_invalid"),
   ("storage_type_invalid", "loop_storage_type_invalid"),

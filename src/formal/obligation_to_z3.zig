@@ -16,6 +16,7 @@ pub const CanonicalPromotionShape = canonical_types.CanonicalPromotionShape;
 pub const CanonicalPromotionPolicy = canonical_types.CanonicalPromotionPolicy;
 pub const canonical_promotion_table = canonical_types.canonical_promotion_table;
 pub const EncodeError = canonical_types.EncodeError;
+pub const encodeErrorReason = canonical_types.encodeErrorReason;
 
 pub const Adapter = canonical_encode.Adapter;
 
@@ -23,7 +24,7 @@ pub const queryCanonicalSupport = canonical_support.queryCanonicalSupport;
 pub const queryCanonicalPromotionShape = canonical_support.queryCanonicalPromotionShape;
 pub const queryCanonicalRequiredModePromoted = canonical_support.queryCanonicalRequiredModePromoted;
 pub const queryCanonicalCrosscheckRequiredByPolicy = canonical_support.queryCanonicalCrosscheckRequiredByPolicy;
-pub const queryIsCanonicalLoopPost = canonical_support.queryIsCanonicalLoopPost;
+pub const queryIsCanonicalLoopQuery = canonical_support.queryIsCanonicalLoopQuery;
 pub const queryCanonicalMeasurementRequired = canonical_support.queryCanonicalMeasurementRequired;
 
 comptime {

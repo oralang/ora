@@ -198,7 +198,7 @@ fn writeModulePreamble(
     try writer.writeAll("import ");
     try writer.writeAll(import_name);
     try writer.writeByte('\n');
-    if (include_loops) try writer.writeAll("import Ora.Loop.Denotation\n");
+    if (include_loops) try writer.writeAll("import Ora.Loop.StorageCertificate\n");
     try writer.writeAll("\nnamespace ");
     try writer.writeAll(namespace);
     try writer.writeAll("\n\nopen Ora.Obligation\n\n");
@@ -347,14 +347,6 @@ fn writeLoopEdges(writer: anytype, edges: []const obligation.LoopEdgeRow) !void 
         try writeLeanString(writer, edge.structural_key);
         try writer.writeAll(", timeline := ");
         try writeLoopTimeline(writer, edge.timeline);
-        try writer.writeAll(", path := ");
-        try writeFormulaList(writer, edge.path_formulas);
-        try writer.writeAll(", safetyCheckpoints := ");
-        try writeLoopSafetyCheckpoints(writer, edge.safety_checkpoints);
-        if (edge.summary_dependencies.len != 0) {
-            try writer.writeAll(", summaryDependencies := ");
-            try writeLoopSummaryDependencies(writer, edge.summary_dependencies);
-        }
         try writer.writeAll(", nextState := ");
         try writeLoopStepAssignments(writer, edge.next_state);
         try writer.writeAll(", target := .");
@@ -368,37 +360,6 @@ fn writeLoopEdges(writer: anytype, edges: []const obligation.LoopEdgeRow) !void 
         try writer.writeAll(", targetFormulas := ");
         try writeFormulaList(writer, edge.target_formulas);
         try writer.writeAll(" }");
-    }
-    try writer.writeByte(']');
-}
-
-fn writeLoopSafetyCheckpoints(
-    writer: anytype,
-    checkpoints: []const obligation.LoopSafetyCheckpoint,
-) !void {
-    try writer.writeByte('[');
-    for (checkpoints, 0..) |checkpoint, index| {
-        if (index != 0) try writer.writeAll(", ");
-        try writer.writeAll("{ id := ");
-        try writer.print("{d}, structuralKey := ", .{checkpoint.id});
-        try writeLeanString(writer, checkpoint.structural_key);
-        try writer.print(", afterDependencyCount := {d}, formulas := ", .{
-            checkpoint.after_dependency_count,
-        });
-        try writeFormulaList(writer, checkpoint.formulas);
-        try writer.writeAll(" }");
-    }
-    try writer.writeByte(']');
-}
-
-fn writeLoopSummaryDependencies(
-    writer: anytype,
-    dependencies: []const obligation.LoopSummaryDependency,
-) !void {
-    try writer.writeByte('[');
-    for (dependencies, 0..) |dependency, index| {
-        if (index != 0) try writer.writeAll(", ");
-        try writeLoopSummaryDependency(writer, dependency);
     }
     try writer.writeByte(']');
 }
@@ -767,7 +728,10 @@ fn writeSemanticDefinitions(writer: anytype, set: obligation.ObligationSet, proo
             const summary = obligation.findById(set.loop_summaries, summary_id) orelse
                 return error.InvalidDependency;
             const has_dependencies = loopSummaryHasDependencies(summary);
-            try writer.writeAll(if (has_dependencies)
+            const direct_storage = loopSummaryUsesDirectStorageCertificate(summary);
+            try writer.writeAll(if (direct_storage)
+                "  Ora.Loop.directStorageLoopProofAuthorizationFromAssumptions emittedManifest\n    "
+            else if (has_dependencies)
                 "  Ora.Loop.loopProofAuthorizationFromAssumptionsIn emittedManifest\n    "
             else
                 "  Ora.Loop.loopProofAuthorizationFromAssumptions emittedManifest\n    ");
@@ -775,7 +739,9 @@ fn writeSemanticDefinitions(writer: anytype, set: obligation.ObligationSet, proo
             if (has_dependencies) try writer.writeAll("\n    emittedLoopSummaries");
             try writer.print("\n    emittedLoopSummary_{d}\n\n", .{summary_id});
             try writer.print("def emittedVerifiedQuery_{d} : Prop :=\n", .{query.id});
-            try writer.writeAll(if (has_dependencies)
+            try writer.writeAll(if (direct_storage)
+                "  Ora.Loop.directStorageLoopVerifiedFromAssumptions emittedManifest\n    "
+            else if (has_dependencies)
                 "  Ora.Loop.loopVerifiedFromAssumptionsIn emittedManifest\n    "
             else
                 "  Ora.Loop.loopVerifiedFromAssumptions emittedManifest\n    ");
@@ -799,7 +765,12 @@ fn writeSemanticDefinitions(writer: anytype, set: obligation.ObligationSet, proo
                     query.id,
                     query.id,
                     query.id,
-                    if (has_dependencies) "loop_authorization_sound_in" else "loop_authorization_sound",
+                    if (direct_storage)
+                        "direct_storage_loop_authorization_sound"
+                    else if (has_dependencies)
+                        "loop_authorization_sound_in"
+                    else
+                        "loop_authorization_sound",
                 },
             );
             try writeAssumptionRowsByIds(writer, set, query.assumption_ids);
@@ -821,8 +792,21 @@ fn writeSemanticDefinitions(writer: anytype, set: obligation.ObligationSet, proo
 }
 
 fn loopSummaryHasDependencies(summary: obligation.LoopSummaryRow) bool {
-    for (summary.edges) |edge| if (edge.summary_dependencies.len != 0) return true;
+    for (summary.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
+        .summary_dependency => return true,
+        else => {},
+    };
     return false;
+}
+
+fn loopSummaryUsesDirectStorageCertificate(summary: obligation.LoopSummaryRow) bool {
+    var has_storage = false;
+    for (summary.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
+        .storage_read, .storage_write => has_storage = true,
+        .summary_dependency => return false,
+        else => {},
+    };
+    return has_storage;
 }
 
 fn writeRowDefinitions(writer: anytype, set: obligation.ObligationSet, proof_surface: bool) !void {
@@ -964,22 +948,25 @@ fn loopInductionQuerySemanticSupport(
                 .unsupported = .{ .unsupported_loop_summary = .loop_control_target_unsupported },
             },
         }
-        for (edge.path_formulas) |formula| {
-            if (formulaReferencesSummaryDependencyVariable(set, summary, formula)) {
-                return .{ .unsupported = .{ .unsupported_loop_summary = .loop_summary_dependency_value_out_of_scope } };
-            }
-            switch (formulaSemanticSupport(set, formula)) {
-                .supported => {},
-                .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
-            }
-        }
-        for (edge.safety_checkpoints) |checkpoint| {
-            for (checkpoint.formulas) |formula| {
+        var dependency_count: u32 = 0;
+        for (edge.timeline) |event| switch (event.payload) {
+            .path_assumption => |path| for (path.formulas) |expression| {
+                const formula = expression.formula;
+                if (formulaReferencesSummaryDependencyVariable(set, summary, formula)) {
+                    return .{ .unsupported = .{ .unsupported_loop_summary = .loop_summary_dependency_value_out_of_scope } };
+                }
+                switch (formulaSemanticSupport(set, formula)) {
+                    .supported => {},
+                    .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
+                }
+            },
+            .safety_checkpoint => |checkpoint| for (checkpoint.formulas) |expression| {
+                const formula = expression.formula;
                 if (formulaReferencesUnavailableCheckpointDependency(
                     set,
                     summary,
                     edge,
-                    checkpoint.after_dependency_count,
+                    dependency_count,
                     formula,
                 )) {
                     return .{ .unsupported = .{ .unsupported_loop_summary = .loop_summary_dependency_value_out_of_scope } };
@@ -988,8 +975,10 @@ fn loopInductionQuerySemanticSupport(
                     .supported => {},
                     .unsupported => return .{ .unsupported = .{ .unsupported_loop_summary = .loop_formula_unsupported } },
                 }
-            }
-        }
+            },
+            .summary_dependency => dependency_count += 1,
+            .storage_read, .storage_write => {},
+        };
         for (edge.target_formulas) |formula| {
             if (formulaReferencesSummaryDependencyVariable(set, summary, formula)) {
                 return .{ .unsupported = .{ .unsupported_loop_summary = .loop_summary_dependency_value_out_of_scope } };
@@ -1157,17 +1146,22 @@ fn summaryDependencyVariableAvailableAtCheckpoint(
 ) bool {
     var owned_by_dependency = false;
     for (summary.edges) |candidate_edge| {
-        for (candidate_edge.summary_dependencies, 0..) |dependency, dependency_index| {
-            const inner = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
-                return false;
-            for (inner.variables) |variable| {
-                if (variable.id == null or !obligation.freeVarIdEql(variable.id.?, id)) continue;
-                owned_by_dependency = true;
-                if (candidate_edge.id == edge.id and dependency_index < after_dependency_count) {
-                    return true;
+        var dependency_index: u32 = 0;
+        for (candidate_edge.timeline) |event| switch (event.payload) {
+            .summary_dependency => |dependency| {
+                const inner = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
+                    return false;
+                for (inner.variables) |variable| {
+                    if (variable.id == null or !obligation.freeVarIdEql(variable.id.?, id)) continue;
+                    owned_by_dependency = true;
+                    if (candidate_edge.id == edge.id and dependency_index < after_dependency_count) {
+                        return true;
+                    }
                 }
-            }
-        }
+                dependency_index += 1;
+            },
+            else => {},
+        };
     }
     return !owned_by_dependency;
 }
@@ -1215,11 +1209,14 @@ fn summaryDependencyOwnsFreeVariable(
     summary: obligation.LoopSummaryRow,
     id: obligation.FreeVarId,
 ) bool {
-    for (summary.edges) |edge| for (edge.summary_dependencies) |dependency| {
-        const inner = obligation.findById(set.loop_summaries, dependency.summary_id) orelse return true;
-        for (inner.variables) |variable| {
-            if (variable.id != null and obligation.freeVarIdEql(variable.id.?, id)) return true;
-        }
+    for (summary.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
+        .summary_dependency => |dependency| {
+            const inner = obligation.findById(set.loop_summaries, dependency.summary_id) orelse return true;
+            for (inner.variables) |variable| {
+                if (variable.id != null and obligation.freeVarIdEql(variable.id.?, id)) return true;
+            }
+        },
+        else => {},
     };
     return false;
 }
@@ -2838,12 +2835,6 @@ test "LoopVC digest covers every certificate-authority component class" {
         .source_key = "loop-state:0",
         .value = .{ .term = 0 },
     }};
-    const safety_checkpoints = [_]obligation.LoopSafetyCheckpoint{.{
-        .id = 0,
-        .structural_key = "body/ora.assert:0",
-        .after_dependency_count = 0,
-        .formulas = &.{.{ .term = 6 }},
-    }};
     const path_expr = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 5 } }};
     const exit_path_expr = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 8 } }};
     const safety_expr = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 6 } }};
@@ -2869,8 +2860,8 @@ test "LoopVC digest covers every certificate-authority component class" {
         .{ .id = 0, .structural_key = "guard/false", .payload = .{ .path_assumption = .{ .formulas = &exit_path_expr } } },
     };
     const edges = [_]obligation.LoopEdgeRow{
-        .{ .id = 0, .structural_key = "body/straight-line-yield", .timeline = &backedge_timeline, .path_formulas = &.{.{ .term = 5 }}, .safety_checkpoints = &safety_checkpoints, .next_state = &backedge_bindings, .target = .backedge },
-        .{ .id = 1, .structural_key = "guard/false-successor", .timeline = &exit_timeline, .path_formulas = &.{.{ .term = 8 }}, .next_state = &exit_bindings, .target = .successor },
+        .{ .id = 0, .structural_key = "body/straight-line-yield", .timeline = &backedge_timeline, .next_state = &backedge_bindings, .target = .backedge },
+        .{ .id = 1, .structural_key = "guard/false-successor", .timeline = &exit_timeline, .next_state = &exit_bindings, .target = .successor },
     };
     const summary: obligation.LoopSummaryRow = .{
         .id = 1,
@@ -3040,8 +3031,10 @@ test "LoopVC digest covers every certificate-authority component class" {
         .loop_summaries = &changed_summaries,
     }, 1))));
 
+    var changed_timeline = backedge_timeline;
+    changed_timeline[0].payload.path_assumption.formulas = &.{.{ .formula = .{ .term = 6 } }};
     var changed_edges = edges;
-    changed_edges[0].path_formulas = &.{.{ .term = 6 }};
+    changed_edges[0].timeline = &changed_timeline;
     changed_summary = summary;
     changed_summary.edges = &changed_edges;
     changed_summaries[0] = changed_summary;
@@ -3052,10 +3045,10 @@ test "LoopVC digest covers every certificate-authority component class" {
         .loop_summaries = &changed_summaries,
     }, 1))));
 
+    changed_timeline = backedge_timeline;
+    changed_timeline[3].payload.safety_checkpoint.formulas = &.{.{ .formula = .{ .term = 4 } }};
     changed_edges = edges;
-    var changed_safety_checkpoints = safety_checkpoints;
-    changed_safety_checkpoints[0].formulas = &.{.{ .term = 4 }};
-    changed_edges[0].safety_checkpoints = &changed_safety_checkpoints;
+    changed_edges[0].timeline = &changed_timeline;
     changed_summary = summary;
     changed_summary.edges = &changed_edges;
     changed_summaries[0] = changed_summary;
@@ -3066,24 +3059,10 @@ test "LoopVC digest covers every certificate-authority component class" {
         .loop_summaries = &changed_summaries,
     }, 1))));
 
+    changed_timeline = backedge_timeline;
+    changed_timeline[3].structural_key = "body/ora.assert:changed";
     changed_edges = edges;
-    changed_safety_checkpoints = safety_checkpoints;
-    changed_safety_checkpoints[0].after_dependency_count = 1;
-    changed_edges[0].safety_checkpoints = &changed_safety_checkpoints;
-    changed_summary = summary;
-    changed_summary.edges = &changed_edges;
-    changed_summaries[0] = changed_summary;
-    try std.testing.expect(!std.mem.eql(u8, &baseline, &(try loopVcSha256(.{
-        .terms = &terms,
-        .assumptions = &assumptions,
-        .queries = &queries,
-        .loop_summaries = &changed_summaries,
-    }, 1))));
-
-    changed_edges = edges;
-    changed_safety_checkpoints = safety_checkpoints;
-    changed_safety_checkpoints[0].structural_key = "body/ora.assert:changed";
-    changed_edges[0].safety_checkpoints = &changed_safety_checkpoints;
+    changed_edges[0].timeline = &changed_timeline;
     changed_summary = summary;
     changed_summary.edges = &changed_edges;
     changed_summaries[0] = changed_summary;
@@ -3130,8 +3109,14 @@ test "LoopVC digest covers every certificate-authority component class" {
         .write_footprint_complete = true,
         .target = .successor,
     };
+    const dependency_event: obligation.LoopTimelineEvent = .{
+        .id = backedge_timeline.len,
+        .structural_key = dependency.structural_key,
+        .payload = .{ .summary_dependency = dependency },
+    };
+    const dependency_timeline = backedge_timeline ++ [_]obligation.LoopTimelineEvent{dependency_event};
     changed_edges = edges;
-    changed_edges[0].summary_dependencies = &.{dependency};
+    changed_edges[0].timeline = &dependency_timeline;
     changed_summary = summary;
     changed_summary.edges = &changed_edges;
     changed_summaries[0] = changed_summary;
@@ -3145,7 +3130,9 @@ test "LoopVC digest covers every certificate-authority component class" {
 
     var changed_dependency = dependency;
     changed_dependency.write_footprint_complete = false;
-    changed_edges[0].summary_dependencies = &.{changed_dependency};
+    var changed_dependency_timeline = dependency_timeline;
+    changed_dependency_timeline[backedge_timeline.len].payload.summary_dependency = changed_dependency;
+    changed_edges[0].timeline = &changed_dependency_timeline;
     changed_summary.edges = &changed_edges;
     changed_summaries[0] = changed_summary;
     try std.testing.expect(!std.mem.eql(u8, &dependency_baseline, &(try loopVcSha256(.{
@@ -3158,7 +3145,9 @@ test "LoopVC digest covers every certificate-authority component class" {
     const other_footprint = [_]obligation.PlaceRef{.{ .root = "other", .region = .storage }};
     changed_dependency = dependency;
     changed_dependency.write_footprint = &other_footprint;
-    changed_edges[0].summary_dependencies = &.{changed_dependency};
+    changed_dependency_timeline = dependency_timeline;
+    changed_dependency_timeline[backedge_timeline.len].payload.summary_dependency = changed_dependency;
+    changed_edges[0].timeline = &changed_dependency_timeline;
     changed_summary.edges = &changed_edges;
     changed_summaries[0] = changed_summary;
     try std.testing.expect(!std.mem.eql(u8, &dependency_baseline, &(try loopVcSha256(.{

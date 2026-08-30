@@ -229,7 +229,8 @@ macro "ora_loop_reduce" loc:(Lean.Parser.Tactic.location)? : tactic =>
     if_pos, if_false, dif_pos, dif_neg] $[$loc:location]?)
 
 macro "ora_loop_split_formulas" loc:(Lean.Parser.Tactic.location)? : tactic =>
-  `(tactic| simp only [ora_loop_row, formulasHoldInState, formulasHoldInEnv,
+  `(tactic| simp only [ora_loop_row, EdgeRow.path_eq_timeline, timelinePathView,
+    formulasHoldInState, formulasHoldInEnv,
     List.forall_mem_cons, List.not_mem_nil, false_implies, and_true]
     $[$loc:location]?)
 
@@ -426,7 +427,10 @@ macro "ora_loop_nested_reduce" : tactic =>
     simp only [Option.isSome, if_true]
     simp only [Option.pure_def, Option.bind_eq_bind,
       Option.some_bind, Option.none_bind]
-    simp only [ora_loop_row, Option.pure_def, Option.bind_eq_bind,
+    simp only [ora_loop_row, EdgeRow.path_eq_timeline,
+      EdgeRow.safety_eq_timeline, EdgeRow.dependencies_eq_timeline,
+      timelinePathView, timelineSafetyView, timelineSafetyViewFrom,
+      timelineDependencyView, Option.pure_def, Option.bind_eq_bind,
       Option.some_bind, Option.none_bind, Option.isSome,
       if_pos, if_false, Bool.false_eq_true]))
 
@@ -653,7 +657,9 @@ macro tk:"ora_loop_auto_plain" : tactic => do
         Ora.Loop.denoteLoopSummary?
       rw [hSupported]
       unfold $autoSummary
-      simp only [ora_loop_row, Ora.Loop.denoteEdges?, Ora.Loop.denoteEdge?,
+      simp only [ora_loop_row, EdgeRow.path_eq_timeline,
+        EdgeRow.safety_eq_timeline, timelinePathView, timelineSafetyView,
+        timelineSafetyViewFrom, Ora.Loop.denoteEdges?, Ora.Loop.denoteEdge?,
         Ora.Loop.denoteControlTarget?, Option.bind, if_pos]
       refine { base := ?_, backedge := ?_, edgeSafety := ?_, exit := ?_ }
       · ora_loop_prove_base
@@ -709,7 +715,9 @@ macro tk:"ora_loop_auto_plain" : tactic => do
           ora_loop_unpack_state hReady
           repeat' first | rcases hReady with ⟨hShape, hReady⟩
           subst_vars
-          simp only [ora_loop_row, Ora.Loop.safetyCheckpointsHold,
+          simp only [ora_loop_row, EdgeRow.safety_eq_timeline,
+            timelineSafetyView, timelineSafetyViewFrom,
+            Ora.Loop.safetyCheckpointsHold,
             List.forall_mem_cons, List.forall_mem_nil])
         all_goals repeat' apply And.intro
         all_goals try (intro checkpoint hCheckpoint; contradiction)
@@ -796,7 +804,10 @@ private def reduceSummaryDependencyAt
       if_true] at $hDependencyLocation
     simp only [Ora.Loop.denoteEdgesWithResolver?,
       Ora.Loop.denoteEdgeWithResolver?,
-      Ora.Loop.denoteSummaryDependencies?] at $hDependencyLocation
+      Ora.Loop.denoteSummaryDependencies?, EdgeRow.path_eq_timeline,
+      EdgeRow.safety_eq_timeline, EdgeRow.dependencies_eq_timeline,
+      timelinePathView, timelineSafetyView, timelineSafetyViewFrom,
+      timelineDependencyView] at $hDependencyLocation
     simp only [Ora.Loop.denoteControlTarget?, Option.bind_eq_bind,
       Option.some_bind, Option.none_bind, Option.pure_def] at $hDependencyLocation
     split at $hDependencyLocation <;> simp_all only
@@ -1033,7 +1044,9 @@ macro tk:"ora_loop_auto_nested" : tactic => do
           ora_loop_unpack_state hReady
           repeat' first | rcases hReady with ⟨hShape, hReady⟩
           subst_vars
-          simp only [ora_loop_row, Ora.Loop.safetyCheckpointsHold,
+          simp only [ora_loop_row, EdgeRow.safety_eq_timeline,
+            timelineSafetyView, timelineSafetyViewFrom,
+            Ora.Loop.safetyCheckpointsHold,
             List.forall_mem_cons, List.forall_mem_nil])
         all_goals repeat' apply And.intro
         all_goals try (intro checkpoint hCheckpoint; contradiction)

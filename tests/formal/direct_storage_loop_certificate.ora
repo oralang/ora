@@ -1,0 +1,13 @@
+contract DirectStorageLoopCertificate {
+    storage var counter: u256 = 0;
+
+    pub fn assign() {
+        var i: u256 = 0;
+        while (i < 1)
+            invariant true
+        {
+            counter = i;
+            i = i +% 1;
+        }
+    }
+}

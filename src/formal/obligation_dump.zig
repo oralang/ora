@@ -825,48 +825,10 @@ fn writeLoopEdgeListField(
         try writer.print("{d}", .{edge.id});
         try writeStringField(writer, "structural_key", edge.structural_key);
         try writeLoopTimelineField(writer, edge.timeline);
-        try writeFormulaListField(writer, "path_formulas", edge.path_formulas);
-        try writeLoopSafetyCheckpointListField(writer, edge.safety_checkpoints);
-        try writeLoopSummaryDependencyListField(writer, edge.summary_dependencies);
         try writeLoopStepAssignmentListField(writer, edge.next_state);
         try writeOptionalStringField(writer, "target", if (edge.target) |target| @tagName(target) else null);
         try writeFormulaListField(writer, "target_formulas", edge.target_formulas);
         try writer.writeByte('}');
-    }
-    try writer.writeByte(']');
-}
-
-fn writeLoopSafetyCheckpointListField(
-    writer: anytype,
-    checkpoints: []const obligation.LoopSafetyCheckpoint,
-) !void {
-    try writeFieldPrefix(writer, "safety_checkpoints");
-    try writer.writeByte('[');
-    for (checkpoints, 0..) |checkpoint, index| {
-        if (index != 0) try writer.writeByte(',');
-        try writer.writeAll("{\"id\":");
-        try writer.print("{d}", .{checkpoint.id});
-        try writeStringField(writer, "structural_key", checkpoint.structural_key);
-        try writeNumberField(
-            writer,
-            "after_dependency_count",
-            checkpoint.after_dependency_count,
-        );
-        try writeFormulaListField(writer, "formulas", checkpoint.formulas);
-        try writer.writeByte('}');
-    }
-    try writer.writeByte(']');
-}
-
-fn writeLoopSummaryDependencyListField(
-    writer: anytype,
-    dependencies: []const obligation.LoopSummaryDependency,
-) !void {
-    try writeFieldPrefix(writer, "summary_dependencies");
-    try writer.writeByte('[');
-    for (dependencies, 0..) |dependency, index| {
-        if (index != 0) try writer.writeByte(',');
-        try writeLoopSummaryDependencyObject(writer, dependency);
     }
     try writer.writeByte(']');
 }
@@ -1696,7 +1658,6 @@ test "json-lines dump pins owner-scoped loop summary schema without authorizing 
                 .formulas = &.{.{ .formula = .{ .term = 0 } }},
             } },
         }},
-        .path_formulas = &.{.{ .term = 0 }},
         .target = .backedge,
     };
     var edge_json = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -1706,9 +1667,7 @@ test "json-lines dump pins owner-scoped loop summary schema without authorizing 
         ",\"edges\":[{\"id\":0,\"structural_key\":\"body/straight-line-yield\"," ++
             "\"timeline\":[{\"id\":0,\"structural_key\":\"body/path\",\"tag\":\"path_assumption\"," ++
             "\"formulas\":[{\"formula\":{\"tag\":\"term\",\"id\":0},\"read_results\":[]}]}]," ++
-            "\"path_formulas\":[{\"tag\":\"term\",\"id\":0}]," ++
-            "\"safety_checkpoints\":[]," ++
-            "\"summary_dependencies\":[],\"next_state\":[]," ++
+            "\"next_state\":[]," ++
             "\"target\":\"backedge\",\"target_formulas\":[]}]",
         edge_json.written(),
     );

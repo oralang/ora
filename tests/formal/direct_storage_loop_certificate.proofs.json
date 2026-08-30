@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "proofs": [
+    {
+      "query_id": 8,
+      "obligation_ids": [],
+      "assumption_ids": [],
+      "module_name": "Ora.UserProof.DirectStorageLoop",
+      "theorem_name": "Ora.UserProof.DirectStorageLoop.discharge_q8",
+      "path": "tests/formal/direct_storage_loop_certificate.lean",
+      "content_sha256": null,
+      "inline_source": true
+    }
+  ]
+}

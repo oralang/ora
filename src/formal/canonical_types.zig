@@ -146,11 +146,19 @@ pub const EncodeError = std.mem.Allocator.Error || error{
     BoundVariableOutOfScope,
     MissingCanonicalQueryState,
     InvalidLoopQuery,
+    LoopStorageRootUntouched,
     UnknownLoopSummary,
     UnknownLoopEdge,
     UnsupportedBoundVariableType,
     Z3ApiError,
 };
+
+pub fn encodeErrorReason(err: EncodeError) []const u8 {
+    return switch (err) {
+        error.LoopStorageRootUntouched => "loop_storage_root_untouched",
+        else => @errorName(err),
+    };
+}
 
 pub const CanonicalPlaceSymbolKind = enum(u8) {
     global,

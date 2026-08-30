@@ -41,7 +41,7 @@ def StorageFormulaContext.withStoreViews
 environment consumed by the shared obligation denotation. The fallback in the
 environment constructor is therefore unreachable for every place read
 reachable from the formula being evaluated. -/
-private def StorageFormulaContext.termStorageReady
+def StorageFormulaContext.termStorageReady
     (context : StorageFormulaContext)
     (bindings : Env) : Nat → TermId → Bool
   | 0, _ => false
@@ -73,7 +73,7 @@ private def StorageFormulaContext.termStorageReady
       | some (.variable _) => true
       | some .result => true
 
-private def StorageFormulaContext.formulaStorageReady
+def StorageFormulaContext.formulaStorageReady
     (context : StorageFormulaContext)
     (bindings : Env) : FormulaRef → Bool
   | .term id =>
@@ -111,6 +111,17 @@ def StorageFormulaContext.evalFormula?
   let env ← context.stateEnv? state
   if !context.formulaStorageReady env formula then none else pure ()
   formulaDenotes? context.manifest env formula
+
+theorem StorageFormulaContext.evalFormula_bool_true
+    (context : StorageFormulaContext)
+    (state : StorageActionState)
+    (bound : Env)
+    (termId : TermId)
+    (hBound : context.stateEnv? state = some bound)
+    (hTerm : context.manifest.terms[termId]? = some (.boolLit true)) :
+    context.evalFormula? (.term termId) state = some True := by
+  unfold evalFormula? formulaStorageReady termStorageReady
+  simp [hBound, hTerm, formulaDenotes?, denoteFormula?]
 
 def StorageFormulaContext.evalValue?
     (context : StorageFormulaContext)

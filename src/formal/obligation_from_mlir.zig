@@ -332,26 +332,24 @@ fn bindLoopSummaryDependencyDigests(collector: *Collector) !void {
         const digest = try obligation_to_lean.loopVcSha256(view, inner.id);
         for (collector.loop_summaries.items[0..summary_index]) |*outer| {
             var binds_inner = false;
-            for (outer.edges) |edge| for (edge.summary_dependencies) |dependency| {
-                if (dependency.summary_id == inner.id) binds_inner = true;
+            for (outer.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
+                .summary_dependency => |dependency| if (dependency.summary_id == inner.id) {
+                    binds_inner = true;
+                },
+                else => {},
             };
             if (!binds_inner) continue;
 
             const rebound_edges = try collector.allocator.dupe(obligation.LoopEdgeRow, outer.edges);
             for (outer.edges, rebound_edges) |edge, *rebound_edge| {
                 var edge_binds_inner = false;
-                for (edge.summary_dependencies) |dependency| {
-                    if (dependency.summary_id == inner.id) edge_binds_inner = true;
-                }
+                for (edge.timeline) |event| switch (event.payload) {
+                    .summary_dependency => |dependency| if (dependency.summary_id == inner.id) {
+                        edge_binds_inner = true;
+                    },
+                    else => {},
+                };
                 if (!edge_binds_inner) continue;
-                const rebound_dependencies = try collector.allocator.dupe(
-                    obligation.LoopSummaryDependency,
-                    edge.summary_dependencies,
-                );
-                for (rebound_dependencies) |*dependency| {
-                    if (dependency.summary_id == inner.id) dependency.loop_vc_sha256 = digest;
-                }
-                rebound_edge.summary_dependencies = rebound_dependencies;
                 const rebound_timeline = try collector.allocator.dupe(
                     obligation.LoopTimelineEvent,
                     edge.timeline,
@@ -1225,7 +1223,9 @@ const Collector = struct {
             .edge = .{
                 .id = @intCast(projected.items.len),
                 .structural_key = "guard/false-successor",
-                .path_formulas = exit_path,
+                .timeline = try appendLoopTimelineEvent(self.allocator, &.{}, .{
+                    .path_assumption = .{ .formulas = try loopFormulaExprs(self.allocator, exit_path) },
+                }, "guard/false-successor/path"),
                 .next_state = exit_bindings,
                 .target = .successor,
             },
@@ -1246,6 +1246,10 @@ const Collector = struct {
             .target_keys = &.{},
             .effect_keys = &.{},
             .state_source_keys = &.{},
+            .timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, &.{}, .{
+                .structural_key = "guard/false-successor/path",
+                .tag = .path_assumption,
+            }),
         });
 
         summary.projection_completeness = compareLoopProjection(projected.items, inventory.items);
@@ -1262,10 +1266,6 @@ const Collector = struct {
         for (projected.items, edges, 0..) |item, *edge, index| {
             edge.* = item.edge;
             edge.id = @intCast(index);
-            edge.timeline = if (timelineInventoryHasStorageEvent(item.timeline_inventory))
-                item.edge.timeline
-            else
-                try buildLegacyLoopTimeline(self.allocator, edge.*);
             if (edge.target == .function_return or edge.target == .error_return) {
                 if (edge.target_formulas.len != item.target_keys.len) {
                     summary.projection_completeness = .target_mismatch;
@@ -1284,9 +1284,7 @@ const Collector = struct {
                     });
                 }
             }
-            if (formulasContainOriginValue(edge.path_formulas) or
-                safetyCheckpointsContainOriginValue(edge.safety_checkpoints) or
-                loopTimelineContainsOriginValue(edge.timeline) or
+            if (loopTimelineContainsOriginValue(edge.timeline) or
                 formulasContainOriginValue(edge.target_formulas) or
                 stepAssignmentsContainOriginValue(edge.next_state))
             {
@@ -1297,7 +1295,7 @@ const Collector = struct {
             }
             if (edge.target == .backedge and
                 self.stepAssignmentsRequireSafety(edge.next_state) and
-                loopSafetyFormulaCount(edge.safety_checkpoints) == 0)
+                edge.safetyFormulaCount() == 0)
             {
                 try self.appendLoopSummaryReason(summary, .loop_body_safety_missing);
             }
@@ -1309,9 +1307,7 @@ const Collector = struct {
         {
             var edges_supported = true;
             for (edges) |edge| {
-                if (formulasContainOriginValue(edge.path_formulas) or
-                    safetyCheckpointsContainOriginValue(edge.safety_checkpoints) or
-                    loopTimelineContainsOriginValue(edge.timeline) or
+                if (loopTimelineContainsOriginValue(edge.timeline) or
                     formulasContainOriginValue(edge.target_formulas) or
                     stepAssignmentsContainOriginValue(edge.next_state)) edges_supported = false;
             }
@@ -2416,9 +2412,6 @@ const Collector = struct {
                 .id = 0,
                 .structural_key = structural_key,
                 .timeline = terminal.path.timeline,
-                .path_formulas = terminal.path.path_formulas,
-                .safety_checkpoints = terminal.path.safety_checkpoints,
-                .summary_dependencies = terminal.path.summary_dependencies,
                 .next_state = assignments,
                 .target = target,
                 .target_formulas = if (is_return_target) terminal.path.target_formulas else &.{},
@@ -3260,7 +3253,7 @@ const Collector = struct {
         const write_slots_complete = (try self.boolAttr(op, "ora.write_slots_complete")) orelse false;
         const source = try self.sourceForOperation(op);
 
-        if (write_slots.len != 0 or modifies_slots_attr != null) {
+        if (modifies_slots_attr != null) {
             try self.addEffectFrameGoal(.write_covered_by_modifies, modifies_slots, write_slots, op_name, symbol, ordinal, source);
         }
         if (read_slots.len != 0 and write_slots.len != 0 and write_slots_complete) {
@@ -6117,57 +6110,6 @@ fn loopFormulaExprs(
     return result;
 }
 
-/// Transitional construction of the unified timeline for the already-closed
-/// local/nested loop lane. Task 3 replaces storage exclusions with exact
-/// action events; the legacy views remain parity inputs until migration ends.
-fn buildLegacyLoopTimeline(
-    allocator: std.mem.Allocator,
-    edge: obligation.LoopEdgeRow,
-) ![]const obligation.LoopTimelineEvent {
-    const event_count = 1 + edge.safety_checkpoints.len + edge.summary_dependencies.len;
-    const events = try allocator.alloc(obligation.LoopTimelineEvent, event_count);
-    var event_index: usize = 0;
-    events[event_index] = .{
-        .id = @intCast(event_index),
-        .structural_key = try std.fmt.allocPrint(allocator, "{s}/path", .{edge.structural_key}),
-        .payload = .{ .path_assumption = .{
-            .formulas = try loopFormulaExprs(allocator, edge.path_formulas),
-        } },
-    };
-    event_index += 1;
-
-    var checkpoint_index: usize = 0;
-    var dependency_index: usize = 0;
-    while (dependency_index <= edge.summary_dependencies.len) : (dependency_index += 1) {
-        while (checkpoint_index < edge.safety_checkpoints.len and
-            edge.safety_checkpoints[checkpoint_index].after_dependency_count == dependency_index)
-        {
-            const checkpoint = edge.safety_checkpoints[checkpoint_index];
-            events[event_index] = .{
-                .id = @intCast(event_index),
-                .structural_key = checkpoint.structural_key,
-                .payload = .{ .safety_checkpoint = .{
-                    .formulas = try loopFormulaExprs(allocator, checkpoint.formulas),
-                } },
-            };
-            event_index += 1;
-            checkpoint_index += 1;
-        }
-        if (dependency_index == edge.summary_dependencies.len) break;
-        const dependency = edge.summary_dependencies[dependency_index];
-        events[event_index] = .{
-            .id = @intCast(event_index),
-            .structural_key = dependency.structural_key,
-            .payload = .{ .summary_dependency = dependency },
-        };
-        event_index += 1;
-    }
-    if (event_index != events.len or checkpoint_index != edge.safety_checkpoints.len) {
-        return error.InvalidLoopTimelineStage;
-    }
-    return events;
-}
-
 fn appendString(
     allocator: std.mem.Allocator,
     existing: []const []const u8,
@@ -6319,13 +6261,8 @@ fn compareLoopProjection(
         if (!stringSlicesEql(semantic.target_keys, structural.target_keys)) {
             return .target_mismatch;
         }
-        if (!stringSlicesEql(semantic.summary_dependency_keys, structural.summary_dependency_keys) or
-            semantic.edge.summary_dependencies.len != structural.summary_dependency_keys.len)
-        {
+        if (!stringSlicesEql(semantic.summary_dependency_keys, structural.summary_dependency_keys)) {
             return .path_mismatch;
-        }
-        for (semantic.edge.summary_dependencies, structural.summary_dependency_keys) |dependency, key| {
-            if (!std.mem.eql(u8, dependency.structural_key, key)) return .path_mismatch;
         }
         if (!storageTimelineInventoryEql(semantic.timeline_inventory, structural.timeline_inventory) or
             !timelineMatchesInventory(semantic.edge.timeline, structural.timeline_inventory))
@@ -6683,15 +6620,6 @@ fn formulasContainOriginValue(formulas: []const obligation.FormulaRef) bool {
     return false;
 }
 
-fn safetyCheckpointsContainOriginValue(
-    checkpoints: []const obligation.LoopSafetyCheckpoint,
-) bool {
-    for (checkpoints) |checkpoint| {
-        if (formulasContainOriginValue(checkpoint.formulas)) return true;
-    }
-    return false;
-}
-
 fn loopTimelineContainsOriginValue(timeline: []const obligation.LoopTimelineEvent) bool {
     for (timeline) |event| switch (event.payload) {
         .path_assumption => |path| for (path.formulas) |formula| {
@@ -6704,12 +6632,6 @@ fn loopTimelineContainsOriginValue(timeline: []const obligation.LoopTimelineEven
         .storage_read, .summary_dependency => {},
     };
     return false;
-}
-
-fn loopSafetyFormulaCount(checkpoints: []const obligation.LoopSafetyCheckpoint) usize {
-    var count: usize = 0;
-    for (checkpoints) |checkpoint| count += checkpoint.formulas.len;
-    return count;
 }
 
 fn safetyCheckpointKeysEql(

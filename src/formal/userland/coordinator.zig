@@ -738,17 +738,22 @@ fn collectLoopSummaryFreeVars(
     for (summary.init_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, ids);
     for (summary.invariant_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, ids);
     for (summary.edges) |edge| {
-        for (edge.path_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, ids);
-        for (edge.safety_checkpoints) |checkpoint| {
-            for (checkpoint.formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, ids);
-        }
+        for (edge.timeline) |event| switch (event.payload) {
+            .path_assumption, .safety_checkpoint => |formulas| for (formulas.formulas) |formula| {
+                try collectFormulaFreeVars(allocator, set, formula.formula, ids);
+            },
+            .summary_dependency => |dependency| {
+                const child = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
+                    return error.InvalidDependency;
+                try collectLoopSummaryFreeVars(allocator, set, child, ids, fuel - 1);
+            },
+            .storage_read => {},
+            .storage_write => |write| {
+                try collectFormulaFreeVars(allocator, set, write.value.formula, ids);
+            },
+        };
         for (edge.target_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, ids);
         for (edge.next_state) |binding| try collectFormulaFreeVars(allocator, set, binding.value, ids);
-        for (edge.summary_dependencies) |dependency| {
-            const child = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
-                return error.InvalidDependency;
-            try collectLoopSummaryFreeVars(allocator, set, child, ids, fuel - 1);
-        }
     }
     for (summary.post_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, ids);
 }
@@ -914,6 +919,7 @@ const AutomaticLoopProofReason = enum {
     automatic_query_shape_unsupported,
     automatic_assumptions_require_external_certificate,
     automatic_nested_summary_requires_external_certificate,
+    automatic_storage_timeline_requires_external_certificate,
     automatic_control_shape_unsupported,
     automatic_formula_reference_unsupported,
     automatic_term_kind_unsupported,
@@ -939,7 +945,18 @@ fn automaticLoopProofReasonName(reason: AutomaticLoopProofReason) []const u8 {
 }
 
 fn loopSummaryHasDependencies(summary: obligation.LoopSummaryRow) bool {
-    for (summary.edges) |edge| if (edge.summary_dependencies.len != 0) return true;
+    for (summary.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
+        .summary_dependency => return true,
+        else => {},
+    };
+    return false;
+}
+
+fn loopSummaryHasStorageTimeline(summary: obligation.LoopSummaryRow) bool {
+    for (summary.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
+        .storage_read, .storage_write => return true,
+        else => {},
+    };
     return false;
 }
 
@@ -953,10 +970,13 @@ fn appendAutomaticSummaryClosure(
     if (fuel == 0) return error.InvalidDependency;
     for (rows.items) |existing| if (existing.id == summary.id) return;
     try rows.append(allocator, summary);
-    for (summary.edges) |edge| for (edge.summary_dependencies) |dependency| {
-        const child = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
-            return error.InvalidDependency;
-        try appendAutomaticSummaryClosure(allocator, set, rows, child, fuel - 1);
+    for (summary.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
+        .summary_dependency => |dependency| {
+            const child = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
+                return error.InvalidDependency;
+            try appendAutomaticSummaryClosure(allocator, set, rows, child, fuel - 1);
+        },
+        else => {},
     };
 }
 
@@ -1019,14 +1039,25 @@ fn automaticDependencyVariable(
     edge: obligation.LoopEdgeRow,
     id: obligation.FreeVarId,
 ) ?obligation.LoopVariable {
-    for (edge.summary_dependencies) |dependency| {
-        const child = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
-            continue;
-        for (child.variables) |variable| {
-            const candidate = variable.id orelse continue;
-            if (obligation.freeVarIdEql(candidate, id)) return variable;
-        }
-    }
+    for (edge.timeline) |event| switch (event.payload) {
+        .storage_read => |read| if (obligation.freeVarIdEql(read.result, id)) {
+            return .{
+                .index = 0,
+                .id = read.result,
+                .name = "storage_read",
+                .ty = read.location.value_ty,
+            };
+        },
+        .summary_dependency => |dependency| {
+            const child = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
+                continue;
+            for (child.variables) |variable| {
+                const candidate = variable.id orelse continue;
+                if (obligation.freeVarIdEql(candidate, id)) return variable;
+            }
+        },
+        else => {},
+    };
     return null;
 }
 
@@ -1273,6 +1304,9 @@ fn automaticLoopPlan(
     }
     const summary = obligation.findById(set.loop_summaries, query.loop_summary_id.?) orelse
         return .{ .unsupported = .automatic_query_shape_unsupported };
+    if (loopSummaryHasStorageTimeline(summary)) {
+        return .{ .unsupported = .automatic_storage_timeline_requires_external_certificate };
+    }
     if (!summary.projectionSupported() or summary.edges.len < 2) {
         return .{ .unsupported = .automatic_control_shape_unsupported };
     }
@@ -1314,31 +1348,51 @@ fn automaticLoopPlan(
         return .{ .unsupported = reason };
     };
     for (summary.edges) |edge| {
-        if (edge.summary_dependencies.len > 1) {
-            return .{ .unsupported = .automatic_nested_summary_requires_external_certificate };
-        }
-        for (edge.summary_dependencies) |dependency| {
-            const child = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
-                return .{ .unsupported = .automatic_nested_summary_requires_external_certificate };
-            if (!child.projectionSupported()) {
-                return .{ .unsupported = .automatic_nested_summary_requires_external_certificate };
-            }
-            for (child.variables) |variable| {
-                if (variable.id == null or automaticIntegerShape(variable.ty) == null) {
+        var dependency_count: usize = 0;
+        for (edge.timeline) |event| switch (event.payload) {
+            .summary_dependency => |dependency| {
+                dependency_count += 1;
+                if (dependency_count > 1) return .{
+                    .unsupported = .automatic_nested_summary_requires_external_certificate,
+                };
+                const child = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
+                    return .{ .unsupported = .automatic_nested_summary_requires_external_certificate };
+                if (!child.projectionSupported()) {
                     return .{ .unsupported = .automatic_nested_summary_requires_external_certificate };
                 }
-            }
-            if (loopSummaryHasDependencies(child)) {
-                return .{ .unsupported = .automatic_nested_summary_requires_external_certificate };
-            }
-            var matching_targets: usize = 0;
-            for (child.edges) |child_edge| {
-                if (child_edge.target == dependency.target) matching_targets += 1;
-            }
-            if (matching_targets != 1) {
-                return .{ .unsupported = .automatic_nested_summary_requires_external_certificate };
-            }
-        }
+                for (child.variables) |variable| {
+                    if (variable.id == null or automaticIntegerShape(variable.ty) == null) {
+                        return .{ .unsupported = .automatic_nested_summary_requires_external_certificate };
+                    }
+                }
+                if (loopSummaryHasDependencies(child)) {
+                    return .{ .unsupported = .automatic_nested_summary_requires_external_certificate };
+                }
+                var matching_targets: usize = 0;
+                for (child.edges) |child_edge| {
+                    if (child_edge.target == dependency.target) matching_targets += 1;
+                }
+                if (matching_targets != 1) {
+                    return .{ .unsupported = .automatic_nested_summary_requires_external_certificate };
+                }
+            },
+            .path_assumption => |path| for (path.formulas) |formula| {
+                if (automaticFormulaReason(set, summary, formula.formula, 256)) |reason| {
+                    return .{ .unsupported = reason };
+                }
+            },
+            .safety_checkpoint => |checkpoint| for (checkpoint.formulas) |formula| {
+                if (automaticFormulaReasonInScope(set, summary, edge, formula.formula, 256)) |reason| {
+                    return .{ .unsupported = reason };
+                }
+            },
+            .storage_write => |write| {
+                if (automaticValueReasonOnEdge(set, summary, edge, write.value.formula)) |reason| {
+                    return .{ .unsupported = reason };
+                }
+            },
+            .storage_read => {},
+        };
         if (edge.next_state.len != summary.variables.len) {
             return .{ .unsupported = .automatic_control_shape_unsupported };
         }
@@ -1353,20 +1407,6 @@ fn automaticLoopPlan(
             if (!obligation.freeVarIdEql(expected, actual)) {
                 return .{ .unsupported = .automatic_control_shape_unsupported };
             }
-        }
-        for (edge.path_formulas) |formula| if (automaticFormulaReason(set, summary, formula, 256)) |reason| {
-            return .{ .unsupported = reason };
-        };
-        for (edge.safety_checkpoints) |checkpoint| {
-            for (checkpoint.formulas) |formula| if (automaticFormulaReasonInScope(
-                set,
-                summary,
-                edge,
-                formula,
-                256,
-            )) |reason| {
-                return .{ .unsupported = reason };
-            };
         }
         for (edge.target_formulas) |formula| if (automaticFormulaReason(set, summary, formula, 256)) |reason| {
             return .{ .unsupported = reason };
@@ -1456,6 +1496,12 @@ fn writeAutomaticLoopProof(
                     "Ora.Loop.denoteEdgesWithResolver?, " ++
                     "Ora.Loop.denoteEdgeWithResolver?, " ++
                     "Ora.Loop.denoteSummaryDependencies?, " ++
+                    "Ora.Loop.EdgeRow.path, " ++
+                    "Ora.Loop.EdgeRow.safetyCheckpoints, " ++
+                    "Ora.Loop.EdgeRow.summaryDependencies, " ++
+                    "Ora.Loop.timelinePathView, " ++
+                    "Ora.Loop.timelineSafetyView, " ++
+                    "Ora.Loop.timelineDependencyView, " ++
                     "Ora.Loop.denoteSummaryDependency?, Ora.Loop.findSummaryRow?, " ++
                     "Ora.Loop.denoteControlTarget?, Option.bind_eq_bind, " ++
                     "Option.pure_def, Option.some_bind, Option.none_bind, Option.isSome, " ++
@@ -1543,17 +1589,20 @@ fn markAutomaticSummaryClosure(
     for (summary.init_formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
     for (summary.invariant_formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
     for (summary.edges) |edge| {
-        for (edge.path_formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
-        for (edge.safety_checkpoints) |checkpoint| {
-            for (checkpoint.formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
-        }
+        for (edge.timeline) |event| switch (event.payload) {
+            .path_assumption, .safety_checkpoint => |formulas| for (formulas.formulas) |formula| {
+                try markAutomaticFormulaClosure(set, formula.formula, marked);
+            },
+            .storage_write => |write| try markAutomaticFormulaClosure(set, write.value.formula, marked),
+            .summary_dependency => |dependency| {
+                const child = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
+                    return error.InvalidDependency;
+                try markAutomaticSummaryClosure(set, child, marked, fuel - 1);
+            },
+            .storage_read => {},
+        };
         for (edge.target_formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
         for (edge.next_state) |binding| try markAutomaticFormulaClosure(set, binding.value, marked);
-        for (edge.summary_dependencies) |dependency| {
-            const child = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
-                return error.InvalidDependency;
-            try markAutomaticSummaryClosure(set, child, marked, fuel - 1);
-        }
     }
     for (summary.post_formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
 }
@@ -1697,10 +1746,13 @@ fn projectionForQuery(set: obligation.ObligationSet, query: obligation.Verificat
         for (loop_summary.init_formulas) |formula| summary.addFormula(formula);
         for (loop_summary.invariant_formulas) |formula| summary.addFormula(formula);
         for (loop_summary.edges) |edge| {
-            for (edge.path_formulas) |formula| summary.addFormula(formula);
-            for (edge.safety_checkpoints) |checkpoint| {
-                for (checkpoint.formulas) |formula| summary.addFormula(formula);
-            }
+            for (edge.timeline) |event| switch (event.payload) {
+                .path_assumption, .safety_checkpoint => |formulas| for (formulas.formulas) |formula| {
+                    summary.addFormula(formula.formula);
+                },
+                .storage_write => |write| summary.addFormula(write.value.formula),
+                .storage_read, .summary_dependency => {},
+            };
             for (edge.target_formulas) |formula| summary.addFormula(formula);
             for (edge.next_state) |binding| summary.addFormula(binding.value);
         }
@@ -1866,13 +1918,6 @@ test "automatic loop proof source delegates to repository tactic deterministical
         .name = "n",
         .ty = u256_ty,
     }};
-    const safety_formulas = [_]obligation.FormulaRef{.{ .term = 8 }};
-    const checkpoints = [_]obligation.LoopSafetyCheckpoint{.{
-        .id = 0,
-        .structural_key = "op:checked-add",
-        .after_dependency_count = 0,
-        .formulas = &safety_formulas,
-    }};
     const backedge_bindings = [_]obligation.LoopStepAssignment{.{
         .variable_index = 0,
         .target = loop_id,
@@ -1910,8 +1955,6 @@ test "automatic loop proof source delegates to repository tactic deterministical
             .id = 0,
             .structural_key = "loop:backedge",
             .timeline = &backedge_timeline,
-            .path_formulas = &.{.{ .term = 3 }},
-            .safety_checkpoints = &checkpoints,
             .next_state = &backedge_bindings,
             .target = .backedge,
         },
@@ -1919,7 +1962,6 @@ test "automatic loop proof source delegates to repository tactic deterministical
             .id = 1,
             .structural_key = "loop:exit",
             .timeline = &exit_timeline,
-            .path_formulas = &.{.{ .term = 9 }},
             .next_state = &exit_bindings,
             .target = .successor,
         },
@@ -2006,11 +2048,15 @@ test "automatic dependency variables are scoped to their declaring edge" {
         .loop_vc_sha256 = [_]u8{0} ** 32,
         .target = .successor,
     };
-    const dependencies = [_]obligation.LoopSummaryDependency{dependency};
+    const dependency_timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = dependency.structural_key,
+        .payload = .{ .summary_dependency = dependency },
+    }};
     const edge: obligation.LoopEdgeRow = .{
         .id = 0,
         .structural_key = "body/straight-line-yield",
-        .summary_dependencies = &dependencies,
+        .timeline = &dependency_timeline,
     };
     const summaries = [_]obligation.LoopSummaryRow{
         .{
@@ -2111,7 +2157,6 @@ test "runtime loop certificate coverage accepts no loops and one exact target" {
         .source_key = "loop-state:0",
         .value = .{ .term = 0 },
     }};
-    const path = [_]obligation.FormulaRef{.{ .term = 0 }};
     const path_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
     const backedge_timeline = [_]obligation.LoopTimelineEvent{.{
         .id = 0,
@@ -2128,7 +2173,6 @@ test "runtime loop certificate coverage accepts no loops and one exact target" {
             .id = 0,
             .structural_key = "body/straight-line-yield",
             .timeline = &backedge_timeline,
-            .path_formulas = &path,
             .next_state = &next_state,
             .target = .backedge,
         },
@@ -2136,7 +2180,6 @@ test "runtime loop certificate coverage accepts no loops and one exact target" {
             .id = 1,
             .structural_key = "guard/false-successor",
             .timeline = &exit_timeline,
-            .path_formulas = &path,
             .next_state = &next_state,
             .target = .successor,
         },
@@ -2187,7 +2230,6 @@ test "runtime loop certificate coverage rejects named exclusions and missing tar
         .source_key = "loop-state:0",
         .value = .{ .term = 0 },
     }};
-    const path = [_]obligation.FormulaRef{.{ .term = 0 }};
     const path_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
     const backedge_timeline = [_]obligation.LoopTimelineEvent{.{
         .id = 0,
@@ -2204,7 +2246,6 @@ test "runtime loop certificate coverage rejects named exclusions and missing tar
             .id = 0,
             .structural_key = "body/straight-line-yield",
             .timeline = &backedge_timeline,
-            .path_formulas = &path,
             .next_state = &next_state,
             .target = .backedge,
         },
@@ -2212,7 +2253,6 @@ test "runtime loop certificate coverage rejects named exclusions and missing tar
             .id = 1,
             .structural_key = "guard/false-successor",
             .timeline = &exit_timeline,
-            .path_formulas = &path,
             .next_state = &next_state,
             .target = .successor,
         },
