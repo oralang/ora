@@ -878,6 +878,7 @@ const Collector = struct {
         const invariant_formulas = try self.collectLoopInvariantFormulas(op, loop_kind, symbol, ordinal);
         const body = loopBodyBlock(op, loop_kind);
         const body_facts = collectLoopBodyFacts(body);
+        const preheader_projection_complete = self.preheaderStorageTraceIsProvablyEmpty(op);
 
         if (loop_source_op_id == null) try appendLoopReason(&reasons, self.allocator, .loop_identity_missing);
         for (variables) |variable| {
@@ -908,6 +909,11 @@ const Collector = struct {
         if (body_facts.has_resource_operation) try appendLoopReason(&reasons, self.allocator, .loop_has_resource_operation);
         if (body_facts.has_break_or_continue) try appendLoopReason(&reasons, self.allocator, .loop_has_break_or_continue);
         if (body_facts.has_error_control_flow) try appendLoopReason(&reasons, self.allocator, .loop_has_error_control_flow);
+        if (self.formulasReferenceStoragePlace(invariant_formulas) and
+            !preheader_projection_complete)
+        {
+            try appendLoopReason(&reasons, self.allocator, .loop_preheader_storage_relation_unsupported);
+        }
 
         const id = self.next_loop_summary_id;
         self.next_loop_summary_id += 1;
@@ -923,6 +929,7 @@ const Collector = struct {
             .variables = variables,
             .init_formulas = init_formulas,
             .invariant_formulas = invariant_formulas,
+            .preheader_projection_complete = preheader_projection_complete,
             .projection_completeness = .unavailable,
             .query_ids = .{},
             .unsupported_reasons = try reasons.toOwnedSlice(self.allocator),
@@ -935,6 +942,57 @@ const Collector = struct {
             .ordinal = ordinal,
             .guard_formula = guard_formula,
         });
+    }
+
+    fn preheaderStorageTraceIsProvablyEmpty(self: *const Collector, loop_op: mlir.MlirOperation) bool {
+        if (mlir.oraBlockIsNull(self.function_entry_block)) return false;
+        var op = mlir.oraBlockGetFirstOperation(self.function_entry_block);
+        while (!mlir.oraOperationIsNull(op) and op.ptr != loop_op.ptr) : (op = mlir.oraOperationGetNextInBlock(op)) {
+            const name = operationName(op);
+            const effect = mlir.oraOperationGetMemoryEffectKind(op);
+            if (effect == mlir.ORA_OPERATION_MEMORY_EFFECT_RECURSIVE or
+                effect == mlir.ORA_OPERATION_MEMORY_EFFECT_UNKNOWN or
+                effect != mlir.ORA_OPERATION_MEMORY_EFFECT_NONE and
+                    !preheaderNonPersistentEffect(name)) return false;
+            if (preheaderInventoryRejects(name)) return false;
+        }
+        return !mlir.oraOperationIsNull(op);
+    }
+
+    fn formulasReferenceStoragePlace(
+        self: *const Collector,
+        formulas: []const obligation.FormulaRef,
+    ) bool {
+        for (formulas) |formula| switch (formula) {
+            .origin_value => {},
+            .term => |id| if (self.termReferencesStoragePlace(id, self.terms.items.len + 1)) return true,
+        };
+        return false;
+    }
+
+    fn termReferencesStoragePlace(self: *const Collector, id: obligation.TermId, fuel: usize) bool {
+        if (fuel == 0 or id >= self.terms.items.len) return false;
+        return switch (self.terms.items[id]) {
+            .place_read => |place| place.region == .storage,
+            .old => |operand| self.termReferencesStoragePlace(operand, fuel - 1),
+            .unary => |unary| self.termReferencesStoragePlace(unary.operand, fuel - 1),
+            .binary => |binary| self.termReferencesStoragePlace(binary.lhs, fuel - 1) or
+                self.termReferencesStoragePlace(binary.rhs, fuel - 1),
+            .refinement_predicate => |predicate| blk: {
+                if (self.termReferencesStoragePlace(predicate.value, fuel - 1)) break :blk true;
+                for (predicate.args) |arg| {
+                    if (self.termReferencesStoragePlace(arg, fuel - 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .quantified => |quantified| blk: {
+                if (quantified.condition) |condition| {
+                    if (self.termReferencesStoragePlace(condition, fuel - 1)) break :blk true;
+                }
+                break :blk self.termReferencesStoragePlace(quantified.body, fuel - 1);
+            },
+            .bool_lit, .int_lit, .variable, .result => false,
+        };
     }
 
     fn recordActiveLoopBodySafetySite(
@@ -5058,8 +5116,14 @@ const Collector = struct {
     fn storageMapReadTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
         if (!mlirTypeIsSupportedInteger(self.operationResultType(op, 0))) return null;
         const place = (try self.storageMapReadPlaceFromMapGet(op)) orelse return null;
-        if (!self.canProjectStablePlace(place)) return null;
+        if (!self.canProjectStablePlace(place) and !self.canProjectLoopCurrentMappingPlace(place)) return null;
         return try self.placeReadTermFromPlace(place);
+    }
+
+    fn canProjectLoopCurrentMappingPlace(self: *const Collector, place: obligation.PlaceRef) bool {
+        if (!self.use_loop_value_bindings or place.region != .storage or
+            place.fields.len != 0 or place.keys.len != 1) return false;
+        return place.keys[0] == .parameter;
     }
 
     fn canProjectStablePlace(self: *Collector, place: obligation.PlaceRef) bool {
@@ -5079,6 +5143,9 @@ const Collector = struct {
         const operand = mlir.oraOperationGetOperand(op, 0);
         if (try self.storageMapReadPlaceFromValue(operand)) |place| {
             if (placeIsDefinitelyDisjointFromAll(place, write_slots)) return try self.placeReadTermFromPlace(place);
+            if (self.canProjectLoopCurrentMappingPlace(place)) {
+                return try self.addTerm(.{ .old = try self.placeReadTermFromPlace(place) });
+            }
             return null;
         }
 
@@ -7343,6 +7410,30 @@ fn directRootLoopEffectSupported(
     if (std.mem.eql(u8, op_name, "ora.map_get") or std.mem.eql(u8, op_name, "ora.map_store")) return true;
     if (std.mem.eql(u8, op_name, "memref.load") or std.mem.eql(u8, op_name, "memref.store")) return true;
     return false;
+}
+
+fn preheaderNonPersistentEffect(name: []const u8) bool {
+    return std.mem.eql(u8, name, "ora.requires") or
+        std.mem.eql(u8, name, "ora.ensures") or
+        std.mem.eql(u8, name, "ora.invariant") or
+        std.mem.eql(u8, name, "ora.assert") or
+        std.mem.eql(u8, name, "ora.assume") or
+        std.mem.eql(u8, name, "ora.refinement_guard") or
+        std.mem.eql(u8, name, "ora.decreases") or std.mem.eql(u8, name, "ora.increases") or
+        std.mem.eql(u8, name, "ora.mload") or std.mem.eql(u8, name, "ora.mload8") or
+        std.mem.eql(u8, name, "ora.mstore") or std.mem.eql(u8, name, "ora.mstore8") or
+        std.mem.eql(u8, name, "ora.tload") or std.mem.eql(u8, name, "ora.tstore");
+}
+
+fn preheaderInventoryRejects(name: []const u8) bool {
+    return std.mem.eql(u8, name, "ora.sload") or std.mem.eql(u8, name, "ora.sstore") or
+        std.mem.eql(u8, name, "ora.map_get") or std.mem.eql(u8, name, "ora.map_store") or
+        std.mem.startsWith(u8, name, "ora.storage.") or
+        std.mem.eql(u8, name, "ora.external_call") or std.mem.eql(u8, name, "func.call") or
+        std.mem.eql(u8, name, "ora.move") or std.mem.eql(u8, name, "ora.create") or
+        std.mem.eql(u8, name, "ora.destroy") or std.mem.eql(u8, name, "ora.havoc") or
+        std.mem.eql(u8, name, "ora.switch") or std.mem.eql(u8, name, "ora.switch_expr") or
+        std.mem.eql(u8, name, "ora.try_stmt") or std.mem.eql(u8, name, "ora.try_catch");
 }
 
 fn isAggregateStorageCarrierLoad(op: mlir.MlirOperation) bool {

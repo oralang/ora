@@ -91,10 +91,14 @@ pub const ObligationSet = struct {
             if (!self.loopSummaryRequiresLeanCertificate(summary.id)) continue;
             for (summary.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
                 .storage_read => |read| if (read.location.projections.len != 0) {
-                    return .storage_projection_authority_unreviewed;
+                    if (!self.reviewedMappingProjection(summary, read.location)) {
+                        return .storage_projection_authority_unreviewed;
+                    }
                 },
                 .storage_write => |write| if (write.location.projections.len != 0) {
-                    return .storage_projection_authority_unreviewed;
+                    if (!self.reviewedMappingProjection(summary, write.location)) {
+                        return .storage_projection_authority_unreviewed;
+                    }
                 },
                 .summary_dependency => |dependency| {
                     if (self.loopSummaryClosureHasStorageEvents(
@@ -108,6 +112,38 @@ pub const ObligationSet = struct {
             };
         }
         return null;
+    }
+
+    fn reviewedMappingProjection(
+        self: ObligationSet,
+        summary: LoopSummaryRow,
+        location: LoopStorageLocationExpr,
+    ) bool {
+        if (!summary.preheader_projection_complete or summary.preheader_timeline.len != 0 or
+            location.projections.len != 1) return false;
+        const key = switch (location.projections[0]) {
+            .mapping_key => |key| key,
+            .field, .fixed_index => return false,
+        };
+        if (key.value.read_results.len != 0) return false;
+        const term_id = switch (key.value.formula) {
+            .term => |id| id,
+            .origin_value => return false,
+        };
+        if (term_id >= self.terms.len) return false;
+        const id = switch (self.terms[term_id]) {
+            .variable => |variable| switch (variable) {
+                .free => |free| free.id,
+                .bound => return false,
+            },
+            else => return false,
+        };
+        for (summary.context_variables) |variable| {
+            if (variable.id) |context_id| {
+                if (freeVarIdEql(context_id, id)) return true;
+            }
+        }
+        return false;
     }
 
     fn loopSummaryRequiresLeanCertificate(self: ObligationSet, summary_id: Id) bool {
@@ -984,6 +1020,10 @@ pub const LoopSummaryRow = struct {
     variables: []const LoopVariable = &.{},
     init_formulas: []const FormulaRef = &.{},
     invariant_formulas: []const FormulaRef = &.{},
+    /// Storage actions from function entry to this loop's preheader.  The
+    /// first storage-authority boundary accepts only a complete empty trace.
+    preheader_timeline: []const LoopTimelineEvent = &.{},
+    preheader_projection_complete: bool = false,
     /// Canonical semantic edges. These are the proof authority for paths,
     /// safety, state transition, and control outcome. Ordering is part of the
     /// certificate identity and must already be canonical.
@@ -1909,6 +1949,7 @@ pub const LoopUnsupportedReason = enum(u8) {
     loop_projection_control_flow_unsupported,
     loop_projection_effect_unsupported,
     loop_projection_path_limit_exceeded,
+    loop_preheader_storage_relation_unsupported,
     loop_summary_dependency_order_invalid,
     loop_summary_dependency_target_unsupported,
     loop_summary_dependency_value_out_of_scope,
@@ -3735,7 +3776,7 @@ test "obligation can point at MLIR origin without proof term" {
     try std.testing.expect(obligation.blocksArtifacts());
 }
 
-test "storage artifact authority is limited to direct roots without storage child frames" {
+test "storage artifact authority admits only reviewed context-key mappings without storage child frames" {
     const ty: TypeRef = .{ .spelling = "u256" };
     const direct_timeline = [_]LoopTimelineEvent{.{
         .id = 0,
@@ -3795,6 +3836,39 @@ test "storage artifact authority is limited to direct roots without storage chil
             .queries = &.{certificate_query},
             .loop_summaries = &.{projected_summary},
         }).storageArtifactAuthorityBlockReason().?,
+    );
+
+    const context_id: FreeVarId = .{ .file_id = 1, .pattern_id = 2 };
+    const context_terms = [_]Term{.{ .variable = .{ .free = .{
+        .id = context_id,
+        .name = "key",
+        .ty = ty,
+    } } }};
+    const context_variables = [_]LoopVariable{.{
+        .index = 0,
+        .id = context_id,
+        .name = "key",
+        .ty = ty,
+    }};
+    const mapping_projection = [_]LoopStorageProjection{.{ .mapping_key = .{
+        .value = .{ .formula = .{ .term = 0 } },
+        .ty = ty,
+    } }};
+    var mapping_timeline = direct_timeline;
+    mapping_timeline[0].payload.storage_write.location.projections = &mapping_projection;
+    var mapping_edges = direct_edges;
+    mapping_edges[0].timeline = &mapping_timeline;
+    var mapping_summary = direct_summary;
+    mapping_summary.context_variables = &context_variables;
+    mapping_summary.preheader_projection_complete = true;
+    mapping_summary.edges = &mapping_edges;
+    try std.testing.expectEqual(
+        @as(?ArtifactBlockReason, null),
+        (ObligationSet{
+            .queries = &.{certificate_query},
+            .terms = &context_terms,
+            .loop_summaries = &.{mapping_summary},
+        }).storageArtifactAuthorityBlockReason(),
     );
 
     const dependency_timeline = [_]LoopTimelineEvent{.{

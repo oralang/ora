@@ -9928,6 +9928,124 @@ test "external direct-root storage certificate binds canonical Z3 and Lean throu
     try expectNoFormalArtifactsInRepoRoot(allocator, stem);
 }
 
+test "external mapping preservation certificate binds canonical Z3 and Lean through the real CLI" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    const stem = "mapping_storage_preservation_certificate";
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output = try pathFromTmpAlloc(allocator, tmp, "accepted");
+    defer allocator.free(output);
+    const run = try runProcessWithLeanPath(allocator, &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=smt-report,bytecode",
+        "--out-dir",
+        output,
+        "--lean-proofs",
+        "tests/formal/mapping_storage_preservation_certificate.proofs.json",
+        "tests/formal/mapping_storage_preservation_certificate.ora",
+    });
+    defer allocator.free(run.stdout);
+    defer allocator.free(run.stderr);
+    try expectExited(run, 0);
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        run.stdout,
+        1,
+        "Lean loop proof gate accepted:\n  kernel-checked certificates: 1",
+    ));
+    try tmp.dir.access(std.testing.io, "accepted/mapping_storage_preservation_certificate.hex", .{});
+    const certificate = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "accepted/mapping_storage_preservation_certificate.lean.proof.json",
+        allocator,
+        .limited(1024 * 1024),
+    );
+    defer allocator.free(certificate);
+    try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"proof_count\": 2"));
+    try testing.expect(std.mem.containsAtLeast(u8, certificate, 2, "\"lean_status\": \"checked\""));
+    try expectNoFormalArtifactsInRepoRoot(allocator, stem);
+}
+
+test "mapping preservation authority rejects nonempty preheaders and missing key inequality" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cases = [_]struct {
+        source: []const u8,
+        stem: []const u8,
+        diagnostic: []const u8,
+    }{
+        .{
+            .source = "tests/formal/fail_mapping_storage_preheader_same_key.ora",
+            .stem = "fail_mapping_storage_preheader_same_key",
+            .diagnostic = "loop_preheader_storage_relation_unsupported",
+        },
+        .{
+            .source = "tests/formal/fail_mapping_storage_preheader_other_key.ora",
+            .stem = "fail_mapping_storage_preheader_other_key",
+            .diagnostic = "loop_preheader_storage_relation_unsupported",
+        },
+        .{
+            .source = "tests/formal/fail_mapping_storage_preservation_no_inequality.ora",
+            .stem = "fail_mapping_storage_preservation_no_inequality",
+            .diagnostic = "Automatic Lean loop proof unavailable",
+        },
+    };
+    for (cases, 0..) |case, index| {
+        const relative = try std.fmt.allocPrint(allocator, "blocked-{d}", .{index});
+        defer allocator.free(relative);
+        const output = try pathFromTmpAlloc(allocator, tmp, relative);
+        defer allocator.free(output);
+        const run = try runProcessWithLeanPath(allocator, &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=bytecode",
+            "--out-dir",
+            output,
+            "--lean-proofs",
+            case.source,
+        });
+        defer allocator.free(run.stdout);
+        defer allocator.free(run.stderr);
+        try expectExited(run, 1);
+        try testing.expect(std.mem.containsAtLeast(u8, run.stdout, 1, case.diagnostic));
+        const hex_path = try std.fmt.allocPrint(allocator, "{s}/{s}.hex", .{ relative, case.stem });
+        defer allocator.free(hex_path);
+        try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, hex_path, .{}));
+        try expectNoFormalArtifactsInRepoRoot(allocator, case.stem);
+    }
+}
+
+test "canonical mapping preservation step rejects absent key inequality" {
+    var result = try collectPackageObligations(
+        testing.allocator,
+        "tests/formal/fail_mapping_storage_preservation_no_inequality.ora",
+    );
+    defer result.deinit();
+    var context = try z3_verification.Z3Context.init(testing.allocator);
+    defer context.deinit();
+    var adapter = obligation_to_z3.Adapter.init(&context, testing.allocator, result.set);
+    var checked = false;
+    for (result.set.queries) |query| {
+        if (query.kind != .loop_invariant_step or query.loop_summary_id == null) continue;
+        const verdict = try adapter.checkLoopQueryForRow(query);
+        try testing.expectEqual(obligation_to_z3.CheckStatus.disproved, verdict.status);
+        checked = true;
+    }
+    try testing.expect(checked);
+}
+
 fn expectRepositoryStorageTacticDeterministic(
     source: []const u8,
     stem: []const u8,

@@ -37,6 +37,8 @@ pub fn writeJsonLines(writer: anytype, set: obligation.ObligationSet) !void {
         try writeLoopVariableListField(writer, "variables", item.variables);
         try writeFormulaListField(writer, "init_formulas", item.init_formulas);
         try writeFormulaListField(writer, "invariant_formulas", item.invariant_formulas);
+        try writeLoopTimelineFieldNamed(writer, "preheader_timeline", item.preheader_timeline);
+        try writeBoolField(writer, "preheader_projection_complete", item.preheader_projection_complete);
         try writeLoopEdgeListField(writer, item.edges);
         try writeStringField(writer, "projection_completeness", @tagName(item.projection_completeness));
         try writeFormulaListField(writer, "post_formulas", item.post_formulas);
@@ -918,7 +920,15 @@ fn writeLoopTimelineField(
     writer: anytype,
     events: []const obligation.LoopTimelineEvent,
 ) !void {
-    try writeFieldPrefix(writer, "timeline");
+    try writeLoopTimelineFieldNamed(writer, "timeline", events);
+}
+
+fn writeLoopTimelineFieldNamed(
+    writer: anytype,
+    comptime name: []const u8,
+    events: []const obligation.LoopTimelineEvent,
+) !void {
+    try writeFieldPrefix(writer, name);
     try writer.writeByte('[');
     for (events, 0..) |event, index| {
         if (index != 0) try writer.writeByte(',');

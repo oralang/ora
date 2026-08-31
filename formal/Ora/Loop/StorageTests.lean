@@ -254,6 +254,83 @@ example
   simp [execResolvedStorageActions?, execStorageActions?, execStorageAction?,
     resolvedStorageActionSemantics, constantStorage, hNe]
 
+def fixedTestLocation (root : String) (key : Value) : StorageLocation :=
+  { root, projections := [.fixedIndex key] }
+
+def mappingTestLocation (root : String) (key : Value) : StorageLocation :=
+  { root, projections := [.mappingKey key] }
+
+def resolvedTimelineSemantics :
+    TimelineSemantics Bool StorageLocation Value PEmpty := {
+  storage := resolvedStorageActionSemantics
+  evalFormula := fun formula _ => some formula
+  childRelation := fun child => nomatch child
+  childFrame := fun child => nomatch child
+}
+
+example
+    (initial : StorageActionState)
+    (result : TimelineResult)
+    (written observed : StorageLocation)
+    (value : Value)
+    (hNe : observed ≠ written)
+    (hExec : TimelineExec resolvedTimelineSemantics
+      [.storage (.write written value)] initial result) :
+    result.state.loop.storage observed = initial.loop.storage observed := by
+  apply TimelineExec.preserves_outside _ _ _ _ _ hExec
+  intro hWritten
+  cases hExec with
+  | cons hEvent hRest =>
+      cases hRest
+      cases hEvent with
+      | storage hAction =>
+          simp [resolvedTimelineSemantics, resolvedStorageActionSemantics,
+            execStorageAction?] at hAction
+          subst_vars
+          simp [TimelineResult.comp] at hWritten
+          exact hNe hWritten
+
+example (root : String) (i j : Value) (hNe : i ≠ j) :
+    mappingTestLocation root i ≠ mappingTestLocation root j := by
+  intro hEqual
+  exact hNe (StorageProjection.mappingKey.inj
+    (List.cons.inj (StorageLocation.mk.inj hEqual).2).1)
+
+example (root : String) (i j : Value) (hNe : i ≠ j) :
+    fixedTestLocation root i ≠ fixedTestLocation root j := by
+  intro hEqual
+  exact hNe (StorageProjection.fixedIndex.inj
+    (List.cons.inj (StorageLocation.mk.inj hEqual).2).1)
+
+example (left right : String) (key : Value) (hNe : left ≠ right) :
+    mappingTestLocation left key ≠ mappingTestLocation right key := by
+  intro hEqual
+  exact hNe (StorageLocation.mk.inj hEqual).1
+
+example (root : String) (key : Value) :
+    fixedTestLocation root key ≠ mappingTestLocation root key := by
+  intro hEqual
+  cases (List.cons.inj (StorageLocation.mk.inj hEqual).2).1
+
+example (root : String) (key initial written : Value)
+    (hNe : initial ≠ written) :
+    let location := mappingTestLocation root key
+    ((constantStorage initial).set location written) location ≠ initial := by
+  simp [Ne.symm hNe]
+
+example (root : String) (i j initial first later : Value)
+    (hKeys : i ≠ j) (hChanged : initial ≠ later) :
+    let written := mappingTestLocation root i
+    let observed := mappingTestLocation root j
+    let afterFirst := (constantStorage initial).set written first
+    afterFirst observed = initial ∧
+      (afterFirst.set observed later) observed ≠ initial := by
+  have hLocations : mappingTestLocation root j ≠ mappingTestLocation root i := by
+    intro hEqual
+    exact hKeys (StorageProjection.mappingKey.inj
+      (List.cons.inj (StorageLocation.mk.inj hEqual).2).1).symm
+  simp [constantStorage, hLocations, Ne.symm hChanged]
+
 example
     (entryValue currentValue writtenValue : Value)
     (locals : List Ora.Integer.Value)

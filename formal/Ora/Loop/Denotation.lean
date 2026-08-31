@@ -335,6 +335,8 @@ structure SummaryRow where
   variables : List VariableRow := []
   init : List FormulaRef := []
   invariants : List FormulaRef := []
+  preheaderTimeline : List TimelineEventRow := []
+  preheaderProjectionComplete : Bool := false
   edges : List EdgeRow := []
   projectionComplete : Bool := false
   post : List FormulaRef := []

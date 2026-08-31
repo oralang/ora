@@ -57,17 +57,23 @@ def directStorageTimeline? : List TimelineEventRow → Option (List DirectStorag
       pure (first ++ (← directStorageTimeline? rest))
 
 def directStorageResolvePlace
-    (_ : FreeVarId → Option Value) (place : PlaceRef) : Option StorageLocation :=
-  if place.region == .storage && place.fields.isEmpty && place.keys.isEmpty &&
-      !place.root.isEmpty then
-    some { root := place.root }
-  else
+    (lookup : FreeVarId → Option Value) (place : PlaceRef) : Option StorageLocation :=
+  if place.region != .storage || !place.fields.isEmpty || place.root.isEmpty then
     none
+  else
+    match place.keys with
+    | [] => some { root := place.root }
+    | [.parameter id] => do
+        pure { root := place.root, projections := [.mappingKey (← lookup id)] }
+    | _ => none
 
 def storageStateFromEnv (env : Env) (entry : Bool) : StorageState :=
   fun location =>
     let place : PlaceRef := { root := location.root, region := .storage }
     env.placeValue (if entry then .entry place else .stable place)
+
+def directStoragePreheaderState (env : Env) (row : SummaryRow) : StorageState :=
+  storageStateFromEnv env row.preheaderProjectionComplete
 
 def directStorageContext
     (manifest : Manifest) (base : Env) (variables : List VariableRow) :
@@ -541,6 +547,7 @@ theorem direct_storage_edges_denote
 
 def directStorageSummarySupported (manifest : Manifest) (row : SummaryRow) : Bool :=
   row.supported manifest &&
+    row.preheaderTimeline.isEmpty &&
     row.edges.any (fun edge => edge.timeline.any fun event =>
       match event.payload with
       | .storageRead _ | .storageWrite _ => true
@@ -556,7 +563,7 @@ def denoteDirectStorageLoopSummary?
     let edges ← denoteDirectStorageEdges? manifest base row.variables row.post row.edges
     let context := directStorageContext manifest base row.variables
     let entry := storageStateFromEnv base true
-    let current := storageStateFromEnv base false
+    let current := directStoragePreheaderState base row
     pure {
       initial := fun state =>
         state.storage = current ∧
@@ -580,7 +587,7 @@ theorem direct_storage_summary_denotes
     row.edges hEdges with ⟨edges, hDenotes⟩
   let context := directStorageContext manifest base row.variables
   let entry := storageStateFromEnv base true
-  let current := storageStateFromEnv base false
+  let current := directStoragePreheaderState base row
   refine ⟨{
     initial := fun state => state.storage = current ∧
       directInitialValues? context entry current row.init = some state.locals
@@ -624,7 +631,7 @@ theorem direct_initial_of_control_denotation
     (hInitial : valuesInitializeState manifest base row.variables row.init locals) :
     summary.initial {
       locals := locals
-      storage := storageStateFromEnv base false
+      storage := directStoragePreheaderState base row
     } := by
   unfold denoteDirectStorageLoopSummary? at hSummary
   have hDirect : directStorageSummarySupported manifest row = true := by
@@ -689,7 +696,7 @@ theorem direct_storage_summary_refinement
           · intro state hExact
             unfold valuesInitializeState
             rw [← hInitial (storageStateFromEnv base true)
-              (storageStateFromEnv base false)]
+              (directStoragePreheaderState base row)]
             exact hExact.2
           · intro state
             exact and_congr Iff.rfl

@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "proofs": [
+    {
+      "query_id": 9,
+      "obligation_ids": [],
+      "assumption_ids": [1],
+      "module_name": "Ora.UserProof.MappingStoragePreservation",
+      "theorem_name": "Ora.UserProof.MappingStoragePreservation.discharge_q9",
+      "path": "tests/formal/mapping_storage_preservation_certificate.lean",
+      "content_sha256": null,
+      "inline_source": true
+    },
+    {
+      "query_id": 11,
+      "obligation_ids": [10],
+      "assumption_ids": [1],
+      "module_name": "Ora.UserProof.MappingStoragePreservation",
+      "theorem_name": "Ora.UserProof.MappingStoragePreservation.discharge_q11",
+      "path": "tests/formal/mapping_storage_preservation_certificate.lean",
+      "content_sha256": null,
+      "inline_source": true
+    }
+  ]
+}

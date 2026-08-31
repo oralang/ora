@@ -262,10 +262,15 @@ pub const Adapter = struct {
         switch (query.kind) {
             .loop_base => {
                 if (query.loop_edge_id != null) return error.InvalidLoopQuery;
+                const has_direct_storage = loopSummaryHasDirectStorageEvents(summary);
+                if (has_direct_storage and summary.preheader_timeline.len != 0) return error.InvalidLoopQuery;
                 const goal = try self.encodeFormulaConjunction(constraints, summary.invariant_formulas);
                 const replacements = try self.encodeFormulaValues(constraints, summary.init_formulas);
                 defer self.allocator.free(replacements);
                 const initialized_goal = try self.substituteLoopVariables(goal, summary.variables, replacements);
+                if (has_direct_storage and summary.preheader_projection_complete) {
+                    try self.appendEmptyPreheaderStoreEqualities(constraints);
+                }
                 try self.appendNegatedGoal(constraints, initialized_goal);
             },
             .loop_body_safety, .loop_invariant_step, .loop_invariant_post => {
@@ -410,6 +415,18 @@ pub const Adapter = struct {
             value,
         );
         try self.context.checkNoError();
+    }
+
+    fn appendEmptyPreheaderStoreEqualities(
+        self: *Adapter,
+        constraints: *std.ArrayList(z3.Z3_ast),
+    ) EncodeError!void {
+        const state = self.loop_state orelse return error.InvalidLoopQuery;
+        for (state.stores.items) |store| {
+            const equal = z3.Z3_mk_eq(self.context.ctx, store.current, store.entry);
+            try self.context.checkNoError();
+            try constraints.append(self.allocator, equal);
+        }
     }
 
     fn appendLoopSummaryDependencyPremise(
@@ -815,11 +832,10 @@ pub const Adapter = struct {
     }
 
     fn encodePlaceRead(self: *Adapter, place: obligation.PlaceRef) EncodeError!z3.Z3_ast {
-        try requireSupportedScalarPlace(place);
         if (self.loop_state != null) {
-            const ty = try self.loopRootTypeRef(place.root);
-            return self.selectLoopLocation(.{ .root = place.root, .value_ty = ty }, try typeInfo(ty), false);
+            return self.selectLoopPlaceRead(place, false);
         }
+        try requireSupportedScalarPlace(place);
         const state = try self.canonicalQueryState();
         const root_state = try state.getOrPutPlaceRoot(self.allocator, place.root);
         const current = root_state.current orelse blk: {
@@ -837,12 +853,10 @@ pub const Adapter = struct {
             .place_read => |place| place,
             else => return error.UnsupportedOldTerm,
         };
-        requireSupportedScalarPlace(place) catch return error.UnsupportedOldTerm;
-
         if (self.loop_state != null) {
-            const ty = try self.loopRootTypeRef(place.root);
-            return self.selectLoopLocation(.{ .root = place.root, .value_ty = ty }, try typeInfo(ty), true);
+            return self.selectLoopPlaceRead(place, true) catch return error.UnsupportedOldTerm;
         }
+        requireSupportedScalarPlace(place) catch return error.UnsupportedOldTerm;
 
         const state = try self.canonicalQueryState();
         const root_state = try state.getOrPutPlaceRoot(self.allocator, place.root);
@@ -867,6 +881,42 @@ pub const Adapter = struct {
             else => {},
         };
         return error.LoopStorageRootUntouched;
+    }
+
+    fn selectLoopPlaceRead(
+        self: *Adapter,
+        place: obligation.PlaceRef,
+        entry: bool,
+    ) EncodeError!z3.Z3_ast {
+        if (place.region != .storage or place.fields.len != 0) return error.UnsupportedPlaceReadTerm;
+        const value_ty = try self.loopRootTypeRef(place.root);
+        const value_info = try typeInfo(value_ty);
+        if (place.keys.len == 0) {
+            return self.selectLoopLocation(.{ .root = place.root, .value_ty = value_ty }, value_info, entry);
+        }
+        if (place.keys.len != 1 or place.keys[0] != .parameter) return error.UnsupportedPlaceReadTerm;
+        const id = place.keys[0].parameter;
+        const state = self.loop_state orelse return error.InvalidLoopQuery;
+        const variable = for (state.summary.context_variables) |candidate| {
+            const candidate_id = candidate.id orelse continue;
+            if (obligation.freeVarIdEql(candidate_id, id)) break candidate;
+        } else return error.UnsupportedPlaceReadTerm;
+        const key_info = try typeInfo(variable.ty);
+        const key = try self.encodeFreeVariableIdentity(id, variable.ty);
+        const resolved = try self.loopProjectedStoreAndKeyFromAst(
+            place.root,
+            "mapping",
+            key,
+            key_info,
+            value_info,
+        );
+        const value = z3.Z3_mk_select(
+            self.context.ctx,
+            if (entry) resolved.store.entry else resolved.store.current,
+            resolved.key,
+        );
+        try self.context.checkNoError();
+        return value;
     }
 
     fn loopStore(
@@ -1010,6 +1060,17 @@ pub const Adapter = struct {
         };
         if (!typeInfoEql(key_info, formula_info)) return error.TypeMismatch;
         const key = try self.encodeValueFormula(expression.value.formula);
+        return self.loopProjectedStoreAndKeyFromAst(root, tag, key, key_info, value_info);
+    }
+
+    fn loopProjectedStoreAndKeyFromAst(
+        self: *Adapter,
+        root: []const u8,
+        tag: []const u8,
+        key: z3.Z3_ast,
+        key_info: TypeInfo,
+        value_info: TypeInfo,
+    ) EncodeError!LoopLocationStoreAndKey {
         const key_shape = try std.fmt.allocPrint(self.allocator, "{s}{d}{s}", .{
             if (key_info.kind == .bool) "bool" else "bv",
             key_info.width,
@@ -1631,6 +1692,14 @@ pub const Adapter = struct {
         if (z3.Z3_get_sort_kind(self.context.ctx, sort) != z3.Z3_BV_SORT) return error.ExpectedBitVector;
     }
 };
+
+fn loopSummaryHasDirectStorageEvents(summary: obligation.LoopSummaryRow) bool {
+    for (summary.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
+        .storage_read, .storage_write => return true,
+        .path_assumption, .safety_checkpoint, .summary_dependency => {},
+    };
+    return false;
+}
 
 fn findLoopEdge(
     summary: obligation.LoopSummaryRow,

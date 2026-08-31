@@ -282,6 +282,10 @@ fn writeLoopSummaryRow(writer: anytype, row: obligation.LoopSummaryRow) !void {
     try writeFormulaList(writer, row.init_formulas);
     try writer.writeAll(", invariants := ");
     try writeFormulaList(writer, row.invariant_formulas);
+    try writer.writeAll(", preheaderTimeline := ");
+    try writeLoopTimeline(writer, row.preheader_timeline);
+    try writer.writeAll(", preheaderProjectionComplete := ");
+    try writer.writeAll(if (row.preheader_projection_complete) "true" else "false");
     try writer.writeAll(", edges := ");
     try writeLoopEdges(writer, row.edges);
     try writer.writeAll(", projectionComplete := ");

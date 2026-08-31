@@ -1321,7 +1321,7 @@ macro tk:"ora_loop_auto_direct_storage" : tactic => do
         ⟨env, locals, hAssumptions, hContext, hInitial⟩
       refine ⟨env, {
         locals := locals
-        storage := Ora.Loop.storageStateFromEnv env false
+        storage := Ora.Loop.directStoragePreheaderState env $autoSummary
       }, hAssumptions, hContext, ?_⟩
       have hEdgeCompatible : ∀ edge, edge ∈ ($autoSummary).edges →
           Ora.Loop.DirectStorageEdgeCompatible $emittedManifest env
