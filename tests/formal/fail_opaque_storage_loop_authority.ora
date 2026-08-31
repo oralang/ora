@@ -1,0 +1,14 @@
+contract OpaqueStorageLoopAuthority {
+    pub fn run(owner: address)
+        modifies @storageRange(@storageDerive("ora.test.loop.opaque", owner), 1)
+    {
+        let slot: StorageSlot = @storageDerive("ora.test.loop.opaque", owner);
+        var i: u256 = 0;
+        while (i < 1)
+            invariant i <= 1
+        {
+            @storageWordStore(slot, 0, i);
+            i = i +% 1;
+        }
+    }
+}

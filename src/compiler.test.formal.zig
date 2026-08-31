@@ -10094,7 +10094,7 @@ fn expectRepositoryStorageTacticDeterministic(
         ));
     }
 
-    inline for (.{ ".hex", ".lean.proof.json" }) |suffix| {
+    inline for (.{ ".hex", ".lean.proof.json", ".smt.report.json", ".smt.report.md" }) |suffix| {
         const first_path = try std.fmt.allocPrint(
             allocator,
             "first/{s}{s}",
@@ -10205,6 +10205,14 @@ test "repository tactic certifies an ordered storage read-write timeline" {
     );
 }
 
+test "repository tactic certifies storage loop closure corpus through the real CLI" {
+    try expectRepositoryStorageTacticDeterministic(
+        "tests/formal/storage_loop_closure_auto.ora",
+        "storage_loop_closure_auto",
+        4,
+    );
+}
+
 test "repository tactic certifies checked arithmetic in a storage timeline" {
     try expectRepositoryStorageTacticDeterministic(
         "tests/formal/direct_storage_loop_checked_auto.ora",
@@ -10213,12 +10221,65 @@ test "repository tactic certifies checked arithmetic in a storage timeline" {
     );
 }
 
-test "repository tactic checks fixed-array storage but artifact authority remains unreviewed" {
+test "repository tactic checks fixed-array aggregate storage but artifact authority remains unreviewed" {
     try expectRepositoryStorageTacticCheckedButAuthorityBlocked(
         "tests/formal/fixed_storage_loop_auto.ora",
         "fixed_storage_loop_auto",
         .storage_projection_authority_unreviewed,
     );
+}
+
+test "transient and opaque loop storage effects fail closed with named exclusions" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cases = [_]struct { source: []const u8, stem: []const u8 }{
+        .{
+            .source = "tests/formal/fail_transient_storage_loop_authority.ora",
+            .stem = "fail_transient_storage_loop_authority",
+        },
+        .{
+            .source = "tests/formal/fail_opaque_storage_loop_authority.ora",
+            .stem = "fail_opaque_storage_loop_authority",
+        },
+    };
+    for (cases, 0..) |case, index| {
+        const relative = try std.fmt.allocPrint(allocator, "blocked-{d}", .{index});
+        defer allocator.free(relative);
+        const output = try pathFromTmpAlloc(allocator, tmp, relative);
+        defer allocator.free(output);
+        const run = try runProcessWithLeanPath(allocator, &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=bytecode",
+            "--out-dir",
+            output,
+            "--lean-proofs",
+            case.source,
+        });
+        defer allocator.free(run.stdout);
+        defer allocator.free(run.stderr);
+        try expectExited(run, 1);
+        try testing.expect(std.mem.containsAtLeast(
+            u8,
+            run.stdout,
+            1,
+            "excluded_by=loop_has_storage_write,loop_projection_effect_unsupported",
+        ));
+        const hex_path = try std.fmt.allocPrint(
+            allocator,
+            "{s}/{s}.hex",
+            .{ relative, case.stem },
+        );
+        defer allocator.free(hex_path);
+        try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, hex_path, .{}));
+        try expectNoFormalArtifactsInRepoRoot(allocator, case.stem);
+    }
 }
 
 test "repository tactic checks runtime-key mapping storage but artifact authority remains unreviewed" {

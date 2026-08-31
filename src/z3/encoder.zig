@@ -286,6 +286,12 @@ pub const Encoder = struct {
     value_map_old: std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
     /// Explicit MLIR value bindings (used for call summary argument substitution).
     value_bindings: std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
+    /// Deterministic display ordinals for otherwise unnamed MLIR values.
+    value_symbol_ids: std.AutoHashMap(u64, u64),
+    /// Deterministic display ordinals for operations that own symbolic state.
+    operation_symbol_ids: std.AutoHashMap(u64, u64),
+    next_value_symbol_id: u64,
+    next_operation_symbol_id: u64,
     /// Map from global storage name to Z3 AST (for consistent storage symbols)
     global_map: std.StringHashMap(z3.Z3_ast),
     /// Map from global storage name to Z3 AST (for old() storage symbols)
@@ -372,6 +378,10 @@ pub const Encoder = struct {
             .value_map = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .value_map_old = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .value_bindings = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
+            .value_symbol_ids = std.AutoHashMap(u64, u64).init(allocator),
+            .operation_symbol_ids = std.AutoHashMap(u64, u64).init(allocator),
+            .next_value_symbol_id = 0,
+            .next_operation_symbol_id = 0,
             .global_map = std.StringHashMap(z3.Z3_ast).init(allocator),
             .global_old_map = std.StringHashMap(z3.Z3_ast).init(allocator),
             .global_entry_map = std.StringHashMap(z3.Z3_ast).init(allocator),
@@ -2321,6 +2331,10 @@ pub const Encoder = struct {
         self.value_map.clearRetainingCapacity();
         self.value_map_old.clearRetainingCapacity();
         self.value_bindings.clearRetainingCapacity();
+        self.value_symbol_ids.clearRetainingCapacity();
+        self.operation_symbol_ids.clearRetainingCapacity();
+        self.next_value_symbol_id = 0;
+        self.next_operation_symbol_id = 0;
         self.materialized_calls.clearRetainingCapacity();
         for (self.inline_function_stack.items) |fn_name| {
             self.allocator.free(fn_name);
@@ -2440,6 +2454,17 @@ pub const Encoder = struct {
         self.value_map.deinit();
         self.value_map_old.deinit();
         self.value_bindings.deinit();
+        self.value_symbol_ids.deinit();
+        self.operation_symbol_ids.deinit();
+    }
+
+    pub fn stableOperationSymbolId(self: *Encoder, op: mlir.MlirOperation) EncodeError!u64 {
+        const entry = try self.operation_symbol_ids.getOrPut(@intFromPtr(op.ptr));
+        if (!entry.found_existing) {
+            entry.value_ptr.* = self.next_operation_symbol_id;
+            self.next_operation_symbol_id += 1;
+        }
+        return entry.value_ptr.*;
     }
 
     pub fn registerFunctionOperation(self: *Encoder, func_op: mlir.MlirOperation) !void {
@@ -5441,7 +5466,7 @@ pub const Encoder = struct {
     /// Try to resolve a human-readable name for an MLIR value.
     /// For function parameters (block arguments of func ops), extracts the
     /// parameter name from the enclosing function's printed form.
-    /// Falls back to "v_{pointer_id}".
+    /// Falls back to a deterministic encounter ordinal.
     fn resolveValueName(self: *Encoder, value: mlir.MlirValue, value_id: u64) ![]u8 {
         if (mlir.mlirValueIsABlockArgument(value)) {
             const owner_block = mlir.mlirBlockArgumentGetOwner(value);
@@ -5464,7 +5489,12 @@ pub const Encoder = struct {
                 }
             }
         }
-        return std.fmt.allocPrint(self.allocator, "v_{d}", .{value_id});
+        const entry = try self.value_symbol_ids.getOrPut(value_id);
+        if (!entry.found_existing) {
+            entry.value_ptr.* = self.next_value_symbol_id;
+            self.next_value_symbol_id += 1;
+        }
+        return std.fmt.allocPrint(self.allocator, "v_{d}", .{entry.value_ptr.*});
     }
 
     /// Extract the parameter name at a given index from a func op's sym_name and

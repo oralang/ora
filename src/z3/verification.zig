@@ -46,12 +46,6 @@ fn nowTimestamp() std.Io.Clock.Timestamp {
     return std.Io.Clock.Timestamp.now(std.Io.Threaded.global_single_threaded.io(), .awake);
 }
 
-fn unixTimestampSeconds() i64 {
-    const timestamp = std.Io.Clock.Timestamp.now(std.Io.Threaded.global_single_threaded.io(), .real);
-    const seconds = @divFloor(timestamp.raw.nanoseconds, std.time.ns_per_s);
-    return std.math.cast(i64, seconds) orelse if (seconds < 0) std.math.minInt(i64) else std.math.maxInt(i64);
-}
-
 fn elapsedNs(start: std.Io.Clock.Timestamp) u64 {
     const end = nowTimestamp();
     const elapsed = std.Io.Clock.Timestamp.durationTo(start, end);
@@ -973,6 +967,7 @@ pub const VerificationPass = struct {
     }
 
     fn seedFreshLoopGlobalState(self: *VerificationPass, loop_op: mlir.MlirOperation, label: []const u8) !void {
+        const loop_symbol_id = try self.encoder.stableOperationSymbolId(loop_op);
         var entry_it = self.encoder.global_entry_map.iterator();
         while (entry_it.next()) |entry| {
             const name = entry.key_ptr.*;
@@ -980,8 +975,8 @@ pub const VerificationPass = struct {
             const sort = z3.Z3_get_sort(self.context.ctx, entry.value_ptr.*);
             const symbol_name = try std.fmt.allocPrint(
                 self.allocator,
-                "loop_{x}_{s}_{s}",
-                .{ @intFromPtr(loop_op.ptr), label, name },
+                "loop_{d}_{s}_{s}",
+                .{ loop_symbol_id, label, name },
             );
             defer self.allocator.free(symbol_name);
             const ast = try self.encoder.mkVariable(symbol_name, sort);
@@ -4323,10 +4318,9 @@ pub const VerificationPass = struct {
             summary.violatable_guards = @intCast(violatable_guard_ids.count());
         }
 
-        const generated_at_unix = unixTimestampSeconds();
         const markdown = try self.renderSmtReportMarkdown(
             source_file,
-            generated_at_unix,
+            0,
             queries.items,
             report_runs,
             summary,
@@ -4337,7 +4331,7 @@ pub const VerificationPass = struct {
 
         const json = try self.renderSmtReportJson(
             source_file,
-            generated_at_unix,
+            0,
             queries.items,
             report_runs,
             summary,
@@ -4362,7 +4356,6 @@ pub const VerificationPass = struct {
         source_file: []const u8,
         verification_result: *const errors.VerificationResult,
     ) !SmtReportArtifacts {
-        const generated_at_unix = unixTimestampSeconds();
         const summary = ReportSummary{
             .verification_success = false,
             .verification_errors = @intCast(verification_result.errors.items.len),
@@ -4378,7 +4371,7 @@ pub const VerificationPass = struct {
 
         const markdown = try self.renderSmtReportMarkdown(
             source_file,
-            generated_at_unix,
+            0,
             &.{},
             &.{},
             summary,
@@ -4389,7 +4382,7 @@ pub const VerificationPass = struct {
 
         const json = try self.renderSmtReportJson(
             source_file,
-            generated_at_unix,
+            0,
             &.{},
             &.{},
             summary,
@@ -4408,7 +4401,6 @@ pub const VerificationPass = struct {
         source_file: []const u8,
         verification_result: ?*const errors.VerificationResult,
     ) !SmtReportArtifacts {
-        const generated_at_unix = unixTimestampSeconds();
         const summary = ReportSummary{
             .verification_success = false,
             .verification_errors = if (verification_result) |vr| @intCast(vr.errors.items.len) else 0,
@@ -4425,7 +4417,7 @@ pub const VerificationPass = struct {
 
         const markdown = try self.renderSmtReportMarkdown(
             source_file,
-            generated_at_unix,
+            0,
             &.{},
             &.{},
             summary,
@@ -4436,7 +4428,7 @@ pub const VerificationPass = struct {
 
         const json = try self.renderSmtReportJson(
             source_file,
-            generated_at_unix,
+            0,
             &.{},
             &.{},
             summary,
@@ -4453,7 +4445,7 @@ pub const VerificationPass = struct {
     fn renderSmtReportMarkdown(
         self: *VerificationPass,
         source_file: []const u8,
-        generated_at_unix: i64,
+        _: i64,
         queries: []const PreparedQuery,
         runs: []const ReportQueryRun,
         summary: ReportSummary,
@@ -4468,7 +4460,6 @@ pub const VerificationPass = struct {
 
         try writer.writeAll("## 1. Run Metadata\n");
         try writer.print("- Source file: `{s}`\n", .{source_file});
-        try writer.print("- Generated at (unix): `{d}`\n", .{generated_at_unix});
         try writer.print("- Verification mode: `{s}`\n", .{verifyModeLabel(self.verify_mode)});
         try writer.print("- verify_calls: `{any}`\n", .{self.verify_calls});
         try writer.print("- verify_state: `{any}`\n", .{self.verify_state});
@@ -4647,7 +4638,6 @@ pub const VerificationPass = struct {
             try writer.print("- Status: `{s}`\n", .{queryStatusLabel(run.status)});
             try writer.print("- Fragment: `{s}`\n", .{queryFragmentLabel(query.fragment)});
             try writer.print("- Solver logic: `{s}`\n", .{querySolverLogicLabel(query.solver_logic)});
-            try writer.print("- Elapsed ms: `{d}`\n", .{run.elapsed_ms});
             try writer.print("- Constraint count: `{d}`\n", .{query.constraint_count});
             try writer.print("- SMT bytes: `{d}`\n", .{query.smtlib_bytes});
             try writer.print("- SMT hash: `0x{x}`\n", .{query.smtlib_hash});
@@ -4695,7 +4685,7 @@ pub const VerificationPass = struct {
     fn renderSmtReportJson(
         self: *VerificationPass,
         source_file: []const u8,
-        generated_at_unix: i64,
+        _: i64,
         queries: []const PreparedQuery,
         runs: []const ReportQueryRun,
         summary: ReportSummary,
@@ -4711,7 +4701,6 @@ pub const VerificationPass = struct {
         try writer.writeAll("\"source_file\":");
         try writeJsonStringEscaped(writer, source_file);
         try writer.writeByte(',');
-        try writer.print("\"generated_at_unix\":{d},", .{generated_at_unix});
 
         try writer.writeAll("\"settings\":{");
         try writer.writeAll("\"verify_mode\":");
@@ -4997,7 +4986,6 @@ pub const VerificationPass = struct {
             try writeJsonStringEscaped(writer, queryFragmentLabel(query.fragment));
             try writer.writeAll(",\"solver_logic\":");
             try writeJsonStringEscaped(writer, querySolverLogicLabel(query.solver_logic));
-            try writer.print(",\"elapsed_ms\":{d}", .{run.elapsed_ms});
             try writer.print(",\"constraint_count\":{d}", .{query.constraint_count});
             try writer.print(",\"smtlib_bytes\":{d}", .{query.smtlib_bytes});
             try writer.writeAll(",\"smtlib_hash\":");
