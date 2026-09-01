@@ -128,12 +128,9 @@ def StorageFormulaContext.evalPreheaderValue?
     (context : StorageFormulaContext)
     (entryStorage currentStorage : StorageState)
     (formula : FormulaRef) : Option Value := do
-  let state : StorageActionState := {
-    loop := { locals := [], storage := currentStorage }
-    entryStorage := entryStorage
-  }
-  if !context.formulaStorageReady context.entryEnv formula then none else pure ()
-  formulaValue? context.manifest (context.withStoreViews context.entryEnv state) formula
+  let env := context.preheaderEnv entryStorage currentStorage
+  if !context.formulaStorageReady env formula then none else pure ()
+  formulaValue? context.manifest env formula
 
 def StorageFormulaContext.evalFormula?
     (context : StorageFormulaContext)

@@ -84,6 +84,23 @@ def directStorageContext
   resolvePlace := directStorageResolvePlace
 }
 
+def restrictStoragePreheaderEnv (base : Env) (variables : List VariableRow) : Env :=
+  { base with freeBindings := base.freeBindings.filter fun binding =>
+      variables.any fun declared => declared.id == binding.1 }
+
+/-- Preheader evaluation reuses the ordinary storage semantics with an empty
+local binder.  Its free environment contains only declared function-context
+variables; executed reads are added by `stateEnv?` in timeline order. -/
+def directStoragePreheaderContext
+    (manifest : Manifest)
+    (base : Env)
+    (variables : List VariableRow) : StorageFormulaContext := {
+  manifest
+  entryEnv := restrictStoragePreheaderEnv base variables
+  bindLocals := fun env locals => if locals.isEmpty then some env else none
+  resolvePlace := directStorageResolvePlace
+}
+
 def directInitialValues?
     (context : StorageFormulaContext)
     (entry current : StorageState) : List FormulaRef → Option (List Ora.Integer.Value)
@@ -92,6 +109,33 @@ def directInitialValues?
       let value ← context.evalPreheaderValue? entry current formula
       let integer ← match value with | .integer value => some value | .bool _ => none
       pure (integer :: (← directInitialValues? context entry current rest))
+
+def directInitialValuesAfterPreheader?
+    (context : StorageFormulaContext)
+    (state : StorageActionState) : List FormulaRef → Option (List Ora.Integer.Value)
+  | [] => some []
+  | formula :: rest => do
+      let value ← context.evalValue? formula state
+      let integer ← match value with | .integer value => some value | .bool _ => none
+      pure (integer :: (← directInitialValuesAfterPreheader? context state rest))
+
+theorem direct_initial_values_after_empty_preheader
+    (context : StorageFormulaContext)
+    (entry current : StorageState)
+    (formulas : List FormulaRef)
+    (hEmpty : context.bindLocals context.entryEnv [] = some context.entryEnv) :
+    directInitialValuesAfterPreheader? context {
+      loop := { locals := [], storage := current }
+      entryStorage := entry
+    } formulas = directInitialValues? context entry current formulas := by
+  induction formulas with
+  | nil => rfl
+  | cons formula rest ih =>
+      simp [directInitialValuesAfterPreheader?, directInitialValues?,
+        StorageFormulaContext.evalValue?, StorageFormulaContext.stateEnv?,
+        StorageFormulaContext.evalPreheaderValue?,
+        StorageFormulaContext.preheaderEnv, bindStorageReads,
+        hEmpty, ih]
 
 def directFormulasHold
     (context : StorageFormulaContext)
@@ -110,6 +154,105 @@ def directStorageSemantics (context : StorageFormulaContext) :
   childRelation := fun child => nomatch child
   childFrame := fun child => nomatch child
 }
+
+abbrev directStoragePreheaderSemantics := directStorageSemantics
+
+def directStoragePreheaderInitialState (base : Env) : StorageActionState :=
+  let entry := storageStateFromEnv base true
+  {
+    loop := { locals := [], storage := entry }
+    entryStorage := entry
+  }
+
+/-- Exact preheader execution is part of the loop's initial predicate.  The
+`TimelineSafe` conjunct prevents an always-failing prefix from manufacturing a
+vacuous loop certificate. -/
+def directStoragePreheaderProducesInitial
+    (context : StorageFormulaContext)
+    (events : List DirectStorageEvent)
+    (initial : StorageActionState)
+    (formulas : List FormulaRef)
+    (following : LoopState) : Prop :=
+  ∃ result,
+    TimelineExec (directStoragePreheaderSemantics context) events initial result ∧
+      TimelineSafe (directStoragePreheaderSemantics context) events initial ∧
+      directInitialValuesAfterPreheader? context result.state formulas =
+        some following.locals ∧
+      following.storage = result.state.loop.storage
+
+/-- Lean-first denotation seam only.  The live storage-summary denotation keeps
+its existing empty-prefix support predicate until the later authority task. -/
+def denoteDirectStoragePreheaderInitial?
+    (manifest : Manifest)
+    (base : Env)
+    (row : SummaryRow) : Option (LoopState → Prop) := do
+  if !row.preheaderProjectionComplete then none else pure ()
+  let events ← directStorageTimeline? row.preheaderTimeline
+  let context := directStoragePreheaderContext manifest base row.contextVariables
+  let initial := directStoragePreheaderInitialState base
+  pure (directStoragePreheaderProducesInitial context events initial row.init)
+
+theorem direct_storage_preheader_empty_iff
+    (context : StorageFormulaContext)
+    (initial : StorageActionState)
+    (formulas : List FormulaRef)
+    (following : LoopState) :
+    directStoragePreheaderProducesInitial context [] initial formulas following ↔
+      directInitialValuesAfterPreheader? context initial formulas =
+          some following.locals ∧
+        following.storage = initial.loop.storage := by
+  constructor
+  · rintro ⟨result, hExec, _, hValues, hStorage⟩
+    cases hExec
+    exact ⟨hValues, hStorage⟩
+  · rintro ⟨hValues, hStorage⟩
+    refine ⟨{ state := initial }, .nil initial, ?_, hValues, hStorage⟩
+    simp [TimelineSafe]
+
+theorem direct_storage_preheader_empty_matches_legacy
+    (context : StorageFormulaContext)
+    (entry current : StorageState)
+    (formulas : List FormulaRef)
+    (following : LoopState)
+    (hEmpty : context.bindLocals context.entryEnv [] = some context.entryEnv) :
+    directStoragePreheaderProducesInitial context [] {
+      loop := { locals := [], storage := current }
+      entryStorage := entry
+    } formulas following ↔
+      directInitialValues? context entry current formulas = some following.locals ∧
+        following.storage = current := by
+  rw [direct_storage_preheader_empty_iff,
+    direct_initial_values_after_empty_preheader context entry current formulas hEmpty]
+
+theorem direct_storage_preheader_initial_has_safe_execution
+    (context : StorageFormulaContext)
+    (events : List DirectStorageEvent)
+    (initial : StorageActionState)
+    (formulas : List FormulaRef)
+    (following : LoopState)
+    (hInitial : directStoragePreheaderProducesInitial
+      context events initial formulas following) :
+    ∃ result,
+      TimelineExec (directStoragePreheaderSemantics context) events initial result ∧
+        TimelineSafe (directStoragePreheaderSemantics context) events initial := by
+  rcases hInitial with ⟨result, hExec, hSafe, _, _⟩
+  exact ⟨result, hExec, hSafe⟩
+
+theorem direct_storage_preheader_initial_preserves_entry
+    (context : StorageFormulaContext)
+    (events : List DirectStorageEvent)
+    (initial : StorageActionState)
+    (formulas : List FormulaRef)
+    (following : LoopState)
+    (hInitial : directStoragePreheaderProducesInitial
+      context events initial formulas following) :
+    ∃ result,
+      TimelineExec (directStoragePreheaderSemantics context) events initial result ∧
+        result.state.entryStorage = initial.entryStorage ∧
+        following.storage = result.state.loop.storage := by
+  rcases hInitial with ⟨result, hExec, _, _, hStorage⟩
+  exact ⟨result, hExec,
+    TimelineExec.preserves_entryStorage _ _ _ _ hExec, hStorage⟩
 
 def directStorageFinalLocals?
     (context : StorageFormulaContext)

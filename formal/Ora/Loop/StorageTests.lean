@@ -1,6 +1,6 @@
 /- Executable examples for the Lean-first storage timeline model. -/
 
-import Ora.Loop.StorageDenotation
+import Ora.Loop.StorageCertificate
 
 namespace Ora.Loop
 
@@ -106,6 +106,181 @@ def readResultManifest : Manifest := {
     ty := some (.compilerTypeId 6)
   })]
 }
+
+example :
+    let state : StorageActionState := {
+      loop := { locals := [], storage := constantStorage (testU256 0) }
+      entryStorage := constantStorage (testU256 0)
+      reads := [{ id := testReadId 9, value := testU256 7 }]
+    }
+    directInitialValuesAfterPreheader?
+      (noLocalFormulaContext readResultManifest) state [.term 0] =
+        some [Ora.Integer.Value.ofNat (.unsigned .w256) 7] := by
+  decide
+
+def preheaderTestManifest : Manifest := {
+  terms := [
+    .intLit { value := "7", ty := some (.compilerTypeId 6) },
+    .variable (.free {
+      id := testReadId 9
+      name := "preheader_read"
+      ty := some (.compilerTypeId 6)
+    }),
+    .boolLit true,
+    .boolLit false
+  ]
+}
+
+def preheaderContextId : FreeVarId := { file_id := 0, pattern_id := 20 }
+def preheaderExcludedLoopId : FreeVarId := { file_id := 0, pattern_id := 21 }
+
+example :
+    let base := (Env.empty.setFree preheaderExcludedLoopId (testU256 9)).setFree
+      preheaderContextId (testU256 8)
+    let restricted := restrictStoragePreheaderEnv base [{
+      index := 0
+      id := preheaderContextId
+      name := "limit"
+      ty := .compilerTypeId 6
+    }]
+    restricted.lookupFree preheaderContextId = some (testU256 8) ∧
+      restricted.lookupFree preheaderExcludedLoopId = none := by
+  decide
+
+def preheaderTestLocationRow : StorageLocationExprRow := {
+  root := "counter"
+  valueTy := .compilerTypeId 6
+}
+
+def preheaderTestRow : SummaryRow := {
+  id := 1
+  owner := "preheaderTest"
+  kind := .scfWhile
+  init := [.term 1]
+  preheaderTimeline := [{
+    id := 0
+    structuralKey := "preheader/check"
+    payload := .safetyCheckpoint { formulas := [{ formula := .term 2 }] }
+  }, {
+    id := 1
+    structuralKey := "preheader/write"
+    payload := .storageWrite {
+      location := preheaderTestLocationRow
+      value := { formula := .term 0 }
+    }
+  }, {
+    id := 2
+    structuralKey := "preheader/read"
+    payload := .storageRead {
+      result := testReadId 9
+      location := preheaderTestLocationRow
+    }
+  }]
+  preheaderProjectionComplete := true
+}
+
+def preheaderTestEvents : List DirectStorageEvent := [
+  .check (.term 2),
+  .storage (.write {
+    root := "counter"
+    valueTy := .compilerTypeId 6
+  } (.term 0)),
+  .storage (.read (testReadId 9) {
+    root := "counter"
+    valueTy := .compilerTypeId 6
+  })
+]
+
+example : directStorageTimeline? preheaderTestRow.preheaderTimeline =
+    some preheaderTestEvents := by
+  rfl
+
+example (base : Env) :
+    denoteDirectStoragePreheaderInitial? preheaderTestManifest base
+      preheaderTestRow = some
+        (directStoragePreheaderProducesInitial
+          (directStoragePreheaderContext preheaderTestManifest base
+            preheaderTestRow.contextVariables)
+          preheaderTestEvents (directStoragePreheaderInitialState base)
+          preheaderTestRow.init) := by
+  rfl
+
+example
+    (context : StorageFormulaContext)
+    (initial : StorageActionState)
+    (formulas : List FormulaRef)
+    (following : LoopState) :
+    directStoragePreheaderProducesInitial context [] initial formulas following ↔
+      directInitialValuesAfterPreheader? context initial formulas =
+          some following.locals ∧
+        following.storage = initial.loop.storage :=
+  direct_storage_preheader_empty_iff context initial formulas following
+
+example (storage entryStorage : StorageState) :
+    let initial : StorageActionState := {
+      loop := { locals := [], storage }
+      entryStorage
+    }
+    directStoragePreheaderProducesInitial
+      (noLocalFormulaContext { terms := [.boolLit true] })
+      [.check (.term 0)] initial [] {
+        locals := []
+        storage := initial.loop.storage
+      } := by
+  dsimp only
+  let initial : StorageActionState := {
+    loop := { locals := [], storage }
+    entryStorage
+  }
+  let context := noLocalFormulaContext { terms := [.boolLit true] }
+  have hEval : (directStoragePreheaderSemantics context).evalFormula
+      (.term 0) initial = some True := by
+    simp [directStoragePreheaderSemantics, directStorageSemantics, context,
+      noLocalFormulaContext, StorageFormulaContext.evalFormula?,
+      StorageFormulaContext.stateEnv?, bindStorageReads,
+      StorageFormulaContext.formulaStorageReady,
+      StorageFormulaContext.termStorageReady,
+      StorageFormulaContext.withStoreViews, formulaDenotes?, denoteFormula?]
+  let finalResult : TimelineResult :=
+    ({ state := initial } : TimelineResult).comp { state := initial }
+  refine ⟨finalResult, .cons (.check hEval) (.nil initial), ?_, rfl, rfl⟩
+  intro before formula after hEvents beforeResult hExec
+  cases before with
+  | nil =>
+      simp at hEvents
+      rcases hEvents with ⟨rfl, rfl⟩
+      cases hExec
+      exact ⟨True, hEval, trivial⟩
+  | cons head tail =>
+      simp at hEvents
+
+example (storage entryStorage : StorageState) (following : LoopState) :
+    let initial : StorageActionState := {
+      loop := { locals := [], storage }
+      entryStorage
+    }
+    ¬ directStoragePreheaderProducesInitial
+      (noLocalFormulaContext { terms := [.boolLit false] })
+      [.check (.term 0)] initial [] following := by
+  dsimp only
+  let initial : StorageActionState := {
+    loop := { locals := [], storage }
+    entryStorage
+  }
+  intro hInitial
+  rcases direct_storage_preheader_initial_has_safe_execution _ _ _ _ _ hInitial with
+    ⟨_, _, hSafe⟩
+  have hFalse := false_checkpoint_does_not_disappear
+    (directStoragePreheaderSemantics
+      (noLocalFormulaContext { terms := [.boolLit false] }))
+    (.term 0) initial (by
+      simp [directStoragePreheaderSemantics, directStorageSemantics,
+        noLocalFormulaContext, StorageFormulaContext.evalFormula?,
+        StorageFormulaContext.stateEnv?, bindStorageReads,
+        StorageFormulaContext.formulaStorageReady,
+        StorageFormulaContext.termStorageReady,
+        StorageFormulaContext.withStoreViews, formulaDenotes?, denoteFormula?])
+  exact hFalse.2 hSafe
 
 example :
     let state : StorageActionState := {

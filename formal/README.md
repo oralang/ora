@@ -21,6 +21,7 @@ lowering preserves semantics.
 | Snapshot syncs | Compiler-emitted data rows are regenerated and checked against handwritten Lean specifications | Selected finite surfaces only; not arbitrary compiler behavior |
 | Obligation semantics | A supported manifest fragment has fail-closed Lean denotation and reusable bit-vector, storage, resource, and agreement theorems | Partial fragment; unsupported terms denote to `none` and cannot be proved |
 | Userland proof acceptance | Selected plain Z3-`UNKNOWN` obligations can be discharged by audited Lean proofs and unblock artifact emission | Lean proofs cannot override `SAT`, degraded, vacuous, or unsupported rows and cannot erase runtime guards |
+| Loop induction | Supported verifier-input Ora MLIR loop summaries are denoted in Lean and checked through a finite-reachability induction theorem | The claim is partial correctness and body safety for the denoted verifier-input Ora MLIR; the frontend, LoopVC projection, backend, unsupported loop shapes, and termination remain outside the theorem |
 | Dispatcher verification | Repository snapshots check planner facts; contract builds with `--lean-proofs` check the concrete SIR dispatcher and, when bytecode is emitted, bind a validated backend report to the bytecode | Per-contract translation validation of known dispatcher shapes, not a general SIR-to-EVM correctness theorem |
 | Resource model | Abstract create, destroy, and move operations have guard, conservation, self-move, and frame theorems | The abstract model is not a complete proof of every emitted resource operation |
 
@@ -61,7 +62,8 @@ The following theorems or connections do not currently exist:
 - no preservation, progress, or no-stuck theorem for Ora programs;
 - no source-to-HIR, HIR-to-MLIR, MLIR-to-SIR, or SIR-to-EVM correctness proof;
 - no versioned post-state storage semantics for written roots;
-- no Lean proof lane for loop invariant step relations;
+- no proof that source-to-verifier-input-Ora-MLIR lowering, LoopVC projection,
+  or later backend lowering preserves the denoted loop semantics;
 - no canonical SMT byte-equivalence result for every verification query;
 - no proof that every compiler-generated resource goal corresponds to a
   meaningful live proof row.
@@ -122,13 +124,17 @@ Lean is invoked as a proof checker; it is not linked into the `ora` executable.
 The verification system trusts the following components outside the Lean
 kernel:
 
+- source-to-verifier-input-Ora-MLIR lowering;
+- extraction of loop states, transitions, safety conditions, exits, and owners
+  from verifier-input Ora MLIR;
 - compiler extraction of manifests, identities, snapshots, and dispatcher
   facts;
 - the correspondence between extracted facts and the compiler IR they describe;
 - Z3 and Ora's SMT encoder for obligations discharged by Z3;
 - the hand-maintained relation between Lean denotation and the live SMT encoding
   outside the required canonical crosscheck fragment;
-- lowering and legalization not covered by dispatcher template validation;
+- Ora-to-SIR lowering, legalization, and EVM code generation not covered by
+  dispatcher template validation;
 - cryptographic hashes used to bind proof certificates to artifacts.
 
 Unsupported or malformed proof data blocks proof acceptance and artifact
