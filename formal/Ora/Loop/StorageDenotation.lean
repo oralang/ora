@@ -159,6 +159,73 @@ def StorageFormulaContext.evalValue?
   if !context.formulaStorageReady env formula then none else pure ()
   formulaValue? context.manifest env formula
 
+theorem StorageFormulaContext.evalValue_free_variable
+    (context : StorageFormulaContext)
+    (state : StorageActionState)
+    (bound : Env)
+    (termId : TermId)
+    (reference : FreeVarRef)
+    (value : Value)
+    (hBound : context.stateEnv? state = some bound)
+    (hTerm : context.manifest.terms[termId]? = some (.variable (.free reference)))
+    (hValue : bound.lookupFree reference.id = some value) :
+    context.evalValue? (.term termId) state = some value := by
+  unfold evalValue? formulaStorageReady termStorageReady
+  simp only [hBound, Option.bind_eq_bind, Option.some_bind, hTerm,
+    Bool.not_true, Bool.false_eq_true, if_false]
+  unfold formulaValue? denoteValue?
+  simp only [hTerm, Env.lookupVar, hValue, Option.pure_def, Option.some_bind]
+
+theorem StorageFormulaContext.evalFormula_place_eq_old_self
+    (context : StorageFormulaContext)
+    (state : StorageActionState)
+    (bound : Env)
+    (fuel : Nat)
+    (equality current old entry : TermId)
+    (ty : TyRef)
+    (place : PlaceRef)
+    (location : StorageLocation)
+    (hBound : context.stateEnv? state = some bound)
+    (hLength : context.manifest.terms.length = fuel + 1)
+    (hEquality : context.manifest.terms[equality]? = some (.binary {
+      op := .eq, lhs := current, rhs := old, ty := some ty }))
+    (hCurrent : context.manifest.terms[current]? = some (.placeRead place))
+    (hOld : context.manifest.terms[old]? = some (.old entry))
+    (hEntry : context.manifest.terms[entry]? = some (.placeRead place))
+    (hCurrentLocation : context.resolvePlace bound.lookupFree place = some location)
+    (hEntryLocation : context.resolvePlace context.entryEnv.lookupFree place = some location)
+    (hCurrentValue : bound.placeValue (.stable place) = state.loop.storage location)
+    (hEntryValue : bound.placeValue (.entry place) = state.entryStorage location) :
+    (∃ proposition,
+      context.evalFormula? (.term equality) state = some proposition ∧ proposition) ↔
+      match Value.eqProp? (state.loop.storage location)
+          (state.entryStorage location) with
+      | some proposition => proposition
+      | none => False := by
+  unfold evalFormula? formulaStorageReady
+  rw [hLength]
+  simp only [hBound, Option.bind_eq_bind, Option.some_bind, termStorageReady,
+    hEquality, hCurrent, hOld, hEntry, hCurrentLocation, hEntryLocation,
+    Option.isSome_some, Bool.true_and, Bool.not_true, Bool.false_eq_true,
+    if_false]
+  unfold formulaDenotes? denoteFormula?
+  rw [hLength]
+  simp only [hEquality, denoteValue?, hCurrent, hOld, hEntry,
+    Env.lookupPlace, Env.lookupEntryPlace,
+    hCurrentValue, hEntryValue, Option.bind_eq_bind,
+    Option.some_bind]
+  cases hEqualityValue : Value.eqProp? (state.loop.storage location)
+      (state.entryStorage location) with
+  | none => simp [hEqualityValue]
+  | some proposition =>
+      simp only [hEqualityValue, Option.pure_def, Option.some_bind,
+        Option.some.injEq]
+      constructor
+      · rintro ⟨candidate, hCandidate, hHolds⟩
+        exact hCandidate.mpr hHolds
+      · intro hHolds
+        exact ⟨proposition, rfl, hHolds⟩
+
 def storageValueMatchesTy : Value → TyRef → Bool
   | .bool _, ty => ty.isBool
   | .integer value, ty => ty.integerShape? == some value.shape

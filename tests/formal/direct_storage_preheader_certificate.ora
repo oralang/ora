@@ -1,0 +1,15 @@
+contract DirectStoragePreheaderCertificate {
+    storage var counter: u256 = 0;
+
+    pub fn preserve()
+        modifies counter
+    {
+        counter = counter;
+        var i: u256 = 0;
+        while (i < 1)
+            invariant counter == old(counter)
+        {
+            i = i;
+        }
+    }
+}

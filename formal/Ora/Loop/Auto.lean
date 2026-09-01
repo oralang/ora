@@ -1316,6 +1316,8 @@ macro tk:"ora_loop_auto_direct_storage" : tactic => do
       rw [hSupported]
       simp only [Bool.true_and, ora_loop_row, List.any, List.all]
       decide
+    have hPreheaderEmpty : ($autoSummary).preheaderTimeline.isEmpty = true := by
+      simp only [ora_loop_row, List.isEmpty]
     constructor
     · rcases hScalar.1 with
         ⟨env, locals, hAssumptions, hContext, hInitial⟩
@@ -1332,7 +1334,8 @@ macro tk:"ora_loop_auto_direct_storage" : tactic => do
         ora_loop_expand_membership edge hMember
         all_goals ora_loop_direct_edge_compatible $autoSummary env
       rcases Ora.Loop.direct_storage_summary_denotes $emittedManifest env
-          $autoSummary hDirect hEdgeCompatible with ⟨concreteVC, hConcrete⟩
+          $autoSummary hDirect hPreheaderEmpty hEdgeCompatible with
+          ⟨concreteVC, hConcrete⟩
       rw [hConcrete]
       unfold Ora.Loop.loopInitialPremises at hInitial
       cases hAbstract : Ora.Loop.denoteLoopSummary?
@@ -1344,6 +1347,7 @@ macro tk:"ora_loop_auto_direct_storage" : tactic => do
             $emittedManifest env $autoSummary abstractVC locals hAbstract hInitial
           apply Ora.Loop.direct_initial_of_control_denotation
             $emittedManifest env $autoSummary concreteVC locals hConcrete
+          · exact hPreheaderEmpty
           · ora_loop_direct_initial_control
           · exact hValues
     · intro env hAssumptions hContext
@@ -1363,7 +1367,8 @@ macro tk:"ora_loop_auto_direct_storage" : tactic => do
             ora_loop_expand_membership edge hMember
             all_goals ora_loop_direct_edge_compatible $autoSummary env
           rcases Ora.Loop.direct_storage_summary_denotes $emittedManifest env
-              $autoSummary hDirect hEdgeCompatible with ⟨concreteVC, hConcrete⟩
+              $autoSummary hDirect hPreheaderEmpty hEdgeCompatible with
+              ⟨concreteVC, hConcrete⟩
           simp only [hConcrete]
           apply Ora.Loop.induction_obligations_of_refinement
             abstractVC concreteVC (fun state => state.locals)
@@ -1371,6 +1376,7 @@ macro tk:"ora_loop_auto_direct_storage" : tactic => do
           apply Ora.Loop.direct_storage_summary_refinement
             $emittedManifest env $autoSummary abstractVC concreteVC
             hAbstract hConcrete
+          · exact hPreheaderEmpty
           · ora_loop_direct_initial_control
           · intro formula hMember
             simp only [ora_loop_row, List.mem_cons, List.not_mem_nil,

@@ -690,11 +690,14 @@ theorem direct_storage_edges_denote
 
 def directStorageSummarySupported (manifest : Manifest) (row : SummaryRow) : Bool :=
   row.supported manifest &&
-    row.preheaderTimeline.isEmpty &&
-    row.edges.any (fun edge => edge.timeline.any fun event =>
+    row.preheaderProjectionComplete &&
+    (row.preheaderTimeline.any (fun event =>
       match event.payload with
       | .storageRead _ | .storageWrite _ => true
-      | _ => false) &&
+      | _ => false) || row.edges.any (fun edge => edge.timeline.any fun event =>
+      match event.payload with
+      | .storageRead _ | .storageWrite _ => true
+      | _ => false)) &&
     row.edges.all (fun edge => edge.timeline.all fun event =>
       match event.payload with
       | .summaryDependency _ => false
@@ -707,10 +710,13 @@ def denoteDirectStorageLoopSummary?
     let context := directStorageContext manifest base row.variables
     let entry := storageStateFromEnv base true
     let current := directStoragePreheaderState base row
+    let initial ← if row.preheaderTimeline.isEmpty then
+      pure (fun state => state.storage = current ∧
+        directInitialValues? context entry current row.init = some state.locals)
+    else
+      denoteDirectStoragePreheaderInitial? manifest base row
     pure {
-      initial := fun state =>
-        state.storage = current ∧
-          directInitialValues? context entry current row.init = some state.locals
+      initial
       invariant := fun state =>
         stateReady row.variables state.locals ∧
           directFormulasHold context entry state row.invariants
@@ -723,6 +729,7 @@ theorem direct_storage_summary_denotes
     (base : Env)
     (row : SummaryRow)
     (hDirect : directStorageSummarySupported manifest row = true)
+    (hEmpty : row.preheaderTimeline.isEmpty = true)
     (hEdges : ∀ edge, edge ∈ row.edges →
       DirectStorageEdgeCompatible manifest base row.variables row.post edge) :
     ∃ summary, denoteDirectStorageLoopSummary? manifest base row = some summary := by
@@ -739,7 +746,7 @@ theorem direct_storage_summary_denotes
     edges := edges
   }, ?_⟩
   unfold denoteDirectStorageLoopSummary?
-  rw [hDirect, hDenotes]
+  rw [hDirect, hDenotes, hEmpty]
   rfl
 
 theorem scalar_initial_values_of_denotation
@@ -770,6 +777,7 @@ theorem direct_initial_of_control_denotation
     (summary : LoopVC LoopState)
     (locals : ScalarLoopState)
     (hSummary : denoteDirectStorageLoopSummary? manifest base row = some summary)
+    (hEmpty : row.preheaderTimeline.isEmpty = true)
     (hCompatible : directInitialControlCompatible manifest base row.variables row.init)
     (hInitial : valuesInitializeState manifest base row.variables row.init locals) :
     summary.initial {
@@ -780,7 +788,7 @@ theorem direct_initial_of_control_denotation
   have hDirect : directStorageSummarySupported manifest row = true := by
     cases hValue : directStorageSummarySupported manifest row <;>
       simp [hValue] at hSummary ⊢
-  simp only [hDirect, if_true] at hSummary
+  simp only [hDirect, if_true, hEmpty] at hSummary
   cases hEdges : denoteDirectStorageEdges? manifest base row.variables row.post row.edges with
   | none => simp [hEdges] at hSummary
   | some edges =>
@@ -801,6 +809,7 @@ theorem direct_storage_summary_refinement
     (concreteVC : LoopVC LoopState)
     (hAbstract : denoteLoopSummary? manifest base row = some abstractVC)
     (hConcrete : denoteDirectStorageLoopSummary? manifest base row = some concreteVC)
+    (hEmpty : row.preheaderTimeline.isEmpty = true)
     (hInitial : directInitialControlCompatible manifest base row.variables row.init)
     (hInvariant : ∀ formula, formula ∈ row.invariants →
       directFormulaControlCompatible manifest base row.variables formula)
@@ -814,7 +823,7 @@ theorem direct_storage_summary_refinement
   have hDirect : directStorageSummarySupported manifest row = true := by
     cases hValue : directStorageSummarySupported manifest row <;>
       simp [hValue] at hConcrete ⊢
-  simp only [hSupported, hDirect, if_true] at hAbstract hConcrete
+  simp only [hSupported, hDirect, if_true, hEmpty] at hAbstract hConcrete
   cases hAbstractEdges : denoteEdges? manifest base row.variables row.post row.edges with
   | none => simp [hAbstractEdges] at hAbstract
   | some abstractEdges =>

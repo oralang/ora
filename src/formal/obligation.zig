@@ -89,28 +89,28 @@ pub const ObligationSet = struct {
     fn storageArtifactAuthorityBlockReason(self: ObligationSet) ?ArtifactBlockReason {
         for (self.loop_summaries) |summary| {
             if (!self.loopSummaryRequiresLeanCertificate(summary.id)) continue;
-            for (summary.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
-                .storage_read => |read| if (read.location.projections.len != 0) {
-                    if (!self.reviewedMappingProjection(summary, read.location)) {
-                        return .storage_projection_authority_unreviewed;
-                    }
-                },
-                .storage_write => |write| if (write.location.projections.len != 0) {
-                    if (!self.reviewedMappingProjection(summary, write.location)) {
-                        return .storage_projection_authority_unreviewed;
-                    }
-                },
-                .summary_dependency => |dependency| {
-                    if (self.loopSummaryClosureHasStorageEvents(
-                        dependency.summary_id,
-                        self.loop_summaries.len + 1,
-                    )) {
-                        return .storage_child_frame_authority_unreviewed;
-                    }
-                },
-                .path_assumption, .safety_checkpoint => {},
-            };
+            if (self.timelineStorageAuthorityBlockReason(summary, summary.preheader_timeline)) |reason| return reason;
+            for (summary.edges) |edge| if (self.timelineStorageAuthorityBlockReason(summary, edge.timeline)) |reason| return reason;
         }
+        return null;
+    }
+
+    fn timelineStorageAuthorityBlockReason(
+        self: ObligationSet,
+        summary: LoopSummaryRow,
+        timeline: []const LoopTimelineEvent,
+    ) ?ArtifactBlockReason {
+        for (timeline) |event| switch (event.payload) {
+            .storage_read => |read| if (read.location.projections.len != 0 and
+                !self.reviewedMappingProjection(summary, read.location)) return .storage_projection_authority_unreviewed,
+            .storage_write => |write| if (write.location.projections.len != 0 and
+                !self.reviewedMappingProjection(summary, write.location)) return .storage_projection_authority_unreviewed,
+            .summary_dependency => |dependency| if (self.loopSummaryClosureHasStorageEvents(
+                dependency.summary_id,
+                self.loop_summaries.len + 1,
+            )) return .storage_child_frame_authority_unreviewed,
+            .path_assumption, .safety_checkpoint => {},
+        };
         return null;
     }
 
@@ -119,8 +119,7 @@ pub const ObligationSet = struct {
         summary: LoopSummaryRow,
         location: LoopStorageLocationExpr,
     ) bool {
-        if (!summary.preheader_projection_complete or summary.preheader_timeline.len != 0 or
-            location.projections.len != 1) return false;
+        if (!summary.preheader_projection_complete or location.projections.len != 1) return false;
         const key = switch (location.projections[0]) {
             .mapping_key => |key| key,
             .field, .fixed_index => return false,
@@ -3922,6 +3921,7 @@ test "storage artifact authority admits only reviewed context-key mappings witho
     var mapping_summary = direct_summary;
     mapping_summary.context_variables = &context_variables;
     mapping_summary.preheader_projection_complete = true;
+    mapping_summary.preheader_timeline = &mapping_timeline;
     mapping_summary.edges = &mapping_edges;
     try std.testing.expectEqual(
         @as(?ArtifactBlockReason, null),
@@ -3930,6 +3930,17 @@ test "storage artifact authority admits only reviewed context-key mappings witho
             .terms = &context_terms,
             .loop_summaries = &.{mapping_summary},
         }).storageArtifactAuthorityBlockReason(),
+    );
+
+    var fixed_preheader_summary = direct_summary;
+    fixed_preheader_summary.preheader_projection_complete = true;
+    fixed_preheader_summary.preheader_timeline = &projected_timeline;
+    try std.testing.expectEqual(
+        ArtifactBlockReason.storage_projection_authority_unreviewed,
+        (ObligationSet{
+            .queries = &.{certificate_query},
+            .loop_summaries = &.{fixed_preheader_summary},
+        }).storageArtifactAuthorityBlockReason().?,
     );
 
     const dependency_timeline = [_]LoopTimelineEvent{.{

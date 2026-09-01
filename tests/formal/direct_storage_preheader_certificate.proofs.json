@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "proofs": [
+    {
+      "query_id": 10,
+      "obligation_ids": [],
+      "assumption_ids": [],
+      "module_name": "Ora.UserProof.DirectStoragePreheader",
+      "theorem_name": "Ora.UserProof.DirectStoragePreheader.discharge_q10",
+      "path": "tests/formal/direct_storage_preheader_certificate.lean",
+      "content_sha256": null,
+      "inline_source": true
+    },
+    {
+      "query_id": 2,
+      "obligation_ids": [1],
+      "assumption_ids": [],
+      "module_name": "Ora.UserProof.DirectStoragePreheader",
+      "theorem_name": "Ora.UserProof.DirectStoragePreheader.discharge_q2",
+      "path": "tests/formal/direct_storage_preheader_certificate.lean",
+      "content_sha256": null,
+      "inline_source": true
+    }
+  ]
+}

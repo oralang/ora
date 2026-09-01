@@ -5539,7 +5539,10 @@ const Collector = struct {
     fn scalarStorageLoadTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
         if (!mlirTypeIsSupportedInteger(self.operationResultType(op, 0))) return null;
         const root = try self.stringAttr(op, "global") orelse return null;
-        if (!self.canProjectStablePlace(.{ .root = root, .region = .storage })) return null;
+        // Function queries require an independently proven stable place. A
+        // LoopVC instead denotes this term against its explicit current store.
+        if (!self.canProjectStablePlace(.{ .root = root, .region = .storage }) and
+            !self.use_loop_value_bindings) return null;
         return try self.placeReadTerm(root);
     }
 

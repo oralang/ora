@@ -9985,11 +9985,13 @@ test "mapping preservation without external certificates remains blocked" {
         source: []const u8,
         stem: []const u8,
         diagnostic: []const u8,
+        z3_diagnostic: ?[]const u8 = null,
     }{
         .{
             .source = "tests/formal/fail_mapping_storage_preheader_same_key.ora",
             .stem = "fail_mapping_storage_preheader_same_key",
             .diagnostic = "Automatic Lean loop proof unavailable",
+            .z3_diagnostic = "failed to prove invariant in writeOther",
         },
         .{
             .source = "tests/formal/fail_mapping_storage_preheader_other_key.ora",
@@ -10020,11 +10022,220 @@ test "mapping preservation without external certificates remains blocked" {
         defer allocator.free(run.stderr);
         try expectExited(run, 1);
         try testing.expect(std.mem.containsAtLeast(u8, run.stdout, 1, case.diagnostic));
+        if (case.z3_diagnostic) |diagnostic| {
+            try testing.expect(std.mem.containsAtLeast(u8, run.stdout, 1, diagnostic));
+            try testing.expect(std.mem.containsAtLeast(
+                u8,
+                run.stdout,
+                1,
+                "userland verification failed (Z3: rejected, Lean obligation gate: rejected)",
+            ));
+        }
         const hex_path = try std.fmt.allocPrint(allocator, "{s}/{s}.hex", .{ relative, case.stem });
         defer allocator.free(hex_path);
         try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, hex_path, .{}));
         try expectNoFormalArtifactsInRepoRoot(allocator, case.stem);
     }
+}
+
+fn expectExternalPreheaderCertificateDeterministic(
+    source: []const u8,
+    proofs: []const u8,
+    stem: []const u8,
+    proof_count: usize,
+) !void {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var obligations = try collectPackageObligations(allocator, source);
+    defer obligations.deinit();
+    var first_module = std.Io.Writer.Allocating.init(allocator);
+    defer first_module.deinit();
+    try obligation_to_lean.writeModule(&first_module.writer, obligations.set, .{});
+    var second_module = std.Io.Writer.Allocating.init(allocator);
+    defer second_module.deinit();
+    try obligation_to_lean.writeModule(&second_module.writer, obligations.set, .{});
+    try testing.expectEqualStrings(first_module.written(), second_module.written());
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    for ([_][]const u8{ "first", "second" }) |relative| {
+        const output = try pathFromTmpAlloc(allocator, tmp, relative);
+        defer allocator.free(output);
+        const run = try runProcessWithLeanPath(allocator, &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=smt-report,bytecode",
+            "--out-dir",
+            output,
+            "--lean-proofs",
+            proofs,
+            source,
+        });
+        defer allocator.free(run.stdout);
+        defer allocator.free(run.stderr);
+        try expectExited(run, 0);
+        try testing.expect(std.mem.containsAtLeast(
+            u8,
+            run.stdout,
+            1,
+            "Lean loop proof gate accepted:\n  kernel-checked certificates: 1",
+        ));
+
+        const certificate_path = try std.fmt.allocPrint(
+            allocator,
+            "{s}/{s}.lean.proof.json",
+            .{ relative, stem },
+        );
+        defer allocator.free(certificate_path);
+        const certificate = try tmp.dir.readFileAlloc(
+            std.testing.io,
+            certificate_path,
+            allocator,
+            .limited(1024 * 1024),
+        );
+        defer allocator.free(certificate);
+        const proof_count_text = try std.fmt.allocPrint(
+            allocator,
+            "\"proof_count\": {d}",
+            .{proof_count},
+        );
+        defer allocator.free(proof_count_text);
+        try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, proof_count_text));
+        const hex_path = try std.fmt.allocPrint(allocator, "{s}/{s}.hex", .{ relative, stem });
+        defer allocator.free(hex_path);
+        try tmp.dir.access(std.testing.io, hex_path, .{});
+    }
+
+    inline for (.{
+        ".hex",
+        ".lean.proof.json",
+        ".formal.artifacts.json",
+        ".smt.report.json",
+        ".smt.report.md",
+    }) |suffix| {
+        const first_path = try std.fmt.allocPrint(allocator, "first/{s}{s}", .{ stem, suffix });
+        defer allocator.free(first_path);
+        const second_path = try std.fmt.allocPrint(allocator, "second/{s}{s}", .{ stem, suffix });
+        defer allocator.free(second_path);
+        const first = try tmp.dir.readFileAlloc(
+            std.testing.io,
+            first_path,
+            allocator,
+            .limited(16 * 1024 * 1024),
+        );
+        defer allocator.free(first);
+        const second = try tmp.dir.readFileAlloc(
+            std.testing.io,
+            second_path,
+            allocator,
+            .limited(16 * 1024 * 1024),
+        );
+        defer allocator.free(second);
+        try testing.expectEqualStrings(first, second);
+    }
+    try expectNoFormalArtifactsInRepoRoot(allocator, stem);
+}
+
+test "external certificate binds a nonempty direct-root preheader deterministically" {
+    try expectExternalPreheaderCertificateDeterministic(
+        "tests/formal/direct_storage_preheader_certificate.ora",
+        "tests/formal/direct_storage_preheader_certificate.proofs.json",
+        "direct_storage_preheader_certificate",
+        2,
+    );
+}
+
+test "external certificate binds a nonempty reviewed mapping preheader deterministically" {
+    try expectExternalPreheaderCertificateDeterministic(
+        "tests/formal/mapping_storage_preheader_certificate.ora",
+        "tests/formal/mapping_storage_preheader_certificate.proofs.json",
+        "mapping_storage_preheader_certificate",
+        3,
+    );
+}
+
+test "an earlier loop blocks a proof-relevant nonempty preheader by name" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output = try pathFromTmpAlloc(allocator, tmp, "blocked");
+    defer allocator.free(output);
+    const run = try runProcessWithLeanPath(allocator, &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=bytecode",
+        "--out-dir",
+        output,
+        "--lean-proofs",
+        "tests/formal/fail_preheader_control_projection.ora",
+    });
+    defer allocator.free(run.stdout);
+    defer allocator.free(run.stderr);
+    try expectExited(run, 1);
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        run.stdout,
+        1,
+        "excluded_by=loop_preheader_control_unsupported",
+    ));
+    try testing.expectError(
+        error.FileNotFound,
+        tmp.dir.access(std.testing.io, "blocked/fail_preheader_control_projection.hex", .{}),
+    );
+    try expectNoFormalArtifactsInRepoRoot(allocator, "fail_preheader_control_projection");
+}
+
+test "a nonempty preheader cannot certify a false storage invariant" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output = try pathFromTmpAlloc(allocator, tmp, "blocked");
+    defer allocator.free(output);
+    const run = try runProcessWithLeanPath(allocator, &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=bytecode",
+        "--out-dir",
+        output,
+        "--lean-proofs",
+        "tests/formal/fail_direct_storage_preheader_false_invariant.ora",
+    });
+    defer allocator.free(run.stdout);
+    defer allocator.free(run.stderr);
+    try expectExited(run, 1);
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        run.stdout,
+        1,
+        "userland verification failed (Z3: rejected, Lean obligation gate: rejected)",
+    ));
+    try testing.expectError(
+        error.FileNotFound,
+        tmp.dir.access(
+            std.testing.io,
+            "blocked/fail_direct_storage_preheader_false_invariant.hex",
+            .{},
+        ),
+    );
+    try expectNoFormalArtifactsInRepoRoot(
+        allocator,
+        "fail_direct_storage_preheader_false_invariant",
+    );
 }
 
 test "canonical preheader projection inventories every operation before the loop" {
