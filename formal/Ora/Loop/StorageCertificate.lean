@@ -690,7 +690,7 @@ theorem direct_storage_edges_denote
 
 def directStorageSummarySupported (manifest : Manifest) (row : SummaryRow) : Bool :=
   row.supported manifest &&
-    row.preheaderProjectionComplete &&
+    (row.preheaderTimeline.isEmpty || row.preheaderProjectionComplete) &&
     (row.preheaderTimeline.any (fun event =>
       match event.payload with
       | .storageRead _ | .storageWrite _ => true

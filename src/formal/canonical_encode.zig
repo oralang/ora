@@ -254,7 +254,7 @@ pub const Adapter = struct {
         var loop_state: LoopEncodeState = .{
             .summary = summary,
             .preheader_starts_at_entry = query.kind == .loop_base and
-                loopSummaryHasDirectStorageEvents(summary),
+                summary.preheader_projection_complete,
         };
         defer loop_state.deinit(self.allocator);
         self.loop_state = &loop_state;
@@ -267,8 +267,7 @@ pub const Adapter = struct {
         switch (query.kind) {
             .loop_base => {
                 if (query.loop_edge_id != null) return error.InvalidLoopQuery;
-                const has_direct_storage = loopSummaryHasDirectStorageEvents(summary);
-                const preheader = if (has_direct_storage) blk: {
+                const preheader = if (summary.preheader_timeline.len != 0) blk: {
                     if (!summary.preheader_projection_complete) return error.InvalidLoopQuery;
                     break :blk (try self.appendLoopTimeline(
                         constraints,
@@ -1715,18 +1714,6 @@ pub const Adapter = struct {
         if (z3.Z3_get_sort_kind(self.context.ctx, sort) != z3.Z3_BV_SORT) return error.ExpectedBitVector;
     }
 };
-
-fn loopSummaryHasDirectStorageEvents(summary: obligation.LoopSummaryRow) bool {
-    for (summary.preheader_timeline) |event| switch (event.payload) {
-        .storage_read, .storage_write => return true,
-        .path_assumption, .safety_checkpoint, .summary_dependency => {},
-    };
-    for (summary.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
-        .storage_read, .storage_write => return true,
-        .path_assumption, .safety_checkpoint, .summary_dependency => {},
-    };
-    return false;
-}
 
 fn findLoopEdge(
     summary: obligation.LoopSummaryRow,

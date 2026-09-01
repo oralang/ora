@@ -855,6 +855,26 @@ pub fn querySemanticSupport(set: obligation.ObligationSet, query: obligation.Ver
     }
     if (query.obligation_ids.len == 0) return .{ .unsupported = .empty_query };
 
+    switch (queryAssumptionsSemanticSupport(set, query)) {
+        .supported => {},
+        .unsupported => |reason| return .{ .unsupported = reason },
+    }
+
+    for (query.obligation_ids) |obligation_id| {
+        const row = obligation.findById(set.obligations, obligation_id) orelse return .{ .unsupported = .invalid_dependency };
+        switch (kindSemanticSupport(set, query.owner, row.kind)) {
+            .supported => {},
+            .unsupported => |reason| return .{ .unsupported = reason },
+        }
+    }
+
+    return .supported;
+}
+
+fn queryAssumptionsSemanticSupport(
+    set: obligation.ObligationSet,
+    query: obligation.VerificationQuery,
+) SemanticSupport {
     for (query.assumption_ids) |assumption_id| {
         const row = obligation.findById(set.assumptions, assumption_id) orelse return .{ .unsupported = .invalid_dependency };
         if (row.formula) |formula| {
@@ -866,15 +886,6 @@ pub fn querySemanticSupport(set: obligation.ObligationSet, query: obligation.Ver
             return .{ .unsupported = .unsupported_origin_value };
         }
     }
-
-    for (query.obligation_ids) |obligation_id| {
-        const row = obligation.findById(set.obligations, obligation_id) orelse return .{ .unsupported = .invalid_dependency };
-        switch (kindSemanticSupport(set, query.owner, row.kind)) {
-            .supported => {},
-            .unsupported => |reason| return .{ .unsupported = reason },
-        }
-    }
-
     return .supported;
 }
 
@@ -901,6 +912,10 @@ fn loopInductionQuerySemanticSupport(
         summary.edges.len == 0)
     {
         return .{ .unsupported = .{ .unsupported_loop_summary = .loop_update_not_scalar_assignment } };
+    }
+    switch (queryAssumptionsSemanticSupport(set, query)) {
+        .supported => {},
+        .unsupported => |reason| return .{ .unsupported = reason },
     }
 
     for (summary.context_variables) |variable| {

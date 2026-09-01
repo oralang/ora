@@ -320,7 +320,10 @@ fn bindLoopSummaryDependencyDigests(collector: *Collector) !void {
     while (summary_index > 0) {
         summary_index -= 1;
         const inner = collector.loop_summaries.items[summary_index];
-        if (!inner.projectionSupported()) continue;
+        if (!inner.projectionSupported()) {
+            try markLoopSummaryDependentsUnsupported(collector, summary_index);
+            continue;
+        }
         const view: obligation.ObligationSet = .{
             .terms = collector.terms.items,
             .obligations = collector.obligations.items,
@@ -329,27 +332,32 @@ fn bindLoopSummaryDependencyDigests(collector: *Collector) !void {
             .loop_summaries = collector.loop_summaries.items,
             .diagnostics = collector.diagnostics.items,
         };
+        if (inner.query_ids.induction.len != 1) return error.InvalidLoopSummary;
+        const induction_query = obligation.findById(
+            collector.queries.items,
+            inner.query_ids.induction[0],
+        ) orelse return error.InvalidLoopSummary;
+        if (induction_query.kind != .loop_induction or induction_query.loop_summary_id != inner.id) {
+            return error.InvalidLoopSummary;
+        }
+        switch (obligation_to_lean.querySemanticSupport(view, induction_query)) {
+            .supported => {},
+            .unsupported => |reason| {
+                try collector.appendLoopSummaryReason(
+                    &collector.loop_summaries.items[summary_index],
+                    loopUnsupportedReasonForSemantic(reason),
+                );
+                try markLoopSummaryDependentsUnsupported(collector, summary_index);
+                continue;
+            },
+        }
         const digest = try obligation_to_lean.loopVcSha256(view, inner.id);
         for (collector.loop_summaries.items[0..summary_index]) |*outer| {
-            var binds_inner = false;
-            for (outer.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
-                .summary_dependency => |dependency| if (dependency.summary_id == inner.id) {
-                    binds_inner = true;
-                },
-                else => {},
-            };
-            if (!binds_inner) continue;
+            if (!loopSummaryBindsSummary(outer.*, inner.id)) continue;
 
             const rebound_edges = try collector.allocator.dupe(obligation.LoopEdgeRow, outer.edges);
             for (outer.edges, rebound_edges) |edge, *rebound_edge| {
-                var edge_binds_inner = false;
-                for (edge.timeline) |event| switch (event.payload) {
-                    .summary_dependency => |dependency| if (dependency.summary_id == inner.id) {
-                        edge_binds_inner = true;
-                    },
-                    else => {},
-                };
-                if (!edge_binds_inner) continue;
+                if (!timelineBindsSummary(edge.timeline, inner.id)) continue;
                 const rebound_timeline = try collector.allocator.dupe(
                     obligation.LoopTimelineEvent,
                     edge.timeline,
@@ -363,6 +371,34 @@ fn bindLoopSummaryDependencyDigests(collector: *Collector) !void {
                 rebound_edge.timeline = rebound_timeline;
             }
             outer.edges = rebound_edges;
+        }
+    }
+}
+
+fn timelineBindsSummary(
+    timeline: []const obligation.LoopTimelineEvent,
+    summary_id: obligation.Id,
+) bool {
+    for (timeline) |event| switch (event.payload) {
+        .summary_dependency => |dependency| if (dependency.summary_id == summary_id) return true,
+        else => {},
+    };
+    return false;
+}
+
+fn loopSummaryBindsSummary(summary: obligation.LoopSummaryRow, summary_id: obligation.Id) bool {
+    for (summary.edges) |edge| if (timelineBindsSummary(edge.timeline, summary_id)) return true;
+    return false;
+}
+
+fn markLoopSummaryDependentsUnsupported(
+    collector: *Collector,
+    summary_index: usize,
+) !void {
+    const inner_id = collector.loop_summaries.items[summary_index].id;
+    for (collector.loop_summaries.items[0..summary_index]) |*outer| {
+        if (loopSummaryBindsSummary(outer.*, inner_id)) {
+            try collector.appendLoopSummaryReason(outer, .loop_formula_unsupported);
         }
     }
 }

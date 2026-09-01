@@ -12106,6 +12106,29 @@ test "structured loop certificates arm the real CLI and missing proofs block art
     try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.testing.io, artifact_path, .{}));
 }
 
+test "loop digest binding preserves unsupported assumptions as a named exclusion" {
+    var result = try collectPackageObligations(testing.allocator, "ora-example/smt/verification/loop_invariants.ora");
+    defer result.deinit();
+
+    var found = false;
+    for (result.set.loop_summaries) |summary| {
+        if (summary.owner != .statement or
+            !std.mem.eql(u8, summary.owner.statement.function_name, "accumulateToStorage")) continue;
+        found = true;
+        try testing.expect(loopSummaryHasReason(summary, .loop_formula_unsupported));
+        try testing.expect(!summary.projectionSupported());
+        try testing.expectEqual(@as(usize, 1), summary.query_ids.induction.len);
+        const query = obligation.findById(
+            result.set.queries,
+            summary.query_ids.induction[0],
+        ) orelse return error.TestUnexpectedResult;
+        try testing.expectEqual(@as(?[32]u8, null), query.loop_vc_sha256);
+        try testing.expectEqual(obligation.ProofRequirement.backend_result, query.proof_requirement);
+        try testing.expectEqual(obligation.ArtifactPolicy.diagnostic_only, query.artifact_policy);
+    }
+    try testing.expect(found);
+}
+
 test "canonical LoopVC Z3 checks consume the shared edge rows" {
     var result = try collectPackageObligations(testing.allocator, "ora-example/smt/verification/loop_invariants.ora");
     defer result.deinit();
