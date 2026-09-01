@@ -62,6 +62,7 @@ const LoopEncodeState = struct {
     stores: std.ArrayList(LoopStore) = .empty,
     reads: std.ArrayList(LoopRead) = .empty,
     roots: std.ArrayList(LoopRoot) = .empty,
+    preheader_starts_at_entry: bool = false,
 
     fn deinit(self: *LoopEncodeState, allocator: std.mem.Allocator) void {
         for (self.stores.items) |store| allocator.free(store.domain);
@@ -250,7 +251,11 @@ pub const Adapter = struct {
         defer query_state.deinit(self.allocator);
         self.query_state = &query_state;
         defer self.query_state = null;
-        var loop_state: LoopEncodeState = .{ .summary = summary };
+        var loop_state: LoopEncodeState = .{
+            .summary = summary,
+            .preheader_starts_at_entry = query.kind == .loop_base and
+                loopSummaryHasDirectStorageEvents(summary),
+        };
         defer loop_state.deinit(self.allocator);
         self.loop_state = &loop_state;
         defer self.loop_state = null;
@@ -263,15 +268,30 @@ pub const Adapter = struct {
             .loop_base => {
                 if (query.loop_edge_id != null) return error.InvalidLoopQuery;
                 const has_direct_storage = loopSummaryHasDirectStorageEvents(summary);
-                if (has_direct_storage and summary.preheader_timeline.len != 0) return error.InvalidLoopQuery;
+                const preheader = if (has_direct_storage) blk: {
+                    if (!summary.preheader_projection_complete) return error.InvalidLoopQuery;
+                    break :blk (try self.appendLoopTimeline(
+                        constraints,
+                        summary.preheader_timeline,
+                        null,
+                        true,
+                    )) orelse return error.InvalidLoopQuery;
+                } else null;
                 const goal = try self.encodeFormulaConjunction(constraints, summary.invariant_formulas);
                 const replacements = try self.encodeFormulaValues(constraints, summary.init_formulas);
                 defer self.allocator.free(replacements);
                 const initialized_goal = try self.substituteLoopVariables(goal, summary.variables, replacements);
-                if (has_direct_storage and summary.preheader_projection_complete) {
-                    try self.appendEmptyPreheaderStoreEqualities(constraints);
-                }
-                try self.appendNegatedGoal(constraints, initialized_goal);
+                if (preheader) |result| {
+                    defer self.allocator.free(result.prefix);
+                    const reachable_goal = try self.implyFromPremises(result.prefix, initialized_goal);
+                    const complete_goal = z3.Z3_mk_and(
+                        self.context.ctx,
+                        2,
+                        &[_]z3.Z3_ast{ result.safety, reachable_goal },
+                    );
+                    try self.context.checkNoError();
+                    try self.appendNegatedGoal(constraints, complete_goal);
+                } else try self.appendNegatedGoal(constraints, initialized_goal);
             },
             .loop_body_safety, .loop_invariant_step, .loop_invariant_post => {
                 const edge = findLoopEdge(summary, query.loop_edge_id orelse return error.InvalidLoopQuery) orelse
@@ -279,12 +299,14 @@ pub const Adapter = struct {
                 try self.appendFormulaPremises(constraints, summary.invariant_formulas);
                 const safety_goal = try self.appendLoopTimeline(
                     constraints,
+                    edge.timeline,
                     edge,
                     query.kind == .loop_body_safety,
                 );
                 if (query.kind == .loop_body_safety) {
-                    const goal = safety_goal orelse return error.InvalidLoopQuery;
-                    try self.appendNegatedGoal(constraints, goal);
+                    const result = safety_goal orelse return error.InvalidLoopQuery;
+                    defer self.allocator.free(result.prefix);
+                    try self.appendNegatedGoal(constraints, result.safety);
                     return;
                 }
                 const target = edge.target orelse return error.InvalidLoopQuery;
@@ -309,15 +331,16 @@ pub const Adapter = struct {
     fn appendLoopTimeline(
         self: *Adapter,
         constraints: *std.ArrayList(z3.Z3_ast),
-        edge: obligation.LoopEdgeRow,
+        timeline: []const obligation.LoopTimelineEvent,
+        parent_edge: ?obligation.LoopEdgeRow,
         collect_safety_goal: bool,
-    ) EncodeError!?z3.Z3_ast {
+    ) EncodeError!?struct { safety: z3.Z3_ast, prefix: []const z3.Z3_ast } {
         var prefix: std.ArrayList(z3.Z3_ast) = .empty;
-        defer prefix.deinit(self.allocator);
+        errdefer prefix.deinit(self.allocator);
         const premises = if (collect_safety_goal) &prefix else constraints;
         var safety = z3.Z3_mk_true(self.context.ctx);
         try self.context.checkNoError();
-        for (edge.timeline) |event| switch (event.payload) {
+        for (timeline) |event| switch (event.payload) {
             .path_assumption => |path| for (path.formulas) |expression| {
                 try self.appendFormulaPremises(premises, &.{expression.formula});
             },
@@ -349,11 +372,15 @@ pub const Adapter = struct {
             },
             .summary_dependency => |dependency| try self.appendLoopSummaryDependencyPremise(
                 premises,
-                edge,
+                parent_edge orelse return error.InvalidLoopQuery,
                 dependency,
             ),
         };
-        return if (collect_safety_goal) safety else null;
+        if (!collect_safety_goal) {
+            prefix.deinit(self.allocator);
+            return null;
+        }
+        return .{ .safety = safety, .prefix = try prefix.toOwnedSlice(self.allocator) };
     }
 
     fn implyFromPremises(
@@ -415,18 +442,6 @@ pub const Adapter = struct {
             value,
         );
         try self.context.checkNoError();
-    }
-
-    fn appendEmptyPreheaderStoreEqualities(
-        self: *Adapter,
-        constraints: *std.ArrayList(z3.Z3_ast),
-    ) EncodeError!void {
-        const state = self.loop_state orelse return error.InvalidLoopQuery;
-        for (state.stores.items) |store| {
-            const equal = z3.Z3_mk_eq(self.context.ctx, store.current, store.entry);
-            try self.context.checkNoError();
-            try constraints.append(self.allocator, equal);
-        }
     }
 
     fn appendLoopSummaryDependencyPremise(
@@ -875,6 +890,11 @@ pub const Adapter = struct {
 
     fn loopRootTypeRef(self: *Adapter, root: []const u8) EncodeError!obligation.TypeRef {
         const state = self.loop_state orelse return error.InvalidLoopQuery;
+        for (state.summary.preheader_timeline) |event| switch (event.payload) {
+            .storage_read => |read| if (std.mem.eql(u8, read.location.root, root)) return read.location.value_ty,
+            .storage_write => |write| if (std.mem.eql(u8, write.location.root, root)) return write.location.value_ty,
+            else => {},
+        };
         for (state.summary.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
             .storage_read => |read| if (std.mem.eql(u8, read.location.root, root)) return read.location.value_ty,
             .storage_write => |write| if (std.mem.eql(u8, write.location.root, root)) return write.location.value_ty,
@@ -960,8 +980,11 @@ pub const Adapter = struct {
                 .{ domain, shape },
             );
         defer self.allocator.free(entry_name);
-        const current = try self.namedConst(current_name, array_sort);
         const entry = try self.namedConst(entry_name, array_sort);
+        const current = if (state.preheader_starts_at_entry)
+            entry
+        else
+            try self.namedConst(current_name, array_sort);
         const owned_domain = try self.allocator.dupe(u8, domain);
         errdefer self.allocator.free(owned_domain);
         try state.stores.append(self.allocator, .{
@@ -1694,6 +1717,10 @@ pub const Adapter = struct {
 };
 
 fn loopSummaryHasDirectStorageEvents(summary: obligation.LoopSummaryRow) bool {
+    for (summary.preheader_timeline) |event| switch (event.payload) {
+        .storage_read, .storage_write => return true,
+        .path_assumption, .safety_checkpoint, .summary_dependency => {},
+    };
     for (summary.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
         .storage_read, .storage_write => return true,
         .path_assumption, .safety_checkpoint, .summary_dependency => {},
@@ -1959,6 +1986,139 @@ test "canonical LoopVC safety excludes premises after each checkpoint" {
     defer solver.deinit();
     for (constraints.items) |constraint| try solver.assertChecked(constraint);
     try std.testing.expectEqual(z3.Z3_L_TRUE, try solver.checkChecked());
+}
+
+test "canonical LoopVC replays nonempty preheaders with prefix-staged safety" {
+    var z3_ctx = try z3_verification.Z3Context.init(std.testing.allocator);
+    defer z3_ctx.deinit();
+
+    const loop_id: obligation.FreeVarId = .{ .file_id = 1, .pattern_id = 1 };
+    const u256_ty: obligation.TypeRef = .{ .spelling = "u256" };
+    const terms = [_]obligation.Term{
+        .{ .int_lit = .{ .value = "0", .ty = u256_ty } },
+        .{ .bool_lit = true },
+        .{ .int_lit = .{ .value = "7", .ty = u256_ty } },
+        .{ .place_read = .{ .root = "counter", .region = .storage } },
+        .{ .binary = .{ .op = .eq, .lhs = 3, .rhs = 2 } },
+        .{ .bool_lit = false },
+        .{ .variable = .{ .free = .{ .id = loop_id, .name = "i", .ty = u256_ty } } },
+    };
+    const variable: obligation.LoopVariable = .{
+        .index = 0,
+        .id = loop_id,
+        .name = "i",
+        .ty = u256_ty,
+    };
+    const binding: obligation.LoopStepAssignment = .{
+        .variable_index = 0,
+        .target = loop_id,
+        .source_key = "loop:i",
+        .value = .{ .term = 6 },
+    };
+    const true_formulas = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 1 } }};
+    const false_formulas = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 5 } }};
+    const body_timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "body:path",
+        .payload = .{ .path_assumption = .{ .formulas = &true_formulas } },
+    }};
+    const edges = [_]obligation.LoopEdgeRow{
+        .{
+            .id = 0,
+            .structural_key = "edge:backedge",
+            .timeline = &body_timeline,
+            .next_state = &.{binding},
+            .target = .backedge,
+        },
+        .{
+            .id = 1,
+            .structural_key = "edge:exit",
+            .timeline = &body_timeline,
+            .next_state = &.{binding},
+            .target = .successor,
+        },
+    };
+    const write_event: obligation.LoopTimelineEvent = .{
+        .id = 0,
+        .structural_key = "preheader:write",
+        .payload = .{ .storage_write = .{
+            .location = .{ .root = "counter", .value_ty = u256_ty },
+            .value = .{ .formula = .{ .term = 2 } },
+        } },
+    };
+    var summary: obligation.LoopSummaryRow = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "preheaderReplay" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .loop_source_op_id = 1,
+        .loop_kind = .scf_while,
+        .variables = &.{variable},
+        .init_formulas = &.{.{ .term = 0 }},
+        .invariant_formulas = &.{.{ .term = 4 }},
+        .preheader_timeline = &.{write_event},
+        .preheader_projection_complete = true,
+        .edges = &edges,
+        .projection_completeness = .complete,
+        .post_formulas = &.{.{ .term = 4 }},
+    };
+    const query: obligation.VerificationQuery = .{
+        .id = 10,
+        .owner = summary.owner,
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .artifact_policy = .blocks_verified_artifacts,
+        .proof_requirement = .backend_result,
+        .backend = .z3,
+        .kind = .loop_base,
+        .loop_summary_id = 1,
+    };
+
+    var adapter = Adapter.init(&z3_ctx, std.testing.allocator, .{
+        .terms = &terms,
+        .queries = &.{query},
+        .loop_summaries = &.{summary},
+    });
+    var constraints: std.ArrayList(z3.Z3_ast) = .empty;
+    defer constraints.deinit(std.testing.allocator);
+    try adapter.appendLoopQueryConstraints(&constraints, query);
+    var solver = try Solver.init(&z3_ctx, std.testing.allocator);
+    defer solver.deinit();
+    for (constraints.items) |constraint| try solver.assertChecked(constraint);
+    try std.testing.expectEqual(z3.Z3_L_FALSE, try solver.checkChecked());
+
+    const unsafe_preheader = [_]obligation.LoopTimelineEvent{
+        .{
+            .id = 0,
+            .structural_key = "preheader:check",
+            .payload = .{ .safety_checkpoint = .{ .formulas = &false_formulas } },
+        },
+        .{
+            .id = 1,
+            .structural_key = "preheader:later-path",
+            .payload = .{ .path_assumption = .{ .formulas = &false_formulas } },
+        },
+        .{
+            .id = 2,
+            .structural_key = "preheader:write",
+            .payload = write_event.payload,
+        },
+    };
+    summary.preheader_timeline = &unsafe_preheader;
+    var unsafe_adapter = Adapter.init(&z3_ctx, std.testing.allocator, .{
+        .terms = &terms,
+        .queries = &.{query},
+        .loop_summaries = &.{summary},
+    });
+    var unsafe_constraints: std.ArrayList(z3.Z3_ast) = .empty;
+    defer unsafe_constraints.deinit(std.testing.allocator);
+    try unsafe_adapter.appendLoopQueryConstraints(&unsafe_constraints, query);
+    var unsafe_solver = try Solver.init(&z3_ctx, std.testing.allocator);
+    defer unsafe_solver.deinit();
+    for (unsafe_constraints.items) |constraint| try unsafe_solver.assertChecked(constraint);
+    try std.testing.expectEqual(z3.Z3_L_TRUE, try unsafe_solver.checkChecked());
 }
 
 test "canonical LoopVC untouched storage root has a named failure" {
