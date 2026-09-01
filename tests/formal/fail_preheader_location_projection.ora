@@ -1,0 +1,16 @@
+contract FailPreheaderLocationProjection {
+    storage var values: [u256; 2];
+    storage var observed: map<u256, u256>;
+
+    pub fn run(observed_key: u256, value: u256)
+        modifies values
+    {
+        values[0] = value;
+        var current: u256 = 0;
+        while (current < 1)
+            invariant observed[observed_key] == old(observed[observed_key])
+        {
+            current = current +% 1;
+        }
+    }
+}

@@ -492,12 +492,32 @@ const InventoryLoopPath = struct {
 const LoopTimelineInventoryEvent = struct {
     structural_key: []const u8,
     tag: obligation.LoopTimelineEventTag,
+    formula_source: ?[]const u8 = null,
     storage_root: ?[]const u8 = null,
     storage_projections: []const LoopStorageProjectionInventory = &.{},
     storage_result: ?obligation.FreeVarId = null,
     storage_value_source: ?[]const u8 = null,
     storage_ty: ?obligation.TypeRef = null,
     summary_dependency: ?obligation.LoopSummaryDependency = null,
+};
+
+const ProjectedLoopPreheader = struct {
+    operation_keys: []const []const u8 = &.{},
+    timeline: []const obligation.LoopTimelineEvent = &.{},
+    event_inventory: []const LoopTimelineInventoryEvent = &.{},
+    formula_overrides: []const Collector.LoopFormulaOverride = &.{},
+};
+
+const InventoryLoopPreheader = struct {
+    operation_keys: []const []const u8 = &.{},
+    event_inventory: []const LoopTimelineInventoryEvent = &.{},
+};
+
+const CollectedLoopPreheader = struct {
+    timeline: []const obligation.LoopTimelineEvent = &.{},
+    formula_overrides: []const Collector.LoopFormulaOverride = &.{},
+    complete: bool = false,
+    reason: ?obligation.LoopUnsupportedReason = null,
 };
 
 const LoopStorageProjectionInventoryTag = enum {
@@ -873,12 +893,15 @@ const Collector = struct {
         const variables = try self.collectLoopVariables(op, loop_kind);
         try self.bindLoopValues(op, loop_kind, variables);
         const context_variables = try self.collectLoopContextVariables();
+        const preheader = try self.collectLoopPreheader(op, symbol, ordinal);
+        const previous_formula_overrides = self.active_loop_formula_overrides;
+        self.active_loop_formula_overrides = preheader.formula_overrides;
+        defer self.active_loop_formula_overrides = previous_formula_overrides;
         const init_formulas = try self.collectLoopInitFormulas(op, loop_kind, variables, symbol, ordinal);
         const guard_formula = try self.collectLoopGuardFormula(op, loop_kind, variables, symbol, ordinal);
         const invariant_formulas = try self.collectLoopInvariantFormulas(op, loop_kind, symbol, ordinal);
         const body = loopBodyBlock(op, loop_kind);
         const body_facts = collectLoopBodyFacts(body);
-        const preheader_projection_complete = self.preheaderStorageTraceIsProvablyEmpty(op);
 
         if (loop_source_op_id == null) try appendLoopReason(&reasons, self.allocator, .loop_identity_missing);
         for (variables) |variable| {
@@ -909,11 +932,25 @@ const Collector = struct {
         if (body_facts.has_resource_operation) try appendLoopReason(&reasons, self.allocator, .loop_has_resource_operation);
         if (body_facts.has_break_or_continue) try appendLoopReason(&reasons, self.allocator, .loop_has_break_or_continue);
         if (body_facts.has_error_control_flow) try appendLoopReason(&reasons, self.allocator, .loop_has_error_control_flow);
-        if (self.formulasReferenceStoragePlace(invariant_formulas) and
-            !preheader_projection_complete)
-        {
+        const preheader_is_proof_relevant = self.formulasReferenceStoragePlace(init_formulas) or
+            self.formulasReferenceStoragePlace(invariant_formulas);
+        if (preheader_is_proof_relevant and preheader.reason != null) {
+            try appendLoopReason(&reasons, self.allocator, preheader.reason.?);
+        }
+        if (preheader_is_proof_relevant and !preheader.complete) {
             try appendLoopReason(&reasons, self.allocator, .loop_preheader_storage_relation_unsupported);
         }
+
+        // Until canonical Z3 execution is wired, preserve the reviewed empty
+        // prefix representation whenever the complete prefix has no
+        // persistent action.  The full collector still inventories every
+        // operation; only proof-relevant nonempty storage traces enter the
+        // LoopVC digest in this task.
+        const preheader_timeline = if (preheader_is_proof_relevant and
+            loopTimelineHasPersistentStorageEvent(preheader.timeline))
+            preheader.timeline
+        else
+            &.{};
 
         const id = self.next_loop_summary_id;
         self.next_loop_summary_id += 1;
@@ -929,7 +966,8 @@ const Collector = struct {
             .variables = variables,
             .init_formulas = init_formulas,
             .invariant_formulas = invariant_formulas,
-            .preheader_projection_complete = preheader_projection_complete,
+            .preheader_timeline = preheader_timeline,
+            .preheader_projection_complete = preheader.complete,
             .projection_completeness = .unavailable,
             .query_ids = .{},
             .unsupported_reasons = try reasons.toOwnedSlice(self.allocator),
@@ -944,19 +982,411 @@ const Collector = struct {
         });
     }
 
-    fn preheaderStorageTraceIsProvablyEmpty(self: *const Collector, loop_op: mlir.MlirOperation) bool {
-        if (mlir.oraBlockIsNull(self.function_entry_block)) return false;
+    fn collectLoopPreheader(
+        self: *Collector,
+        loop_op: mlir.MlirOperation,
+        symbol: ?[]const u8,
+        ordinal: u32,
+    ) !CollectedLoopPreheader {
+        const terms_start = self.terms.items.len;
+        var retain_projected_terms = false;
+        defer if (!retain_projected_terms) self.discardTermsFrom(terms_start);
+
+        const projected = self.projectLoopPreheader(loop_op, symbol, ordinal) catch |err| {
+            return .{ .reason = preheaderProjectionFailure(err) orelse return err };
+        };
+        const inventory = self.inventoryLoopPreheader(loop_op) catch |err| {
+            return .{ .reason = preheaderProjectionFailure(err) orelse return err };
+        };
+        if (!preheaderProjectionMatchesInventory(projected, inventory)) return .{
+            .reason = .loop_preheader_inventory_mismatch,
+        };
+        retain_projected_terms = loopTimelineHasPersistentStorageEvent(projected.timeline);
+        return .{
+            .timeline = projected.timeline,
+            .formula_overrides = projected.formula_overrides,
+            .complete = true,
+        };
+    }
+
+    fn discardTermsFrom(self: *Collector, start: usize) void {
+        for (start..self.terms.items.len) |index| {
+            _ = self.arithmetic_safety_terms.remove(@intCast(index));
+        }
+        self.terms.shrinkRetainingCapacity(start);
+    }
+
+    fn projectLoopPreheader(
+        self: *Collector,
+        loop_op: mlir.MlirOperation,
+        symbol: ?[]const u8,
+        ordinal: u32,
+    ) !ProjectedLoopPreheader {
+        if (mlir.oraBlockIsNull(self.function_entry_block)) return error.LoopPreheaderControlUnsupported;
+        const draft: LoopSummaryDraft = .{ .symbol = symbol, .ordinal = ordinal };
+        var result: ProjectedLoopPreheader = .{};
         var op = mlir.oraBlockGetFirstOperation(self.function_entry_block);
         while (!mlir.oraOperationIsNull(op) and op.ptr != loop_op.ptr) : (op = mlir.oraOperationGetNextInBlock(op)) {
             const name = operationName(op);
+            const key = self.operationStructuralKey(op, name) catch return error.LoopPreheaderControlUnsupported;
+            result.operation_keys = try appendString(self.allocator, result.operation_keys, key);
+            if (preheaderControlOperationUnsupported(op, name)) return error.LoopPreheaderControlUnsupported;
+
             const effect = mlir.oraOperationGetMemoryEffectKind(op);
             if (effect == mlir.ORA_OPERATION_MEMORY_EFFECT_RECURSIVE or
-                effect == mlir.ORA_OPERATION_MEMORY_EFFECT_UNKNOWN or
-                effect != mlir.ORA_OPERATION_MEMORY_EFFECT_NONE and
-                    !preheaderNonPersistentEffect(name)) return false;
-            if (preheaderInventoryRejects(name)) return false;
+                effect == mlir.ORA_OPERATION_MEMORY_EFFECT_UNKNOWN)
+            {
+                return error.LoopPreheaderEffectUnsupported;
+            }
+            if (effect == mlir.ORA_OPERATION_MEMORY_EFFECT_NONE and
+                !preheaderPureValueOperationSupported(name))
+            {
+                return error.LoopPreheaderValueUnsupported;
+            }
+
+            if (std.mem.eql(u8, name, "ora.sload")) {
+                if (effect != mlir.ORA_OPERATION_MEMORY_EFFECT_READ or
+                    mlir.oraOperationGetNumResults(op) != 1) return error.LoopPreheaderEffectUnsupported;
+                if (isAggregateStorageCarrierLoad(op)) continue;
+                const value = mlir.oraOperationGetResult(op, 0);
+                const location = self.directStorageLocation(op, value) catch
+                    return error.LoopPreheaderLocationUnsupported;
+                const read_id = self.storageReadId(op) catch return error.LoopPreheaderValueUnsupported;
+                const read_term = try self.addTerm(.{ .variable = .{ .free = .{
+                    .id = read_id,
+                    .name = location.root,
+                    .ty = location.value_ty,
+                } } });
+                result.formula_overrides = try appendFormulaOverride(self.allocator, result.formula_overrides, .{
+                    .value_id = @intFromPtr(value.ptr),
+                    .formula = .{ .term = read_term },
+                });
+                result.timeline = try appendLoopTimelineEvent(self.allocator, result.timeline, .{
+                    .storage_read = .{ .result = read_id, .location = location },
+                }, key);
+                result.event_inventory = try appendLoopTimelineInventoryEvent(self.allocator, result.event_inventory, .{
+                    .structural_key = key,
+                    .tag = .storage_read,
+                    .storage_root = location.root,
+                    .storage_result = read_id,
+                    .storage_ty = location.value_ty,
+                });
+                continue;
+            }
+            if (std.mem.eql(u8, name, "ora.sstore")) {
+                if (effect != mlir.ORA_OPERATION_MEMORY_EFFECT_WRITE or
+                    mlir.oraOperationGetNumOperands(op) != 1) return error.LoopPreheaderEffectUnsupported;
+                const value = mlir.oraOperationGetOperand(op, 0);
+                const location = self.directStorageLocation(op, value) catch
+                    return error.LoopPreheaderLocationUnsupported;
+                const formula = self.loopFormulaFromValueWithOverrides(
+                    value,
+                    result.formula_overrides,
+                    name,
+                    symbol,
+                    ordinal,
+                    0,
+                ) catch return error.LoopPreheaderValueUnsupported;
+                if (formula == .origin_value) return error.LoopPreheaderValueUnsupported;
+                const source = self.sourceKeyForValue(value, &.{}) catch
+                    return error.LoopPreheaderValueUnsupported;
+                result.timeline = try appendLoopTimelineEvent(self.allocator, result.timeline, .{
+                    .storage_write = .{
+                        .location = location,
+                        .value = .{
+                            .formula = formula,
+                            .read_results = try self.readResultsForFormula(formula, result.timeline),
+                        },
+                    },
+                }, key);
+                result.event_inventory = try appendLoopTimelineInventoryEvent(self.allocator, result.event_inventory, .{
+                    .structural_key = key,
+                    .tag = .storage_write,
+                    .storage_root = location.root,
+                    .storage_value_source = source,
+                    .storage_ty = location.value_ty,
+                });
+                continue;
+            }
+            if (std.mem.eql(u8, name, "ora.map_get") or std.mem.eql(u8, name, "ora.map_store")) {
+                try self.projectPreheaderMappingEvent(op, name, effect, draft, key, &result);
+                continue;
+            }
+            if ((std.mem.eql(u8, name, "memref.load") and inventoryMemrefLoadTargetsPersistentRoot(op)) or
+                (std.mem.eql(u8, name, "memref.store") and inventoryMemrefStoreTargetsPersistentRoot(op)) or
+                std.mem.startsWith(u8, name, "ora.storage."))
+            {
+                return error.LoopPreheaderLocationUnsupported;
+            }
+            if (preheaderAssumptionOperation(name) or isLoopSafetyOperation(op, name)) {
+                if (mlir.oraOperationGetNumOperands(op) == 0) return error.LoopPreheaderValueUnsupported;
+                const value = mlir.oraOperationGetOperand(op, 0);
+                const formula = self.loopFormulaFromValueWithOverrides(
+                    value,
+                    result.formula_overrides,
+                    name,
+                    symbol,
+                    ordinal,
+                    0,
+                ) catch return error.LoopPreheaderValueUnsupported;
+                if (formula == .origin_value) return error.LoopPreheaderValueUnsupported;
+                const source = self.sourceKeyForValue(value, &.{}) catch
+                    return error.LoopPreheaderValueUnsupported;
+                const payload: obligation.LoopTimelineEventPayload = if (preheaderAssumptionOperation(name))
+                    .{ .path_assumption = .{ .formulas = try self.loopFormulaExprsWithReads(&.{formula}, result.timeline) } }
+                else
+                    .{ .safety_checkpoint = .{ .formulas = try self.loopFormulaExprsWithReads(&.{formula}, result.timeline) } };
+                result.timeline = try appendLoopTimelineEvent(self.allocator, result.timeline, payload, key);
+                result.event_inventory = try appendLoopTimelineInventoryEvent(self.allocator, result.event_inventory, .{
+                    .structural_key = key,
+                    .tag = std.meta.activeTag(payload),
+                    .formula_source = source,
+                });
+                continue;
+            }
+            if (effect != mlir.ORA_OPERATION_MEMORY_EFFECT_NONE) return error.LoopPreheaderEffectUnsupported;
         }
-        return !mlir.oraOperationIsNull(op);
+        if (mlir.oraOperationIsNull(op)) return error.LoopPreheaderControlUnsupported;
+        return result;
+    }
+
+    fn projectPreheaderMappingEvent(
+        self: *Collector,
+        op: mlir.MlirOperation,
+        name: []const u8,
+        effect: mlir.OraOperationMemoryEffectKind,
+        draft: LoopSummaryDraft,
+        key: []const u8,
+        result: *ProjectedLoopPreheader,
+    ) !void {
+        const is_read = std.mem.eql(u8, name, "ora.map_get");
+        const expected_effect: mlir.OraOperationMemoryEffectKind = if (is_read)
+            mlir.ORA_OPERATION_MEMORY_EFFECT_READ
+        else
+            mlir.ORA_OPERATION_MEMORY_EFFECT_WRITE;
+        const expected_operands: usize = if (is_read) 2 else 3;
+        if (effect != expected_effect) {
+            return error.LoopPreheaderEffectUnsupported;
+        }
+        if (mlir.oraOperationGetNumOperands(op) != expected_operands or
+            is_read and mlir.oraOperationGetNumResults(op) != 1)
+        {
+            return error.LoopPreheaderEffectUnsupported;
+        }
+        const value = if (is_read) mlir.oraOperationGetResult(op, 0) else mlir.oraOperationGetOperand(op, 2);
+        if (is_read and isAggregateStorageValue(value)) return;
+        const projected = self.projectedMapStorageLocation(
+            op,
+            mlir.oraOperationGetOperand(op, 0),
+            mlir.oraOperationGetOperand(op, 1),
+            value,
+            result.formula_overrides,
+            &.{},
+            result.timeline,
+            draft,
+        ) catch return error.LoopPreheaderLocationUnsupported;
+        if (projected.location.projections.len != 1 or
+            !self.preheaderMappingProjectionReviewed(projected.location.projections[0]))
+        {
+            return error.LoopPreheaderLocationUnsupported;
+        }
+        if (is_read) {
+            const read_id = self.storageReadId(op) catch return error.LoopPreheaderValueUnsupported;
+            const read_term = try self.addTerm(.{ .variable = .{ .free = .{
+                .id = read_id,
+                .name = projected.location.root,
+                .ty = projected.location.value_ty,
+            } } });
+            result.formula_overrides = try appendFormulaOverride(self.allocator, result.formula_overrides, .{
+                .value_id = @intFromPtr(value.ptr),
+                .formula = .{ .term = read_term },
+            });
+            result.timeline = try appendLoopTimelineEvent(self.allocator, result.timeline, .{
+                .storage_read = .{ .result = read_id, .location = projected.location },
+            }, key);
+            result.event_inventory = try appendLoopTimelineInventoryEvent(self.allocator, result.event_inventory, .{
+                .structural_key = key,
+                .tag = .storage_read,
+                .storage_root = projected.location.root,
+                .storage_projections = projected.inventory,
+                .storage_result = read_id,
+                .storage_ty = projected.location.value_ty,
+            });
+            return;
+        }
+        const formula = self.loopFormulaFromValueWithOverrides(
+            value,
+            result.formula_overrides,
+            name,
+            draft.symbol,
+            draft.ordinal,
+            2,
+        ) catch return error.LoopPreheaderValueUnsupported;
+        if (formula == .origin_value) return error.LoopPreheaderValueUnsupported;
+        const source = self.sourceKeyForValue(value, &.{}) catch return error.LoopPreheaderValueUnsupported;
+        result.timeline = try appendLoopTimelineEvent(self.allocator, result.timeline, .{
+            .storage_write = .{
+                .location = projected.location,
+                .value = .{
+                    .formula = formula,
+                    .read_results = try self.readResultsForFormula(formula, result.timeline),
+                },
+            },
+        }, key);
+        result.event_inventory = try appendLoopTimelineInventoryEvent(self.allocator, result.event_inventory, .{
+            .structural_key = key,
+            .tag = .storage_write,
+            .storage_root = projected.location.root,
+            .storage_projections = projected.inventory,
+            .storage_value_source = source,
+            .storage_ty = projected.location.value_ty,
+        });
+    }
+
+    fn preheaderMappingProjectionReviewed(
+        self: *const Collector,
+        projection: obligation.LoopStorageProjection,
+    ) bool {
+        const key = switch (projection) {
+            .mapping_key => |key| key,
+            .field, .fixed_index => return false,
+        };
+        if (key.value.read_results.len != 0) return false;
+        const term_id = switch (key.value.formula) {
+            .term => |id| id,
+            .origin_value => return false,
+        };
+        if (term_id >= self.terms.items.len) return false;
+        const id = switch (self.terms.items[term_id]) {
+            .variable => |variable| switch (variable) {
+                .free => |free| free.id,
+                .bound => return false,
+            },
+            else => return false,
+        };
+        for (self.function_param_binding_ids) |parameter_id| {
+            if (obligation.freeVarIdEql(parameter_id, id)) return true;
+        }
+        return false;
+    }
+
+    fn inventoryLoopPreheader(
+        self: *Collector,
+        loop_op: mlir.MlirOperation,
+    ) !InventoryLoopPreheader {
+        if (mlir.oraBlockIsNull(self.function_entry_block)) return error.LoopPreheaderControlUnsupported;
+        var result: InventoryLoopPreheader = .{};
+        var op = mlir.oraBlockGetFirstOperation(self.function_entry_block);
+        while (!mlir.oraOperationIsNull(op) and op.ptr != loop_op.ptr) : (op = mlir.oraOperationGetNextInBlock(op)) {
+            const name = operationName(op);
+            const key = self.operationStructuralKey(op, name) catch return error.LoopPreheaderControlUnsupported;
+            result.operation_keys = try appendString(self.allocator, result.operation_keys, key);
+            if (preheaderControlOperationUnsupported(op, name)) return error.LoopPreheaderControlUnsupported;
+
+            const effect = mlir.oraOperationGetMemoryEffectKind(op);
+            if (effect == mlir.ORA_OPERATION_MEMORY_EFFECT_RECURSIVE or
+                effect == mlir.ORA_OPERATION_MEMORY_EFFECT_UNKNOWN)
+            {
+                return error.LoopPreheaderEffectUnsupported;
+            }
+            if (effect == mlir.ORA_OPERATION_MEMORY_EFFECT_NONE and
+                !preheaderPureValueOperationSupported(name))
+            {
+                return error.LoopPreheaderValueUnsupported;
+            }
+
+            var event: ?LoopTimelineInventoryEvent = null;
+            if (std.mem.eql(u8, name, "ora.sload")) {
+                if (effect != mlir.ORA_OPERATION_MEMORY_EFFECT_READ or
+                    mlir.oraOperationGetNumResults(op) != 1) return error.LoopPreheaderEffectUnsupported;
+                if (isAggregateStorageCarrierLoad(op)) continue;
+                const value = mlir.oraOperationGetResult(op, 0);
+                const location = self.directStorageLocation(op, value) catch
+                    return error.LoopPreheaderLocationUnsupported;
+                event = .{
+                    .structural_key = key,
+                    .tag = .storage_read,
+                    .storage_root = location.root,
+                    .storage_result = self.storageReadId(op) catch return error.LoopPreheaderValueUnsupported,
+                    .storage_ty = location.value_ty,
+                };
+            } else if (std.mem.eql(u8, name, "ora.sstore")) {
+                if (effect != mlir.ORA_OPERATION_MEMORY_EFFECT_WRITE or
+                    mlir.oraOperationGetNumOperands(op) != 1) return error.LoopPreheaderEffectUnsupported;
+                const value = mlir.oraOperationGetOperand(op, 0);
+                const location = self.directStorageLocation(op, value) catch
+                    return error.LoopPreheaderLocationUnsupported;
+                event = .{
+                    .structural_key = key,
+                    .tag = .storage_write,
+                    .storage_root = location.root,
+                    .storage_value_source = self.sourceKeyForValue(value, &.{}) catch
+                        return error.LoopPreheaderValueUnsupported,
+                    .storage_ty = location.value_ty,
+                };
+            } else if (std.mem.eql(u8, name, "ora.map_get") or std.mem.eql(u8, name, "ora.map_store")) {
+                const is_read = std.mem.eql(u8, name, "ora.map_get");
+                const expected_effect: mlir.OraOperationMemoryEffectKind = if (is_read)
+                    mlir.ORA_OPERATION_MEMORY_EFFECT_READ
+                else
+                    mlir.ORA_OPERATION_MEMORY_EFFECT_WRITE;
+                const expected_operands: usize = if (is_read) 2 else 3;
+                if (effect != expected_effect or
+                    mlir.oraOperationGetNumOperands(op) != expected_operands or
+                    is_read and mlir.oraOperationGetNumResults(op) != 1)
+                {
+                    return error.LoopPreheaderEffectUnsupported;
+                }
+                const value = if (is_read) mlir.oraOperationGetResult(op, 0) else mlir.oraOperationGetOperand(op, 2);
+                if (is_read and isAggregateStorageValue(value)) continue;
+                const location = self.inventoryMapStorageLocation(
+                    mlir.oraOperationGetOperand(op, 0),
+                    mlir.oraOperationGetOperand(op, 1),
+                    value,
+                    &.{},
+                ) catch return error.LoopPreheaderLocationUnsupported;
+                if (location.projections.len != 1 or location.projections[0].tag != .mapping_key) {
+                    return error.LoopPreheaderLocationUnsupported;
+                }
+                event = .{
+                    .structural_key = key,
+                    .tag = if (is_read) .storage_read else .storage_write,
+                    .storage_root = location.root,
+                    .storage_projections = location.projections,
+                    .storage_result = if (is_read)
+                        self.storageReadId(op) catch return error.LoopPreheaderValueUnsupported
+                    else
+                        null,
+                    .storage_value_source = if (!is_read)
+                        self.sourceKeyForValue(value, &.{}) catch return error.LoopPreheaderValueUnsupported
+                    else
+                        null,
+                    .storage_ty = location.value_ty,
+                };
+            } else if (preheaderAssumptionOperation(name) or isLoopSafetyOperation(op, name)) {
+                if (mlir.oraOperationGetNumOperands(op) == 0) return error.LoopPreheaderValueUnsupported;
+                event = .{
+                    .structural_key = key,
+                    .tag = if (preheaderAssumptionOperation(name)) .path_assumption else .safety_checkpoint,
+                    .formula_source = self.sourceKeyForValue(mlir.oraOperationGetOperand(op, 0), &.{}) catch
+                        return error.LoopPreheaderValueUnsupported,
+                };
+            } else if ((std.mem.eql(u8, name, "memref.load") and inventoryMemrefLoadTargetsPersistentRoot(op)) or
+                (std.mem.eql(u8, name, "memref.store") and inventoryMemrefStoreTargetsPersistentRoot(op)) or
+                std.mem.startsWith(u8, name, "ora.storage."))
+            {
+                return error.LoopPreheaderLocationUnsupported;
+            } else if (effect != mlir.ORA_OPERATION_MEMORY_EFFECT_NONE) {
+                return error.LoopPreheaderEffectUnsupported;
+            }
+            if (event) |row| result.event_inventory = try appendLoopTimelineInventoryEvent(
+                self.allocator,
+                result.event_inventory,
+                row,
+            );
+        }
+        if (mlir.oraOperationIsNull(op)) return error.LoopPreheaderControlUnsupported;
+        return result;
     }
 
     fn formulasReferenceStoragePlace(
@@ -6757,6 +7187,26 @@ fn safetyCheckpointKeysFromRows(
     return keys;
 }
 
+fn preheaderProjectionMatchesInventory(
+    projected: ProjectedLoopPreheader,
+    inventory: InventoryLoopPreheader,
+) bool {
+    if (!stringSlicesEql(projected.operation_keys, inventory.operation_keys) or
+        projected.event_inventory.len != inventory.event_inventory.len or
+        !timelineMatchesInventory(projected.timeline, inventory.event_inventory)) return false;
+    for (projected.event_inventory, inventory.event_inventory) |left, right| {
+        if (!std.mem.eql(u8, left.structural_key, right.structural_key) or left.tag != right.tag or
+            !optionalStringEql(left.formula_source, right.formula_source) or
+            !optionalStringEql(left.storage_root, right.storage_root) or
+            !storageProjectionInventoriesEql(left.storage_projections, right.storage_projections) or
+            !optionalFreeVarEql(left.storage_result, right.storage_result) or
+            !optionalStringEql(left.storage_value_source, right.storage_value_source) or
+            !optionalIntegerTypeEql(left.storage_ty, right.storage_ty) or
+            !optionalDependencyEql(left.summary_dependency, right.summary_dependency)) return false;
+    }
+    return true;
+}
+
 fn compareLoopProjection(
     projected: []const ProjectedLoopEdge,
     inventory: []const InventoryLoopEdge,
@@ -7193,6 +7643,14 @@ fn formulasContainOriginValue(formulas: []const obligation.FormulaRef) bool {
     return false;
 }
 
+fn loopTimelineHasPersistentStorageEvent(timeline: []const obligation.LoopTimelineEvent) bool {
+    for (timeline) |event| switch (event.payload) {
+        .storage_read, .storage_write => return true,
+        .path_assumption, .safety_checkpoint, .summary_dependency => {},
+    };
+    return false;
+}
+
 fn loopTimelineContainsOriginValue(timeline: []const obligation.LoopTimelineEvent) bool {
     for (timeline) |event| switch (event.payload) {
         .path_assumption => |path| for (path.formulas) |formula| {
@@ -7412,28 +7870,34 @@ fn directRootLoopEffectSupported(
     return false;
 }
 
-fn preheaderNonPersistentEffect(name: []const u8) bool {
-    return std.mem.eql(u8, name, "ora.requires") or
-        std.mem.eql(u8, name, "ora.ensures") or
-        std.mem.eql(u8, name, "ora.invariant") or
-        std.mem.eql(u8, name, "ora.assert") or
-        std.mem.eql(u8, name, "ora.assume") or
-        std.mem.eql(u8, name, "ora.refinement_guard") or
-        std.mem.eql(u8, name, "ora.decreases") or std.mem.eql(u8, name, "ora.increases") or
-        std.mem.eql(u8, name, "ora.mload") or std.mem.eql(u8, name, "ora.mload8") or
-        std.mem.eql(u8, name, "ora.mstore") or std.mem.eql(u8, name, "ora.mstore8") or
-        std.mem.eql(u8, name, "ora.tload") or std.mem.eql(u8, name, "ora.tstore");
+fn preheaderControlOperationUnsupported(op: mlir.MlirOperation, name: []const u8) bool {
+    return std.mem.eql(u8, name, "scf.while") or std.mem.eql(u8, name, "scf.for") or
+        std.mem.eql(u8, name, "ora.switch") or std.mem.eql(u8, name, "ora.switch_expr") or
+        std.mem.eql(u8, name, "ora.try_stmt") or std.mem.eql(u8, name, "ora.try_catch") or
+        mlir.oraOperationGetNumRegions(op) != 0 or mlir.mlirOperationGetNumSuccessors(op) != 0;
 }
 
-fn preheaderInventoryRejects(name: []const u8) bool {
-    return std.mem.eql(u8, name, "ora.sload") or std.mem.eql(u8, name, "ora.sstore") or
-        std.mem.eql(u8, name, "ora.map_get") or std.mem.eql(u8, name, "ora.map_store") or
-        std.mem.startsWith(u8, name, "ora.storage.") or
-        std.mem.eql(u8, name, "ora.external_call") or std.mem.eql(u8, name, "func.call") or
-        std.mem.eql(u8, name, "ora.move") or std.mem.eql(u8, name, "ora.create") or
-        std.mem.eql(u8, name, "ora.destroy") or std.mem.eql(u8, name, "ora.havoc") or
-        std.mem.eql(u8, name, "ora.switch") or std.mem.eql(u8, name, "ora.switch_expr") or
-        std.mem.eql(u8, name, "ora.try_stmt") or std.mem.eql(u8, name, "ora.try_catch");
+fn preheaderProjectionFailure(err: anyerror) ?obligation.LoopUnsupportedReason {
+    return switch (err) {
+        error.LoopPreheaderControlUnsupported => .loop_preheader_control_unsupported,
+        error.LoopPreheaderEffectUnsupported => .loop_preheader_effect_unsupported,
+        error.LoopPreheaderValueUnsupported => .loop_preheader_value_unsupported,
+        error.LoopPreheaderLocationUnsupported => .loop_preheader_location_unsupported,
+        else => null,
+    };
+}
+
+fn preheaderAssumptionOperation(name: []const u8) bool {
+    return std.mem.eql(u8, name, "ora.requires") or std.mem.eql(u8, name, "ora.assume");
+}
+
+fn preheaderPureValueOperationSupported(name: []const u8) bool {
+    return std.mem.eql(u8, name, "arith.constant") or std.mem.eql(u8, name, "arith.trunci") or
+        std.mem.eql(u8, name, "ora.old") or isTransparentValueOp(name) or
+        arithmetic_value_op_map.has(name) or arithmetic_div_rem_value_op_map.has(name) or
+        std.mem.eql(u8, name, "arith.xori") or std.mem.eql(u8, name, "arith.andi") or
+        std.mem.eql(u8, name, "arith.ori") or std.mem.eql(u8, name, "arith.cmpi") or
+        std.mem.eql(u8, name, "ora.cmp");
 }
 
 fn isAggregateStorageCarrierLoad(op: mlir.MlirOperation) bool {
@@ -8016,6 +8480,66 @@ test "direct-root timeline inventory compares every storage event field" {
     var wrong_dependency = inventory;
     wrong_dependency.timeline_inventory = &wrong_dependency_rows;
     try std.testing.expectEqual(.effect_mismatch, compareLoopProjection(&.{semantic}, &.{wrong_dependency}));
+}
+
+test "preheader projection completeness compares the complete ordered region" {
+    const ty: obligation.TypeRef = .{ .compiler_type_id = 6 };
+    const write = obligation.LoopTimelineEvent{ .id = 0, .structural_key = "op:1/ora.sstore", .payload = .{
+        .storage_write = .{
+            .location = .{ .root = "counter", .value_ty = ty },
+            .value = .{ .formula = .{ .term = 0 } },
+        },
+    } };
+    const row = LoopTimelineInventoryEvent{
+        .structural_key = write.structural_key,
+        .tag = .storage_write,
+        .storage_root = "counter",
+        .storage_value_source = "function-param:0",
+        .storage_ty = ty,
+    };
+    const projected: ProjectedLoopPreheader = .{
+        .operation_keys = &.{ "op:0/arith.constant", write.structural_key },
+        .timeline = &.{write},
+        .event_inventory = &.{row},
+    };
+    const inventory: InventoryLoopPreheader = .{
+        .operation_keys = projected.operation_keys,
+        .event_inventory = &.{row},
+    };
+    try std.testing.expect(preheaderProjectionMatchesInventory(projected, inventory));
+
+    var missing_operation = inventory;
+    missing_operation.operation_keys = inventory.operation_keys[0..1];
+    try std.testing.expect(!preheaderProjectionMatchesInventory(projected, missing_operation));
+
+    var reordered_operation = inventory;
+    reordered_operation.operation_keys = &.{ write.structural_key, "op:0/arith.constant" };
+    try std.testing.expect(!preheaderProjectionMatchesInventory(projected, reordered_operation));
+
+    var missing_event = inventory;
+    missing_event.event_inventory = &.{};
+    try std.testing.expect(!preheaderProjectionMatchesInventory(projected, missing_event));
+
+    var duplicated_event = inventory;
+    duplicated_event.event_inventory = &.{ row, row };
+    try std.testing.expect(!preheaderProjectionMatchesInventory(projected, duplicated_event));
+
+    var fabricated_row = row;
+    fabricated_row.structural_key = "op:2/ora.sstore";
+    var fabricated = inventory;
+    fabricated.event_inventory = &.{fabricated_row};
+    try std.testing.expect(!preheaderProjectionMatchesInventory(projected, fabricated));
+
+    var wrong_source_row = row;
+    wrong_source_row.storage_value_source = "function-param:1";
+    var wrong_source = inventory;
+    wrong_source.event_inventory = &.{wrong_source_row};
+    try std.testing.expect(!preheaderProjectionMatchesInventory(projected, wrong_source));
+
+    try std.testing.expectEqualStrings(
+        "loop_preheader_inventory_mismatch",
+        @tagName(obligation.LoopUnsupportedReason.loop_preheader_inventory_mismatch),
+    );
 }
 
 fn classifyQuantifierBinder(type_text: []const u8) QuantifierBinderClassification {

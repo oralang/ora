@@ -9972,7 +9972,7 @@ test "external mapping preservation certificate binds canonical Z3 and Lean thro
     try expectNoFormalArtifactsInRepoRoot(allocator, stem);
 }
 
-test "mapping preservation authority rejects nonempty preheaders and missing key inequality" {
+test "mapping preservation without external certificates remains blocked" {
     std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
@@ -9989,12 +9989,12 @@ test "mapping preservation authority rejects nonempty preheaders and missing key
         .{
             .source = "tests/formal/fail_mapping_storage_preheader_same_key.ora",
             .stem = "fail_mapping_storage_preheader_same_key",
-            .diagnostic = "loop_preheader_storage_relation_unsupported",
+            .diagnostic = "Automatic Lean loop proof unavailable",
         },
         .{
             .source = "tests/formal/fail_mapping_storage_preheader_other_key.ora",
             .stem = "fail_mapping_storage_preheader_other_key",
-            .diagnostic = "loop_preheader_storage_relation_unsupported",
+            .diagnostic = "Automatic Lean loop proof unavailable",
         },
         .{
             .source = "tests/formal/fail_mapping_storage_preservation_no_inequality.ora",
@@ -10024,6 +10024,70 @@ test "mapping preservation authority rejects nonempty preheaders and missing key
         defer allocator.free(hex_path);
         try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, hex_path, .{}));
         try expectNoFormalArtifactsInRepoRoot(allocator, case.stem);
+    }
+}
+
+test "canonical preheader projection inventories every operation before the loop" {
+    var result = try collectPackageObligations(
+        testing.allocator,
+        "tests/formal/fail_mapping_storage_preheader_other_key.ora",
+    );
+    defer result.deinit();
+
+    try testing.expectEqual(@as(usize, 1), result.set.loop_summaries.len);
+    const summary = result.set.loop_summaries[0];
+    try testing.expect(summary.preheader_projection_complete);
+    try testing.expectEqual(@as(usize, 3), summary.preheader_timeline.len);
+    try testing.expectEqual(obligation.LoopTimelineEventTag.path_assumption, std.meta.activeTag(
+        summary.preheader_timeline[0].payload,
+    ));
+    try testing.expectEqual(obligation.LoopTimelineEventTag.safety_checkpoint, std.meta.activeTag(
+        summary.preheader_timeline[1].payload,
+    ));
+    try testing.expectEqual(obligation.LoopTimelineEventTag.storage_write, std.meta.activeTag(
+        summary.preheader_timeline[2].payload,
+    ));
+    const write = summary.preheader_timeline[2].payload.storage_write;
+    try testing.expectEqualStrings("values", write.location.root);
+    try testing.expectEqual(@as(usize, 1), write.location.projections.len);
+    try testing.expect(write.location.projections[0] == .mapping_key);
+    try testing.expect(!loopSummaryHasReason(summary, .loop_preheader_storage_relation_unsupported));
+}
+
+test "preheader projection failures are named at the canonical boundary" {
+    const cases = [_]struct {
+        source: []const u8,
+        function: []const u8,
+        reason: obligation.LoopUnsupportedReason,
+    }{
+        .{
+            .source = "tests/formal/fail_preheader_control_projection.ora",
+            .function = "run",
+            .reason = .loop_preheader_control_unsupported,
+        },
+        .{
+            .source = "tests/formal/fail_preheader_effect_projection.ora",
+            .function = "run",
+            .reason = .loop_preheader_effect_unsupported,
+        },
+        .{
+            .source = "tests/formal/fail_preheader_location_projection.ora",
+            .function = "run",
+            .reason = .loop_preheader_location_unsupported,
+        },
+    };
+    for (cases) |case| {
+        var result = try collectPackageObligations(testing.allocator, case.source);
+        defer result.deinit();
+        var found = false;
+        for (result.set.loop_summaries) |summary| {
+            if (summary.owner != .statement or
+                !std.mem.eql(u8, summary.owner.statement.function_name, case.function) or
+                !loopSummaryHasReason(summary, case.reason)) continue;
+            try testing.expect(!summary.preheader_projection_complete);
+            found = true;
+        }
+        try testing.expect(found);
     }
 }
 
