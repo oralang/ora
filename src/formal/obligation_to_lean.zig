@@ -2913,6 +2913,16 @@ test "LoopVC digest covers every certificate-authority component class" {
     const old_domain_digest = try loopVcSha256InDomain(set, 1, "ora-loop-vc-v1\n");
     try std.testing.expect(!std.mem.eql(u8, &baseline, &old_domain_digest));
 
+    var preheader_summary = summary;
+    preheader_summary.preheader_timeline = &.{backedge_timeline[0]};
+    preheader_summary.preheader_projection_complete = true;
+    try std.testing.expect(!std.mem.eql(u8, &baseline, &(try loopVcSha256(.{
+        .terms = &terms,
+        .assumptions = &assumptions,
+        .queries = &queries,
+        .loop_summaries = &.{preheader_summary},
+    }, 1))));
+
     const DigestCheck = struct {
         fn differs(
             expected: [32]u8,

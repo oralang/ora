@@ -65,4 +65,10 @@ def loopTimelineValidationRows : List (String × String) := [
   ("body_safety_missing", "loop_body_safety_missing")
 ]
 
+def loopPreheaderValidationRows : List (String × String) := [
+  ("supported", ""),
+  ("read_identity_forward", "loop_storage_read_identity_forward"),
+  ("dependency_unsupported", "loop_preheader_storage_relation_unsupported")
+]
+
 end Ora.Generated

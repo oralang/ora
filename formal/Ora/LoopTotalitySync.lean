@@ -285,6 +285,39 @@ theorem loop_timeline_validation_matches :
     loopTimelineValidationRows.all timelineValidationRowMatches = true := by
   decide
 
+def preheaderReadEvent : TimelineEventRow :=
+  { timelineReadEvent with id := 0, structuralKey := "preheader/read" }
+def preheaderWriteEvent : TimelineEventRow :=
+  { timelineWriteEvent with id := 1, structuralKey := "preheader/write" }
+def preheaderSafetyEvent : TimelineEventRow :=
+  { timelineSafetyEvent with id := 2, structuralKey := "preheader/check" }
+
+def preheaderTimelineForMutation : String → List TimelineEventRow
+  | "read_identity_forward" => [{ preheaderWriteEvent with id := 0 },
+      { preheaderReadEvent with id := 1 }, preheaderSafetyEvent]
+  | "dependency_unsupported" =>
+      [{ timelineDependencyEvent with id := 0, structuralKey := "preheader/child" },
+       preheaderWriteEvent, preheaderSafetyEvent]
+  | _ => [preheaderReadEvent, preheaderWriteEvent, preheaderSafetyEvent]
+
+def preheaderMutationNames : List String := [
+  "supported", "read_identity_forward", "dependency_unsupported"
+]
+
+def preheaderValidationRowMatches : String × String → Bool
+  | (mutation, compilerReason) =>
+      preheaderMutationNames.contains mutation &&
+        compilerReason == match preheaderTimelineReason? [loopId]
+            (preheaderTimelineForMutation mutation) with
+          | some reason => reason.name
+          | none => ""
+
+theorem loop_preheader_validation_mutations_pinned :
+    loopPreheaderValidationRows.map Prod.fst == preheaderMutationNames := by decide
+
+theorem loop_preheader_validation_matches :
+    loopPreheaderValidationRows.all preheaderValidationRowMatches = true := by decide
+
 def summaryForMutation : String → SummaryRow
   | "supported_u8" => { baseSummary with variables := [{ baseVariable with ty := .compilerTypeId 1 }] }
   | "supported_u16" => { baseSummary with variables := [{ baseVariable with ty := .compilerTypeId 2 }] }

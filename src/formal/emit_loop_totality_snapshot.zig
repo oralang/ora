@@ -101,6 +101,18 @@ const TimelineMutation = enum {
 
 const timeline_cases = std.meta.tags(TimelineMutation);
 
+// Common order, identity, duplicate, location, and read-reference mutations
+// are pinned above against the same `validateTimeline` core used by preheaders.
+// If edge and preheader validation are ever split, duplicate those rows here;
+// these cases cover only the preheader-specific policy differences.
+const PreheaderMutation = enum {
+    supported,
+    read_identity_forward,
+    dependency_unsupported,
+};
+
+const preheader_cases = std.meta.tags(PreheaderMutation);
+
 const ty_u256: obligation.TypeRef = .{
     .compiler_type_id = builtin.lookupBuiltinById(.u256).comptime_type_id,
 };
@@ -492,6 +504,43 @@ fn timelineReason(mutation: TimelineMutation) ?obligation.LoopUnsupportedReason 
     return summary.validationReason();
 }
 
+fn preheaderReason(mutation: PreheaderMutation) ?obligation.LoopUnsupportedReason {
+    const formula = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
+    const read_id: obligation.FreeVarId = .{ .file_id = 10, .pattern_id = 90 };
+    const read_refs = [_]obligation.FreeVarId{read_id};
+    const location: obligation.LoopStorageLocationExpr = .{ .root = "counter", .value_ty = ty_u256 };
+    var events = [_]obligation.LoopTimelineEvent{
+        .{ .id = 0, .structural_key = "preheader/read", .payload = .{ .storage_read = .{ .result = read_id, .location = location } } },
+        .{ .id = 1, .structural_key = "preheader/write", .payload = .{ .storage_write = .{ .location = location, .value = .{ .formula = .{ .term = 0 }, .read_results = &read_refs } } } },
+        .{ .id = 2, .structural_key = "preheader/check", .payload = .{ .safety_checkpoint = .{ .formulas = &formula } } },
+    };
+    switch (mutation) {
+        .supported => {},
+        .read_identity_forward => std.mem.swap(obligation.LoopTimelineEvent, &events[0], &events[1]),
+        .dependency_unsupported => events[0].payload = .{ .summary_dependency = .{
+            .id = 0,
+            .structural_key = "preheader/child",
+            .summary_id = 2,
+            .loop_vc_sha256 = [_]u8{0} ** 32,
+            .write_footprint_complete = true,
+            .target = .successor,
+        } },
+    }
+    for (&events, 0..) |*event, index| event.id = @intCast(index);
+    const variables = [_]obligation.LoopVariable{.{ .index = 0, .id = loop_id, .ty = ty_u256 }};
+    return (obligation.LoopSummaryRow{
+        .id = summary_id,
+        .owner = .{ .function = .{ .name = "run" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .loop_source_op_id = 0,
+        .loop_kind = .scf_while,
+        .variables = &variables,
+        .preheader_timeline = &events,
+    }).preheaderTimelineValidationReason();
+}
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     var stdout_buffer: [4096]u8 = undefined;
@@ -537,6 +586,14 @@ pub fn main(init: std.process.Init) !void {
             try writeLeanString(writer, "");
         }
         try writer.writeAll(if (index + 1 == timeline_cases.len) ")\n" else "),\n");
+    }
+    try writer.writeAll("]\n\ndef loopPreheaderValidationRows : List (String × String) := [\n");
+    for (preheader_cases, 0..) |mutation, index| {
+        try writer.writeAll("  (");
+        try writeLeanString(writer, @tagName(mutation));
+        try writer.writeAll(", ");
+        try writeLeanString(writer, if (preheaderReason(mutation)) |reason| @tagName(reason) else "");
+        try writer.writeAll(if (index + 1 == preheader_cases.len) ")\n" else "),\n");
     }
     try writer.writeAll("]\n\nend Ora.Generated\n");
     try writer.flush();

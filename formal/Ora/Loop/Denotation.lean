@@ -117,6 +117,7 @@ inductive TimelineShapeReason where
   | dependencyOrderInvalid
   | dependencyTargetUnsupported
   | bodySafetyMissing
+  | preheaderUnsupported
   deriving Repr, BEq, DecidableEq
 
 def TimelineShapeReason.name : TimelineShapeReason → String
@@ -135,6 +136,7 @@ def TimelineShapeReason.name : TimelineShapeReason → String
   | .dependencyOrderInvalid => "loop_summary_dependency_order_invalid"
   | .dependencyTargetUnsupported => "loop_summary_dependency_target_unsupported"
   | .bodySafetyMissing => "loop_body_safety_missing"
+  | .preheaderUnsupported => "loop_preheader_storage_relation_unsupported"
 
 def timelineReadIds (events : List TimelineEventRow) : List FreeVarId :=
   events.filterMap fun event => match event.payload with
@@ -194,10 +196,11 @@ def footprintPlaceSupported (place : PlaceRef) : Bool :=
 
 def timelineEventsReason?
     (events : List TimelineEventRow)
-    (variableIds : List FreeVarId) : Option TimelineShapeReason :=
+    (variableIds : List FreeVarId)
+    (requirePath allowDependencies : Bool) : Option TimelineShapeReason :=
   let rec visit : Nat → Nat → Bool → List String → List TimelineEventRow →
       Option TimelineShapeReason
-    | _, _, hasPath, _, [] => if hasPath then none else some .pathMissing
+    | _, _, hasPath, _, [] => if requirePath && !hasPath then some .pathMissing else none
     | expected, dependencyIndex, hasPath, keys, event :: rest =>
         if event.id != expected then some .eventOrderInvalid
         else if event.structuralKey.isEmpty then some .eventIdentityMissing
@@ -232,7 +235,8 @@ def timelineEventsReason?
                   | some reason => some reason
                   | none => next
           | .summaryDependency dependency =>
-              if dependency.id != dependencyIndex then some .dependencyOrderInvalid
+              if !allowDependencies then some .preheaderUnsupported
+              else if dependency.id != dependencyIndex then some .dependencyOrderInvalid
               else if !dependencyTargetSupported dependency.target then
                 some .dependencyTargetUnsupported
               else if !dependency.writeFootprintComplete ||
@@ -240,7 +244,7 @@ def timelineEventsReason?
                 some .childFootprintMissing
               else visit (expected + 1) (dependencyIndex + 1) hasPath
                 (keys ++ [event.structuralKey]) rest
-  if events.isEmpty then some .timelineMissing
+  if events.isEmpty then if requirePath then some .timelineMissing else none
   else visit 0 0 false [] events
 
 structure SafetyCheckpointRow where
@@ -313,7 +317,7 @@ theorem EdgeRow.dependencies_eq_timeline (edge : EdgeRow) :
 def edgeTimelineReason?
     (variableIds : List FreeVarId)
     (edge : EdgeRow) : Option TimelineShapeReason :=
-  match timelineEventsReason? edge.timeline variableIds with
+  match timelineEventsReason? edge.timeline variableIds true true with
   | some reason => some reason
   | none =>
       match edge.nextState.findSome? fun binding =>
@@ -321,6 +325,11 @@ def edgeTimelineReason?
             binding.readResults with
       | some reason => some reason
       | none => none
+
+def preheaderTimelineReason?
+    (variableIds : List FreeVarId)
+    (events : List TimelineEventRow) : Option TimelineShapeReason :=
+  timelineEventsReason? events variableIds false false
 
 def edgeTimelineShapeSupported
     (variableIds : List FreeVarId)
@@ -519,6 +528,38 @@ def formulaDenotable (manifest : Manifest) (env : Env) (formula : FormulaRef) : 
 def valueDenotable (manifest : Manifest) (env : Env) (formula : FormulaRef) : Bool :=
   (formulaValue? manifest env formula).isSome
 
+def storageLocationFormulasDenotable
+    (manifest : Manifest)
+    (env : Env)
+    (location : StorageLocationExprRow) : Bool :=
+  location.projections.all fun projection => match projection with
+    | .field _ => true
+    | .fixedIndex key | .mappingKey key => valueDenotable manifest env key.value.formula
+
+def preheaderTimelineEnv?
+    (manifest : Manifest) : Env → List TimelineEventRow → Option Env
+  | env, [] => some env
+  | env, event :: rest => do
+      let next ← match event.payload with
+        | .pathAssumption path | .safetyCheckpoint path =>
+            if path.formulas.all (fun formula => formulaDenotable manifest env formula.formula)
+              then some env else none
+        | .storageRead read =>
+            if storageLocationFormulasDenotable manifest env read.location then
+              some (env.setFree read.result (valueForTy read.location.valueTy))
+            else none
+        | .storageWrite write =>
+            if storageLocationFormulasDenotable manifest env write.location &&
+                valueDenotable manifest env write.value.formula then some env else none
+        | .summaryDependency _ => none
+      preheaderTimelineEnv? manifest next rest
+
+def preheaderTimelineFormulasDenotable
+    (manifest : Manifest)
+    (row : SummaryRow) : Bool :=
+  let context := row.contextVariables.foldl bindSupportVariable Env.empty
+  (preheaderTimelineEnv? manifest context row.preheaderTimeline).isSome
+
 def safetyCheckpointDenotable
     (manifest : Manifest)
     (rows : List SummaryRow)
@@ -574,11 +615,17 @@ def SummaryRow.baseShapeSupported (row : SummaryRow) : Bool :=
 
 def SummaryRow.shapeSupported (row : SummaryRow) : Bool :=
   row.baseShapeSupported &&
+    (preheaderTimelineReason?
+      ((row.contextVariables ++ row.variables).map VariableRow.id)
+      row.preheaderTimeline).isNone &&
     row.edges.all (edgeShapeSupported row.contextVariables row.variables)
 
 def SummaryRow.shapeSupportedIn (rows : List SummaryRow) (row : SummaryRow) : Bool :=
   summaryIdsUnique rows &&
     row.baseShapeSupported &&
+    (preheaderTimelineReason?
+      ((row.contextVariables ++ row.variables).map VariableRow.id)
+      row.preheaderTimeline).isNone &&
     row.edges.all (fun edge =>
       edgeBaseShapeSupported row.contextVariables row.variables edge &&
         edgeDependenciesSupported rows row edge)
@@ -586,6 +633,7 @@ def SummaryRow.shapeSupportedIn (rows : List SummaryRow) (row : SummaryRow) : Bo
 def SummaryRow.formulasDenotable (manifest : Manifest) (row : SummaryRow) : Bool :=
   let env := row.supportEnv
   row.init.all (valueDenotable manifest env) &&
+    preheaderTimelineFormulasDenotable manifest row &&
     row.invariants.all (formulaDenotable manifest env) &&
     row.edges.all (edgeFormulasDenotable manifest env) &&
     row.post.all (formulaDenotable manifest env)
@@ -597,6 +645,7 @@ def SummaryRow.formulasDenotableIn
   let base := row.supportEnv
   let dependent := row.supportEnvIn rows
   row.init.all (valueDenotable manifest base) &&
+    preheaderTimelineFormulasDenotable manifest row &&
     row.invariants.all (formulaDenotable manifest base) &&
     row.edges.all (edgeControlFormulasDenotable manifest rows row base) &&
     row.edges.all (edgeBindingsDenotable manifest dependent) &&

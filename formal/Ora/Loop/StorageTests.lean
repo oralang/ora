@@ -191,6 +191,20 @@ def preheaderTestEvents : List DirectStorageEvent := [
   })
 ]
 
+example : preheaderTimelineReason? [] preheaderTestRow.preheaderTimeline = none := by decide
+
+example : preheaderTimelineFormulasDenotable preheaderTestManifest preheaderTestRow = true := by decide
+
+example : storageLocationFormulasDenotable preheaderTestManifest
+    (Env.empty.setFree (testReadId 9) (testU256 7)) {
+      root := "values"
+      projections := [.mappingKey {
+        value := { formula := .term 1, readResults := [testReadId 9] }
+        ty := .compilerTypeId 6
+      }]
+      valueTy := .compilerTypeId 6
+    } = true := by decide
+
 example : directStorageTimeline? preheaderTestRow.preheaderTimeline =
     some preheaderTestEvents := by
   rfl

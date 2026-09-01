@@ -195,25 +195,13 @@ pub const ObligationSet = struct {
         for (self.loop_summaries) |summary| {
             for (summary.init_formulas) |formula| try self.validateFormulaRef(formula);
             for (summary.invariant_formulas) |formula| try self.validateFormulaRef(formula);
+            try self.validateLoopTimelineTermReferences(summary.preheader_timeline);
             for (summary.edges) |edge| {
                 for (edge.target_formulas) |formula| try self.validateFormulaRef(formula);
                 for (edge.next_state) |binding| try self.validateFormulaRef(binding.value);
-                for (edge.timeline, 0..) |event, event_index| switch (event.payload) {
-                    .path_assumption => |path| for (path.formulas) |formula| {
-                        try self.validateLoopFormulaExpr(edge, event_index, formula);
-                    },
-                    .safety_checkpoint => |checkpoint| for (checkpoint.formulas) |formula| {
-                        try self.validateLoopFormulaExpr(edge, event_index, formula);
-                    },
-                    .storage_read => |read| try self.validateLoopStorageLocation(edge, event_index, read.location),
-                    .storage_write => |write| {
-                        try self.validateLoopStorageLocation(edge, event_index, write.location);
-                        try self.validateLoopFormulaExpr(edge, event_index, write.value);
-                    },
-                    .summary_dependency => {},
-                };
+                try self.validateLoopTimelineTermReferences(edge.timeline);
                 for (edge.next_state) |binding| {
-                    try self.validateLoopFormulaExpr(edge, edge.timeline.len, .{
+                    try self.validateLoopFormulaExpr(edge.timeline, edge.timeline.len, .{
                         .formula = binding.value,
                         .read_results = binding.read_results,
                     });
@@ -221,6 +209,26 @@ pub const ObligationSet = struct {
             }
             for (summary.post_formulas) |formula| try self.validateFormulaRef(formula);
         }
+    }
+
+    fn validateLoopTimelineTermReferences(
+        self: ObligationSet,
+        events: []const LoopTimelineEvent,
+    ) !void {
+        for (events, 0..) |event, event_index| switch (event.payload) {
+            .path_assumption => |path| for (path.formulas) |formula| {
+                try self.validateLoopFormulaExpr(events, event_index, formula);
+            },
+            .safety_checkpoint => |checkpoint| for (checkpoint.formulas) |formula| {
+                try self.validateLoopFormulaExpr(events, event_index, formula);
+            },
+            .storage_read => |read| try self.validateLoopStorageLocation(events, event_index, read.location),
+            .storage_write => |write| {
+                try self.validateLoopStorageLocation(events, event_index, write.location);
+                try self.validateLoopFormulaExpr(events, event_index, write.value);
+            },
+            .summary_dependency => {},
+        };
     }
 
     fn validateKindTermRefs(self: ObligationSet, kind: Kind) !void {
@@ -248,21 +256,21 @@ pub const ObligationSet = struct {
 
     fn validateLoopStorageLocation(
         self: ObligationSet,
-        edge: LoopEdgeRow,
+        events: []const LoopTimelineEvent,
         event_index: usize,
         location: LoopStorageLocationExpr,
     ) !void {
         for (location.projections) |projection| switch (projection) {
             .field => {},
             .fixed_index, .mapping_key => |key| {
-                try self.validateLoopFormulaExpr(edge, event_index, key.value);
+                try self.validateLoopFormulaExpr(events, event_index, key.value);
             },
         };
     }
 
     fn validateLoopFormulaExpr(
         self: ObligationSet,
-        edge: LoopEdgeRow,
+        events: []const LoopTimelineEvent,
         event_index: usize,
         expression: LoopFormulaExpr,
     ) !void {
@@ -272,7 +280,7 @@ pub const ObligationSet = struct {
                 return error.InvalidTimelineReadReference;
             }
         }
-        for (edge.timeline) |event| switch (event.payload) {
+        for (events) |event| switch (event.payload) {
             .storage_read => |read| {
                 if (!self.formulaReferencesFreeVar(expression.formula, read.result)) continue;
                 if (!freeVarInList(read.result, expression.read_results)) {
@@ -1040,6 +1048,10 @@ pub const LoopSummaryRow = struct {
         return self.unsupported_reasons.len == 0 and self.validationReason() == null;
     }
 
+    pub fn preheaderTimelineValidationReason(self: LoopSummaryRow) ?LoopUnsupportedReason {
+        return validateTimeline(self, self.preheader_timeline, false, false);
+    }
+
     pub fn validationReason(self: LoopSummaryRow) ?LoopUnsupportedReason {
         switch (self.projection_completeness) {
             .complete => {},
@@ -1069,6 +1081,8 @@ pub const LoopSummaryRow = struct {
                 }
             }
         }
+
+        if (self.preheaderTimelineValidationReason()) |reason| return reason;
 
         var has_backedge = false;
         var has_exit = false;
@@ -1347,13 +1361,18 @@ fn formulaEventReason(
     return null;
 }
 
-fn validateLoopTimeline(summary: LoopSummaryRow, edge: LoopEdgeRow) ?LoopUnsupportedReason {
+fn validateTimeline(
+    summary: LoopSummaryRow,
+    events: []const LoopTimelineEvent,
+    require_path: bool,
+    allow_dependencies: bool,
+) ?LoopUnsupportedReason {
     var has_path = false;
     var dependency_index: u32 = 0;
-    for (edge.timeline, 0..) |event, event_index| {
+    for (events, 0..) |event, event_index| {
         if (event.id != event_index) return .loop_timeline_event_order_invalid;
         if (event.structural_key.len == 0) return .loop_timeline_event_identity_missing;
-        for (edge.timeline[0..event_index]) |previous| {
+        for (events[0..event_index]) |previous| {
             if (std.mem.eql(u8, previous.structural_key, event.structural_key)) {
                 return .loop_timeline_event_identity_duplicate;
             }
@@ -1361,24 +1380,24 @@ fn validateLoopTimeline(summary: LoopSummaryRow, edge: LoopEdgeRow) ?LoopUnsuppo
         switch (event.payload) {
             .path_assumption => |path| {
                 has_path = true;
-                if (formulaEventReason(edge.timeline, event_index, path.formulas, .loop_timeline_path_missing)) |reason| {
+                if (formulaEventReason(events, event_index, path.formulas, .loop_timeline_path_missing)) |reason| {
                     return reason;
                 }
             },
             .safety_checkpoint => |checkpoint| {
-                if (formulaEventReason(edge.timeline, event_index, checkpoint.formulas, .loop_body_safety_missing)) |reason| {
+                if (formulaEventReason(events, event_index, checkpoint.formulas, .loop_body_safety_missing)) |reason| {
                     return reason;
                 }
             },
             .storage_read => |read| {
-                if (storageLocationReason(edge.timeline, event_index, read.location)) |reason| return reason;
+                if (storageLocationReason(events, event_index, read.location)) |reason| return reason;
                 for (summary.context_variables) |variable| if (variable.id) |id| {
                     if (freeVarIdEql(id, read.result)) return .loop_storage_read_identity_duplicate;
                 };
                 for (summary.variables) |variable| if (variable.id) |id| {
                     if (freeVarIdEql(id, read.result)) return .loop_storage_read_identity_duplicate;
                 };
-                for (edge.timeline[0..event_index]) |previous| switch (previous.payload) {
+                for (events[0..event_index]) |previous| switch (previous.payload) {
                     .storage_read => |prior_read| if (freeVarIdEql(prior_read.result, read.result)) {
                         return .loop_storage_read_identity_duplicate;
                     },
@@ -1386,12 +1405,13 @@ fn validateLoopTimeline(summary: LoopSummaryRow, edge: LoopEdgeRow) ?LoopUnsuppo
                 };
             },
             .storage_write => |write| {
-                if (storageLocationReason(edge.timeline, event_index, write.location)) |reason| return reason;
-                if (timelineReadReferencesReason(edge.timeline, event_index, write.value.read_results)) |reason| {
+                if (storageLocationReason(events, event_index, write.location)) |reason| return reason;
+                if (timelineReadReferencesReason(events, event_index, write.value.read_results)) |reason| {
                     return reason;
                 }
             },
             .summary_dependency => |dependency| {
+                if (!allow_dependencies) return .loop_preheader_storage_relation_unsupported;
                 if (dependency.id != dependency_index) return .loop_summary_dependency_order_invalid;
                 dependency_index += 1;
                 if (!dependency.targetSupported()) return .loop_summary_dependency_target_unsupported;
@@ -1404,7 +1424,12 @@ fn validateLoopTimeline(summary: LoopSummaryRow, edge: LoopEdgeRow) ?LoopUnsuppo
             },
         }
     }
-    if (!has_path) return .loop_timeline_path_missing;
+    if (require_path and !has_path) return .loop_timeline_path_missing;
+    return null;
+}
+
+fn validateLoopTimeline(summary: LoopSummaryRow, edge: LoopEdgeRow) ?LoopUnsupportedReason {
+    if (validateTimeline(summary, edge.timeline, true, true)) |reason| return reason;
     for (edge.next_state) |binding| {
         if (timelineReadReferencesReason(edge.timeline, edge.timeline.len, binding.read_results)) |reason| {
             return reason;
@@ -1887,6 +1912,37 @@ test "ordered loop timeline schema rejects identity order and read-reference mut
     invalid_summary.edges = &edges;
     const invalid_set: ObligationSet = .{ .terms = &terms, .loop_summaries = &.{invalid_summary} };
     try std.testing.expectError(error.InvalidTimelineReadReference, invalid_set.validateTermReferences());
+
+    var preheader_read = read_event;
+    preheader_read.id = 0;
+    preheader_read.structural_key = "preheader/read";
+    var preheader_write = timeline[2];
+    preheader_write.id = 1;
+    preheader_write.structural_key = "preheader/write";
+    const preheader = [_]LoopTimelineEvent{ preheader_read, preheader_write };
+    summary.preheader_timeline = &preheader;
+    edges[0].timeline = &timeline;
+    edges[0].next_state = &bindings;
+    try std.testing.expectEqual(@as(?LoopUnsupportedReason, null), summary.validationReason());
+    try (ObligationSet{ .terms = &terms, .loop_summaries = &.{summary} }).validateTermReferences();
+
+    const forward_preheader = [_]LoopTimelineEvent{
+        .{ .id = 0, .structural_key = preheader_write.structural_key, .payload = preheader_write.payload },
+        .{ .id = 1, .structural_key = preheader_read.structural_key, .payload = preheader_read.payload },
+    };
+    summary.preheader_timeline = &forward_preheader;
+    try std.testing.expectEqual(
+        LoopUnsupportedReason.loop_storage_read_identity_forward,
+        summary.preheaderTimelineValidationReason().?,
+    );
+
+    preheader_write.payload.storage_write.value.read_results = &.{};
+    const undeclared_preheader = [_]LoopTimelineEvent{ preheader_read, preheader_write };
+    summary.preheader_timeline = &undeclared_preheader;
+    try std.testing.expectError(
+        error.InvalidTimelineReadReference,
+        (ObligationSet{ .terms = &terms, .loop_summaries = &.{summary} }).validateTermReferences(),
+    );
 }
 
 pub const LoopQueryIds = struct {
