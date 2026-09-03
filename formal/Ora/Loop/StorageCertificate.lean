@@ -67,6 +67,32 @@ def directStorageResolvePlace
         pure { root := place.root, projections := [.mappingKey (← lookup id)] }
     | _ => none
 
+theorem directStorageMappingLocations_ne
+    (root : String) (readKey writeKey : Value)
+    (hNe : readKey ≠ writeKey) :
+    ({ root := root, projections := [.mappingKey readKey] } : StorageLocation) ≠
+      { root := root, projections := [.mappingKey writeKey] } := by
+  intro hEqual
+  exact hNe (StorageProjection.mappingKey.inj
+    (List.cons.inj (StorageLocation.mk.inj hEqual).2).1)
+
+/-- Once exact projection coverage resolves every timeline write into the
+checked frame, frame disjointness is sufficient for store preservation. -/
+theorem TimelineExec.preserves_outside_resolved_frame
+    (semantics : TimelineSemantics FormulaExpr LocationExpr ValueExpr Child)
+    (events : List (EventOf FormulaExpr LocationExpr ValueExpr Child))
+    (initial : StorageActionState)
+    (result : TimelineResult)
+    (frame : List StorageLocation)
+    (observed : StorageLocation)
+    (hExec : TimelineExec semantics events initial result)
+    (hCovered : ∀ written, result.writes written → written ∈ frame)
+    (hOutside : ∀ written ∈ frame, observed ≠ written) :
+    result.state.loop.storage observed = initial.loop.storage observed := by
+  apply TimelineExec.preserves_outside semantics events initial result observed hExec
+  intro hWritten
+  exact hOutside observed (hCovered observed hWritten) rfl
+
 def storageStateFromEnv (env : Env) (entry : Bool) : StorageState :=
   fun location =>
     let place : PlaceRef := { root := location.root, region := .storage }

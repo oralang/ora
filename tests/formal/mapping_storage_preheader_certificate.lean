@@ -32,40 +32,6 @@ def witness : Env :=
     |>.setFree { file_id := 0, pattern_id := 1 } one)
     |>.setFree { file_id := 0, pattern_id := 2 } zero
 
-theorem bindStateLookupFreeOfNotMem
-    (env bound : Env)
-    (variables : List VariableRow)
-    (state : List Ora.Integer.Value)
-    (id : FreeVarId)
-    (hFresh : id ∉ variables.map VariableRow.id)
-    (hBind : bindState? env variables state = some bound) :
-    bound.lookupFree id = env.lookupFree id := by
-  induction variables generalizing env bound state with
-  | nil =>
-      cases state with
-      | nil =>
-          simp only [bindState?, Option.some.injEq] at hBind
-          subst bound
-          rfl
-      | cons _ _ => simp [bindState?] at hBind
-  | cons row rest ih =>
-      cases state with
-      | nil => simp [bindState?] at hBind
-      | cons value values =>
-          simp only [List.map_cons, List.mem_cons, not_or] at hFresh
-          simp only [bindState?] at hBind
-          split at hBind
-          · rw [ih (env := env.setFree row.id (.integer value))
-              (bound := bound) (state := values) hFresh.2 hBind]
-            unfold Env.setFree Env.lookupFree
-            simp only [lookupFreeBinding]
-            have hDifferent : (row.id == id) = false := by
-              apply Bool.eq_false_iff.mpr
-              intro hEqual
-              exact hFresh.1 (beq_iff_eq.mp hEqual).symm
-            simp only [hDifferent, Bool.false_eq_true, if_false]
-          · cases hBind
-
 theorem restrictStoragePreheaderLookup
     (bindings : List (FreeVarId × Value))
     (variables : List VariableRow)
@@ -93,52 +59,6 @@ theorem restrictStoragePreheaderLookup
         have hKeepFalse : variables.any (fun row => row.id == binding.1) =
             false := Bool.eq_false_iff.mpr hKeep
         simp only [hKeepFalse, Bool.false_eq_true, if_false, hDifferent, ih]
-
-theorem storageReadWritesNone
-    (semantics : StorageActionSemantics LocationExpr ValueExpr)
-    (id : StorageReadId)
-    (location : LocationExpr)
-    (initial : StorageActionState)
-    (result : StorageActionResult)
-    (hExec : execStorageAction? semantics (.read id location) initial =
-      some result) :
-    result.writeTrace = [] := by
-  simp only [execStorageAction?, Option.bind_eq_bind,
-    Option.bind_eq_some] at hExec
-  rcases hExec with ⟨resolved, _, hExec⟩
-  split at hExec
-  · simp only [Option.none_bind] at hExec
-    cases hExec
-  · simp only [Option.pure_def, Option.some_bind,
-      StorageActionState.bindRead?] at hExec
-    split at hExec
-    · simp only [Option.none_bind] at hExec
-      cases hExec
-    · simp only [Option.some_bind, Option.some.injEq] at hExec
-      subst result
-      rfl
-
-theorem storageWriteTrace
-    (semantics : StorageActionSemantics LocationExpr ValueExpr)
-    (location : LocationExpr)
-    (value : ValueExpr)
-    (initial : StorageActionState)
-    (result : StorageActionResult)
-    (hExec : execStorageAction? semantics (.write location value) initial =
-      some result) :
-    ∃ resolved,
-      semantics.evalLocation location initial = some resolved ∧
-        result.writeTrace = [resolved] := by
-  simp only [execStorageAction?, Option.bind_eq_bind,
-    Option.bind_eq_some] at hExec
-  rcases hExec with ⟨resolved, hResolved, stored, _, hExec⟩
-  split at hExec
-  · simp only [Option.none_bind] at hExec
-    cases hExec
-  · simp only [Option.pure_def, Option.some_bind,
-      Option.some.injEq] at hExec
-    subst result
-    exact ⟨resolved, hResolved, rfl⟩
 
 theorem evalValueIntegerLiteral
     (context : StorageFormulaContext)
@@ -200,7 +120,7 @@ theorem mappingInvariantIff
     simp [emittedLoopSummary_1]
   have hLocalObserved : localsBound.lookupFree
       { file_id := 0, pattern_id := 1 } = some (.integer observedKey) := by
-    rw [bindStateLookupFreeOfNotMem env localsBound
+    rw [bindState_lookupFree_of_not_mem env localsBound
       emittedLoopSummary_1.variables state.locals _ hFresh hLocalsBound]
     exact hObserved
   let actionState : StorageActionState := {
@@ -299,7 +219,7 @@ theorem preheaderPreservesObserved
         cases hCheck
         cases hWriteEvent with
         | @storage _ _ writeResult hWriteAction =>
-          rcases storageWriteTrace _ _ _ _ _ hWriteAction with
+          rcases execStorageWrite_writeTrace_singleton _ _ _ _ _ hWriteAction with
             ⟨writtenLocation, hLocation, hTrace⟩
           simp [TimelineResult.comp, hTrace] at hWritten
           let context := directStoragePreheaderContext emittedManifest env
@@ -736,8 +656,10 @@ theorem discharge_q11 : emittedQuery_11 := by
                     | @storage _ _ read0Result hRead0 =>
                       cases h2 with
                       | @storage _ _ read1Result hRead1 =>
-                        have hRead0Empty := storageReadWritesNone _ _ _ _ _ hRead0
-                        have hRead1Empty := storageReadWritesNone _ _ _ _ _ hRead1
+                        have hRead0Empty :=
+                          execStorageRead_writeTrace_nil _ _ _ _ _ hRead0
+                        have hRead1Empty :=
+                          execStorageRead_writeTrace_nil _ _ _ _ _ hRead1
                         simp [TimelineResult.comp, hRead0Empty,
                           hRead1Empty] at hWritten
             have hCurrentSemantic :=

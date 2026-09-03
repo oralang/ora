@@ -376,6 +376,52 @@ theorem execStorageRead_appends_read_id
       simp only [List.map_append, List.map_singleton,
         StorageReadBinding.id]
 
+theorem execStorageRead_writeTrace_nil
+    (semantics : StorageActionSemantics LocationExpr ValueExpr)
+    (id : StorageReadId)
+    (location : LocationExpr)
+    (initial : StorageActionState)
+    (result : StorageActionResult)
+    (hExec : execStorageAction? semantics (.read id location) initial =
+      some result) :
+    result.writeTrace = [] := by
+  simp only [execStorageAction?, Option.bind_eq_bind,
+    Option.bind_eq_some] at hExec
+  rcases hExec with ⟨resolved, _, hExec⟩
+  split at hExec
+  · simp only [Option.none_bind] at hExec
+    cases hExec
+  · simp only [Option.pure_def, Option.some_bind,
+      StorageActionState.bindRead?] at hExec
+    split at hExec
+    · simp only [Option.none_bind] at hExec
+      cases hExec
+    · simp only [Option.some_bind, Option.some.injEq] at hExec
+      subst result
+      rfl
+
+theorem execStorageWrite_writeTrace_singleton
+    (semantics : StorageActionSemantics LocationExpr ValueExpr)
+    (location : LocationExpr)
+    (value : ValueExpr)
+    (initial : StorageActionState)
+    (result : StorageActionResult)
+    (hExec : execStorageAction? semantics (.write location value) initial =
+      some result) :
+    ∃ resolved,
+      semantics.evalLocation location initial = some resolved ∧
+        result.writeTrace = [resolved] := by
+  simp only [execStorageAction?, Option.bind_eq_bind,
+    Option.bind_eq_some] at hExec
+  rcases hExec with ⟨resolved, hResolved, stored, _, hExec⟩
+  split at hExec
+  · simp only [Option.none_bind] at hExec
+    cases hExec
+  · simp only [Option.pure_def, Option.some_bind,
+      Option.some.injEq] at hExec
+    subst result
+    exact ⟨resolved, hResolved, rfl⟩
+
 theorem execStorageActions_preserves_locals
     (semantics : StorageActionSemantics LocationExpr ValueExpr)
     (actions : List (StorageAction LocationExpr ValueExpr))

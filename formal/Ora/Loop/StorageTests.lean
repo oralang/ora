@@ -466,24 +466,44 @@ example
     (hExec : TimelineExec resolvedTimelineSemantics
       [.storage (.write written value)] initial result) :
     result.state.loop.storage observed = initial.loop.storage observed := by
-  apply TimelineExec.preserves_outside _ _ _ _ _ hExec
-  intro hWritten
-  cases hExec with
-  | cons hEvent hRest =>
-      cases hRest
-      cases hEvent with
-      | storage hAction =>
-          simp [resolvedTimelineSemantics, resolvedStorageActionSemantics,
-            execStorageAction?] at hAction
-          subst_vars
-          simp [TimelineResult.comp] at hWritten
-          exact hNe hWritten
+  apply TimelineExec.preserves_outside_resolved_frame _ _ _ _ [written]
+    observed hExec
+  · intro candidate hWritten
+    cases hExec with
+    | cons hEvent hRest =>
+        cases hRest
+        cases hEvent with
+        | storage hAction =>
+            simp [resolvedTimelineSemantics, resolvedStorageActionSemantics,
+              execStorageAction?] at hAction
+            subst_vars
+            simpa [TimelineResult.comp] using hWritten
+  · intro candidate hMember
+    simp only [List.mem_singleton] at hMember
+    subst candidate
+    exact hNe
 
 example (root : String) (i j : Value) (hNe : i ≠ j) :
     mappingTestLocation root i ≠ mappingTestLocation root j := by
-  intro hEqual
-  exact hNe (StorageProjection.mappingKey.inj
-    (List.cons.inj (StorageLocation.mk.inj hEqual).2).1)
+  exact directStorageMappingLocations_ne root i j hNe
+
+example
+    (initial : StorageActionState)
+    (result : TimelineResult)
+    (first second observed : StorageLocation)
+    (events : List (TimelineEvent Bool StorageLocation Value PEmpty))
+    (hExec : TimelineExec resolvedTimelineSemantics events initial result)
+    (hCovered : ∀ written, result.writes written → written ∈ [first, second])
+    (hFirst : observed ≠ first)
+    (hSecond : observed ≠ second) :
+    result.state.loop.storage observed = initial.loop.storage observed := by
+  apply TimelineExec.preserves_outside_resolved_frame _ _ _ _ [first, second]
+    observed hExec hCovered
+  intro written hMember
+  simp only [List.mem_cons, List.not_mem_nil, or_false] at hMember
+  rcases hMember with rfl | rfl
+  · exact hFirst
+  · exact hSecond
 
 example (root : String) (i j : Value) (hNe : i ≠ j) :
     fixedTestLocation root i ≠ fixedTestLocation root j := by

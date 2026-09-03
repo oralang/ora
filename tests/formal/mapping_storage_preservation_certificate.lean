@@ -34,86 +34,6 @@ attribute [local ora_loop_data]
   emitted_term_32_lookup emitted_term_33_lookup emitted_term_34_lookup
   emitted_term_35_lookup
 
-theorem storageReadWritesNone
-    (semantics : Ora.Loop.StorageActionSemantics LocationExpr ValueExpr)
-    (id : Ora.Loop.StorageReadId)
-    (location : LocationExpr)
-    (initial : Ora.Loop.StorageActionState)
-    (result : Ora.Loop.StorageActionResult)
-    (hExec : Ora.Loop.execStorageAction? semantics (.read id location) initial =
-      some result) :
-    result.writeTrace = [] := by
-  simp only [Ora.Loop.execStorageAction?, Option.bind_eq_bind,
-    Option.bind_eq_some] at hExec
-  rcases hExec with ⟨resolved, _, hExec⟩
-  split at hExec
-  · simp only [Option.none_bind] at hExec
-    cases hExec
-  · simp only [Option.pure_def, Option.some_bind,
-      Ora.Loop.StorageActionState.bindRead?] at hExec
-    split at hExec
-    · simp only [Option.none_bind] at hExec
-      cases hExec
-    · simp only [Option.some_bind, Option.some.injEq] at hExec
-      subst result
-      rfl
-
-theorem storageWriteTrace
-    (semantics : Ora.Loop.StorageActionSemantics LocationExpr ValueExpr)
-    (location : LocationExpr)
-    (value : ValueExpr)
-    (initial : Ora.Loop.StorageActionState)
-    (result : Ora.Loop.StorageActionResult)
-    (hExec : Ora.Loop.execStorageAction? semantics (.write location value) initial =
-      some result) :
-    ∃ resolved,
-      semantics.evalLocation location initial = some resolved ∧
-        result.writeTrace = [resolved] := by
-  simp only [Ora.Loop.execStorageAction?, Option.bind_eq_bind,
-    Option.bind_eq_some] at hExec
-  rcases hExec with ⟨resolved, hResolved, stored, _, hExec⟩
-  split at hExec
-  · simp only [Option.none_bind] at hExec
-    cases hExec
-  · simp only [Option.pure_def, Option.some_bind,
-      Option.some.injEq] at hExec
-    subst result
-    exact ⟨resolved, hResolved, rfl⟩
-
-theorem bindStateLookupFreeOfNotMem
-    (env bound : Env)
-    (variables : List Ora.Loop.VariableRow)
-    (state : List Ora.Integer.Value)
-    (id : FreeVarId)
-    (hFresh : id ∉ variables.map Ora.Loop.VariableRow.id)
-    (hBind : Ora.Loop.bindState? env variables state = some bound) :
-    bound.lookupFree id = env.lookupFree id := by
-  induction variables generalizing env bound state with
-  | nil =>
-      cases state with
-      | nil =>
-          simp only [Ora.Loop.bindState?, Option.some.injEq] at hBind
-          subst bound
-          rfl
-      | cons _ _ => simp [Ora.Loop.bindState?] at hBind
-  | cons row rest ih =>
-      cases state with
-      | nil => simp [Ora.Loop.bindState?] at hBind
-      | cons value values =>
-          simp only [List.map_cons, List.mem_cons, not_or] at hFresh
-          simp only [Ora.Loop.bindState?] at hBind
-          split at hBind
-          · rw [ih (env := env.setFree row.id (.integer value))
-              (bound := bound) (state := values) hFresh.2 hBind]
-            unfold Env.setFree Env.lookupFree
-            simp only [lookupFreeBinding]
-            have hDifferent : (row.id == id) = false := by
-              apply Bool.eq_false_iff.mpr
-              intro hEqual
-              exact hFresh.1 (beq_iff_eq.mp hEqual).symm
-            simp only [hDifferent, Bool.false_eq_true, if_false]
-          · cases hBind
-
 theorem discharge_q9 : emittedQuery_9 := by
   unfold emittedQuery_9 Ora.Loop.directStorageLoopProofAuthorizationFromAssumptions
   have hSupported : emittedLoopSummary_1.supported emittedManifest = true := by decide
@@ -282,12 +202,17 @@ theorem discharge_q9 : emittedQuery_9 := by
               root := "values"
               projections := [.mappingKey (.integer observedKey)]
             }
+            let writeLocation : Ora.Loop.StorageLocation := {
+              root := "values"
+              projections := [.mappingKey (.integer writeKey)]
+            }
             have hPreserved : result.state.loop.storage observedLocation =
                 current.storage observedLocation := by
-              apply Ora.Loop.TimelineExec.preserves_outside _ _ _ _ _ hExec
-              intro hWritten
-              cases hExec with
-              | cons h0 hTail0 =>
+              apply Ora.Loop.TimelineExec.preserves_outside_resolved_frame
+                _ _ _ _ [writeLocation] observedLocation hExec
+              · intro written hWritten
+                cases hExec with
+                | cons h0 hTail0 =>
                   cases hTail0 with
                   | cons h1 hTail1 =>
                       cases hTail1 with
@@ -304,12 +229,15 @@ theorem discharge_q9 : emittedQuery_9 := by
                                           cases h3 with
                                           | @storage action2 state2 writeResult hWrite =>
                                               have hRead0Empty :=
-                                                storageReadWritesNone _ _ _ _ _ hRead0
+                                                Ora.Loop.execStorageRead_writeTrace_nil
+                                                  _ _ _ _ _ hRead0
                                               have hRead1Empty :=
-                                                storageReadWritesNone _ _ _ _ _ hRead1
+                                                Ora.Loop.execStorageRead_writeTrace_nil
+                                                  _ _ _ _ _ hRead1
                                               simp [Ora.Loop.TimelineResult.comp,
                                                 hRead0Empty, hRead1Empty] at hWritten
-                                              rcases storageWriteTrace _ _ _ _ _ hWrite with
+                                              rcases Ora.Loop.execStorageWrite_writeTrace_singleton
+                                                  _ _ _ _ _ hWrite with
                                                 ⟨writtenLocation, hLocation, hWriteTrace⟩
                                               rw [hWriteTrace] at hWritten
                                               simp only [List.mem_singleton] at hWritten
@@ -349,7 +277,7 @@ theorem discharge_q9 : emittedQuery_9 := by
                                                     hBoundState] at hLocation
                                               | some locationBound =>
                                                   have hBoundLookup :=
-                                                    bindStateLookupFreeOfNotMem
+                                                    Ora.Loop.bindState_lookupFree_of_not_mem
                                                       env locationBound variables
                                                       read1Result.state.loop.locals
                                                       { file_id := 0, pattern_id := 0 }
@@ -417,10 +345,13 @@ theorem discharge_q9 : emittedQuery_9 := by
                                                     beq_self_eq_true, if_pos,
                                                     if_false] at hLocation
                                                   cases hLocation
-                                                  exact hKeysNe
-                                                    (Ora.Loop.StorageProjection.mappingKey.inj
-                                                      (List.cons.inj
-                                                        (Ora.Loop.StorageLocation.mk.inj hWritten).2).1).symm
+                                                  simp only [List.mem_singleton]
+                                                  exact hWritten
+              · intro written hMember
+                simp only [List.mem_singleton] at hMember
+                subst written
+                exact Ora.Loop.directStorageMappingLocations_ne "values"
+                  (.integer observedKey) (.integer writeKey) hKeysNe.symm
             constructor
             · exact hReady
             · intro formula hFormula
@@ -440,11 +371,11 @@ theorem discharge_q9 : emittedQuery_9 := by
                   { file_id := 0, pattern_id := 1 } ∉
                     variables.map Ora.Loop.VariableRow.id := by
                 simp [variables, emittedLoopSummary_1]
-              have hCurrentObserved := bindStateLookupFreeOfNotMem
+              have hCurrentObserved := Ora.Loop.bindState_lookupFree_of_not_mem
                 env currentBound variables current.locals
                 { file_id := 0, pattern_id := 1 }
                 hObservedFresh hCurrentBound
-              have hFollowingObserved := bindStateLookupFreeOfNotMem
+              have hFollowingObserved := Ora.Loop.bindState_lookupFree_of_not_mem
                 env followingBound variables locals
                 { file_id := 0, pattern_id := 1 }
                 hObservedFresh hFollowingBound

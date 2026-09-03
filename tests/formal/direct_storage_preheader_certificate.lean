@@ -20,30 +20,6 @@ def witness : Env := {
   placeValue := fun _ => zero
 }
 
-theorem storageReadWritesNone
-    (semantics : Ora.Loop.StorageActionSemantics LocationExpr ValueExpr)
-    (id : Ora.Loop.StorageReadId)
-    (location : LocationExpr)
-    (initial : Ora.Loop.StorageActionState)
-    (result : Ora.Loop.StorageActionResult)
-    (hExec : Ora.Loop.execStorageAction? semantics (.read id location) initial =
-      some result) :
-    result.writeTrace = [] := by
-  simp only [Ora.Loop.execStorageAction?, Option.bind_eq_bind,
-    Option.bind_eq_some] at hExec
-  rcases hExec with ⟨resolved, _, hExec⟩
-  split at hExec
-  · simp only [Option.none_bind] at hExec
-    cases hExec
-  · simp only [Option.pure_def, Option.some_bind,
-      Ora.Loop.StorageActionState.bindRead?] at hExec
-    split at hExec
-    · simp only [Option.none_bind] at hExec
-      cases hExec
-    · simp only [Option.some_bind, Option.some.injEq] at hExec
-      subst result
-      rfl
-
 theorem evalValueIntegerLiteral
     (context : StorageFormulaContext)
     (state : StorageActionState)
@@ -533,10 +509,12 @@ theorem discharge_q10 : emittedQuery_10 := by
                               | @storage action0 state0 read0Result hRead0 =>
                                   cases h2 with
                                   | @storage action1 state1 read1Result hRead1 =>
-                                      have hRead0Empty := storageReadWritesNone
-                                        _ _ _ _ _ hRead0
-                                      have hRead1Empty := storageReadWritesNone
-                                        _ _ _ _ _ hRead1
+                                      have hRead0Empty :=
+                                        Ora.Loop.execStorageRead_writeTrace_nil
+                                          _ _ _ _ _ hRead0
+                                      have hRead1Empty :=
+                                        Ora.Loop.execStorageRead_writeTrace_nil
+                                          _ _ _ _ _ hRead1
                                       simp [Ora.Loop.TimelineResult.comp,
                                         hRead0Empty, hRead1Empty] at hWritten
             have hCurrentSemantic :=

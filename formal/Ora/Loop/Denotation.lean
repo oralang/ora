@@ -713,6 +713,40 @@ theorem bindState_some_of_stateReady
           refine ⟨bound, ?_⟩
           simp only [bindState?, hShape, hBound, if_pos]
 
+theorem bindState_lookupFree_of_not_mem
+    (env bound : Env)
+    (variables : List VariableRow)
+    (state : ScalarLoopState)
+    (id : FreeVarId)
+    (hFresh : id ∉ variables.map VariableRow.id)
+    (hBind : bindState? env variables state = some bound) :
+    bound.lookupFree id = env.lookupFree id := by
+  induction variables generalizing env bound state with
+  | nil =>
+      cases state with
+      | nil =>
+          simp only [bindState?, Option.some.injEq] at hBind
+          subst bound
+          rfl
+      | cons _ _ => simp [bindState?] at hBind
+  | cons row rest ih =>
+      cases state with
+      | nil => simp [bindState?] at hBind
+      | cons value values =>
+          simp only [List.map_cons, List.mem_cons, not_or] at hFresh
+          simp only [bindState?] at hBind
+          split at hBind
+          · rw [ih (env := env.setFree row.id (.integer value))
+              (bound := bound) (state := values) hFresh.2 hBind]
+            unfold Env.setFree Env.lookupFree
+            simp only [lookupFreeBinding]
+            have hDifferent : (row.id == id) = false := by
+              apply Bool.eq_false_iff.mpr
+              intro hEqual
+              exact hFresh.1 (beq_iff_eq.mp hEqual).symm
+            simp only [hDifferent, Bool.false_eq_true, if_false]
+          · cases hBind
+
 def formulaHoldsInState
     (manifest : Manifest)
     (base : Env)
