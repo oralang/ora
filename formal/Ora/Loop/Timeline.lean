@@ -340,6 +340,39 @@ theorem TimelineEventExec.preserves_outside
       exact (semantics.childFrame child).preservesOutside initial.loop following
         hRelation location hOutside
 
+theorem TimelineEventExec.read_writes_false
+    (semantics : TimelineSemantics FormulaExpr LocationExpr ValueExpr Child)
+    (id : StorageReadId)
+    (location : LocationExpr)
+    (initial : StorageActionState)
+    (result : TimelineResult)
+    (hExec : TimelineEventExec semantics (.storage (.read id location))
+      initial result) :
+    ∀ written, ¬ result.writes written := by
+  cases hExec with
+  | storage hAction =>
+      have hTrace := execStorageRead_writeTrace_nil _ _ _ _ _ hAction
+      simp [hTrace]
+
+theorem TimelineEventExec.write_within_resolved
+    (semantics : TimelineSemantics FormulaExpr LocationExpr ValueExpr Child)
+    (location : LocationExpr)
+    (value : ValueExpr)
+    (resolved : StorageLocation)
+    (initial : StorageActionState)
+    (result : TimelineResult)
+    (hResolved : semantics.storage.evalLocation location initial = some resolved)
+    (hExec : TimelineEventExec semantics (.storage (.write location value))
+      initial result) :
+    ∀ written, result.writes written → written = resolved := by
+  cases hExec with
+  | storage hAction =>
+      rcases execStorageWrite_writeTrace_singleton _ _ _ _ _ hAction with
+        ⟨actual, hActual, hTrace⟩
+      have hEqual : actual = resolved := Option.some.inj (hActual.symm.trans hResolved)
+      subst actual
+      simp [hTrace]
+
 theorem TimelineExec.preserves_entryStorage
     (semantics : TimelineSemantics FormulaExpr LocationExpr ValueExpr Child)
     (events : List (EventOf FormulaExpr LocationExpr ValueExpr Child))
@@ -480,6 +513,56 @@ theorem TimelineExec.preserves_outside
       exact (ih hOutsideRest).trans
         (TimelineEventExec.preserves_outside semantics event initial first
           location hEvent hOutsideFirst)
+
+/-- Lift independently established per-event write frames to the complete
+timeline.  The premise is state-polymorphic: coverage must hold for every
+execution admitted by an event, so later events cannot justify earlier
+writes and omitted writes cannot disappear in composition. -/
+theorem TimelineExec.writes_within
+    (semantics : TimelineSemantics FormulaExpr LocationExpr ValueExpr Child)
+    (events : List (EventOf FormulaExpr LocationExpr ValueExpr Child))
+    (initial : StorageActionState)
+    (result : TimelineResult)
+    (frame : List StorageLocation)
+    (hEventFrame : ∀ event, event ∈ events →
+      ∀ before after,
+        TimelineEventExec semantics event before after →
+        ∀ written, after.writes written → written ∈ frame)
+    (hExec : TimelineExec semantics events initial result) :
+    ∀ written, result.writes written → written ∈ frame := by
+  induction hExec with
+  | nil => simp [TimelineResult.comp]
+  | @cons event rest before first following hEvent hRest ih =>
+      intro written hWritten
+      rcases hWritten with hFirst | hFollowing
+      · exact hEventFrame event (by simp) before first hEvent written hFirst
+      · apply ih
+        · intro tail hMember
+          exact hEventFrame tail (by simp [hMember])
+        · exact hFollowing
+
+/-- A complete per-event frame plus disjointness proves preservation without
+requiring a certificate author to destruct the timeline execution tree. -/
+theorem TimelineExec.preserves_outside_event_frame
+    (semantics : TimelineSemantics FormulaExpr LocationExpr ValueExpr Child)
+    (events : List (EventOf FormulaExpr LocationExpr ValueExpr Child))
+    (initial : StorageActionState)
+    (result : TimelineResult)
+    (frame : List StorageLocation)
+    (observed : StorageLocation)
+    (hEventFrame : ∀ event, event ∈ events →
+      ∀ before after,
+        TimelineEventExec semantics event before after →
+        ∀ written, after.writes written → written ∈ frame)
+    (hOutside : ∀ written ∈ frame, observed ≠ written)
+    (hExec : TimelineExec semantics events initial result) :
+    result.state.loop.storage observed = initial.loop.storage observed := by
+  apply TimelineExec.preserves_outside semantics events initial result observed
+    hExec
+  intro hWritten
+  have hMember := TimelineExec.writes_within semantics events initial result frame
+    hEventFrame hExec observed hWritten
+  exact hOutside observed hMember rfl
 
 /-- Final local bindings are evaluated after the complete trace.  They may
 read the final store and preceding read identities, but cannot replace the

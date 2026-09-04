@@ -284,6 +284,40 @@ def StorageFormulaContext.evalLocation?
     projections := ← context.evalProjections? state expression.projections
   }
 
+/-- Resolve a one-key mapping location from the exact free-variable binding
+used at this timeline point.  The key's Ora type and the stored value type are
+both checked by the ordinary location evaluator. -/
+theorem StorageFormulaContext.evalLocation_mapping_free_variable
+    (context : StorageFormulaContext)
+    (state : StorageActionState)
+    (bound : Env)
+    (termId : TermId)
+    (reference : FreeVarRef)
+    (key : Value)
+    (keyTy valueTy : TyRef)
+    (root : String)
+    (hBound : context.stateEnv? state = some bound)
+    (hTerm : context.manifest.terms[termId]? = some (.variable (.free reference)))
+    (hLookup : bound.lookupFree reference.id = some key)
+    (hKeyType : storageValueMatchesTy key keyTy = true)
+    (hValueType : valueTy.isBool || valueTy.integerShape?.isSome)
+    (hRoot : root.isEmpty = false) :
+    context.evalLocation? {
+      root
+      projections := [.mappingKey { formula := .term termId, ty := keyTy }]
+      valueTy
+    } state = some { root, projections := [.mappingKey key] } := by
+  unfold StorageFormulaContext.evalLocation?
+    StorageFormulaContext.evalProjections?
+    StorageFormulaContext.evalTypedValue?
+  rw [context.evalValue_free_variable state bound termId reference key
+    hBound hTerm hLookup]
+  simp [StorageFormulaContext.evalProjections?, hRoot, hValueType, hKeyType]
+  intro hBool
+  have hSome : valueTy.integerShape?.isSome = true := by
+    simpa [hBool] using hValueType
+  exact Option.isSome_iff_ne_none.mp hSome
+
 def StorageFormulaContext.actionSemantics
     (context : StorageFormulaContext) :
     StorageActionSemantics StorageLocationExpr FormulaRef := {

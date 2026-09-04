@@ -110,6 +110,34 @@ def directStorageContext
   resolvePlace := directStorageResolvePlace
 }
 
+/-- A function-context value not shadowed by a loop variable or timeline read
+keeps the same identity in the exact environment used to resolve storage
+locations.  Mapping-frame proofs use this lemma instead of replaying the two
+binding implementations. -/
+theorem directStorageContext_lookupFree_of_not_bound
+    (manifest : Manifest)
+    (base bound : Env)
+    (variables : List VariableRow)
+    (state : StorageActionState)
+    (id : FreeVarId)
+    (hLocalFresh : id ∉ variables.map VariableRow.id)
+    (hReadFresh : id ∉ state.reads.map StorageReadBinding.id)
+    (hBound : (directStorageContext manifest base variables).stateEnv? state =
+      some bound) :
+    bound.lookupFree id = base.lookupFree id := by
+  unfold StorageFormulaContext.stateEnv? directStorageContext at hBound
+  cases hLocals : bindState? base variables state.loop.locals with
+  | none => simp [hLocals] at hBound
+  | some localsBound =>
+      simp only [hLocals, Option.bind_eq_bind, Option.some_bind,
+        Option.pure_def] at hBound
+      have hEqual := Option.some.inj hBound
+      subst bound
+      rw [StorageFormulaContext.withStoreViews_lookupFree,
+        bindStorageReads_lookupFree_of_not_mem _ _ _ hReadFresh,
+        bindState_lookupFree_of_not_mem base localsBound variables
+          state.loop.locals id hLocalFresh hLocals]
+
 def restrictStoragePreheaderEnv (base : Env) (variables : List VariableRow) : Env :=
   { base with freeBindings := base.freeBindings.filter fun binding =>
       variables.any fun declared => declared.id == binding.1 }

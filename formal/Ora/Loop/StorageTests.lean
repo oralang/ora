@@ -25,6 +25,32 @@ def testReadId (patternId : Nat) : StorageReadId :=
 def testU256 (value : Nat) : Value :=
   .integer (Ora.Integer.Value.ofNat (.unsigned .w256) value)
 
+def stableMappingKeyId : FreeVarId := { file_id := 0, pattern_id := 40 }
+
+def stableMappingKeyManifest : Manifest := {
+  terms := [.variable (.free {
+    id := stableMappingKeyId
+    name := "key"
+    ty := some (.compilerTypeId 6)
+  })]
+}
+
+example :
+    let key := testU256 7
+    let base := Env.empty.setFree stableMappingKeyId key
+    let context := directStorageContext stableMappingKeyManifest base []
+    let state : StorageActionState := {
+      loop := { locals := [], storage := constantStorage (testU256 0) }
+      entryStorage := constantStorage (testU256 0)
+    }
+    context.evalLocation? {
+      root := "values"
+      projections := [.mappingKey {
+        formula := .term 0, ty := .compilerTypeId 6 }]
+      valueTy := .compilerTypeId 6
+    } state = some { root := "values", projections := [.mappingKey key] } := by
+  decide
+
 def directTestPlace : PlaceRef :=
   { root := "counter", region := .storage }
 
@@ -482,6 +508,69 @@ example
     simp only [List.mem_singleton] at hMember
     subst candidate
     exact hNe
+
+/-- Reads and repeated writes to one mapping location preserve a distinct
+mapping location through the generic whole-timeline frame theorem. -/
+example
+    (initial : StorageActionState)
+    (result : TimelineResult)
+    (source written observed : StorageLocation)
+    (readId : StorageReadId)
+    (first second : Value)
+    (hNe : observed ≠ written)
+    (hExec : TimelineExec resolvedTimelineSemantics
+      [.storage (.read readId source),
+       .storage (.write written first),
+       .storage (.write written second)] initial result) :
+    result.state.loop.storage observed = initial.loop.storage observed := by
+  apply TimelineExec.preserves_outside_event_frame _ _ _ _ [written]
+    observed ?_ ?_ hExec
+  · intro event hMember before after hEvent candidate hCandidate
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hMember
+    rcases hMember with rfl | rfl | rfl
+    · exact False.elim
+        (TimelineEventExec.read_writes_false _ _ _ _ _ hEvent _ hCandidate)
+    · simpa using TimelineEventExec.write_within_resolved _ _ _ written
+        before after rfl hEvent candidate hCandidate
+    · simpa using TimelineEventExec.write_within_resolved _ _ _ written
+        before after rfl hEvent candidate hCandidate
+  · intro candidate hMember
+    simp only [List.mem_singleton] at hMember
+    subst candidate
+    exact hNe
+
+/-- A later write to the observed mapping key cannot be hidden by an earlier
+disjoint write: the singleton frame premise itself is false. -/
+example
+    (initial : StorageActionState)
+    (written observed : StorageLocation)
+    (later : Value)
+    (hNe : observed ≠ written) :
+    ¬ (∀ after,
+      TimelineEventExec resolvedTimelineSemantics
+        (.storage (.write observed later)) initial after →
+      ∀ location, after.writes location → location ∈ [written]) := by
+  intro hFrame
+  let followingState : StorageActionState := {
+    initial with loop := { initial.loop with
+      storage := initial.loop.storage.set observed later }
+  }
+  have hLater : execStorageAction? resolvedStorageActionSemantics
+      (.write observed later) initial = some {
+        state := followingState, writeTrace := [observed]
+      } := by
+    simp [resolvedStorageActionSemantics, execStorageAction?, followingState]
+  have hLaterEvent : TimelineEventExec resolvedTimelineSemantics
+      (.storage (.write observed later)) initial {
+        state := followingState, writes := fun location => location ∈ [observed]
+      } := by
+    exact @TimelineEventExec.storage Bool StorageLocation Value PEmpty
+      resolvedTimelineSemantics (.write observed later) initial
+      { state := followingState, writeTrace := [observed] }
+      (by simpa [resolvedTimelineSemantics] using hLater)
+  have hObserved := hFrame _ hLaterEvent observed (by simp)
+  simp only [List.mem_singleton] at hObserved
+  exact hNe hObserved
 
 example (root : String) (i j : Value) (hNe : i ≠ j) :
     mappingTestLocation root i ≠ mappingTestLocation root j := by
