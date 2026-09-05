@@ -1,0 +1,7 @@
+contract FixedArrayConstantReadOutOfBounds {
+    storage var values: [u256; 4];
+
+    pub fn read() -> u256 {
+        return values[4];
+    }
+}

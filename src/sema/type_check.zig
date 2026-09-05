@@ -3285,6 +3285,7 @@ const TypeChecker = struct {
             .Assign => |assign| {
                 try self.visitExpr(assign.value);
                 if (try self.emitNonVarAssignmentIfNeeded(assign.target)) return;
+                try self.checkConstantFixedArrayPatternIndices(assign.target);
                 const expected = try self.patternLocatedType(assign.target);
                 const expected_type = expected.type;
                 if (expected_type.kind() == .resource_place) {
@@ -3748,6 +3749,7 @@ const TypeChecker = struct {
                 try self.visitExpr(index.base);
                 try self.visitExpr(index.index);
                 const base_type = self.expr_types[index.base.index()];
+                try self.emitConstantFixedArrayBoundsErrorIfNeeded(base_type, index.index);
                 const place_or_value_type = self.indexAccessType(base_type, index.index);
                 try self.emitImplicitResourceReadIfDisallowed(expr_id, place_or_value_type);
                 const result_type = resourcePlaceReadType(place_or_value_type) orelse place_or_value_type;
@@ -10194,6 +10196,52 @@ const TypeChecker = struct {
             },
             else => .{ .unknown = {} },
         };
+    }
+
+    fn checkConstantFixedArrayPatternIndices(self: *TypeChecker, pattern_id: ast.PatternId) !void {
+        switch (self.file.pattern(pattern_id).*) {
+            .Field => |field| try self.checkConstantFixedArrayPatternIndices(field.base),
+            .Index => |index| {
+                try self.checkConstantFixedArrayPatternIndices(index.base);
+                const base_type = try self.patternType(index.base);
+                try self.emitConstantFixedArrayBoundsErrorIfNeeded(base_type, index.index);
+            },
+            .StructDestructure => |destructure| for (destructure.fields) |field| {
+                try self.checkConstantFixedArrayPatternIndices(field.binding);
+            },
+            .Name, .Error => {},
+        }
+    }
+
+    fn emitConstantFixedArrayBoundsErrorIfNeeded(
+        self: *TypeChecker,
+        base_type: Type,
+        index_expr_id: ast.ExprId,
+    ) !void {
+        const array = switch (base_type) {
+            .array => |array| array,
+            else => return,
+        };
+        const extent = array.len orelse return;
+        const value = (try self.integerValueForResolution(index_expr_id)) orelse return;
+        const integer = switch (value) {
+            .integer => |integer| integer,
+            else => return,
+        };
+        const canonical_index = if (exprUsesWrappedIntegerValue(self, index_expr_id))
+            try const_bridge.wrapIntegerToType(self.arena, integer, u256Type().integer)
+        else
+            integer;
+        const extent_value = try BigInt.initSet(self.arena, extent);
+        const is_negative = !canonical_index.isPositive() and !canonical_index.eqlZero();
+        if (!is_negative and canonical_index.order(extent_value).compare(.lt)) return;
+
+        const index_text = try self.integerValueText(canonical_index);
+        try self.emitExprError(
+            index_expr_id,
+            "fixed-array index {s} is out of bounds for array extent {d}",
+            .{ index_text, extent },
+        );
     }
 
     fn assignForPatternTypes(self: *TypeChecker, for_stmt: ast.ForStmt) void {

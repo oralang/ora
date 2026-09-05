@@ -361,7 +361,10 @@ const ConstEvaluator = struct {
                     },
                     else => _ = self.evalExpr(expr_stmt.expr) catch null,
                 },
-                .Assign => |assign| _ = self.evalComptimeAssign(assign, true) catch null,
+                .Assign => |assign| {
+                    self.visitAssignmentTargetExpressions(assign.target);
+                    _ = self.evalComptimeAssign(assign, true) catch null;
+                },
                 .Log => |log_stmt| {
                     for (log_stmt.args) |arg| _ = self.evalExpr(arg) catch null;
                 },
@@ -393,6 +396,20 @@ const ConstEvaluator = struct {
             .NamedError => |named_error| _ = self.evalExpr(named_error.callee) catch null,
             .Or => |or_pattern| for (or_pattern.alternatives) |alternative| self.visitSwitchPattern(alternative),
             .Ok, .Err, .Else => {},
+        }
+    }
+
+    fn visitAssignmentTargetExpressions(self: *ConstEvaluator, pattern_id: ast.PatternId) void {
+        switch (self.file.pattern(pattern_id).*) {
+            .Field => |field| self.visitAssignmentTargetExpressions(field.base),
+            .Index => |index| {
+                self.visitAssignmentTargetExpressions(index.base);
+                _ = self.evalExpr(index.index) catch null;
+            },
+            .StructDestructure => |destructure| for (destructure.fields) |field| {
+                self.visitAssignmentTargetExpressions(field.binding);
+            },
+            .Name, .Error => {},
         }
     }
 

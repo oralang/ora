@@ -1,0 +1,1 @@
+expect_error = "fixed-array index 4 is out of bounds for array extent 4"

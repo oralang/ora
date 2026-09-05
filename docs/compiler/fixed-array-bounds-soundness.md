@@ -1,6 +1,6 @@
 # Fixed-Array Bounds Soundness
 
-Status: IN PROGRESS — CONTRACT APPROVED; TASK 1 CLOSED. This is an S1
+Status: IN PROGRESS — CONTRACT APPROVED; TASKS 1–2 CLOSED. This is an S1
 compiler-correctness project, not a loop-proof capability extension.
 Fixed-array loop artifact authority remains blocked until this contract is
 implemented and independently reviewed.
@@ -169,11 +169,11 @@ as a dedicated commit after review.
 
 ### Task 2 — Constant out-of-bounds rejection
 
-- [ ] Reject constant out-of-bounds reads in sema.
-- [ ] Reject constant out-of-bounds writes in sema.
-- [ ] Accept indices `0` and `extent - 1`.
-- [ ] Preserve runtime-dependent indices for Task 3 checking.
-- [ ] Emit one source-anchored diagnostic per invalid access.
+- [x] Reject constant out-of-bounds reads in sema.
+- [x] Reject constant out-of-bounds writes in sema.
+- [x] Accept indices `0` and `extent - 1`.
+- [x] Preserve runtime-dependent indices for Task 3 checking.
+- [x] Emit one source-anchored diagnostic per invalid access.
 
 Task 2 changes compilation behavior and lands separately after focused
 positive and negative corpus tests.

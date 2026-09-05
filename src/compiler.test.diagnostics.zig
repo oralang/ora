@@ -2392,6 +2392,69 @@ test "compiler reports heterogeneous array literals and keeps tuple element type
     try testing.expectEqual(compiler.sema.TypeKind.bool, typecheck.exprType(ret_stmt.value.?).kind());
 }
 
+test "compiler rejects constant fixed-array indexes outside the resolved extent" {
+    const accepted_source =
+        \\contract FixedArrayBounds {
+        \\    storage var stored: [u256; 4];
+        \\
+        \\    pub fn accepted(index: u256) -> u256 {
+        \\        var local: [u256; 4] = [0, 0, 0, 0];
+        \\        local[0] = 1;
+        \\        local[3] = 2;
+        \\        stored[0] = local[0];
+        \\        stored[3] = local[3];
+        \\        stored[index] = local[0];
+        \\        return stored[index] + stored[3];
+        \\    }
+        \\}
+    ;
+
+    var accepted = try compileText(accepted_source);
+    defer accepted.deinit();
+    const accepted_typecheck = try accepted.db.moduleTypeCheck(accepted.root_module_id);
+    try testing.expect(accepted_typecheck.diagnostics.isEmpty());
+
+    const rejected_source =
+        \\contract FixedArrayBounds {
+        \\    storage var stored: [u256; 4];
+        \\
+        \\    pub fn rejected() -> u256 {
+        \\        var local: [u256; 4] = [0, 0, 0, 0];
+        \\        local[4] = 1;
+        \\        local[(2 + 3)] = 2;
+        \\        stored[4] = 3;
+        \\        let direct = local[4];
+        \\        let grouped = stored[(2 + 2)];
+        \\        let huge = stored[4294967296];
+        \\        var empty: [u256; 0] = [];
+        \\        empty[0] = 0;
+        \\        return direct + grouped + huge + empty[0];
+        \\    }
+        \\}
+    ;
+
+    var rejected = try compileText(rejected_source);
+    defer rejected.deinit();
+    const rejected_typecheck = try rejected.db.moduleTypeCheck(rejected.root_module_id);
+    try testing.expectEqual(@as(usize, 8), rejected_typecheck.diagnostics.len());
+    try testing.expectEqual(@as(usize, 4), countDiagnosticMessages(
+        &rejected_typecheck.diagnostics,
+        "fixed-array index 4 is out of bounds for array extent 4",
+    ));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(
+        &rejected_typecheck.diagnostics,
+        "fixed-array index 5 is out of bounds for array extent 4",
+    ));
+    try testing.expectEqual(@as(usize, 2), countDiagnosticMessages(
+        &rejected_typecheck.diagnostics,
+        "fixed-array index 0 is out of bounds for array extent 0",
+    ));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(
+        &rejected_typecheck.diagnostics,
+        "fixed-array index 4294967296 is out of bounds for array extent 4",
+    ));
+}
+
 test "compiler rejects first-class runtime map handles" {
     const source_text =
         \\contract NestedMaps {
