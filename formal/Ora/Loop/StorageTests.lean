@@ -1,6 +1,7 @@
 /- Executable examples for the Lean-first storage timeline model. -/
 
 import Ora.Loop.StorageCertificate
+import Ora.FixedArray
 
 namespace Ora.Loop
 
@@ -888,5 +889,46 @@ the abstract control predicate, while safety remains independently required. -/
 example : refinementExactVC.InductionObligations :=
   induction_obligations_of_refinement refinementControlVC refinementExactVC
     Prod.fst refinementControlInduction refinementExactRefinesControl
+
+private def checkedIndexStorageSemantics :
+    StorageActionSemantics PEmpty PEmpty := {
+  evalLocation := fun impossible => nomatch impossible
+  evalValue := fun impossible => nomatch impossible
+  valueMatchesLocation := fun impossible => nomatch impossible
+}
+
+private def checkedIndexTimelineSemantics :
+    TimelineSemantics Ora.FixedArray.CheckedIndex PEmpty PEmpty PEmpty := {
+  storage := checkedIndexStorageSemantics
+  evalFormula := fun checked _ => some checked.Safe
+  childRelation := fun impossible => nomatch impossible
+  childFrame := fun impossible => nomatch impossible
+}
+
+private def checkedIndexState : StorageActionState := {
+  loop := {
+    locals := []
+    storage := constantStorage (.bool false)
+  }
+  entryStorage := constantStorage (.bool false)
+}
+
+/-- A contradiction after an unsafe fixed-array checkpoint cannot prove the
+earlier checkpoint.  `TimelineSafe` observes only the exact preceding prefix. -/
+example :
+    let unsafeIndex := Ora.FixedArray.CheckedIndex.ofNat 4 4
+    ¬ TimelineSafe checkedIndexTimelineSemantics
+      [.check unsafeIndex, .assume unsafeIndex] checkedIndexState := by
+  dsimp
+  intro hSafe
+  have hRequired := hSafe [] (Ora.FixedArray.CheckedIndex.ofNat 4 4)
+    [.assume (Ora.FixedArray.CheckedIndex.ofNat 4 4)] rfl
+    { state := checkedIndexState } (.nil checkedIndexState)
+  rcases hRequired with ⟨proposition, hEval, hHolds⟩
+  have hFalse : proposition = False := by
+    simpa [checkedIndexTimelineSemantics, Ora.FixedArray.CheckedIndex.Safe,
+      Ora.FixedArray.CheckedIndex.ofNat] using hEval
+  subst proposition
+  exact hHolds
 
 end Ora.Loop
