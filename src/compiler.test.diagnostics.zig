@@ -2406,6 +2406,16 @@ test "compiler rejects constant fixed-array indexes outside the resolved extent"
         \\        stored[index] = local[0];
         \\        return stored[index] + stored[3];
         \\    }
+        \\
+        \\    pub fn extentThree() {
+        \\        var dest: [u256; 3] = [0, 0, 0];
+        \\        dest[2] = 1;
+        \\    }
+        \\
+        \\    pub fn extentFour() {
+        \\        var dest: [u256; 4] = [0, 0, 0, 0];
+        \\        dest[3] = 1;
+        \\    }
         \\}
     ;
 

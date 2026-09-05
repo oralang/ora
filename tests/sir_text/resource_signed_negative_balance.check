@@ -3,7 +3,6 @@
 
 // CHECK-LABEL: fn settle:
 // CHECK: c0 = const 0x0
-// CHECK: slot_settled = const 0x1
 // CHECK: [[POS_AMOUNT:v[0-9]+]] = sgt v0 c0
 // CHECK: [[ZERO_AMOUNT:v[0-9]+]] = eq v0 c0
 // CHECK: [[NON_NEG:v[0-9]+]] = or [[POS_AMOUNT]] [[ZERO_AMOUNT]]

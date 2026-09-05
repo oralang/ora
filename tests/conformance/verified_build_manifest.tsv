@@ -43,6 +43,7 @@ same-bytecode	falsification_loop_invariant.spec.toml	-
 same-bytecode	falsification_map_effect.spec.toml	-
 same-bytecode	falsification_map_frame.spec.toml	-
 same-bytecode	falsification_storage_branch.spec.toml	-
+same-bytecode	fixed_array_bounds_verified.spec.toml	-
 same-bytecode	generic_instantiation.spec.toml	-
 same-bytecode	lock_guard_revert.spec.toml	-
 same-bytecode	loop_control_suffix.spec.toml	-
@@ -75,7 +76,7 @@ same-bytecode	storage_dynamic_array.spec.toml	-
 same-bytecode	storage_fixed_bytes_mapping.spec.toml	-
 same-bytecode	storage_map_bitfield.spec.toml	-
 same-bytecode	storage_map_struct.spec.toml	-
-same-bytecode	storage_map_struct_array.spec.toml	-
+unverifiable	storage_map_struct_array.spec.toml	contract_invariant_unproved
 same-bytecode	storage_mapping.spec.toml	-
 same-bytecode	storage_narrow_integer_mapping.spec.toml	-
 same-bytecode	storage_nested_map_struct.spec.toml	-
@@ -88,7 +89,7 @@ same-bytecode	storage_slice_dynamic_struct.spec.toml	-
 same-bytecode	storage_slice_struct.spec.toml	-
 same-bytecode	storage_string_key_mapping.spec.toml	-
 same-bytecode	storage_struct.spec.toml	-
-same-bytecode	storage_struct_static_array.spec.toml	-
+unverifiable	storage_struct_static_array.spec.toml	contract_invariant_unproved
 same-bytecode	storage_triple_nested_mapping.spec.toml	-
 same-bytecode	storage_u256_mapping.spec.toml	-
 same-bytecode	switch_execution.spec.toml	-

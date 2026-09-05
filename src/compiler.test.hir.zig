@@ -2087,6 +2087,49 @@ test "compiler lowers checked shifts with source-owned range asserts" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shrui"));
 }
 
+test "compiler lowers every source fixed-array access through the shared bounds assert" {
+    const source_text =
+        \\contract FixedArrayBounds {
+        \\    storage var values: [u256; 4];
+        \\    pub fn read(index: u256) -> u256 {
+        \\        return values[index];
+        \\    }
+        \\    pub fn write(index: u256, value: u256) {
+        \\        values[index] = value;
+        \\    }
+        \\    pub fn add(index: u256, value: u256) {
+        \\        values[index] +%= value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expectEqual(@as(usize, 4), std.mem.count(u8, hir_text, "fixed-array index out of bounds"));
+    try testing.expectEqual(@as(usize, 4), std.mem.count(u8, hir_text, "arith.cmpi ult"));
+
+    var cursor: usize = 0;
+    for (0..4) |_| {
+        const assertion = std.mem.indexOfPos(u8, hir_text, cursor, "fixed-array index out of bounds") orelse
+            return error.TestUnexpectedResult;
+        const next_load = std.mem.indexOfPos(u8, hir_text, assertion, "memref.load");
+        const next_store = std.mem.indexOfPos(u8, hir_text, assertion, "memref.store");
+        const access = if (next_load) |load|
+            if (next_store) |store| @min(load, store) else load
+        else
+            next_store orelse return error.TestUnexpectedResult;
+        const following_assertion = std.mem.indexOfPos(u8, hir_text, assertion + 1, "fixed-array index out of bounds");
+        if (following_assertion) |next| try testing.expect(access < next);
+        cursor = access + 1;
+    }
+}
+
 test "compiler lowers wrapping power through ora.power" {
     const source_text =
         \\pub fn wrap_pow(a: u256, b: u256) -> u256 {
@@ -2618,6 +2661,7 @@ test "compiler lowers imported fixed size data wrapper with concrete array lengt
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "@std.storage.fixed_size_data.load__3"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref<3xi256>"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.storage.word_load"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "fixed-array index out of bounds"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.lowering_error"));
 }
 

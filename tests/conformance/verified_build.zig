@@ -71,9 +71,9 @@ test "verified conformance manifest pins all three build classes" {
         }
     }
 
-    try testing.expectEqual(@as(usize, 62), counts[@intFromEnum(runner.VerifiedBuildClass.same_bytecode)]);
+    try testing.expectEqual(@as(usize, 61), counts[@intFromEnum(runner.VerifiedBuildClass.same_bytecode)]);
     try testing.expectEqual(@as(usize, 11), counts[@intFromEnum(runner.VerifiedBuildClass.rewritten)]);
-    try testing.expectEqual(@as(usize, 23), counts[@intFromEnum(runner.VerifiedBuildClass.unverifiable)]);
+    try testing.expectEqual(@as(usize, 25), counts[@intFromEnum(runner.VerifiedBuildClass.unverifiable)]);
 }
 
 test "resource rewrite executes with proved runtime checks kept" {
@@ -99,6 +99,18 @@ test "checked shift bounds execute in verified and no-verify builds" {
 
     const source_path = types.CONFORMANCE_DIR_REL ++ "/checked_shift_verified.ora";
     const spec_path = types.CONFORMANCE_DIR_REL ++ "/checked_shift_verified.spec.toml";
+    try runner.runConformanceSpecWithExtraArgs(testing.allocator, source_path, spec_path, &.{"--no-verify"});
+    try runner.runConformanceSpecWithExtraArgs(testing.allocator, source_path, spec_path, &.{});
+}
+
+test "fixed-array bounds execute for in-bounds accesses in verified and no-verify builds" {
+    std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const source_path = types.CONFORMANCE_DIR_REL ++ "/fixed_array_bounds_verified.ora";
+    const spec_path = types.CONFORMANCE_DIR_REL ++ "/fixed_array_bounds_verified.spec.toml";
     try runner.runConformanceSpecWithExtraArgs(testing.allocator, source_path, spec_path, &.{"--no-verify"});
     try runner.runConformanceSpecWithExtraArgs(testing.allocator, source_path, spec_path, &.{});
 }

@@ -11393,6 +11393,7 @@ const TypeChecker = struct {
             .Name => |name| blk: {
                 const direct = self.pattern_types[pattern_id.index()].type;
                 if (direct.kind() != .unknown) break :blk direct;
+                if (self.resolvedPatternBindingLocatedType(pattern_id)) |resolved| break :blk resolved.type;
                 break :blk self.lookupNamedPatternType(name.name);
             },
             .Field => |field| try self.fieldPatternType(field),
@@ -11407,6 +11408,7 @@ const TypeChecker = struct {
             .Name => |name| blk: {
                 const direct = self.pattern_types[pattern_id.index()];
                 if (direct.kind() != .unknown) break :blk direct;
+                if (self.resolvedPatternBindingLocatedType(pattern_id)) |resolved| break :blk resolved;
                 break :blk self.lookupNamedPatternLocatedType(name.name);
             },
             .StructDestructure => self.pattern_types[pattern_id.index()],
@@ -11496,6 +11498,16 @@ const TypeChecker = struct {
 
     fn lookupNamedPatternType(self: *const TypeChecker, name: []const u8) Type {
         return self.lookupNamedPatternLocatedType(name).type;
+    }
+
+    fn resolvedPatternBindingLocatedType(self: *const TypeChecker, pattern_id: ast.PatternId) ?LocatedType {
+        if (pattern_id.index() >= self.resolution.pattern_bindings.len) return null;
+        const binding = self.resolution.pattern_bindings[pattern_id.index()] orelse return null;
+        const resolved = switch (binding) {
+            .item => |item_id| self.itemLocatedType(item_id),
+            .pattern => |bound_pattern_id| self.pattern_types[bound_pattern_id.index()],
+        };
+        return if (resolved.kind() == .unknown) null else resolved;
     }
 
     fn lookupNamedPatternLocatedType(self: *const TypeChecker, name: []const u8) LocatedType {

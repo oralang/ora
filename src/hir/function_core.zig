@@ -3035,6 +3035,69 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             appendOp(self.block, assert_op);
         }
 
+        pub fn emitFixedArrayBoundsAssert(
+            self: *FunctionLowerer,
+            semantic_base_type: sema.Type,
+            base: mlir.MlirValue,
+            index: mlir.MlirValue,
+            range: source.TextRange,
+        ) anyerror!void {
+            const array = switch (semantic_base_type) {
+                .array => |array| array,
+                else => return,
+            };
+            const lowered_base_type = mlir.oraValueGetType(base);
+            if (!mlir.oraTypeIsAMemRef(lowered_base_type) or
+                mlir.oraShapedTypeGetRank(lowered_base_type) != 1 or
+                !mlir.oraShapedTypeHasStaticShape(lowered_base_type))
+            {
+                try self.parent.emitLoweringError(
+                    range,
+                    "fixed-array value must have one statically resolved dimension before bounds-check lowering",
+                    .{},
+                );
+                return error.MlirOperationCreationFailed;
+            }
+            const lowered_extent = mlir.oraShapedTypeGetDimSize(lowered_base_type, 0);
+            if (lowered_extent < 0) {
+                try self.parent.emitLoweringError(
+                    range,
+                    "fixed-array extent must be resolved before bounds-check lowering",
+                    .{},
+                );
+                return error.MlirOperationCreationFailed;
+            }
+            const extent: u64 = if (array.len) |semantic_extent| blk: {
+                if (semantic_extent != @as(u64, @intCast(lowered_extent))) {
+                    try self.parent.emitLoweringError(
+                        range,
+                        "fixed-array semantic extent {d} disagrees with lowered extent {d}",
+                        .{ semantic_extent, lowered_extent },
+                    );
+                    return error.MlirOperationCreationFailed;
+                }
+                break :blk semantic_extent;
+            } else @intCast(lowered_extent);
+            const index_type = reprIntegerType(self.parent.context);
+            if (!mlir.oraTypeEqual(mlir.oraValueGetType(index), index_type)) {
+                try self.parent.emitLoweringError(
+                    range,
+                    "fixed-array index must use the canonical u256 representation before bounds-check lowering",
+                    .{},
+                );
+                return error.MlirOperationCreationFailed;
+            }
+            const loc = self.parent.location(range);
+            const extent_value = appendValueOp(
+                self.block,
+                createIntegerConstant(self.parent.context, loc, index_type, @intCast(extent)),
+            );
+            const in_bounds_op = self.createCompareOp(loc, "ult", index, extent_value);
+            if (mlir.oraOperationIsNull(in_bounds_op)) return error.MlirOperationCreationFailed;
+            const in_bounds = appendValueOp(self.block, in_bounds_op);
+            try @This().emitSafetyAssert(self, in_bounds, "fixed-array index out of bounds", range);
+        }
+
         pub fn emitOverflowAssert(self: *FunctionLowerer, overflow_flag: mlir.MlirValue, message: []const u8, range: source.TextRange) anyerror!void {
             const loc = self.parent.location(range);
             const true_val = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
@@ -3125,6 +3188,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     return;
                 },
                 .Index => |index| {
+                    const semantic_base_type = @This().patternType(self, index.base, locals);
                     const base_value = try @This().lowerPatternValueWithCache(self, index.base, locals, cache);
                     const base_type = mlir.oraValueGetType(base_value);
                     const target_type = self.parent.lowerSemaType(@This().patternType(self, pattern_id, locals), index.range);
@@ -3135,6 +3199,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             try @This().maybeEmitGuardedIndexedStorageWrite(self, root_name, key_value, index.range);
                         }
                         const index_value = try @This().convertIndexToIndexType(self, key_value, index.range);
+                        try @This().emitFixedArrayBoundsAssert(self, semantic_base_type, base_value, key_value, index.range);
                         const op = mlir.oraMemrefStoreOpCreate(
                             self.parent.context,
                             self.parent.location(index.range),
@@ -3462,10 +3527,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     return error.UnknownAssignmentTarget;
                 },
                 .Index => |index| blk: {
+                    const semantic_base_type = @This().patternType(self, index.base, locals);
                     const base_value = try @This().lowerPatternValueWithCache(self, index.base, locals, cache);
                     if (mlir.oraTypeIsAMemRef(mlir.oraValueGetType(base_value))) {
                         const key_value = try self.lowerExprForFlowTarget(index.index, reprIntegerType(self.parent.context), locals);
                         const index_value = try @This().convertIndexToIndexType(self, key_value, index.range);
+                        try @This().emitFixedArrayBoundsAssert(self, semantic_base_type, base_value, key_value, index.range);
                         const result_type = self.parent.lowerSemaType(@This().patternType(self, pattern_id, locals), index.range);
                         const op = mlir.oraMemrefLoadOpCreate(
                             self.parent.context,

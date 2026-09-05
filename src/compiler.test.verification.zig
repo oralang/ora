@@ -3741,13 +3741,17 @@ test "verification supports storage map values containing fixed arrays without d
         \\contract MapOfArrays {
         \\    storage var slots: map<address, [u256; 4]>;
         \\
-        \\    pub fn set_slot(account: address, index: u256, val: u256) {
+        \\    pub fn set_slot(account: address, index: u256, val: u256)
+        \\        requires index < 4
+        \\    {
         \\        let arr: [u256; 4] = slots[account];
         \\        arr[index] = val;
         \\        slots[account] = arr;
         \\    }
         \\
-        \\    pub fn get_slot(account: address, index: u256) -> u256 {
+        \\    pub fn get_slot(account: address, index: u256) -> u256
+        \\        requires index < 4
+        \\    {
         \\        let arr: [u256; 4] = slots[account];
         \\        return arr[index];
         \\    }
