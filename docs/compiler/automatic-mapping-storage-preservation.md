@@ -1,8 +1,8 @@
 # Automatic Mapping-Storage Preservation Proofs
 
-Status: PROPOSED. The Lean semantic bridge is implemented but uncommitted.
-No automatic proof or new artifact authority may land until this contract is
-reviewed and approved.
+Status: CLOSED WITHOUT AUTOMATIC AUTHORITY. Task 1 landed in `6514687d8`.
+Task 2 triggered the project's stop condition and was reverted. Mapping
+storage-preservation claims continue to require an external Lean certificate.
 
 ## Objective
 
@@ -123,22 +123,28 @@ stops and the design returns to review.
 
 ### Task 1 — Lean frame bridge
 
-- [ ] Prove that reads contribute no write footprint.
-- [ ] Bind a write footprint to the location returned by the ordinary location
+- [x] Prove that reads contribute no write footprint.
+- [x] Bind a write footprint to the location returned by the ordinary location
   evaluator.
-- [ ] Lift state-polymorphic per-event frame coverage over the whole timeline.
-- [ ] Compose complete frame coverage and location disjointness into storage
+- [x] Lift state-polymorphic per-event frame coverage over the whole timeline.
+- [x] Compose complete frame coverage and location disjointness into storage
   preservation.
-- [ ] Prove that a context-stable key survives loop-local and timeline-read
+- [x] Prove that a context-stable key survives loop-local and timeline-read
   binding.
-- [ ] Prove typed one-key mapping resolution through the ordinary evaluator.
-- [ ] Pin repeated-write preservation and the later-observed-write
+- [x] Prove typed one-key mapping resolution through the ordinary evaluator.
+- [x] Pin repeated-write preservation and the later-observed-write
   counterexample in Lean.
 
 Task 1 changes no compiler authority. It is complete only after reviewer
 approval and a dedicated commit.
 
 ### Task 2 — Repository tactic wiring
+
+Closed through the stop-control path on 2026-09-05. The attempted
+implementation did not produce a kernel-accepted certificate and reached
+`+816` uncommitted production lines, exceeding the entire project's `+400`
+hard limit. The experiment was removed in full. The checklist remains
+unchecked because automatic proof construction was not implemented.
 
 - [ ] Teach `ora_loop_auto` to recognize the denoted preservation obligation
   from the goal and canonical LoopVC data.
@@ -154,6 +160,13 @@ approval and a dedicated commit.
 - [ ] Leave all nonmatching goals open so Lean rejects the automatic proof.
 
 Task 2 may not add a Zig recognizer or emit a fixture-shaped Lean proof.
+
+The observed failure was fail-closed: the generated proof left a required
+post-timeline invariant goal open, Lean introduced `sorryAx`, and the axiom
+audit rejected the proof. No certificate or bytecode was emitted. Continuing
+the same approach would duplicate the existing scalar/control proof planner
+inside a second storage-specific tactic, contrary to the architecture and
+growth constraints above.
 
 ### Task 3 — Production acceptance evidence
 
@@ -217,3 +230,20 @@ chain of custody.
 Completion does not claim automatic proof support for fixed arrays,
 loop-carried keys, read-result keys, multiple projections, storage-mutating
 children, or arbitrary storage formulas.
+
+## Closure Outcome
+
+The automatic project did not meet its completion condition and is closed by
+its explicit stop rule. The committed result is limited to the reusable Task 1
+frame-preservation bridge. The following behavior is unchanged:
+
+- canonical Z3 and the Lean kernel remain mandatory for storage-loop
+  certificates;
+- the reviewed external-certificate path remains accepted and digest-bound;
+- automatic planning still rejects assumption-carrying mapping-preservation
+  loops with `automatic_assumptions_require_external_certificate`; and
+- no new artifact-emission or runtime-check-erasure authority was introduced.
+
+Any future automatic mapping-preservation project requires a new reviewed
+contract with a compact proof-composition seam; it must not resume the reverted
+storage-specific proof-script approach.
