@@ -118,16 +118,21 @@ const FixedIndexMutation = enum {
     extent_invalid,
     checkpoint_missing,
     checkpoint_late,
+    checkpoint_wrong_shape,
+    checkpoint_wrong_index,
+    checkpoint_wrong_type,
     checkpoint_inconsistent,
     checkpoint_noncanonical_literal,
 };
 
 const FixedIndexTimelineShape = enum { normal, missing, late };
+const FixedIndexFormulaShape = enum { canonical, wrong_operator, wrong_index, wrong_type };
 
 const FixedIndexFixtureConfig = struct {
     literal_value: []const u8 = "4",
     extent: u64 = 4,
     timeline_shape: FixedIndexTimelineShape = .normal,
+    formula_shape: FixedIndexFormulaShape = .canonical,
 };
 
 fn fixedIndexFixtureConfig(mutation: FixedIndexMutation) FixedIndexFixtureConfig {
@@ -136,6 +141,9 @@ fn fixedIndexFixtureConfig(mutation: FixedIndexMutation) FixedIndexFixtureConfig
         .extent_invalid => .{ .extent = 0 },
         .checkpoint_missing => .{ .timeline_shape = .missing },
         .checkpoint_late => .{ .timeline_shape = .late },
+        .checkpoint_wrong_shape => .{ .formula_shape = .wrong_operator },
+        .checkpoint_wrong_index => .{ .formula_shape = .wrong_index },
+        .checkpoint_wrong_type => .{ .formula_shape = .wrong_type },
         .checkpoint_inconsistent => .{ .extent = 3 },
         .checkpoint_noncanonical_literal => .{ .literal_value = "04" },
     };
@@ -580,7 +588,12 @@ fn fixedIndexReason(mutation: FixedIndexMutation) ?obligation.LoopUnsupportedRea
             .value = config.literal_value,
             .ty = ty_u256,
         } },
-        .{ .binary = .{ .op = .lt, .lhs = 0, .rhs = 1, .ty = ty_u256 } },
+        .{ .binary = .{
+            .op = if (config.formula_shape == .wrong_operator) .le else .lt,
+            .lhs = if (config.formula_shape == .wrong_index) 1 else 0,
+            .rhs = 1,
+            .ty = if (config.formula_shape == .wrong_type) ty_u8 else ty_u256,
+        } },
     };
     const formulas = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 2 } }};
     const projection = [_]obligation.LoopStorageProjection{.{ .fixed_index = .{

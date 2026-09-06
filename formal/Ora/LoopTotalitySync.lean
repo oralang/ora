@@ -290,6 +290,9 @@ inductive FixedIndexMutation
   | extentInvalid
   | checkpointMissing
   | checkpointLate
+  | checkpointWrongShape
+  | checkpointWrongIndex
+  | checkpointWrongType
   | checkpointInconsistent
   | checkpointNoncanonicalLiteral
   deriving DecidableEq
@@ -299,6 +302,9 @@ def FixedIndexMutation.name : FixedIndexMutation → String
   | .extentInvalid => "extent_invalid"
   | .checkpointMissing => "checkpoint_missing"
   | .checkpointLate => "checkpoint_late"
+  | .checkpointWrongShape => "checkpoint_wrong_shape"
+  | .checkpointWrongIndex => "checkpoint_wrong_index"
+  | .checkpointWrongType => "checkpoint_wrong_type"
   | .checkpointInconsistent => "checkpoint_inconsistent"
   | .checkpointNoncanonicalLiteral => "checkpoint_noncanonical_literal"
 
@@ -307,21 +313,32 @@ inductive FixedIndexTimelineShape
   | missing
   | late
 
+inductive FixedIndexFormulaShape
+  | canonical
+  | wrongOperator
+  | wrongIndex
+  | wrongType
+
 structure FixedIndexFixtureConfig where
   literalValue : String := "4"
   extent : Nat := 4
   timelineShape : FixedIndexTimelineShape := .normal
+  formulaShape : FixedIndexFormulaShape := .canonical
 
 def fixedIndexFixtureConfig : FixedIndexMutation → FixedIndexFixtureConfig
   | .supported => {}
   | .extentInvalid => { extent := 0 }
   | .checkpointMissing => { timelineShape := .missing }
   | .checkpointLate => { timelineShape := .late }
+  | .checkpointWrongShape => { formulaShape := .wrongOperator }
+  | .checkpointWrongIndex => { formulaShape := .wrongIndex }
+  | .checkpointWrongType => { formulaShape := .wrongType }
   | .checkpointInconsistent => { extent := 3 }
   | .checkpointNoncanonicalLiteral => { literalValue := "04" }
 
 def fixedIndexMutations : List FixedIndexMutation := [
   .supported, .extentInvalid, .checkpointMissing, .checkpointLate,
+  .checkpointWrongShape, .checkpointWrongIndex, .checkpointWrongType,
   .checkpointInconsistent, .checkpointNoncanonicalLiteral
 ]
 
@@ -335,10 +352,16 @@ def fixedIndexManifest (mutation : FixedIndexMutation) : Manifest := {
       value := (fixedIndexFixtureConfig mutation).literalValue
       ty := some (.compilerTypeId 6) },
     .binary {
-      op := .lt
-      lhs := 0
+      op := match (fixedIndexFixtureConfig mutation).formulaShape with
+        | .wrongOperator => .le
+        | _ => .lt
+      lhs := match (fixedIndexFixtureConfig mutation).formulaShape with
+        | .wrongIndex => 1
+        | _ => 0
       rhs := 1
-      ty := some (.compilerTypeId 6) }
+      ty := some (match (fixedIndexFixtureConfig mutation).formulaShape with
+        | .wrongType => .compilerTypeId 1
+        | _ => .compilerTypeId 6) }
   ]
 }
 

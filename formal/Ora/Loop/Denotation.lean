@@ -116,6 +116,10 @@ inductive TimelineShapeReason where
   | storageProjectionInvalid
   | fixedIndexExtentInvalid
   | fixedIndexBoundsCheckpointMissing
+  | fixedIndexBoundsFormulaShapeMismatch
+  | fixedIndexBoundsIndexIdentityMismatch
+  | fixedIndexBoundsTypeMismatch
+  | fixedIndexBoundsExtentLiteralMismatch
   | storageTypeInvalid
   | readIdentityDuplicate
   | readIdentityForeign
@@ -137,6 +141,13 @@ def TimelineShapeReason.name : TimelineShapeReason → String
   | .storageProjectionInvalid => "loop_storage_projection_invalid"
   | .fixedIndexExtentInvalid => "loop_fixed_index_extent_invalid"
   | .fixedIndexBoundsCheckpointMissing => "loop_fixed_index_bounds_checkpoint_missing"
+  | .fixedIndexBoundsFormulaShapeMismatch =>
+      "loop_fixed_index_bounds_formula_shape_mismatch"
+  | .fixedIndexBoundsIndexIdentityMismatch =>
+      "loop_fixed_index_bounds_index_identity_mismatch"
+  | .fixedIndexBoundsTypeMismatch => "loop_fixed_index_bounds_type_mismatch"
+  | .fixedIndexBoundsExtentLiteralMismatch =>
+      "loop_fixed_index_bounds_extent_literal_mismatch"
   | .storageTypeInvalid => "loop_storage_type_invalid"
   | .readIdentityDuplicate => "loop_storage_read_identity_duplicate"
   | .readIdentityForeign => "loop_storage_read_identity_foreign"
@@ -553,22 +564,65 @@ def storageLocationFormulasDenotable
         valueDenotable manifest env projection.index.value.formula
     | .mappingKey key => valueDenotable manifest env key.value.formula
 
-def fixedIndexBoundsFormulaMatches
+inductive FixedIndexBoundsMatch where
+  | matched
+  | formulaShapeMismatch
+  | indexIdentityMismatch
+  | typeMismatch
+  | extentLiteralMismatch
+  deriving Repr, BEq, DecidableEq
+
+def FixedIndexBoundsMatch.rank : FixedIndexBoundsMatch → Nat
+  | .matched => 0
+  | .formulaShapeMismatch => 1
+  | .indexIdentityMismatch => 2
+  | .typeMismatch => 3
+  | .extentLiteralMismatch => 4
+
+def FixedIndexBoundsMatch.reason? : FixedIndexBoundsMatch → Option TimelineShapeReason
+  | .matched => none
+  | .formulaShapeMismatch => some .fixedIndexBoundsFormulaShapeMismatch
+  | .indexIdentityMismatch => some .fixedIndexBoundsIndexIdentityMismatch
+  | .typeMismatch => some .fixedIndexBoundsTypeMismatch
+  | .extentLiteralMismatch => some .fixedIndexBoundsExtentLiteralMismatch
+
+def fixedIndexBoundsFormulaMatch
     (manifest : Manifest)
     (candidate : FormulaExprRow)
-    (projection : FixedIndexProjectionRow) : Bool :=
+    (projection : FixedIndexProjectionRow) : FixedIndexBoundsMatch :=
   match candidate.formula, projection.index.value.formula with
   | .term formulaId, .term indexId =>
       match manifest.terms[formulaId]? with
       | some (.binary binary) =>
-          binary.op == .lt && binary.lhs == indexId &&
-            binary.ty == some projection.index.ty &&
-            match manifest.terms[binary.rhs]? with
+          if binary.op != .lt then .formulaShapeMismatch
+          else if binary.lhs != indexId then .indexIdentityMismatch
+          else if binary.ty != some projection.index.ty then .typeMismatch
+          else match manifest.terms[binary.rhs]? with
             | some (.intLit literal) =>
-                literal.value == toString projection.extent &&
-                  literal.ty == some projection.index.ty
-            | _ => false
-      | _ => false
+                if literal.ty != some projection.index.ty then .typeMismatch
+                else if literal.value != toString projection.extent then
+                  .extentLiteralMismatch
+                else .matched
+            | _ => .formulaShapeMismatch
+      | _ => .formulaShapeMismatch
+
+def bestFixedIndexBoundsMatch? :
+    List FixedIndexBoundsMatch → Option FixedIndexBoundsMatch
+  | [] => none
+  | result :: rest =>
+      if result == .matched then some .matched
+      else match bestFixedIndexBoundsMatch? rest with
+        | some .matched => some .matched
+        | some later =>
+            if result.rank >= later.rank then some result else some later
+        | none => some result
+
+def priorSafetyFormulas : List TimelineEventRow → List FormulaExprRow
+  | [] => []
+  | event :: rest =>
+      match event.payload with
+      | .safetyCheckpoint checkpoint => checkpoint.formulas ++ priorSafetyFormulas rest
+      | _ => priorSafetyFormulas rest
 
 def fixedIndexProjectionBoundsReason?
     (manifest : Manifest)
@@ -576,12 +630,13 @@ def fixedIndexProjectionBoundsReason?
     (projection : FixedIndexProjectionRow) : Option TimelineShapeReason :=
   if !fixedIndexExtentValid projection.extent then
     some .fixedIndexExtentInvalid
-  else if prior.any fun event => match event.payload with
-    | .safetyCheckpoint checkpoint =>
-        checkpoint.formulas.any (fixedIndexBoundsFormulaMatches manifest · projection)
-    | _ => false
-  then none
-  else some .fixedIndexBoundsCheckpointMissing
+  else
+    match bestFixedIndexBoundsMatch?
+        ((priorSafetyFormulas prior).map
+          (fixedIndexBoundsFormulaMatch manifest · projection)) with
+    | some .matched => none
+    | some mismatch => mismatch.reason?
+    | none => some .fixedIndexBoundsCheckpointMissing
 
 def storageLocationFixedIndexBoundsReason?
     (manifest : Manifest)
