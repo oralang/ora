@@ -638,6 +638,8 @@ def placeDefinitelyDisjoint (lhs rhs : PlaceRef) : Bool :=
     true
   else if lhs.fields != rhs.fields then
     false
+  else if lhs.projectionDomain != rhs.projectionDomain then
+    false
   else
     placeKeyListsDefinitelyDisjoint lhs.keys rhs.keys
 
@@ -680,6 +682,8 @@ def keyEvidencePathMatches
   else if read.root != write.root then
     false
   else if read.fields != write.fields then
+    false
+  else if read.projectionDomain != write.projectionDomain then
     false
   else if read.keys.length != write.keys.length then
     false

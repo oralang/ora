@@ -152,6 +152,97 @@ theorem StorageFormulaContext.evalFormula_bool_true
   unfold evalFormula? formulaStorageReady termStorageReady
   simp [hBound, hTerm, formulaDenotes?, denoteFormula?]
 
+theorem StorageFormulaContext.termStorageReady_variable
+    (context : StorageFormulaContext)
+    (bindings : Env)
+    (fuel : Nat)
+    (termId : TermId)
+    (reference : FreeVarRef)
+    (hFuel : 0 < fuel)
+    (hTerm : context.manifest.terms[termId]? =
+      some (.variable (.free reference))) :
+    context.termStorageReady bindings fuel termId = true := by
+  cases fuel with
+  | zero => simp at hFuel
+  | succ remaining => simp [termStorageReady, hTerm]
+
+theorem StorageFormulaContext.termStorageReady_intLit
+    (context : StorageFormulaContext)
+    (bindings : Env)
+    (fuel : Nat)
+    (termId : TermId)
+    (literal : IntegerLiteralTerm)
+    (hFuel : 0 < fuel)
+    (hTerm : context.manifest.terms[termId]? = some (.intLit literal)) :
+    context.termStorageReady bindings fuel termId = true := by
+  cases fuel with
+  | zero => simp at hFuel
+  | succ remaining => simp [termStorageReady, hTerm]
+
+theorem denoteValue_free_variable
+    (manifest : Manifest)
+    (env : Env)
+    (fuel : Nat)
+    (termId : TermId)
+    (reference : FreeVarRef)
+    (value : Value)
+    (hFuel : 0 < fuel)
+    (hTerm : manifest.terms[termId]? = some (.variable (.free reference)))
+    (hValue : env.lookupFree reference.id = some value) :
+    denoteValue? manifest env fuel termId = some value := by
+  cases fuel with
+  | zero => simp at hFuel
+  | succ remaining => simp [denoteValue?, hTerm, Env.lookupVar, hValue]
+
+theorem denoteValue_intLit
+    (manifest : Manifest)
+    (env : Env)
+    (fuel : Nat)
+    (termId : TermId)
+    (literal : IntegerLiteralTerm)
+    (value : Ora.Integer.Value)
+    (hFuel : 0 < fuel)
+    (hTerm : manifest.terms[termId]? = some (.intLit literal))
+    (hValue : literal.asInteger? = some value) :
+    denoteValue? manifest env fuel termId = some (.integer value) := by
+  cases fuel with
+  | zero => simp at hFuel
+  | succ remaining => simp [denoteValue?, hTerm, hValue]
+
+/-- A source-owned unsigned bounds predicate keeps its exact meaning when its
+index is a context-stable free variable.  Storage state and preceding reads do
+not affect the comparison once the bound environment is fixed. -/
+theorem StorageFormulaContext.evalFormula_u256_lt_free_literal
+    (context : StorageFormulaContext)
+    (state : StorageActionState)
+    (bound : Env)
+    (variableTerm literalTerm comparisonTerm : TermId)
+    (variableValue literalValue : Ora.Integer.Value)
+    (proposition : Prop)
+    (ty : TyRef)
+    (hBound : context.stateEnv? state = some bound)
+    (hComparison : context.manifest.terms[comparisonTerm]? = some (.binary {
+      op := .lt, lhs := variableTerm, rhs := literalTerm, ty := some ty
+    }))
+    (hVariableReady : context.termStorageReady bound
+      context.manifest.terms.length variableTerm = true)
+    (hLiteralReady : context.termStorageReady bound
+      context.manifest.terms.length literalTerm = true)
+    (hVariableValue : denoteValue? context.manifest bound
+      context.manifest.terms.length variableTerm = some (.integer variableValue))
+    (hLiteralValue : denoteValue? context.manifest bound
+      context.manifest.terms.length literalTerm = some (.integer literalValue))
+    (hType : ty.integerShape? = some (.unsigned .w256))
+    (hRelation : variableValue.relation? (.unsigned .w256)
+      Ora.Integer.unsignedLt literalValue = some proposition)
+    :
+    context.evalFormula? (.term comparisonTerm) state = some proposition := by
+  unfold TyRef.integerShape? at hType
+  unfold evalFormula? formulaStorageReady termStorageReady
+  simp [hBound, hComparison, hVariableReady, hLiteralReady, hVariableValue,
+    hLiteralValue, hType, formulaDenotes?, denoteFormula?,
+    hRelation]
+
 def StorageFormulaContext.evalValue?
     (context : StorageFormulaContext)
     (formula : FormulaRef)
@@ -350,6 +441,53 @@ theorem StorageFormulaContext.evalLocation_mapping_free_variable
   have hSome : valueTy.integerShape?.isSome = true := by
     simpa [hBool] using hValueType
   exact Option.isSome_iff_ne_none.mp hSome
+
+/-- Resolve one fixed-array index from the exact context-stable free-variable
+binding used by the timeline. The extent remains part of the canonical
+location expression even though it is not part of element identity. -/
+theorem StorageFormulaContext.evalLocation_fixed_free_variable
+    (context : StorageFormulaContext)
+    (state : StorageActionState)
+    (bound : Env)
+    (termId : TermId)
+    (reference : FreeVarRef)
+    (key : Ora.Integer.Value)
+    (keyTy valueTy : TyRef)
+    (root : String)
+    (extent : Nat)
+    (hBound : context.stateEnv? state = some bound)
+    (hTerm : context.manifest.terms[termId]? = some (.variable (.free reference)))
+    (hLookup : bound.lookupFree reference.id = some (.integer key))
+    (hKeyType : storageValueMatchesTy (.integer key) keyTy = true)
+    (hKeyShape : key.shape = .unsigned .w256)
+    (hValueType : valueTy.isBool || valueTy.integerShape?.isSome)
+    (hRoot : root.isEmpty = false)
+    (hExtentPositive : 0 < extent)
+    (hExtentFits : extent < 2 ^ 256) :
+    context.evalLocation? {
+      root
+      projections := [.fixedIndex {
+        index := { formula := .term termId, ty := keyTy }
+        extent
+      }]
+      valueTy
+    } state = some { root, projections := [.fixedIndex (.integer key)] } := by
+  unfold StorageFormulaContext.evalLocation?
+    StorageFormulaContext.evalProjections?
+    StorageFormulaContext.evalTypedValue?
+  rw [context.evalValue_free_variable state bound termId reference (.integer key)
+    hBound hTerm hLookup]
+  simp [StorageFormulaContext.evalProjections?, hRoot, hValueType, hKeyType,
+    hKeyShape, hExtentPositive, hExtentFits]
+  constructor
+  · intro hBool
+    have hSome : valueTy.integerShape?.isSome = true := by
+      simpa [hBool] using hValueType
+    exact Option.isSome_iff_ne_none.mp hSome
+  · cases key with
+    | mk shape bits =>
+        cases hKeyShape
+        rfl
 
 def StorageFormulaContext.actionSemantics
     (context : StorageFormulaContext) :

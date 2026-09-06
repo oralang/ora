@@ -103,9 +103,9 @@ pub const ObligationSet = struct {
     ) ?ArtifactBlockReason {
         for (timeline) |event| switch (event.payload) {
             .storage_read => |read| if (read.location.projections.len != 0 and
-                !self.reviewedMappingProjection(summary, read.location)) return .storage_projection_authority_unreviewed,
+                !self.reviewedStorageProjection(summary, timeline, read.location)) return .storage_projection_authority_unreviewed,
             .storage_write => |write| if (write.location.projections.len != 0 and
-                !self.reviewedMappingProjection(summary, write.location)) return .storage_projection_authority_unreviewed,
+                !self.reviewedStorageProjection(summary, timeline, write.location)) return .storage_projection_authority_unreviewed,
             .summary_dependency => |dependency| if (self.loopSummaryClosureHasStorageEvents(
                 dependency.summary_id,
                 self.loop_summaries.len + 1,
@@ -115,12 +115,28 @@ pub const ObligationSet = struct {
         return null;
     }
 
+    fn reviewedStorageProjection(
+        self: ObligationSet,
+        summary: LoopSummaryRow,
+        timeline: []const LoopTimelineEvent,
+        location: LoopStorageLocationExpr,
+    ) bool {
+        if (!summary.preheader_projection_complete or location.projections.len != 1) return false;
+        return switch (location.projections[0]) {
+            .mapping_key => self.reviewedMappingProjection(summary, location),
+            // The bounds validator ties this exact projected index and extent
+            // to a preceding source-owned checkpoint in the same timeline.
+            .fixed_index => self.fixedIndexBoundsReason(timeline) == null,
+            .field => false,
+        };
+    }
+
     fn reviewedMappingProjection(
         self: ObligationSet,
         summary: LoopSummaryRow,
         location: LoopStorageLocationExpr,
     ) bool {
-        if (!summary.preheader_projection_complete or location.projections.len != 1) return false;
+        if (location.projections.len != 1) return false;
         const key = switch (location.projections[0]) {
             .mapping_key => |key| key,
             .field, .fixed_index => return false,
@@ -2355,7 +2371,13 @@ pub const PlaceRef = struct {
     root: []const u8,
     region: RegionRef,
     fields: []const []const u8 = &.{},
+    projection_domain: PlaceProjectionDomain = .mapping,
     keys: []const PlaceKey = &.{},
+};
+
+pub const PlaceProjectionDomain = enum(u8) {
+    mapping,
+    fixed_index,
 };
 
 pub const PlaceKeyTag = enum(u8) {
@@ -2382,6 +2404,7 @@ pub fn placeRefEql(lhs: PlaceRef, rhs: PlaceRef) bool {
     if (!std.mem.eql(u8, lhs.root, rhs.root)) return false;
     if (lhs.region != rhs.region) return false;
     if (lhs.fields.len != rhs.fields.len) return false;
+    if (lhs.projection_domain != rhs.projection_domain) return false;
     if (lhs.keys.len != rhs.keys.len) return false;
     for (lhs.fields, rhs.fields) |left, right| {
         if (!std.mem.eql(u8, left, right)) return false;
@@ -2409,6 +2432,9 @@ pub fn placeDefinitelyDisjoint(lhs: PlaceRef, rhs: PlaceRef) bool {
     if (lhs.region != rhs.region) return true;
     if (!std.mem.eql(u8, lhs.root, rhs.root)) return true;
     if (!stringSlicesEql(lhs.fields, rhs.fields)) return false;
+    // Effect-slot metadata cannot yet distinguish array indices from mapping
+    // keys. A cross-domain pair is therefore unknown, never proven disjoint.
+    if (lhs.projection_domain != rhs.projection_domain) return false;
     return placeKeysDefinitelyDisjoint(lhs.keys, rhs.keys);
 }
 
@@ -2638,6 +2664,7 @@ test "manifest enum tags stay byte-sized" {
         UnaryOp,
         BinaryOp,
         Quantifier,
+        PlaceProjectionDomain,
         PlaceKeyTag,
         RegionRef,
         TypeRefTag,
@@ -3710,7 +3737,7 @@ test "obligation can point at MLIR origin without proof term" {
     try std.testing.expect(obligation.blocksArtifacts());
 }
 
-test "storage artifact authority admits only reviewed context-key mappings without storage child frames" {
+test "storage artifact authority admits reviewed mappings and bounded fixed indices without storage child frames" {
     const ty: TypeRef = .{ .spelling = "u256" };
     const direct_timeline = [_]LoopTimelineEvent{.{
         .id = 0,
@@ -3817,6 +3844,68 @@ test "storage artifact authority admits only reviewed context-key mappings witho
         (ObligationSet{
             .queries = &.{certificate_query},
             .loop_summaries = &.{fixed_preheader_summary},
+        }).storageArtifactAuthorityBlockReason().?,
+    );
+
+    const fixed_terms = [_]Term{
+        .{ .variable = .{ .free = .{ .id = context_id, .name = "index", .ty = ty } } },
+        .{ .int_lit = .{ .value = "4", .ty = ty } },
+        .{ .binary = .{ .op = .lt, .lhs = 0, .rhs = 1, .ty = ty } },
+    };
+    const fixed_timeline = [_]LoopTimelineEvent{
+        .{
+            .id = 0,
+            .structural_key = "check/index",
+            .payload = .{ .safety_checkpoint = .{ .formulas = &.{.{
+                .formula = .{ .term = 2 },
+            }} } },
+        },
+        .{
+            .id = 1,
+            .structural_key = "store/values",
+            .payload = .{ .storage_write = .{
+                .location = .{
+                    .root = "values",
+                    .projections = &index_projection,
+                    .value_ty = ty,
+                },
+                .value = .{ .formula = .{ .term = 0 } },
+            } },
+        },
+    };
+    const fixed_edges = [_]LoopEdgeRow{.{
+        .id = 0,
+        .structural_key = "edge/fixed",
+        .timeline = &fixed_timeline,
+    }};
+    var fixed_summary = direct_summary;
+    fixed_summary.preheader_projection_complete = true;
+    fixed_summary.edges = &fixed_edges;
+    try std.testing.expectEqual(
+        @as(?ArtifactBlockReason, null),
+        (ObligationSet{
+            .queries = &.{certificate_query},
+            .terms = &fixed_terms,
+            .loop_summaries = &.{fixed_summary},
+        }).storageArtifactAuthorityBlockReason(),
+    );
+
+    const mixed_projection = [_]LoopStorageProjection{
+        index_projection[0],
+        mapping_projection[0],
+    };
+    var mixed_timeline = fixed_timeline;
+    mixed_timeline[1].payload.storage_write.location.projections = &mixed_projection;
+    var mixed_edges = fixed_edges;
+    mixed_edges[0].timeline = &mixed_timeline;
+    var mixed_summary = fixed_summary;
+    mixed_summary.edges = &mixed_edges;
+    try std.testing.expectEqual(
+        ArtifactBlockReason.storage_projection_authority_unreviewed,
+        (ObligationSet{
+            .queries = &.{certificate_query},
+            .terms = &fixed_terms,
+            .loop_summaries = &.{mixed_summary},
         }).storageArtifactAuthorityBlockReason().?,
     );
 

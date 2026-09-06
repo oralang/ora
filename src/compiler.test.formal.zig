@@ -9972,7 +9972,16 @@ test "external mapping preservation certificate binds canonical Z3 and Lean thro
     try expectNoFormalArtifactsInRepoRoot(allocator, stem);
 }
 
-test "mapping preservation without external certificates remains blocked" {
+test "external fixed-array preservation certificate binds canonical Z3 and Lean deterministically" {
+    try expectExternalPreheaderCertificateDeterministic(
+        "tests/formal/fixed_storage_preservation_certificate.ora",
+        "tests/formal/fixed_storage_preservation_certificate.proofs.json",
+        "fixed_storage_preservation_certificate",
+        2,
+    );
+}
+
+test "projected storage preservation without external certificates remains blocked" {
     std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
@@ -10001,6 +10010,11 @@ test "mapping preservation without external certificates remains blocked" {
         .{
             .source = "tests/formal/fail_mapping_storage_preservation_no_inequality.ora",
             .stem = "fail_mapping_storage_preservation_no_inequality",
+            .diagnostic = "Automatic Lean loop proof unavailable",
+        },
+        .{
+            .source = "tests/formal/fail_fixed_storage_preservation_no_inequality.ora",
+            .stem = "fail_fixed_storage_preservation_no_inequality",
             .diagnostic = "Automatic Lean loop proof unavailable",
         },
     };
@@ -10321,6 +10335,25 @@ test "canonical mapping preservation step rejects absent key inequality" {
     try testing.expect(checked);
 }
 
+test "canonical fixed-array preservation step rejects absent index inequality" {
+    var result = try collectPackageObligations(
+        testing.allocator,
+        "tests/formal/fail_fixed_storage_preservation_no_inequality.ora",
+    );
+    defer result.deinit();
+    var context = try z3_verification.Z3Context.init(testing.allocator);
+    defer context.deinit();
+    var adapter = obligation_to_z3.Adapter.init(&context, testing.allocator, result.set);
+    var checked = false;
+    for (result.set.queries) |query| {
+        if (query.kind != .loop_invariant_step or query.loop_summary_id == null) continue;
+        const verdict = try adapter.checkLoopQueryForRow(query);
+        try testing.expectEqual(obligation_to_z3.CheckStatus.disproved, verdict.status);
+        checked = true;
+    }
+    try testing.expect(checked);
+}
+
 fn expectRepositoryStorageTacticDeterministic(
     source: []const u8,
     stem: []const u8,
@@ -10532,11 +10565,11 @@ test "repository tactic certifies checked arithmetic in a storage timeline" {
     );
 }
 
-test "repository tactic checks fixed-array aggregate storage but artifact authority remains unreviewed" {
-    try expectRepositoryStorageTacticCheckedButAuthorityBlocked(
+test "repository tactic certifies a bounded fixed-array storage loop through the real CLI" {
+    try expectRepositoryStorageTacticDeterministic(
         "tests/formal/fixed_storage_loop_auto.ora",
         "fixed_storage_loop_auto",
-        .storage_projection_authority_unreviewed,
+        1,
     );
 }
 

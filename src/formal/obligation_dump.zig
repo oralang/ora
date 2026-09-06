@@ -1109,7 +1109,11 @@ fn writePlaceObject(writer: anytype, place: obligation.PlaceRef) !void {
         if (index != 0) try writer.writeByte(',');
         try writeJsonString(writer, field);
     }
-    try writer.writeAll("],\"keys\":[");
+    try writer.writeByte(']');
+    if (place.projection_domain != .mapping) {
+        try writeStringField(writer, "projection_domain", "fixed_index");
+    }
+    try writer.writeAll(",\"keys\":[");
     for (place.keys, 0..) |key, index| {
         if (index != 0) try writer.writeByte(',');
         try writePlaceKeyObject(writer, key);

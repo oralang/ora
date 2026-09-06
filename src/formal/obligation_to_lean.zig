@@ -1451,6 +1451,7 @@ fn keyEvidencePathMatches(
     if (read.region != write.region) return false;
     if (!std.mem.eql(u8, read.root, write.root)) return false;
     if (!stringSlicesEql(read.fields, write.fields)) return false;
+    if (read.projection_domain != write.projection_domain) return false;
     if (read.keys.len != write.keys.len) return false;
     const index: usize = @intCast(key_index);
     if (index >= read.keys.len) return false;
@@ -2343,6 +2344,9 @@ fn writePlaceRef(writer: anytype, place: obligation.PlaceRef) !void {
     try writer.writeAll(regionName(place.region));
     try writer.writeAll(", fields := ");
     try writeStringList(writer, place.fields);
+    if (place.projection_domain != .mapping) {
+        try writer.writeAll(", projectionDomain := .fixedIndex");
+    }
     try writer.writeAll(", keys := ");
     try writePlaceKeyList(writer, place.keys);
     try writer.writeAll(" }");
@@ -2787,6 +2791,7 @@ test "Lean emitter writes effect frame obligations" {
         .{
             .root = "balances",
             .region = .storage,
+            .projection_domain = .fixed_index,
             .keys = &declared_keys,
         },
     };
@@ -2826,6 +2831,7 @@ test "Lean emitter writes effect frame obligations" {
     const rendered = buffer.written();
     try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 1, ".effectFrame { relation := .writeCoveredByModifies"));
     try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "{ root := \"balances\", region := .storage"));
+    try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "projectionDomain := .fixedIndex"));
     try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "keys := [.parameter { file_id := 0, pattern_id := 0 }]"));
     try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "def emittedQuery_2 : Prop :="));
     try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "obligationFollowsFromAssumptions emittedManifest"));

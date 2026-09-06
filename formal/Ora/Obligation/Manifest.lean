@@ -89,10 +89,16 @@ inductive PlaceKey where
   | unknown
   deriving Repr, BEq, DecidableEq
 
+inductive PlaceProjectionDomain where
+  | mapping
+  | fixedIndex
+  deriving Repr, BEq, DecidableEq
+
 structure PlaceRef where
   root : String
   region : RegionRef
   fields : List String := []
+  projectionDomain : PlaceProjectionDomain := .mapping
   keys : List PlaceKey := []
   deriving Repr, BEq, DecidableEq
 

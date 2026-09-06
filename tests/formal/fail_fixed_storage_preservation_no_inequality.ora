@@ -1,0 +1,16 @@
+contract FailFixedStoragePreservationNoInequality {
+    storage var values: [u256; 4];
+
+    pub fn writeOther(write_index: u256, observed_index: u256, value: u256)
+        requires(write_index < 4)
+        requires(observed_index < 4)
+    {
+        var i: u256 = 0;
+        while (i < 1)
+            invariant values[observed_index] == old(values[observed_index])
+        {
+            values[write_index] = value;
+            i = i +% 1;
+        }
+    }
+}

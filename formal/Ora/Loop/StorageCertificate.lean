@@ -67,9 +67,24 @@ def directStorageResolvePlace
     none
   else
     match place.keys with
-    | [] => some { root := place.root }
+    | [] =>
+        if place.projectionDomain == .mapping then
+          some { root := place.root }
+        else
+          none
     | [.parameter id] => do
-        pure { root := place.root, projections := [.mappingKey (← lookup id)] }
+        let key ← lookup id
+        match place.projectionDomain with
+        | .mapping =>
+            pure { root := place.root, projections := [.mappingKey key] }
+        | .fixedIndex =>
+            match key with
+            | .integer value =>
+                if value.shape == .unsigned .w256 then
+                  pure { root := place.root, projections := [.fixedIndex key] }
+                else
+                  none
+            | _ => none
     | _ => none
 
 theorem directStorageMappingLocations_ne
@@ -79,6 +94,15 @@ theorem directStorageMappingLocations_ne
       { root := root, projections := [.mappingKey writeKey] } := by
   intro hEqual
   exact hNe (StorageProjection.mappingKey.inj
+    (List.cons.inj (StorageLocation.mk.inj hEqual).2).1)
+
+theorem directStorageFixedIndexLocations_ne
+    (root : String) (readIndex writeIndex : Value)
+    (hNe : readIndex ≠ writeIndex) :
+    ({ root := root, projections := [.fixedIndex readIndex] } : StorageLocation) ≠
+      { root := root, projections := [.fixedIndex writeIndex] } := by
+  intro hEqual
+  exact hNe (StorageProjection.fixedIndex.inj
     (List.cons.inj (StorageLocation.mk.inj hEqual).2).1)
 
 /-- Once exact projection coverage resolves every timeline write into the

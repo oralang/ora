@@ -911,6 +911,7 @@ pub const Adapter = struct {
         const value_ty = try self.loopRootTypeRef(place.root);
         const value_info = try typeInfo(value_ty);
         if (place.keys.len == 0) {
+            if (place.projection_domain != .mapping) return error.UnsupportedPlaceReadTerm;
             return self.selectLoopLocation(.{ .root = place.root, .value_ty = value_ty }, value_info, entry);
         }
         if (place.keys.len != 1 or place.keys[0] != .parameter) return error.UnsupportedPlaceReadTerm;
@@ -921,10 +922,16 @@ pub const Adapter = struct {
             if (obligation.freeVarIdEql(candidate_id, id)) break candidate;
         } else return error.UnsupportedPlaceReadTerm;
         const key_info = try typeInfo(variable.ty);
+        if (place.projection_domain == .fixed_index and !ct.typeInfoIsU256(key_info)) {
+            return error.UnsupportedPlaceReadTerm;
+        }
         const key = try self.encodeFreeVariableIdentity(id, variable.ty);
         const resolved = try self.loopProjectedStoreAndKeyFromAst(
             place.root,
-            "mapping",
+            switch (place.projection_domain) {
+                .mapping => "mapping",
+                .fixed_index => "fixed",
+            },
             key,
             key_info,
             value_info,

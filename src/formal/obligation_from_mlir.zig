@@ -5544,6 +5544,7 @@ const Collector = struct {
         if (std.mem.eql(u8, owner_name, "ora.old")) return try self.oldTerm(owner);
         if (std.mem.eql(u8, owner_name, "ora.sload")) return try self.scalarStorageLoadTerm(owner);
         if (std.mem.eql(u8, owner_name, "ora.map_get")) return try self.storageMapReadTerm(owner);
+        if (std.mem.eql(u8, owner_name, "memref.load")) return try self.fixedArrayReadTerm(owner);
         if (std.mem.eql(u8, owner_name, "arith.constant")) return try self.constantTerm(owner, signed_override);
         if (std.mem.eql(u8, owner_name, "arith.trunci")) {
             return try self.truncatedIntegerLiteralTerm(owner, signed_override);
@@ -5629,6 +5630,13 @@ const Collector = struct {
         return try self.placeReadTermFromPlace(place);
     }
 
+    fn fixedArrayReadTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
+        if (!self.use_loop_value_bindings or
+            !mlirTypeIsSupportedInteger(self.operationResultType(op, 0))) return null;
+        const place = (try self.fixedArrayReadPlaceFromLoad(op)) orelse return null;
+        return try self.placeReadTermFromPlace(place);
+    }
+
     fn canProjectLoopCurrentMappingPlace(self: *const Collector, place: obligation.PlaceRef) bool {
         if (!self.use_loop_value_bindings or place.region != .storage or
             place.fields.len != 0 or place.keys.len != 1) return false;
@@ -5656,6 +5664,11 @@ const Collector = struct {
                 return try self.addTerm(.{ .old = try self.placeReadTermFromPlace(place) });
             }
             return null;
+        }
+
+        if (try self.fixedArrayReadPlaceFromValue(operand)) |place| {
+            if (!self.use_loop_value_bindings) return null;
+            return try self.addTerm(.{ .old = try self.placeReadTermFromPlace(place) });
         }
 
         const root = (try self.scalarStorageLoadRootFromValue(operand)) orelse return null;
@@ -5693,6 +5706,35 @@ const Collector = struct {
         if (mlir.oraOperationIsNull(owner)) return null;
         if (!std.mem.eql(u8, operationName(owner), "ora.map_get")) return null;
         return try self.storageMapReadPlaceFromMapGet(owner);
+    }
+
+    fn fixedArrayReadPlaceFromValue(self: *Collector, value: mlir.MlirValue) !?obligation.PlaceRef {
+        if (!mlir.oraValueIsAOpResult(value)) return null;
+        const owner = mlir.oraOpResultGetOwner(value);
+        if (mlir.oraOperationIsNull(owner) or
+            !std.mem.eql(u8, operationName(owner), "memref.load")) return null;
+        return try self.fixedArrayReadPlaceFromLoad(owner);
+    }
+
+    fn fixedArrayReadPlaceFromLoad(self: *Collector, op: mlir.MlirOperation) !?obligation.PlaceRef {
+        if (mlir.oraOperationGetNumOperands(op) != 2 or
+            mlir.oraOperationGetNumResults(op) != 1) return null;
+        _ = fixedIndexExtent(op, 0, 1, 0) catch return null;
+        const root = persistentStorageRootForCarrier(
+            mlir.oraOperationGetOperand(op, 0),
+        ) catch return null;
+        const key = try self.placeKeyFromValue(fixedIndexSourceValue(
+            mlir.oraOperationGetOperand(op, 1),
+        ));
+        if (key != .parameter) return null;
+        const keys = try self.allocator.alloc(obligation.PlaceKey, 1);
+        keys[0] = key;
+        return .{
+            .root = root,
+            .region = .storage,
+            .projection_domain = .fixed_index,
+            .keys = keys,
+        };
     }
 
     fn storageMapReadPlaceFromMapGet(self: *Collector, op: mlir.MlirOperation) !?obligation.PlaceRef {
