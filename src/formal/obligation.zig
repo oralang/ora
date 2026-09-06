@@ -261,10 +261,89 @@ pub const ObligationSet = struct {
     ) !void {
         for (location.projections) |projection| switch (projection) {
             .field => {},
-            .fixed_index, .mapping_key => |key| {
-                try self.validateLoopFormulaExpr(events, event_index, key.value);
-            },
+            .fixed_index => |fixed| try self.validateLoopFormulaExpr(
+                events,
+                event_index,
+                fixed.index.value,
+            ),
+            .mapping_key => |key| try self.validateLoopFormulaExpr(events, event_index, key.value),
         };
+    }
+
+    fn fixedIndexBoundsFormulaMatches(
+        self: ObligationSet,
+        formula: FormulaRef,
+        projection: LoopFixedIndexProjection,
+    ) bool {
+        const formula_id = switch (formula) {
+            .term => |id| id,
+            .origin_value => return false,
+        };
+        const index_id = switch (projection.index.value.formula) {
+            .term => |id| id,
+            .origin_value => return false,
+        };
+        if (formula_id >= self.terms.len) return false;
+        const binary = switch (self.terms[formula_id]) {
+            .binary => |binary| binary,
+            else => return false,
+        };
+        if (binary.op != .lt or binary.lhs != index_id or
+            !optionalTypeRefsEql(binary.ty, projection.index.ty)) return false;
+        if (binary.rhs >= self.terms.len) return false;
+        const literal = switch (self.terms[binary.rhs]) {
+            .int_lit => |literal| literal,
+            else => return false,
+        };
+        if (!optionalTypeRefsEql(literal.ty, projection.index.ty)) return false;
+        const value = std.fmt.parseInt(u64, literal.value, 10) catch return false;
+        return value == projection.extent;
+    }
+
+    fn fixedIndexBoundsLocationReason(
+        self: ObligationSet,
+        events: []const LoopTimelineEvent,
+        event_index: usize,
+        location: LoopStorageLocationExpr,
+    ) ?LoopUnsupportedReason {
+        for (location.projections) |projection| switch (projection) {
+            .fixed_index => |fixed| {
+                if (fixed.extent == 0) return .loop_fixed_index_extent_invalid;
+                var matched = false;
+                for (events[0..event_index]) |prior| switch (prior.payload) {
+                    .safety_checkpoint => |checkpoint| for (checkpoint.formulas) |candidate| {
+                        if (self.fixedIndexBoundsFormulaMatches(candidate.formula, fixed)) {
+                            matched = true;
+                            break;
+                        }
+                    },
+                    else => {},
+                };
+                if (!matched) return .loop_fixed_index_bounds_checkpoint_missing;
+            },
+            .field, .mapping_key => {},
+        };
+        return null;
+    }
+
+    pub fn fixedIndexBoundsReason(
+        self: ObligationSet,
+        events: []const LoopTimelineEvent,
+    ) ?LoopUnsupportedReason {
+        for (events, 0..) |event, event_index| switch (event.payload) {
+            .storage_read => |read| if (self.fixedIndexBoundsLocationReason(
+                events,
+                event_index,
+                read.location,
+            )) |reason| return reason,
+            .storage_write => |write| if (self.fixedIndexBoundsLocationReason(
+                events,
+                event_index,
+                write.location,
+            )) |reason| return reason,
+            .path_assumption, .safety_checkpoint, .summary_dependency => {},
+        };
+        return null;
     }
 
     fn validateLoopFormulaExpr(
@@ -1207,12 +1286,18 @@ pub const LoopTypedFormula = struct {
     ty: TypeRef,
 };
 
+pub const LoopFixedIndexProjection = struct {
+    index: LoopTypedFormula,
+    /// Exact positive extent of the resolved fixed-array dimension.
+    extent: u64,
+};
+
 /// One ordered projection from a persistent storage root. Keeping field and
 /// key projections in one sequence distinguishes `array[i].field` from
 /// `field.array[i]` and keeps fixed-array and mapping domains distinct.
 pub const LoopStorageProjection = union(LoopStorageProjectionTag) {
     field: []const u8,
-    fixed_index: LoopTypedFormula,
+    fixed_index: LoopFixedIndexProjection,
     mapping_key: LoopTypedFormula,
 };
 
@@ -1289,6 +1374,24 @@ fn typeRefExplicit(ty: TypeRef) bool {
     };
 }
 
+fn typeRefEql(lhs: TypeRef, rhs: TypeRef) bool {
+    return switch (lhs) {
+        .compiler_type_id => |id| switch (rhs) {
+            .compiler_type_id => |other| id == other,
+            .spelling => false,
+        },
+        .spelling => |name| switch (rhs) {
+            .spelling => |other| std.mem.eql(u8, name, other),
+            .compiler_type_id => false,
+        },
+    };
+}
+
+fn optionalTypeRefsEql(lhs: ?TypeRef, rhs: ?TypeRef) bool {
+    if (lhs == null or rhs == null) return lhs == null and rhs == null;
+    return typeRefEql(lhs.?, rhs.?);
+}
+
 fn freeVarInList(id: FreeVarId, values: []const FreeVarId) bool {
     for (values) |candidate| if (freeVarIdEql(id, candidate)) return true;
     return false;
@@ -1337,7 +1440,14 @@ fn storageLocationReason(
     if (!typeRefExplicit(location.value_ty)) return .loop_storage_type_invalid;
     for (location.projections) |projection| switch (projection) {
         .field => |field| if (field.len == 0) return .loop_storage_projection_invalid,
-        .fixed_index, .mapping_key => |key| {
+        .fixed_index => |fixed| {
+            if (fixed.extent == 0) return .loop_fixed_index_extent_invalid;
+            if (!typeRefExplicit(fixed.index.ty)) return .loop_storage_type_invalid;
+            if (timelineReadReferencesReason(events, event_index, fixed.index.value.read_results)) |reason| {
+                return reason;
+            }
+        },
+        .mapping_key => |key| {
             if (!typeRefExplicit(key.ty)) return .loop_storage_type_invalid;
             if (timelineReadReferencesReason(events, event_index, key.value.read_results)) |reason| {
                 return reason;
@@ -2020,6 +2130,8 @@ pub const LoopUnsupportedReason = enum(u8) {
     loop_timeline_path_missing,
     loop_storage_root_missing,
     loop_storage_projection_invalid,
+    loop_fixed_index_extent_invalid,
+    loop_fixed_index_bounds_checkpoint_missing,
     loop_storage_type_invalid,
     loop_storage_read_identity_duplicate,
     loop_storage_read_identity_foreign,
@@ -2154,6 +2266,7 @@ pub const ArithmeticSafetyKind = enum(u8) {
     division_by_zero,
     signed_division_overflow,
     shift_amount_bounds,
+    fixed_array_bounds,
 };
 
 pub const RuntimeGuardGoal = struct {
@@ -3881,8 +3994,11 @@ test "storage artifact authority admits only reviewed context-key mappings witho
     );
 
     const index_projection = [_]LoopStorageProjection{.{ .fixed_index = .{
-        .value = .{ .formula = .{ .term = 0 } },
-        .ty = ty,
+        .index = .{
+            .value = .{ .formula = .{ .term = 0 } },
+            .ty = ty,
+        },
+        .extent = 4,
     } }};
     var projected_timeline = direct_timeline;
     projected_timeline[0].payload.storage_write.location.projections = &index_projection;

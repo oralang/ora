@@ -13,8 +13,13 @@ abbrev DirectStorageEvent :=
 
 def directStorageProjectionData : StorageProjectionRow → StorageProjectionExpr
   | .field name => .field name
-  | .fixedIndex expression => .fixedIndex {
-      formula := expression.value.formula, ty := expression.ty }
+  | .fixedIndex projection => .fixedIndex {
+      index := {
+        formula := projection.index.value.formula
+        ty := projection.index.ty
+      }
+      extent := projection.extent
+    }
   | .mappingKey expression => .mappingKey {
       formula := expression.value.formula, ty := expression.ty }
 

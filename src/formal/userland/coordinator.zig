@@ -735,9 +735,18 @@ fn collectLoopStorageLocationFreeVars(
 ) !void {
     for (location.projections) |projection| switch (projection) {
         .field => {},
-        .fixed_index, .mapping_key => |typed| {
-            try collectFormulaFreeVars(allocator, set, typed.value.formula, ids);
-        },
+        .fixed_index => |fixed| try collectFormulaFreeVars(
+            allocator,
+            set,
+            fixed.index.value.formula,
+            ids,
+        ),
+        .mapping_key => |typed| try collectFormulaFreeVars(
+            allocator,
+            set,
+            typed.value.formula,
+            ids,
+        ),
     };
 }
 

@@ -61,9 +61,14 @@ structure TypedFormulaRow where
   ty : TyRef
   deriving Repr, BEq, DecidableEq
 
+structure FixedIndexProjectionRow where
+  index : TypedFormulaRow
+  extent : Nat
+  deriving Repr, BEq, DecidableEq
+
 inductive StorageProjectionRow where
   | field : String → StorageProjectionRow
-  | fixedIndex : TypedFormulaRow → StorageProjectionRow
+  | fixedIndex : FixedIndexProjectionRow → StorageProjectionRow
   | mappingKey : TypedFormulaRow → StorageProjectionRow
   deriving Repr, BEq, DecidableEq
 
@@ -109,6 +114,8 @@ inductive TimelineShapeReason where
   | pathMissing
   | storageRootMissing
   | storageProjectionInvalid
+  | fixedIndexExtentInvalid
+  | fixedIndexBoundsCheckpointMissing
   | storageTypeInvalid
   | readIdentityDuplicate
   | readIdentityForeign
@@ -128,6 +135,8 @@ def TimelineShapeReason.name : TimelineShapeReason → String
   | .pathMissing => "loop_timeline_path_missing"
   | .storageRootMissing => "loop_storage_root_missing"
   | .storageProjectionInvalid => "loop_storage_projection_invalid"
+  | .fixedIndexExtentInvalid => "loop_fixed_index_extent_invalid"
+  | .fixedIndexBoundsCheckpointMissing => "loop_fixed_index_bounds_checkpoint_missing"
   | .storageTypeInvalid => "loop_storage_type_invalid"
   | .readIdentityDuplicate => "loop_storage_read_identity_duplicate"
   | .readIdentityForeign => "loop_storage_read_identity_foreign"
@@ -163,9 +172,10 @@ def storageProjectionReason?
     (events : List TimelineEventRow)
     (eventIndex : Nat) : StorageProjectionRow → Option TimelineShapeReason
   | .field name => if name.isEmpty then some .storageProjectionInvalid else none
-  | .fixedIndex value =>
-      if !storageTyExplicit value.ty then some .storageTypeInvalid
-      else timelineReadReferencesReason? events eventIndex value.value.readResults
+  | .fixedIndex projection =>
+      if projection.extent == 0 then some .fixedIndexExtentInvalid
+      else if !storageTyExplicit projection.index.ty then some .storageTypeInvalid
+      else timelineReadReferencesReason? events eventIndex projection.index.value.readResults
   | .mappingKey value =>
       if !storageTyExplicit value.ty then some .storageTypeInvalid
       else timelineReadReferencesReason? events eventIndex value.value.readResults
@@ -534,7 +544,71 @@ def storageLocationFormulasDenotable
     (location : StorageLocationExprRow) : Bool :=
   location.projections.all fun projection => match projection with
     | .field _ => true
-    | .fixedIndex key | .mappingKey key => valueDenotable manifest env key.value.formula
+    | .fixedIndex projection =>
+        valueDenotable manifest env projection.index.value.formula
+    | .mappingKey key => valueDenotable manifest env key.value.formula
+
+def fixedIndexBoundsFormulaMatches
+    (manifest : Manifest)
+    (candidate : FormulaExprRow)
+    (projection : FixedIndexProjectionRow) : Bool :=
+  match candidate.formula, projection.index.value.formula with
+  | .term formulaId, .term indexId =>
+      match manifest.terms[formulaId]? with
+      | some (.binary binary) =>
+          binary.op == .lt && binary.lhs == indexId &&
+            binary.ty == some projection.index.ty &&
+            match manifest.terms[binary.rhs]? with
+            | some (.intLit literal) =>
+                literal.value == toString projection.extent &&
+                  literal.ty == some projection.index.ty
+            | _ => false
+      | _ => false
+
+def fixedIndexProjectionBoundsReason?
+    (manifest : Manifest)
+    (prior : List TimelineEventRow)
+    (projection : FixedIndexProjectionRow) : Option TimelineShapeReason :=
+  if projection.extent == 0 || !(decide (projection.extent < 2 ^ 256)) then
+    some .fixedIndexExtentInvalid
+  else if prior.any fun event => match event.payload with
+    | .safetyCheckpoint checkpoint =>
+        checkpoint.formulas.any (fixedIndexBoundsFormulaMatches manifest · projection)
+    | _ => false
+  then none
+  else some .fixedIndexBoundsCheckpointMissing
+
+def storageLocationFixedIndexBoundsReason?
+    (manifest : Manifest)
+    (prior : List TimelineEventRow)
+    (location : StorageLocationExprRow) : Option TimelineShapeReason :=
+  location.projections.findSome? fun projection => match projection with
+    | .fixedIndex fixed => fixedIndexProjectionBoundsReason? manifest prior fixed
+    | .field _ | .mappingKey _ => none
+
+def timelineFixedIndexBoundsReason?
+    (manifest : Manifest) : List TimelineEventRow → Option TimelineShapeReason :=
+  let rec visit (prior : List TimelineEventRow) :
+      List TimelineEventRow → Option TimelineShapeReason
+    | [] => none
+    | event :: rest =>
+        let reason := match event.payload with
+          | .storageRead read =>
+              storageLocationFixedIndexBoundsReason? manifest prior read.location
+          | .storageWrite write =>
+              storageLocationFixedIndexBoundsReason? manifest prior write.location
+          | _ => none
+        match reason with
+        | some reason => some reason
+        | none => visit (prior ++ [event]) rest
+  visit []
+
+def SummaryRow.fixedIndexBoundsSupported
+    (manifest : Manifest)
+    (row : SummaryRow) : Bool :=
+  (timelineFixedIndexBoundsReason? manifest row.preheaderTimeline).isNone &&
+    row.edges.all fun edge =>
+      (timelineFixedIndexBoundsReason? manifest edge.timeline).isNone
 
 def preheaderTimelineEnv?
     (manifest : Manifest) : Env → List TimelineEventRow → Option Env
@@ -652,14 +726,16 @@ def SummaryRow.formulasDenotableIn
     row.post.all (formulaDenotable manifest base)
 
 def SummaryRow.supported (manifest : Manifest) (row : SummaryRow) : Bool :=
-  manifest.wf && manifest.termsTopological && row.shapeSupported && row.formulasDenotable manifest
+  manifest.wf && manifest.termsTopological && row.shapeSupported &&
+    row.fixedIndexBoundsSupported manifest && row.formulasDenotable manifest
 
 def SummaryRow.supportedIn
     (manifest : Manifest)
     (rows : List SummaryRow)
     (row : SummaryRow) : Bool :=
   manifest.wf && manifest.termsTopological &&
-    row.shapeSupportedIn rows && row.formulasDenotableIn manifest rows
+    row.shapeSupportedIn rows && row.fixedIndexBoundsSupported manifest &&
+    row.formulasDenotableIn manifest rows
 
 def contextReady (env : Env) (variables : List VariableRow) : Prop :=
   ∀ loopVar ∈ variables, ∃ value,

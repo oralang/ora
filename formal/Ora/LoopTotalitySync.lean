@@ -285,6 +285,80 @@ theorem loop_timeline_validation_matches :
     loopTimelineValidationRows.all timelineValidationRowMatches = true := by
   decide
 
+def fixedIndexManifest : Manifest := {
+  terms := [
+    .variable (.free {
+      id := timelineReadId
+      name := "i"
+      ty := some (.compilerTypeId 6) }),
+    .intLit {
+      value := "4"
+      ty := some (.compilerTypeId 6) },
+    .binary {
+      op := .lt
+      lhs := 0
+      rhs := 1
+      ty := some (.compilerTypeId 6) }
+  ]
+}
+
+def fixedIndexProjectionFor (mutation : String) : StorageProjectionRow :=
+  .fixedIndex {
+    index := { value := { formula := .term 0 }, ty := .compilerTypeId 6 }
+    extent := if mutation == "extent_invalid" then 0
+      else if mutation == "checkpoint_inconsistent" then 3 else 4
+  }
+
+def fixedIndexCheckpoint : TimelineEventRow := {
+  id := 0
+  structuralKey := "body/check"
+  payload := .safetyCheckpoint { formulas := [{ formula := .term 2 }] }
+}
+
+def fixedIndexWrite (mutation : String) : TimelineEventRow := {
+  id := 1
+  structuralKey := "body/write"
+  payload := .storageWrite {
+    location := {
+      root := "values"
+      projections := [fixedIndexProjectionFor mutation]
+      valueTy := .compilerTypeId 6
+    }
+    value := { formula := .term 0 }
+  }
+}
+
+def fixedIndexTimelineFor : String → List TimelineEventRow
+  | "checkpoint_missing" => [fixedIndexWrite "checkpoint_missing"]
+  | "checkpoint_late" => [
+      { fixedIndexWrite "checkpoint_late" with id := 0 },
+      { fixedIndexCheckpoint with id := 1 }]
+  | mutation => [fixedIndexCheckpoint, fixedIndexWrite mutation]
+
+def fixedIndexReasonForMutation (mutation : String) : String :=
+  match timelineFixedIndexBoundsReason? fixedIndexManifest
+      (fixedIndexTimelineFor mutation) with
+  | some reason => reason.name
+  | none => ""
+
+def fixedIndexMutationNames : List String := [
+  "supported", "extent_invalid", "checkpoint_missing", "checkpoint_late",
+  "checkpoint_inconsistent"
+]
+
+def fixedIndexValidationRowMatches : String × String → Bool
+  | (mutation, compilerReason) =>
+      fixedIndexMutationNames.contains mutation &&
+        compilerReason == fixedIndexReasonForMutation mutation
+
+theorem loop_fixed_index_validation_mutations_pinned :
+    loopFixedIndexBoundsRows.map Prod.fst == fixedIndexMutationNames := by
+  decide
+
+theorem loop_fixed_index_validation_matches :
+    loopFixedIndexBoundsRows.all fixedIndexValidationRowMatches = true := by
+  decide
+
 def preheaderReadEvent : TimelineEventRow :=
   { timelineReadEvent with id := 0, structuralKey := "preheader/read" }
 def preheaderWriteEvent : TimelineEventRow :=

@@ -2440,13 +2440,23 @@ test "compiler rejects constant fixed-array indexes outside the resolved extent"
         \\        empty[0] = 0;
         \\        return direct + grouped + huge + empty[0];
         \\    }
+        \\
+        \\    pub fn earlierExtentFour() {
+        \\        var dest: [u256; 4] = [0, 0, 0, 0];
+        \\        dest[3] = 1;
+        \\    }
+        \\
+        \\    pub fn laterExtentThree() {
+        \\        var dest: [u256; 3] = [0, 0, 0];
+        \\        dest[3] = 1;
+        \\    }
         \\}
     ;
 
     var rejected = try compileText(rejected_source);
     defer rejected.deinit();
     const rejected_typecheck = try rejected.db.moduleTypeCheck(rejected.root_module_id);
-    try testing.expectEqual(@as(usize, 8), rejected_typecheck.diagnostics.len());
+    try testing.expectEqual(@as(usize, 9), rejected_typecheck.diagnostics.len());
     try testing.expectEqual(@as(usize, 4), countDiagnosticMessages(
         &rejected_typecheck.diagnostics,
         "fixed-array index 4 is out of bounds for array extent 4",
@@ -2462,6 +2472,10 @@ test "compiler rejects constant fixed-array indexes outside the resolved extent"
     try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(
         &rejected_typecheck.diagnostics,
         "fixed-array index 4294967296 is out of bounds for array extent 4",
+    ));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(
+        &rejected_typecheck.diagnostics,
+        "fixed-array index 3 is out of bounds for array extent 3",
     ));
 }
 

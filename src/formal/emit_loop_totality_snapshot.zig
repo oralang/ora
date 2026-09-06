@@ -113,6 +113,16 @@ const PreheaderMutation = enum {
 
 const preheader_cases = std.meta.tags(PreheaderMutation);
 
+const FixedIndexMutation = enum {
+    supported,
+    extent_invalid,
+    checkpoint_missing,
+    checkpoint_late,
+    checkpoint_inconsistent,
+};
+
+const fixed_index_cases = std.meta.tags(FixedIndexMutation);
+
 const ty_u256: obligation.TypeRef = .{
     .compiler_type_id = builtin.lookupBuiltinById(.u256).comptime_type_id,
 };
@@ -541,6 +551,39 @@ fn preheaderReason(mutation: PreheaderMutation) ?obligation.LoopUnsupportedReaso
     }).preheaderTimelineValidationReason();
 }
 
+fn fixedIndexReason(mutation: FixedIndexMutation) ?obligation.LoopUnsupportedReason {
+    const index_id: obligation.FreeVarId = .{ .file_id = 10, .pattern_id = 7 };
+    const terms = [_]obligation.Term{
+        .{ .variable = .{ .free = .{ .id = index_id, .name = "i", .ty = ty_u256 } } },
+        .{ .int_lit = .{ .value = "4", .ty = ty_u256 } },
+        .{ .binary = .{ .op = .lt, .lhs = 0, .rhs = 1, .ty = ty_u256 } },
+    };
+    const formulas = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 2 } }};
+    const projection = [_]obligation.LoopStorageProjection{.{ .fixed_index = .{
+        .index = .{ .value = .{ .formula = .{ .term = 0 } }, .ty = ty_u256 },
+        .extent = if (mutation == .extent_invalid) 0 else if (mutation == .checkpoint_inconsistent) 3 else 4,
+    } }};
+    const checkpoint: obligation.LoopTimelineEvent = .{
+        .id = 0,
+        .structural_key = "body/check",
+        .payload = .{ .safety_checkpoint = .{ .formulas = &formulas } },
+    };
+    const write: obligation.LoopTimelineEvent = .{
+        .id = 1,
+        .structural_key = "body/write",
+        .payload = .{ .storage_write = .{
+            .location = .{ .root = "values", .projections = &projection, .value_ty = ty_u256 },
+            .value = .{ .formula = .{ .term = 0 } },
+        } },
+    };
+    const events: []const obligation.LoopTimelineEvent = switch (mutation) {
+        .checkpoint_missing => &.{write},
+        .checkpoint_late => &.{ write, checkpoint },
+        else => &.{ checkpoint, write },
+    };
+    return (obligation.ObligationSet{ .terms = &terms }).fixedIndexBoundsReason(events);
+}
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     var stdout_buffer: [4096]u8 = undefined;
@@ -594,6 +637,14 @@ pub fn main(init: std.process.Init) !void {
         try writer.writeAll(", ");
         try writeLeanString(writer, if (preheaderReason(mutation)) |reason| @tagName(reason) else "");
         try writer.writeAll(if (index + 1 == preheader_cases.len) ")\n" else "),\n");
+    }
+    try writer.writeAll("]\n\ndef loopFixedIndexBoundsRows : List (String × String) := [\n");
+    for (fixed_index_cases, 0..) |mutation, index| {
+        try writer.writeAll("  (");
+        try writeLeanString(writer, @tagName(mutation));
+        try writer.writeAll(", ");
+        try writeLeanString(writer, if (fixedIndexReason(mutation)) |reason| @tagName(reason) else "");
+        try writer.writeAll(if (index + 1 == fixed_index_cases.len) ")\n" else "),\n");
     }
     try writer.writeAll("]\n\nend Ora.Generated\n");
     try writer.flush();

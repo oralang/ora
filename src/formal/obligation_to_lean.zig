@@ -419,9 +419,10 @@ fn writeLoopStorageLocationRow(
                 try writer.writeAll(".field ");
                 try writeLeanString(writer, field);
             },
-            .fixed_index => |value| {
-                try writer.writeAll(".fixedIndex ");
-                try writeLoopTypedFormulaRow(writer, value);
+            .fixed_index => |fixed| {
+                try writer.writeAll(".fixedIndex { index := ");
+                try writeLoopTypedFormulaRow(writer, fixed.index);
+                try writer.print(", extent := {d} }}", .{fixed.extent});
             },
             .mapping_key => |value| {
                 try writer.writeAll(".mappingKey ");
@@ -906,6 +907,12 @@ fn loopInductionQuerySemanticSupport(
     if (summary.validationReason()) |reason| {
         return .{ .unsupported = .{ .unsupported_loop_summary = reason } };
     }
+    if (set.fixedIndexBoundsReason(summary.preheader_timeline)) |reason| {
+        return .{ .unsupported = .{ .unsupported_loop_summary = reason } };
+    }
+    for (summary.edges) |edge| if (set.fixedIndexBoundsReason(edge.timeline)) |reason| {
+        return .{ .unsupported = .{ .unsupported_loop_summary = reason } };
+    };
     if (summary.variables.len == 0 or
         summary.init_formulas.len != summary.variables.len or
         summary.invariant_formulas.len == 0 or
@@ -2859,7 +2866,10 @@ test "LoopVC digest covers every certificate-authority component class" {
     const safety_expr = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 6 } }};
     const read_refs = [_]obligation.FreeVarId{read_id};
     const index_projection = [_]obligation.LoopStorageProjection{.{
-        .fixed_index = .{ .value = .{ .formula = .{ .term = 2 } }, .ty = int_ty },
+        .fixed_index = .{
+            .index = .{ .value = .{ .formula = .{ .term = 2 } }, .ty = int_ty },
+            .extent = 4,
+        },
     }};
     const location: obligation.LoopStorageLocationExpr = .{
         .root = "values",
@@ -2988,6 +2998,21 @@ test "LoopVC digest covers every certificate-authority component class" {
     changed_location.root = "other_values";
     timeline_mutation = backedge_timeline;
     timeline_mutation[1].payload = .{ .storage_read = .{ .result = read_id, .location = changed_location } };
+    timeline_edges = edges;
+    timeline_edges[0].timeline = &timeline_mutation;
+    timeline_summary = summary;
+    timeline_summary.edges = &timeline_edges;
+    try DigestCheck.differs(baseline, &terms, &assumptions, &queries, timeline_summary);
+
+    var changed_extent_projection = index_projection;
+    changed_extent_projection[0].fixed_index.extent = 5;
+    changed_location = location;
+    changed_location.projections = &changed_extent_projection;
+    timeline_mutation = backedge_timeline;
+    timeline_mutation[1].payload = .{ .storage_read = .{
+        .result = read_id,
+        .location = changed_location,
+    } };
     timeline_edges = edges;
     timeline_edges[0].timeline = &timeline_mutation;
     timeline_summary = summary;

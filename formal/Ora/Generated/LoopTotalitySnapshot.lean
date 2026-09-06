@@ -71,4 +71,12 @@ def loopPreheaderValidationRows : List (String × String) := [
   ("dependency_unsupported", "loop_preheader_storage_relation_unsupported")
 ]
 
+def loopFixedIndexBoundsRows : List (String × String) := [
+  ("supported", ""),
+  ("extent_invalid", "loop_fixed_index_extent_invalid"),
+  ("checkpoint_missing", "loop_fixed_index_bounds_checkpoint_missing"),
+  ("checkpoint_late", "loop_fixed_index_bounds_checkpoint_missing"),
+  ("checkpoint_inconsistent", "loop_fixed_index_bounds_checkpoint_missing")
+]
+
 end Ora.Generated

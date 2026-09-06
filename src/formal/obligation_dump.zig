@@ -889,7 +889,12 @@ fn writeLoopStorageLocationObject(
         try writeTaggedObjectPrefix(writer, @tagName(projection));
         switch (projection) {
             .field => |field| try writeStringField(writer, "field", field),
-            .fixed_index, .mapping_key => |value| {
+            .fixed_index => |fixed| {
+                try writeFieldPrefix(writer, "index");
+                try writeLoopTypedFormulaObject(writer, fixed.index);
+                try writeNumberField(writer, "extent", fixed.extent);
+            },
+            .mapping_key => |value| {
                 try writeFieldPrefix(writer, "value");
                 try writeLoopTypedFormulaObject(writer, value);
             },

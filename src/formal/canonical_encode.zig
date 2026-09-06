@@ -1050,7 +1050,7 @@ pub const Adapter = struct {
             .fixed_index => |index| try self.loopProjectedStoreAndKey(
                 location.root,
                 "fixed",
-                index,
+                index.index,
                 info,
                 true,
             ),

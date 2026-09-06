@@ -136,6 +136,9 @@ const assert_safety_map = std.StaticStringMap(obligation.ArithmeticSafetyKind).i
     .{ "checked remainder by zero", .division_by_zero },
     .{ "checked division overflow", .signed_division_overflow },
     .{ "checked shift amount out of range", .shift_amount_bounds },
+    // A for-range may imply this condition, but only the emitted assertion
+    // owns the checkpoint; loop bounds are premises, never a synthesized check.
+    .{ "fixed-array index out of bounds", .fixed_array_bounds },
 });
 
 const transparent_value_ops = std.StaticStringMap(void).initComptime(.{
@@ -567,6 +570,7 @@ const LoopStorageProjectionInventory = struct {
     source_key: ?[]const u8 = null,
     field: ?[]const u8 = null,
     ty: ?obligation.TypeRef = null,
+    extent: ?u64 = null,
 };
 
 const ProjectedLoopStorageLocation = struct {
@@ -2145,6 +2149,33 @@ const Collector = struct {
                     draft.ordinal,
                     0,
                 );
+                if (arithmeticSafetyFromAssertOp(op) == .fixed_array_bounds) {
+                    const predicate = mlir.oraOperationGetOperand(op, 0);
+                    if (!mlir.oraValueIsAOpResult(predicate)) return error.LoopProjectionEffectUnsupported;
+                    const compare = mlir.oraOpResultGetOwner(predicate);
+                    if (mlir.oraOperationIsNull(compare) or mlir.oraOperationGetNumOperands(compare) < 2) {
+                        return error.LoopProjectionEffectUnsupported;
+                    }
+                    const formula_id = switch (formula) {
+                        .term => |id| id,
+                        .origin_value => return error.LoopProjectionEffectUnsupported,
+                    };
+                    if (formula_id >= self.terms.items.len) return error.LoopProjectionEffectUnsupported;
+                    const index_term = switch (self.terms.items[formula_id]) {
+                        .binary => |binary| binary.lhs,
+                        else => return error.LoopProjectionEffectUnsupported,
+                    };
+                    path.formula_overrides = try appendFormulaOverride(
+                        self.allocator,
+                        path.formula_overrides,
+                        .{
+                            .value_id = @intFromPtr(fixedIndexSourceValue(
+                                mlir.oraOperationGetOperand(compare, 0),
+                            ).ptr),
+                            .formula = .{ .term = index_term },
+                        },
+                    );
+                }
                 path.safety_checkpoints = try appendLoopSafetyCheckpoint(
                     self.allocator,
                     path.safety_checkpoints,
@@ -3459,6 +3490,7 @@ const Collector = struct {
         for (0..projection_count) |index| {
             const raw_index = mlir.oraOperationGetOperand(op, first_index_operand + index);
             const source = fixedIndexSourceValue(raw_index);
+            const extent = try fixedIndexExtent(op, memref_operand_index, projection_count, index);
             const formula = try self.loopFormulaFromValueWithOverrides(
                 source,
                 formula_overrides,
@@ -3469,16 +3501,20 @@ const Collector = struct {
             );
             const ty = try self.exactLoopIntegerTypeForValue(source);
             projections[index] = .{ .fixed_index = .{
-                .value = .{
-                    .formula = formula,
-                    .read_results = try self.readResultsForFormula(formula, timeline),
+                .index = .{
+                    .value = .{
+                        .formula = formula,
+                        .read_results = try self.readResultsForFormula(formula, timeline),
+                    },
+                    .ty = ty,
                 },
-                .ty = ty,
+                .extent = extent,
             } };
             inventory[index] = .{
                 .tag = .fixed_index,
                 .source_key = try self.sourceKeyForValue(source, source_overrides),
                 .ty = ty,
+                .extent = extent,
             };
         }
         return .{
@@ -3558,6 +3594,7 @@ const Collector = struct {
                 .tag = .fixed_index,
                 .source_key = try self.sourceKeyForValue(source, source_overrides),
                 .ty = try self.exactLoopIntegerTypeForValue(source),
+                .extent = try fixedIndexExtent(op, memref_operand_index, projection_count, index),
             };
         }
         return .{
@@ -7364,7 +7401,8 @@ fn storageProjectionInventoriesEql(
         if (left.tag != right.tag or
             !optionalStringEql(left.source_key, right.source_key) or
             !optionalStringEql(left.field, right.field) or
-            !optionalIntegerTypeEql(left.ty, right.ty)) return false;
+            !optionalIntegerTypeEql(left.ty, right.ty) or
+            left.extent != right.extent) return false;
     }
     return true;
 }
@@ -7376,11 +7414,15 @@ fn storageProjectionsMatchInventory(
     if (projections.len != inventory.len) return false;
     for (projections, inventory) |projection, item| switch (projection) {
         .field => |field| if (item.tag != .field or
-            !optionalStringEql(field, item.field) or item.source_key != null or item.ty != null) return false,
-        .fixed_index => |index| if (item.tag != .fixed_index or
-            item.source_key == null or !optionalIntegerTypeEql(index.ty, item.ty)) return false,
+            !optionalStringEql(field, item.field) or item.source_key != null or
+            item.ty != null or item.extent != null) return false,
+        .fixed_index => |fixed| if (item.tag != .fixed_index or
+            item.source_key == null or
+            !optionalIntegerTypeEql(fixed.index.ty, item.ty) or
+            item.extent != fixed.extent) return false,
         .mapping_key => |key| if (item.tag != .mapping_key or
-            item.source_key == null or !optionalIntegerTypeEql(key.ty, item.ty)) return false,
+            item.source_key == null or !optionalIntegerTypeEql(key.ty, item.ty) or
+            item.extent != null) return false,
     };
     return true;
 }
@@ -7995,6 +8037,26 @@ fn fixedIndexSourceValue(value: mlir.MlirValue) mlir.MlirValue {
     return mlir.oraOperationGetOperand(owner, 0);
 }
 
+fn fixedIndexExtent(
+    op: mlir.MlirOperation,
+    memref_operand_index: usize,
+    projection_count: usize,
+    projection_index: usize,
+) !u64 {
+    const memref = mlir.oraOperationGetOperand(op, memref_operand_index);
+    const ty = mlir.oraValueGetType(memref);
+    if (!mlir.oraTypeIsAMemRef(ty) or !mlir.oraShapedTypeHasStaticShape(ty)) {
+        return error.LoopProjectionEffectUnsupported;
+    }
+    const rank: usize = @intCast(mlir.oraShapedTypeGetRank(ty));
+    if (rank != projection_count or projection_index >= rank) {
+        return error.LoopProjectionEffectUnsupported;
+    }
+    const extent = mlir.oraShapedTypeGetDimSize(ty, @intCast(projection_index));
+    if (extent <= 0) return error.LoopProjectionEffectUnsupported;
+    return @intCast(extent);
+}
+
 fn storageMapSourceOwner(value: mlir.MlirValue) ?mlir.MlirOperation {
     var current = value;
     var depth: u32 = 0;
@@ -8399,15 +8461,19 @@ test "direct-root timeline inventory compares every storage event field" {
     );
 
     const semantic_projection = [_]obligation.LoopStorageProjection{.{
-        .mapping_key = .{
-            .value = .{ .formula = .{ .term = 2 } },
-            .ty = ty,
+        .fixed_index = .{
+            .index = .{
+                .value = .{ .formula = .{ .term = 2 } },
+                .ty = ty,
+            },
+            .extent = 4,
         },
     }};
     const projection_inventory = [_]LoopStorageProjectionInventory{.{
-        .tag = .mapping_key,
+        .tag = .fixed_index,
         .source_key = "module-op:6/result:0",
         .ty = ty,
+        .extent = 4,
     }};
     var projected_timeline = timeline;
     projected_timeline[1].payload.storage_read.location.projections = &semantic_projection;
@@ -8424,7 +8490,7 @@ test "direct-root timeline inventory compares every storage event field" {
     );
 
     const wrong_projection_inventory = [_]LoopStorageProjectionInventory{.{
-        .tag = .fixed_index,
+        .tag = .mapping_key,
         .source_key = "module-op:6/result:0",
         .ty = ty,
     }};
@@ -8435,6 +8501,17 @@ test "direct-root timeline inventory compares every storage event field" {
     try std.testing.expectEqual(
         obligation.LoopProjectionCompleteness.effect_mismatch,
         compareLoopProjection(&.{projected_semantic}, &.{wrong_projection}),
+    );
+
+    var wrong_extent_items = projection_inventory;
+    wrong_extent_items[0].extent = 3;
+    var wrong_extent_rows = projected_rows;
+    wrong_extent_rows[1].storage_projections = &wrong_extent_items;
+    var wrong_extent = projected_inventory;
+    wrong_extent.timeline_inventory = &wrong_extent_rows;
+    try std.testing.expectEqual(
+        obligation.LoopProjectionCompleteness.effect_mismatch,
+        compareLoopProjection(&.{projected_semantic}, &.{wrong_extent}),
     );
 
     var wrong_projection_source_items = projection_inventory;

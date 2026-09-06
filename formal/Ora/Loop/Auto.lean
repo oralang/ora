@@ -667,9 +667,13 @@ macro tk:"ora_loop_support" : tactic => do
         Ora.Integer.bitAndResult, Ora.Integer.bitXorResult,
         Ora.Spec.IntegerShape.isSigned, Env.lookupVar, Bool.false_eq_true]
       decide
+    have hFixedIndexBounds :
+        ($autoSummary).fixedIndexBoundsSupported $emittedManifest = true := by
+      set_option maxRecDepth 4096 in
+        decide
     have hSupported : ($autoSummary).supported $emittedManifest = true := by
       simp only [ora_loop_manifest, ora_loop_data, Ora.Loop.SummaryRow.supported,
-        hShape, hFormulas, Bool.true_and]
+        hShape, hFixedIndexBounds, hFormulas, Bool.true_and]
     exact hSupported })
 
 /-
@@ -717,8 +721,12 @@ macro "ora_loop_support_in"
           Ora.Integer.bitXorResult, Ora.Spec.IntegerShape.isSigned,
           Env.lookupVar, Bool.false_eq_true]
         decide
+    have hFixedIndexBounds :
+        ($row).fixedIndexBoundsSupported $manifest = true := by
+      set_option maxRecDepth 4096 in
+        decide
     simp only [Ora.Loop.SummaryRow.supportedIn, ora_loop_manifest,
-      hShape, hFormulas, Bool.true_and] })
+      hShape, hFixedIndexBounds, hFormulas, Bool.true_and] })
 
 macro tk:"ora_loop_prove_base" : tactic => do
   let autoSummary := Lean.mkIdentFrom tk `autoSummary

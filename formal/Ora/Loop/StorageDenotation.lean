@@ -7,6 +7,7 @@ immutable function-entry store, and timeline read identities are introduced
 only after their read event.
 -/
 
+import Ora.FixedArray
 import Ora.Loop.Timeline
 
 namespace Ora.Loop
@@ -235,9 +236,14 @@ structure TypedStorageFormula where
   ty : TyRef
   deriving Repr, BEq, DecidableEq
 
+structure FixedIndexProjectionExpr where
+  index : TypedStorageFormula
+  extent : Nat
+  deriving Repr, BEq, DecidableEq
+
 inductive StorageProjectionExpr where
   | field : String → StorageProjectionExpr
-  | fixedIndex : TypedStorageFormula → StorageProjectionExpr
+  | fixedIndex : FixedIndexProjectionExpr → StorageProjectionExpr
   | mappingKey : TypedStorageFormula → StorageProjectionExpr
   deriving Repr, BEq, DecidableEq
 
@@ -262,16 +268,43 @@ def StorageFormulaContext.evalProjections?
   | .field name :: rest => do
       if name.isEmpty then none else pure ()
       pure (.field name :: (← context.evalProjections? state rest))
-  | .fixedIndex expression :: rest => do
-      let value ← context.evalTypedValue? state expression
+  | .fixedIndex projection :: rest => do
+      let value ← context.evalTypedValue? state projection.index
       match value with
       | .integer index =>
-          if index.shape.isSigned then none
-          else pure (.fixedIndex value :: (← context.evalProjections? state rest))
+          let bits ← index.bitsFor? (.unsigned .w256)
+          if decide (0 < projection.extent) &&
+              decide (projection.extent < 2 ^ 256) then
+            pure (.fixedIndex (.integer {
+              shape := .unsigned .w256, bits
+            }) :: (← context.evalProjections? state rest))
+          else none
       | .bool _ => none
   | .mappingKey expression :: rest => do
       let value ← context.evalTypedValue? state expression
       pure (.mappingKey value :: (← context.evalProjections? state rest))
+
+/-- A checked fixed-index projection resolves the storage action at the exact
+index whose bounds predicate was proved; the extent affects safety and shape,
+not the identity of the selected element. -/
+theorem StorageFormulaContext.safe_fixedIndex_denotes_same_projection
+    (context : StorageFormulaContext)
+    (state : StorageActionState)
+    (expression : TypedStorageFormula)
+    (index : Ora.FixedArray.Index)
+    (extent : Nat)
+    (hValue : context.evalTypedValue? state expression = some (.integer {
+      shape := .unsigned .w256, bits := index }))
+    (hWellFormed : ({ index, extent } : Ora.FixedArray.CheckedIndex).WellFormed)
+    (hSafe : ({ index, extent } : Ora.FixedArray.CheckedIndex).Safe) :
+    ({ index, extent } : Ora.FixedArray.CheckedIndex).Safe ∧
+      context.evalProjections? state [.fixedIndex { index := expression, extent }] =
+        some [.fixedIndex (.integer { shape := .unsigned .w256, bits := index })] := by
+  refine ⟨hSafe, ?_⟩
+  simp only [StorageFormulaContext.evalProjections?, hValue, Option.bind_eq_bind,
+    Option.some_bind, Ora.Integer.Value.bitsFor?, if_pos rfl,
+    Option.pure_def]
+  simp [hWellFormed.1, hWellFormed.2]
 
 def StorageFormulaContext.evalLocation?
     (context : StorageFormulaContext)

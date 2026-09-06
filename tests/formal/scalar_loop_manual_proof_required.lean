@@ -27,8 +27,11 @@ theorem discharge_q12 : emittedQuery_12 := by
         Ora.Integer.bitAndResult, Ora.Integer.bitXorResult,
         Ora.Spec.IntegerShape.isSigned, Env.lookupVar, emitted_terms_length, emitted_term_0_lookup, emitted_term_1_lookup, emitted_term_2_lookup, emitted_term_3_lookup, emitted_term_4_lookup, emitted_term_5_lookup, emitted_term_6_lookup, emitted_term_7_lookup, emitted_term_8_lookup, emitted_term_9_lookup, emitted_term_10_lookup, emitted_term_11_lookup, emitted_term_34_lookup, emitted_term_35_lookup, emitted_term_36_lookup, emitted_term_37_lookup, emitted_term_38_lookup, emitted_term_40_lookup, emitted_term_41_lookup, emitted_term_42_lookup, emitted_term_43_lookup, emitted_term_44_lookup, emitted_term_45_lookup, Bool.false_eq_true]
       decide
+    have hFixedIndexBounds :
+        emittedLoopSummary_1.fixedIndexBoundsSupported emittedManifest = true := by
+      decide
     simp only [Ora.Loop.SummaryRow.supported, emitted_manifest_wf,
-      emitted_terms_topological, hShape, hFormulas, Bool.true_and]
+      emitted_terms_topological, hShape, hFixedIndexBounds, hFormulas, Bool.true_and]
   constructor
   · let autoWitnessEnv : Env := Env.empty
     have hInitialSome :
