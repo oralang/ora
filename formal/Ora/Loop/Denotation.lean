@@ -168,12 +168,17 @@ def storageTyExplicit : TyRef → Bool
   | .spelling name => !name.isEmpty
   | .compilerTypeId id => id != 0
 
+def fixedIndexExtentValid (extent : Nat) : Bool :=
+  -- Compiler extents are `u64`; Lean rows use unbounded `Nat`, so the upper
+  -- guard rejects hand-authored rows outside the canonical carrier.
+  extent != 0 && decide (extent < 2 ^ 256)
+
 def storageProjectionReason?
     (events : List TimelineEventRow)
     (eventIndex : Nat) : StorageProjectionRow → Option TimelineShapeReason
   | .field name => if name.isEmpty then some .storageProjectionInvalid else none
   | .fixedIndex projection =>
-      if projection.extent == 0 then some .fixedIndexExtentInvalid
+      if !fixedIndexExtentValid projection.extent then some .fixedIndexExtentInvalid
       else if !storageTyExplicit projection.index.ty then some .storageTypeInvalid
       else timelineReadReferencesReason? events eventIndex projection.index.value.readResults
   | .mappingKey value =>
@@ -569,7 +574,7 @@ def fixedIndexProjectionBoundsReason?
     (manifest : Manifest)
     (prior : List TimelineEventRow)
     (projection : FixedIndexProjectionRow) : Option TimelineShapeReason :=
-  if projection.extent == 0 || !(decide (projection.extent < 2 ^ 256)) then
+  if !fixedIndexExtentValid projection.extent then
     some .fixedIndexExtentInvalid
   else if prior.any fun event => match event.payload with
     | .safetyCheckpoint checkpoint =>

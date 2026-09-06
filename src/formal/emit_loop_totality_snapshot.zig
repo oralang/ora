@@ -119,7 +119,27 @@ const FixedIndexMutation = enum {
     checkpoint_missing,
     checkpoint_late,
     checkpoint_inconsistent,
+    checkpoint_noncanonical_literal,
 };
+
+const FixedIndexTimelineShape = enum { normal, missing, late };
+
+const FixedIndexFixtureConfig = struct {
+    literal_value: []const u8 = "4",
+    extent: u64 = 4,
+    timeline_shape: FixedIndexTimelineShape = .normal,
+};
+
+fn fixedIndexFixtureConfig(mutation: FixedIndexMutation) FixedIndexFixtureConfig {
+    return switch (mutation) {
+        .supported => .{},
+        .extent_invalid => .{ .extent = 0 },
+        .checkpoint_missing => .{ .timeline_shape = .missing },
+        .checkpoint_late => .{ .timeline_shape = .late },
+        .checkpoint_inconsistent => .{ .extent = 3 },
+        .checkpoint_noncanonical_literal => .{ .literal_value = "04" },
+    };
+}
 
 const fixed_index_cases = std.meta.tags(FixedIndexMutation);
 
@@ -552,16 +572,20 @@ fn preheaderReason(mutation: PreheaderMutation) ?obligation.LoopUnsupportedReaso
 }
 
 fn fixedIndexReason(mutation: FixedIndexMutation) ?obligation.LoopUnsupportedReason {
+    const config = fixedIndexFixtureConfig(mutation);
     const index_id: obligation.FreeVarId = .{ .file_id = 10, .pattern_id = 7 };
     const terms = [_]obligation.Term{
         .{ .variable = .{ .free = .{ .id = index_id, .name = "i", .ty = ty_u256 } } },
-        .{ .int_lit = .{ .value = "4", .ty = ty_u256 } },
+        .{ .int_lit = .{
+            .value = config.literal_value,
+            .ty = ty_u256,
+        } },
         .{ .binary = .{ .op = .lt, .lhs = 0, .rhs = 1, .ty = ty_u256 } },
     };
     const formulas = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 2 } }};
     const projection = [_]obligation.LoopStorageProjection{.{ .fixed_index = .{
         .index = .{ .value = .{ .formula = .{ .term = 0 } }, .ty = ty_u256 },
-        .extent = if (mutation == .extent_invalid) 0 else if (mutation == .checkpoint_inconsistent) 3 else 4,
+        .extent = config.extent,
     } }};
     const checkpoint: obligation.LoopTimelineEvent = .{
         .id = 0,
@@ -576,10 +600,10 @@ fn fixedIndexReason(mutation: FixedIndexMutation) ?obligation.LoopUnsupportedRea
             .value = .{ .formula = .{ .term = 0 } },
         } },
     };
-    const events: []const obligation.LoopTimelineEvent = switch (mutation) {
-        .checkpoint_missing => &.{write},
-        .checkpoint_late => &.{ write, checkpoint },
-        else => &.{ checkpoint, write },
+    const events: []const obligation.LoopTimelineEvent = switch (config.timeline_shape) {
+        .missing => &.{write},
+        .late => &.{ write, checkpoint },
+        .normal => &.{ checkpoint, write },
     };
     return (obligation.ObligationSet{ .terms = &terms }).fixedIndexBoundsReason(events);
 }

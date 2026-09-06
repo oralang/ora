@@ -498,6 +498,15 @@
       ]
     },
     {
+      "id": "storage.fixed_array_bounds_varied",
+      "area": "storage",
+      "behavior": "Checked fixed-array boundaries across persistent and local arrays with distinct extents",
+      "specs": [
+        "tests/conformance/fixed_array_bounds_varied.spec.toml",
+        "tests/conformance/fixed_array_bounds_verified.spec.toml"
+      ]
+    },
+    {
       "id": "storage.bitfield",
       "area": "storage",
       "behavior": "Packed bitfield read/modify/write within one slot",

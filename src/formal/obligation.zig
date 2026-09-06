@@ -296,8 +296,15 @@ pub const ObligationSet = struct {
             else => return false,
         };
         if (!optionalTypeRefsEql(literal.ty, projection.index.ty)) return false;
-        const value = std.fmt.parseInt(u64, literal.value, 10) catch return false;
-        return value == projection.extent;
+        const extent_decimal_capacity = comptime std.fmt.count("{d}", .{
+            std.math.maxInt(@TypeOf(projection.extent)),
+        });
+        var extent_buffer: [extent_decimal_capacity]u8 = undefined;
+        // Capacity follows the exact extent type's maximum decimal rendering,
+        // so formatting failure is an internal invariant violation, not a
+        // semantic checkpoint mismatch.
+        const canonical_extent = std.fmt.bufPrint(&extent_buffer, "{d}", .{projection.extent}) catch unreachable;
+        return std.mem.eql(u8, literal.value, canonical_extent);
     }
 
     fn fixedIndexBoundsLocationReason(
@@ -308,7 +315,7 @@ pub const ObligationSet = struct {
     ) ?LoopUnsupportedReason {
         for (location.projections) |projection| switch (projection) {
             .fixed_index => |fixed| {
-                if (fixed.extent == 0) return .loop_fixed_index_extent_invalid;
+                if (!fixedIndexExtentValid(fixed.extent)) return .loop_fixed_index_extent_invalid;
                 var matched = false;
                 for (events[0..event_index]) |prior| switch (prior.payload) {
                     .safety_checkpoint => |checkpoint| for (checkpoint.formulas) |candidate| {
@@ -1431,6 +1438,10 @@ fn timelineReadReferencesReason(
     return null;
 }
 
+fn fixedIndexExtentValid(extent: u64) bool {
+    return extent != 0;
+}
+
 fn storageLocationReason(
     events: []const LoopTimelineEvent,
     event_index: usize,
@@ -1441,7 +1452,7 @@ fn storageLocationReason(
     for (location.projections) |projection| switch (projection) {
         .field => |field| if (field.len == 0) return .loop_storage_projection_invalid,
         .fixed_index => |fixed| {
-            if (fixed.extent == 0) return .loop_fixed_index_extent_invalid;
+            if (!fixedIndexExtentValid(fixed.extent)) return .loop_fixed_index_extent_invalid;
             if (!typeRefExplicit(fixed.index.ty)) return .loop_storage_type_invalid;
             if (timelineReadReferencesReason(events, event_index, fixed.index.value.read_results)) |reason| {
                 return reason;

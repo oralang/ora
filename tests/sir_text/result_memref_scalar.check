@@ -10,21 +10,21 @@
 // CHECK: mstore256 elem2_ptr
 // CHECK: mstore256 elem3_ptr [[ERR_SELECTOR]]
 
-// CHECK-LABEL:     bb0 {
+// CHECK-LABEL:     bb1 {
 // CHECK: mstore256 elem4_ptr
 // CHECK: mstore256 elem5_ptr v1
 
-// CHECK-LABEL:     bb1 {
+// CHECK-LABEL:     bb3 {
 // CHECK-NOT: const 0xFF7E9F57
 // CHECK: mstore256 elem10_ptr
 // CHECK-NOT: const 0xFF7E9F57
 // CHECK: mstore256 elem11_ptr 0xFF7E9F57
 
-// CHECK-LABEL:     bb2 {
+// CHECK-LABEL:     bb4 {
 // CHECK: elem7 = mload256
 // CHECK: elem9 = mload256
 // CHECK: and elem7
 // CHECK: eq
 
-// CHECK-LABEL:     bb4
-// CHECK: bb4 -> elem9
+// CHECK-LABEL:     bb6
+// CHECK: bb6 -> elem9

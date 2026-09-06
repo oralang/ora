@@ -43,6 +43,7 @@ same-bytecode	falsification_loop_invariant.spec.toml	-
 same-bytecode	falsification_map_effect.spec.toml	-
 same-bytecode	falsification_map_frame.spec.toml	-
 same-bytecode	falsification_storage_branch.spec.toml	-
+same-bytecode	fixed_array_bounds_varied.spec.toml	-
 same-bytecode	fixed_array_bounds_verified.spec.toml	-
 same-bytecode	generic_instantiation.spec.toml	-
 same-bytecode	lock_guard_revert.spec.toml	-

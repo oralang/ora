@@ -2150,6 +2150,9 @@ const Collector = struct {
                     0,
                 );
                 if (arithmeticSafetyFromAssertOp(op) == .fixed_array_bounds) {
+                    // This seam only reuses the source-owned comparison's lhs
+                    // identity. fixedIndexBoundsReason separately requires the
+                    // exact `lt(index, canonical extent)` term before support.
                     const predicate = mlir.oraOperationGetOperand(op, 0);
                     if (!mlir.oraValueIsAOpResult(predicate)) return error.LoopProjectionEffectUnsupported;
                     const compare = mlir.oraOpResultGetOwner(predicate);
