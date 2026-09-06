@@ -945,6 +945,31 @@ test "compiler resolves assignment integer literals before HIR lowering" {
     try testing.expectEqual(@as(usize, 0), hir_result.type_fallback_count);
 }
 
+test "compiler resolves constant address map keys in assignment targets before HIR lowering" {
+    const source_text =
+        \\contract Ledger {
+        \\    storage var balances: map<address, u256>;
+        \\    storage var allowances: map<address, map<address, u256>>;
+        \\    const OWNER: address = 0x1234567890123456789012345678901234567890;
+        \\
+        \\    pub fn init() {
+        \\        balances[OWNER] = 1000;
+        \\        allowances[OWNER][OWNER] = 500;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.items.len);
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.type_fallback_count);
+    try testing.expect(hir_result.isEmittable());
+}
+
 test "compiler rejects assignment integer literals that overflow the target type" {
     const source_text =
         \\contract Counter {

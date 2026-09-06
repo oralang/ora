@@ -3863,6 +3863,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             const item_value = if (is_range_iterable) current_value else blk: {
                 const item_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[for_stmt.item_pattern.index()].type, for_stmt.range);
+                // Array iteration uses scf.for's [0, static extent) induction value, so this load is in bounds by construction.
                 const item_load = mlir.oraMemrefLoadOpCreate(
                     self.parent.context,
                     loc,

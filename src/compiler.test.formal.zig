@@ -10460,6 +10460,42 @@ fn expectRepositoryStorageTacticCheckedButAuthorityBlocked(
             1,
             "\"final_artifact_authorization\": \"blocked\"",
         ));
+
+        var output_dir = try tmp.dir.openDir(std.testing.io, relative, .{ .iterate = true });
+        defer output_dir.close(std.testing.io);
+        var entries = output_dir.iterate();
+        while (try entries.next(std.testing.io)) |entry| {
+            try testing.expect(!std.mem.startsWith(u8, entry.name, ".ora-staging-"));
+        }
+    }
+
+    inline for (.{
+        ".formal.accounting.json",
+        ".formal.artifacts.json",
+        ".formal.loops.json",
+        ".lean.obligations.lean",
+        ".smt.report.json",
+        ".smt.report.md",
+    }) |suffix| {
+        const first_path = try std.fmt.allocPrint(allocator, "first/{s}{s}", .{ stem, suffix });
+        defer allocator.free(first_path);
+        const second_path = try std.fmt.allocPrint(allocator, "second/{s}{s}", .{ stem, suffix });
+        defer allocator.free(second_path);
+        const first = try tmp.dir.readFileAlloc(
+            std.testing.io,
+            first_path,
+            allocator,
+            .limited(16 * 1024 * 1024),
+        );
+        defer allocator.free(first);
+        const second = try tmp.dir.readFileAlloc(
+            std.testing.io,
+            second_path,
+            allocator,
+            .limited(16 * 1024 * 1024),
+        );
+        defer allocator.free(second);
+        try testing.expectEqualStrings(first, second);
     }
     try expectNoFormalArtifactsInRepoRoot(allocator, stem);
 }

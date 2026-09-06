@@ -3285,6 +3285,7 @@ const TypeChecker = struct {
             .Assign => |assign| {
                 try self.visitExpr(assign.value);
                 if (try self.emitNonVarAssignmentIfNeeded(assign.target)) return;
+                try self.visitAssignmentTargetExpressions(assign.target);
                 try self.checkConstantFixedArrayPatternIndices(assign.target);
                 const expected = try self.patternLocatedType(assign.target);
                 const expected_type = expected.type;
@@ -10208,6 +10209,20 @@ const TypeChecker = struct {
             },
             .StructDestructure => |destructure| for (destructure.fields) |field| {
                 try self.checkConstantFixedArrayPatternIndices(field.binding);
+            },
+            .Name, .Error => {},
+        }
+    }
+
+    fn visitAssignmentTargetExpressions(self: *TypeChecker, pattern_id: ast.PatternId) !void {
+        switch (self.file.pattern(pattern_id).*) {
+            .Field => |field| try self.visitAssignmentTargetExpressions(field.base),
+            .Index => |index| {
+                try self.visitAssignmentTargetExpressions(index.base);
+                try self.visitExpr(index.index);
+            },
+            .StructDestructure => |destructure| for (destructure.fields) |field| {
+                try self.visitAssignmentTargetExpressions(field.binding);
             },
             .Name, .Error => {},
         }

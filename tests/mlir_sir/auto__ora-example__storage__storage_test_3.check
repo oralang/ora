@@ -19,7 +19,7 @@
 // CHECK-NEXT:     sir.sstore %slot_owner : !sir.u256, %9 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/storage/storage_test_3.ora":21:9)))
 // CHECK-NEXT:     sir.sstore %0 : !sir.u256, %c0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/storage/storage_test_3.ora":22:9)))
 // CHECK-NEXT:     %10 = sir.and %8 : !sir.u256, %3 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/storage/storage_test_3.ora":26:19)))
-// CHECK-NEXT:     %11 = sir.and %8 : !sir.u256, %3 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/storage/storage_test_3.ora":16:36)))
+// CHECK-NEXT:     %11 = sir.and %8 : !sir.u256, %3 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/storage/storage_test_3.ora":25:15)))
 // CHECK-NEXT:     %ptr = sir.malloc %2 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/storage/storage_test_3.ora":25:9)))
 // CHECK-NEXT:     sir.store %ptr : !sir.ptr<1>, %11 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/storage/storage_test_3.ora":25:9)))
 // CHECK-NEXT:     %ptr_off = sir.addptr %ptr : !sir.ptr<1>, %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/storage/storage_test_3.ora":25:9)))

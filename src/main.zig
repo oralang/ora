@@ -1173,6 +1173,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     if (direct_emit_verification_failed) {
+        discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
         exitCli(1);
     }
 
