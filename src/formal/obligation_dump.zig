@@ -1393,6 +1393,40 @@ test "json-lines dump of parameter place key uses free variable id" {
     );
 }
 
+test "json-lines dump pins fixed-index place serialization" {
+    const keys = [_]obligation.PlaceKey{.{ .parameter = .{ .file_id = 77, .pattern_id = 1 } }};
+    const terms = [_]obligation.Term{
+        .{ .place_read = .{
+            .root = "values",
+            .region = .storage,
+            .projection_domain = .fixed_index,
+            .keys = &keys,
+        } },
+    };
+    const item: obligation.Obligation = .{
+        .id = 5,
+        .owner = .{ .function = .{ .name = "read_at" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .{ .mlir_op = .{ .op_name = "ora.ensures", .symbol = "read_at", .ordinal = 0 } },
+        .kind = .{ .logical = .{
+            .role = .ensures,
+            .formula = .{ .term = 0 },
+        } },
+    };
+    const set: obligation.ObligationSet = .{ .obligations = &.{item}, .terms = &terms };
+    const actual = try dumpToOwnedString(std.testing.allocator, set);
+    defer std.testing.allocator.free(actual);
+
+    try std.testing.expectEqualStrings(
+        "{\"record\":\"artifact_decision\",\"schema_version\":8,\"status\":\"blocked\",\"reason\":\"missing_proof\"}\n" ++
+            coverage_one_logical_one_term ++
+            "{\"record\":\"obligation\",\"schema_version\":8,\"id\":5,\"owner\":{\"tag\":\"function\",\"module\":null,\"contract\":null,\"name\":\"read_at\"},\"source\":{\"file\":null,\"line\":0,\"column\":0,\"byte_start\":0,\"byte_end\":0},\"phase\":\"ora_mlir\",\"origin\":{\"tag\":\"mlir_op\",\"op_name\":\"ora.ensures\",\"symbol\":\"read_at\",\"ordinal\":0},\"kind\":{\"tag\":\"logical\",\"role\":\"ensures\",\"formula\":{\"tag\":\"term\",\"id\":0}},\"artifact_policy\":\"blocks_verified_artifacts\",\"dependencies\":[],\"derived_from\":[]}\n" ++
+            "{\"record\":\"term\",\"schema_version\":8,\"id\":0,\"term\":{\"tag\":\"place_read\",\"place\":{\"root\":\"values\",\"region\":\"storage\",\"fields\":[],\"projection_domain\":\"fixed_index\",\"keys\":[{\"tag\":\"parameter\",\"id\":{\"file_id\":77,\"pattern_id\":1}}]}}}\n",
+        actual,
+    );
+}
+
 test "coverage summary counts term and origin_value formulas by obligation kind" {
     const terms = [_]obligation.Term{
         .{ .bool_lit = true },

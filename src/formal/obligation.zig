@@ -2686,6 +2686,29 @@ test "storage place disjointness fixtures match Zig relation" {
     }
 }
 
+test "storage projection domains cannot manufacture disjointness" {
+    const key_one = [_]PlaceKey{.{ .constant = "1" }};
+    const key_two = [_]PlaceKey{.{ .constant = "2" }};
+    const mapping: PlaceRef = .{
+        .root = "values",
+        .region = .storage,
+        .projection_domain = .mapping,
+        .keys = &key_one,
+    };
+    const fixed_same_key: PlaceRef = .{
+        .root = "values",
+        .region = .storage,
+        .projection_domain = .fixed_index,
+        .keys = &key_one,
+    };
+    var fixed_other_key = fixed_same_key;
+    fixed_other_key.keys = &key_two;
+
+    try std.testing.expect(!placeRefEql(mapping, fixed_same_key));
+    try std.testing.expect(!placeDefinitelyDisjoint(mapping, fixed_other_key));
+    try std.testing.expect(!placeDefinitelyDisjoint(fixed_other_key, mapping));
+}
+
 test "verification query summary counts solver-facing categories" {
     const queries = [_]VerificationQuery{
         .{

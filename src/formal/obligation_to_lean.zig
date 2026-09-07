@@ -2841,6 +2841,7 @@ test "LoopVC digest covers every certificate-authority component class" {
     const int_ty: obligation.TypeRef = .{ .spelling = "u256" };
     const loop_id: obligation.FreeVarId = .{ .file_id = 1, .pattern_id = 1 };
     const read_id: obligation.FreeVarId = .{ .file_id = 1, .pattern_id = 2 };
+    const place_keys = [_]obligation.PlaceKey{.{ .parameter = read_id }};
     const terms = [_]obligation.Term{
         .{ .variable = .{ .free = .{ .id = loop_id, .name = "i", .ty = int_ty } } },
         .{ .int_lit = .{ .value = "0", .ty = int_ty } },
@@ -2853,6 +2854,12 @@ test "LoopVC digest covers every certificate-authority component class" {
         .{ .unary = .{ .op = .not, .operand = 5 } },
         .{ .binary = .{ .op = .eq, .lhs = 0, .rhs = 3, .ty = int_ty } },
         .{ .variable = .{ .free = .{ .id = read_id, .name = "read_result", .ty = int_ty } } },
+        .{ .place_read = .{
+            .root = "values",
+            .region = .storage,
+            .projection_domain = .fixed_index,
+            .keys = &place_keys,
+        } },
     };
     const variables = [_]obligation.LoopVariable{.{ .index = 0, .id = loop_id, .name = "i", .ty = int_ty }};
     const backedge_bindings = [_]obligation.LoopStepAssignment{.{
@@ -2972,6 +2979,16 @@ test "LoopVC digest covers every certificate-authority component class" {
             try std.testing.expect(!std.mem.eql(u8, &expected, &actual));
         }
     };
+
+    var projection_domain_terms = terms;
+    projection_domain_terms[11].place_read.projection_domain = .mapping;
+    try DigestCheck.differs(
+        baseline,
+        &projection_domain_terms,
+        &assumptions,
+        &queries,
+        summary,
+    );
 
     var timeline_mutation = backedge_timeline;
     timeline_mutation[1].structural_key = "body/read:changed";

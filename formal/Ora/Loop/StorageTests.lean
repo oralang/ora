@@ -476,6 +476,37 @@ def fixedTestLocation (root : String) (key : Value) : StorageLocation :=
 def mappingTestLocation (root : String) (key : Value) : StorageLocation :=
   { root, projections := [.mappingKey key] }
 
+def mappingDomainTestPlace (key : PlaceKey) : PlaceRef :=
+  { root := "values", region := .storage, projectionDomain := .mapping,
+    keys := [key] }
+
+def fixedDomainTestPlace (key : PlaceKey) : PlaceRef :=
+  { root := "values", region := .storage, projectionDomain := .fixedIndex,
+    keys := [key] }
+
+example :
+    (mappingDomainTestPlace (.constant "1") ==
+      fixedDomainTestPlace (.constant "1")) = false := by
+  decide
+
+example :
+    placeDefinitelyDisjoint
+      (mappingDomainTestPlace (.constant "1"))
+      (fixedDomainTestPlace (.constant "2")) = false ∧
+    placeDefinitelyDisjoint
+      (fixedDomainTestPlace (.constant "2"))
+      (mappingDomainTestPlace (.constant "1")) = false := by
+  decide
+
+example :
+    keyEvidencePathMatches
+      (mappingDomainTestPlace (.parameter { file_id := 0, pattern_id := 1 }))
+      (fixedDomainTestPlace (.parameter { file_id := 0, pattern_id := 2 }))
+      0
+      { file_id := 0, pattern_id := 1 }
+      { file_id := 0, pattern_id := 2 } = false := by
+  decide
+
 def resolvedTimelineSemantics :
     TimelineSemantics Bool StorageLocation Value PEmpty := {
   storage := resolvedStorageActionSemantics
