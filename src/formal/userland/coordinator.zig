@@ -1310,6 +1310,20 @@ fn automaticValueUsesLoopVariable(
     };
 }
 
+fn timelineHasReadBeforeSafetyCheckpoint(events: []const obligation.LoopTimelineEvent) bool {
+    var later_checkpoint = false;
+    var index = events.len;
+    while (index > 0) {
+        index -= 1;
+        switch (events[index].payload) {
+            .safety_checkpoint => later_checkpoint = true,
+            .storage_read => if (later_checkpoint) return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
 fn automaticLoopPlan(
     set: obligation.ObligationSet,
     query: obligation.VerificationQuery,
@@ -1363,6 +1377,9 @@ fn automaticLoopPlan(
         return .{ .unsupported = reason };
     };
     for (summary.edges) |edge| {
+        if (timelineHasReadBeforeSafetyCheckpoint(edge.timeline)) {
+            return .{ .unsupported = .automatic_storage_timeline_requires_external_certificate };
+        }
         var dependency_count: usize = 0;
         for (edge.timeline) |event| switch (event.payload) {
             .summary_dependency => |dependency| {

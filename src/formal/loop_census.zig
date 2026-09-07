@@ -57,9 +57,9 @@ const LoopRecord = struct {
     invariant_support: []const InvariantSupport,
     queries: QueryCounts = .{},
     shape_scalar_fragment: bool,
-    shape_excluded_by: []const []const u8,
+    source_shape_structural_excluded_by: []const []const u8,
     scalar_fragment: bool,
-    excluded_by: []const []const u8,
+    source_shape_excluded_by: []const []const u8,
 };
 
 const RawLoop = struct {
@@ -427,9 +427,9 @@ fn buildLoopRecord(
         .loop_var_types = try loop_var_types.toOwnedSlice(arena),
         .invariant_support = try invariant_support.toOwnedSlice(arena),
         .shape_scalar_fragment = shape_excluded.items.len == 0,
-        .shape_excluded_by = try shape_excluded.toOwnedSlice(arena),
+        .source_shape_structural_excluded_by = try shape_excluded.toOwnedSlice(arena),
         .scalar_fragment = excluded.items.len == 0,
-        .excluded_by = try excluded.toOwnedSlice(arena),
+        .source_shape_excluded_by = try excluded.toOwnedSlice(arena),
     };
 }
 
@@ -805,15 +805,15 @@ fn writeLoopRecord(writer: anytype, file_path: []const u8, record: LoopRecord) !
     }
     try writer.writeAll("]},\"shape_scalar_fragment\":");
     try writer.writeAll(boolJson(record.shape_scalar_fragment));
-    try writer.writeAll(",\"shape_excluded_by\":[");
-    for (record.shape_excluded_by, 0..) |reason, index| {
+    try writer.writeAll(",\"source_shape_structural_excluded_by\":[");
+    for (record.source_shape_structural_excluded_by, 0..) |reason, index| {
         if (index != 0) try writer.writeByte(',');
         try writeJsonString(writer, reason);
     }
     try writer.writeAll("],\"scalar_fragment\":");
     try writer.writeAll(boolJson(record.scalar_fragment));
-    try writer.writeAll(",\"excluded_by\":[");
-    for (record.excluded_by, 0..) |reason, index| {
+    try writer.writeAll(",\"source_shape_excluded_by\":[");
+    for (record.source_shape_excluded_by, 0..) |reason, index| {
         if (index != 0) try writer.writeByte(',');
         try writeJsonString(writer, reason);
     }

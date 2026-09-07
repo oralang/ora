@@ -670,6 +670,16 @@ macro tk:"ora_loop_support" : tactic => do
     have hFixedIndexBounds :
         ($autoSummary).fixedIndexBoundsSupported $emittedManifest = true := by
       set_option maxRecDepth 4096 in
+        simp only [ora_loop_row, ora_loop_data,
+          Ora.Loop.SummaryRow.fixedIndexBoundsSupported,
+          Ora.Loop.timelineFixedIndexBoundsReason?,
+          Ora.Loop.timelineFixedIndexBoundsReason?.visit,
+          Ora.Loop.storageLocationFixedIndexBoundsReason?,
+          Ora.Loop.fixedIndexProjectionBoundsReason?,
+          Ora.Loop.priorSafetyFormulas,
+          Ora.Loop.bestFixedIndexBoundsMatch?,
+          Ora.Loop.fixedIndexBoundsFormulaMatch,
+          Ora.Loop.fixedIndexExtentValid, List.all, Option.isNone]
         decide
     have hSupported : ($autoSummary).supported $emittedManifest = true := by
       simp only [ora_loop_manifest, ora_loop_data, Ora.Loop.SummaryRow.supported,
@@ -724,6 +734,16 @@ macro "ora_loop_support_in"
     have hFixedIndexBounds :
         ($row).fixedIndexBoundsSupported $manifest = true := by
       set_option maxRecDepth 4096 in
+        simp only [ora_loop_row, ora_loop_data,
+          Ora.Loop.SummaryRow.fixedIndexBoundsSupported,
+          Ora.Loop.timelineFixedIndexBoundsReason?,
+          Ora.Loop.timelineFixedIndexBoundsReason?.visit,
+          Ora.Loop.storageLocationFixedIndexBoundsReason?,
+          Ora.Loop.fixedIndexProjectionBoundsReason?,
+          Ora.Loop.priorSafetyFormulas,
+          Ora.Loop.bestFixedIndexBoundsMatch?,
+          Ora.Loop.fixedIndexBoundsFormulaMatch,
+          Ora.Loop.fixedIndexExtentValid, List.all, Option.isNone]
         decide
     simp only [Ora.Loop.SummaryRow.supportedIn, ora_loop_manifest,
       hShape, hFixedIndexBounds, hFormulas, Bool.true_and] })

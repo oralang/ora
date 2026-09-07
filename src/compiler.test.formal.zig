@@ -10565,6 +10565,92 @@ test "repository tactic certifies checked arithmetic in a storage timeline" {
     );
 }
 
+test "repository tactic certifies checked increments after fixed-array storage writes" {
+    try expectRepositoryStorageTacticDeterministic(
+        "tests/formal/checked_storage_loop_auto.ora",
+        "checked_storage_loop_auto",
+        2,
+    );
+}
+
+test "repository tactic certifies a typed-constant loop beside an unused aggregate parameter" {
+    try expectRepositoryStorageTacticDeterministic(
+        "tests/formal/const_initialized_storage_loop_auto.ora",
+        "const_initialized_storage_loop_auto",
+        1,
+    );
+}
+
+test "storage read before checked increment requires an external certificate by name" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output = try pathFromTmpAlloc(allocator, tmp, "blocked");
+    defer allocator.free(output);
+    const run = try runProcessWithLeanPath(allocator, &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=bytecode",
+        "--out-dir",
+        output,
+        "--lean-proofs",
+        "tests/formal/fail_storage_read_before_checked_loop_auto.ora",
+    });
+    defer allocator.free(run.stdout);
+    defer allocator.free(run.stderr);
+    try expectExited(run, 1);
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        run.stdout,
+        1,
+        "automatic_storage_timeline_requires_external_certificate",
+    ));
+    try testing.expectError(
+        error.FileNotFound,
+        tmp.dir.access(std.testing.io, "blocked/fail_storage_read_before_checked_loop_auto.hex", .{}),
+    );
+}
+
+test "weak loop invariant cannot authorize a checked storage-loop increment" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output = try pathFromTmpAlloc(allocator, tmp, "blocked");
+    defer allocator.free(output);
+    const run = try runProcessWithLeanPath(allocator, &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=bytecode",
+        "--out-dir",
+        output,
+        "--lean-proofs",
+        "tests/formal/fail_storage_loop_checked_add_unproved.ora",
+    });
+    defer allocator.free(run.stdout);
+    defer allocator.free(run.stderr);
+    try expectExited(run, 1);
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        run.stdout,
+        1,
+        "failed to prove loop body safety",
+    ));
+    try testing.expectError(
+        error.FileNotFound,
+        tmp.dir.access(std.testing.io, "blocked/fail_storage_loop_checked_add_unproved.hex", .{}),
+    );
+}
+
 test "repository tactic certifies a bounded fixed-array storage loop through the real CLI" {
     try expectRepositoryStorageTacticDeterministic(
         "tests/formal/fixed_storage_loop_auto.ora",

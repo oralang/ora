@@ -947,11 +947,15 @@ const Collector = struct {
         for (variables) |variable| {
             if (variable.id == null) try appendLoopReason(&reasons, self.allocator, .loop_identity_missing);
             const value = loopVariableValue(op, loop_kind, variable.index);
-            const semantic_integer = typeRefIntegerInfo(variable.ty) != null;
-            if (!semantic_integer) try appendLoopReason(&reasons, self.allocator, .loop_value_type_unresolved);
+            const semantic_integer = typeRefIntegerInfo(variable.ty);
+            if (semantic_integer == null) try appendLoopReason(&reasons, self.allocator, .loop_value_type_unresolved);
             const carrier_is_integer = !mlir.oraValueIsNull(value) and
                 (loop_kind == .scf_for and variable.index == 0 or
-                    mlirTypeIsSupportedInteger(mlir.oraValueGetType(value)));
+                    semantic_integer != null and
+                        mlirIntegerCarrierHasWidth(
+                            mlir.oraValueGetType(value),
+                            semantic_integer.?.width,
+                        ));
             if (!carrier_is_integer) {
                 try appendLoopReason(&reasons, self.allocator, .loop_variable_not_registered_integer);
             }
@@ -4052,19 +4056,26 @@ const Collector = struct {
 
     fn collectLoopContextVariables(self: *Collector) ![]const obligation.LoopVariable {
         if (self.function_param_names.len == 0) return &.{};
-        const variables = try self.allocator.alloc(obligation.LoopVariable, self.function_param_names.len);
-        for (variables, 0..) |*variable, index| {
-            variable.* = .{
+        var variables: std.ArrayList(obligation.LoopVariable) = .empty;
+        for (self.function_param_names, 0..) |name, index| {
+            const ty = if (index < self.function_param_types.len)
+                self.function_param_types[index]
+            else
+                try self.unknownTypeRef();
+            // The scalar LoopVC environment contains only registered integer
+            // parameters. A formula that actually references any omitted
+            // parameter remains non-denotable and therefore fails closed;
+            // unrelated slice or aggregate parameters must not exclude an
+            // otherwise self-contained integer loop.
+            if (typeRefIntegerInfo(ty) == null) continue;
+            try variables.append(self.allocator, .{
                 .index = @intCast(index),
                 .id = self.freeVarIdForFunctionParam(index),
-                .name = self.function_param_names[index],
-                .ty = if (index < self.function_param_types.len)
-                    self.function_param_types[index]
-                else
-                    try self.unknownTypeRef(),
-            };
+                .name = name,
+                .ty = ty,
+            });
         }
-        return variables;
+        return variables.toOwnedSlice(self.allocator);
     }
 
     fn bindLoopValues(
@@ -6957,6 +6968,11 @@ fn mlirTypeIsSupportedInteger(ty: mlir.MlirType) bool {
     return type_builtin.lookupIntegerBuiltin(signed, @intCast(width)) != null;
 }
 
+fn mlirIntegerCarrierHasWidth(ty: mlir.MlirType, expected_width: u16) bool {
+    const width = integerTypeWidth(ty) orelse return false;
+    return width == expected_width;
+}
+
 fn mlirIntegerTypeIsSigned(ty: mlir.MlirType) bool {
     if (mlir.oraTypeIsNull(ty)) return false;
     if (mlir.oraTypeIsIntegerType(ty) or mlir.oraTypeIsAInteger(ty)) {
@@ -8264,6 +8280,20 @@ fn expectedResourcePropertyMask(op: obligation.ResourceOperation) u32 {
         .destroy => resourcePropertyBit(.amount_non_negative) |
             resourcePropertyBit(.source_sufficient),
     };
+}
+
+test "loop integer carriers retain an exact semantic width cross-check" {
+    const context = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(context);
+    try std.testing.expect(mlir.oraDialectRegister(context));
+
+    const unsigned_256 = mlir.oraIntegerTypeGet(context, 256, false);
+    const signed_128 = mlir.oraIntegerTypeGet(context, 128, true);
+    const boolean = mlir.oraBoolTypeGet(context);
+    try std.testing.expect(mlirIntegerCarrierHasWidth(unsigned_256, 256));
+    try std.testing.expect(!mlirIntegerCarrierHasWidth(unsigned_256, 128));
+    try std.testing.expect(mlirIntegerCarrierHasWidth(signed_128, 128));
+    try std.testing.expect(!mlirIntegerCarrierHasWidth(boolean, 256));
 }
 
 fn resourceSiteComplete(site: Collector.ResourceCompletenessSite) bool {
