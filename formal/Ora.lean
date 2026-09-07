@@ -39,6 +39,7 @@ import Ora.Types.Projection
 import Ora.Spec.Facts
 import Ora.Integer.Arithmetic
 import Ora.FixedArray
+import Ora.DynamicIndex
 import Ora.Generated.CompilerSnapshot
 import Ora.Sync
 import Ora.Spec.DeclEnvFacts
