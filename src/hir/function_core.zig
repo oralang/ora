@@ -59,10 +59,17 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 value: mlir.MlirValue,
             };
 
+            const IndexEntry = struct {
+                pattern_id: ast.PatternId,
+                index: mlir.MlirValue,
+            };
+
             entries: std.ArrayList(Entry) = .empty,
+            indexes: std.ArrayList(IndexEntry) = .empty,
 
             fn deinit(self: *PatternValueCache, allocator: std.mem.Allocator) void {
                 self.entries.deinit(allocator);
+                self.indexes.deinit(allocator);
             }
 
             fn get(self: *const PatternValueCache, pattern_id: ast.PatternId) ?mlir.MlirValue {
@@ -77,6 +84,21 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try self.entries.append(allocator, .{
                     .pattern_id = pattern_id,
                     .value = value,
+                });
+            }
+
+            fn getIndex(self: *const PatternValueCache, pattern_id: ast.PatternId) ?mlir.MlirValue {
+                for (self.indexes.items) |entry| {
+                    if (entry.pattern_id.index() == pattern_id.index()) return entry.index;
+                }
+                return null;
+            }
+
+            fn putIndex(self: *PatternValueCache, allocator: std.mem.Allocator, pattern_id: ast.PatternId, index: mlir.MlirValue) !void {
+                if (self.getIndex(pattern_id) != null) return;
+                try self.indexes.append(allocator, .{
+                    .pattern_id = pattern_id,
+                    .index = index,
                 });
             }
         };
@@ -3098,6 +3120,75 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             try @This().emitSafetyAssert(self, in_bounds, "fixed-array index out of bounds", range);
         }
 
+        pub fn emitDynamicIndexBoundsAssert(
+            self: *FunctionLowerer,
+            semantic_base_type: sema.Type,
+            base: mlir.MlirValue,
+            index: mlir.MlirValue,
+            range: source.TextRange,
+        ) anyerror!void {
+            const index_type = reprIntegerType(self.parent.context);
+            if (!mlir.oraTypeEqual(mlir.oraValueGetType(index), index_type)) {
+                try self.parent.emitLoweringError(
+                    range,
+                    "dynamic index must use the canonical u256 representation before bounds-check lowering",
+                    .{},
+                );
+                return error.MlirOperationCreationFailed;
+            }
+
+            const loc = self.parent.location(range);
+            const length = switch (semantic_base_type.kind()) {
+                .slice => blk: {
+                    const lowered_base_type = mlir.oraValueGetType(base);
+                    if (!mlir.oraTypeIsAMemRef(lowered_base_type) or mlir.oraShapedTypeGetRank(lowered_base_type) != 1) {
+                        try self.parent.emitLoweringError(
+                            range,
+                            "dynamic slice value must have one resolved dimension before bounds-check lowering",
+                            .{},
+                        );
+                        return error.MlirOperationCreationFailed;
+                    }
+                    const mlir_index_type = mlir.oraIndexTypeCreate(self.parent.context);
+                    const dimension = appendValueOp(
+                        self.block,
+                        createIntegerConstant(self.parent.context, loc, mlir_index_type, 0),
+                    );
+                    const dim_op = mlir.oraMemrefDimOpCreate(self.parent.context, loc, base, dimension);
+                    if (mlir.oraOperationIsNull(dim_op)) return error.MlirOperationCreationFailed;
+                    const dim_value = appendValueOp(self.block, dim_op);
+                    const cast_op = mlir.oraArithIndexCastUIOpCreate(
+                        self.parent.context,
+                        loc,
+                        dim_value,
+                        index_type,
+                    );
+                    if (mlir.oraOperationIsNull(cast_op)) return error.MlirOperationCreationFailed;
+                    break :blk appendValueOp(self.block, cast_op);
+                },
+                .bytes, .string => blk: {
+                    const length_op = mlir.oraLengthOpCreate(self.parent.context, loc, base, index_type);
+                    if (mlir.oraOperationIsNull(length_op)) return error.MlirOperationCreationFailed;
+                    break :blk appendValueOp(self.block, length_op);
+                },
+                // Static arrays are checked immediately before this call by
+                // emitFixedArrayBoundsAssert.
+                .array => return,
+                else => {
+                    try self.parent.emitLoweringError(
+                        range,
+                        "indexed value type has no bounds-check lowering owner",
+                        .{},
+                    );
+                    return error.MlirOperationCreationFailed;
+                },
+            };
+            const in_bounds_op = self.createCompareOp(loc, "ult", index, length);
+            if (mlir.oraOperationIsNull(in_bounds_op)) return error.MlirOperationCreationFailed;
+            const in_bounds = appendValueOp(self.block, in_bounds_op);
+            try @This().emitSafetyAssert(self, in_bounds, "dynamic index out of bounds", range);
+        }
+
         pub fn emitOverflowAssert(self: *FunctionLowerer, overflow_flag: mlir.MlirValue, message: []const u8, range: source.TextRange) anyerror!void {
             const loc = self.parent.location(range);
             const true_val = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
@@ -3194,12 +3285,22 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const target_type = self.parent.lowerSemaType(@This().patternType(self, pattern_id, locals), index.range);
                     const converted = try @This().convertValueForFlow(self, value, target_type, index.range);
                     if (mlir.oraTypeIsAMemRef(base_type)) {
-                        const key_value = try self.lowerExprForFlowTarget(index.index, reprIntegerType(self.parent.context), locals);
+                        const cached_index = if (semantic_base_type.kind() == .slice)
+                            if (cache) |pattern_cache| pattern_cache.getIndex(pattern_id) else null
+                        else
+                            null;
+                        const key_value = cached_index orelse try self.lowerExprForFlowTarget(index.index, reprIntegerType(self.parent.context), locals);
                         if (@This().guardedStorageRootNameForPattern(self, index.base)) |root_name| {
                             try @This().maybeEmitGuardedIndexedStorageWrite(self, root_name, key_value, index.range);
                         }
                         const index_value = try @This().convertIndexToIndexType(self, key_value, index.range);
                         try @This().emitFixedArrayBoundsAssert(self, semantic_base_type, base_value, key_value, index.range);
+                        // A compound target reuses the exact base and index checked by
+                        // lowerPatternValueWithCache. Dynamic sequence lengths cannot
+                        // change between that read and this store in today's language.
+                        if (cached_index == null) {
+                            try @This().emitDynamicIndexBoundsAssert(self, semantic_base_type, base_value, key_value, index.range);
+                        }
                         const op = mlir.oraMemrefStoreOpCreate(
                             self.parent.context,
                             self.parent.location(index.range),
@@ -3533,6 +3634,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         const key_value = try self.lowerExprForFlowTarget(index.index, reprIntegerType(self.parent.context), locals);
                         const index_value = try @This().convertIndexToIndexType(self, key_value, index.range);
                         try @This().emitFixedArrayBoundsAssert(self, semantic_base_type, base_value, key_value, index.range);
+                        try @This().emitDynamicIndexBoundsAssert(self, semantic_base_type, base_value, key_value, index.range);
+                        if (semantic_base_type.kind() == .slice) {
+                            if (cache) |pattern_cache| {
+                                try pattern_cache.putIndex(self.parent.allocator, pattern_id, key_value);
+                            }
+                        }
                         const result_type = self.parent.lowerSemaType(@This().patternType(self, pattern_id, locals), index.range);
                         const op = mlir.oraMemrefLoadOpCreate(
                             self.parent.context,

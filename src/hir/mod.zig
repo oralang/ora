@@ -1709,6 +1709,7 @@ const FunctionLowerer = struct {
     pub const emitCheckedShiftAmountAssert = FunctionCore.emitCheckedShiftAmountAssert;
     pub const emitCheckedDivRemSafetyAsserts = FunctionCore.emitCheckedDivRemSafetyAsserts;
     pub const emitFixedArrayBoundsAssert = FunctionCore.emitFixedArrayBoundsAssert;
+    pub const emitDynamicIndexBoundsAssert = FunctionCore.emitDynamicIndexBoundsAssert;
     pub const emitOverflowAssert = FunctionCore.emitOverflowAssert;
 
     pub const lowerIfStmt = ControlFlow.lowerIfStmt;

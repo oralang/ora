@@ -3219,6 +3219,10 @@ const TypeChecker = struct {
             },
             .For => |for_stmt| {
                 try self.visitExpr(for_stmt.iterable);
+                switch (self.expr_types[for_stmt.iterable.index()].kind()) {
+                    .bytes, .string => try self.emitRangeMessage(for_stmt.range, "dynamic bytes/string iteration lowering is not supported"),
+                    else => {},
+                }
                 if (for_stmt.range_end != null) {
                     try self.contextualizeLiteral(for_stmt.iterable, forRangeIndexType());
                 }
@@ -3286,6 +3290,7 @@ const TypeChecker = struct {
                 try self.visitExpr(assign.value);
                 if (try self.emitNonVarAssignmentIfNeeded(assign.target)) return;
                 try self.visitAssignmentTargetExpressions(assign.target);
+                if (try self.emitInvalidDynamicIndexAssignmentIfNeeded(assign.target)) return;
                 try self.checkConstantFixedArrayPatternIndices(assign.target);
                 const expected = try self.patternLocatedType(assign.target);
                 const expected_type = expected.type;
@@ -3751,6 +3756,7 @@ const TypeChecker = struct {
                 try self.visitExpr(index.index);
                 const base_type = self.expr_types[index.base.index()];
                 try self.emitConstantFixedArrayBoundsErrorIfNeeded(base_type, index.index);
+                try self.emitConstantDynamicIndexBoundsErrorIfNeeded(base_type, index.base, index.index);
                 const place_or_value_type = self.indexAccessType(base_type, index.index);
                 try self.emitImplicitResourceReadIfDisallowed(expr_id, place_or_value_type);
                 const result_type = resourcePlaceReadType(place_or_value_type) orelse place_or_value_type;
@@ -10228,6 +10234,48 @@ const TypeChecker = struct {
         }
     }
 
+    fn assignmentRootName(self: *const TypeChecker, pattern_id: ast.PatternId) ?[]const u8 {
+        return switch (self.file.pattern(pattern_id).*) {
+            .Name => |name| name.name,
+            .Field => |field| self.assignmentRootName(field.base),
+            .Index => |index| self.assignmentRootName(index.base),
+            .StructDestructure, .Error => null,
+        };
+    }
+
+    fn emitInvalidDynamicIndexAssignmentIfNeeded(self: *TypeChecker, pattern_id: ast.PatternId) !bool {
+        return switch (self.file.pattern(pattern_id).*) {
+            .Field => |field| try self.emitInvalidDynamicIndexAssignmentIfNeeded(field.base),
+            .Index => |index| blk: {
+                if (try self.emitInvalidDynamicIndexAssignmentIfNeeded(index.base)) break :blk true;
+                const base = try self.patternLocatedType(index.base);
+                if (base.provenance == .calldata) {
+                    const name = self.assignmentRootName(index.base) orelse "parameter";
+                    try self.emitRangeError(index.range, "cannot assign through calldata parameter '{s}'", .{name});
+                    break :blk true;
+                }
+                switch (base.type.kind()) {
+                    .bytes => {
+                        try self.emitRangeError(index.range, "indexed assignment to 'bytes' is not supported", .{});
+                        break :blk true;
+                    },
+                    .string => {
+                        try self.emitRangeError(index.range, "cannot assign to indexed element of immutable type 'string'", .{});
+                        break :blk true;
+                    },
+                    else => break :blk false,
+                }
+            },
+            .StructDestructure => |destructure| blk: {
+                for (destructure.fields) |field| {
+                    if (try self.emitInvalidDynamicIndexAssignmentIfNeeded(field.binding)) break :blk true;
+                }
+                break :blk false;
+            },
+            .Name, .Error => false,
+        };
+    }
+
     fn emitConstantFixedArrayBoundsErrorIfNeeded(
         self: *TypeChecker,
         base_type: Type,
@@ -10257,6 +10305,58 @@ const TypeChecker = struct {
             "fixed-array index {s} is out of bounds for array extent {d}",
             .{ index_text, extent },
         );
+    }
+
+    fn emitConstantDynamicIndexBoundsErrorIfNeeded(
+        self: *TypeChecker,
+        base_type: Type,
+        base_expr_id: ast.ExprId,
+        index_expr_id: ast.ExprId,
+    ) !void {
+        switch (base_type.kind()) {
+            .slice, .bytes, .string => {},
+            else => return,
+        }
+        const length = self.constantDynamicLength(base_expr_id) orelse return;
+        const value = (try self.integerValueForResolution(index_expr_id)) orelse return;
+        const integer = switch (value) {
+            .integer => |integer| integer,
+            else => return,
+        };
+        const canonical_index = if (exprUsesWrappedIntegerValue(self, index_expr_id))
+            try const_bridge.wrapIntegerToType(self.arena, integer, u256Type().integer)
+        else
+            integer;
+        const length_value = try BigInt.initSet(self.arena, length);
+        const is_negative = !canonical_index.isPositive() and !canonical_index.eqlZero();
+        if (!is_negative and canonical_index.order(length_value).compare(.lt)) return;
+
+        const index_text = try self.integerValueText(canonical_index);
+        try self.emitExprError(
+            index_expr_id,
+            "dynamic index {s} is out of bounds for runtime length {d}",
+            .{ index_text, length },
+        );
+    }
+
+    fn constantDynamicLength(self: *const TypeChecker, expr_id: ast.ExprId) ?usize {
+        if (self.const_eval.values[expr_id.index()]) |value| {
+            return switch (value) {
+                .string => |string| string.len,
+                .fixed_bytes => |bytes| bytes.len,
+                .tuple => |elements| elements.len,
+                else => null,
+            };
+        }
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.constantDynamicLength(group.expr),
+            .ArrayLiteral => |array| array.elements.len,
+            .Builtin => |builtin| if (std.mem.eql(u8, builtin.name, "cast") and builtin.args.len == 1)
+                self.constantDynamicLength(builtin.args[0])
+            else
+                null,
+            else => null,
+        };
     }
 
     fn assignForPatternTypes(self: *TypeChecker, for_stmt: ast.ForStmt) void {

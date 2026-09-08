@@ -1,0 +1,5 @@
+contract DynamicIndexLiteralOutOfBounds {
+    pub fn read() -> u8 {
+        return "hi"[2];
+    }
+}

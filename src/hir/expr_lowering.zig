@@ -506,6 +506,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         const key = try self.lowerExprForFlowTarget(index.index, reprIntegerType(self.parent.context), locals);
                         const index_value = try @This().convertIndexToIndexType(self, key, index.range);
                         try FunctionLowerer.emitFixedArrayBoundsAssert(self, base_type, base, key, index.range);
+                        try FunctionLowerer.emitDynamicIndexBoundsAssert(self, base_type, base, key, index.range);
                         const result_type = self.parent.lowerExprType(expr_id);
                         const op = mlir.oraMemrefLoadOpCreate(
                             self.parent.context,
@@ -520,6 +521,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     switch (base_type.kind()) {
                         .bytes, .string => {
                             const key = try self.lowerExprForFlowTarget(index.index, reprIntegerType(self.parent.context), locals);
+                            try FunctionLowerer.emitDynamicIndexBoundsAssert(self, base_type, base, key, index.range);
                             const raw_byte_type = reprIntegerType(self.parent.context);
                             const op = mlir.oraByteAtOpCreate(
                                 self.parent.context,

@@ -1,0 +1,5 @@
+contract DynamicIndexBytesLiteralOutOfBounds {
+    pub fn read() -> u8 {
+        return hex"deadbeef"[4];
+    }
+}

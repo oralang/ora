@@ -1,0 +1,1 @@
+expect_error = "cannot assign to indexed element of immutable type 'string'"
