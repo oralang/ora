@@ -539,6 +539,15 @@
       ]
     },
     {
+      "id": "storage.dynamic_index_bounds",
+      "area": "storage",
+      "behavior": "Runtime bounds enforcement for dynamic bytes, strings, and non-u256 slices in verified and no-verify builds",
+      "specs": [
+        "tests/conformance/dynamic_bytes_string_bounds.spec.toml",
+        "tests/conformance/dynamic_index_bounds_verified.spec.toml"
+      ]
+    },
+    {
       "id": "storage.slice_of_structs",
       "area": "storage",
       "behavior": "Dynamic array of fixed structs (uint256,uint256,uint256)[] stores at keccak(slot) base with correct per-element offsets; get_middle reads back",

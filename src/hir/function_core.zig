@@ -101,6 +101,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     .index = index,
                 });
             }
+
+            fn clearValues(self: *PatternValueCache) void {
+                self.entries.clearRetainingCapacity();
+            }
         };
 
         pub fn init(parent: *Lowerer, item_id: ast.ItemId, function: ast.FunctionItem, op: mlir.MlirOperation, return_type: ?mlir.MlirType) FunctionLowerer {
@@ -3280,25 +3284,29 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 .Index => |index| {
                     const semantic_base_type = @This().patternType(self, index.base, locals);
+                    const cached_index = if (semantic_base_type.kind() == .slice)
+                        if (cache) |pattern_cache| pattern_cache.getIndex(pattern_id) else null
+                    else
+                        null;
+                    const reload_storage_base = cached_index != null and
+                        @This().patternIsStorageBacked(self, index.base, locals);
+                    if (reload_storage_base) cache.?.clearValues();
                     const base_value = try @This().lowerPatternValueWithCache(self, index.base, locals, cache);
                     const base_type = mlir.oraValueGetType(base_value);
                     const target_type = self.parent.lowerSemaType(@This().patternType(self, pattern_id, locals), index.range);
                     const converted = try @This().convertValueForFlow(self, value, target_type, index.range);
                     if (mlir.oraTypeIsAMemRef(base_type)) {
-                        const cached_index = if (semantic_base_type.kind() == .slice)
-                            if (cache) |pattern_cache| pattern_cache.getIndex(pattern_id) else null
-                        else
-                            null;
                         const key_value = cached_index orelse try self.lowerExprForFlowTarget(index.index, reprIntegerType(self.parent.context), locals);
                         if (@This().guardedStorageRootNameForPattern(self, index.base)) |root_name| {
                             try @This().maybeEmitGuardedIndexedStorageWrite(self, root_name, key_value, index.range);
                         }
                         const index_value = try @This().convertIndexToIndexType(self, key_value, index.range);
                         try @This().emitFixedArrayBoundsAssert(self, semantic_base_type, base_value, key_value, index.range);
-                        // A compound target reuses the exact base and index checked by
-                        // lowerPatternValueWithCache. Dynamic sequence lengths cannot
-                        // change between that read and this store in today's language.
-                        if (cached_index == null) {
+                        // Memory-backed compound targets may reuse the read-side check:
+                        // their local sequence value is unreachable by a callee. A
+                        // storage-backed target reloads its descriptor above and checks
+                        // the current length again immediately before the store.
+                        if (cached_index == null or reload_storage_base) {
                             try @This().emitDynamicIndexBoundsAssert(self, semantic_base_type, base_value, key_value, index.range);
                         }
                         const op = mlir.oraMemrefStoreOpCreate(
@@ -3392,6 +3400,22 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Field => null,
                 .Index => |index| @This().guardedStorageRootNameForPattern(self, index.base),
                 .StructDestructure, .Error => null,
+            };
+        }
+
+        fn patternIsStorageBacked(self: *FunctionLowerer, pattern_id: ast.PatternId, locals: *LocalEnv) bool {
+            return switch (self.parent.file.pattern(pattern_id).*) {
+                .Name => |name| blk: {
+                    if (locals.lookupName(name.name) != null) break :blk false;
+                    const item_id = self.parent.item_index.lookup(name.name) orelse break :blk false;
+                    break :blk switch (self.parent.file.item(item_id).*) {
+                        .Field => |field| field.storage_class == .storage,
+                        else => false,
+                    };
+                },
+                .Field => |field| @This().patternIsStorageBacked(self, field.base, locals),
+                .Index => |index| @This().patternIsStorageBacked(self, index.base, locals),
+                .StructDestructure, .Error => false,
             };
         }
 
@@ -3631,14 +3655,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const semantic_base_type = @This().patternType(self, index.base, locals);
                     const base_value = try @This().lowerPatternValueWithCache(self, index.base, locals, cache);
                     if (mlir.oraTypeIsAMemRef(mlir.oraValueGetType(base_value))) {
-                        const key_value = try self.lowerExprForFlowTarget(index.index, reprIntegerType(self.parent.context), locals);
+                        const key_value = if (cache) |pattern_cache|
+                            pattern_cache.getIndex(pattern_id) orelse
+                                try self.lowerExprForFlowTarget(index.index, reprIntegerType(self.parent.context), locals)
+                        else
+                            try self.lowerExprForFlowTarget(index.index, reprIntegerType(self.parent.context), locals);
                         const index_value = try @This().convertIndexToIndexType(self, key_value, index.range);
                         try @This().emitFixedArrayBoundsAssert(self, semantic_base_type, base_value, key_value, index.range);
                         try @This().emitDynamicIndexBoundsAssert(self, semantic_base_type, base_value, key_value, index.range);
-                        if (semantic_base_type.kind() == .slice) {
-                            if (cache) |pattern_cache| {
-                                try pattern_cache.putIndex(self.parent.allocator, pattern_id, key_value);
-                            }
+                        if (cache) |pattern_cache| {
+                            try pattern_cache.putIndex(self.parent.allocator, pattern_id, key_value);
                         }
                         const result_type = self.parent.lowerSemaType(@This().patternType(self, pattern_id, locals), index.range);
                         const op = mlir.oraMemrefLoadOpCreate(
@@ -3658,10 +3684,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         break :blk2 self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, index.range);
                     };
                     const map_key_type = mlir.oraMapTypeGetKeyType(mlir.oraValueGetType(base_value));
-                    const key_value = if (!mlir.oraTypeIsNull(map_key_type))
+                    const key_value = if (cache) |pattern_cache|
+                        pattern_cache.getIndex(pattern_id) orelse if (!mlir.oraTypeIsNull(map_key_type))
+                            try self.lowerExprForFlowTarget(index.index, map_key_type, locals)
+                        else
+                            try self.lowerExpr(index.index, locals)
+                    else if (!mlir.oraTypeIsNull(map_key_type))
                         try self.lowerExprForFlowTarget(index.index, map_key_type, locals)
                     else
                         try self.lowerExpr(index.index, locals);
+                    if (cache) |pattern_cache| {
+                        try pattern_cache.putIndex(self.parent.allocator, pattern_id, key_value);
+                    }
                     const converted_key = if (!mlir.oraTypeIsNull(map_key_type))
                         try @This().convertValueForFlow(self, key_value, map_key_type, index.range)
                     else

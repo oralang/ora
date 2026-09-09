@@ -2161,16 +2161,20 @@ test "compiler lowers every source dynamic index through the shared bounds asser
     defer testing.allocator.free(hir_text);
 
     try testing.expect(hir_result.diagnostics.isEmpty());
-    try testing.expectEqual(@as(usize, 11), std.mem.count(u8, hir_text, "dynamic index out of bounds"));
-    try testing.expectEqual(@as(usize, 9), std.mem.count(u8, hir_text, "memref.dim"));
+    try testing.expectEqual(@as(usize, 12), std.mem.count(u8, hir_text, "dynamic index out of bounds"));
+    try testing.expectEqual(@as(usize, 10), std.mem.count(u8, hir_text, "memref.dim"));
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, hir_text, "ora.length"));
 
     const add_start = std.mem.indexOf(u8, hir_text, "func.func @addSlice") orelse return error.TestUnexpectedResult;
     const add_end = std.mem.indexOfPos(u8, hir_text, add_start, "func.func @writeMemory") orelse return error.TestUnexpectedResult;
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, hir_text[add_start..add_end], "dynamic index out of bounds"));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, hir_text[add_start..add_end], "dynamic index out of bounds"));
+
+    const memory_start = add_end;
+    const memory_end = std.mem.indexOfPos(u8, hir_text, memory_start, "func.func @readNested") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, hir_text[memory_start..memory_end], "dynamic index out of bounds"));
 
     var cursor: usize = 0;
-    for (0..11) |_| {
+    for (0..12) |_| {
         const assertion = std.mem.indexOfPos(u8, hir_text, cursor, "dynamic index out of bounds") orelse
             return error.TestUnexpectedResult;
         var access: ?usize = null;

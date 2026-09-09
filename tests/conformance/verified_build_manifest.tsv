@@ -31,6 +31,8 @@ same-bytecode	dispatcher_error_union_revert.spec.toml	-
 unverifiable	dispatcher_hot_prefix.spec.toml	contract_invariant_unproved
 same-bytecode	dispatcher_narrow_error_union_return.spec.toml	-
 same-bytecode	dispatcher_string_arg.spec.toml	-
+unverifiable	dynamic_bytes_string_bounds.spec.toml	contract_invariant_unproved
+same-bytecode	dynamic_index_bounds_verified.spec.toml	-
 same-bytecode	enum_storage_roundtrip.spec.toml	-
 same-bytecode	environment_log.spec.toml	-
 same-bytecode	error_union_local_aggregate.spec.toml	-
@@ -73,7 +75,7 @@ unverifiable	short_calldata_dispatch.spec.toml	contract_invariant_unproved
 same-bytecode	source_inline.spec.toml	-
 same-bytecode	storage_bitfield.spec.toml	-
 same-bytecode	storage_custom_bitfield.spec.toml	-
-same-bytecode	storage_dynamic_array.spec.toml	-
+unverifiable	storage_dynamic_array.spec.toml	contract_invariant_unproved
 same-bytecode	storage_fixed_bytes_mapping.spec.toml	-
 same-bytecode	storage_map_bitfield.spec.toml	-
 same-bytecode	storage_map_struct.spec.toml	-
@@ -86,8 +88,8 @@ same-bytecode	storage_result_dynamic_bytes.spec.toml	-
 unverifiable	storage_result_dynamic_slice.spec.toml	contract_invariant_unproved
 same-bytecode	storage_result_dynamic_string.spec.toml	-
 same-bytecode	storage_result_scalar.spec.toml	-
-same-bytecode	storage_slice_dynamic_struct.spec.toml	-
-same-bytecode	storage_slice_struct.spec.toml	-
+unverifiable	storage_slice_dynamic_struct.spec.toml	contract_invariant_unproved
+unverifiable	storage_slice_struct.spec.toml	contract_invariant_unproved
 same-bytecode	storage_string_key_mapping.spec.toml	-
 same-bytecode	storage_struct.spec.toml	-
 unverifiable	storage_struct_static_array.spec.toml	contract_invariant_unproved

@@ -1,0 +1,88 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "set_blob(bytes)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x010203"]
+returns = {}
+
+[[call]]
+fn = "read_blob(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [2]
+returns = { u8 = 3 }
+
+[[call]]
+fn = "read_blob(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [3]
+reverts = { data = "0xdd8bfc7c" }
+
+[[call]]
+fn = "set_blob(bytes)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x"]
+returns = {}
+
+[[call]]
+fn = "read_blob(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [0]
+reverts = { data = "0xdd8bfc7c" }
+
+[[call]]
+fn = "set_text(string)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["ora"]
+returns = {}
+
+[[call]]
+fn = "read_text(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [2]
+returns = { u8 = 97 }
+
+[[call]]
+fn = "read_text(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [3]
+reverts = { data = "0xdd8bfc7c" }
+
+[[call]]
+fn = "set_text(string)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [""]
+returns = {}
+
+[[call]]
+fn = "read_text(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [0]
+reverts = { data = "0xdd8bfc7c" }
+
+[[call]]
+fn = "read_address(address[],uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [["0x1000000000000000000000000000000000000001", "0x2000000000000000000000000000000000000002"], 1]
+returns = { address = "0x2000000000000000000000000000000000000002" }
+
+[[call]]
+fn = "read_address(address[],uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [["0x1000000000000000000000000000000000000001", "0x2000000000000000000000000000000000000002"], 2]
+reverts = { data = "0xdd8bfc7c" }
