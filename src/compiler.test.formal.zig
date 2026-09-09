@@ -10424,7 +10424,7 @@ fn expectRepositoryStorageTacticDeterministic(
     try expectNoFormalArtifactsInRepoRoot(allocator, stem);
 }
 
-fn expectRepositoryStorageTacticCheckedButAuthorityBlocked(
+fn expectRepositoryLoopAuthorityBlocked(
     source: []const u8,
     stem: []const u8,
     reason: obligation.ArtifactBlockReason,
@@ -10460,6 +10460,12 @@ fn expectRepositoryStorageTacticCheckedButAuthorityBlocked(
         defer allocator.free(run.stderr);
         try expectExited(run, 1);
         try testing.expect(std.mem.containsAtLeast(u8, run.stdout, 1, decision_text));
+        try testing.expect(std.mem.containsAtLeast(
+            u8,
+            run.stdout,
+            1,
+            "userland verification failed (Z3: accepted, Lean obligation gate: rejected)",
+        ));
         try testing.expect(!std.mem.containsAtLeast(
             u8,
             run.stdout,
@@ -10713,7 +10719,7 @@ test "transient and opaque loop storage effects fail closed with named exclusion
 }
 
 test "repository tactic checks runtime-key mapping storage but artifact authority remains unreviewed" {
-    try expectRepositoryStorageTacticCheckedButAuthorityBlocked(
+    try expectRepositoryLoopAuthorityBlocked(
         "tests/formal/mapping_storage_loop_auto.ora",
         "mapping_storage_loop_auto",
         .storage_projection_authority_unreviewed,
@@ -10729,10 +10735,18 @@ test "repository tactic certifies branch-specific storage writes" {
 }
 
 test "repository tactic checks nested storage mutation but child frame authority remains unreviewed" {
-    try expectRepositoryStorageTacticCheckedButAuthorityBlocked(
+    try expectRepositoryLoopAuthorityBlocked(
         "tests/formal/nested_storage_loop_auto.ora",
         "nested_storage_loop_auto",
         .storage_child_frame_authority_unreviewed,
+    );
+}
+
+test "dynamic sequence bounds enter LoopVC but artifact authority remains unreviewed" {
+    try expectRepositoryLoopAuthorityBlocked(
+        "tests/formal/dynamic_sequence_loop_bounds.ora",
+        "dynamic_sequence_loop_bounds",
+        .dynamic_sequence_authority_unreviewed,
     );
 }
 

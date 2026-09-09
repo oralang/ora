@@ -1391,8 +1391,10 @@ test "tensor.dim encodes dynamic shape dims consistently and folds static dims" 
     const null_attr = mlir.MlirAttribute{ .ptr = null };
 
     const c0_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 0);
-    const c0_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c0_attr);
-    const c0 = mlir.oraOperationGetResult(c0_op, 0);
+    const c0_a_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c0_attr);
+    const c0_a = mlir.oraOperationGetResult(c0_a_op, 0);
+    const c0_b_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c0_attr);
+    const c0_b = mlir.oraOperationGetResult(c0_b_op, 0);
     const empty_attrs = [_]mlir.MlirNamedAttribute{};
 
     const dyn_shape: [1]i64 = .{mlir.oraShapedTypeDynamicSize()};
@@ -1403,10 +1405,14 @@ test "tensor.dim encodes dynamic shape dims consistently and folds static dims" 
     const dyn_body = mlir.oraFuncOpGetBodyBlock(dyn_func);
     const dyn_arg = mlir.oraBlockGetArgument(dyn_body, 0);
 
-    const dyn_dim_a_op = mlir.oraTensorDimOpCreate(mlir_ctx, loc, dyn_arg, c0);
-    const dyn_dim_b_op = mlir.oraTensorDimOpCreate(mlir_ctx, loc, dyn_arg, c0);
+    const dyn_dim_a_op = mlir.oraTensorDimOpCreate(mlir_ctx, loc, dyn_arg, c0_a);
+    const dyn_dim_b_op = mlir.oraTensorDimOpCreate(mlir_ctx, loc, dyn_arg, c0_b);
     const dyn_dim_a = try encoder.encodeOperation(dyn_dim_a_op);
     const dyn_dim_b = try encoder.encodeOperation(dyn_dim_b_op);
+    try testing.expectEqualStrings(
+        "shape_dim_0_axis_0_cur",
+        std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, dyn_dim_a)),
+    );
 
     var solver_dyn = try Solver.init(&z3_ctx, testing.allocator);
     defer solver_dyn.deinit();
@@ -1421,7 +1427,7 @@ test "tensor.dim encodes dynamic shape dims consistently and folds static dims" 
     const static_body = mlir.oraFuncOpGetBodyBlock(static_func);
     const static_arg = mlir.oraBlockGetArgument(static_body, 0);
 
-    const static_dim_op = mlir.oraTensorDimOpCreate(mlir_ctx, loc, static_arg, c0);
+    const static_dim_op = mlir.oraTensorDimOpCreate(mlir_ctx, loc, static_arg, c0_a);
     const static_dim = try encoder.encodeOperation(static_dim_op);
     const static_sort = z3.Z3_get_sort(z3_ctx.ctx, static_dim);
     const expected = z3.Z3_mk_unsigned_int64(z3_ctx.ctx, 7, static_sort);

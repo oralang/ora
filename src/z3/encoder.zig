@@ -171,8 +171,9 @@ pub const Encoder = struct {
     const max_computed_storage_erase_smt_words = 1024;
 
     const TensorDimKey = struct {
-        source_value_id: u64,
-        dim_value_id: u64,
+        source_identity: u64,
+        dim_identity: u256,
+        dim_is_constant: bool,
         is_old: bool,
     };
 
@@ -3274,10 +3275,11 @@ pub const Encoder = struct {
         }
 
         const mode_tag = if (key.is_old) "old" else "cur";
+        const dim_tag = if (key.dim_is_constant) "axis" else "value";
         const name = try std.fmt.allocPrint(
             self.allocator,
-            "shape_dim_{d}_{d}_{s}",
-            .{ key.source_value_id, key.dim_value_id, mode_tag },
+            "shape_dim_{d}_{s}_{d}_{s}",
+            .{ key.source_identity, dim_tag, key.dim_identity, mode_tag },
         );
         defer self.allocator.free(name);
         const dim_ast = try self.mkVariable(name, result_sort);
@@ -3296,12 +3298,20 @@ pub const Encoder = struct {
         if (num_operands < 1) return error.InvalidOperandCount;
 
         const source_value = mlir.oraOperationGetOperand(mlir_op, 0);
-        var dim_value_id: u64 = 0;
+        var dim_identity: u256 = 0;
+        var dim_is_constant = false;
         var dim_index: ?u256 = null;
         if (num_operands >= 2) {
             const dim_value = mlir.oraOperationGetOperand(mlir_op, 1);
-            dim_value_id = @intFromPtr(dim_value.ptr);
             dim_index = self.getValueConstUnsigned(dim_value, 64);
+            if (dim_index) |index| {
+                // Axis constants denote the same dimension even when lowering
+                // materializes distinct constant operations at each read.
+                dim_identity = index;
+                dim_is_constant = true;
+            } else {
+                dim_identity = try self.valueSymbolId(dim_value);
+            }
         }
 
         const source_type = mlir.oraValueGetType(source_value);
@@ -3320,8 +3330,9 @@ pub const Encoder = struct {
         }
 
         const key = TensorDimKey{
-            .source_value_id = @intFromPtr(source_value.ptr),
-            .dim_value_id = dim_value_id,
+            .source_identity = try self.valueSymbolId(source_value),
+            .dim_identity = dim_identity,
+            .dim_is_constant = dim_is_constant,
             .is_old = mode == .Old,
         };
         return try self.getOrCreateShapedDimSymbol(key, result_sort);
@@ -5064,7 +5075,7 @@ pub const Encoder = struct {
         // if no defining operation, create a fresh variable
         const value_type = mlir.oraValueGetType(mlir_value);
         const sort = try self.encodeMLIRTypeForSymbol(value_type);
-        const var_name = try self.resolveValueName(mlir_value, value_id);
+        const var_name = try self.resolveValueName(mlir_value);
         defer self.allocator.free(var_name);
         const encoded = try self.mkVariable(var_name, sort);
         try self.addBlockArgumentConstraints(mlir_value, encoded, mode);
@@ -5467,7 +5478,7 @@ pub const Encoder = struct {
     /// For function parameters (block arguments of func ops), extracts the
     /// parameter name from the enclosing function's printed form.
     /// Falls back to a deterministic encounter ordinal.
-    fn resolveValueName(self: *Encoder, value: mlir.MlirValue, value_id: u64) ![]u8 {
+    fn resolveValueName(self: *Encoder, value: mlir.MlirValue) ![]u8 {
         if (mlir.mlirValueIsABlockArgument(value)) {
             const owner_block = mlir.mlirBlockArgumentGetOwner(value);
             if (!mlir.oraBlockIsNull(owner_block)) {
@@ -5489,12 +5500,16 @@ pub const Encoder = struct {
                 }
             }
         }
-        const entry = try self.value_symbol_ids.getOrPut(value_id);
+        return std.fmt.allocPrint(self.allocator, "v_{d}", .{try self.valueSymbolId(value)});
+    }
+
+    fn valueSymbolId(self: *Encoder, value: mlir.MlirValue) !u64 {
+        const entry = try self.value_symbol_ids.getOrPut(@intFromPtr(value.ptr));
         if (!entry.found_existing) {
             entry.value_ptr.* = self.next_value_symbol_id;
             self.next_value_symbol_id += 1;
         }
-        return std.fmt.allocPrint(self.allocator, "v_{d}", .{entry.value_ptr.*});
+        return entry.value_ptr.*;
     }
 
     /// Extract the parameter name at a given index from a func op's sym_name and

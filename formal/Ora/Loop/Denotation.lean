@@ -80,6 +80,8 @@ structure StorageLocationExprRow where
 
 structure TimelineFormulaEventRow where
   formulas : List FormulaExprRow
+  /-- Marks the formula as the source-owned dynamic-index bounds assertion. -/
+  dynamicIndexBounds : Bool := false
   deriving Repr, BEq, DecidableEq
 
 structure StorageReadEventRow where

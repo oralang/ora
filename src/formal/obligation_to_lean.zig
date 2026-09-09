@@ -477,6 +477,7 @@ fn writeLoopTimeline(writer: anytype, events: []const obligation.LoopTimelineEve
             .safety_checkpoint => |checkpoint| {
                 try writer.writeAll("safetyCheckpoint { formulas := ");
                 try writeLoopFormulaExprRowList(writer, checkpoint.formulas);
+                if (checkpoint.dynamic_index_bounds) try writer.writeAll(", dynamicIndexBounds := true");
                 try writer.writeAll(" }");
             },
             .storage_read => |read| {
@@ -2896,7 +2897,10 @@ test "LoopVC digest covers every certificate-authority component class" {
             .location = location,
             .value = .{ .formula = .{ .term = 10 }, .read_results = &read_refs },
         } } },
-        .{ .id = 3, .structural_key = "body/ora.assert:0", .payload = .{ .safety_checkpoint = .{ .formulas = &safety_expr } } },
+        .{ .id = 3, .structural_key = "body/ora.assert:0", .payload = .{ .safety_checkpoint = .{
+            .formulas = &safety_expr,
+            .dynamic_index_bounds = true,
+        } } },
     };
     const exit_timeline = [_]obligation.LoopTimelineEvent{
         .{ .id = 0, .structural_key = "guard/false", .payload = .{ .path_assumption = .{ .formulas = &exit_path_expr } } },
@@ -2979,6 +2983,14 @@ test "LoopVC digest covers every certificate-authority component class" {
             try std.testing.expect(!std.mem.eql(u8, &expected, &actual));
         }
     };
+
+    var access_timeline = backedge_timeline;
+    access_timeline[3].payload.safety_checkpoint.dynamic_index_bounds = false;
+    var access_edges = edges;
+    access_edges[0].timeline = &access_timeline;
+    var access_summary = summary;
+    access_summary.edges = &access_edges;
+    try DigestCheck.differs(baseline, &terms, &assumptions, &queries, access_summary);
 
     var projection_domain_terms = terms;
     projection_domain_terms[11].place_read.projection_domain = .mapping;

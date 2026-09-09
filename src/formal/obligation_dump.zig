@@ -942,8 +942,14 @@ fn writeLoopTimelineFieldNamed(
         try writeStringField(writer, "structural_key", event.structural_key);
         try writeStringField(writer, "tag", @tagName(event.payload));
         switch (event.payload) {
-            .path_assumption, .safety_checkpoint => |formula_event| {
+            .path_assumption => |formula_event| {
                 try writeLoopFormulaExprListField(writer, "formulas", formula_event.formulas);
+            },
+            .safety_checkpoint => |checkpoint| {
+                try writeLoopFormulaExprListField(writer, "formulas", checkpoint.formulas);
+                if (checkpoint.dynamic_index_bounds) {
+                    try writeBoolField(writer, "dynamic_index_bounds", true);
+                }
             },
             .storage_read => |read| {
                 try writeFreeVarIdNamedField(writer, "result", read.result);
@@ -1724,4 +1730,22 @@ test "json-lines dump pins owner-scoped loop summary schema without authorizing 
             "\"target\":\"backedge\",\"target_formulas\":[]}]",
         edge_json.written(),
     );
+
+    const checked_timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "body/check",
+        .payload = .{ .safety_checkpoint = .{
+            .formulas = &.{.{ .formula = .{ .term = 2 } }},
+            .dynamic_index_bounds = true,
+        } },
+    }};
+    var checked_json = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer checked_json.deinit();
+    try writeLoopTimelineField(&checked_json.writer, &checked_timeline);
+    try std.testing.expect(std.mem.containsAtLeast(
+        u8,
+        checked_json.written(),
+        1,
+        "\"dynamic_index_bounds\":true",
+    ));
 }

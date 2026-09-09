@@ -139,6 +139,7 @@ const assert_safety_map = std.StaticStringMap(obligation.ArithmeticSafetyKind).i
     // A for-range may imply this condition, but only the emitted assertion
     // owns the checkpoint; loop bounds are premises, never a synthesized check.
     .{ "fixed-array index out of bounds", .fixed_array_bounds },
+    .{ "dynamic index out of bounds", .dynamic_index_bounds },
 });
 
 const transparent_value_ops = std.StaticStringMap(void).initComptime(.{
@@ -515,6 +516,7 @@ const SemanticLoopPath = struct {
     effect_keys: []const []const u8 = &.{},
     timeline: []const obligation.LoopTimelineEvent = &.{},
     timeline_inventory: []const LoopTimelineInventoryEvent = &.{},
+    dynamic_accesses: []const LoopDynamicAccessInventory = &.{},
 };
 
 const InventoryLoopPath = struct {
@@ -526,6 +528,7 @@ const InventoryLoopPath = struct {
     summary_dependency_keys: []const []const u8 = &.{},
     effect_keys: []const []const u8 = &.{},
     timeline_inventory: []const LoopTimelineInventoryEvent = &.{},
+    dynamic_accesses: []const LoopDynamicAccessInventory = &.{},
 };
 
 const LoopTimelineInventoryEvent = struct {
@@ -540,16 +543,34 @@ const LoopTimelineInventoryEvent = struct {
     summary_dependency: ?obligation.LoopSummaryDependency = null,
 };
 
+const LoopDynamicAccessInventory = struct {
+    structural_key: []const u8,
+    owner_identity: []const u8,
+    index_identity: []const u8,
+};
+
+const DynamicAccessSite = struct {
+    base: mlir.MlirValue,
+    index: mlir.MlirValue,
+};
+
+const DynamicAccessCheck = struct {
+    index: mlir.MlirValue,
+    owner: mlir.MlirValue,
+};
+
 const ProjectedLoopPreheader = struct {
     operation_keys: []const []const u8 = &.{},
     timeline: []const obligation.LoopTimelineEvent = &.{},
     event_inventory: []const LoopTimelineInventoryEvent = &.{},
+    dynamic_accesses: []const LoopDynamicAccessInventory = &.{},
     formula_overrides: []const Collector.LoopFormulaOverride = &.{},
 };
 
 const InventoryLoopPreheader = struct {
     operation_keys: []const []const u8 = &.{},
     event_inventory: []const LoopTimelineInventoryEvent = &.{},
+    dynamic_accesses: []const LoopDynamicAccessInventory = &.{},
 };
 
 const CollectedLoopPreheader = struct {
@@ -616,6 +637,7 @@ const ProjectedLoopEdge = struct {
     effect_keys: []const []const u8,
     state_source_keys: []const []const u8,
     timeline_inventory: []const LoopTimelineInventoryEvent = &.{},
+    dynamic_accesses: []const LoopDynamicAccessInventory = &.{},
 };
 
 const InventoryLoopEdge = struct {
@@ -629,6 +651,7 @@ const InventoryLoopEdge = struct {
     effect_keys: []const []const u8,
     state_source_keys: []const []const u8,
     timeline_inventory: []const LoopTimelineInventoryEvent = &.{},
+    dynamic_accesses: []const LoopDynamicAccessInventory = &.{},
 };
 
 const LoopSafetyCheckpointKey = struct {
@@ -684,6 +707,7 @@ const Collector = struct {
 
     const synthetic_file_id = std.math.maxInt(u32);
     const storage_read_file_id = synthetic_file_id - 2;
+    const dynamic_length_file_id = synthetic_file_id - 3;
 
     const BinderFrame = struct {
         name: []const u8,
@@ -1176,10 +1200,28 @@ const Collector = struct {
                 if (formula == .origin_value) return error.LoopPreheaderValueUnsupported;
                 const source = self.sourceKeyForValue(value, &.{}) catch
                     return error.LoopPreheaderValueUnsupported;
+                const projected_access = if (preheaderAssumptionOperation(name))
+                    null
+                else
+                    self.projectedDynamicAccess(
+                        op,
+                        formula,
+                        &.{},
+                    ) catch return error.LoopPreheaderValueUnsupported;
+                if (projected_access) |access| {
+                    result.dynamic_accesses = try appendDynamicAccessInventory(
+                        self.allocator,
+                        result.dynamic_accesses,
+                        access,
+                    );
+                }
                 const payload: obligation.LoopTimelineEventPayload = if (preheaderAssumptionOperation(name))
                     .{ .path_assumption = .{ .formulas = try self.loopFormulaExprsWithReads(&.{formula}, result.timeline) } }
                 else
-                    .{ .safety_checkpoint = .{ .formulas = try self.loopFormulaExprsWithReads(&.{formula}, result.timeline) } };
+                    .{ .safety_checkpoint = .{
+                        .formulas = try self.loopFormulaExprsWithReads(&.{formula}, result.timeline),
+                        .dynamic_index_bounds = projected_access != null,
+                    } };
                 result.timeline = try appendLoopTimelineEvent(self.allocator, result.timeline, payload, key);
                 result.event_inventory = try appendLoopTimelineInventoryEvent(self.allocator, result.event_inventory, .{
                     .structural_key = key,
@@ -1321,6 +1363,7 @@ const Collector = struct {
         if (mlir.oraBlockIsNull(self.function_entry_block)) return error.LoopPreheaderControlUnsupported;
         var result: InventoryLoopPreheader = .{};
         var op = mlir.oraBlockGetFirstOperation(self.function_entry_block);
+        var previous_op: mlir.MlirOperation = std.mem.zeroes(mlir.MlirOperation);
         while (!mlir.oraOperationIsNull(op) and op.ptr != loop_op.ptr) : (op = mlir.oraOperationGetNextInBlock(op)) {
             const name = operationName(op);
             const key = self.operationStructuralKey(op, name) catch return error.LoopPreheaderControlUnsupported;
@@ -1339,11 +1382,22 @@ const Collector = struct {
                 return error.LoopPreheaderValueUnsupported;
             }
 
+            if (try self.inventoryDynamicAccess(op, previous_op, &.{})) |access| {
+                result.dynamic_accesses = try appendDynamicAccessInventory(
+                    self.allocator,
+                    result.dynamic_accesses,
+                    access,
+                );
+            }
+
             var event: ?LoopTimelineInventoryEvent = null;
             if (std.mem.eql(u8, name, "ora.sload")) {
                 if (effect != mlir.ORA_OPERATION_MEMORY_EFFECT_READ or
                     mlir.oraOperationGetNumResults(op) != 1) return error.LoopPreheaderEffectUnsupported;
-                if (isAggregateStorageCarrierLoad(op)) continue;
+                if (isAggregateStorageCarrierLoad(op)) {
+                    previous_op = op;
+                    continue;
+                }
                 const value = mlir.oraOperationGetResult(op, 0);
                 const location = self.directStorageLocation(op, value) catch
                     return error.LoopPreheaderLocationUnsupported;
@@ -1382,7 +1436,10 @@ const Collector = struct {
                     return error.LoopPreheaderEffectUnsupported;
                 }
                 const value = if (is_read) mlir.oraOperationGetResult(op, 0) else mlir.oraOperationGetOperand(op, 2);
-                if (is_read and isAggregateStorageValue(value)) continue;
+                if (is_read and isAggregateStorageValue(value)) {
+                    previous_op = op;
+                    continue;
+                }
                 const location = self.inventoryMapStorageLocation(
                     mlir.oraOperationGetOperand(op, 0),
                     mlir.oraOperationGetOperand(op, 1),
@@ -1428,6 +1485,7 @@ const Collector = struct {
                 result.event_inventory,
                 row,
             );
+            previous_op = op;
         }
         if (mlir.oraOperationIsNull(op)) return error.LoopPreheaderControlUnsupported;
         return result;
@@ -2183,6 +2241,18 @@ const Collector = struct {
                         },
                     );
                 }
+                const projected_access = try self.projectedDynamicAccess(
+                    op,
+                    formula,
+                    path.source_overrides,
+                );
+                if (projected_access) |access| {
+                    path.dynamic_accesses = try appendDynamicAccessInventory(
+                        self.allocator,
+                        path.dynamic_accesses,
+                        access,
+                    );
+                }
                 path.safety_checkpoints = try appendLoopSafetyCheckpoint(
                     self.allocator,
                     path.safety_checkpoints,
@@ -2194,10 +2264,10 @@ const Collector = struct {
                     },
                 );
                 path.timeline = try appendLoopTimelineEvent(self.allocator, path.timeline, .{
-                    .safety_checkpoint = .{ .formulas = try self.loopFormulaExprsWithReads(
-                        &.{formula},
-                        path.timeline,
-                    ) },
+                    .safety_checkpoint = .{
+                        .formulas = try self.loopFormulaExprsWithReads(&.{formula}, path.timeline),
+                        .dynamic_index_bounds = projected_access != null,
+                    },
                 }, effect_key);
             }
             if (draftHasTargetSite(draft, op)) {
@@ -2227,6 +2297,7 @@ const Collector = struct {
     ) anyerror!void {
         var path = initial_path;
         var op = first;
+        var previous_op: mlir.MlirOperation = std.mem.zeroes(mlir.MlirOperation);
         while (!mlir.oraOperationIsNull(op)) : (op = mlir.oraOperationGetNextInBlock(op)) {
             const name = operationName(op);
             if (std.mem.eql(u8, name, "ora.loop_control")) {
@@ -2256,6 +2327,7 @@ const Collector = struct {
             }
             if (std.mem.eql(u8, name, "scf.while") or std.mem.eql(u8, name, "scf.for")) {
                 path = try self.bindInventoryNestedLoop(op, path);
+                previous_op = op;
                 continue;
             }
             if (mlir.oraOperationGetNumRegions(op) != 0 or mlir.mlirOperationGetNumSuccessors(op) != 0) {
@@ -2263,6 +2335,13 @@ const Collector = struct {
             }
 
             const effect_key = try self.operationStructuralKey(op, name);
+            if (try self.inventoryDynamicAccess(op, previous_op, path.source_overrides)) |access| {
+                path.dynamic_accesses = try appendDynamicAccessInventory(
+                    self.allocator,
+                    path.dynamic_accesses,
+                    access,
+                );
+            }
             const effect_kind = mlir.oraOperationGetMemoryEffectKind(op);
             switch (effect_kind) {
                 mlir.ORA_OPERATION_MEMORY_EFFECT_NONE => {},
@@ -2280,7 +2359,10 @@ const Collector = struct {
             if (std.mem.eql(u8, name, "ora.sload")) {
                 if (effect_kind != mlir.ORA_OPERATION_MEMORY_EFFECT_READ or
                     mlir.oraOperationGetNumResults(op) != 1) return error.LoopProjectionEffectUnsupported;
-                if (isAggregateStorageCarrierLoad(op)) continue;
+                if (isAggregateStorageCarrierLoad(op)) {
+                    previous_op = op;
+                    continue;
+                }
                 const result = mlir.oraOperationGetResult(op, 0);
                 const location = try self.directStorageLocation(op, result);
                 path.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, path.timeline_inventory, .{
@@ -2350,7 +2432,10 @@ const Collector = struct {
                     mlir.oraOperationGetNumResults(op) != 1 or
                     mlir.oraOperationGetNumOperands(op) != 2) return error.LoopProjectionEffectUnsupported;
                 const result = mlir.oraOperationGetResult(op, 0);
-                if (isAggregateStorageValue(result)) continue;
+                if (isAggregateStorageValue(result)) {
+                    previous_op = op;
+                    continue;
+                }
                 const location = try self.inventoryMapStorageLocation(
                     mlir.oraOperationGetOperand(op, 0),
                     mlir.oraOperationGetOperand(op, 1),
@@ -2401,6 +2486,7 @@ const Collector = struct {
             if (isLoopTargetOperation(op, name)) {
                 path.target_keys = try appendString(self.allocator, path.target_keys, effect_key);
             }
+            previous_op = op;
         }
         return error.UnsupportedLoopControlFlow;
     }
@@ -3251,6 +3337,7 @@ const Collector = struct {
             .effect_keys = terminal.path.effect_keys,
             .state_source_keys = terminal.path.state_source_keys,
             .timeline_inventory = terminal.path.timeline_inventory,
+            .dynamic_accesses = terminal.path.dynamic_accesses,
         };
     }
 
@@ -3356,6 +3443,7 @@ const Collector = struct {
             .effect_keys = terminal.path.effect_keys,
             .state_source_keys = terminal.path.state_source_keys,
             .timeline_inventory = terminal.path.timeline_inventory,
+            .dynamic_accesses = terminal.path.dynamic_accesses,
         };
     }
 
@@ -3390,6 +3478,52 @@ const Collector = struct {
         const result_index = operationResultIndex(owner, value) orelse return error.UnsupportedLoopControlFlow;
         const direct = try std.fmt.allocPrint(self.allocator, "module-op:{d}/result:{d}", .{ ordinal, result_index });
         return (try self.sourceDependencyKey(value, overrides, self.operation_ordinals.count() + 1)) orelse direct;
+    }
+
+    fn projectedDynamicAccess(
+        self: *Collector,
+        assert_op: mlir.MlirOperation,
+        formula: obligation.FormulaRef,
+        source_overrides: []const LoopValueSource,
+    ) !?LoopDynamicAccessInventory {
+        if (arithmeticSafetyFromAssertOp(assert_op) != .dynamic_index_bounds) return null;
+        const formula_id = switch (formula) {
+            .term => |id| id,
+            .origin_value => return error.LoopProjectionEffectUnsupported,
+        };
+        if (formula_id >= self.terms.items.len) return error.LoopProjectionEffectUnsupported;
+        const binary = switch (self.terms.items[formula_id]) {
+            .binary => |value| value,
+            else => return error.LoopProjectionEffectUnsupported,
+        };
+        const ty = typeRefIntegerInfo(binary.ty) orelse return error.LoopProjectionEffectUnsupported;
+        if (binary.op != .lt or ty.signed or ty.width != 256) {
+            return error.LoopProjectionEffectUnsupported;
+        }
+        const check = dynamicAccessCheckFromAssert(assert_op) orelse
+            return error.LoopProjectionEffectUnsupported;
+        return .{
+            .structural_key = try self.operationStructuralKey(assert_op, operationName(assert_op)),
+            .owner_identity = try self.sourceKeyForValue(check.owner, source_overrides),
+            .index_identity = try self.sourceKeyForValue(check.index, source_overrides),
+        };
+    }
+
+    fn inventoryDynamicAccess(
+        self: *Collector,
+        access_op: mlir.MlirOperation,
+        assert_op: mlir.MlirOperation,
+        source_overrides: []const LoopValueSource,
+    ) !?LoopDynamicAccessInventory {
+        const site = dynamicAccessSite(access_op) orelse return null;
+        if (arithmeticSafetyFromAssertOp(assert_op) != .dynamic_index_bounds) {
+            return error.LoopProjectionEffectUnsupported;
+        }
+        return .{
+            .structural_key = try self.operationStructuralKey(assert_op, operationName(assert_op)),
+            .owner_identity = try self.sourceKeyForValue(site.base, source_overrides),
+            .index_identity = try self.sourceKeyForValue(site.index, source_overrides),
+        };
     }
 
     fn sourceDependencyKey(
@@ -4074,6 +4208,23 @@ const Collector = struct {
                 .name = name,
                 .ty = ty,
             });
+        }
+        if (!mlir.oraBlockIsNull(self.function_entry_block)) {
+            const argument_count: usize = @intCast(mlir.oraBlockGetNumArguments(self.function_entry_block));
+            for (0..@min(argument_count, self.function_param_names.len)) |index| {
+                const value = mlir.oraBlockGetArgument(self.function_entry_block, index);
+                if (!dynamicSequenceTypeHasLogicalLength(mlir.oraValueGetType(value))) continue;
+                try variables.append(self.allocator, .{
+                    .index = @intCast(self.function_param_names.len + index),
+                    .id = dynamicLengthFreeVarId(index),
+                    .name = try std.fmt.allocPrint(
+                        self.allocator,
+                        "{s}.len",
+                        .{self.function_param_names[index]},
+                    ),
+                    .ty = self.builtinTypeRef(.u256),
+                });
+            }
         }
         return variables.toOwnedSlice(self.allocator);
     }
@@ -5553,6 +5704,12 @@ const Collector = struct {
             return try self.termFromValueWithIntegerSignedness(mlir.oraOperationGetOperand(owner, 0), signed_override);
         }
         if (std.mem.eql(u8, owner_name, "ora.old")) return try self.oldTerm(owner);
+        if (std.mem.eql(u8, owner_name, "memref.dim") or
+            std.mem.eql(u8, owner_name, "tensor.dim") or
+            std.mem.eql(u8, owner_name, "ora.length"))
+        {
+            return try self.dynamicLengthTerm(owner);
+        }
         if (std.mem.eql(u8, owner_name, "ora.sload")) return try self.scalarStorageLoadTerm(owner);
         if (std.mem.eql(u8, owner_name, "ora.map_get")) return try self.storageMapReadTerm(owner);
         if (std.mem.eql(u8, owner_name, "memref.load")) return try self.fixedArrayReadTerm(owner);
@@ -6403,6 +6560,21 @@ const Collector = struct {
             .file_id = synthetic_file_id,
             .pattern_id = @intCast(index),
         };
+    }
+
+    fn dynamicLengthTerm(self: *Collector, op: mlir.MlirOperation) !?obligation.TermId {
+        const source = dynamicLengthSourceValue(op) orelse return null;
+        const parameter_index = self.functionEntryBlockArgumentNumber(source) orelse return null;
+        if (!dynamicSequenceTypeHasLogicalLength(mlir.oraValueGetType(source))) return null;
+        const parameter_name = if (parameter_index < self.function_param_names.len)
+            self.function_param_names[parameter_index]
+        else
+            "dynamic-value";
+        return try self.addTerm(.{ .variable = .{ .free = .{
+            .id = dynamicLengthFreeVarId(parameter_index),
+            .name = try std.fmt.allocPrint(self.allocator, "{s}.len", .{parameter_name}),
+            .ty = self.builtinTypeRef(.u256),
+        } } });
     }
 
     fn combinedAssumptionConditionForOwner(self: *Collector, owner: obligation.Owner) !?obligation.TermId {
@@ -7310,6 +7482,17 @@ fn appendLoopTimelineInventoryEvent(
     return result;
 }
 
+fn appendDynamicAccessInventory(
+    allocator: std.mem.Allocator,
+    existing: []const LoopDynamicAccessInventory,
+    access: LoopDynamicAccessInventory,
+) ![]const LoopDynamicAccessInventory {
+    const result = try allocator.alloc(LoopDynamicAccessInventory, existing.len + 1);
+    @memcpy(result[0..existing.len], existing);
+    result[result.len - 1] = access;
+    return result;
+}
+
 fn safetyCheckpointKeysFromRows(
     allocator: std.mem.Allocator,
     checkpoints: []const obligation.LoopSafetyCheckpoint,
@@ -7329,19 +7512,10 @@ fn preheaderProjectionMatchesInventory(
     inventory: InventoryLoopPreheader,
 ) bool {
     if (!stringSlicesEql(projected.operation_keys, inventory.operation_keys) or
+        !dynamicAccessInventoriesEql(projected.dynamic_accesses, inventory.dynamic_accesses) or
         projected.event_inventory.len != inventory.event_inventory.len or
         !timelineMatchesInventory(projected.timeline, inventory.event_inventory)) return false;
-    for (projected.event_inventory, inventory.event_inventory) |left, right| {
-        if (!std.mem.eql(u8, left.structural_key, right.structural_key) or left.tag != right.tag or
-            !optionalStringEql(left.formula_source, right.formula_source) or
-            !optionalStringEql(left.storage_root, right.storage_root) or
-            !storageProjectionInventoriesEql(left.storage_projections, right.storage_projections) or
-            !optionalFreeVarEql(left.storage_result, right.storage_result) or
-            !optionalStringEql(left.storage_value_source, right.storage_value_source) or
-            !optionalIntegerTypeEql(left.storage_ty, right.storage_ty) or
-            !optionalDependencyEql(left.summary_dependency, right.summary_dependency)) return false;
-    }
-    return true;
+    return timelineInventoriesEql(projected.event_inventory, inventory.event_inventory);
 }
 
 fn compareLoopProjection(
@@ -7392,12 +7566,31 @@ fn compareLoopProjection(
             return .path_mismatch;
         }
         if (!storageTimelineInventoryEql(semantic.timeline_inventory, structural.timeline_inventory) or
+            !dynamicAccessInventoriesEql(semantic.dynamic_accesses, structural.dynamic_accesses) or
             !timelineMatchesInventory(semantic.edge.timeline, structural.timeline_inventory))
         {
             return .effect_mismatch;
         }
     }
     return .complete;
+}
+
+fn timelineInventoriesEql(
+    lhs: []const LoopTimelineInventoryEvent,
+    rhs: []const LoopTimelineInventoryEvent,
+) bool {
+    if (lhs.len != rhs.len) return false;
+    for (lhs, rhs) |left, right| {
+        if (!std.mem.eql(u8, left.structural_key, right.structural_key) or left.tag != right.tag or
+            !optionalStringEql(left.formula_source, right.formula_source) or
+            !optionalStringEql(left.storage_root, right.storage_root) or
+            !storageProjectionInventoriesEql(left.storage_projections, right.storage_projections) or
+            !optionalFreeVarEql(left.storage_result, right.storage_result) or
+            !optionalStringEql(left.storage_value_source, right.storage_value_source) or
+            !optionalIntegerTypeEql(left.storage_ty, right.storage_ty) or
+            !optionalDependencyEql(left.summary_dependency, right.summary_dependency)) return false;
+    }
+    return true;
 }
 
 fn storageTimelineInventoryEql(
@@ -7510,6 +7703,19 @@ fn optionalIntegerTypeEql(lhs: ?obligation.TypeRef, rhs: ?obligation.TypeRef) bo
             else => false,
         },
     };
+}
+
+fn dynamicAccessInventoriesEql(
+    lhs: []const LoopDynamicAccessInventory,
+    rhs: []const LoopDynamicAccessInventory,
+) bool {
+    if (lhs.len != rhs.len) return false;
+    for (lhs, rhs) |left, right| {
+        if (!std.mem.eql(u8, left.structural_key, right.structural_key) or
+            !std.mem.eql(u8, left.owner_identity, right.owner_identity) or
+            !std.mem.eql(u8, left.index_identity, right.index_identity)) return false;
+    }
+    return true;
 }
 
 fn optionalDependencyEql(
@@ -8098,6 +8304,95 @@ fn fixedIndexSourceValue(value: mlir.MlirValue) mlir.MlirValue {
     return mlir.oraOperationGetOperand(owner, 0);
 }
 
+fn dynamicLengthFreeVarId(parameter_index: usize) obligation.FreeVarId {
+    return .{
+        .file_id = Collector.dynamic_length_file_id,
+        .pattern_id = @intCast(parameter_index),
+    };
+}
+
+fn dynamicAccessSite(op: mlir.MlirOperation) ?DynamicAccessSite {
+    const name = operationName(op);
+    var site: DynamicAccessSite = undefined;
+    if (std.mem.eql(u8, name, "memref.load") and mlir.oraOperationGetNumOperands(op) == 2) {
+        site = .{
+            .base = mlir.oraOperationGetOperand(op, 0),
+            .index = fixedIndexSourceValue(mlir.oraOperationGetOperand(op, 1)),
+        };
+    } else if (std.mem.eql(u8, name, "memref.store") and mlir.oraOperationGetNumOperands(op) == 3) {
+        site = .{
+            .base = mlir.oraOperationGetOperand(op, 1),
+            .index = fixedIndexSourceValue(mlir.oraOperationGetOperand(op, 2)),
+        };
+    } else if (std.mem.eql(u8, name, "ora.byte_at") and mlir.oraOperationGetNumOperands(op) == 2) {
+        const base = mlir.oraOperationGetOperand(op, 0);
+        site = .{
+            .base = base,
+            .index = mlir.oraOperationGetOperand(op, 1),
+        };
+    } else return null;
+    return if (dynamicSequenceTypeHasLogicalLength(mlir.oraValueGetType(site.base))) site else null;
+}
+
+fn dynamicAccessCheckFromAssert(op: mlir.MlirOperation) ?DynamicAccessCheck {
+    var message = stringAttrView(op, "message") orelse return null;
+    if (assert_safety_map.get(message.slice()) != .dynamic_index_bounds or
+        mlir.oraOperationGetNumOperands(op) != 1) return null;
+    const predicate = mlir.oraOperationGetOperand(op, 0);
+    if (!mlir.oraValueIsAOpResult(predicate)) return null;
+    const compare = mlir.oraOpResultGetOwner(predicate);
+    if (mlir.oraOperationIsNull(compare) or mlir.oraOperationGetNumOperands(compare) != 2) return null;
+    const length = mlir.oraOperationGetOperand(compare, 1);
+    return .{
+        .index = fixedIndexSourceValue(mlir.oraOperationGetOperand(compare, 0)),
+        .owner = dynamicLengthOwnerFromValue(length) orelse return null,
+    };
+}
+
+fn dynamicSequenceTypeHasLogicalLength(ty: mlir.MlirType) bool {
+    if (mlir.oraTypeIsNull(ty)) return false;
+    if (mlir.oraTypeIsAMemRef(ty)) {
+        return mlir.oraShapedTypeGetRank(ty) == 1 and !mlir.oraShapedTypeHasStaticShape(ty);
+    }
+    const context = mlir.mlirTypeGetContext(ty);
+    return mlir.oraTypeEqual(ty, mlir.oraBytesTypeGet(context)) or
+        mlir.oraTypeEqual(ty, mlir.oraStringTypeGet(context));
+}
+
+fn dynamicLengthSourceValue(op: mlir.MlirOperation) ?mlir.MlirValue {
+    const name = operationName(op);
+    if (std.mem.eql(u8, name, "ora.length")) {
+        if (mlir.oraOperationGetNumOperands(op) != 1) return null;
+        return mlir.oraOperationGetOperand(op, 0);
+    }
+    if (!std.mem.eql(u8, name, "memref.dim") and !std.mem.eql(u8, name, "tensor.dim")) return null;
+    if (mlir.oraOperationGetNumOperands(op) != 2) return null;
+    const dimension = mlir.oraOperationGetOperand(op, 1);
+    if (!mlir.oraValueIsAOpResult(dimension)) return null;
+    const constant = mlir.oraOpResultGetOwner(dimension);
+    if (mlir.oraOperationIsNull(constant) or !std.mem.eql(u8, operationName(constant), "arith.constant")) return null;
+    const value_attr = mlir.oraOperationGetAttributeByName(constant, strRef("value"));
+    if (mlir.oraAttributeIsNull(value_attr)) return null;
+    const text = mlir.oraIntegerAttrGetValueString(value_attr);
+    defer if (text.data != null) mlir.oraStringRefFree(text);
+    if (text.data == null or !std.mem.eql(u8, std.mem.trim(u8, text.data[0..text.length], " \t\n\r"), "0")) return null;
+    return mlir.oraOperationGetOperand(op, 0);
+}
+
+fn dynamicLengthOwnerFromValue(value: mlir.MlirValue) ?mlir.MlirValue {
+    var current = value;
+    var remaining: u32 = 32;
+    while (remaining != 0 and mlir.oraValueIsAOpResult(current)) : (remaining -= 1) {
+        const owner = mlir.oraOpResultGetOwner(current);
+        if (dynamicLengthSourceValue(owner)) |source| return source;
+        if (!isTransparentValueOp(operationName(owner)) or mlir.oraOperationGetNumOperands(owner) != 1) {
+            return null;
+        }
+        current = mlir.oraOperationGetOperand(owner, 0);
+    }
+    return null;
+}
+
 fn fixedIndexExtent(
     op: mlir.MlirOperation,
     memref_operand_index: usize,
@@ -8460,6 +8755,72 @@ test "independent loop inventory comparison fails closed by witness class" {
         obligation.LoopProjectionCompleteness.ambiguous_identity,
         compareLoopProjection(&.{ semantic, semantic }, &.{ inventory, inventory }),
     );
+}
+
+test "dynamic access projection requires an identical independent inventory row" {
+    const timeline = [_]obligation.LoopTimelineEvent{
+        .{ .id = 0, .structural_key = "body/path", .payload = .{ .path_assumption = .{
+            .formulas = &.{.{ .formula = .{ .term = 2 } }},
+        } } },
+        .{ .id = 1, .structural_key = "body/check", .payload = .{ .safety_checkpoint = .{
+            .formulas = &.{.{ .formula = .{ .term = 3 } }},
+            .dynamic_index_bounds = true,
+        } } },
+    };
+    const access_inventory: LoopDynamicAccessInventory = .{
+        .structural_key = "body/check",
+        .owner_identity = "function-param:0",
+        .index_identity = "loop-state:0",
+    };
+    const rows = [_]LoopTimelineInventoryEvent{
+        .{ .structural_key = "body/path", .tag = .path_assumption },
+        .{ .structural_key = "body/check", .tag = .safety_checkpoint, .formula_source = "module-op:3/result:0" },
+    };
+    const checkpoint = LoopSafetyCheckpointKey{ .structural_key = "body/check", .after_dependency_count = 0 };
+    const semantic: ProjectedLoopEdge = .{
+        .edge = .{ .id = 0, .structural_key = "body/yield", .timeline = &timeline, .target = .backedge },
+        .terminator_key = "body/yield",
+        .safety_checkpoints = &.{checkpoint},
+        .effect_keys = &.{},
+        .state_source_keys = &.{},
+        .timeline_inventory = &.{},
+        .dynamic_accesses = &.{access_inventory},
+    };
+    const inventory: InventoryLoopEdge = .{
+        .structural_key = "body/yield",
+        .target = .backedge,
+        .terminator_key = "body/yield",
+        .safety_checkpoints = &.{checkpoint},
+        .effect_keys = &.{},
+        .state_source_keys = &.{},
+        .binding_source_keys = &.{},
+        .timeline_inventory = &rows,
+        .dynamic_accesses = &.{access_inventory},
+    };
+    try std.testing.expectEqual(.complete, compareLoopProjection(&.{semantic}, &.{inventory}));
+
+    var missing = inventory;
+    missing.dynamic_accesses = &.{};
+    try std.testing.expectEqual(.effect_mismatch, compareLoopProjection(&.{semantic}, &.{missing}));
+
+    var changed_access = access_inventory;
+    changed_access.owner_identity = "function-param:1";
+    var changed = inventory;
+    changed.dynamic_accesses = &.{changed_access};
+    try std.testing.expectEqual(.effect_mismatch, compareLoopProjection(&.{semantic}, &.{changed}));
+
+    changed_access = access_inventory;
+    changed_access.index_identity = "loop-state:1";
+    changed.dynamic_accesses = &.{changed_access};
+    try std.testing.expectEqual(.effect_mismatch, compareLoopProjection(&.{semantic}, &.{changed}));
+
+    changed_access = access_inventory;
+    changed_access.structural_key = "body/other-check";
+    changed.dynamic_accesses = &.{changed_access};
+    try std.testing.expectEqual(.effect_mismatch, compareLoopProjection(&.{semantic}, &.{changed}));
+
+    changed.dynamic_accesses = &.{ access_inventory, access_inventory };
+    try std.testing.expectEqual(.effect_mismatch, compareLoopProjection(&.{semantic}, &.{changed}));
 }
 
 test "direct-root timeline inventory compares every storage event field" {

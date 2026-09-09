@@ -42,7 +42,7 @@ pub const ObligationSet = struct {
         }
         self.validateTermReferences() catch return .{ .blocked = .invalid_dependency };
         self.validateIdReferences() catch return .{ .blocked = .invalid_dependency };
-        if (self.storageArtifactAuthorityBlockReason()) |reason| {
+        if (self.loopArtifactAuthorityBlockReason()) |reason| {
             return .{ .blocked = reason };
         }
 
@@ -87,16 +87,16 @@ pub const ObligationSet = struct {
         return .allowed;
     }
 
-    fn storageArtifactAuthorityBlockReason(self: ObligationSet) ?ArtifactBlockReason {
+    fn loopArtifactAuthorityBlockReason(self: ObligationSet) ?ArtifactBlockReason {
         for (self.loop_summaries) |summary| {
             if (!self.loopSummaryRequiresLeanCertificate(summary.id)) continue;
-            if (self.timelineStorageAuthorityBlockReason(summary, summary.preheader_timeline)) |reason| return reason;
-            for (summary.edges) |edge| if (self.timelineStorageAuthorityBlockReason(summary, edge.timeline)) |reason| return reason;
+            if (self.timelineArtifactAuthorityBlockReason(summary, summary.preheader_timeline)) |reason| return reason;
+            for (summary.edges) |edge| if (self.timelineArtifactAuthorityBlockReason(summary, edge.timeline)) |reason| return reason;
         }
         return null;
     }
 
-    fn timelineStorageAuthorityBlockReason(
+    fn timelineArtifactAuthorityBlockReason(
         self: ObligationSet,
         summary: LoopSummaryRow,
         timeline: []const LoopTimelineEvent,
@@ -110,7 +110,10 @@ pub const ObligationSet = struct {
                 dependency.summary_id,
                 self.loop_summaries.len + 1,
             )) return .storage_child_frame_authority_unreviewed,
-            .path_assumption, .safety_checkpoint => {},
+            .safety_checkpoint => |checkpoint| if (checkpoint.dynamic_index_bounds) {
+                return .dynamic_sequence_authority_unreviewed;
+            },
+            .path_assumption => {},
         };
         return null;
     }
@@ -893,6 +896,7 @@ pub const ArtifactBlockReason = enum(u8) {
     lean_required_failure,
     storage_projection_authority_unreviewed,
     storage_child_frame_authority_unreviewed,
+    dynamic_sequence_authority_unreviewed,
     source_accounting_failure,
 };
 
@@ -1257,6 +1261,10 @@ pub const LoopStorageLocationExpr = struct {
 
 pub const LoopTimelineFormulaEvent = struct {
     formulas: []const LoopFormulaExpr,
+    /// The formula is the source-owned `index < runtime length` assertion.
+    /// Its terms carry the canonical index and length identities; the MLIR
+    /// projection inventory separately binds them to the actual access.
+    dynamic_index_bounds: bool = false,
 };
 
 pub const LoopStorageReadEvent = struct {
@@ -2044,6 +2052,7 @@ pub const ArithmeticSafetyKind = enum(u8) {
     signed_division_overflow,
     shift_amount_bounds,
     fixed_array_bounds,
+    dynamic_index_bounds,
 };
 
 pub const RuntimeGuardGoal = struct {
@@ -3801,7 +3810,7 @@ test "storage artifact authority admits reviewed mappings and bounded fixed indi
     };
     try std.testing.expectEqual(
         @as(?ArtifactBlockReason, null),
-        direct_set.storageArtifactAuthorityBlockReason(),
+        direct_set.loopArtifactAuthorityBlockReason(),
     );
 
     const index_projection = [_]LoopStorageProjection{.{ .fixed_index = .{
@@ -3822,7 +3831,7 @@ test "storage artifact authority admits reviewed mappings and bounded fixed indi
         (ObligationSet{
             .queries = &.{certificate_query},
             .loop_summaries = &.{projected_summary},
-        }).storageArtifactAuthorityBlockReason().?,
+        }).loopArtifactAuthorityBlockReason().?,
     );
 
     const context_id: FreeVarId = .{ .file_id = 1, .pattern_id = 2 };
@@ -3856,7 +3865,7 @@ test "storage artifact authority admits reviewed mappings and bounded fixed indi
             .queries = &.{certificate_query},
             .terms = &context_terms,
             .loop_summaries = &.{mapping_summary},
-        }).storageArtifactAuthorityBlockReason(),
+        }).loopArtifactAuthorityBlockReason(),
     );
 
     var fixed_preheader_summary = direct_summary;
@@ -3867,7 +3876,7 @@ test "storage artifact authority admits reviewed mappings and bounded fixed indi
         (ObligationSet{
             .queries = &.{certificate_query},
             .loop_summaries = &.{fixed_preheader_summary},
-        }).storageArtifactAuthorityBlockReason().?,
+        }).loopArtifactAuthorityBlockReason().?,
     );
 
     const fixed_terms = [_]Term{
@@ -3910,7 +3919,7 @@ test "storage artifact authority admits reviewed mappings and bounded fixed indi
             .queries = &.{certificate_query},
             .terms = &fixed_terms,
             .loop_summaries = &.{fixed_summary},
-        }).storageArtifactAuthorityBlockReason(),
+        }).loopArtifactAuthorityBlockReason(),
     );
 
     const mixed_projection = [_]LoopStorageProjection{
@@ -3929,7 +3938,7 @@ test "storage artifact authority admits reviewed mappings and bounded fixed indi
             .queries = &.{certificate_query},
             .terms = &fixed_terms,
             .loop_summaries = &.{mixed_summary},
-        }).storageArtifactAuthorityBlockReason().?,
+        }).loopArtifactAuthorityBlockReason().?,
     );
 
     const dependency_timeline = [_]LoopTimelineEvent{.{
@@ -3958,8 +3967,52 @@ test "storage artifact authority admits reviewed mappings and bounded fixed indi
         (ObligationSet{
             .queries = &.{certificate_query},
             .loop_summaries = &.{ parent_summary, child_summary },
-        }).storageArtifactAuthorityBlockReason().?,
+        }).loopArtifactAuthorityBlockReason().?,
     );
+}
+
+test "dynamic sequence checks remain outside artifact authority" {
+    const ty: TypeRef = .{ .spelling = "u256" };
+    const terms = [_]Term{
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 1, .pattern_id = 1 }, .name = "i", .ty = ty } } },
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 1, .pattern_id = 2 }, .name = "values.len", .ty = ty } } },
+        .{ .binary = .{ .op = .lt, .lhs = 0, .rhs = 1, .ty = ty } },
+    };
+    const formulas = [_]LoopFormulaExpr{.{ .formula = .{ .term = 2 } }};
+    const timeline = [_]LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "body/check",
+        .payload = .{ .safety_checkpoint = .{
+            .formulas = &formulas,
+            .dynamic_index_bounds = true,
+        } },
+    }};
+    const summary: LoopSummaryRow = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "read" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .loop_source_op_id = 1,
+        .loop_kind = .scf_while,
+        .edges = &.{.{ .id = 0, .structural_key = "body", .timeline = &timeline }},
+        .query_ids = .{ .induction = &.{2} },
+    };
+    const query: VerificationQuery = .{
+        .id = 2,
+        .owner = summary.owner,
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .proof_requirement = .lean_certificate,
+        .kind = .loop_induction,
+        .loop_summary_id = summary.id,
+    };
+    try expectArtifactBlocked(.dynamic_sequence_authority_unreviewed, (ObligationSet{
+        .terms = &terms,
+        .queries = &.{query},
+        .loop_summaries = &.{summary},
+    }).artifactDecision());
 }
 
 test "diagnostic-only query carries accounting identity without artifact authority" {
