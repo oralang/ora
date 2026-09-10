@@ -67,6 +67,7 @@ import Ora.Obligation.Agreement
 import Ora.Loop.Core
 import Ora.Loop.Storage
 import Ora.Loop.Timeline
+import Ora.Loop.HeaderFacts
 import Ora.Loop.StorageDenotation
 import Ora.Loop.StorageCertificate
 import Ora.Loop.StorageTests
