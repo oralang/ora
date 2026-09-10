@@ -1100,6 +1100,26 @@ test "verification supports native string and bytes index access when length pre
     try testing.expect(!result.degraded);
 }
 
+test "verification does not join entry storage length to dynamic access length" {
+    const source_text =
+        \\contract StorageLengthBoundary {
+        \\    storage var history: slice[u256];
+        \\    pub fn read(index: u256) -> u256
+        \\        requires index < history.len
+        \\    {
+        \\        return history[index];
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "read");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(result.errors_len > 0);
+    try testing.expectEqualStrings("InvariantViolation", result.error_kinds);
+    try testing.expect(!result.degraded);
+}
+
 test "verification requires byte slice bounds before using projected length" {
     const source_text =
         \\pub fn cut_unchecked(data: bytes) -> bytes
