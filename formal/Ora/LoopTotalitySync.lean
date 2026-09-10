@@ -416,6 +416,127 @@ theorem loop_fixed_index_validation_matches :
     loopFixedIndexBoundsRows == expectedFixedIndexBoundsRows := by
   decide
 
+inductive HeaderFactMutation
+  | supported
+  | rowIdInvalid
+  | rowOrderInvalid
+  | identityMissing
+  | identityDuplicate
+  | sourceUnresolved
+  | blockMismatch
+  | sourceNotEarlier
+  | targetMismatch
+  | valueIdentityDuplicate
+  | valueTypeMissing
+  | assumptionMissing
+  | assumptionUnexpected
+  | unmatchedAssumption
+  | extraAssumption
+  | formulaMismatch
+  | ownerMismatch
+  deriving DecidableEq
+
+def HeaderFactMutation.name : HeaderFactMutation → String
+  | .supported => "supported"
+  | .rowIdInvalid => "row_id_invalid"
+  | .rowOrderInvalid => "row_order_invalid"
+  | .identityMissing => "identity_missing"
+  | .identityDuplicate => "identity_duplicate"
+  | .sourceUnresolved => "source_unresolved"
+  | .blockMismatch => "block_mismatch"
+  | .sourceNotEarlier => "source_not_earlier"
+  | .targetMismatch => "target_mismatch"
+  | .valueIdentityDuplicate => "value_identity_duplicate"
+  | .valueTypeMissing => "value_type_missing"
+  | .assumptionMissing => "assumption_missing"
+  | .assumptionUnexpected => "assumption_unexpected"
+  | .unmatchedAssumption => "unmatched_assumption"
+  | .extraAssumption => "extra_assumption"
+  | .formulaMismatch => "formula_mismatch"
+  | .ownerMismatch => "owner_mismatch"
+
+def headerFactMutations : List HeaderFactMutation := [
+  .supported, .rowIdInvalid, .rowOrderInvalid, .identityMissing, .identityDuplicate,
+  .sourceUnresolved, .blockMismatch, .sourceNotEarlier, .targetMismatch,
+  .valueIdentityDuplicate, .valueTypeMissing, .assumptionMissing, .assumptionUnexpected,
+  .unmatchedAssumption, .extraAssumption, .formulaMismatch, .ownerMismatch
+]
+
+def baseHeaderFact : CanonicalHeaderFactRow := {
+  id := 0
+  structuralKey := "header-fact:0"
+  formula := .term 1
+  sourceKind := .functionRequires
+  sourceStructuralKey := "requires:0"
+  sourceBlockKey := "block:0"
+  sourcePosition := 1
+  targetStructuralKey := "loop:0"
+  targetBlockKey := "block:0"
+  targetPosition := 4
+  stableValues := [{ id := loopId, ty := .compilerTypeId 6 }]
+  assumptionId := some 7
+}
+
+def secondHeaderFact : CanonicalHeaderFactRow := {
+  baseHeaderFact with id := 1, sourceStructuralKey := "requires:1", sourcePosition := 2
+}
+
+def headerFactsForMutation : HeaderFactMutation → List CanonicalHeaderFactRow
+  | .rowIdInvalid => [{ baseHeaderFact with id := 1 }]
+  | .rowOrderInvalid => [baseHeaderFact,
+      { secondHeaderFact with sourcePosition := 1 }]
+  | .identityMissing => [{ baseHeaderFact with structuralKey := "" }]
+  | .identityDuplicate => [baseHeaderFact,
+      { secondHeaderFact with structuralKey := baseHeaderFact.structuralKey }]
+  | .sourceUnresolved => [{ baseHeaderFact with sourceKind := .unresolved }]
+  | .blockMismatch => [{ baseHeaderFact with sourceBlockKey := "block:1" }]
+  | .sourceNotEarlier => [{ baseHeaderFact with sourcePosition := 4 }]
+  | .targetMismatch => [baseHeaderFact,
+      { secondHeaderFact with structuralKey := "header-fact:1", targetStructuralKey := "loop:1" }]
+  | .valueIdentityDuplicate => [{ baseHeaderFact with stableValues := [
+      { id := loopId, ty := .compilerTypeId 6 },
+      { id := loopId, ty := .compilerTypeId 6 }] }]
+  | .valueTypeMissing => [{ baseHeaderFact with stableValues := [
+      { id := loopId, ty := .compilerTypeId 0 }] }]
+  | .assumptionMissing => [{ baseHeaderFact with assumptionId := none }]
+  | .assumptionUnexpected => [{ baseHeaderFact with sourceKind := .pathAssume }]
+  | _ => [baseHeaderFact]
+
+def headerFactManifest (mutation : HeaderFactMutation) : Manifest := {
+  baseManifest with assumptions := [{
+    id := 7
+    owner := if mutation == .ownerMismatch then "other" else "run"
+    kind := .requires
+    formula := some (.term (if mutation == .formulaMismatch then 0 else 1))
+  }, {
+    id := 8
+    owner := "run"
+    kind := .requires
+    formula := some (.term 1)
+  }]
+}
+
+def headerFactAssumptionIds : HeaderFactMutation → List Nat
+  | .unmatchedAssumption => []
+  | .extraAssumption => [7, 8]
+  | _ => [7]
+
+def expectedHeaderFactValidationRows : List (String × Bool × Bool) :=
+  headerFactMutations.map fun mutation =>
+    let rows := headerFactsForMutation mutation
+    (mutation.name, headerFactsShapeSupported rows,
+      headerFactsMatchAssumptions (headerFactManifest mutation) "run" rows
+        (headerFactAssumptionIds mutation))
+
+theorem loop_header_fact_validation_mutations_pinned :
+    (loopHeaderFactValidationRows.map fun row => row.1) ==
+      headerFactMutations.map (·.name) := by
+  decide
+
+theorem loop_header_fact_validation_matches :
+    loopHeaderFactValidationRows == expectedHeaderFactValidationRows := by
+  decide
+
 def preheaderReadEvent : TimelineEventRow :=
   { timelineReadEvent with id := 0, structuralKey := "preheader/read" }
 def preheaderWriteEvent : TimelineEventRow :=

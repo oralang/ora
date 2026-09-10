@@ -6,6 +6,7 @@ targets, or incomplete state bindings make `denoteLoopSummary?` return `none`.
 -/
 
 import Ora.Loop.StorageDenotation
+import Ora.Loop.HeaderFacts
 
 namespace Ora.Loop
 
@@ -32,6 +33,80 @@ structure VariableRow where
   name : String := ""
   ty : TyRef
   deriving Repr, BEq, DecidableEq
+
+def storageTyExplicit : TyRef → Bool
+  | .spelling name => !name.isEmpty
+  | .compilerTypeId id => id != 0
+
+structure HeaderFactValueRow where
+  id : FreeVarId
+  ty : TyRef
+  deriving Repr, BEq, DecidableEq
+
+structure CanonicalHeaderFactRow where
+  id : Nat
+  structuralKey : String
+  formula : FormulaRef
+  sourceKind : HeaderFactSource
+  sourceStructuralKey : String
+  sourceBlockKey : String
+  sourcePosition : Nat
+  targetStructuralKey : String
+  targetBlockKey : String
+  targetPosition : Nat
+  stableValues : List HeaderFactValueRow := []
+  assumptionId : Option Nat := none
+  deriving Repr, BEq, DecidableEq
+
+def CanonicalHeaderFactRow.semanticRow
+    (row : CanonicalHeaderFactRow) : HeaderFactRow FormulaRef := {
+  id := row.id
+  structuralKey := row.structuralKey
+  formula := row.formula
+  sourceKind := row.sourceKind
+  source := { block := row.sourceBlockKey, position := row.sourcePosition }
+  target := { block := row.targetBlockKey, position := row.targetPosition }
+}
+
+def headerFactsIndexedFrom : Nat → List CanonicalHeaderFactRow → Bool
+  | _, [] => true
+  | expected, row :: rest => row.id == expected && headerFactsIndexedFrom (expected + 1) rest
+
+def headerFactsShapeSupported (rows : List CanonicalHeaderFactRow) : Bool :=
+  headerFactsIndexedFrom 0 rows &&
+    rows.all (fun row => !row.structuralKey.isEmpty &&
+        !row.sourceStructuralKey.isEmpty && !row.sourceBlockKey.isEmpty &&
+        !row.targetStructuralKey.isEmpty && !row.targetBlockKey.isEmpty &&
+        row.semanticRow.shapeSupported &&
+        row.stableValues.all (storageTyExplicit ·.ty) &&
+        decide (row.stableValues.map HeaderFactValueRow.id).Nodup &&
+        ((row.sourceKind == .functionRequires && row.assumptionId.isSome) ||
+          (row.sourceKind == .pathAssume && row.assumptionId.isNone))) &&
+    decide (rows.map CanonicalHeaderFactRow.structuralKey).Nodup &&
+    decide (rows.map CanonicalHeaderFactRow.sourceStructuralKey).Nodup &&
+    decide ((rows.map CanonicalHeaderFactRow.sourcePosition).Pairwise (fun lhs rhs => lhs < rhs)) &&
+    match rows with
+      | [] => true
+      | first :: rest => rest.all fun row =>
+          row.targetStructuralKey == first.targetStructuralKey &&
+            row.targetBlockKey == first.targetBlockKey &&
+            row.targetPosition == first.targetPosition
+
+def headerFactsMatchAssumptions
+    (manifest : Manifest) (owner : String)
+    (rows : List CanonicalHeaderFactRow) (assumptionIds : List Nat) : Bool :=
+  headerFactsShapeSupported rows &&
+    rows.filterMap (fun row =>
+      if row.sourceKind == .functionRequires then row.assumptionId else none) == assumptionIds &&
+    rows.all fun row => match row.sourceKind, row.assumptionId with
+      | .functionRequires, some id => manifest.assumptions.any fun assumption =>
+          assumption.id == id && assumption.owner == owner &&
+            assumption.kind == .requires &&
+            match assumption.formula, row.formula with
+              | some (.term assumptionTerm), .term factTerm => assumptionTerm == factTerm
+              | none, _ => false
+      | .pathAssume, none => true
+      | _, _ => false
 
 structure StateBindingRow where
   variableIndex : Nat
@@ -176,10 +251,6 @@ def timelineReadReferencesReason?
       else if (timelineReadIds (events.drop eventIndex)).contains reference then
         some .readIdentityForward
       else some .readIdentityForeign
-
-def storageTyExplicit : TyRef → Bool
-  | .spelling name => !name.isEmpty
-  | .compilerTypeId id => id != 0
 
 def fixedIndexExtentValid (extent : Nat) : Bool :=
   -- Compiler extents are `u64`; Lean rows use unbounded `Nat`, so the upper
@@ -372,6 +443,7 @@ structure SummaryRow where
   variables : List VariableRow := []
   init : List FormulaRef := []
   invariants : List FormulaRef := []
+  headerFacts : List CanonicalHeaderFactRow := []
   preheaderTimeline : List TimelineEventRow := []
   preheaderProjectionComplete : Bool := false
   edges : List EdgeRow := []
@@ -751,6 +823,7 @@ def SummaryRow.baseShapeSupported (row : SummaryRow) : Bool :=
 
 def SummaryRow.shapeSupported (row : SummaryRow) : Bool :=
   row.baseShapeSupported &&
+    headerFactsShapeSupported row.headerFacts &&
     (preheaderTimelineReason?
       ((row.contextVariables ++ row.variables).map VariableRow.id)
       row.preheaderTimeline).isNone &&
@@ -759,6 +832,7 @@ def SummaryRow.shapeSupported (row : SummaryRow) : Bool :=
 def SummaryRow.shapeSupportedIn (rows : List SummaryRow) (row : SummaryRow) : Bool :=
   summaryIdsUnique rows &&
     row.baseShapeSupported &&
+    headerFactsShapeSupported row.headerFacts &&
     (preheaderTimelineReason?
       ((row.contextVariables ++ row.variables).map VariableRow.id)
       row.preheaderTimeline).isNone &&
@@ -769,6 +843,7 @@ def SummaryRow.shapeSupportedIn (rows : List SummaryRow) (row : SummaryRow) : Bo
 def SummaryRow.formulasDenotable (manifest : Manifest) (row : SummaryRow) : Bool :=
   let env := row.supportEnv
   row.init.all (valueDenotable manifest env) &&
+    row.headerFacts.all (formulaDenotable manifest env ·.formula) &&
     preheaderTimelineFormulasDenotable manifest row &&
     row.invariants.all (formulaDenotable manifest env) &&
     row.edges.all (edgeFormulasDenotable manifest env) &&
@@ -781,6 +856,7 @@ def SummaryRow.formulasDenotableIn
   let base := row.supportEnv
   let dependent := row.supportEnvIn rows
   row.init.all (valueDenotable manifest base) &&
+    row.headerFacts.all (formulaDenotable manifest base ·.formula) &&
     preheaderTimelineFormulasDenotable manifest row &&
     row.invariants.all (formulaDenotable manifest base) &&
     row.edges.all (edgeControlFormulasDenotable manifest rows row base) &&

@@ -37,6 +37,7 @@ pub fn writeJsonLines(writer: anytype, set: obligation.ObligationSet) !void {
         try writeLoopVariableListField(writer, "variables", item.variables);
         try writeFormulaListField(writer, "init_formulas", item.init_formulas);
         try writeFormulaListField(writer, "invariant_formulas", item.invariant_formulas);
+        try writeLoopHeaderFactsField(writer, item.header_facts);
         try writeLoopTimelineFieldNamed(writer, "preheader_timeline", item.preheader_timeline);
         try writeBoolField(writer, "preheader_projection_complete", item.preheader_projection_complete);
         try writeLoopEdgeListField(writer, item.edges);
@@ -779,6 +780,38 @@ fn writeLoopVariableListField(
         }
         try writeOptionalStringField(writer, "name", variable.name);
         try writeTypeRefField(writer, "ty", variable.ty);
+        try writer.writeByte('}');
+    }
+    try writer.writeByte(']');
+}
+
+fn writeLoopHeaderFactsField(writer: anytype, rows: []const obligation.LoopHeaderFactRow) !void {
+    try writeFieldPrefix(writer, "header_facts");
+    try writer.writeByte('[');
+    for (rows, 0..) |row, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.writeAll("{\"id\":");
+        try writer.print("{d}", .{row.id});
+        try writeStringField(writer, "structural_key", row.structural_key);
+        try writeFormulaFieldNamed(writer, "formula", row.formula);
+        try writeStringField(writer, "source_kind", @tagName(row.source_kind));
+        try writeStringField(writer, "source_structural_key", row.source.structural_key);
+        try writeStringField(writer, "source_block_key", row.source.block_key);
+        try writeNumberField(writer, "source_position", row.source.position);
+        try writeStringField(writer, "target_structural_key", row.target.structural_key);
+        try writeStringField(writer, "target_block_key", row.target.block_key);
+        try writeNumberField(writer, "target_position", row.target.position);
+        try writeFieldPrefix(writer, "stable_values");
+        try writer.writeByte('[');
+        for (row.stable_values, 0..) |value, value_index| {
+            if (value_index != 0) try writer.writeByte(',');
+            try writer.writeAll("{\"id\":");
+            try writeFreeVarIdObject(writer, value.id);
+            try writeTypeRefField(writer, "ty", value.ty);
+            try writer.writeByte('}');
+        }
+        try writer.writeByte(']');
+        try writeOptionalNumberField(writer, "assumption_id", row.assumption_id);
         try writer.writeByte('}');
     }
     try writer.writeByte(']');
@@ -1667,6 +1700,14 @@ test "json-lines dump pins owner-scoped loop summary schema without authorizing 
         .loop_identity_missing,
         .loop_query_not_owner_scoped,
     };
+    const header_facts = [_]obligation.LoopHeaderFactRow{.{
+        .id = 0,
+        .structural_key = "header-fact:0",
+        .formula = .{ .term = 0 },
+        .source_kind = .path_assume,
+        .source = .{ .structural_key = "op:2/ora.assume", .block_key = "block:0", .position = 2 },
+        .target = .{ .structural_key = "op:7/scf.while", .block_key = "block:0", .position = 7 },
+    }};
     const row: obligation.LoopSummaryRow = .{
         .id = 1,
         .owner = .{ .statement = .{ .function_name = "count", .ordinal = 7 } },
@@ -1676,10 +1717,14 @@ test "json-lines dump pins owner-scoped loop summary schema without authorizing 
         .loop_source_op_id = 7,
         .loop_kind = .scf_while,
         .variables = &variables,
+        .header_facts = &header_facts,
         .query_ids = .{},
         .unsupported_reasons = &reasons,
     };
-    const actual = try dumpToOwnedString(std.testing.allocator, .{ .loop_summaries = &.{row} });
+    const actual = try dumpToOwnedString(std.testing.allocator, .{
+        .terms = &.{.{ .bool_lit = true }},
+        .loop_summaries = &.{row},
+    });
     defer std.testing.allocator.free(actual);
 
     try std.testing.expect(std.mem.startsWith(
@@ -1700,6 +1745,12 @@ test "json-lines dump pins owner-scoped loop summary schema without authorizing 
         "{\"record\":\"loop_summary\",\"schema_version\":8,\"id\":1,\"owner\":{\"tag\":\"statement\",\"function_name\":\"count\",\"ordinal\":7}",
     ));
     try std.testing.expect(std.mem.containsAtLeast(u8, actual, 1, "\"query_ids\":{\"induction\":[],\"base\":[],\"step\":[],\"body_safety\":[],\"post\":[]}"));
+    try std.testing.expect(std.mem.containsAtLeast(
+        u8,
+        actual,
+        1,
+        "\"header_facts\":[{\"id\":0,\"structural_key\":\"header-fact:0\",\"formula\":{\"tag\":\"term\",\"id\":0},\"source_kind\":\"path_assume\",\"source_structural_key\":\"op:2/ora.assume\",\"source_block_key\":\"block:0\",\"source_position\":2,\"target_structural_key\":\"op:7/scf.while\",\"target_block_key\":\"block:0\",\"target_position\":7,\"stable_values\":[],\"assumption_id\":null}]",
+    ));
     try std.testing.expect(std.mem.containsAtLeast(
         u8,
         actual,

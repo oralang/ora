@@ -33,13 +33,6 @@ pub fn Validator(comptime Schema: type) type {
             }
         };
 
-        fn typeRefExplicit(ty: Schema.TypeRef) bool {
-            return switch (ty) {
-                .spelling => |spelling| spelling.len != 0,
-                .compiler_type_id => |id| id != 0,
-            };
-        }
-
         fn typeRefEql(lhs: Schema.TypeRef, rhs: Schema.TypeRef) bool {
             return switch (lhs) {
                 .compiler_type_id => |id| switch (rhs) {
@@ -106,18 +99,18 @@ pub fn Validator(comptime Schema: type) type {
             location: Schema.LoopStorageLocationExpr,
         ) ?Reason {
             if (location.root.len == 0) return .loop_storage_root_missing;
-            if (!typeRefExplicit(location.value_ty)) return .loop_storage_type_invalid;
+            if (!Schema.typeRefExplicit(location.value_ty)) return .loop_storage_type_invalid;
             for (location.projections) |projection| switch (projection) {
                 .field => |field| if (field.len == 0) return .loop_storage_projection_invalid,
                 .fixed_index => |fixed| {
                     if (!fixedIndexExtentValid(fixed.extent)) return .loop_fixed_index_extent_invalid;
-                    if (!typeRefExplicit(fixed.index.ty)) return .loop_storage_type_invalid;
+                    if (!Schema.typeRefExplicit(fixed.index.ty)) return .loop_storage_type_invalid;
                     if (timelineReadReferencesReason(events, event_index, fixed.index.value.read_results)) |reason| {
                         return reason;
                     }
                 },
                 .mapping_key => |key| {
-                    if (!typeRefExplicit(key.ty)) return .loop_storage_type_invalid;
+                    if (!Schema.typeRefExplicit(key.ty)) return .loop_storage_type_invalid;
                     if (timelineReadReferencesReason(events, event_index, key.value.read_results)) |reason| {
                         return reason;
                     }

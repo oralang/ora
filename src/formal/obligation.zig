@@ -90,6 +90,7 @@ pub const ObligationSet = struct {
     fn loopArtifactAuthorityBlockReason(self: ObligationSet) ?ArtifactBlockReason {
         for (self.loop_summaries) |summary| {
             if (!self.loopSummaryRequiresLeanCertificate(summary.id)) continue;
+            if (summary.header_facts.len != 0) return .header_fact_authority_unreviewed;
             if (self.timelineArtifactAuthorityBlockReason(summary, summary.preheader_timeline)) |reason| return reason;
             for (summary.edges) |edge| if (self.timelineArtifactAuthorityBlockReason(summary, edge.timeline)) |reason| return reason;
         }
@@ -214,6 +215,7 @@ pub const ObligationSet = struct {
         for (self.loop_summaries) |summary| {
             for (summary.init_formulas) |formula| try self.validateFormulaRef(formula);
             for (summary.invariant_formulas) |formula| try self.validateFormulaRef(formula);
+            for (summary.header_facts) |fact| try self.validateFormulaRef(fact.formula);
             try self.validateLoopTimelineTermReferences(summary.preheader_timeline);
             for (summary.edges) |edge| {
                 for (edge.target_formulas) |formula| try self.validateFormulaRef(formula);
@@ -326,6 +328,43 @@ pub const ObligationSet = struct {
             .origin_value => false,
             .term => |id| self.termReferencesFreeVar(id, target, self.terms.len + 1),
         };
+    }
+
+    /// Exact one-to-one match used by the later automatic-authority task.
+    /// Callers must first validate the set's term references; this matcher
+    /// deliberately compares canonical IDs rather than revalidating them.
+    /// Defining it here does not relax the current assumption policy.
+    pub fn loopHeaderFactsMatchAssumptions(
+        self: ObligationSet,
+        summary: LoopSummaryRow,
+        assumption_ids: []const Id,
+    ) bool {
+        if (loopHeaderFactsReason(summary.header_facts) != null) return false;
+        var expected: usize = 0;
+        for (summary.header_facts) |fact| switch (fact.source_kind) {
+            .path_assume => {},
+            .unresolved => return false,
+            .function_requires => {
+                const id = fact.assumption_id orelse return false;
+                if (expected >= assumption_ids.len or assumption_ids[expected] != id) return false;
+                const assumption = findById(self.assumptions, id) orelse return false;
+                if (assumption.kind != .requires) return false;
+                const assumption_term = switch (assumption.formula orelse return false) {
+                    .term => |term| term,
+                    .origin_value => return false,
+                };
+                const fact_term = switch (fact.formula) {
+                    .term => |term| term,
+                    .origin_value => return false,
+                };
+                if (assumption_term != fact_term or assumption.owner != .function or
+                    summary.owner != .statement or
+                    !std.mem.eql(u8, assumption.owner.function.name, summary.owner.statement.function_name))
+                    return false;
+                expected += 1;
+            },
+        };
+        return expected == assumption_ids.len;
     }
 
     fn termReferencesFreeVar(self: ObligationSet, id: TermId, target: FreeVarId, fuel: usize) bool {
@@ -897,6 +936,7 @@ pub const ArtifactBlockReason = enum(u8) {
     storage_projection_authority_unreviewed,
     storage_child_frame_authority_unreviewed,
     dynamic_sequence_authority_unreviewed,
+    header_fact_authority_unreviewed,
     source_accounting_failure,
 };
 
@@ -1043,6 +1083,34 @@ pub const BackendComponent = enum(u8) {
     artifact_policy,
 };
 
+pub const LoopHeaderFactSource = enum(u8) {
+    path_assume,
+    function_requires,
+    unresolved,
+};
+
+pub const LoopHeaderPoint = struct {
+    structural_key: []const u8,
+    block_key: []const u8,
+    position: u32,
+};
+
+pub const LoopHeaderFactValue = struct {
+    id: FreeVarId,
+    ty: TypeRef,
+};
+
+pub const LoopHeaderFactRow = struct {
+    id: u32,
+    structural_key: []const u8,
+    formula: FormulaRef,
+    source_kind: LoopHeaderFactSource,
+    source: LoopHeaderPoint,
+    target: LoopHeaderPoint,
+    stable_values: []const LoopHeaderFactValue = &.{},
+    assumption_id: ?Id = null,
+};
+
 /// Backend-neutral data required to denote a loop proof. Unresolved identities
 /// and unsupported shapes remain explicit in `unsupported_reasons`; they can
 /// never become proof targets.
@@ -1058,6 +1126,7 @@ pub const LoopSummaryRow = struct {
     variables: []const LoopVariable = &.{},
     init_formulas: []const FormulaRef = &.{},
     invariant_formulas: []const FormulaRef = &.{},
+    header_facts: []const LoopHeaderFactRow = &.{},
     /// Storage actions from function entry to this loop's preheader.  The
     /// first storage-authority boundary accepts only a complete empty trace.
     preheader_timeline: []const LoopTimelineEvent = &.{},
@@ -1100,6 +1169,7 @@ pub const LoopSummaryRow = struct {
             .unsupported_effect => return .loop_projection_effect_unsupported,
             .path_limit_exceeded => return .loop_projection_path_limit_exceeded,
         }
+        if (loopHeaderFactsReason(self.header_facts)) |reason| return reason;
         if (self.variables.len == 0) return .loop_state_empty;
         if (self.edges.len == 0) return .loop_edge_missing;
 
@@ -1164,6 +1234,42 @@ pub const LoopSummaryRow = struct {
         return null;
     }
 };
+
+pub fn loopHeaderFactsReason(rows: []const LoopHeaderFactRow) ?LoopUnsupportedReason {
+    for (rows, 0..) |row, index| {
+        if (row.id != index) return .loop_header_fact_id_invalid;
+        if (index != 0 and rows[index - 1].source.position >= row.source.position)
+            return .loop_header_fact_order_invalid;
+        if (row.structural_key.len == 0 or row.source.structural_key.len == 0 or
+            row.source.block_key.len == 0 or row.target.structural_key.len == 0 or
+            row.target.block_key.len == 0) return .loop_header_fact_identity_missing;
+        for (rows[0..index]) |previous| {
+            if (std.mem.eql(u8, previous.structural_key, row.structural_key) or
+                std.mem.eql(u8, previous.source.structural_key, row.source.structural_key))
+                return .loop_header_fact_identity_duplicate;
+            if (!std.mem.eql(u8, previous.target.structural_key, row.target.structural_key) or
+                !std.mem.eql(u8, previous.target.block_key, row.target.block_key) or
+                previous.target.position != row.target.position)
+                return .loop_header_fact_target_mismatch;
+        }
+        if (row.source_kind == .unresolved) return .loop_header_fact_source_unresolved;
+        if (!std.mem.eql(u8, row.source.block_key, row.target.block_key))
+            return .loop_header_fact_block_mismatch;
+        if (row.source.position >= row.target.position) return .loop_header_fact_source_not_earlier;
+        for (row.stable_values, 0..) |value, value_index| {
+            if (!typeRefExplicit(value.ty)) return .loop_value_type_unresolved;
+            for (row.stable_values[0..value_index]) |previous| {
+                if (freeVarIdEql(previous.id, value.id)) return .loop_header_fact_value_identity_duplicate;
+            }
+        }
+        switch (row.source_kind) {
+            .function_requires => if (row.assumption_id == null) return .loop_header_fact_assumption_missing,
+            .path_assume => if (row.assumption_id != null) return .loop_header_fact_assumption_unexpected,
+            .unresolved => unreachable,
+        }
+    }
+    return null;
+}
 
 /// Loop proof claims are made about the Ora MLIR module supplied to the
 /// verifier before Ora-to-SIR conversion. The frontend, projection from this
@@ -1429,6 +1535,95 @@ test "loop projection completeness and structural identities fail closed" {
     try std.testing.expectEqual(LoopUnsupportedReason.loop_projection_effect_mismatch, row.validationReason().?);
     row.projection_completeness = .unsupported_effect;
     try std.testing.expectEqual(LoopUnsupportedReason.loop_projection_effect_unsupported, row.validationReason().?);
+}
+
+test "loop header facts validate shape and exact function assumptions" {
+    const stable_id: FreeVarId = .{ .file_id = 1, .pattern_id = 2 };
+    const stable_values = [_]LoopHeaderFactValue{.{ .id = stable_id, .ty = .{ .spelling = "u256" } }};
+    const target: LoopHeaderPoint = .{ .structural_key = "op:9/scf.while", .block_key = "block:0", .position = 9 };
+    const fact: LoopHeaderFactRow = .{
+        .id = 0,
+        .structural_key = "header-fact:0",
+        .formula = .{ .term = 0 },
+        .source_kind = .function_requires,
+        .source = .{ .structural_key = "assumption:7", .block_key = "block:0", .position = 1 },
+        .target = target,
+        .stable_values = &stable_values,
+        .assumption_id = 7,
+    };
+    try std.testing.expectEqual(@as(?LoopUnsupportedReason, null), loopHeaderFactsReason(&.{fact}));
+
+    var changed = fact;
+    changed.id = 1;
+    try std.testing.expectEqual(LoopUnsupportedReason.loop_header_fact_id_invalid, loopHeaderFactsReason(&.{changed}).?);
+    const second_fact: LoopHeaderFactRow = .{
+        .id = 1,
+        .structural_key = "header-fact:1",
+        .formula = .{ .term = 0 },
+        .source_kind = .function_requires,
+        .source = .{ .structural_key = "assumption:8", .block_key = "block:0", .position = 1 },
+        .target = target,
+        .stable_values = &stable_values,
+        .assumption_id = 8,
+    };
+    try std.testing.expectEqual(
+        LoopUnsupportedReason.loop_header_fact_order_invalid,
+        loopHeaderFactsReason(&.{ fact, second_fact }).?,
+    );
+    changed = fact;
+    changed.source.block_key = "block:1";
+    try std.testing.expectEqual(LoopUnsupportedReason.loop_header_fact_block_mismatch, loopHeaderFactsReason(&.{changed}).?);
+    changed = fact;
+    changed.source.position = target.position;
+    try std.testing.expectEqual(LoopUnsupportedReason.loop_header_fact_source_not_earlier, loopHeaderFactsReason(&.{changed}).?);
+    changed = fact;
+    changed.assumption_id = null;
+    try std.testing.expectEqual(LoopUnsupportedReason.loop_header_fact_assumption_missing, loopHeaderFactsReason(&.{changed}).?);
+
+    const assumption: Assumption = .{
+        .id = 7,
+        .owner = .{ .function = .{ .name = "run" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .source,
+        .kind = .requires,
+        .formula = .{ .term = 0 },
+    };
+    const summary: LoopSummaryRow = .{
+        .id = 1,
+        .owner = .{ .statement = .{ .function_name = "run", .ordinal = 0 } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .loop_source_op_id = 0,
+        .loop_kind = .scf_while,
+        .header_facts = &.{fact},
+    };
+    const set: ObligationSet = .{ .assumptions = &.{assumption} };
+    try std.testing.expect(set.loopHeaderFactsMatchAssumptions(summary, &.{7}));
+    try std.testing.expect(!set.loopHeaderFactsMatchAssumptions(summary, &.{}));
+    try std.testing.expect(!set.loopHeaderFactsMatchAssumptions(summary, &.{ 7, 8 }));
+
+    var wrong_assumption = assumption;
+    wrong_assumption.formula = .{ .term = 1 };
+    try std.testing.expect(!(ObligationSet{ .assumptions = &.{wrong_assumption} })
+        .loopHeaderFactsMatchAssumptions(summary, &.{7}));
+
+    wrong_assumption = assumption;
+    wrong_assumption.owner = .{ .function = .{ .name = "other" } };
+    try std.testing.expect(!(ObligationSet{ .assumptions = &.{wrong_assumption} })
+        .loopHeaderFactsMatchAssumptions(summary, &.{7}));
+
+    const origin_formula: FormulaRef = .{ .origin_value = .{ .origin = .source } };
+    var origin_fact = fact;
+    origin_fact.formula = origin_formula;
+    var origin_assumption = assumption;
+    origin_assumption.formula = origin_formula;
+    var origin_summary = summary;
+    const origin_facts = [_]LoopHeaderFactRow{origin_fact};
+    origin_summary.header_facts = &origin_facts;
+    try std.testing.expect(!(ObligationSet{ .assumptions = &.{origin_assumption} })
+        .loopHeaderFactsMatchAssumptions(origin_summary, &.{7}));
 }
 
 test "loop summary dependencies are ordered bound and fail closed before denotation" {
@@ -1925,6 +2120,17 @@ pub const LoopUnsupportedReason = enum(u8) {
     loop_value_type_unresolved,
     loop_value_width_mismatch,
     loop_value_signedness_mismatch,
+    loop_header_fact_id_invalid,
+    loop_header_fact_order_invalid,
+    loop_header_fact_identity_missing,
+    loop_header_fact_identity_duplicate,
+    loop_header_fact_source_unresolved,
+    loop_header_fact_block_mismatch,
+    loop_header_fact_source_not_earlier,
+    loop_header_fact_target_mismatch,
+    loop_header_fact_value_identity_duplicate,
+    loop_header_fact_assumption_missing,
+    loop_header_fact_assumption_unexpected,
 };
 
 pub const SourceRef = struct {
@@ -2631,6 +2837,13 @@ pub const TypeRef = union(TypeRefTag) {
     compiler_type_id: u32,
 };
 
+pub fn typeRefExplicit(ty: TypeRef) bool {
+    return switch (ty) {
+        .spelling => |spelling| spelling.len != 0,
+        .compiler_type_id => |id| id != 0,
+    };
+}
+
 test "manifest enum tags stay byte-sized" {
     inline for (.{
         DiagnosticKind,
@@ -2641,6 +2854,7 @@ test "manifest enum tags stay byte-sized" {
         OwnerTag,
         BackendComponent,
         LoopKind,
+        LoopHeaderFactSource,
         LoopStorageProjectionTag,
         LoopTimelineEventTag,
         LoopUnsupportedReason,
@@ -4013,6 +4227,42 @@ test "dynamic sequence checks remain outside artifact authority" {
         .queries = &.{query},
         .loop_summaries = &.{summary},
     }).artifactDecision());
+}
+
+test "header facts remain outside artifact authority until prover integration" {
+    const fact: LoopHeaderFactRow = .{
+        .id = 0,
+        .structural_key = "header-fact:0",
+        .formula = .{ .term = 0 },
+        .source_kind = .path_assume,
+        .source = .{ .structural_key = "assume:0", .block_key = "block:0", .position = 1 },
+        .target = .{ .structural_key = "loop:0", .block_key = "block:0", .position = 2 },
+    };
+    const summary: LoopSummaryRow = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "run" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .loop_source_op_id = 1,
+        .loop_kind = .scf_while,
+        .header_facts = &.{fact},
+    };
+    const query: VerificationQuery = .{
+        .id = 2,
+        .owner = summary.owner,
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .proof_requirement = .lean_certificate,
+        .kind = .loop_induction,
+        .loop_summary_id = summary.id,
+    };
+    try std.testing.expectEqual(
+        ArtifactBlockReason.header_fact_authority_unreviewed,
+        (ObligationSet{ .queries = &.{query}, .loop_summaries = &.{summary} })
+            .loopArtifactAuthorityBlockReason().?,
+    );
 }
 
 test "diagnostic-only query carries accounting identity without artifact authority" {

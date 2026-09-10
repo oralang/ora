@@ -151,6 +151,28 @@ fn fixedIndexFixtureConfig(mutation: FixedIndexMutation) FixedIndexFixtureConfig
 
 const fixed_index_cases = std.meta.tags(FixedIndexMutation);
 
+const HeaderFactMutation = enum {
+    supported,
+    row_id_invalid,
+    row_order_invalid,
+    identity_missing,
+    identity_duplicate,
+    source_unresolved,
+    block_mismatch,
+    source_not_earlier,
+    target_mismatch,
+    value_identity_duplicate,
+    value_type_missing,
+    assumption_missing,
+    assumption_unexpected,
+    unmatched_assumption,
+    extra_assumption,
+    formula_mismatch,
+    owner_mismatch,
+};
+
+const header_fact_cases = std.meta.tags(HeaderFactMutation);
+
 const ty_u256: obligation.TypeRef = .{
     .compiler_type_id = builtin.lookupBuiltinById(.u256).comptime_type_id,
 };
@@ -621,6 +643,79 @@ fn fixedIndexReason(mutation: FixedIndexMutation) ?obligation.LoopUnsupportedRea
     return (obligation.ObligationSet{ .terms = &terms }).fixedIndexBoundsReason(events);
 }
 
+fn headerFactOutcome(mutation: HeaderFactMutation) struct { shape: bool, assumptions: bool } {
+    // Rows below intentionally retain slices into this array so the type and
+    // duplicate-identity mutations exercise the exact referenced row data.
+    var values = [_]obligation.LoopHeaderFactValue{
+        .{ .id = loop_id, .ty = ty_u256 },
+        .{ .id = loop_id, .ty = ty_u256 },
+    };
+    const fact: obligation.LoopHeaderFactRow = .{
+        .id = 0,
+        .structural_key = "header-fact:0",
+        .formula = .{ .term = 1 },
+        .source_kind = .function_requires,
+        .source = .{ .structural_key = "requires:0", .block_key = "block:0", .position = 1 },
+        .target = .{ .structural_key = "loop:0", .block_key = "block:0", .position = 4 },
+        .stable_values = values[0..1],
+        .assumption_id = 7,
+    };
+    var rows = [_]obligation.LoopHeaderFactRow{ fact, fact };
+    var row_count: usize = 1;
+    switch (mutation) {
+        .supported, .unmatched_assumption, .extra_assumption, .formula_mismatch, .owner_mismatch => {},
+        .row_id_invalid => rows[0].id = 1,
+        .row_order_invalid => {
+            row_count = 2;
+            rows[1].id = 1;
+            rows[1].structural_key = "header-fact:1";
+            rows[1].source.structural_key = "requires:1";
+        },
+        .identity_missing => rows[0].structural_key = "",
+        .identity_duplicate, .target_mismatch => {
+            row_count = 2;
+            rows[1].id = 1;
+            rows[1].source.position = 2;
+            rows[1].source.structural_key = "requires:1";
+            if (mutation == .target_mismatch) {
+                rows[1].structural_key = "header-fact:1";
+                rows[1].target.structural_key = "loop:1";
+            }
+        },
+        .source_unresolved => rows[0].source_kind = .unresolved,
+        .block_mismatch => rows[0].source.block_key = "block:1",
+        .source_not_earlier => rows[0].source.position = 4,
+        .value_identity_duplicate => rows[0].stable_values = values[0..2],
+        .value_type_missing => values[0].ty = .{ .compiler_type_id = 0 },
+        .assumption_missing => rows[0].assumption_id = null,
+        .assumption_unexpected => rows[0].source_kind = .path_assume,
+    }
+    const assumptions = [_]obligation.Assumption{
+        .{ .id = 7, .owner = .{ .function = .{ .name = if (mutation == .owner_mismatch) "other" else "run" } }, .source = .generated(), .phase = .sema, .origin = .source, .kind = .requires, .formula = .{ .term = if (mutation == .formula_mismatch) 0 else 1 } },
+        .{ .id = 8, .owner = .{ .function = .{ .name = "run" } }, .source = .generated(), .phase = .sema, .origin = .source, .kind = .requires, .formula = .{ .term = 1 } },
+    };
+    const summary: obligation.LoopSummaryRow = .{
+        .id = 1,
+        .owner = .{ .statement = .{ .function_name = "run", .ordinal = 0 } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .loop_source_op_id = 0,
+        .loop_kind = .scf_while,
+        .header_facts = rows[0..row_count],
+    };
+    const ids: []const obligation.Id = switch (mutation) {
+        .unmatched_assumption => &.{},
+        .extra_assumption => &.{ 7, 8 },
+        else => &.{7},
+    };
+    const set: obligation.ObligationSet = .{ .assumptions = &assumptions };
+    return .{
+        .shape = obligation.loopHeaderFactsReason(summary.header_facts) == null,
+        .assumptions = set.loopHeaderFactsMatchAssumptions(summary, ids),
+    };
+}
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     var stdout_buffer: [4096]u8 = undefined;
@@ -682,6 +777,15 @@ pub fn main(init: std.process.Init) !void {
         try writer.writeAll(", ");
         try writeLeanString(writer, if (fixedIndexReason(mutation)) |reason| @tagName(reason) else "");
         try writer.writeAll(if (index + 1 == fixed_index_cases.len) ")\n" else "),\n");
+    }
+    try writer.writeAll("]\n\ndef loopHeaderFactValidationRows : List (String × Bool × Bool) := [\n");
+    for (header_fact_cases, 0..) |mutation, index| {
+        const outcome = headerFactOutcome(mutation);
+        try writer.writeAll("  (");
+        try writeLeanString(writer, @tagName(mutation));
+        try writer.writeAll(if (outcome.shape) ", true" else ", false");
+        try writer.writeAll(if (outcome.assumptions) ", true)" else ", false)");
+        try writer.writeAll(if (index + 1 == header_fact_cases.len) "\n" else ",\n");
     }
     try writer.writeAll("]\n\nend Ora.Generated\n");
     try writer.flush();

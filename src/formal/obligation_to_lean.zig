@@ -232,7 +232,7 @@ fn writeLoopSummaryDefinitions(writer: anytype, set: obligation.ObligationSet) !
 /// an unrelated term changes, but it cannot retain a certificate after a
 /// referenced term changes.
 pub fn loopVcSha256(set: obligation.ObligationSet, summary_id: obligation.Id) ![32]u8 {
-    return loopVcSha256InDomain(set, summary_id, "ora-loop-vc-v2\n");
+    return loopVcSha256InDomain(set, summary_id, "ora-loop-vc-v3\n");
 }
 
 fn loopVcSha256InDomain(
@@ -282,6 +282,8 @@ fn writeLoopSummaryRow(writer: anytype, row: obligation.LoopSummaryRow) !void {
     try writeFormulaList(writer, row.init_formulas);
     try writer.writeAll(", invariants := ");
     try writeFormulaList(writer, row.invariant_formulas);
+    try writer.writeAll(", headerFacts := ");
+    try writeLoopHeaderFacts(writer, row.header_facts);
     try writer.writeAll(", preheaderTimeline := ");
     try writeLoopTimeline(writer, row.preheader_timeline);
     try writer.writeAll(", preheaderProjectionComplete := ");
@@ -294,6 +296,44 @@ fn writeLoopSummaryRow(writer: anytype, row: obligation.LoopSummaryRow) !void {
     try writeFormulaList(writer, row.post_formulas);
     try writer.writeAll(", unsupportedReasons := []");
     try writer.writeAll(" }");
+}
+
+fn writeLoopHeaderFacts(writer: anytype, rows: []const obligation.LoopHeaderFactRow) !void {
+    try writer.writeByte('[');
+    for (rows, 0..) |row, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writer.print("{{ id := {d}, structuralKey := ", .{row.id});
+        try writeLeanString(writer, row.structural_key);
+        try writer.writeAll(", formula := ");
+        try writeFormula(writer, row.formula);
+        try writer.writeAll(", sourceKind := .");
+        try writer.writeAll(switch (row.source_kind) {
+            .path_assume => "pathAssume",
+            .function_requires => "functionRequires",
+            .unresolved => "unresolved",
+        });
+        try writer.writeAll(", sourceStructuralKey := ");
+        try writeLeanString(writer, row.source.structural_key);
+        try writer.writeAll(", sourceBlockKey := ");
+        try writeLeanString(writer, row.source.block_key);
+        try writer.print(", sourcePosition := {d}, targetStructuralKey := ", .{row.source.position});
+        try writeLeanString(writer, row.target.structural_key);
+        try writer.writeAll(", targetBlockKey := ");
+        try writeLeanString(writer, row.target.block_key);
+        try writer.print(", targetPosition := {d}, stableValues := [", .{row.target.position});
+        for (row.stable_values, 0..) |value, value_index| {
+            if (value_index != 0) try writer.writeAll(", ");
+            try writer.writeAll("{ id := ");
+            try writeFreeVarId(writer, value.id);
+            try writer.writeAll(", ty := ");
+            try writeTypeRef(writer, value.ty);
+            try writer.writeAll(" }");
+        }
+        try writer.writeAll("], assumptionId := ");
+        if (row.assumption_id) |id| try writer.print("some {d}", .{id}) else try writer.writeAll("none");
+        try writer.writeAll(" }");
+    }
+    try writer.writeByte(']');
 }
 
 fn writeLoopVariables(writer: anytype, variables: []const obligation.LoopVariable) !void {
@@ -2838,6 +2878,20 @@ test "Lean emitter writes effect frame obligations" {
     try std.testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "obligationFollowsFromAssumptions emittedManifest"));
 }
 
+test "Lean emitter refuses origin-owned header facts" {
+    const fact: obligation.LoopHeaderFactRow = .{
+        .id = 0,
+        .structural_key = "header-fact:0",
+        .formula = .{ .origin_value = .{ .origin = .source } },
+        .source_kind = .path_assume,
+        .source = .{ .structural_key = "assume:0", .block_key = "block:0", .position = 1 },
+        .target = .{ .structural_key = "loop:0", .block_key = "block:0", .position = 2 },
+    };
+    var buffer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer buffer.deinit();
+    try std.testing.expectError(error.UnsupportedOriginValue, writeLoopHeaderFacts(&buffer.writer, &.{fact}));
+}
+
 test "LoopVC digest covers every certificate-authority component class" {
     const int_ty: obligation.TypeRef = .{ .spelling = "u256" };
     const loop_id: obligation.FreeVarId = .{ .file_id = 1, .pattern_id = 1 };
@@ -2863,6 +2917,17 @@ test "LoopVC digest covers every certificate-authority component class" {
         } },
     };
     const variables = [_]obligation.LoopVariable{.{ .index = 0, .id = loop_id, .name = "i", .ty = int_ty }};
+    const header_values = [_]obligation.LoopHeaderFactValue{.{ .id = loop_id, .ty = int_ty }};
+    const header_facts = [_]obligation.LoopHeaderFactRow{.{
+        .id = 0,
+        .structural_key = "header-fact:0",
+        .formula = .{ .term = 6 },
+        .source_kind = .function_requires,
+        .source = .{ .structural_key = "requires:0", .block_key = "block:0", .position = 1 },
+        .target = .{ .structural_key = "loop:0", .block_key = "block:0", .position = 3 },
+        .stable_values = &header_values,
+        .assumption_id = 50,
+    }};
     const backedge_bindings = [_]obligation.LoopStepAssignment{.{
         .variable_index = 0,
         .target = loop_id,
@@ -2920,6 +2985,7 @@ test "LoopVC digest covers every certificate-authority component class" {
         .variables = &variables,
         .init_formulas = &.{.{ .term = 1 }},
         .invariant_formulas = &.{.{ .term = 4 }},
+        .header_facts = &header_facts,
         .edges = &edges,
         .projection_completeness = .complete,
         .post_formulas = &.{.{ .term = 9 }},
@@ -2952,8 +3018,55 @@ test "LoopVC digest covers every certificate-authority component class" {
         .loop_summaries = &summaries,
     };
     const baseline = try loopVcSha256(set, 1);
-    const old_domain_digest = try loopVcSha256InDomain(set, 1, "ora-loop-vc-v1\n");
+    const old_domain_digest = try loopVcSha256InDomain(set, 1, "ora-loop-vc-v2\n");
     try std.testing.expect(!std.mem.eql(u8, &baseline, &old_domain_digest));
+
+    const HeaderFactMutation = enum {
+        id,
+        structural_key,
+        formula,
+        source_kind,
+        source_structural_key,
+        source_block_key,
+        source_position,
+        target_structural_key,
+        target_block_key,
+        target_position,
+        stable_value_id,
+        stable_value_type,
+        assumption_id,
+    };
+    inline for (std.meta.tags(HeaderFactMutation)) |mutation| {
+        var changed_fact = header_facts[0];
+        var changed_values = header_values;
+        switch (mutation) {
+            .id => changed_fact.id = 1,
+            .structural_key => changed_fact.structural_key = "header-fact:changed",
+            .formula => changed_fact.formula = .{ .term = 5 },
+            .source_kind => changed_fact.source_kind = .path_assume,
+            .source_structural_key => changed_fact.source.structural_key = "requires:changed",
+            .source_block_key => changed_fact.source.block_key = "block:changed",
+            .source_position => changed_fact.source.position = 2,
+            .target_structural_key => changed_fact.target.structural_key = "loop:changed",
+            .target_block_key => changed_fact.target.block_key = "block:changed",
+            .target_position => changed_fact.target.position = 4,
+            .stable_value_id => changed_values[0].id.pattern_id = 9,
+            .stable_value_type => changed_values[0].ty = .{ .spelling = "u128" },
+            .assumption_id => changed_fact.assumption_id = 51,
+        }
+        changed_fact.stable_values = &changed_values;
+        const changed_facts = [_]obligation.LoopHeaderFactRow{changed_fact};
+        var changed_summary = summary;
+        changed_summary.header_facts = &changed_facts;
+        const changed_summaries = [_]obligation.LoopSummaryRow{changed_summary};
+        const changed_digest = try loopVcSha256(.{
+            .terms = &terms,
+            .assumptions = &assumptions,
+            .queries = &queries,
+            .loop_summaries = &changed_summaries,
+        }, 1);
+        try std.testing.expect(!std.mem.eql(u8, &baseline, &changed_digest));
+    }
 
     var preheader_summary = summary;
     preheader_summary.preheader_timeline = &.{backedge_timeline[0]};

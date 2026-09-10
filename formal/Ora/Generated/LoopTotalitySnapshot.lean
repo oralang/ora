@@ -83,4 +83,24 @@ def loopFixedIndexBoundsRows : List (String × String) := [
   ("checkpoint_noncanonical_literal", "loop_fixed_index_bounds_extent_literal_mismatch")
 ]
 
+def loopHeaderFactValidationRows : List (String × Bool × Bool) := [
+  ("supported", true, true),
+  ("row_id_invalid", false, false),
+  ("row_order_invalid", false, false),
+  ("identity_missing", false, false),
+  ("identity_duplicate", false, false),
+  ("source_unresolved", false, false),
+  ("block_mismatch", false, false),
+  ("source_not_earlier", false, false),
+  ("target_mismatch", false, false),
+  ("value_identity_duplicate", false, false),
+  ("value_type_missing", false, false),
+  ("assumption_missing", false, false),
+  ("assumption_unexpected", false, false),
+  ("unmatched_assumption", true, false),
+  ("extra_assumption", true, false),
+  ("formula_mismatch", true, false),
+  ("owner_mismatch", true, false)
+]
+
 end Ora.Generated
