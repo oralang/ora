@@ -90,11 +90,35 @@ pub const ObligationSet = struct {
     fn loopArtifactAuthorityBlockReason(self: ObligationSet) ?ArtifactBlockReason {
         for (self.loop_summaries) |summary| {
             if (!self.loopSummaryRequiresLeanCertificate(summary.id)) continue;
-            if (summary.header_facts.len != 0) return .header_fact_authority_unreviewed;
+            // Task 3 does not give compiler-generated proofs authority over
+            // header facts. A manifest-backed external certificate keeps its
+            // existing authority because the facts are not denotational yet
+            // and the checked proof is rebound to the migrated LoopVC digest.
+            if (summary.header_facts.len != 0 and
+                !self.loopSummaryHasExternalLeanCertificate(summary.id))
+            {
+                return .header_fact_authority_unreviewed;
+            }
             if (self.timelineArtifactAuthorityBlockReason(summary, summary.preheader_timeline)) |reason| return reason;
             for (summary.edges) |edge| if (self.timelineArtifactAuthorityBlockReason(summary, edge.timeline)) |reason| return reason;
         }
         return null;
+    }
+
+    fn loopSummaryHasExternalLeanCertificate(self: ObligationSet, summary_id: Id) bool {
+        for (self.queries) |query| {
+            if (query.backend != .lean or query.kind != .loop_induction or
+                query.loop_summary_id != summary_id or query.discharges_query_id == null)
+            {
+                continue;
+            }
+            const artifact_id = query.proof_artifact_id orelse continue;
+            const artifact = self.proofArtifactById(artifact_id) orelse continue;
+            if (artifact.path == null or !self.queryHasValidProofArtifact(query)) continue;
+            const result = query.result orelse continue;
+            if (querySucceeded(query, result)) return true;
+        }
+        return false;
     }
 
     fn timelineArtifactAuthorityBlockReason(
@@ -328,6 +352,52 @@ pub const ObligationSet = struct {
             .origin_value => false,
             .term => |id| self.termReferencesFreeVar(id, target, self.terms.len + 1),
         };
+    }
+
+    pub fn collectFormulaFreeVars(
+        self: ObligationSet,
+        allocator: std.mem.Allocator,
+        formula: FormulaRef,
+        ids: *std.ArrayList(FreeVarId),
+    ) !void {
+        if (formula == .term) try self.collectTermFreeVars(allocator, formula.term, ids, self.terms.len + 1);
+    }
+
+    pub fn freeVarType(self: ObligationSet, id: FreeVarId) ?TypeRef {
+        for (self.terms) |term| if (term == .variable and term.variable == .free and
+            freeVarIdEql(term.variable.free.id, id)) return term.variable.free.ty;
+        return null;
+    }
+
+    fn collectTermFreeVars(
+        self: ObligationSet,
+        allocator: std.mem.Allocator,
+        id: TermId,
+        ids: *std.ArrayList(FreeVarId),
+        fuel: usize,
+    ) !void {
+        if (fuel == 0 or id >= self.terms.len) return error.InvalidTermReference;
+        switch (self.terms[id]) {
+            .variable => |variable| if (variable == .free) {
+                for (ids.items) |existing| if (freeVarIdEql(existing, variable.free.id)) return;
+                try ids.append(allocator, variable.free.id);
+            },
+            .old => |operand| try self.collectTermFreeVars(allocator, operand, ids, fuel - 1),
+            .unary => |unary| try self.collectTermFreeVars(allocator, unary.operand, ids, fuel - 1),
+            .binary => |binary| {
+                try self.collectTermFreeVars(allocator, binary.lhs, ids, fuel - 1);
+                try self.collectTermFreeVars(allocator, binary.rhs, ids, fuel - 1);
+            },
+            .refinement_predicate => |predicate| {
+                try self.collectTermFreeVars(allocator, predicate.value, ids, fuel - 1);
+                for (predicate.args) |arg| try self.collectTermFreeVars(allocator, arg, ids, fuel - 1);
+            },
+            .quantified => |quantified| {
+                if (quantified.condition) |condition| try self.collectTermFreeVars(allocator, condition, ids, fuel - 1);
+                try self.collectTermFreeVars(allocator, quantified.body, ids, fuel - 1);
+            },
+            .bool_lit, .int_lit, .result, .place_read => {},
+        }
     }
 
     /// Exact one-to-one match used by the later automatic-authority task.
@@ -2131,6 +2201,12 @@ pub const LoopUnsupportedReason = enum(u8) {
     loop_header_fact_value_identity_duplicate,
     loop_header_fact_assumption_missing,
     loop_header_fact_assumption_unexpected,
+    loop_header_fact_inventory_mismatch,
+    loop_header_fact_position_unsupported,
+    loop_header_fact_provenance_unsupported,
+    loop_header_fact_type_unsupported,
+    loop_header_fact_effect_unsupported,
+    loop_header_fact_assumption_mismatch,
 };
 
 pub const SourceRef = struct {
@@ -4262,6 +4338,41 @@ test "header facts remain outside artifact authority until prover integration" {
         ArtifactBlockReason.header_fact_authority_unreviewed,
         (ObligationSet{ .queries = &.{query}, .loop_summaries = &.{summary} })
             .loopArtifactAuthorityBlockReason().?,
+    );
+
+    const artifact: ProofArtifact = .{
+        .id = 3,
+        .owner = summary.owner,
+        .source = .generated(),
+        .module_name = "Ora.UserProof.HeaderFact",
+        .theorem_name = "discharge_q2",
+        .path = "proofs/HeaderFact.lean",
+    };
+    var lean_query = query;
+    lean_query.id = 4;
+    lean_query.backend = .lean;
+    lean_query.proof_requirement = .backend_result;
+    lean_query.proof_artifact_id = artifact.id;
+    lean_query.discharges_query_id = query.id;
+    lean_query.result = .{ .status = .proved };
+    try std.testing.expectEqual(
+        @as(?ArtifactBlockReason, null),
+        (ObligationSet{
+            .queries = &.{ query, lean_query },
+            .loop_summaries = &.{summary},
+            .proof_artifacts = &.{artifact},
+        }).loopArtifactAuthorityBlockReason(),
+    );
+
+    var automatic_artifact = artifact;
+    automatic_artifact.path = null;
+    try std.testing.expectEqual(
+        ArtifactBlockReason.header_fact_authority_unreviewed,
+        (ObligationSet{
+            .queries = &.{ query, lean_query },
+            .loop_summaries = &.{summary},
+            .proof_artifacts = &.{automatic_artifact},
+        }).loopArtifactAuthorityBlockReason().?,
     );
 }
 

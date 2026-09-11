@@ -670,63 +670,6 @@ fn findAssumption(set: obligation.ObligationSet, id: obligation.Id) ?obligation.
     return null;
 }
 
-fn freeVarIdsEqual(lhs: obligation.FreeVarId, rhs: obligation.FreeVarId) bool {
-    return lhs.file_id == rhs.file_id and lhs.pattern_id == rhs.pattern_id;
-}
-
-fn appendUniqueFreeVar(
-    allocator: std.mem.Allocator,
-    ids: *std.ArrayList(obligation.FreeVarId),
-    id: obligation.FreeVarId,
-) !void {
-    for (ids.items) |existing| if (freeVarIdsEqual(existing, id)) return;
-    try ids.append(allocator, id);
-}
-
-fn collectTermFreeVars(
-    allocator: std.mem.Allocator,
-    set: obligation.ObligationSet,
-    term_id: obligation.TermId,
-    ids: *std.ArrayList(obligation.FreeVarId),
-    fuel: u32,
-) !void {
-    if (fuel == 0) return error.LeanAutoProofTermCycle;
-    if (term_id >= set.terms.len) return error.InvalidTermReference;
-    switch (set.terms[term_id]) {
-        .variable => |variable| switch (variable) {
-            .free => |free| try appendUniqueFreeVar(allocator, ids, free.id),
-            .bound => {},
-        },
-        .old => |operand| try collectTermFreeVars(allocator, set, operand, ids, fuel - 1),
-        .unary => |unary| try collectTermFreeVars(allocator, set, unary.operand, ids, fuel - 1),
-        .binary => |binary| {
-            try collectTermFreeVars(allocator, set, binary.lhs, ids, fuel - 1);
-            try collectTermFreeVars(allocator, set, binary.rhs, ids, fuel - 1);
-        },
-        .refinement_predicate => |predicate| {
-            try collectTermFreeVars(allocator, set, predicate.value, ids, fuel - 1);
-            for (predicate.args) |arg| try collectTermFreeVars(allocator, set, arg, ids, fuel - 1);
-        },
-        .quantified => |quantified| {
-            if (quantified.condition) |condition| try collectTermFreeVars(allocator, set, condition, ids, fuel - 1);
-            try collectTermFreeVars(allocator, set, quantified.body, ids, fuel - 1);
-        },
-        .bool_lit, .int_lit, .result, .place_read => {},
-    }
-}
-
-fn collectFormulaFreeVars(
-    allocator: std.mem.Allocator,
-    set: obligation.ObligationSet,
-    formula: obligation.FormulaRef,
-    ids: *std.ArrayList(obligation.FreeVarId),
-) !void {
-    switch (formula) {
-        .term => |term| try collectTermFreeVars(allocator, set, term, ids, 256),
-        .origin_value => {},
-    }
-}
-
 fn collectLoopStorageLocationFreeVars(
     allocator: std.mem.Allocator,
     set: obligation.ObligationSet,
@@ -735,15 +678,13 @@ fn collectLoopStorageLocationFreeVars(
 ) !void {
     for (location.projections) |projection| switch (projection) {
         .field => {},
-        .fixed_index => |fixed| try collectFormulaFreeVars(
+        .fixed_index => |fixed| try set.collectFormulaFreeVars(
             allocator,
-            set,
             fixed.index.value.formula,
             ids,
         ),
-        .mapping_key => |typed| try collectFormulaFreeVars(
+        .mapping_key => |typed| try set.collectFormulaFreeVars(
             allocator,
-            set,
             typed.value.formula,
             ids,
         ),
@@ -758,12 +699,12 @@ fn collectLoopSummaryFreeVars(
     fuel: usize,
 ) !void {
     if (fuel == 0) return error.InvalidDependency;
-    for (summary.init_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, ids);
-    for (summary.invariant_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, ids);
+    for (summary.init_formulas) |formula| try set.collectFormulaFreeVars(allocator, formula, ids);
+    for (summary.invariant_formulas) |formula| try set.collectFormulaFreeVars(allocator, formula, ids);
     for (summary.edges) |edge| {
         for (edge.timeline) |event| switch (event.payload) {
             .path_assumption, .safety_checkpoint => |formulas| for (formulas.formulas) |formula| {
-                try collectFormulaFreeVars(allocator, set, formula.formula, ids);
+                try set.collectFormulaFreeVars(allocator, formula.formula, ids);
             },
             .summary_dependency => |dependency| {
                 const child = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
@@ -775,13 +716,13 @@ fn collectLoopSummaryFreeVars(
             },
             .storage_write => |write| {
                 try collectLoopStorageLocationFreeVars(allocator, set, write.location, ids);
-                try collectFormulaFreeVars(allocator, set, write.value.formula, ids);
+                try set.collectFormulaFreeVars(allocator, write.value.formula, ids);
             },
         };
-        for (edge.target_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, ids);
-        for (edge.next_state) |binding| try collectFormulaFreeVars(allocator, set, binding.value, ids);
+        for (edge.target_formulas) |formula| try set.collectFormulaFreeVars(allocator, formula, ids);
+        for (edge.next_state) |binding| try set.collectFormulaFreeVars(allocator, binding.value, ids);
     }
-    for (summary.post_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, ids);
+    for (summary.post_formulas) |formula| try set.collectFormulaFreeVars(allocator, formula, ids);
 }
 
 fn collectQueryFreeVars(
@@ -793,11 +734,11 @@ fn collectQueryFreeVars(
     errdefer ids.deinit(allocator);
     for (query.assumption_ids) |id| {
         const assumption = findAssumption(set, id) orelse return error.InvalidDependency;
-        if (assumption.formula) |formula| try collectFormulaFreeVars(allocator, set, formula, &ids);
+        if (assumption.formula) |formula| try set.collectFormulaFreeVars(allocator, formula, &ids);
     }
     for (query.obligation_ids) |id| {
         const item = findObligation(set, id) orelse return error.InvalidDependency;
-        if (obligation.kindFormula(item.kind)) |formula| try collectFormulaFreeVars(allocator, set, formula, &ids);
+        if (obligation.kindFormula(item.kind)) |formula| try set.collectFormulaFreeVars(allocator, formula, &ids);
     }
     if (query.kind == .loop_induction) {
         const summary_id = query.loop_summary_id orelse return error.InvalidDependency;
@@ -849,7 +790,7 @@ fn writeFreeVarEqualityFacts(
         try writeFreeVarId(writer, lhs);
         try writer.writeAll(" : FreeVarId) == ");
         try writeFreeVarId(writer, rhs);
-        try writer.print(") = {s} := by rfl\n", .{if (freeVarIdsEqual(lhs, rhs)) "true" else "false"});
+        try writer.print(") = {s} := by rfl\n", .{if (obligation.freeVarIdEql(lhs, rhs)) "true" else "false"});
     };
     if (form == .local_haves) return;
     try writer.writeAll("attribute [local ora_loop_data]");
@@ -2119,7 +2060,7 @@ test "automatic proof environment includes storage projection keys" {
     const free_vars = try collectQueryFreeVars(allocator, set, query);
     defer allocator.free(free_vars);
     try std.testing.expectEqual(@as(usize, 1), free_vars.len);
-    try std.testing.expect(freeVarIdsEqual(key_id, free_vars[0]));
+    try std.testing.expect(obligation.freeVarIdEql(key_id, free_vars[0]));
 }
 
 test "automatic dependency variables are scoped to their declaring edge" {

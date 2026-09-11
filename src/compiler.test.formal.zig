@@ -9582,7 +9582,9 @@ test "formal loop summary rows are source-owner scoped scalar data" {
     const storage = storage_loop orelse return error.TestUnexpectedResult;
     try testing.expect(!loopSummaryHasReason(storage, .loop_has_storage_write));
     try testing.expect(!loopSummaryHasReason(storage, .loop_has_storage_read));
-    try testing.expect(loopSummaryHasReason(storage, .loop_formula_unsupported));
+    // The storage-derived requirement is now inspected by the header-fact
+    // projector and rejected at its precise stable-value boundary.
+    try testing.expect(loopSummaryHasReason(storage, .loop_header_fact_type_unsupported));
     try testing.expectEqual(obligation.LoopProjectionCompleteness.complete, storage.projection_completeness);
     var storage_reads: usize = 0;
     var storage_writes: usize = 0;
@@ -12267,12 +12269,69 @@ test "structured loop certificates arm the real CLI and missing proofs block art
     try expectExited(result, 1);
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "certificate-required=1"));
     try testing.expect(
-        std.mem.containsAtLeast(u8, result.stdout, 1, "lean_required_failure") or
-            std.mem.containsAtLeast(u8, result.stderr, 1, "lean_required_failure"),
+        std.mem.containsAtLeast(u8, result.stdout, 1, "header_fact_authority_unreviewed") or
+            std.mem.containsAtLeast(u8, result.stderr, 1, "header_fact_authority_unreviewed"),
     );
     const artifact_path = try std.fs.path.join(allocator, &.{ output_path, "loop_structured_cli.hex" });
     defer allocator.free(artifact_path);
     try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.testing.io, artifact_path, .{}));
+}
+
+test "loop header facts project canonical assumptions through an independent stable prefix inventory" {
+    var result = try collectPackageObligations(testing.allocator, "tests/formal/loop_header_fact_projection.ora");
+    defer result.deinit();
+
+    var requires_seen = false;
+    var fallthrough_seen = false;
+    var earlier_loop_count: usize = 0;
+    var first_target_position: ?u32 = null;
+    var dynamic_length_seen = false;
+    var storage_rejected = false;
+    var call_rejected = false;
+    for (result.set.loop_summaries) |summary| {
+        if (summary.owner != .statement) continue;
+        const name = summary.owner.statement.function_name;
+        if (std.mem.eql(u8, name, "fromRequires")) {
+            requires_seen = true;
+            try testing.expectEqual(@as(usize, 1), summary.header_facts.len);
+            const fact = summary.header_facts[0];
+            try testing.expectEqual(obligation.LoopHeaderFactSource.function_requires, fact.source_kind);
+            try testing.expect(fact.source.position < fact.target.position);
+            try testing.expectEqual(@as(usize, 1), fact.stable_values.len);
+            const assumption_id = fact.assumption_id orelse return error.TestUnexpectedResult;
+            try testing.expect(result.set.loopHeaderFactsMatchAssumptions(summary, &.{assumption_id}));
+        } else if (std.mem.eql(u8, name, "fromFallthrough")) {
+            fallthrough_seen = true;
+            try testing.expectEqual(@as(usize, 1), summary.header_facts.len);
+            try testing.expectEqual(obligation.LoopHeaderFactSource.path_assume, summary.header_facts[0].source_kind);
+            try testing.expectEqual(@as(?obligation.Id, null), summary.header_facts[0].assumption_id);
+        } else if (std.mem.eql(u8, name, "acrossEarlierLoop")) {
+            earlier_loop_count += 1;
+            try testing.expectEqual(@as(usize, 1), summary.header_facts.len);
+            try testing.expectEqual(obligation.LoopHeaderFactSource.function_requires, summary.header_facts[0].source_kind);
+            if (first_target_position) |first| try testing.expect(summary.header_facts[0].target.position > first) else first_target_position = summary.header_facts[0].target.position;
+        } else if (std.mem.eql(u8, name, "fromDynamicLength")) {
+            dynamic_length_seen = true;
+            try testing.expectEqual(@as(usize, 1), summary.header_facts.len);
+            try testing.expectEqual(@as(usize, 1), summary.header_facts[0].stable_values.len);
+            try testing.expectEqual(@as(usize, 1), summary.context_variables.len);
+            try testing.expect(obligation.freeVarIdEql(
+                summary.header_facts[0].stable_values[0].id,
+                summary.context_variables[0].id.?,
+            ));
+        } else if (std.mem.eql(u8, name, "storageDerivedFact")) {
+            storage_rejected = loopSummaryHasReason(summary, .loop_header_fact_type_unsupported);
+        } else if (std.mem.eql(u8, name, "callBetweenFactAndLoop")) {
+            call_rejected = loopSummaryHasReason(summary, .loop_header_fact_effect_unsupported);
+        }
+    }
+    try testing.expect(requires_seen and fallthrough_seen and dynamic_length_seen);
+    try testing.expectEqual(@as(usize, 2), earlier_loop_count);
+    try testing.expect(storage_rejected and call_rejected);
+    try testing.expectEqual(
+        obligation.ArtifactDecision{ .blocked = .header_fact_authority_unreviewed },
+        result.set.artifactDecision(),
+    );
 }
 
 test "loop digest binding preserves unsupported assumptions as a named exclusion" {
@@ -12284,7 +12343,7 @@ test "loop digest binding preserves unsupported assumptions as a named exclusion
         if (summary.owner != .statement or
             !std.mem.eql(u8, summary.owner.statement.function_name, "accumulateToStorage")) continue;
         found = true;
-        try testing.expect(loopSummaryHasReason(summary, .loop_formula_unsupported));
+        try testing.expect(loopSummaryHasReason(summary, .loop_header_fact_type_unsupported));
         try testing.expect(!summary.projectionSupported());
         try testing.expectEqual(@as(usize, 1), summary.query_ids.induction.len);
         const query = obligation.findById(

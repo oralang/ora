@@ -580,6 +580,15 @@ const CollectedLoopPreheader = struct {
     reason: ?obligation.LoopUnsupportedReason = null,
 };
 
+const LoopHeaderFactInventory = struct {
+    ordinal: u32,
+    source_name: []const u8,
+    structural_key: []const u8,
+    source_kind: obligation.LoopHeaderFactSource,
+    position: u32,
+    stable_values: []const obligation.LoopHeaderFactValue,
+};
+
 const LoopStorageProjectionInventoryTag = enum {
     field,
     fixed_index,
@@ -957,6 +966,12 @@ const Collector = struct {
         const variables = try self.collectLoopVariables(op, loop_kind);
         try self.bindLoopValues(op, loop_kind, variables);
         const context_variables = try self.collectLoopContextVariables();
+        const header_facts = self.collectLoopHeaderFacts(op, .{ .function = .{
+            .name = owner.statement.function_name,
+        } }) catch |err| blk: {
+            try appendLoopReason(&reasons, self.allocator, headerFactProjectionFailure(err) orelse return err);
+            break :blk &.{};
+        };
         const preheader = try self.collectLoopPreheader(op, symbol, ordinal);
         const previous_formula_overrides = self.active_loop_formula_overrides;
         self.active_loop_formula_overrides = preheader.formula_overrides;
@@ -1034,6 +1049,7 @@ const Collector = struct {
             .variables = variables,
             .init_formulas = init_formulas,
             .invariant_formulas = invariant_formulas,
+            .header_facts = header_facts,
             .preheader_timeline = preheader_timeline,
             .preheader_projection_complete = preheader.complete,
             .projection_completeness = .unavailable,
@@ -1082,6 +1098,202 @@ const Collector = struct {
             _ = self.arithmetic_safety_terms.remove(@intCast(index));
         }
         self.terms.shrinkRetainingCapacity(start);
+    }
+
+    fn collectLoopHeaderFacts(self: *Collector, loop_op: mlir.MlirOperation, owner: obligation.Owner) ![]const obligation.LoopHeaderFactRow {
+        const block = mlir.mlirOperationGetBlock(loop_op);
+        if (mlir.oraBlockIsNull(block)) return error.LoopHeaderFactPositionUnsupported;
+        const projected = try self.projectLoopHeaderFactAssumptions(loop_op, owner);
+        const inventory = try self.inventoryLoopHeaderFacts(loop_op);
+        if (projected.len != inventory.len) return error.LoopHeaderFactInventoryMismatch;
+        if (projected.len == 0) return &.{};
+        const block_key = try self.headerBlockKey(block);
+        const target_key = try self.operationStructuralKey(loop_op, operationName(loop_op));
+        const target_position = headerOperationPosition(block, loop_op) orelse
+            return error.LoopHeaderFactPositionUnsupported;
+        var rows: std.ArrayList(obligation.LoopHeaderFactRow) = .empty;
+        defer rows.deinit(self.allocator);
+        for (projected, inventory) |assumption, item| {
+            const formula = assumption.formula orelse return error.LoopHeaderFactProvenanceUnsupported;
+            if (formula == .origin_value) return error.LoopHeaderFactProvenanceUnsupported;
+            const origin = if (assumption.origin == .mlir_op) assumption.origin.mlir_op else return error.LoopHeaderFactProvenanceUnsupported;
+            if (origin.ordinal != item.ordinal or !std.mem.eql(u8, origin.op_name, item.source_name))
+                return error.LoopHeaderFactInventoryMismatch;
+            var formula_values: std.ArrayList(obligation.FreeVarId) = .empty;
+            defer formula_values.deinit(self.allocator);
+            const set: obligation.ObligationSet = .{ .terms = self.terms.items };
+            try set.collectFormulaFreeVars(self.allocator, formula, &formula_values);
+            if (formula_values.items.len != item.stable_values.len) return error.LoopHeaderFactInventoryMismatch;
+            for (formula_values.items) |value_id|
+                if (!headerFactValuesContain(item.stable_values, value_id)) return error.LoopHeaderFactInventoryMismatch;
+            for (item.stable_values) |stable| if (!optionalTypeRefEql(set.freeVarType(stable.id), stable.ty))
+                return error.LoopHeaderFactInventoryMismatch;
+            if ((item.source_kind == .path_assume and assumption.kind != .path_assume) or
+                (item.source_kind == .function_requires and assumption.kind != .requires))
+            {
+                return error.LoopHeaderFactInventoryMismatch;
+            }
+            const id: u32 = @intCast(rows.items.len);
+            try rows.append(self.allocator, .{
+                .id = id,
+                .structural_key = try std.fmt.allocPrint(self.allocator, "header-fact:{d}/{s}", .{ id, item.structural_key }),
+                .formula = formula,
+                .source_kind = item.source_kind,
+                .source = .{ .structural_key = item.structural_key, .block_key = block_key, .position = item.position },
+                .target = .{ .structural_key = target_key, .block_key = block_key, .position = target_position },
+                .stable_values = item.stable_values,
+                .assumption_id = if (item.source_kind == .function_requires) assumption.id else null,
+            });
+        }
+        const assumption_ids = try self.assumptionIdsForLoopOwner(owner);
+        var assumption_index: usize = 0;
+        for (rows.items) |row| if (row.assumption_id) |id| {
+            if (assumption_index >= assumption_ids.len or assumption_ids[assumption_index] != id)
+                return error.LoopHeaderFactAssumptionMismatch;
+            assumption_index += 1;
+        };
+        if (assumption_index != assumption_ids.len) return error.LoopHeaderFactAssumptionMismatch;
+        return rows.toOwnedSlice(self.allocator);
+    }
+
+    fn projectLoopHeaderFactAssumptions(self: *Collector, loop_op: mlir.MlirOperation, owner: obligation.Owner) ![]const obligation.Assumption {
+        var rows: std.ArrayList(obligation.Assumption) = .empty;
+        defer rows.deinit(self.allocator);
+        var op = mlir.oraBlockGetFirstOperation(mlir.mlirOperationGetBlock(loop_op));
+        while (!mlir.oraOperationIsNull(op) and op.ptr != loop_op.ptr) : (op = mlir.oraOperationGetNextInBlock(op)) {
+            const fact = self.headerFactAssumption(op, owner) orelse continue;
+            if (fact.kind == .requires or fact.kind == .path_assume)
+                try rows.append(self.allocator, fact);
+        }
+        if (mlir.oraOperationIsNull(op)) return error.LoopHeaderFactPositionUnsupported;
+        return rows.toOwnedSlice(self.allocator);
+    }
+
+    fn inventoryLoopHeaderFacts(self: *Collector, loop_op: mlir.MlirOperation) ![]const LoopHeaderFactInventory {
+        const block = mlir.mlirOperationGetBlock(loop_op);
+        var rows: std.ArrayList(LoopHeaderFactInventory) = .empty;
+        defer rows.deinit(self.allocator);
+        var prefix_supported = true;
+        var position: u32 = 0;
+        var op = mlir.oraBlockGetFirstOperation(block);
+        while (!mlir.oraOperationIsNull(op) and op.ptr != loop_op.ptr) : ({
+            op = mlir.oraOperationGetNextInBlock(op);
+            position += 1;
+        }) {
+            const name = operationName(op);
+            const key = try self.operationStructuralKey(op, name);
+            if (std.mem.eql(u8, name, "ora.requires") or std.mem.eql(u8, name, "ora.assume")) {
+                const source_kind = try inventoryHeaderFactSource(op, name);
+                var stable: std.ArrayList(obligation.LoopHeaderFactValue) = .empty;
+                defer stable.deinit(self.allocator);
+                if (mlir.oraOperationGetNumOperands(op) != 1 or
+                    !try self.collectStableHeaderValue(mlir.oraOperationGetOperand(op, 0), &stable, 64))
+                {
+                    return error.LoopHeaderFactTypeUnsupported;
+                }
+                try rows.append(self.allocator, .{
+                    .ordinal = self.operationOrdinal(op) orelse return error.LoopHeaderFactPositionUnsupported,
+                    .source_name = name,
+                    .structural_key = key,
+                    .source_kind = source_kind,
+                    .position = position,
+                    .stable_values = try stable.toOwnedSlice(self.allocator),
+                });
+            } else if (!self.headerPrefixOperationSupported(op, name)) {
+                prefix_supported = false;
+            }
+        }
+        if (mlir.oraOperationIsNull(op)) return error.LoopHeaderFactPositionUnsupported;
+        if (rows.items.len != 0 and !prefix_supported) return error.LoopHeaderFactEffectUnsupported;
+        return rows.toOwnedSlice(self.allocator);
+    }
+
+    fn headerFactAssumption(self: *const Collector, op: mlir.MlirOperation, owner: obligation.Owner) ?obligation.Assumption {
+        const ordinal = self.operationOrdinal(op) orelse return null;
+        const name = operationName(op);
+        for (self.assumptions.items) |assumption| {
+            if (!ownerEqual(assumption.owner, owner) or assumption.origin != .mlir_op) continue;
+            const origin = assumption.origin.mlir_op;
+            if (origin.ordinal != ordinal or !std.mem.eql(u8, origin.op_name, name)) continue;
+            return assumption;
+        }
+        return null;
+    }
+
+    fn collectStableHeaderValue(
+        self: *Collector,
+        value: mlir.MlirValue,
+        stable: *std.ArrayList(obligation.LoopHeaderFactValue),
+        fuel: usize,
+    ) !bool {
+        if (fuel == 0 or mlir.oraValueIsNull(value)) return false;
+        if (mlir.mlirValueIsABlockArgument(value)) {
+            const index = self.functionEntryBlockArgumentNumber(value) orelse return false;
+            if (index >= self.function_param_types.len or !headerFactTypeSupported(self.function_param_types[index])) {
+                return false;
+            }
+            try appendHeaderFactValue(self.allocator, stable, .{
+                .id = self.freeVarIdForFunctionParam(index),
+                .ty = self.function_param_types[index],
+            });
+            return true;
+        }
+        if (!mlir.oraValueIsAOpResult(value)) return false;
+        const owner = mlir.oraOpResultGetOwner(value);
+        if (dynamicLengthSourceValue(owner)) |source| {
+            const index = self.functionEntryBlockArgumentNumber(source) orelse return false;
+            try appendHeaderFactValue(self.allocator, stable, .{
+                .id = dynamicLengthFreeVarId(index),
+                .ty = self.builtinTypeRef(.u256),
+            });
+            return true;
+        }
+        const name = operationName(owner);
+        if (std.mem.eql(u8, name, "arith.constant")) return true;
+        if (!preheaderPureValueOperationSupported(name)) return false;
+        const operand_count: usize = @intCast(mlir.oraOperationGetNumOperands(owner));
+        if (operand_count == 0) return false;
+        for (0..operand_count) |index| {
+            if (!try self.collectStableHeaderValue(mlir.oraOperationGetOperand(owner, index), stable, fuel - 1)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fn headerBlockKey(self: *Collector, block: mlir.MlirBlock) ![]const u8 {
+        if (mlir.oraBlockIsNull(block)) return error.LoopHeaderFactPositionUnsupported;
+        const first = mlir.oraBlockGetFirstOperation(block);
+        const ordinal = self.operationOrdinal(first) orelse return error.LoopHeaderFactPositionUnsupported;
+        return try std.fmt.allocPrint(self.allocator, "block:first-op:{d}", .{ordinal});
+    }
+
+    fn headerPrefixOperationSupported(self: *Collector, op: mlir.MlirOperation, name: []const u8) bool {
+        if (preheaderPureValueOperationSupported(name) or dynamicLengthSourceValue(op) != null or
+            isLoopSafetyOperation(op, name)) return true;
+        if (std.mem.eql(u8, name, "ora.conditional_return")) {
+            const regions: usize = @intCast(mlir.oraOperationGetNumRegions(op));
+            for (0..regions) |region_index| {
+                var block = mlir.oraRegionGetFirstBlock(mlir.oraOperationGetRegion(op, region_index));
+                while (!mlir.oraBlockIsNull(block)) : (block = mlir.oraBlockGetNextInRegion(block)) {
+                    if (collectLoopBodyFacts(block).has_call) return false;
+                }
+            }
+            return true;
+        }
+        if (std.mem.eql(u8, name, "scf.while") or std.mem.eql(u8, name, "scf.for")) {
+            for (self.loop_summary_drafts.items, 0..) |draft, index| {
+                if (draft.loop_op.ptr != op.ptr) continue;
+                return self.loop_summaries.items[index].projection_completeness == .complete and
+                    !collectLoopBodyFacts(draft.body).has_call;
+            }
+            return false;
+        }
+        const effect = mlir.oraOperationGetMemoryEffectKind(op);
+        if (effect == mlir.ORA_OPERATION_MEMORY_EFFECT_RECURSIVE or
+            effect == mlir.ORA_OPERATION_MEMORY_EFFECT_UNKNOWN) return false;
+        return effect != mlir.ORA_OPERATION_MEMORY_EFFECT_NONE and
+            directRootLoopEffectSupported(op, name, effect);
     }
 
     fn projectLoopPreheader(
@@ -4201,7 +4413,7 @@ const Collector = struct {
             // parameter remains non-denotable and therefore fails closed;
             // unrelated slice or aggregate parameters must not exclude an
             // otherwise self-contained integer loop.
-            if (typeRefIntegerInfo(ty) == null) continue;
+            if (!headerFactTypeSupported(ty)) continue;
             try variables.append(self.allocator, .{
                 .index = @intCast(index),
                 .id = self.freeVarIdForFunctionParam(index),
@@ -7587,7 +7799,7 @@ fn timelineInventoriesEql(
             !storageProjectionInventoriesEql(left.storage_projections, right.storage_projections) or
             !optionalFreeVarEql(left.storage_result, right.storage_result) or
             !optionalStringEql(left.storage_value_source, right.storage_value_source) or
-            !optionalIntegerTypeEql(left.storage_ty, right.storage_ty) or
+            !optionalTypeRefEql(left.storage_ty, right.storage_ty) or
             !optionalDependencyEql(left.summary_dependency, right.summary_dependency)) return false;
     }
     return true;
@@ -7607,7 +7819,7 @@ fn storageTimelineInventoryEql(
             !storageProjectionInventoriesEql(left.storage_projections, right.storage_projections) or
             !optionalFreeVarEql(left.storage_result, right.storage_result) or
             !optionalStringEql(left.storage_value_source, right.storage_value_source) or
-            !optionalIntegerTypeEql(left.storage_ty, right.storage_ty) or
+            !optionalTypeRefEql(left.storage_ty, right.storage_ty) or
             !optionalDependencyEql(left.summary_dependency, right.summary_dependency)) return false;
         semantic_index += 1;
     }
@@ -7634,10 +7846,10 @@ fn timelineMatchesInventory(
             .storage_read => |read| if (!optionalStringEql(read.location.root, item.storage_root) or
                 !storageProjectionsMatchInventory(read.location.projections, item.storage_projections) or
                 !optionalFreeVarEql(read.result, item.storage_result) or
-                !optionalIntegerTypeEql(read.location.value_ty, item.storage_ty)) return false,
+                !optionalTypeRefEql(read.location.value_ty, item.storage_ty)) return false,
             .storage_write => |write| if (!optionalStringEql(write.location.root, item.storage_root) or
                 !storageProjectionsMatchInventory(write.location.projections, item.storage_projections) or
-                !optionalIntegerTypeEql(write.location.value_ty, item.storage_ty) or
+                !optionalTypeRefEql(write.location.value_ty, item.storage_ty) or
                 item.storage_value_source == null) return false,
             .summary_dependency => |dependency| if (!optionalDependencyEql(dependency, item.summary_dependency)) return false,
             .path_assumption, .safety_checkpoint => {},
@@ -7655,7 +7867,7 @@ fn storageProjectionInventoriesEql(
         if (left.tag != right.tag or
             !optionalStringEql(left.source_key, right.source_key) or
             !optionalStringEql(left.field, right.field) or
-            !optionalIntegerTypeEql(left.ty, right.ty) or
+            !optionalTypeRefEql(left.ty, right.ty) or
             left.extent != right.extent) return false;
     }
     return true;
@@ -7672,10 +7884,10 @@ fn storageProjectionsMatchInventory(
             item.ty != null or item.extent != null) return false,
         .fixed_index => |fixed| if (item.tag != .fixed_index or
             item.source_key == null or
-            !optionalIntegerTypeEql(fixed.index.ty, item.ty) or
+            !optionalTypeRefEql(fixed.index.ty, item.ty) or
             item.extent != fixed.extent) return false,
         .mapping_key => |key| if (item.tag != .mapping_key or
-            item.source_key == null or !optionalIntegerTypeEql(key.ty, item.ty) or
+            item.source_key == null or !optionalTypeRefEql(key.ty, item.ty) or
             item.extent != null) return false,
     };
     return true;
@@ -7691,7 +7903,7 @@ fn optionalFreeVarEql(lhs: ?obligation.FreeVarId, rhs: ?obligation.FreeVarId) bo
     return obligation.freeVarIdEql(lhs.?, rhs.?);
 }
 
-fn optionalIntegerTypeEql(lhs: ?obligation.TypeRef, rhs: ?obligation.TypeRef) bool {
+fn optionalTypeRefEql(lhs: ?obligation.TypeRef, rhs: ?obligation.TypeRef) bool {
     if (lhs == null or rhs == null) return lhs == null and rhs == null;
     return switch (lhs.?) {
         .compiler_type_id => |left| switch (rhs.?) {
@@ -8233,6 +8445,61 @@ fn preheaderProjectionFailure(err: anyerror) ?obligation.LoopUnsupportedReason {
         error.LoopPreheaderLocationUnsupported => .loop_preheader_location_unsupported,
         else => null,
     };
+}
+
+fn headerFactProjectionFailure(err: anyerror) ?obligation.LoopUnsupportedReason {
+    return switch (err) {
+        error.LoopHeaderFactInventoryMismatch => .loop_header_fact_inventory_mismatch,
+        error.LoopHeaderFactPositionUnsupported => .loop_header_fact_position_unsupported,
+        error.LoopHeaderFactProvenanceUnsupported => .loop_header_fact_provenance_unsupported,
+        error.LoopHeaderFactTypeUnsupported => .loop_header_fact_type_unsupported,
+        error.LoopHeaderFactEffectUnsupported => .loop_header_fact_effect_unsupported,
+        error.LoopHeaderFactAssumptionMismatch => .loop_header_fact_assumption_mismatch,
+        else => null,
+    };
+}
+
+fn inventoryHeaderFactSource(op: mlir.MlirOperation, name: []const u8) !obligation.LoopHeaderFactSource {
+    if (std.mem.eql(u8, name, "ora.requires")) {
+        var kind = stringAttrView(op, "ora.source_fact_kind") orelse return error.LoopHeaderFactProvenanceUnsupported;
+        if (!std.mem.eql(u8, kind.slice(), "requires") or !hasAttr(op, "ora.source_fact_id"))
+            return error.LoopHeaderFactProvenanceUnsupported;
+        return .function_requires;
+    }
+    var origin = stringAttrView(op, "ora.assume_origin") orelse return error.LoopHeaderFactProvenanceUnsupported;
+    return if (std.mem.eql(u8, origin.slice(), "path")) .path_assume else error.LoopHeaderFactProvenanceUnsupported;
+}
+
+fn headerFactTypeSupported(ty: obligation.TypeRef) bool {
+    if (typeRefIntegerInfo(ty) != null) return true;
+    return switch (ty) {
+        .spelling => |name| std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "i1"),
+        .compiler_type_id => |id| id == type_builtin.lookupBuiltinById(.bool).comptime_type_id,
+    };
+}
+
+fn headerOperationPosition(block: mlir.MlirBlock, target: mlir.MlirOperation) ?u32 {
+    var position: u32 = 0;
+    var op = mlir.oraBlockGetFirstOperation(block);
+    while (!mlir.oraOperationIsNull(op)) : ({
+        op = mlir.oraOperationGetNextInBlock(op);
+        position += 1;
+    }) if (op.ptr == target.ptr) return position;
+    return null;
+}
+
+fn appendHeaderFactValue(
+    allocator: std.mem.Allocator,
+    values: *std.ArrayList(obligation.LoopHeaderFactValue),
+    value: obligation.LoopHeaderFactValue,
+) !void {
+    for (values.items) |existing| if (obligation.freeVarIdEql(existing.id, value.id)) return;
+    try values.append(allocator, value);
+}
+
+fn headerFactValuesContain(values: []const obligation.LoopHeaderFactValue, id: obligation.FreeVarId) bool {
+    for (values) |value| if (obligation.freeVarIdEql(value.id, id)) return true;
+    return false;
 }
 
 fn preheaderAssumptionOperation(name: []const u8) bool {
