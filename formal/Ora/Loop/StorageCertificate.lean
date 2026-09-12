@@ -554,7 +554,7 @@ theorem DirectStorageEdgeCompatible.timelineSafety
       simp
     have hLocals := TimelineExec.preserves_locals _ _ _ _
       (by intro child; nomatch child) hExec
-    have hNoReads : ∀ event, event ∈ before → event.NoStorageRead := by
+    have hNoReads : ∀ event, event ∈ before → event.NoRead := by
       apply timelineReadBeforeCheckSupported_no_read
         (directStorageEvents row) proof.readOrderSupported before formula after
       rw [proof.assumptionPrefix]

@@ -8,7 +8,7 @@ safety checkpoints do not.  Safety is instead required at every reachable
 prefix, so a false check cannot disappear by deleting a transition.
 -/
 
-import Ora.Loop.Storage
+import Ora.Loop.IndexedRegion
 
 namespace Ora.Loop
 
@@ -20,6 +20,8 @@ inductive TimelineEvent
   | check : FormulaExpr → TimelineEvent FormulaExpr LocationExpr ValueExpr Child
   | storage : StorageAction LocationExpr ValueExpr →
       TimelineEvent FormulaExpr LocationExpr ValueExpr Child
+  | indexedRead : IndexedRegionRead ValueExpr →
+      TimelineEvent FormulaExpr LocationExpr ValueExpr Child
   | child : Child → TimelineEvent FormulaExpr LocationExpr ValueExpr Child
 
 /-- Meaning of the expressions and certified child relations carried by an
@@ -27,6 +29,8 @@ edge timeline.  Every evaluator observes the exact state at its event. -/
 structure TimelineSemantics
     (FormulaExpr LocationExpr ValueExpr Child : Type) where
   storage : StorageActionSemantics LocationExpr ValueExpr
+  indexedRegion : IndexedRegionReadSemantics ValueExpr :=
+    IndexedRegionReadSemantics.unsupported
   evalFormula : FormulaExpr → StorageActionState → Option Prop
   childRelation : Child → LoopState → LoopState → Prop
   childFrame : ∀ child, CertifiedWriteFrame (childRelation child)
@@ -47,14 +51,16 @@ def TimelineResult.comp
 abbrev EventOf (FormulaExpr LocationExpr ValueExpr Child : Type) :=
   TimelineEvent FormulaExpr LocationExpr ValueExpr Child
 
-def TimelineEvent.NoStorageRead :
+def TimelineEvent.NoRead :
     EventOf FormulaExpr LocationExpr ValueExpr Child → Prop
   | .storage (.read _ _) => False
+  | .indexedRead _ => False
   | _ => True
 
-def TimelineEvent.isStorageRead :
+def TimelineEvent.isRead :
     EventOf FormulaExpr LocationExpr ValueExpr Child → Bool
   | .storage (.read _ _) => true
+  | .indexedRead _ => true
   | _ => false
 
 def TimelineEvent.isCheck :
@@ -72,7 +78,7 @@ def timelineReadBeforeCheckSupported :
     List (EventOf FormulaExpr LocationExpr ValueExpr Child) → Bool
   | [] => true
   | event :: rest =>
-      (if event.isStorageRead then !timelineHasCheck rest else true) &&
+      (if event.isRead then !timelineHasCheck rest else true) &&
         timelineReadBeforeCheckSupported rest
 
 theorem timelineHasCheck_of_mem_check
@@ -93,7 +99,7 @@ theorem timelineReadBeforeCheckSupported_no_read
     (hEvents : events = before ++ TimelineEvent.check formula :: after)
     (observed : EventOf FormulaExpr LocationExpr ValueExpr Child)
     (hMember : observed ∈ before) :
-    observed.NoStorageRead := by
+    observed.NoRead := by
   induction events generalizing before with
   | nil => simp at hEvents
   | cons head tail ih =>
@@ -114,6 +120,15 @@ theorem timelineReadBeforeCheckSupported_no_read
             | assume => trivial
             | check => trivial
             | child => trivial
+            | indexedRead read =>
+                have hHasCheck := timelineHasCheck_of_mem_check tail formula (by
+                  rw [hTail]
+                  simp)
+                unfold timelineReadBeforeCheckSupported at hSupported
+                simp only [TimelineEvent.isRead, if_true,
+                  Bool.and_eq_true] at hSupported
+                rw [hHasCheck] at hSupported
+                simp at hSupported
             | storage action =>
                 cases action with
                 | write => trivial
@@ -122,7 +137,7 @@ theorem timelineReadBeforeCheckSupported_no_read
                       rw [hTail]
                       simp)
                     unfold timelineReadBeforeCheckSupported at hSupported
-                    simp only [TimelineEvent.isStorageRead, if_true,
+                    simp only [TimelineEvent.isRead, if_true,
                       Bool.and_eq_true] at hSupported
                     rw [hHasCheck] at hSupported
                     simp at hSupported
@@ -131,6 +146,7 @@ theorem timelineReadBeforeCheckSupported_no_read
 def TimelineEvent.readIds :
     EventOf FormulaExpr LocationExpr ValueExpr Child → List StorageReadId
   | .storage (.read id _) => [id]
+  | .indexedRead read => [read.id]
   | _ => []
 
 def timelineReadIdsOf
@@ -178,6 +194,9 @@ inductive TimelineEventExec
         state := result.state
         writes := fun location => location ∈ result.writeTrace
       }
+  | indexedRead {read state following}
+      (hExec : IndexedRegionReadExec semantics.indexedRegion read state following) :
+      TimelineEventExec semantics (.indexedRead read) state { state := following }
   | child {child state following}
       (hRelation : semantics.childRelation child state.loop following) :
       TimelineEventExec semantics (.child child) state {
@@ -261,6 +280,8 @@ theorem TimelineEventExec.preserves_entryStorage
   | check => rfl
   | storage hAction =>
       exact execStorageAction_preserves_entryStorage semantics.storage _ _ _ hAction
+  | indexedRead hRead =>
+      exact (IndexedRegionReadExec.state_effects _ _ _ _ hRead).2.2.1
   | child => rfl
 
 theorem TimelineEventExec.preserves_locals
@@ -277,6 +298,9 @@ theorem TimelineEventExec.preserves_locals
   | check => rfl
   | storage hAction =>
       exact execStorageAction_preserves_locals semantics.storage _ _ _ hAction
+  | indexedRead hRead =>
+      exact congrArg LoopState.locals
+        (IndexedRegionReadExec.state_effects _ _ _ _ hRead).2.1
   | child hRelation => exact hChildPreserves _ _ _ hRelation
 
 theorem TimelineEventExec.preserves_reads
@@ -284,7 +308,7 @@ theorem TimelineEventExec.preserves_reads
     (event : EventOf FormulaExpr LocationExpr ValueExpr Child)
     (initial : StorageActionState)
     (result : TimelineResult)
-    (hNoRead : event.NoStorageRead)
+    (hNoRead : event.NoRead)
     (hExec : TimelineEventExec semantics event initial result) :
     result.state.reads = initial.reads := by
   cases hExec with
@@ -296,6 +320,7 @@ theorem TimelineEventExec.preserves_reads
       | write location value =>
           exact execStorageWrite_preserves_reads semantics.storage location value
             initial actionResult hAction
+  | indexedRead => exact False.elim hNoRead
   | child => rfl
 
 theorem TimelineEventExec.read_ids
@@ -319,6 +344,9 @@ theorem TimelineEventExec.read_ids
           rw [execStorageWrite_preserves_reads semantics.storage location value
             initial actionResult hAction]
           simp [TimelineEvent.readIds]
+  | indexedRead hRead =>
+      simpa [TimelineEvent.readIds] using
+        (IndexedRegionReadExec.state_effects _ _ _ _ hRead).2.2.2
   | child => simp [TimelineEvent.readIds]
 
 theorem TimelineEventExec.preserves_outside
@@ -336,6 +364,9 @@ theorem TimelineEventExec.preserves_outside
   | storage hAction =>
       exact execStorageAction_preserves_unwritten semantics.storage _ _ _ location
         hAction hOutside
+  | indexedRead hRead =>
+      exact congrArg (fun loop => loop.storage location)
+        (IndexedRegionReadExec.state_effects _ _ _ _ hRead).2.1
   | @child child _ following hRelation =>
       exact (semantics.childFrame child).preservesOutside initial.loop following
         hRelation location hOutside
@@ -353,6 +384,16 @@ theorem TimelineEventExec.read_writes_false
   | storage hAction =>
       have hTrace := execStorageRead_writeTrace_nil _ _ _ _ _ hAction
       simp [hTrace]
+
+theorem TimelineEventExec.indexed_read_writes_false
+    (semantics : TimelineSemantics FormulaExpr LocationExpr ValueExpr Child)
+    (read : IndexedRegionRead ValueExpr)
+    (initial : StorageActionState)
+    (result : TimelineResult)
+    (hExec : TimelineEventExec semantics (.indexedRead read) initial result) :
+    ∀ written, ¬ result.writes written := by
+  cases hExec
+  simp
 
 theorem TimelineEventExec.write_within_resolved
     (semantics : TimelineSemantics FormulaExpr LocationExpr ValueExpr Child)
@@ -407,14 +448,14 @@ theorem TimelineExec.preserves_reads
     (events : List (EventOf FormulaExpr LocationExpr ValueExpr Child))
     (initial : StorageActionState)
     (result : TimelineResult)
-    (hNoReads : ∀ event, event ∈ events → event.NoStorageRead)
+    (hNoReads : ∀ event, event ∈ events → event.NoRead)
     (hExec : TimelineExec semantics events initial result) :
     result.state.reads = initial.reads := by
   induction hExec with
   | nil => rfl
   | @cons event rest initial first following hEvent hRest ih =>
-      have hHead : event.NoStorageRead := hNoReads event (by simp)
-      have hTail : ∀ tailEvent, tailEvent ∈ rest → tailEvent.NoStorageRead := by
+      have hHead : event.NoRead := hNoReads event (by simp)
+      have hTail : ∀ tailEvent, tailEvent ∈ rest → tailEvent.NoRead := by
         intro tailEvent hMember
         exact hNoReads tailEvent (by simp [hMember])
       exact (ih hTail).trans

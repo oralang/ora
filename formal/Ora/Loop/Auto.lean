@@ -308,7 +308,7 @@ macro "ora_loop_direct_timeline_reduce"
     Ora.Loop.directStorageProjection?, Ora.Loop.directStorageProjections?,
     Ora.Loop.directStorageProjectionData,
     Ora.Loop.directStorageEventData, Ora.Loop.directStorageEvents,
-    Ora.Loop.directStorageTarget, Ora.Loop.TimelineEvent.NoStorageRead,
+    Ora.Loop.directStorageTarget, Ora.Loop.TimelineEvent.NoRead,
     Ora.Loop.timelineReadIdsOf, Ora.Loop.TimelineEvent.readIds,
     Ora.Loop.TimelineEvent.check.injEq,
     Ora.Loop.TimelineEvent.assume.injEq,
