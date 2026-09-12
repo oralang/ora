@@ -102,6 +102,7 @@ pub const ObligationSet = struct {
         timeline: []const LoopTimelineEvent,
     ) ?ArtifactBlockReason {
         for (timeline) |event| switch (event.payload) {
+            .indexed_region_read => return .dynamic_sequence_authority_unreviewed,
             .storage_read => |read| if (read.location.projections.len != 0 and
                 !self.reviewedStorageProjection(summary, timeline, read.location)) return .storage_projection_authority_unreviewed,
             .storage_write => |write| if (write.location.projections.len != 0 and
@@ -188,7 +189,7 @@ pub const ObligationSet = struct {
                 dependency.summary_id,
                 remaining - 1,
             )) return true,
-            .path_assumption, .safety_checkpoint => {},
+            .path_assumption, .safety_checkpoint, .indexed_region_read => {},
         };
         return false;
     }
@@ -243,6 +244,7 @@ pub const ObligationSet = struct {
                 try self.validateLoopFormulaExpr(events, event_index, formula);
             },
             .storage_read => |read| try self.validateLoopStorageLocation(events, event_index, read.location),
+            .indexed_region_read => |read| try self.validateLoopFormulaExpr(events, event_index, read.index),
             .storage_write => |write| {
                 try self.validateLoopStorageLocation(events, event_index, write.location);
                 try self.validateLoopFormulaExpr(events, event_index, write.value);
@@ -310,15 +312,12 @@ pub const ObligationSet = struct {
                 return error.InvalidTimelineReadReference;
             }
         }
-        for (events) |event| switch (event.payload) {
-            .storage_read => |read| {
-                if (!self.formulaReferencesFreeVar(expression.formula, read.result)) continue;
-                if (!freeVarInList(read.result, expression.read_results)) {
-                    return error.InvalidTimelineReadReference;
-                }
-                if (event.id >= event_index) return error.InvalidTimelineReadReference;
-            },
-            else => {},
+        for (events) |event| if (loopTimelineReadId(event.payload)) |read_id| {
+            if (!self.formulaReferencesFreeVar(expression.formula, read_id)) continue;
+            if (!freeVarInList(read_id, expression.read_results)) {
+                return error.InvalidTimelineReadReference;
+            }
+            if (event.id >= event_index) return error.InvalidTimelineReadReference;
         };
     }
 
@@ -1422,6 +1421,17 @@ pub const LoopStorageReadEvent = struct {
     location: LoopStorageLocationExpr,
 };
 
+pub const LoopIndexedRegionKind = enum(u8) { calldata, memory };
+
+pub const LoopIndexedRegionReadEvent = struct {
+    result: FreeVarId,
+    region: LoopIndexedRegionKind,
+    owner: FreeVarId,
+    index: LoopFormulaExpr,
+    element_ty: TypeRef,
+    checkpoint_structural_key: []const u8,
+};
+
 pub const LoopStorageWriteEvent = struct {
     location: LoopStorageLocationExpr,
     value: LoopFormulaExpr,
@@ -1431,6 +1441,7 @@ pub const LoopTimelineEventTag = enum(u8) {
     path_assumption,
     safety_checkpoint,
     storage_read,
+    indexed_region_read,
     storage_write,
     summary_dependency,
 };
@@ -1439,9 +1450,18 @@ pub const LoopTimelineEventPayload = union(LoopTimelineEventTag) {
     path_assumption: LoopTimelineFormulaEvent,
     safety_checkpoint: LoopTimelineFormulaEvent,
     storage_read: LoopStorageReadEvent,
+    indexed_region_read: LoopIndexedRegionReadEvent,
     storage_write: LoopStorageWriteEvent,
     summary_dependency: LoopSummaryDependency,
 };
+
+pub fn loopTimelineReadId(payload: LoopTimelineEventPayload) ?FreeVarId {
+    return switch (payload) {
+        .storage_read => |read| read.result,
+        .indexed_region_read => |read| read.result,
+        else => null,
+    };
+}
 
 pub const LoopTimelineEvent = struct {
     id: u32,
@@ -2160,6 +2180,9 @@ pub const LoopUnsupportedReason = enum(u8) {
     loop_storage_read_identity_duplicate,
     loop_storage_read_identity_foreign,
     loop_storage_read_identity_forward,
+    loop_indexed_region_checkpoint_missing,
+    loop_indexed_region_checkpoint_invalid,
+    loop_indexed_region_checkpoint_after_read,
     loop_storage_child_footprint_missing,
     loop_value_type_unresolved,
     loop_value_width_mismatch,
@@ -4277,6 +4300,32 @@ test "dynamic sequence checks remain outside artifact authority" {
         .queries = &.{query},
         .loop_summaries = &.{summary},
     }).artifactDecision());
+
+    const indexed_timeline = [_]LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "body/read",
+        .payload = .{ .indexed_region_read = .{
+            .result = .{ .file_id = 1, .pattern_id = 3 },
+            .region = .calldata,
+            .owner = .{ .file_id = 1, .pattern_id = 4 },
+            .index = .{ .formula = .{ .term = 0 } },
+            .element_ty = ty,
+            .checkpoint_structural_key = "body/check",
+        } },
+    }};
+    var indexed_summary = summary;
+    indexed_summary.edges = &.{.{
+        .id = 0,
+        .structural_key = "body",
+        .timeline = &indexed_timeline,
+    }};
+    try std.testing.expectEqual(
+        ArtifactBlockReason.dynamic_sequence_authority_unreviewed,
+        (ObligationSet{
+            .queries = &.{query},
+            .loop_summaries = &.{indexed_summary},
+        }).loopArtifactAuthorityBlockReason().?,
+    );
 }
 
 test "header facts use the ordinary mandatory Lean authority path" {

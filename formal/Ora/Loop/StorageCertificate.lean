@@ -53,7 +53,7 @@ def directStorageEvent? (row : TimelineEventRow) : Option (List DirectStorageEve
   | .storageWrite event => do
       let location ← directStorageLocation? event.location
       pure [.storage (.write location event.value.formula)]
-  | .summaryDependency _ => none
+  | .indexedRegionRead _ | .summaryDependency _ => none
 
 def directStorageTimeline? : List TimelineEventRow → Option (List DirectStorageEvent)
   | [] => some []
@@ -427,7 +427,7 @@ def directStorageEventData (row : TimelineEventRow) : List DirectStorageEvent :=
         projections := event.location.projections.map directStorageProjectionData
         valueTy := event.location.valueTy
       })]
-  | .summaryDependency _ => []
+  | .indexedRegionRead _ | .summaryDependency _ => []
 
 def directStorageEvents (row : EdgeRow) : List DirectStorageEvent :=
   row.timeline.flatMap directStorageEventData
@@ -477,6 +477,11 @@ theorem directStorageCheck_mem_iff
           simpa only [List.flatMap_cons, directStorageEventData,
             timelineSafetyViewFrom, List.mem_append, List.mem_singleton,
             TimelineEvent.check_ne_storage, false_or] using
+            ih (dependencyCount := dependencyCount)
+              (checkpointId := checkpointId)
+      | indexedRegionRead read =>
+          simpa only [List.flatMap_cons, directStorageEventData,
+            timelineSafetyViewFrom, List.nil_append] using
             ih (dependencyCount := dependencyCount)
               (checkpointId := checkpointId)
       | summaryDependency dependency =>

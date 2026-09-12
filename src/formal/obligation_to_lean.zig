@@ -527,6 +527,21 @@ fn writeLoopTimeline(writer: anytype, events: []const obligation.LoopTimelineEve
                 try writeLoopStorageLocationRow(writer, read.location);
                 try writer.writeAll(" }");
             },
+            .indexed_region_read => |read| {
+                try writer.writeAll("indexedRegionRead { result := ");
+                try writeFreeVarId(writer, read.result);
+                try writer.writeAll(", region := .");
+                try writer.writeAll(@tagName(read.region));
+                try writer.writeAll(", owner := ");
+                try writeFreeVarId(writer, read.owner);
+                try writer.writeAll(", index := ");
+                try writeLoopFormulaExprRow(writer, read.index);
+                try writer.writeAll(", elementTy := ");
+                try writeTypeRef(writer, read.element_ty);
+                try writer.writeAll(", checkpointStructuralKey := ");
+                try writeLeanString(writer, read.checkpoint_structural_key);
+                try writer.writeAll(" }");
+            },
             .storage_write => |write| {
                 try writer.writeAll("storageWrite { location := ");
                 try writeLoopStorageLocationRow(writer, write.location);
@@ -1044,7 +1059,7 @@ fn loopInductionQuerySemanticSupport(
                 }
             },
             .summary_dependency => dependency_count += 1,
-            .storage_read, .storage_write => {},
+            .storage_read, .indexed_region_read, .storage_write => {},
         };
         for (edge.target_formulas) |formula| {
             if (formulaReferencesSummaryDependencyVariable(set, summary, formula)) {
@@ -2892,10 +2907,49 @@ test "Lean emitter refuses origin-owned header facts" {
     try std.testing.expectError(error.UnsupportedOriginValue, writeLoopHeaderFacts(&buffer.writer, &.{fact}));
 }
 
+test "Lean emitter pins indexed-region read timeline data" {
+    const events = [_]obligation.LoopTimelineEvent{
+        .{
+            .id = 0,
+            .structural_key = "body/check",
+            .payload = .{ .safety_checkpoint = .{
+                .formulas = &.{.{ .formula = .{ .term = 2 } }},
+                .dynamic_index_bounds = true,
+            } },
+        },
+        .{
+            .id = 1,
+            .structural_key = "body/read",
+            .payload = .{ .indexed_region_read = .{
+                .result = .{ .file_id = 7, .pattern_id = 8 },
+                .region = .calldata,
+                .owner = .{ .file_id = 7, .pattern_id = 3 },
+                .index = .{ .formula = .{ .term = 4 } },
+                .element_ty = .{ .compiler_type_id = 6 },
+                .checkpoint_structural_key = "body/check",
+            } },
+        },
+    };
+    var buffer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer buffer.deinit();
+    try writeLoopTimeline(&buffer.writer, &events);
+    try std.testing.expect(std.mem.containsAtLeast(
+        u8,
+        buffer.written(),
+        1,
+        ".indexedRegionRead { result := { file_id := 7, pattern_id := 8 }, " ++
+            "region := .calldata, owner := { file_id := 7, pattern_id := 3 }, " ++
+            "index := { formula := .term 4, readResults := [] }, " ++
+            "elementTy := .compilerTypeId 6, checkpointStructuralKey := \"body/check\" }",
+    ));
+}
+
 test "LoopVC digest covers every certificate-authority component class" {
     const int_ty: obligation.TypeRef = .{ .spelling = "u256" };
     const loop_id: obligation.FreeVarId = .{ .file_id = 1, .pattern_id = 1 };
     const read_id: obligation.FreeVarId = .{ .file_id = 1, .pattern_id = 2 };
+    const region_read_id: obligation.FreeVarId = .{ .file_id = 1, .pattern_id = 3 };
+    const region_owner_id: obligation.FreeVarId = .{ .file_id = 1, .pattern_id = 4 };
     const place_keys = [_]obligation.PlaceKey{.{ .parameter = read_id }};
     const terms = [_]obligation.Term{
         .{ .variable = .{ .free = .{ .id = loop_id, .name = "i", .ty = int_ty } } },
@@ -2965,6 +3019,14 @@ test "LoopVC digest covers every certificate-authority component class" {
         .{ .id = 3, .structural_key = "body/ora.assert:0", .payload = .{ .safety_checkpoint = .{
             .formulas = &safety_expr,
             .dynamic_index_bounds = true,
+        } } },
+        .{ .id = 4, .structural_key = "body/region-read", .payload = .{ .indexed_region_read = .{
+            .result = region_read_id,
+            .region = .calldata,
+            .owner = region_owner_id,
+            .index = .{ .formula = .{ .term = 0 } },
+            .element_ty = int_ty,
+            .checkpoint_structural_key = "body/ora.assert:0",
         } } },
     };
     const exit_timeline = [_]obligation.LoopTimelineEvent{
@@ -3096,6 +3158,36 @@ test "LoopVC digest covers every certificate-authority component class" {
             try std.testing.expect(!std.mem.eql(u8, &expected, &actual));
         }
     };
+
+    const IndexedRegionMutation = enum {
+        result,
+        region,
+        owner,
+        index_formula,
+        index_read_results,
+        element_type,
+        checkpoint_structural_key,
+    };
+    inline for (std.meta.tags(IndexedRegionMutation)) |mutation| {
+        var changed_timeline = backedge_timeline;
+        var changed_read = changed_timeline[4].payload.indexed_region_read;
+        const changed_read_results = [_]obligation.FreeVarId{read_id};
+        switch (mutation) {
+            .result => changed_read.result.pattern_id = 30,
+            .region => changed_read.region = .memory,
+            .owner => changed_read.owner.pattern_id = 40,
+            .index_formula => changed_read.index.formula = .{ .term = 1 },
+            .index_read_results => changed_read.index.read_results = &changed_read_results,
+            .element_type => changed_read.element_ty = .{ .spelling = "u128" },
+            .checkpoint_structural_key => changed_read.checkpoint_structural_key = "body/ora.assert:changed",
+        }
+        changed_timeline[4].payload.indexed_region_read = changed_read;
+        var changed_edges = edges;
+        changed_edges[0].timeline = &changed_timeline;
+        var changed_summary = summary;
+        changed_summary.edges = &changed_edges;
+        try DigestCheck.differs(baseline, &terms, &assumptions, &queries, changed_summary);
+    }
 
     var access_timeline = backedge_timeline;
     access_timeline[3].payload.safety_checkpoint.dynamic_index_bounds = false;

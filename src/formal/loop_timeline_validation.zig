@@ -56,9 +56,8 @@ pub fn Validator(comptime Schema: type) type {
         }
 
         fn timelineContainsReadIdentity(events: []const Schema.LoopTimelineEvent, id: Schema.FreeVarId) bool {
-            for (events) |event| switch (event.payload) {
-                .storage_read => |read| if (freeVarIdEql(read.result, id)) return true,
-                else => {},
+            for (events) |event| if (Schema.loopTimelineReadId(event.payload)) |read_id| {
+                if (freeVarIdEql(read_id, id)) return true;
             };
             return false;
         }
@@ -73,13 +72,12 @@ pub fn Validator(comptime Schema: type) type {
                     if (freeVarIdEql(previous, reference)) return .loop_storage_read_identity_duplicate;
                 }
                 var found_before = false;
-                for (events[0..event_index]) |event| switch (event.payload) {
-                    .storage_read => |read| if (freeVarIdEql(read.result, reference)) {
+                for (events[0..event_index]) |event| {
+                    if (Schema.loopTimelineReadId(event.payload)) |read_id| if (freeVarIdEql(read_id, reference)) {
                         found_before = true;
                         break;
-                    },
-                    else => {},
-                };
+                    };
+                }
                 if (found_before) continue;
                 if (timelineContainsReadIdentity(events[event_index..], reference)) {
                     return .loop_storage_read_identity_forward;
@@ -132,6 +130,42 @@ pub fn Validator(comptime Schema: type) type {
             return null;
         }
 
+        fn indexedRegionCheckpointReason(
+            events: []const Schema.LoopTimelineEvent,
+            event_index: usize,
+            structural_key: []const u8,
+        ) ?Reason {
+            if (structural_key.len == 0) return .loop_indexed_region_checkpoint_missing;
+            for (events[0..event_index]) |event| {
+                if (!std.mem.eql(u8, event.structural_key, structural_key)) continue;
+                return switch (event.payload) {
+                    .safety_checkpoint => |check| if (check.dynamic_index_bounds)
+                        null
+                    else
+                        .loop_indexed_region_checkpoint_invalid,
+                    else => .loop_indexed_region_checkpoint_invalid,
+                };
+            }
+            for (events[event_index + 1 ..]) |event| {
+                if (std.mem.eql(u8, event.structural_key, structural_key))
+                    return .loop_indexed_region_checkpoint_after_read;
+            }
+            return .loop_indexed_region_checkpoint_missing;
+        }
+
+        fn readIdentityDuplicate(
+            summary: Schema.LoopSummaryRow,
+            events: []const Schema.LoopTimelineEvent,
+            event_index: usize,
+            result: Schema.FreeVarId,
+        ) bool {
+            for (summary.context_variables) |variable| if (variable.id) |id|
+                if (freeVarIdEql(id, result)) return true;
+            for (summary.variables) |variable| if (variable.id) |id|
+                if (freeVarIdEql(id, result)) return true;
+            return timelineContainsReadIdentity(events[0..event_index], result);
+        }
+
         pub fn timelineReason(
             summary: Schema.LoopSummaryRow,
             events: []const Schema.LoopTimelineEvent,
@@ -162,18 +196,20 @@ pub fn Validator(comptime Schema: type) type {
                     },
                     .storage_read => |read| {
                         if (storageLocationReason(events, event_index, read.location)) |reason| return reason;
-                        for (summary.context_variables) |variable| if (variable.id) |id| {
-                            if (freeVarIdEql(id, read.result)) return .loop_storage_read_identity_duplicate;
-                        };
-                        for (summary.variables) |variable| if (variable.id) |id| {
-                            if (freeVarIdEql(id, read.result)) return .loop_storage_read_identity_duplicate;
-                        };
-                        for (events[0..event_index]) |previous| switch (previous.payload) {
-                            .storage_read => |prior_read| if (freeVarIdEql(prior_read.result, read.result)) {
-                                return .loop_storage_read_identity_duplicate;
-                            },
-                            else => {},
-                        };
+                        if (readIdentityDuplicate(summary, events, event_index, read.result))
+                            return .loop_storage_read_identity_duplicate;
+                    },
+                    .indexed_region_read => |read| {
+                        if (!Schema.typeRefExplicit(read.element_ty)) return .loop_storage_type_invalid;
+                        if (timelineReadReferencesReason(events, event_index, read.index.read_results)) |reason|
+                            return reason;
+                        if (readIdentityDuplicate(summary, events, event_index, read.result))
+                            return .loop_storage_read_identity_duplicate;
+                        if (indexedRegionCheckpointReason(
+                            events,
+                            event_index,
+                            read.checkpoint_structural_key,
+                        )) |reason| return reason;
                     },
                     .storage_write => |write| {
                         if (storageLocationReason(events, event_index, write.location)) |reason| return reason;
@@ -290,7 +326,7 @@ pub fn Validator(comptime Schema: type) type {
                     events[0..event_index],
                     write.location,
                 )) |reason| return reason,
-                .path_assumption, .safety_checkpoint, .summary_dependency => {},
+                .path_assumption, .safety_checkpoint, .indexed_region_read, .summary_dependency => {},
             };
             return null;
         }

@@ -270,7 +270,8 @@ def timelineValidationRowMatches : String × String → Bool
 
 theorem loop_timeline_event_tags_pinned :
     loopTimelineEventTags == ["path_assumption", "safety_checkpoint",
-      "storage_read", "storage_write", "summary_dependency"] := by
+      "storage_read", "indexed_region_read", "storage_write",
+      "summary_dependency"] := by
   decide
 
 theorem loop_storage_projection_tags_pinned :
@@ -283,6 +284,154 @@ theorem loop_timeline_validation_mutations_pinned :
 
 theorem loop_timeline_validation_matches :
     loopTimelineValidationRows.all timelineValidationRowMatches = true := by
+  decide
+
+inductive IndexedRegionMutation
+  | supported
+  | readMissingShapeValid
+  | readDuplicated
+  | readOrderInvalid
+  | checkpointMissing
+  | checkpointAfterRead
+  | checkpointWrongEvent
+  | checkpointNotDynamic
+  | ownerChangedShapeValid
+  | indexChangedShapeValid
+  | regionChangedShapeValid
+  | elementTypeChangedShapeValid
+  | elementTypeInvalid
+  | readIdentityDuplicate
+  | readIdentityCrossDomain
+  | indexReadForeign
+  | indexReadForward
+  deriving DecidableEq
+
+def IndexedRegionMutation.name : IndexedRegionMutation → String
+  | .supported => "supported"
+  | .readMissingShapeValid => "read_missing_shape_valid"
+  | .readDuplicated => "read_duplicated"
+  | .readOrderInvalid => "read_order_invalid"
+  | .checkpointMissing => "checkpoint_missing"
+  | .checkpointAfterRead => "checkpoint_after_read"
+  | .checkpointWrongEvent => "checkpoint_wrong_event"
+  | .checkpointNotDynamic => "checkpoint_not_dynamic"
+  | .ownerChangedShapeValid => "owner_changed_shape_valid"
+  | .indexChangedShapeValid => "index_changed_shape_valid"
+  | .regionChangedShapeValid => "region_changed_shape_valid"
+  | .elementTypeChangedShapeValid => "element_type_changed_shape_valid"
+  | .elementTypeInvalid => "element_type_invalid"
+  | .readIdentityDuplicate => "read_identity_duplicate"
+  | .readIdentityCrossDomain => "read_identity_cross_domain"
+  | .indexReadForeign => "index_read_foreign"
+  | .indexReadForward => "index_read_forward"
+
+def indexedRegionMutations : List IndexedRegionMutation := [
+  .supported, .readMissingShapeValid, .readDuplicated, .readOrderInvalid,
+  .checkpointMissing, .checkpointAfterRead, .checkpointWrongEvent,
+  .checkpointNotDynamic, .ownerChangedShapeValid, .indexChangedShapeValid,
+  .regionChangedShapeValid, .elementTypeChangedShapeValid, .elementTypeInvalid,
+  .readIdentityDuplicate,
+  .readIdentityCrossDomain, .indexReadForeign, .indexReadForward
+]
+
+def indexedRegionForwardId : FreeVarId := { file_id := 10, pattern_id := 91 }
+
+def indexedRegionOwnerPattern (mutation : IndexedRegionMutation) : Nat :=
+  if mutation == .ownerChangedShapeValid then 8 else 7
+
+def indexedRegionIndexTerm (mutation : IndexedRegionMutation) : Nat :=
+  if mutation == .indexChangedShapeValid then 1 else 0
+
+def indexedRegionCheckpoint (dynamic : Bool := true) : TimelineEventRow := {
+  id := 0
+  structuralKey := "body/dynamic-check"
+  payload := .safetyCheckpoint {
+    formulas := [{ formula := .term 0 }]
+    dynamicIndexBounds := dynamic
+  }
+}
+
+def indexedRegionRead (mutation : IndexedRegionMutation) : TimelineEventRow := {
+  id := 1
+  structuralKey := "body/region-read"
+  payload := .indexedRegionRead {
+    result := if mutation == .readIdentityDuplicate then loopId else timelineReadId
+    region := if mutation == .regionChangedShapeValid then .memory else .calldata
+    owner := { file_id := 10, pattern_id := indexedRegionOwnerPattern mutation }
+    index := {
+      formula := .term (indexedRegionIndexTerm mutation)
+      readResults := match mutation with
+        | .indexReadForeign => [timelineForeignId]
+        | .indexReadForward => [indexedRegionForwardId]
+        | _ => []
+    }
+    elementTy := match mutation with
+      | .elementTypeChangedShapeValid => .compilerTypeId 1
+      | .elementTypeInvalid => .compilerTypeId 0
+      | _ => .compilerTypeId 6
+    checkpointStructuralKey := if mutation == .checkpointMissing then ""
+      else "body/dynamic-check"
+  }
+}
+
+def indexedRegionForwardRead : TimelineEventRow := {
+  id := 2
+  structuralKey := "body/forward-read"
+  payload := .indexedRegionRead {
+    result := indexedRegionForwardId
+    region := .calldata
+    owner := { file_id := 10, pattern_id := 7 }
+    index := { formula := .term 0 }
+    elementTy := .compilerTypeId 6
+    checkpointStructuralKey := "body/dynamic-check"
+  }
+}
+
+def indexedRegionWrongCheckpointEvent : TimelineEventRow := {
+  id := 0
+  structuralKey := "body/dynamic-check"
+  payload := .storageRead {
+    result := indexedRegionForwardId
+    location := timelineLocation
+  }
+}
+
+def indexedRegionTimeline : IndexedRegionMutation → List TimelineEventRow
+  | .readMissingShapeValid => [indexedRegionCheckpoint]
+  | .readDuplicated => [indexedRegionCheckpoint, indexedRegionRead .readDuplicated,
+      { indexedRegionRead .readDuplicated with id := 2 }]
+  | .readOrderInvalid => [indexedRegionCheckpoint,
+      { indexedRegionRead .readOrderInvalid with id := 7 }]
+  | .checkpointAfterRead => [
+      { indexedRegionRead .checkpointAfterRead with id := 0 },
+      { indexedRegionCheckpoint with id := 1 }]
+  | .checkpointWrongEvent => [indexedRegionWrongCheckpointEvent,
+      indexedRegionRead .checkpointWrongEvent]
+  | .checkpointNotDynamic => [indexedRegionCheckpoint false,
+      indexedRegionRead .checkpointNotDynamic]
+  | .readIdentityCrossDomain => [
+      { timelineReadEvent with id := 0, structuralKey := "body/storage-read" },
+      indexedRegionRead .readIdentityCrossDomain]
+  | .indexReadForward => [indexedRegionCheckpoint,
+      indexedRegionRead .indexReadForward, indexedRegionForwardRead]
+  | mutation => [indexedRegionCheckpoint, indexedRegionRead mutation]
+
+def indexedRegionReasonForMutation (mutation : IndexedRegionMutation) : String :=
+  match preheaderTimelineReason? [loopId] (indexedRegionTimeline mutation) with
+  | some reason => reason.name
+  | none => ""
+
+def expectedIndexedRegionValidationRows : List (String × String) :=
+  indexedRegionMutations.map fun mutation =>
+    (mutation.name, indexedRegionReasonForMutation mutation)
+
+theorem loop_indexed_region_validation_mutations_pinned :
+    loopIndexedRegionValidationRows.map Prod.fst ==
+      indexedRegionMutations.map (·.name) := by
+  decide
+
+theorem loop_indexed_region_validation_matches :
+    loopIndexedRegionValidationRows == expectedIndexedRegionValidationRows := by
   decide
 
 inductive FixedIndexMutation

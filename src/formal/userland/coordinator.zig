@@ -714,6 +714,9 @@ fn collectLoopSummaryFreeVars(
             .storage_read => |read| {
                 try collectLoopStorageLocationFreeVars(allocator, set, read.location, ids);
             },
+            .indexed_region_read => |read| {
+                try set.collectFormulaFreeVars(allocator, read.index.formula, ids);
+            },
             .storage_write => |write| {
                 try collectLoopStorageLocationFreeVars(allocator, set, write.location, ids);
                 try set.collectFormulaFreeVars(allocator, write.value.formula, ids);
@@ -1258,7 +1261,7 @@ fn timelineHasReadBeforeSafetyCheckpoint(events: []const obligation.LoopTimeline
         index -= 1;
         switch (events[index].payload) {
             .safety_checkpoint => later_checkpoint = true,
-            .storage_read => if (later_checkpoint) return true,
+            .storage_read, .indexed_region_read => if (later_checkpoint) return true,
             else => {},
         }
     }
@@ -1366,6 +1369,9 @@ fn automaticLoopPlan(
                 }
             },
             .storage_read => {},
+            .indexed_region_read => return .{
+                .unsupported = .automatic_storage_timeline_requires_external_certificate,
+            },
         };
         if (edge.next_state.len != summary.variables.len) {
             return .{ .unsupported = .automatic_control_shape_unsupported };
@@ -1577,6 +1583,7 @@ fn markAutomaticSummaryClosure(
                 try markAutomaticFormulaClosure(set, formula.formula, marked);
             },
             .storage_write => |write| try markAutomaticFormulaClosure(set, write.value.formula, marked),
+            .indexed_region_read => |read| try markAutomaticFormulaClosure(set, read.index.formula, marked),
             .summary_dependency => |dependency| {
                 const child = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
                     return error.InvalidDependency;
@@ -1734,6 +1741,7 @@ fn projectionForQuery(set: obligation.ObligationSet, query: obligation.Verificat
                     summary.addFormula(formula.formula);
                 },
                 .storage_write => |write| summary.addFormula(write.value.formula),
+                .indexed_region_read => |read| summary.addFormula(read.index.formula),
                 .storage_read, .summary_dependency => {},
             };
             for (edge.target_formulas) |formula| summary.addFormula(formula);

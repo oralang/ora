@@ -7851,6 +7851,7 @@ fn timelineMatchesInventory(
                 !storageProjectionsMatchInventory(write.location.projections, item.storage_projections) or
                 !optionalTypeRefEql(write.location.value_ty, item.storage_ty) or
                 item.storage_value_source == null) return false,
+            .indexed_region_read => return false,
             .summary_dependency => |dependency| if (!optionalDependencyEql(dependency, item.summary_dependency)) return false,
             .path_assumption, .safety_checkpoint => {},
         }
@@ -8206,7 +8207,7 @@ fn formulasContainOriginValue(formulas: []const obligation.FormulaRef) bool {
 fn loopTimelineHasPersistentStorageEvent(timeline: []const obligation.LoopTimelineEvent) bool {
     for (timeline) |event| switch (event.payload) {
         .storage_read, .storage_write => return true,
-        .path_assumption, .safety_checkpoint, .summary_dependency => {},
+        .path_assumption, .safety_checkpoint, .indexed_region_read, .summary_dependency => {},
     };
     return false;
 }
@@ -8219,6 +8220,7 @@ fn loopTimelineContainsOriginValue(timeline: []const obligation.LoopTimelineEven
         .safety_checkpoint => |checkpoint| for (checkpoint.formulas) |formula| {
             if (formula.formula == .origin_value) return true;
         },
+        .indexed_region_read => |read| if (read.index.formula == .origin_value) return true,
         .storage_write => |write| if (write.value.formula == .origin_value) return true,
         .storage_read, .summary_dependency => {},
     };

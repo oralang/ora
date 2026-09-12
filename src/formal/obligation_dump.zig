@@ -989,6 +989,15 @@ fn writeLoopTimelineFieldNamed(
                 try writeFieldPrefix(writer, "location");
                 try writeLoopStorageLocationObject(writer, read.location);
             },
+            .indexed_region_read => |read| {
+                try writeFreeVarIdNamedField(writer, "result", read.result);
+                try writeStringField(writer, "region", @tagName(read.region));
+                try writeFreeVarIdNamedField(writer, "owner", read.owner);
+                try writeFieldPrefix(writer, "index");
+                try writeLoopFormulaExprObject(writer, read.index);
+                try writeTypeRefField(writer, "element_ty", read.element_ty);
+                try writeStringField(writer, "checkpoint_structural_key", read.checkpoint_structural_key);
+            },
             .storage_write => |storage_write| {
                 try writeFieldPrefix(writer, "location");
                 try writeLoopStorageLocationObject(writer, storage_write.location);
@@ -1798,5 +1807,31 @@ test "json-lines dump pins owner-scoped loop summary schema without authorizing 
         checked_json.written(),
         1,
         "\"dynamic_index_bounds\":true",
+    ));
+
+    const indexed_timeline = [_]obligation.LoopTimelineEvent{ checked_timeline[0], .{
+        .id = 1,
+        .structural_key = "body/read",
+        .payload = .{ .indexed_region_read = .{
+            .result = .{ .file_id = 7, .pattern_id = 8 },
+            .region = .calldata,
+            .owner = .{ .file_id = 7, .pattern_id = 3 },
+            .index = .{ .formula = .{ .term = 4 } },
+            .element_ty = .{ .compiler_type_id = 6 },
+            .checkpoint_structural_key = "body/check",
+        } },
+    } };
+    var indexed_json = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer indexed_json.deinit();
+    try writeLoopTimelineField(&indexed_json.writer, &indexed_timeline);
+    try std.testing.expect(std.mem.containsAtLeast(
+        u8,
+        indexed_json.written(),
+        1,
+        "{\"id\":1,\"structural_key\":\"body/read\",\"tag\":\"indexed_region_read\"," ++
+            "\"result\":{\"file_id\":7,\"pattern_id\":8},\"region\":\"calldata\"," ++
+            "\"owner\":{\"file_id\":7,\"pattern_id\":3},\"index\":{\"formula\":{\"tag\":\"term\",\"id\":4}," ++
+            "\"read_results\":[]},\"element_ty\":{\"tag\":\"compiler_type_id\",\"value\":6}," ++
+            "\"checkpoint_structural_key\":\"body/check\"}",
     ));
 }

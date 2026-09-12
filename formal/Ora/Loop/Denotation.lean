@@ -175,6 +175,20 @@ structure StorageReadEventRow where
   location : StorageLocationExprRow
   deriving Repr, BEq, DecidableEq
 
+inductive IndexedRegionKindRow where
+  | calldata
+  | memory
+  deriving Repr, BEq, DecidableEq
+
+structure IndexedRegionReadEventRow where
+  result : FreeVarId
+  region : IndexedRegionKindRow
+  owner : FreeVarId
+  index : FormulaExprRow
+  elementTy : TyRef
+  checkpointStructuralKey : String
+  deriving Repr, BEq, DecidableEq
+
 structure StorageWriteEventRow where
   location : StorageLocationExprRow
   value : FormulaExprRow
@@ -184,6 +198,7 @@ inductive TimelineEventPayloadRow where
   | pathAssumption : TimelineFormulaEventRow → TimelineEventPayloadRow
   | safetyCheckpoint : TimelineFormulaEventRow → TimelineEventPayloadRow
   | storageRead : StorageReadEventRow → TimelineEventPayloadRow
+  | indexedRegionRead : IndexedRegionReadEventRow → TimelineEventPayloadRow
   | storageWrite : StorageWriteEventRow → TimelineEventPayloadRow
   | summaryDependency : SummaryDependencyRow → TimelineEventPayloadRow
   deriving Repr, BEq, DecidableEq
@@ -212,6 +227,9 @@ inductive TimelineShapeReason where
   | readIdentityDuplicate
   | readIdentityForeign
   | readIdentityForward
+  | indexedRegionCheckpointMissing
+  | indexedRegionCheckpointInvalid
+  | indexedRegionCheckpointAfterRead
   | childFootprintMissing
   | dependencyOrderInvalid
   | dependencyTargetUnsupported
@@ -240,6 +258,9 @@ def TimelineShapeReason.name : TimelineShapeReason → String
   | .readIdentityDuplicate => "loop_storage_read_identity_duplicate"
   | .readIdentityForeign => "loop_storage_read_identity_foreign"
   | .readIdentityForward => "loop_storage_read_identity_forward"
+  | .indexedRegionCheckpointMissing => "loop_indexed_region_checkpoint_missing"
+  | .indexedRegionCheckpointInvalid => "loop_indexed_region_checkpoint_invalid"
+  | .indexedRegionCheckpointAfterRead => "loop_indexed_region_checkpoint_after_read"
   | .childFootprintMissing => "loop_storage_child_footprint_missing"
   | .dependencyOrderInvalid => "loop_summary_dependency_order_invalid"
   | .dependencyTargetUnsupported => "loop_summary_dependency_target_unsupported"
@@ -249,6 +270,7 @@ def TimelineShapeReason.name : TimelineShapeReason → String
 def timelineReadIds (events : List TimelineEventRow) : List FreeVarId :=
   events.filterMap fun event => match event.payload with
     | .storageRead read => some read.result
+    | .indexedRegionRead read => some read.result
     | _ => none
 
 def timelineReadReferencesReason?
@@ -297,6 +319,21 @@ def timelineFormulaEventReason?
   else formulas.findSome? fun formula =>
     timelineReadReferencesReason? events eventIndex formula.readResults
 
+def indexedRegionCheckpointReason?
+    (events : List TimelineEventRow) (eventIndex : Nat)
+    (structuralKey : String) : Option TimelineShapeReason :=
+  if structuralKey.isEmpty then some .indexedRegionCheckpointMissing
+  else
+    match (events.take eventIndex).find? (fun event => event.structuralKey == structuralKey) with
+    | some event => match event.payload with
+        | .safetyCheckpoint check =>
+            if check.dynamicIndexBounds then none else some .indexedRegionCheckpointInvalid
+        | _ => some .indexedRegionCheckpointInvalid
+    | none =>
+        if (events.drop (eventIndex + 1)).any (fun event => event.structuralKey == structuralKey)
+          then some .indexedRegionCheckpointAfterRead
+          else some .indexedRegionCheckpointMissing
+
 def dependencyTargetSupported : ControlTargetRow → Bool
   | .successor | .functionReturn | .errorReturn => true
   | .backedge | .explicitRevert | .unresolved => false
@@ -337,6 +374,18 @@ def timelineEventsReason?
                       (timelineReadIds (events.take expected)).contains read.result then
                     some .readIdentityDuplicate
                   else next
+          | .indexedRegionRead read =>
+              if !storageTyExplicit read.elementTy then some .storageTypeInvalid
+              else match timelineReadReferencesReason? events expected read.index.readResults with
+                | some reason => some reason
+                | none =>
+                    if variableIds.contains read.result ||
+                        (timelineReadIds (events.take expected)).contains read.result then
+                      some .readIdentityDuplicate
+                    else match indexedRegionCheckpointReason? events expected
+                        read.checkpointStructuralKey with
+                      | some reason => some reason
+                      | none => next
           | .storageWrite write =>
               match storageLocationReason? events expected write.location with
               | some reason => some reason
@@ -726,6 +775,7 @@ def timelineFixedIndexBoundsReason?
         let reason := match event.payload with
           | .storageRead read =>
               storageLocationFixedIndexBoundsReason? manifest prior read.location
+          | .indexedRegionRead _ => none
           | .storageWrite write =>
               storageLocationFixedIndexBoundsReason? manifest prior write.location
           | _ => none
@@ -753,6 +803,7 @@ def preheaderTimelineEnv?
             if storageLocationFormulasDenotable manifest env read.location then
               some (env.setFree read.result (valueForTy read.location.valueTy))
             else none
+        | .indexedRegionRead _ => none
         | .storageWrite write =>
             if storageLocationFormulasDenotable manifest env write.location &&
                 valueDenotable manifest env write.value.formula then some env else none

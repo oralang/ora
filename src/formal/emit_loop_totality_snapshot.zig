@@ -101,6 +101,28 @@ const TimelineMutation = enum {
 
 const timeline_cases = std.meta.tags(TimelineMutation);
 
+const IndexedRegionMutation = enum {
+    supported,
+    read_missing_shape_valid,
+    read_duplicated,
+    read_order_invalid,
+    checkpoint_missing,
+    checkpoint_after_read,
+    checkpoint_wrong_event,
+    checkpoint_not_dynamic,
+    owner_changed_shape_valid,
+    index_changed_shape_valid,
+    region_changed_shape_valid,
+    element_type_changed_shape_valid,
+    element_type_invalid,
+    read_identity_duplicate,
+    read_identity_cross_domain,
+    index_read_foreign,
+    index_read_forward,
+};
+
+const indexed_region_cases = std.meta.tags(IndexedRegionMutation);
+
 // Common order, identity, duplicate, location, and read-reference mutations
 // are pinned above against the same `validateTimeline` core used by preheaders.
 // If edge and preheader validation are ever split, duplicate those rows here;
@@ -601,6 +623,124 @@ fn preheaderReason(mutation: PreheaderMutation) ?obligation.LoopUnsupportedReaso
     }).preheaderTimelineValidationReason();
 }
 
+fn indexedRegionReason(mutation: IndexedRegionMutation) ?obligation.LoopUnsupportedReason {
+    const read_id: obligation.FreeVarId = .{ .file_id = 10, .pattern_id = 90 };
+    const forward_id: obligation.FreeVarId = .{ .file_id = 10, .pattern_id = 91 };
+    const foreign_id: obligation.FreeVarId = .{ .file_id = 10, .pattern_id = 92 };
+    const foreign_refs = [_]obligation.FreeVarId{foreign_id};
+    const forward_refs = [_]obligation.FreeVarId{forward_id};
+    const checkpoint: obligation.LoopTimelineEvent = .{
+        .id = 0,
+        .structural_key = "body/dynamic-check",
+        .payload = .{ .safety_checkpoint = .{
+            .formulas = &.{.{ .formula = .{ .term = 0 } }},
+            .dynamic_index_bounds = mutation != .checkpoint_not_dynamic,
+        } },
+    };
+    const read: obligation.LoopTimelineEvent = .{
+        .id = 1,
+        .structural_key = "body/region-read",
+        .payload = .{ .indexed_region_read = .{
+            .result = if (mutation == .read_identity_duplicate) loop_id else read_id,
+            .region = if (mutation == .region_changed_shape_valid) .memory else .calldata,
+            .owner = .{
+                .file_id = 10,
+                .pattern_id = if (mutation == .owner_changed_shape_valid) 8 else 7,
+            },
+            .index = .{
+                .formula = .{ .term = if (mutation == .index_changed_shape_valid) 1 else 0 },
+                .read_results = switch (mutation) {
+                    .index_read_foreign => &foreign_refs,
+                    .index_read_forward => &forward_refs,
+                    else => &.{},
+                },
+            },
+            .element_ty = switch (mutation) {
+                .element_type_changed_shape_valid => ty_u8,
+                .element_type_invalid => .{ .compiler_type_id = 0 },
+                else => ty_u256,
+            },
+            .checkpoint_structural_key = if (mutation == .checkpoint_missing)
+                ""
+            else
+                checkpoint.structural_key,
+        } },
+    };
+    const prior_storage_read: obligation.LoopTimelineEvent = .{
+        .id = 0,
+        .structural_key = "body/storage-read",
+        .payload = .{ .storage_read = .{
+            .result = read_id,
+            .location = .{ .root = "counter", .value_ty = ty_u256 },
+        } },
+    };
+    const forward_read: obligation.LoopTimelineEvent = .{
+        .id = 2,
+        .structural_key = "body/forward-read",
+        .payload = .{ .indexed_region_read = .{
+            .result = forward_id,
+            .region = .calldata,
+            .owner = .{ .file_id = 10, .pattern_id = 7 },
+            .index = .{ .formula = .{ .term = 0 } },
+            .element_ty = ty_u256,
+            .checkpoint_structural_key = checkpoint.structural_key,
+        } },
+    };
+    var events = [_]obligation.LoopTimelineEvent{ checkpoint, read, forward_read };
+    var event_slice: []const obligation.LoopTimelineEvent = events[0..2];
+    switch (mutation) {
+        .supported,
+        .read_missing_shape_valid,
+        .read_duplicated,
+        .read_order_invalid,
+        .checkpoint_missing,
+        .checkpoint_not_dynamic,
+        .owner_changed_shape_valid,
+        .index_changed_shape_valid,
+        .region_changed_shape_valid,
+        .element_type_changed_shape_valid,
+        .element_type_invalid,
+        .read_identity_duplicate,
+        .index_read_foreign,
+        => {},
+        .checkpoint_after_read => {
+            std.mem.swap(obligation.LoopTimelineEvent, &events[0], &events[1]);
+            for (events[0..2], 0..) |*event, index| event.id = @intCast(index);
+        },
+        .checkpoint_wrong_event => events[0].payload = .{ .storage_read = .{
+            .result = forward_id,
+            .location = .{ .root = "counter", .value_ty = ty_u256 },
+        } },
+        .read_identity_cross_domain => {
+            events[0] = prior_storage_read;
+            events[1] = read;
+        },
+        .index_read_forward => event_slice = &events,
+    }
+    switch (mutation) {
+        .read_missing_shape_valid => event_slice = events[0..1],
+        .read_duplicated => event_slice = &.{ checkpoint, read, .{
+            .id = 2,
+            .structural_key = read.structural_key,
+            .payload = read.payload,
+        } },
+        .read_order_invalid => events[1].id = 7,
+        else => {},
+    }
+    const variables = [_]obligation.LoopVariable{.{ .index = 0, .id = loop_id, .ty = ty_u256 }};
+    return (obligation.LoopSummaryRow{
+        .id = summary_id,
+        .owner = .{ .function = .{ .name = "run" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .loop_source_op_id = 0,
+        .loop_kind = .scf_while,
+        .variables = &variables,
+        .preheader_timeline = event_slice,
+    }).preheaderTimelineValidationReason();
+}
+
 fn fixedIndexReason(mutation: FixedIndexMutation) ?obligation.LoopUnsupportedReason {
     const config = fixedIndexFixtureConfig(mutation);
     const index_id: obligation.FreeVarId = .{ .file_id = 10, .pattern_id = 7 };
@@ -777,6 +917,14 @@ pub fn main(init: std.process.Init) !void {
         try writer.writeAll(", ");
         try writeLeanString(writer, if (fixedIndexReason(mutation)) |reason| @tagName(reason) else "");
         try writer.writeAll(if (index + 1 == fixed_index_cases.len) ")\n" else "),\n");
+    }
+    try writer.writeAll("]\n\ndef loopIndexedRegionValidationRows : List (String × String) := [\n");
+    for (indexed_region_cases, 0..) |mutation, index| {
+        try writer.writeAll("  (");
+        try writeLeanString(writer, @tagName(mutation));
+        try writer.writeAll(", ");
+        try writeLeanString(writer, if (indexedRegionReason(mutation)) |reason| @tagName(reason) else "");
+        try writer.writeAll(if (index + 1 == indexed_region_cases.len) ")\n" else "),\n");
     }
     try writer.writeAll("]\n\ndef loopHeaderFactValidationRows : List (String × Bool × Bool) := [\n");
     for (header_fact_cases, 0..) |mutation, index| {

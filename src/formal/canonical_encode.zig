@@ -367,6 +367,7 @@ pub const Adapter = struct {
                 try self.applyLoopRead(read);
                 try self.appendSideConstraints(premises);
             },
+            .indexed_region_read => return error.InvalidLoopQuery,
             .storage_write => |write| {
                 try self.applyLoopWrite(write);
                 try self.appendSideConstraints(premises);
@@ -495,7 +496,7 @@ pub const Adapter = struct {
                 exit_edge,
                 nested,
             ),
-            .storage_read, .storage_write => return error.InvalidLoopQuery,
+            .storage_read, .indexed_region_read, .storage_write => return error.InvalidLoopQuery,
         };
 
         const raw_following = try self.encodeBindingValues(

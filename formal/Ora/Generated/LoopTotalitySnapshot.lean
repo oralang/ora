@@ -42,7 +42,7 @@ def loopTotalityRows : List (String × String × Bool × String × Bool) := [
   ("query_id_mismatch", "query_id_mismatch", false, "loop_summary_query_mismatch", true)
 ]
 
-def loopTimelineEventTags : List String := ["path_assumption", "safety_checkpoint", "storage_read", "storage_write", "summary_dependency"]
+def loopTimelineEventTags : List String := ["path_assumption", "safety_checkpoint", "storage_read", "indexed_region_read", "storage_write", "summary_dependency"]
 
 def loopStorageProjectionTags : List String := ["field", "fixed_index", "mapping_key"]
 
@@ -81,6 +81,26 @@ def loopFixedIndexBoundsRows : List (String × String) := [
   ("checkpoint_wrong_type", "loop_fixed_index_bounds_type_mismatch"),
   ("checkpoint_inconsistent", "loop_fixed_index_bounds_extent_literal_mismatch"),
   ("checkpoint_noncanonical_literal", "loop_fixed_index_bounds_extent_literal_mismatch")
+]
+
+def loopIndexedRegionValidationRows : List (String × String) := [
+  ("supported", ""),
+  ("read_missing_shape_valid", ""),
+  ("read_duplicated", "loop_timeline_event_identity_duplicate"),
+  ("read_order_invalid", "loop_timeline_event_order_invalid"),
+  ("checkpoint_missing", "loop_indexed_region_checkpoint_missing"),
+  ("checkpoint_after_read", "loop_indexed_region_checkpoint_after_read"),
+  ("checkpoint_wrong_event", "loop_indexed_region_checkpoint_invalid"),
+  ("checkpoint_not_dynamic", "loop_indexed_region_checkpoint_invalid"),
+  ("owner_changed_shape_valid", ""),
+  ("index_changed_shape_valid", ""),
+  ("region_changed_shape_valid", ""),
+  ("element_type_changed_shape_valid", ""),
+  ("element_type_invalid", "loop_storage_type_invalid"),
+  ("read_identity_duplicate", "loop_storage_read_identity_duplicate"),
+  ("read_identity_cross_domain", "loop_storage_read_identity_duplicate"),
+  ("index_read_foreign", "loop_storage_read_identity_foreign"),
+  ("index_read_forward", "loop_storage_read_identity_forward")
 ]
 
 def loopHeaderFactValidationRows : List (String × Bool × Bool) := [
