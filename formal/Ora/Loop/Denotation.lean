@@ -7,10 +7,20 @@ targets, or incomplete state bindings make `denoteLoopSummary?` return `none`.
 
 import Ora.Loop.StorageDenotation
 import Ora.Loop.HeaderFacts
+import Ora.Loop.IntegerTypeSimpAttr
 
 namespace Ora.Loop
 
 open Ora.Obligation
+
+attribute [ora_loop_integer_types] TyRef.integerShape?
+  integerShapeForCompilerTypeId_u8 integerShapeForCompilerTypeId_u16
+  integerShapeForCompilerTypeId_u32 integerShapeForCompilerTypeId_u64
+  integerShapeForCompilerTypeId_u128 integerShapeForCompilerTypeId_u160
+  integerShapeForCompilerTypeId_u256 integerShapeForCompilerTypeId_i8
+  integerShapeForCompilerTypeId_i16 integerShapeForCompilerTypeId_i32
+  integerShapeForCompilerTypeId_i64 integerShapeForCompilerTypeId_i128
+  integerShapeForCompilerTypeId_i256
 
 inductive LoopKind where
   | scfWhile
@@ -68,12 +78,13 @@ def CanonicalHeaderFactRow.semanticRow
   target := { block := row.targetBlockKey, position := row.targetPosition }
 }
 
-def headerFactsIndexedFrom : Nat → List CanonicalHeaderFactRow → Bool
+def rowsIndexedFrom {Row : Type} (rowIndex : Row → Nat) : Nat → List Row → Bool
   | _, [] => true
-  | expected, row :: rest => row.id == expected && headerFactsIndexedFrom (expected + 1) rest
+  | expected, row :: rest =>
+      rowIndex row == expected && rowsIndexedFrom rowIndex (expected + 1) rest
 
 def headerFactsShapeSupported (rows : List CanonicalHeaderFactRow) : Bool :=
-  headerFactsIndexedFrom 0 rows &&
+  rowsIndexedFrom CanonicalHeaderFactRow.id 0 rows &&
     rows.all (fun row => !row.structuralKey.isEmpty &&
         !row.sourceStructuralKey.isEmpty && !row.sourceBlockKey.isEmpty &&
         !row.targetStructuralKey.isEmpty && !row.targetBlockKey.isEmpty &&
@@ -455,11 +466,6 @@ structure SummaryRow where
 def idsUnique (variables : List VariableRow) : Bool :=
   decide (variables.map VariableRow.id).Nodup
 
-def variablesIndexedFrom : Nat → List VariableRow → Bool
-  | _, [] => true
-  | expected, loopVar :: rest =>
-      loopVar.index == expected && variablesIndexedFrom (expected + 1) rest
-
 def variablesAreIntegers (variables : List VariableRow) : Bool :=
   variables.all (fun loopVar => loopVar.ty.integerShape?.isSome)
 
@@ -474,10 +480,6 @@ def bindingsMatchVariables : List VariableRow → List StateBindingRow → Bool
         !binding.sourceKey.isEmpty &&
         bindingsMatchVariables variables bindings
   | _, _ => false
-
-def edgesIndexedFrom : Nat → List EdgeRow → Bool
-  | _, [] => true
-  | expected, edge :: rest => edge.id == expected && edgesIndexedFrom (expected + 1) rest
 
 def edgeStructuralKeysValid (edges : List EdgeRow) : Bool :=
   edges.all (fun edge => !edge.structuralKey.isEmpty) &&
@@ -536,11 +538,6 @@ def dependencyDigestValid (dependency : SummaryDependencyRow) : Bool :=
   dependency.loopVcSha256.length == 64 &&
     dependency.loopVcSha256.toList.all lowerHexDigit
 
-def dependenciesIndexedFrom : Nat → List SummaryDependencyRow → Bool
-  | _, [] => true
-  | expected, dependency :: rest =>
-      dependency.id == expected && dependenciesIndexedFrom (expected + 1) rest
-
 def dependencyStructuralKeysValid (dependencies : List SummaryDependencyRow) : Bool :=
   dependencies.all (fun dependency => !dependency.structuralKey.isEmpty) &&
     decide (dependencies.map SummaryDependencyRow.structuralKey).Nodup
@@ -578,7 +575,7 @@ def edgeDependenciesSupported
     (rows : List SummaryRow)
     (parent : SummaryRow)
     (edge : EdgeRow) : Bool :=
-  dependenciesIndexedFrom 0 edge.summaryDependencies &&
+  rowsIndexedFrom SummaryDependencyRow.id 0 edge.summaryDependencies &&
     dependencyStructuralKeysValid edge.summaryDependencies &&
     edge.summaryDependencies.all (dependencyShapeSupported rows parent)
 
@@ -811,13 +808,13 @@ def SummaryRow.baseShapeSupported (row : SummaryRow) : Bool :=
     row.init.length == row.variables.length &&
     !row.invariants.isEmpty &&
     !row.edges.isEmpty &&
-    variablesIndexedFrom 0 row.variables &&
+    rowsIndexedFrom VariableRow.index 0 row.variables &&
     idsUnique row.variables &&
     idsUnique row.contextVariables &&
     variablesAreIntegers row.variables &&
     variablesAreIntegers row.contextVariables &&
     variableSetsDisjoint row.variables row.contextVariables &&
-    edgesIndexedFrom 0 row.edges &&
+    rowsIndexedFrom EdgeRow.id 0 row.edges &&
     edgeStructuralKeysValid row.edges &&
     hasBackedge row.edges && hasExit row.edges
 

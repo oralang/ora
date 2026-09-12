@@ -132,9 +132,8 @@ theorem TimelineExec.establishes_header_facts
   have hLeading := TimelineExec.leading_assumptions_hold semantics
     (headerFactFormulas rows) [] initial result (by simpa using hExec)
   intro row hMember
-  exact hLeading row.formula (by
-    simp [headerFactFormulas]
-    exact ⟨row, hMember, rfl⟩)
+  exact hLeading row.formula
+    (List.mem_map.mpr ⟨row, hMember, rfl⟩)
 
 /-- Header facts are ambient, stable premises for the existing induction
 obligations.  Discharging this implication yields the original obligation
@@ -165,14 +164,8 @@ theorem no_loop_initial_without_header_facts
     (vc : LoopVC State)
     (hMissing : ¬ facts) :
     ¬ ∃ state, LoopInitialWithHeaderFacts facts vc state := by
-  intro hWitness
-  rcases hWitness with ⟨state, hInitial⟩
+  rintro ⟨state, hInitial⟩
   exact hMissing hInitial.1
-
-private def headerFactTestTarget : HeaderPoint := {
-  block := "function-entry"
-  position := 7
-}
 
 private def headerFactTestRow : HeaderFactRow Bool := {
   id := 0
@@ -180,23 +173,18 @@ private def headerFactTestRow : HeaderFactRow Bool := {
   formula := true
   sourceKind := .pathAssume
   source := { block := "function-entry", position := 2 }
-  target := headerFactTestTarget
+  target := { block := "function-entry", position := 7 }
 }
 
 example : headerFactTestRow.shapeReason? = none := rfl
 
-example :
-    ({ headerFactTestRow with
-      source := { block := "nested", position := 2 } }).shapeReason? =
-        some .sourceBlockMismatch := rfl
+example : ({ headerFactTestRow with source := { block := "nested", position := 2 } }).shapeReason? =
+    some .sourceBlockMismatch := rfl
 
-example :
-    ({ headerFactTestRow with
-      source := { block := "function-entry", position := 7 } }).shapeReason? =
-        some .sourceNotEarlier := rfl
+example : ({ headerFactTestRow with source := { block := "function-entry", position := 7 } }).shapeReason? =
+    some .sourceNotEarlier := rfl
 
-example :
-    ({ headerFactTestRow with sourceKind := .unresolved }).shapeReason? =
-      some .sourceKindUnresolved := rfl
+example : ({ headerFactTestRow with sourceKind := .unresolved }).shapeReason? =
+    some .sourceKindUnresolved := rfl
 
 end Ora.Loop

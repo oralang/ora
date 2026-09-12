@@ -56,13 +56,7 @@ private partial def unpackReadyStateAt
       Syntax.node SourceInfo.none `null #[]]⟩
   let reduced ← evalTacticAt (← `(tactic|
     try simp only [Ora.Loop.stateReady, Ora.Loop.valuesMatchVariables,
-      ora_loop_row, TyRef.integerShape?, integerShapeForCompilerTypeId_u8,
-      integerShapeForCompilerTypeId_u16, integerShapeForCompilerTypeId_u32,
-      integerShapeForCompilerTypeId_u64, integerShapeForCompilerTypeId_u128,
-      integerShapeForCompilerTypeId_u160, integerShapeForCompilerTypeId_u256,
-      integerShapeForCompilerTypeId_i8, integerShapeForCompilerTypeId_i16,
-      integerShapeForCompilerTypeId_i32, integerShapeForCompilerTypeId_i64,
-      integerShapeForCompilerTypeId_i128, integerShapeForCompilerTypeId_i256,
+      ora_loop_row, ora_loop_integer_types,
       Bool.and_true, Bool.and_false, Bool.and_eq_true,
       Bool.false_eq_true, beq_iff_eq, Option.some.injEq,
       and_true, and_false, true_and, false_and, False.elim]
@@ -214,14 +208,8 @@ macro "ora_loop_reduce" loc:(Lean.Parser.Tactic.location)? : tactic =>
     Ora.Spec.IntegerShape.isSigned, Ora.Spec.IntegerShape.bits,
     Ora.Spec.uintBits, Ora.Spec.sintBits, Env.setFree, Env.lookupVar,
     Env.lookupFree, lookupFreeBinding, lookupFreeBinding_cons_of_beq_true,
-    lookupFreeBinding_cons_of_beq_false, TyRef.integerShape?,
-    integerShapeForCompilerTypeId_u8, integerShapeForCompilerTypeId_u16,
-    integerShapeForCompilerTypeId_u32, integerShapeForCompilerTypeId_u64,
-    integerShapeForCompilerTypeId_u128, integerShapeForCompilerTypeId_u160,
-    integerShapeForCompilerTypeId_u256, integerShapeForCompilerTypeId_i8,
-    integerShapeForCompilerTypeId_i16, integerShapeForCompilerTypeId_i32,
-    integerShapeForCompilerTypeId_i64, integerShapeForCompilerTypeId_i128,
-    integerShapeForCompilerTypeId_i256, parseDecimalNat?, parseDecimalNatAux,
+    lookupFreeBinding_cons_of_beq_false, ora_loop_integer_types,
+    parseDecimalNat?, parseDecimalNatAux,
     decimalDigit?, Value.eqProp?, List.take, Option.pure_def,
     Option.bind_eq_bind, Option.some_bind, Option.none_bind, Option.map_some',
     Option.map_none', Option.some.injEq, Option.isSome, String.isEmpty,
@@ -240,13 +228,7 @@ macro "ora_loop_split_formulas" loc:(Lean.Parser.Tactic.location)? : tactic =>
 
 macro "ora_loop_formula_context_reduce" loc:(Lean.Parser.Tactic.location)? : tactic =>
   `(tactic| simp only [ora_loop_row, formulaHoldsInState, formulaHoldsInEnv,
-    bindState?, TyRef.integerShape?, integerShapeForCompilerTypeId_u8,
-    integerShapeForCompilerTypeId_u16, integerShapeForCompilerTypeId_u32,
-    integerShapeForCompilerTypeId_u64, integerShapeForCompilerTypeId_u128,
-    integerShapeForCompilerTypeId_u160, integerShapeForCompilerTypeId_u256,
-    integerShapeForCompilerTypeId_i8, integerShapeForCompilerTypeId_i16,
-    integerShapeForCompilerTypeId_i32, integerShapeForCompilerTypeId_i64,
-    integerShapeForCompilerTypeId_i128, integerShapeForCompilerTypeId_i256,
+    bindState?, ora_loop_integer_types,
     beq_iff_eq, beq_self_eq_true, Option.some.injEq, if_pos, if_false]
     $[$loc:location]?)
 
@@ -452,13 +434,7 @@ macro "ora_loop_value_reduce" loc:(Lean.Parser.Tactic.location)? : tactic =>
     Ora.Integer.bitXorResult, Ora.Spec.IntegerShape.isSigned,
     Env.setFree, Env.lookupVar, Env.lookupFree, lookupFreeBinding,
     lookupFreeBinding_cons_of_beq_true, lookupFreeBinding_cons_of_beq_false,
-    TyRef.integerShape?, integerShapeForCompilerTypeId_u8,
-    integerShapeForCompilerTypeId_u16, integerShapeForCompilerTypeId_u32,
-    integerShapeForCompilerTypeId_u64, integerShapeForCompilerTypeId_u128,
-    integerShapeForCompilerTypeId_u160, integerShapeForCompilerTypeId_u256,
-    integerShapeForCompilerTypeId_i8, integerShapeForCompilerTypeId_i16,
-    integerShapeForCompilerTypeId_i32, integerShapeForCompilerTypeId_i64,
-    integerShapeForCompilerTypeId_i128, integerShapeForCompilerTypeId_i256,
+    ora_loop_integer_types,
     parseDecimalNat?, parseDecimalNatAux, decimalDigit?, Option.pure_def,
     Option.bind_eq_bind, Option.some_bind, Option.none_bind, Option.map_some',
     Option.map_none', Option.some.injEq, Nat.zero_mul, Nat.mul_zero,
@@ -478,13 +454,7 @@ macro "ora_loop_transition_reduce" loc:(Lean.Parser.Tactic.location)? : tactic =
 
 macro "ora_loop_state_shape_reduce" loc:(Lean.Parser.Tactic.location)? : tactic =>
   `(tactic| simp only [ora_loop_row, valuesMatchVariables,
-    TyRef.integerShape?, integerShapeForCompilerTypeId_u8,
-    integerShapeForCompilerTypeId_u16, integerShapeForCompilerTypeId_u32,
-    integerShapeForCompilerTypeId_u64, integerShapeForCompilerTypeId_u128,
-    integerShapeForCompilerTypeId_u160, integerShapeForCompilerTypeId_u256,
-    integerShapeForCompilerTypeId_i8, integerShapeForCompilerTypeId_i16,
-    integerShapeForCompilerTypeId_i32, integerShapeForCompilerTypeId_i64,
-    integerShapeForCompilerTypeId_i128, integerShapeForCompilerTypeId_i256,
+    ora_loop_integer_types,
     beq_self_eq_true, Bool.and_true, Option.ite_none_right_eq_some,
     Option.some.injEq] $[$loc:location]?)
 
@@ -516,27 +486,15 @@ private def hasContextLookupFact : TacticM Bool := do
 
 elab "ora_loop_apply_context" : tactic => do
   unless ← hasContextLookupFact do return
-  evalTactic (← `(tactic| simp_all only [Env.lookupFree, TyRef.integerShape?,
-    integerShapeForCompilerTypeId_u8, integerShapeForCompilerTypeId_u16,
-    integerShapeForCompilerTypeId_u32, integerShapeForCompilerTypeId_u64,
-    integerShapeForCompilerTypeId_u128, integerShapeForCompilerTypeId_u160,
-    integerShapeForCompilerTypeId_u256, integerShapeForCompilerTypeId_i8,
-    integerShapeForCompilerTypeId_i16, integerShapeForCompilerTypeId_i32,
-    integerShapeForCompilerTypeId_i64, integerShapeForCompilerTypeId_i128,
-    integerShapeForCompilerTypeId_i256, Option.some.injEq]))
+  evalTactic (← `(tactic| simp_all only [Env.lookupFree,
+    ora_loop_integer_types, Option.some.injEq]))
 
 macro "ora_loop_normalize" loc:(Lean.Parser.Tactic.location)? : tactic =>
   `(tactic| simp only [Value.eqProp?, Ora.Integer.Value.eqProp?,
     Ora.Integer.Value.relation?, Ora.Integer.Value.binary?,
     Ora.Integer.Value.bitsFor?, Ora.Spec.IntegerShape.isSigned,
     Ora.Spec.IntegerShape.bits, Ora.Spec.uintBits, Ora.Spec.sintBits,
-    TyRef.integerShape?, integerShapeForCompilerTypeId_u8,
-    integerShapeForCompilerTypeId_u16, integerShapeForCompilerTypeId_u32,
-    integerShapeForCompilerTypeId_u64, integerShapeForCompilerTypeId_u128,
-    integerShapeForCompilerTypeId_u160, integerShapeForCompilerTypeId_u256,
-    integerShapeForCompilerTypeId_i8, integerShapeForCompilerTypeId_i16,
-    integerShapeForCompilerTypeId_i32, integerShapeForCompilerTypeId_i64,
-    integerShapeForCompilerTypeId_i128, integerShapeForCompilerTypeId_i256,
+    ora_loop_integer_types,
     Option.pure_def, Option.bind_eq_bind, Option.some_bind, Option.none_bind,
     Option.map_some', Option.map_none', Option.some.injEq,
     if_pos, if_false, dif_pos, dif_neg, beq_iff_eq, beq_self_eq_true,
@@ -603,6 +561,20 @@ macro "ora_loop_close" : tactic =>
              Nat.reducePow, Nat.reduceMod] <;> omega)
        | omega)
     | ora_loop_linear_close)
+
+macro "ora_loop_select_emitted_row" row:ident member:ident : tactic =>
+  `(tactic| (
+    simp only [ora_loop_row, List.mem_cons, List.not_mem_nil, or_false]
+      at $member:ident
+    repeat' first
+      | subst $row:ident
+      | rcases $member:ident with $member:ident | $member:ident))
+
+macro "ora_loop_unpack_ready" ready:ident : tactic =>
+  `(tactic| (
+    ora_loop_unpack_state $ready:ident
+    repeat' first | rcases $ready:ident with ⟨hShape, $ready:ident⟩
+    subst_vars))
 
 /- This reducer traverses the complete emitted nested-summary data.  Its local
 recursion allowance is isolated from the induction and arithmetic proof steps. -/
@@ -890,11 +862,7 @@ macro tk:"ora_loop_auto_plain" : tactic => do
       refine { base := ?_, backedge := ?_, edgeSafety := ?_, exit := ?_ }
       · ora_loop_prove_base
       · intro edge current following hMember hTarget hInvariant hPath hSafe hNext
-        simp only [ora_loop_row, List.mem_cons, List.not_mem_nil, or_false]
-          at hMember
-        repeat' first
-          | subst edge
-          | rcases hMember with hMember | hMember
+        ora_loop_select_emitted_row edge hMember
         all_goals dsimp at hTarget hInvariant hPath hSafe hNext ⊢
         all_goals try contradiction
         all_goals (
@@ -931,17 +899,11 @@ macro tk:"ora_loop_auto_plain" : tactic => do
             all_goals subst_vars
             all_goals ora_loop_close)
       · intro edge state hMember hInvariant hPath
-        simp only [ora_loop_row, List.mem_cons, List.not_mem_nil, or_false]
-          at hMember
-        repeat' first
-          | subst edge
-          | rcases hMember with hMember | hMember
+        ora_loop_select_emitted_row edge hMember
         all_goals (
           dsimp at hInvariant hPath ⊢
           rcases hInvariant with ⟨hReady, hInvariant⟩
-          ora_loop_unpack_state hReady
-          repeat' first | rcases hReady with ⟨hShape, hReady⟩
-          subst_vars
+          ora_loop_unpack_ready hReady
           simp only [ora_loop_row, EdgeRow.safety_eq_timeline,
             timelineSafetyView, timelineSafetyViewFrom,
             Ora.Loop.safetyCheckpointsHold,
@@ -965,11 +927,7 @@ macro tk:"ora_loop_auto_plain" : tactic => do
             all_goals subst_vars
             all_goals ora_loop_close)
       · intro edge current following hMember hTarget hInvariant hPath hSafe hNext
-        simp only [ora_loop_row, List.mem_cons, List.not_mem_nil, or_false]
-          at hMember
-        repeat' first
-          | subst edge
-          | rcases hMember with hMember | hMember
+        ora_loop_select_emitted_row edge hMember
         all_goals dsimp at hTarget hInvariant hPath hSafe hNext ⊢
         all_goals try contradiction
         all_goals (
@@ -1228,11 +1186,7 @@ macro tk:"ora_loop_auto_nested" : tactic => do
       constructor
       · ora_loop_prove_base
       · intro edge current following hMember hTarget hInvariant hPath hSafe hNext
-        simp only [ora_loop_row, List.mem_cons, List.not_mem_nil, or_false]
-          at hMember
-        repeat' first
-          | subst edge
-          | rcases hMember with hMember | hMember
+        ora_loop_select_emitted_row edge hMember
         all_goals dsimp at hTarget hInvariant hPath hSafe hNext ⊢
         all_goals try contradiction
         ora_loop_all_goals (
@@ -1242,9 +1196,7 @@ macro tk:"ora_loop_auto_nested" : tactic => do
             apply Ora.Loop.bound_state_after_dependencies_ready
               $emittedManifest env ($autoSummary).variables current _ _ following
             exact hNext
-          ora_loop_unpack_state hReady
-          repeat' first | rcases hReady with ⟨hShape, hReady⟩
-          subst_vars
+          ora_loop_unpack_ready hReady
           rcases hNext with ⟨beforeDependencies, afterDependencies,
             hParentBound, hDependencies, hApply⟩
           ora_loop_formula_context_reduce at hParentBound
@@ -1261,17 +1213,11 @@ macro tk:"ora_loop_auto_nested" : tactic => do
           all_goals
             ora_loop_finish_nested_backedges hApply following hFollowingReady)
       · intro edge state hMember hInvariant hPath
-        simp only [ora_loop_row, List.mem_cons, List.not_mem_nil, or_false]
-          at hMember
-        repeat' first
-          | subst edge
-          | rcases hMember with hMember | hMember
+        ora_loop_select_emitted_row edge hMember
         all_goals (
           dsimp at hInvariant hPath ⊢
           rcases hInvariant with ⟨hReady, hInvariant⟩
-          ora_loop_unpack_state hReady
-          repeat' first | rcases hReady with ⟨hShape, hReady⟩
-          subst_vars
+          ora_loop_unpack_ready hReady
           simp only [ora_loop_row, EdgeRow.safety_eq_timeline,
             timelineSafetyView, timelineSafetyViewFrom,
             Ora.Loop.safetyCheckpointsHold,
@@ -1295,18 +1241,12 @@ macro tk:"ora_loop_auto_nested" : tactic => do
           ora_loop_reduce_environment_relations hDependencies
           all_goals ora_loop_finish_nested_safety)
       · intro edge current following hMember hTarget hInvariant hPath hSafe hNext
-        simp only [ora_loop_row, List.mem_cons, List.not_mem_nil, or_false]
-          at hMember
-        repeat' first
-          | subst edge
-          | rcases hMember with hMember | hMember
+        ora_loop_select_emitted_row edge hMember
         all_goals dsimp at hTarget hInvariant hPath hSafe hNext ⊢
         all_goals try contradiction
         all_goals (
           rcases hInvariant with ⟨hReady, hInvariant⟩
-          ora_loop_unpack_state hReady
-          repeat' first | rcases hReady with ⟨hShape, hReady⟩
-          subst_vars
+          ora_loop_unpack_ready hReady
           rw [Ora.Loop.stateBindingsProduceAfterNoDependencies_iff] at hNext
           ora_loop_transition_reduce at hNext
           ora_loop_formula_context_reduce at hNext
