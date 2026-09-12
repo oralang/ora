@@ -10541,6 +10541,61 @@ fn expectRepositoryLoopAuthorityBlocked(
     try expectNoFormalArtifactsInRepoRoot(allocator, stem);
 }
 
+fn expectRepositoryLoopProofConstructionBlocked(
+    source: []const u8,
+    stem: []const u8,
+    expected_certificate_count: usize,
+) !void {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output = try pathFromTmpAlloc(allocator, tmp, "blocked");
+    defer allocator.free(output);
+    const expected_summary = try std.fmt.allocPrint(
+        allocator,
+        "total={d}, certificate-required={d}, excluded=0",
+        .{ expected_certificate_count, expected_certificate_count },
+    );
+    defer allocator.free(expected_summary);
+    const run = try runProcessWithLeanPath(allocator, &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=smt-report,bytecode",
+        "--out-dir",
+        output,
+        "--lean-proofs",
+        source,
+    });
+    defer allocator.free(run.stdout);
+    defer allocator.free(run.stderr);
+    try expectExited(run, 1);
+    try testing.expect(std.mem.containsAtLeast(u8, run.stdout, 1, expected_summary));
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        run.stdout,
+        1,
+        "automatic_storage_timeline_requires_external_certificate",
+    ));
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        run.stdout,
+        1,
+        "userland verification failed (Z3: accepted, Lean obligation gate: rejected)",
+    ));
+    const hex_path = try std.fmt.allocPrint(allocator, "blocked/{s}.hex", .{stem});
+    defer allocator.free(hex_path);
+    try testing.expectError(
+        error.FileNotFound,
+        tmp.dir.access(std.testing.io, hex_path, .{}),
+    );
+    try expectNoFormalArtifactsInRepoRoot(allocator, stem);
+}
+
 test "repository tactic certifies a direct-root storage loop through the real CLI" {
     try expectRepositoryStorageTacticDeterministic(
         "tests/formal/direct_storage_loop_auto.ora",
@@ -10744,11 +10799,130 @@ test "repository tactic checks nested storage mutation but child frame authority
     );
 }
 
-test "dynamic sequence bounds enter LoopVC but artifact authority remains unreviewed" {
-    try expectRepositoryLoopAuthorityBlocked(
+test "dynamic sequence reads reach proof construction before reads-only authority" {
+    try expectRepositoryLoopProofConstructionBlocked(
         "tests/formal/dynamic_sequence_loop_bounds.ora",
         "dynamic_sequence_loop_bounds",
-        .dynamic_sequence_authority_unreviewed,
+        3,
+    );
+}
+
+test "indexed region reads project with canonical owners and independent exclusions" {
+    var result = try collectPackageObligations(
+        testing.allocator,
+        "tests/formal/indexed_region_read_projection.ora",
+    );
+    defer result.deinit();
+
+    const affine = loopSummaryByFunction(result.set, "affine") orelse return error.TestUnexpectedResult;
+    try testing.expect(affine.projectionSupported());
+    try testing.expect(!loopSummaryHasReason(affine, .loop_formula_unsupported));
+    try testing.expectEqual(@as(usize, 1), affine.query_ids.induction.len);
+    const affine_query = obligation.findById(result.set.queries, affine.query_ids.induction[0]) orelse
+        return error.TestUnexpectedResult;
+    try testing.expectEqual(obligation.ProofRequirement.lean_certificate, affine_query.proof_requirement);
+    try testing.expect(affine_query.loop_vc_sha256 != null);
+    try testing.expectEqual(
+        obligation.ArtifactBlockReason.dynamic_sequence_authority_unreviewed,
+        result.set.artifactDecision().blocked,
+    );
+    var affine_read: ?obligation.LoopIndexedRegionReadEvent = null;
+    var affine_read_position: ?usize = null;
+    var affine_checkpoint_position: ?usize = null;
+    var affine_value_consumed = false;
+    for (affine.edges) |edge| {
+        if (edge.target != .backedge) continue;
+        for (edge.timeline, 0..) |event, position| switch (event.payload) {
+            .indexed_region_read => |read| {
+                affine_read = read;
+                affine_read_position = position;
+                for (edge.timeline[0..position], 0..) |prior, prior_position| {
+                    if (std.mem.eql(u8, prior.structural_key, read.checkpoint_structural_key)) {
+                        affine_checkpoint_position = prior_position;
+                    }
+                }
+            },
+            .storage_write => |write| if (affine_read) |read| {
+                for (write.value.read_results) |read_result| {
+                    affine_value_consumed = affine_value_consumed or
+                        obligation.freeVarIdEql(read.result, read_result);
+                }
+            },
+            else => {},
+        };
+    }
+    const projected_read = affine_read orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(obligation.LoopIndexedRegionKind.calldata, projected_read.region);
+    try testing.expectEqual(
+        type_builtin.lookupBuiltinById(.u256).comptime_type_id,
+        projected_read.element_ty.compiler_type_id,
+    );
+    try testing.expect(affine_checkpoint_position.? < affine_read_position.?);
+    try testing.expect(affine_value_consumed);
+
+    const alias = loopSummaryByFunction(result.set, "sameBackingAlias") orelse
+        return error.TestUnexpectedResult;
+    try testing.expect(alias.projectionSupported());
+    var alias_reads: [2]obligation.LoopIndexedRegionReadEvent = undefined;
+    var alias_read_count: usize = 0;
+    for (alias.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
+        .indexed_region_read => |read| {
+            if (alias_read_count >= alias_reads.len) return error.TestUnexpectedResult;
+            alias_reads[alias_read_count] = read;
+            alias_read_count += 1;
+        },
+        else => {},
+    };
+    try testing.expectEqual(alias_reads.len, alias_read_count);
+    try testing.expect(obligation.freeVarIdEql(alias_reads[0].owner, alias_reads[1].owner));
+    const first_index = switch (alias_reads[0].index.formula) {
+        .term => |id| switch (result.set.terms[id]) {
+            .variable => |variable| switch (variable) {
+                .free => |free| free.id,
+                .bound => return error.TestUnexpectedResult,
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        .origin_value => return error.TestUnexpectedResult,
+    };
+    const second_index = switch (alias_reads[1].index.formula) {
+        .term => |id| switch (result.set.terms[id]) {
+            .variable => |variable| switch (variable) {
+                .free => |free| free.id,
+                .bound => return error.TestUnexpectedResult,
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        .origin_value => return error.TestUnexpectedResult,
+    };
+    try testing.expect(obligation.freeVarIdEql(first_index, second_index));
+    try testing.expect(!obligation.freeVarIdEql(alias_reads[0].result, alias_reads[1].result));
+
+    const two_owners = loopSummaryByFunction(result.set, "twoOwners") orelse
+        return error.TestUnexpectedResult;
+    try testing.expect(loopSummaryHasReason(two_owners, .loop_indexed_region_owner_count_unsupported));
+    const merged = loopSummaryByFunction(result.set, "mergedOwner") orelse
+        return error.TestUnexpectedResult;
+    try testing.expect(loopSummaryHasReason(merged, .loop_indexed_region_alias_unsupported));
+    const write = loopSummaryByFunction(result.set, "writeThroughAlias") orelse
+        return error.TestUnexpectedResult;
+    try testing.expect(loopSummaryHasReason(write, .loop_indexed_region_write_unreviewed));
+    const call_owner = loopSummaryByFunction(result.set, "callProducedOwner") orelse
+        return error.TestUnexpectedResult;
+    try testing.expect(loopSummaryHasReason(call_owner, .loop_indexed_region_owner_unsupported));
+    const storage_owner = loopSummaryByFunction(result.set, "storageLoadedOwner") orelse
+        return error.TestUnexpectedResult;
+    try testing.expect(loopSummaryHasReason(storage_owner, .loop_indexed_region_owner_unsupported));
+    const call_body = loopSummaryByFunction(result.set, "callInBody") orelse
+        return error.TestUnexpectedResult;
+    try testing.expect(loopSummaryHasReason(call_body, .loop_has_call));
+}
+
+test "indexed region affine loop reaches proof construction with authority fenced" {
+    try expectRepositoryLoopProofConstructionBlocked(
+        "tests/formal/indexed_region_read_affine.ora",
+        "indexed_region_read_affine",
+        1,
     );
 }
 

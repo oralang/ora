@@ -540,6 +540,12 @@ const LoopTimelineInventoryEvent = struct {
     storage_result: ?obligation.FreeVarId = null,
     storage_value_source: ?[]const u8 = null,
     storage_ty: ?obligation.TypeRef = null,
+    indexed_result: ?obligation.FreeVarId = null,
+    indexed_region: ?obligation.LoopIndexedRegionKind = null,
+    indexed_owner: ?obligation.FreeVarId = null,
+    indexed_index_source: ?[]const u8 = null,
+    indexed_element_ty: ?obligation.TypeRef = null,
+    indexed_checkpoint_key: ?[]const u8 = null,
     summary_dependency: ?obligation.LoopSummaryDependency = null,
 };
 
@@ -1010,6 +1016,9 @@ const Collector = struct {
         }
         if (body_facts.has_storage_write) try appendLoopReason(&reasons, self.allocator, .loop_has_storage_write);
         if (body_facts.has_storage_read) try appendLoopReason(&reasons, self.allocator, .loop_has_storage_read);
+        if (body_facts.has_indexed_region_write) {
+            try appendLoopReason(&reasons, self.allocator, .loop_indexed_region_write_unreviewed);
+        }
         if (body_facts.has_call) try appendLoopReason(&reasons, self.allocator, .loop_has_call);
         if (body_facts.has_external_call) try appendLoopReason(&reasons, self.allocator, .loop_has_external_call);
         if (body_facts.has_resource_operation) try appendLoopReason(&reasons, self.allocator, .loop_has_resource_operation);
@@ -1920,30 +1929,9 @@ const Collector = struct {
             draft,
             summary,
             &semantic_terminals,
-        ) catch |err| switch (err) {
-            error.LoopControlMarkerMalformed,
-            error.LoopControlMarkerTargetMismatch,
-            => {
-                summary.projection_completeness = loopControlProjectionFailure(err).?;
-                return;
-            },
-            error.UnsupportedLoopControlFlow => {
-                summary.projection_completeness = .unsupported_control_flow;
-                return;
-            },
-            error.LoopProjectionPathLimitExceeded => {
-                summary.projection_completeness = .path_limit_exceeded;
-                return;
-            },
-            error.LoopProjectionEffectUnsupported => {
-                summary.projection_completeness = .unsupported_effect;
-                return;
-            },
-            error.LoopTargetFormulaTargetMismatch => {
-                summary.projection_completeness = .target_mismatch;
-                return;
-            },
-            else => return err,
+        ) catch |err| {
+            if (try self.recordLoopProjectionFailure(summary, err)) return;
+            return err;
         };
         self.validateSemanticLoopControlManifest(control_manifest, semantic_terminals.items) catch |err| {
             summary.projection_completeness = loopControlProjectionFailure(err) orelse return err;
@@ -1964,30 +1952,9 @@ const Collector = struct {
             draft,
             summary,
             &inventory_terminals,
-        ) catch |err| switch (err) {
-            error.LoopControlMarkerMalformed,
-            error.LoopControlMarkerTargetMismatch,
-            => {
-                summary.projection_completeness = loopControlProjectionFailure(err).?;
-                return;
-            },
-            error.UnsupportedLoopControlFlow => {
-                summary.projection_completeness = .unsupported_control_flow;
-                return;
-            },
-            error.LoopProjectionPathLimitExceeded => {
-                summary.projection_completeness = .path_limit_exceeded;
-                return;
-            },
-            error.LoopProjectionEffectUnsupported => {
-                summary.projection_completeness = .unsupported_effect;
-                return;
-            },
-            error.LoopTargetFormulaTargetMismatch => {
-                summary.projection_completeness = .target_mismatch;
-                return;
-            },
-            else => return err,
+        ) catch |err| {
+            if (try self.recordLoopProjectionFailure(summary, err)) return;
+            return err;
         };
         self.validateInventoryLoopControlManifest(control_manifest, inventory_terminals.items) catch |err| {
             summary.projection_completeness = loopControlProjectionFailure(err) orelse return err;
@@ -2080,7 +2047,17 @@ const Collector = struct {
         });
 
         summary.projection_completeness = compareLoopProjection(projected.items, inventory.items);
-        if (summary.projection_completeness != .complete) return;
+        if (summary.projection_completeness != .complete) {
+            if (summary.projection_completeness == .effect_mismatch and
+                loopProjectionHasIndexedRegionEvent(projected.items, inventory.items))
+            {
+                try self.appendLoopSummaryReason(summary, .loop_indexed_region_inventory_mismatch);
+            }
+            return;
+        }
+        if (loopProjectionHasMultipleIndexedRegionOwners(projected.items)) {
+            try self.appendLoopSummaryReason(summary, .loop_indexed_region_owner_count_unsupported);
+        }
         var has_storage_event = false;
         for (projected.items) |item| has_storage_event = has_storage_event or
             timelineInventoryHasStorageEvent(item.timeline_inventory);
@@ -2140,6 +2117,27 @@ const Collector = struct {
             }
             if (edges_supported) try self.removeLoopSummaryReason(summary, .loop_formula_unsupported);
         }
+    }
+
+    fn recordLoopProjectionFailure(
+        self: *Collector,
+        summary: *obligation.LoopSummaryRow,
+        err: anyerror,
+    ) !bool {
+        summary.projection_completeness = switch (err) {
+            error.LoopControlMarkerMalformed,
+            error.LoopControlMarkerTargetMismatch,
+            => loopControlProjectionFailure(err).?,
+            error.UnsupportedLoopControlFlow => .unsupported_control_flow,
+            error.LoopProjectionPathLimitExceeded => .path_limit_exceeded,
+            error.LoopProjectionEffectUnsupported => .unsupported_effect,
+            error.LoopTargetFormulaTargetMismatch => .target_mismatch,
+            else => if (indexedRegionProjectionFailure(err)) |reason| blk: {
+                try self.appendLoopSummaryReason(summary, reason);
+                break :blk .unsupported_effect;
+            } else return false,
+        };
+        return true;
     }
 
     fn projectSemanticLoopSequence(
@@ -2336,6 +2334,79 @@ const Collector = struct {
                     .storage_value_source = try self.sourceKeyForValue(value, path.source_overrides),
                     .storage_ty = projected.location.value_ty,
                 });
+            } else if (dynamicAccessSite(op)) |site| {
+                const expected_effect = if (std.mem.eql(u8, name, "ora.byte_at"))
+                    mlir.ORA_OPERATION_MEMORY_EFFECT_NONE
+                else
+                    mlir.ORA_OPERATION_MEMORY_EFFECT_READ;
+                if (effect_kind != expected_effect) {
+                    if (effect_kind == mlir.ORA_OPERATION_MEMORY_EFFECT_WRITE)
+                        return error.LoopIndexedRegionWriteUnreviewed;
+                    return error.LoopProjectionEffectUnsupported;
+                }
+                const result = mlir.oraOperationGetResult(op, 0);
+                const owner = try self.projectedIndexedRegionOwner(site.base);
+                const index_source = try self.sourceKeyForValue(site.index, path.source_overrides);
+                const owner_source = try self.dynamicAccessOwnerIdentity(site.base, path.source_overrides);
+                const access = latestMatchingDynamicAccess(
+                    path.dynamic_accesses,
+                    owner_source,
+                    index_source,
+                ) orelse return error.LoopIndexedRegionCheckpointMissing;
+                const index_formula = try self.loopFormulaFromValueWithOverrides(
+                    site.index,
+                    path.formula_overrides,
+                    name,
+                    draft.symbol,
+                    draft.ordinal,
+                    1,
+                );
+                if (index_formula == .origin_value) return error.LoopProjectionEffectUnsupported;
+                const element_ty = self.exactLoopIntegerTypeForValue(result) catch
+                    return error.LoopIndexedRegionTypeUnsupported;
+                if (typeRefIntegerInfo(element_ty) == null)
+                    return error.LoopIndexedRegionTypeUnsupported;
+                const read_id = try self.storageReadId(op);
+                const read_term = try self.addTerm(.{ .variable = .{ .free = .{
+                    .id = read_id,
+                    .name = effect_key,
+                    .ty = element_ty,
+                } } });
+                const event: obligation.LoopIndexedRegionReadEvent = .{
+                    .result = read_id,
+                    .region = .calldata,
+                    .owner = owner,
+                    .index = .{
+                        .formula = index_formula,
+                        .read_results = try self.readResultsForFormula(index_formula, path.timeline),
+                    },
+                    .element_ty = element_ty,
+                    .checkpoint_structural_key = access.structural_key,
+                };
+                path.timeline = try appendLoopTimelineEvent(
+                    self.allocator,
+                    path.timeline,
+                    .{ .indexed_region_read = event },
+                    effect_key,
+                );
+                path.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, path.timeline_inventory, .{
+                    .structural_key = effect_key,
+                    .tag = .indexed_region_read,
+                    .indexed_result = read_id,
+                    .indexed_region = .calldata,
+                    .indexed_owner = owner,
+                    .indexed_index_source = index_source,
+                    .indexed_element_ty = element_ty,
+                    .indexed_checkpoint_key = access.structural_key,
+                });
+                path.formula_overrides = try appendFormulaOverride(self.allocator, path.formula_overrides, .{
+                    .value_id = @intFromPtr(result.ptr),
+                    .formula = .{ .term = read_term },
+                });
+                path.source_overrides = try appendValueSource(self.allocator, path.source_overrides, .{
+                    .value_id = @intFromPtr(result.ptr),
+                    .key = effect_key,
+                });
             } else if (std.mem.eql(u8, name, "ora.map_get")) {
                 if (effect_kind != mlir.ORA_OPERATION_MEMORY_EFFECT_READ or
                     mlir.oraOperationGetNumResults(op) != 1 or
@@ -2415,6 +2486,19 @@ const Collector = struct {
             }
             if (draftHasSafetySite(draft, op)) {
                 if (mlir.oraOperationGetNumOperands(op) == 0) return error.LoopProjectionEffectUnsupported;
+                if (arithmeticSafetyFromAssertOp(op) == .dynamic_index_bounds) {
+                    const check = dynamicAccessCheckFromAssert(op) orelse
+                        return error.LoopIndexedRegionCheckpointMissing;
+                    _ = self.projectedIndexedRegionOwner(check.owner) catch |err| {
+                        const next = mlir.oraOperationGetNextInBlock(op);
+                        if (!mlir.oraOperationIsNull(next) and dynamicAccessSite(next) != null and
+                            mlir.oraOperationGetMemoryEffectKind(next) == mlir.ORA_OPERATION_MEMORY_EFFECT_WRITE)
+                        {
+                            return error.LoopIndexedRegionWriteUnreviewed;
+                        }
+                        return err;
+                    };
+                }
                 const formula = try self.loopFormulaFromValueWithOverrides(
                     mlir.oraOperationGetOperand(op, 0),
                     path.formula_overrides,
@@ -2547,7 +2631,8 @@ const Collector = struct {
             }
 
             const effect_key = try self.operationStructuralKey(op, name);
-            if (try self.inventoryDynamicAccess(op, previous_op, path.source_overrides)) |access| {
+            const dynamic_access = try self.inventoryDynamicAccess(op, previous_op, path.source_overrides);
+            if (dynamic_access) |access| {
                 path.dynamic_accesses = try appendDynamicAccessInventory(
                     self.allocator,
                     path.dynamic_accesses,
@@ -2638,6 +2723,43 @@ const Collector = struct {
                     .storage_projections = location.projections,
                     .storage_value_source = try self.sourceKeyForValue(value, path.source_overrides),
                     .storage_ty = location.value_ty,
+                });
+            } else if (dynamicAccessSite(op)) |site| {
+                const expected_effect = if (std.mem.eql(u8, name, "ora.byte_at"))
+                    mlir.ORA_OPERATION_MEMORY_EFFECT_NONE
+                else
+                    mlir.ORA_OPERATION_MEMORY_EFFECT_READ;
+                if (effect_kind != expected_effect) {
+                    if (effect_kind == mlir.ORA_OPERATION_MEMORY_EFFECT_WRITE)
+                        return error.LoopIndexedRegionWriteUnreviewed;
+                    return error.LoopProjectionEffectUnsupported;
+                }
+                const result = mlir.oraOperationGetResult(op, 0);
+                const owner = try self.inventoryIndexedRegionOwner(site.base);
+                const element_mlir_ty = if (std.mem.eql(u8, name, "memref.load"))
+                    mlir.oraShapedTypeGetElementType(mlir.oraValueGetType(site.base))
+                else if (std.mem.eql(u8, name, "ora.byte_at"))
+                    mlir.oraValueGetType(result)
+                else
+                    return error.LoopIndexedRegionTypeUnsupported;
+                const element_ty = try self.typeRefFromMlirType(element_mlir_ty);
+                if (typeRefIntegerInfo(element_ty) == null)
+                    return error.LoopIndexedRegionTypeUnsupported;
+                const read_id = try self.storageReadId(op);
+                path.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, path.timeline_inventory, .{
+                    .structural_key = effect_key,
+                    .tag = .indexed_region_read,
+                    .indexed_result = read_id,
+                    .indexed_region = .calldata,
+                    .indexed_owner = owner,
+                    .indexed_index_source = try self.sourceKeyForValue(site.index, path.source_overrides),
+                    .indexed_element_ty = element_ty,
+                    .indexed_checkpoint_key = (dynamic_access orelse
+                        return error.LoopIndexedRegionCheckpointMissing).structural_key,
+                });
+                path.source_overrides = try appendValueSource(self.allocator, path.source_overrides, .{
+                    .value_id = @intFromPtr(result.ptr),
+                    .key = effect_key,
                 });
             } else if (std.mem.eql(u8, name, "ora.map_get")) {
                 if (effect_kind != mlir.ORA_OPERATION_MEMORY_EFFECT_READ or
@@ -3716,7 +3838,7 @@ const Collector = struct {
             return error.LoopProjectionEffectUnsupported;
         return .{
             .structural_key = try self.operationStructuralKey(assert_op, operationName(assert_op)),
-            .owner_identity = try self.sourceKeyForValue(check.owner, source_overrides),
+            .owner_identity = try self.dynamicAccessOwnerIdentity(check.owner, source_overrides),
             .index_identity = try self.sourceKeyForValue(check.index, source_overrides),
         };
     }
@@ -3733,9 +3855,59 @@ const Collector = struct {
         }
         return .{
             .structural_key = try self.operationStructuralKey(assert_op, operationName(assert_op)),
-            .owner_identity = try self.sourceKeyForValue(site.base, source_overrides),
+            .owner_identity = try self.dynamicAccessOwnerIdentity(site.base, source_overrides),
             .index_identity = try self.sourceKeyForValue(site.index, source_overrides),
         };
+    }
+
+    fn dynamicAccessOwnerIdentity(
+        self: *Collector,
+        value: mlir.MlirValue,
+        overrides: []const LoopValueSource,
+    ) ![]const u8 {
+        return self.sourceKeyForValue(value, overrides) catch |err| switch (err) {
+            error.UnsupportedLoopControlFlow => {
+                if (!mlir.oraValueIsAOpResult(value)) return err;
+                return self.directOperationResultKey(value);
+            },
+            else => return err,
+        };
+    }
+
+    fn projectedIndexedRegionOwner(
+        self: *Collector,
+        base: mlir.MlirValue,
+    ) !obligation.FreeVarId {
+        if (!mlir.mlirValueIsABlockArgument(base)) return indexedRegionOwnerFailure(base);
+        const parameter_index = self.functionEntryBlockArgumentNumber(base) orelse
+            return error.LoopIndexedRegionOwnerUnsupported;
+        if (parameter_index >= self.function_param_binding_ids.len or
+            !dynamicSequenceTypeHasLogicalLength(mlir.oraValueGetType(base)))
+        {
+            return error.LoopIndexedRegionOwnerUnsupported;
+        }
+        return self.function_param_binding_ids[parameter_index];
+    }
+
+    fn inventoryIndexedRegionOwner(
+        self: *Collector,
+        base: mlir.MlirValue,
+    ) !obligation.FreeVarId {
+        if (!mlir.mlirValueIsABlockArgument(base)) return indexedRegionOwnerFailure(base);
+        if (mlir.oraBlockIsNull(self.function_entry_block) or
+            mlir.mlirBlockArgumentGetOwner(base).ptr != self.function_entry_block.ptr)
+        {
+            return error.LoopIndexedRegionOwnerUnsupported;
+        }
+        const raw_index = mlir.mlirBlockArgumentGetArgNumber(base);
+        if (raw_index < 0) return error.LoopIndexedRegionOwnerUnsupported;
+        const parameter_index: usize = @intCast(raw_index);
+        if (parameter_index >= self.function_param_binding_ids.len or
+            !dynamicSequenceTypeHasLogicalLength(mlir.oraValueGetType(base)))
+        {
+            return error.LoopIndexedRegionOwnerUnsupported;
+        }
+        return self.function_param_binding_ids[parameter_index];
     }
 
     fn sourceDependencyKey(
@@ -4045,6 +4217,9 @@ const Collector = struct {
         const set: obligation.ObligationSet = .{ .terms = self.terms.items };
         for (timeline) |event| switch (event.payload) {
             .storage_read => |read| if (set.formulaReferencesFreeVar(formula, read.result)) {
+                try results.append(self.allocator, read.result);
+            },
+            .indexed_region_read => |read| if (set.formulaReferencesFreeVar(formula, read.result)) {
                 try results.append(self.allocator, read.result);
             },
             else => {},
@@ -7520,6 +7695,7 @@ fn collectNamedOperationsInBlock(
 const LoopBodyFacts = struct {
     has_storage_write: bool = false,
     has_storage_read: bool = false,
+    has_indexed_region_write: bool = false,
     has_call: bool = false,
     has_external_call: bool = false,
     has_resource_operation: bool = false,
@@ -7541,6 +7717,10 @@ fn collectLoopBodyFactsInBlock(block: mlir.MlirBlock, facts: *LoopBodyFacts) voi
         const name = operationName(child);
         if (inventoryPersistentWriteOperation(child, name)) facts.has_storage_write = true;
         if (std.mem.eql(u8, name, "ora.sload") or std.mem.eql(u8, name, "ora.tload")) facts.has_storage_read = true;
+        if (dynamicAccessSite(child) != null) {
+            if (mlir.oraOperationGetMemoryEffectKind(child) == mlir.ORA_OPERATION_MEMORY_EFFECT_WRITE)
+                facts.has_indexed_region_write = true;
+        }
         if (std.mem.eql(u8, name, "func.call") or std.mem.eql(u8, name, "ora.external_call")) facts.has_call = true;
         if (std.mem.eql(u8, name, "ora.external_call") or hasAttr(child, "ora.trusted_extern_frame")) facts.has_external_call = true;
         if (std.mem.eql(u8, name, "ora.move") or std.mem.eql(u8, name, "ora.create") or std.mem.eql(u8, name, "ora.destroy")) {
@@ -7705,6 +7885,30 @@ fn appendDynamicAccessInventory(
     return result;
 }
 
+fn indexedRegionOwnerFailure(base: mlir.MlirValue) anyerror {
+    if (mlir.oraValueIsAOpResult(base)) {
+        const name = operationName(mlir.oraOpResultGetOwner(base));
+        if (std.mem.eql(u8, name, "scf.if") or std.mem.eql(u8, name, "arith.select"))
+            return error.LoopIndexedRegionAliasUnsupported;
+    }
+    return error.LoopIndexedRegionOwnerUnsupported;
+}
+
+fn latestMatchingDynamicAccess(
+    accesses: []const LoopDynamicAccessInventory,
+    owner_identity: []const u8,
+    index_identity: []const u8,
+) ?LoopDynamicAccessInventory {
+    var index = accesses.len;
+    while (index != 0) {
+        index -= 1;
+        const access = accesses[index];
+        if (std.mem.eql(u8, access.owner_identity, owner_identity) and
+            std.mem.eql(u8, access.index_identity, index_identity)) return access;
+    }
+    return null;
+}
+
 fn safetyCheckpointKeysFromRows(
     allocator: std.mem.Allocator,
     checkpoints: []const obligation.LoopSafetyCheckpoint,
@@ -7777,7 +7981,7 @@ fn compareLoopProjection(
         if (!stringSlicesEql(semantic.summary_dependency_keys, structural.summary_dependency_keys)) {
             return .path_mismatch;
         }
-        if (!storageTimelineInventoryEql(semantic.timeline_inventory, structural.timeline_inventory) or
+        if (!effectTimelineInventoryEql(semantic.timeline_inventory, structural.timeline_inventory) or
             !dynamicAccessInventoriesEql(semantic.dynamic_accesses, structural.dynamic_accesses) or
             !timelineMatchesInventory(semantic.edge.timeline, structural.timeline_inventory))
         {
@@ -7793,34 +7997,39 @@ fn timelineInventoriesEql(
 ) bool {
     if (lhs.len != rhs.len) return false;
     for (lhs, rhs) |left, right| {
-        if (!std.mem.eql(u8, left.structural_key, right.structural_key) or left.tag != right.tag or
-            !optionalStringEql(left.formula_source, right.formula_source) or
-            !optionalStringEql(left.storage_root, right.storage_root) or
-            !storageProjectionInventoriesEql(left.storage_projections, right.storage_projections) or
-            !optionalFreeVarEql(left.storage_result, right.storage_result) or
-            !optionalStringEql(left.storage_value_source, right.storage_value_source) or
-            !optionalTypeRefEql(left.storage_ty, right.storage_ty) or
-            !optionalDependencyEql(left.summary_dependency, right.summary_dependency)) return false;
+        if (!timelineInventoryEventEql(left, right)) return false;
     }
     return true;
 }
 
-fn storageTimelineInventoryEql(
+fn timelineInventoryEventEql(left: LoopTimelineInventoryEvent, right: LoopTimelineInventoryEvent) bool {
+    return std.mem.eql(u8, left.structural_key, right.structural_key) and left.tag == right.tag and
+        optionalStringEql(left.formula_source, right.formula_source) and
+        optionalStringEql(left.storage_root, right.storage_root) and
+        storageProjectionInventoriesEql(left.storage_projections, right.storage_projections) and
+        optionalFreeVarEql(left.storage_result, right.storage_result) and
+        optionalStringEql(left.storage_value_source, right.storage_value_source) and
+        optionalTypeRefEql(left.storage_ty, right.storage_ty) and
+        optionalFreeVarEql(left.indexed_result, right.indexed_result) and
+        left.indexed_region == right.indexed_region and
+        optionalFreeVarEql(left.indexed_owner, right.indexed_owner) and
+        optionalStringEql(left.indexed_index_source, right.indexed_index_source) and
+        optionalTypeRefEql(left.indexed_element_ty, right.indexed_element_ty) and
+        optionalStringEql(left.indexed_checkpoint_key, right.indexed_checkpoint_key) and
+        optionalDependencyEql(left.summary_dependency, right.summary_dependency);
+}
+
+fn effectTimelineInventoryEql(
     semantic: []const LoopTimelineInventoryEvent,
     structural: []const LoopTimelineInventoryEvent,
 ) bool {
     var semantic_index: usize = 0;
     for (structural) |right| {
-        if (right.tag != .storage_read and right.tag != .storage_write) continue;
+        if (right.tag != .storage_read and right.tag != .storage_write and
+            right.tag != .indexed_region_read) continue;
         if (semantic_index >= semantic.len) return false;
         const left = semantic[semantic_index];
-        if (!std.mem.eql(u8, left.structural_key, right.structural_key) or left.tag != right.tag or
-            !optionalStringEql(left.storage_root, right.storage_root) or
-            !storageProjectionInventoriesEql(left.storage_projections, right.storage_projections) or
-            !optionalFreeVarEql(left.storage_result, right.storage_result) or
-            !optionalStringEql(left.storage_value_source, right.storage_value_source) or
-            !optionalTypeRefEql(left.storage_ty, right.storage_ty) or
-            !optionalDependencyEql(left.summary_dependency, right.summary_dependency)) return false;
+        if (!timelineInventoryEventEql(left, right)) return false;
         semantic_index += 1;
     }
     return semantic_index == semantic.len;
@@ -7851,7 +8060,15 @@ fn timelineMatchesInventory(
                 !storageProjectionsMatchInventory(write.location.projections, item.storage_projections) or
                 !optionalTypeRefEql(write.location.value_ty, item.storage_ty) or
                 item.storage_value_source == null) return false,
-            .indexed_region_read => return false,
+            .indexed_region_read => |read| {
+                if (!optionalFreeVarEql(read.result, item.indexed_result) or
+                    item.indexed_region != read.region or
+                    !optionalFreeVarEql(read.owner, item.indexed_owner) or
+                    read.index.formula == .origin_value or
+                    item.indexed_index_source == null or item.indexed_index_source.?.len == 0 or
+                    !optionalTypeRefEql(read.element_ty, item.indexed_element_ty) or
+                    !optionalStringEql(read.checkpoint_structural_key, item.indexed_checkpoint_key)) return false;
+            },
             .summary_dependency => |dependency| if (!optionalDependencyEql(dependency, item.summary_dependency)) return false,
             .path_assumption, .safety_checkpoint => {},
         }
@@ -7929,6 +8146,32 @@ fn dynamicAccessInventoriesEql(
             !std.mem.eql(u8, left.index_identity, right.index_identity)) return false;
     }
     return true;
+}
+
+fn loopProjectionHasMultipleIndexedRegionOwners(edges: []const ProjectedLoopEdge) bool {
+    var first: ?obligation.FreeVarId = null;
+    for (edges) |edge| for (edge.edge.timeline) |event| switch (event.payload) {
+        .indexed_region_read => |read| {
+            if (first) |owner| {
+                if (!obligation.freeVarIdEql(owner, read.owner)) return true;
+            } else first = read.owner;
+        },
+        else => {},
+    };
+    return false;
+}
+
+fn loopProjectionHasIndexedRegionEvent(
+    projected: []const ProjectedLoopEdge,
+    inventory: []const InventoryLoopEdge,
+) bool {
+    for (projected) |edge| for (edge.edge.timeline) |event| {
+        if (event.payload == .indexed_region_read) return true;
+    };
+    for (inventory) |edge| for (edge.timeline_inventory) |event| {
+        if (event.tag == .indexed_region_read) return true;
+    };
+    return false;
 }
 
 fn optionalDependencyEql(
@@ -8457,6 +8700,17 @@ fn headerFactProjectionFailure(err: anyerror) ?obligation.LoopUnsupportedReason 
         error.LoopHeaderFactTypeUnsupported => .loop_header_fact_type_unsupported,
         error.LoopHeaderFactEffectUnsupported => .loop_header_fact_effect_unsupported,
         error.LoopHeaderFactAssumptionMismatch => .loop_header_fact_assumption_mismatch,
+        else => null,
+    };
+}
+
+fn indexedRegionProjectionFailure(err: anyerror) ?obligation.LoopUnsupportedReason {
+    return switch (err) {
+        error.LoopIndexedRegionAliasUnsupported => .loop_indexed_region_alias_unsupported,
+        error.LoopIndexedRegionOwnerUnsupported => .loop_indexed_region_owner_unsupported,
+        error.LoopIndexedRegionWriteUnreviewed => .loop_indexed_region_write_unreviewed,
+        error.LoopIndexedRegionCheckpointMissing => .loop_indexed_region_checkpoint_missing,
+        error.LoopIndexedRegionTypeUnsupported => .loop_value_type_unresolved,
         else => null,
     };
 }
@@ -9090,6 +9344,76 @@ test "dynamic access projection requires an identical independent inventory row"
 
     changed.dynamic_accesses = &.{ access_inventory, access_inventory };
     try std.testing.expectEqual(.effect_mismatch, compareLoopProjection(&.{semantic}, &.{changed}));
+}
+
+test "indexed region timeline comparison covers every projected access field" {
+    const ty: obligation.TypeRef = .{ .compiler_type_id = 6 };
+    const owner: obligation.FreeVarId = .{ .file_id = 1, .pattern_id = 2 };
+    const result: obligation.FreeVarId = .{ .file_id = Collector.storage_read_file_id, .pattern_id = 9 };
+    const read: obligation.LoopIndexedRegionReadEvent = .{
+        .result = result,
+        .region = .calldata,
+        .owner = owner,
+        .index = .{ .formula = .{ .term = 4 } },
+        .element_ty = ty,
+        .checkpoint_structural_key = "body/check",
+    };
+    const timeline = [_]obligation.LoopTimelineEvent{
+        .{ .id = 0, .structural_key = "body/path", .payload = .{ .path_assumption = .{
+            .formulas = &.{.{ .formula = .{ .term = 2 } }},
+        } } },
+        .{ .id = 1, .structural_key = "body/check", .payload = .{ .safety_checkpoint = .{
+            .formulas = &.{.{ .formula = .{ .term = 3 } }},
+            .dynamic_index_bounds = true,
+        } } },
+        .{ .id = 2, .structural_key = "body/read", .payload = .{ .indexed_region_read = read } },
+    };
+    const semantic_rows = [_]LoopTimelineInventoryEvent{.{
+        .structural_key = "body/read",
+        .tag = .indexed_region_read,
+        .indexed_result = result,
+        .indexed_region = .calldata,
+        .indexed_owner = owner,
+        .indexed_index_source = "loop-state:0",
+        .indexed_element_ty = ty,
+        .indexed_checkpoint_key = "body/check",
+    }};
+    var rows = [_]LoopTimelineInventoryEvent{
+        .{ .structural_key = "body/path", .tag = .path_assumption },
+        .{ .structural_key = "body/check", .tag = .safety_checkpoint },
+        semantic_rows[0],
+    };
+    const checkpoint: LoopSafetyCheckpointKey = .{ .structural_key = "body/check", .after_dependency_count = 0 };
+    const semantic: ProjectedLoopEdge = .{
+        .edge = .{ .id = 0, .structural_key = "body/yield", .timeline = &timeline, .target = .backedge },
+        .terminator_key = "body/yield",
+        .safety_checkpoints = &.{checkpoint},
+        .effect_keys = &.{"body/read"},
+        .state_source_keys = &.{},
+        .timeline_inventory = &semantic_rows,
+    };
+    const inventory: InventoryLoopEdge = .{
+        .structural_key = "body/yield",
+        .target = .backedge,
+        .terminator_key = "body/yield",
+        .binding_source_keys = &.{},
+        .safety_checkpoints = &.{checkpoint},
+        .effect_keys = &.{"body/read"},
+        .state_source_keys = &.{},
+        .timeline_inventory = &rows,
+    };
+    try std.testing.expectEqual(.complete, compareLoopProjection(&.{semantic}, &.{inventory}));
+
+    inline for (.{ "result", "region", "owner", "index", "type", "checkpoint" }) |field| {
+        rows[2] = semantic_rows[0];
+        if (comptime std.mem.eql(u8, field, "result")) rows[2].indexed_result.?.pattern_id += 1;
+        if (comptime std.mem.eql(u8, field, "region")) rows[2].indexed_region = .memory;
+        if (comptime std.mem.eql(u8, field, "owner")) rows[2].indexed_owner.?.pattern_id += 1;
+        if (comptime std.mem.eql(u8, field, "index")) rows[2].indexed_index_source = "loop-state:1";
+        if (comptime std.mem.eql(u8, field, "type")) rows[2].indexed_element_ty = .{ .compiler_type_id = 5 };
+        if (comptime std.mem.eql(u8, field, "checkpoint")) rows[2].indexed_checkpoint_key = "body/other";
+        try std.testing.expectEqual(.effect_mismatch, compareLoopProjection(&.{semantic}, &.{inventory}));
+    }
 }
 
 test "direct-root timeline inventory compares every storage event field" {
