@@ -263,6 +263,8 @@ pub const Adapter = struct {
         defer self.use_free_variable_identity_names = false;
 
         try self.appendLoopAssumptions(constraints, query.assumption_ids);
+        for (summary.header_facts) |fact|
+            try self.appendFormulaPremises(constraints, &.{fact.formula});
 
         switch (query.kind) {
             .loop_base => {

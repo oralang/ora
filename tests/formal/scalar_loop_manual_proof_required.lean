@@ -64,7 +64,7 @@ theorem discharge_q12 : emittedQuery_12 := by
             Ora.Loop.EdgeRow.safety_eq_timeline,
             Ora.Loop.timelinePathView, Ora.Loop.timelineSafetyView,
             Ora.Loop.timelineSafetyViewFrom]
-          exact hInitial
+          exact ⟨by simp [Ora.Loop.headerFactsHoldInEnv], hInitial⟩
   · intro env hAssumptions hContext
     simp only [Ora.Loop.loopInductionObligationsAtEnv,
       Ora.Loop.denoteLoopSummary?, hSupported, Ora.Loop.denoteEdges?,
@@ -76,6 +76,7 @@ theorem discharge_q12 : emittedQuery_12 := by
     constructor
     · intro state hInitial
       dsimp at hInitial ⊢
+      rcases hInitial with ⟨hHeaderFacts, hInitial⟩
       have hReady := Ora.Loop.initialized_state_ready emittedManifest env
         (autoSummary).variables (autoSummary).init state hInitial
       simp only [Ora.Loop.valuesInitializeState, Ora.Loop.initializeState?, Ora.Loop.evaluateIntegerFormulas?, Ora.Loop.integerFormulaValue?, Ora.Loop.valuesMatchVariables] at hInitial
@@ -84,7 +85,7 @@ theorem discharge_q12 : emittedQuery_12 := by
       have hState := (Option.some.inj hInitial).symm
       subst state
       let auto_following_bits_0 := (BitVec.ofNat 256 0)
-      refine ⟨hReady, ?_⟩
+      refine ⟨hReady, hHeaderFacts, ?_⟩
       intro formula hFormula
       simp at hFormula
       rcases hFormula with hFormula | hFormula <;> subst formula
@@ -117,7 +118,7 @@ theorem discharge_q12 : emittedQuery_12 := by
       rcases hMember with hMember | hMember
       · subst edge
         dsimp at hTarget hInvariant hPath hSafe hNext ⊢
-        rcases hInvariant with ⟨hReady, hInvariant⟩
+        rcases hInvariant with ⟨hReady, hHeaderFacts, hInvariant⟩
         have hFollowingReady := Ora.Loop.bound_state_ready emittedManifest env
           (autoSummary).variables current following
           (autoSummary).edges[0].nextState hNext
@@ -147,7 +148,7 @@ theorem discharge_q12 : emittedQuery_12 := by
             have hFollowing := (Option.some.inj hNext).symm
             subst following
             let auto_following_bits_0 := (Ora.Integer.wrappingResult (.unsigned .w256) .add auto_state_bits_0 (BitVec.ofNat 256 1))
-            refine ⟨hFollowingReady, ?_⟩
+            refine ⟨hFollowingReady, hHeaderFacts, ?_⟩
             intro formula hFormula
             simp at hFormula
             rcases hFormula with hFormula | hFormula <;> subst formula
@@ -184,7 +185,7 @@ theorem discharge_q12 : emittedQuery_12 := by
       rcases hMember with hMember | hMember
       · subst edge
         dsimp at hInvariant hPath ⊢
-        rcases hInvariant with ⟨hReady, hInvariant⟩
+        rcases hInvariant with ⟨hReady, _, hInvariant⟩
         rcases state with _ | ⟨auto_state_value_0, auto_state_tail_0⟩
         · simp [Ora.Loop.stateReady, Ora.Loop.valuesMatchVariables] at hReady
         ·
@@ -242,7 +243,7 @@ theorem discharge_q12 : emittedQuery_12 := by
         simp at hTarget
       · subst edge
         dsimp at hTarget hInvariant hPath hSafe hNext ⊢
-        rcases hInvariant with ⟨hReady, hInvariant⟩
+        rcases hInvariant with ⟨hReady, _, hInvariant⟩
         rcases current with _ | ⟨auto_state_value_0, auto_state_tail_0⟩
         · simp [Ora.Loop.stateReady, Ora.Loop.valuesMatchVariables] at hReady
         ·

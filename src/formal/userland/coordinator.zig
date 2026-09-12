@@ -1272,11 +1272,12 @@ fn automaticLoopPlan(
     if (query.kind != .loop_induction or query.loop_summary_id == null) {
         return .{ .unsupported = .automatic_query_shape_unsupported };
     }
-    if (query.assumption_ids.len != 0) {
-        return .{ .unsupported = .automatic_assumptions_require_external_certificate };
-    }
     const summary = obligation.findById(set.loop_summaries, query.loop_summary_id.?) orelse
         return .{ .unsupported = .automatic_query_shape_unsupported };
+    set.validateTermReferences() catch return .{ .unsupported = .automatic_query_shape_unsupported };
+    set.validateIdReferences() catch return .{ .unsupported = .automatic_query_shape_unsupported };
+    if (!set.loopHeaderFactsMatchAssumptions(summary, query.assumption_ids))
+        return .{ .unsupported = .automatic_assumptions_require_external_certificate };
     if (!summary.projectionSupported() or summary.edges.len < 2) {
         return .{ .unsupported = .automatic_control_shape_unsupported };
     }
@@ -1502,6 +1503,14 @@ fn writeAutomaticLoopProof(
             .{summary.id},
         );
     }
+    try writer.writeAll("private abbrev autoAssumptions : List AssumptionRow := [");
+    for (query.assumption_ids, 0..) |id, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writer.print("emittedAssumptionRow_{d}", .{id});
+    }
+    try writer.writeAll("]\nattribute [local ora_loop_row] autoAssumptions");
+    for (query.assumption_ids) |id| try writer.print(" emittedAssumptionRow_{d}", .{id});
+    try writer.writeByte('\n');
     try writer.print(
         "theorem discharge_q{d} : emittedQuery_{d} := by ora_loop_auto\n" ++
             "end\n",
@@ -1559,6 +1568,7 @@ fn markAutomaticSummaryClosure(
     fuel: usize,
 ) !void {
     if (fuel == 0) return error.InvalidDependency;
+    for (summary.header_facts) |fact| try markAutomaticFormulaClosure(set, fact.formula, marked);
     for (summary.init_formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
     for (summary.invariant_formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
     for (summary.edges) |edge| {
@@ -1954,18 +1964,24 @@ test "automatic loop proof source delegates to repository tactic deterministical
         .edges = &edges,
         .projection_completeness = .complete,
         .post_formulas = &.{.{ .term = 4 }},
+        .query_ids = .{
+            .base = &.{11},
+            .induction = &.{10},
+            .body_safety = &.{ 12, 13 },
+            .step = &.{14},
+            .post = &.{15},
+        },
     }};
-    const queries = [_]obligation.VerificationQuery{.{
-        .id = 10,
-        .owner = .{ .function = .{ .name = "countTo" } },
-        .source = .{},
-        .phase = .ora_mlir,
-        .origin = .source,
-        .proof_requirement = .lean_certificate,
-        .backend = .lean,
-        .kind = .loop_induction,
-        .loop_summary_id = 1,
-    }};
+    const digest = [_]u8{0xA5} ** 32;
+    const owner: obligation.Owner = .{ .function = .{ .name = "countTo" } };
+    const queries = [_]obligation.VerificationQuery{
+        .{ .id = 10, .owner = owner, .source = .{}, .phase = .ora_mlir, .origin = .source, .proof_requirement = .lean_certificate, .kind = .loop_induction, .loop_summary_id = 1, .loop_vc_sha256 = digest },
+        .{ .id = 11, .owner = owner, .source = .{}, .phase = .ora_mlir, .origin = .source, .backend = .z3, .kind = .loop_base, .loop_summary_id = 1, .loop_vc_sha256 = digest },
+        .{ .id = 12, .owner = owner, .source = .{}, .phase = .ora_mlir, .origin = .source, .backend = .z3, .kind = .loop_body_safety, .loop_summary_id = 1, .loop_edge_id = 0, .loop_vc_sha256 = digest },
+        .{ .id = 13, .owner = owner, .source = .{}, .phase = .ora_mlir, .origin = .source, .backend = .z3, .kind = .loop_body_safety, .loop_summary_id = 1, .loop_edge_id = 1, .loop_vc_sha256 = digest },
+        .{ .id = 14, .owner = owner, .source = .{}, .phase = .ora_mlir, .origin = .source, .backend = .z3, .kind = .loop_invariant_step, .loop_summary_id = 1, .loop_edge_id = 0, .loop_vc_sha256 = digest },
+        .{ .id = 15, .owner = owner, .source = .{}, .phase = .ora_mlir, .origin = .source, .backend = .z3, .kind = .loop_invariant_post, .loop_summary_id = 1, .loop_edge_id = 1, .loop_vc_sha256 = digest },
+    };
     const set: obligation.ObligationSet = .{
         .terms = &terms,
         .queries = &queries,

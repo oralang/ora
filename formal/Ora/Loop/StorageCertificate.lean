@@ -799,9 +799,10 @@ def denoteDirectStorageLoopSummary?
     else
       denoteDirectStoragePreheaderInitial? manifest base row
     pure {
-      initial
+      initial := fun state => headerFactsHoldInEnv manifest base row.headerFacts ∧ initial state
       invariant := fun state =>
         stateReady row.variables state.locals ∧
+          headerFactsHoldInEnv manifest base row.headerFacts ∧
           directFormulasHold context entry state row.invariants
       edges
     }
@@ -822,9 +823,11 @@ theorem direct_storage_summary_denotes
   let entry := storageStateFromEnv base true
   let current := directStoragePreheaderState base row
   refine ⟨{
-    initial := fun state => state.storage = current ∧
+    initial := fun state => headerFactsHoldInEnv manifest base row.headerFacts ∧
+      state.storage = current ∧
       directInitialValues? context entry current row.init = some state.locals
     invariant := fun state => stateReady row.variables state.locals ∧
+      headerFactsHoldInEnv manifest base row.headerFacts ∧
       directFormulasHold context entry state row.invariants
     edges := edges
   }, ?_⟩
@@ -840,7 +843,8 @@ theorem scalar_initial_values_of_denotation
     (locals : ScalarLoopState)
     (hSummary : denoteLoopSummary? manifest base row = some summary)
     (hInitial : summary.initial locals) :
-    valuesInitializeState manifest base row.variables row.init locals := by
+    headerFactsHoldInEnv manifest base row.headerFacts ∧
+      valuesInitializeState manifest base row.variables row.init locals := by
   unfold denoteLoopSummary? at hSummary
   have hSupported : row.supported manifest = true := by
     cases hValue : row.supported manifest <;> simp [hValue] at hSummary ⊢
@@ -862,7 +866,8 @@ theorem direct_initial_of_control_denotation
     (hSummary : denoteDirectStorageLoopSummary? manifest base row = some summary)
     (hEmpty : row.preheaderTimeline.isEmpty = true)
     (hCompatible : directInitialControlCompatible manifest base row.variables row.init)
-    (hInitial : valuesInitializeState manifest base row.variables row.init locals) :
+    (hInitial : headerFactsHoldInEnv manifest base row.headerFacts ∧
+      valuesInitializeState manifest base row.variables row.init locals) :
     summary.initial {
       locals := locals
       storage := directStoragePreheaderState base row
@@ -878,11 +883,10 @@ theorem direct_initial_of_control_denotation
       simp only [hEdges, Option.bind_eq_bind, Option.some_bind,
         Option.pure_def, Option.some.injEq] at hSummary
       subst summary
-      constructor
-      · rfl
-      · unfold valuesInitializeState at hInitial
-        rw [hCompatible]
-        exact hInitial
+      refine ⟨hInitial.1, rfl, ?_⟩
+      unfold valuesInitializeState at hInitial
+      rw [hCompatible]
+      exact hInitial.2
 
 theorem direct_storage_summary_refinement
     (manifest : Manifest)
@@ -929,14 +933,15 @@ theorem direct_storage_summary_refinement
               hAbstractEdges hConcreteEdges
           }
           · intro state hExact
+            refine ⟨hExact.1, ?_⟩
             unfold valuesInitializeState
             rw [← hInitial (storageStateFromEnv base true)
               (directStoragePreheaderState base row)]
-            exact hExact.2
+            exact hExact.2.2
           · intro state
-            exact and_congr Iff.rfl
+            exact and_congr Iff.rfl (and_congr Iff.rfl
               (direct_formulas_control_compatible manifest base row.variables
-                row.invariants hInvariant state (storageStateFromEnv base true))
+                row.invariants hInvariant state (storageStateFromEnv base true)))
 
 def directStorageLoopProofAuthorizationFromAssumptions
     (manifest : Manifest) (assumptions : List AssumptionRow) (row : SummaryRow) : Prop :=

@@ -1,0 +1,58 @@
+contract LoopHeaderFactAuto {
+    pub fn fromRequires(limit: u256) -> u256
+    requires limit <= 4
+    {
+        var i: u256 = 0;
+        while (i < limit)
+        invariant i <= 4
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+
+    pub fn fromFallthrough(limit: u256) -> u256 {
+        if (limit > 4) {
+            return 0;
+        }
+        var i: u256 = 0;
+        while (i < limit)
+        invariant i <= 4
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+
+    pub fn acrossEarlierLoop(limit: u256) -> u256
+    requires limit <= 4
+    {
+        var first: u256 = 0;
+        while (first < 1)
+        invariant first <= 1
+        {
+            first = first + 1;
+        }
+
+        var second: u256 = 0;
+        while (second < limit)
+        invariant second <= 4
+        {
+            second = second + 1;
+        }
+        return second;
+    }
+
+    pub fn fromDynamicLength(values: slice[u256]) -> u256 {
+        if (values.len > 4) {
+            return 0;
+        }
+        var i: u256 = 0;
+        while (i < values.len)
+        invariant i <= 4
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+}

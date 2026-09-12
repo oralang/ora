@@ -12269,8 +12269,8 @@ test "structured loop certificates arm the real CLI and missing proofs block art
     try expectExited(result, 1);
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "certificate-required=1"));
     try testing.expect(
-        std.mem.containsAtLeast(u8, result.stdout, 1, "header_fact_authority_unreviewed") or
-            std.mem.containsAtLeast(u8, result.stderr, 1, "header_fact_authority_unreviewed"),
+        std.mem.containsAtLeast(u8, result.stdout, 1, "lean_required_failure") or
+            std.mem.containsAtLeast(u8, result.stderr, 1, "lean_required_failure"),
     );
     const artifact_path = try std.fs.path.join(allocator, &.{ output_path, "loop_structured_cli.hex" });
     defer allocator.free(artifact_path);
@@ -12329,8 +12329,57 @@ test "loop header facts project canonical assumptions through an independent sta
     try testing.expectEqual(@as(usize, 2), earlier_loop_count);
     try testing.expect(storage_rejected and call_rejected);
     try testing.expectEqual(
-        obligation.ArtifactDecision{ .blocked = .header_fact_authority_unreviewed },
+        obligation.ArtifactDecision{ .blocked = .missing_proof },
         result.set.artifactDecision(),
+    );
+}
+
+test "repository tactic certifies dominating loop header facts deterministically" {
+    try expectRepositoryStorageTacticDeterministic(
+        "tests/formal/loop_header_fact_auto.ora",
+        "loop_header_fact_auto",
+        5,
+    );
+}
+
+test "unsupported loop header facts block bytecode with named exclusions" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output = try pathFromTmpAlloc(allocator, tmp, "blocked");
+    defer allocator.free(output);
+    const run = try runProcessWithLeanPath(allocator, &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=bytecode",
+        "--out-dir",
+        output,
+        "--lean-proofs",
+        "tests/formal/loop_header_fact_projection.ora",
+    });
+    defer allocator.free(run.stdout);
+    defer allocator.free(run.stderr);
+    try expectExited(run, 1);
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        run.stdout,
+        1,
+        "excluded_by=loop_header_fact_type_unsupported",
+    ));
+    try testing.expect(std.mem.containsAtLeast(
+        u8,
+        run.stdout,
+        1,
+        "excluded_by=loop_header_fact_effect_unsupported",
+    ));
+    try testing.expectError(
+        error.FileNotFound,
+        tmp.dir.access(std.testing.io, "blocked/loop_header_fact_projection.hex", .{}),
     );
 }
 

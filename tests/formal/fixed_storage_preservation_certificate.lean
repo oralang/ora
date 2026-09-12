@@ -89,6 +89,25 @@ theorem second_assumption_holds
     simp [hThird, assumptionAnd?] at hAll
   exact hAll.2.1
 
+set_option maxRecDepth 4096 in
+private theorem headerFacts_of_assumptions
+    (env : Env)
+    (hAssumptions : assumptionsDenoteInEnv emittedManifest env
+      [emittedAssumptionRow_1, emittedAssumptionRow_2, emittedAssumptionRow_3]) :
+    Ora.Loop.headerFactsHoldInEnv emittedManifest env emittedLoopSummary_1.headerFacts := by
+  intro fact hFact
+  simp only [emittedLoopSummary_1, List.mem_cons, List.not_mem_nil, or_false] at hFact
+  rcases hFact with rfl | rfl | rfl
+  · simpa [Ora.Loop.formulaHoldsInEnv, assumptionDenotesInEnv?, emittedAssumptionRow_1]
+      using first_assumption_holds emittedManifest env emittedAssumptionRow_1
+        emittedAssumptionRow_2 emittedAssumptionRow_3 hAssumptions
+  · simpa [Ora.Loop.formulaHoldsInEnv, assumptionDenotesInEnv?, emittedAssumptionRow_2]
+      using second_assumption_holds emittedManifest env emittedAssumptionRow_1
+        emittedAssumptionRow_2 emittedAssumptionRow_3 hAssumptions
+  · simpa [Ora.Loop.formulaHoldsInEnv, assumptionDenotesInEnv?, emittedAssumptionRow_3]
+      using third_assumption_holds emittedManifest env emittedAssumptionRow_1
+        emittedAssumptionRow_2 emittedAssumptionRow_3 hAssumptions
+
 theorem some_prop_of_match_holds (value : Option Prop)
     (hValue : match value with | some proposition => proposition | none => False) :
     ∃ proposition, value = some proposition ∧ proposition := by
@@ -114,13 +133,26 @@ theorem discharge_q17 : emittedQuery_17 := by
       |>.setFree { file_id := 0, pattern_id := 0 } zero)
       |>.setFree { file_id := 0, pattern_id := 1 } one)
       |>.setFree { file_id := 0, pattern_id := 2 } zero
+    have hWitnessAssumptions : assumptionsDenoteInEnv emittedManifest witness
+        [emittedAssumptionRow_1, emittedAssumptionRow_2, emittedAssumptionRow_3] := by
+      simp only [assumptionsDenoteInEnv, assumptionsDenoteInEnv?,
+        assumptionDenotesInEnv?, assumptionAnd?, emittedAssumptionRow_1,
+        emittedAssumptionRow_2, emittedAssumptionRow_3, formulaDenotes?,
+        denoteFormula?, denoteValue?, emitted_term_0_lookup, emitted_term_1_lookup,
+        emitted_term_2_lookup, emitted_term_3_lookup, emitted_term_4_lookup,
+        emitted_term_5_lookup, emitted_term_6_lookup, emitted_term_7_lookup,
+        emitted_term_8_lookup, Env.lookupVar, Env.lookupFree,
+        Option.bind_eq_bind, Option.some_bind, Option.none_bind, Option.pure_def]
+      simp [witness, zero, one, Env.setFree, lookupFreeBinding,
+        TyRef.integerShape?, integerShapeForCompilerTypeId_u256,
+        IntegerLiteralTerm.asInteger?, Ora.Integer.Value.ofNat]
+      ora_loop_value_reduce
+      repeat' apply And.intro
+      all_goals ora_loop_close
     refine ⟨witness, {
       locals := [Ora.Integer.Value.ofNat (.unsigned .w256) 0]
       storage := Ora.Loop.storageStateFromEnv witness true
-    }, ?_, ?_, ?_⟩
-    · dsimp [witness, zero, one]
-      ora_loop_reduce
-      simp
+    }, hWitnessAssumptions, ?_, ?_⟩
     · simp [Ora.Loop.contextReady, emittedLoopSummary_1, witness, zero, one,
         Env.setFree, Env.lookupFree, lookupFreeBinding,
         TyRef.integerShape?, integerShapeForCompilerTypeId_u256]
@@ -133,8 +165,10 @@ theorem discharge_q17 : emittedQuery_17 := by
         Ora.Loop.denoteControlTarget?, Option.bind_eq_bind,
         Option.some_bind, Option.pure_def, emittedLoopSummary_1,
         List.isEmpty, List.map, List.append, Bool.not_false, Bool.not_true,
-        Bool.false_or, Bool.false_eq_true, if_false]
-      constructor <;> rfl
+      Bool.false_or, Bool.false_eq_true, if_false]
+      constructor
+      · exact headerFacts_of_assumptions witness hWitnessAssumptions
+      · constructor <;> rfl
   · intro env hAssumptions hContext
     have hWrite := hContext {
       index := 0
@@ -232,7 +266,7 @@ theorem discharge_q17 : emittedQuery_17 := by
       Bool.false_or, Bool.false_eq_true, if_false]
     refine { base := ?_, backedge := ?_, edgeSafety := ?_, exit := ?_ }
     · intro state hInitial
-      rcases hInitial with ⟨hStorage, hLocals⟩
+      rcases hInitial with ⟨hHeaderFacts, hStorage, hLocals⟩
       rcases state with ⟨locals, storage⟩
       change some [Ora.Integer.Value.ofNat (.unsigned .w256) 0] =
         some locals at hLocals
@@ -244,23 +278,25 @@ theorem discharge_q17 : emittedQuery_17 := by
       · simp [Ora.Loop.stateReady, Ora.Loop.valuesMatchVariables,
           emittedLoopSummary_1, TyRef.integerShape?,
           integerShapeForCompilerTypeId_u256, Ora.Integer.Value.ofNat]
-      · intro formula hFormula
-        simp only [List.mem_cons, List.not_mem_nil, or_false] at hFormula
-        rcases hFormula with rfl
-        unfold Ora.Loop.StorageFormulaContext.evalFormula?
-          Ora.Loop.StorageFormulaContext.stateEnv?
-          Ora.Loop.directStorageContext
-        simp only [Ora.Loop.bindStorageReads, List.foldl,
+      · constructor
+        · exact hHeaderFacts
+        · intro formula hFormula
+          simp only [List.mem_cons, List.not_mem_nil, or_false] at hFormula
+          rcases hFormula with rfl
+          unfold Ora.Loop.StorageFormulaContext.evalFormula?
+            Ora.Loop.StorageFormulaContext.stateEnv?
+            Ora.Loop.directStorageContext
+          simp only [Ora.Loop.bindStorageReads, List.foldl,
           Option.bind_eq_bind, Option.some_bind, Option.none_bind]
-        ora_loop_reduce
-        simp only [Ora.Loop.StorageFormulaContext.formulaStorageReady,
+          ora_loop_reduce
+          simp only [Ora.Loop.StorageFormulaContext.formulaStorageReady,
           Ora.Loop.StorageFormulaContext.termStorageReady,
           Ora.Loop.StorageFormulaContext.withStoreViews,
           Ora.Loop.directStorageResolvePlace, ora_loop_data,
           formulaDenotes?, denoteFormula?, denoteValue?, Env.lookupVar,
           Env.lookupFree, Option.bind_eq_bind, Option.some_bind,
           Option.none_bind, Option.pure_def]
-        simp only [hObservedKey, hObservedUnsigned, Env.lookupFree, Env.lookupPlace,
+          simp only [hObservedKey, hObservedUnsigned, Env.lookupFree, Env.lookupPlace,
           Env.lookupEntryPlace, lookupFreeBinding,
           Ora.Loop.StorageFormulaContext.withStoreViews,
           Ora.Loop.directStorageResolvePlace,
@@ -271,22 +307,23 @@ theorem discharge_q17 : emittedQuery_17 := by
           Option.bind_eq_bind, Option.some_bind, Option.none_bind,
           Option.pure_def, List.isEmpty, Bool.not_true,
           Bool.not_false, Bool.false_or, Bool.true_or]
-        have hRegion : (RegionRef.storage != RegionRef.storage) = false := by decide
-        have hRoot : "values".isEmpty = false := by decide
-        simp only [hRegion, hRoot, Bool.false_eq_true, if_false]
-        generalize hStored : env.placeValue (.entry ({
-          root := "values"
-          region := .storage
-        } : PlaceRef)) = stored
-        cases stored <;> simp [hStored, hObservedBinding,
-          hObservedUnsigned] <;>
-          exact ⟨True, trivial⟩
+          have hRegion : (RegionRef.storage != RegionRef.storage) = false := by decide
+          have hRoot : "values".isEmpty = false := by decide
+          simp only [hRegion, hRoot, Bool.false_eq_true, if_false]
+          generalize hStored : env.placeValue (.entry ({
+            root := "values"
+            region := .storage
+          } : PlaceRef)) = stored
+          cases stored <;> simp [hStored, hObservedBinding,
+            hObservedUnsigned] <;>
+            exact ⟨True, trivial⟩
     · simp only [Ora.Loop.LoopVC.BackedgeObligation,
         Ora.Loop.timelineEdge]
       intro edge current following hMember hTarget hInvariant hPath hSafe hNext
       simp only [List.mem_cons, List.not_mem_nil, or_false] at hMember
       rcases hMember with rfl | rfl
       · dsimp at hNext ⊢
+        rcases hInvariant with ⟨hInvariantReady, hHeaderFacts, hInvariantFormulas⟩
         rcases hNext with ⟨result, locals, hExec, hLocals, rfl⟩
         let variables := emittedLoopSummary_1.variables
         let bindings := emittedLoopSummary_1.edges[0].nextState
@@ -452,76 +489,75 @@ theorem discharge_q17 : emittedQuery_17 := by
                 subst written
                 exact Ora.Loop.directStorageFixedIndexLocations_ne "values"
                   (.integer observedKey) (.integer writeKey) hKeysNe.symm
-            constructor
-            · exact hReady
-            · intro formula hFormula
-              simp only [List.mem_cons, List.not_mem_nil, or_false] at hFormula
-              rcases hFormula with rfl
-              have hCurrent := hInvariant.2 (.term 16) (by simp)
-              rcases hCurrent with ⟨proposition, hCurrentEval, hHolds⟩
-              refine ⟨proposition, ?_, hHolds⟩
-              rw [← hCurrentEval]
-              rcases Ora.Loop.bindState_some_of_stateReady env variables
-                  current.locals hInvariant.1 with
-                ⟨currentBound, hCurrentBound⟩
-              rcases Ora.Loop.bindState_some_of_stateReady env variables
-                  locals hReady with
-                ⟨followingBound, hFollowingBound⟩
-              have hObservedFresh :
-                  { file_id := 0, pattern_id := 1 } ∉
-                    variables.map Ora.Loop.VariableRow.id := by
-                simp [variables, emittedLoopSummary_1]
-              have hCurrentObserved := Ora.Loop.bindState_lookupFree_of_not_mem
-                env currentBound variables current.locals
-                { file_id := 0, pattern_id := 1 }
-                hObservedFresh hCurrentBound
-              have hFollowingObserved := Ora.Loop.bindState_lookupFree_of_not_mem
-                env followingBound variables locals
-                { file_id := 0, pattern_id := 1 }
-                hObservedFresh hFollowingBound
-              have hCurrentLookup : currentBound.lookupFree
-                  { file_id := 0, pattern_id := 1 } =
-                    some (.integer observedKey) := by
-                rw [hCurrentObserved]
-                exact hObservedKey
-              have hFollowingLookup : followingBound.lookupFree
-                  { file_id := 0, pattern_id := 1 } =
-                    some (.integer observedKey) := by
-                rw [hFollowingObserved]
-                exact hObservedKey
-              dsimp [variables, emittedLoopSummary_1] at hCurrentBound hFollowingBound
-              dsimp [observedLocation] at hPreserved
-              simp only [Env.lookupFree] at hCurrentLookup hFollowingLookup
-              have hRegion : (RegionRef.storage != RegionRef.storage) = false := by decide
-              have hRoot : "values".isEmpty = false := by decide
-              unfold Ora.Loop.StorageFormulaContext.evalFormula?
-                Ora.Loop.StorageFormulaContext.stateEnv?
-                Ora.Loop.directStorageContext
-              simp only [Ora.Loop.bindStorageReads, List.foldl,
-                hCurrentBound, hFollowingBound, Option.bind_eq_bind,
-                Option.some_bind, Option.none_bind]
-              ora_loop_reduce
-              simp only [Ora.Loop.StorageFormulaContext.formulaStorageReady,
-                Ora.Loop.StorageFormulaContext.termStorageReady,
-                Ora.Loop.StorageFormulaContext.withStoreViews,
-                Ora.Loop.directStorageResolvePlace, ora_loop_data,
-                formulaDenotes?, denoteFormula?, denoteValue?, Env.lookupVar,
-                Env.lookupFree, Option.bind_eq_bind, Option.some_bind,
-                Option.none_bind, Option.pure_def]
-              simp only [hRegion, hRoot, hObservedKey, hObservedBinding,
-                hObservedUnsigned, hCurrentLookup,
-                hFollowingLookup, Env.lookupPlace, Env.lookupEntryPlace,
-                lookupFreeBinding,
-                Ora.Loop.StorageFormulaContext.withStoreViews,
-                Ora.Loop.directStorageResolvePlace,
-                Ora.Loop.StorageActionState.currentValue,
-                Ora.Loop.StorageActionState.oldValue,
-                observedLocation, hPreserved, Bool.false_eq_true,
-                Bool.true_eq_false, if_false, if_pos,
-                Option.bind_eq_bind, Option.some_bind, Option.none_bind,
-                Option.pure_def, List.isEmpty, Bool.not_true,
-                Bool.not_false, Bool.false_or, Bool.true_or,
-                beq_self_eq_true]
+            refine ⟨hReady, hHeaderFacts, ?_⟩
+            intro formula hFormula
+            simp only [List.mem_cons, List.not_mem_nil, or_false] at hFormula
+            rcases hFormula with rfl
+            have hCurrent := hInvariantFormulas (.term 16) (by simp)
+            rcases hCurrent with ⟨proposition, hCurrentEval, hHolds⟩
+            refine ⟨proposition, ?_, hHolds⟩
+            rw [← hCurrentEval]
+            rcases Ora.Loop.bindState_some_of_stateReady env variables
+                current.locals hInvariantReady with
+              ⟨currentBound, hCurrentBound⟩
+            rcases Ora.Loop.bindState_some_of_stateReady env variables
+                locals hReady with
+              ⟨followingBound, hFollowingBound⟩
+            have hObservedFresh :
+                { file_id := 0, pattern_id := 1 } ∉
+                  variables.map Ora.Loop.VariableRow.id := by
+              simp [variables, emittedLoopSummary_1]
+            have hCurrentObserved := Ora.Loop.bindState_lookupFree_of_not_mem
+              env currentBound variables current.locals
+              { file_id := 0, pattern_id := 1 }
+              hObservedFresh hCurrentBound
+            have hFollowingObserved := Ora.Loop.bindState_lookupFree_of_not_mem
+              env followingBound variables locals
+              { file_id := 0, pattern_id := 1 }
+              hObservedFresh hFollowingBound
+            have hCurrentLookup : currentBound.lookupFree
+                { file_id := 0, pattern_id := 1 } =
+                  some (.integer observedKey) := by
+              rw [hCurrentObserved]
+              exact hObservedKey
+            have hFollowingLookup : followingBound.lookupFree
+                { file_id := 0, pattern_id := 1 } =
+                  some (.integer observedKey) := by
+              rw [hFollowingObserved]
+              exact hObservedKey
+            dsimp [variables, emittedLoopSummary_1] at hCurrentBound hFollowingBound
+            dsimp [observedLocation] at hPreserved
+            simp only [Env.lookupFree] at hCurrentLookup hFollowingLookup
+            have hRegion : (RegionRef.storage != RegionRef.storage) = false := by decide
+            have hRoot : "values".isEmpty = false := by decide
+            unfold Ora.Loop.StorageFormulaContext.evalFormula?
+              Ora.Loop.StorageFormulaContext.stateEnv?
+              Ora.Loop.directStorageContext
+            simp only [Ora.Loop.bindStorageReads, List.foldl,
+              hCurrentBound, hFollowingBound, Option.bind_eq_bind,
+              Option.some_bind, Option.none_bind]
+            ora_loop_reduce
+            simp only [Ora.Loop.StorageFormulaContext.formulaStorageReady,
+              Ora.Loop.StorageFormulaContext.termStorageReady,
+              Ora.Loop.StorageFormulaContext.withStoreViews,
+              Ora.Loop.directStorageResolvePlace, ora_loop_data,
+              formulaDenotes?, denoteFormula?, denoteValue?, Env.lookupVar,
+              Env.lookupFree, Option.bind_eq_bind, Option.some_bind,
+              Option.none_bind, Option.pure_def]
+            simp only [hRegion, hRoot, hObservedKey, hObservedBinding,
+              hObservedUnsigned, hCurrentLookup,
+              hFollowingLookup, Env.lookupPlace, Env.lookupEntryPlace,
+              lookupFreeBinding,
+              Ora.Loop.StorageFormulaContext.withStoreViews,
+              Ora.Loop.directStorageResolvePlace,
+              Ora.Loop.StorageActionState.currentValue,
+              Ora.Loop.StorageActionState.oldValue,
+              observedLocation, hPreserved, Bool.false_eq_true,
+              Bool.true_eq_false, if_false, if_pos,
+              Option.bind_eq_bind, Option.some_bind, Option.none_bind,
+              Option.pure_def, List.isEmpty, Bool.not_true,
+              Bool.not_false, Bool.false_or, Bool.true_or,
+              beq_self_eq_true]
       · simp at hTarget
     · intro edge state hMember hInvariant _
       simp only [List.mem_cons, List.not_mem_nil, or_false] at hMember

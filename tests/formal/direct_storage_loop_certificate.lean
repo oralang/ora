@@ -49,8 +49,8 @@ theorem discharge_q8 : emittedQuery_8 := by
         List.append, Bool.not_false, Bool.not_true, Bool.false_or, Bool.false_eq_true,
         if_false]
       constructor
-      · trivial
-      · rfl
+      · simp [Ora.Loop.headerFactsHoldInEnv]
+      · constructor <;> rfl
   · intro env _ _
     simp only [Ora.Loop.denoteDirectStorageLoopSummary?, hDirect, if_true]
     simp only [
@@ -64,30 +64,29 @@ theorem discharge_q8 : emittedQuery_8 := by
     constructor
     · simp only [Ora.Loop.LoopVC.BaseObligation]
       intro state hInitial
-      rcases hInitial with ⟨_, hLocals⟩
+      rcases hInitial with ⟨_, _, hLocals⟩
       rcases state with ⟨locals, storage⟩
       change some [Ora.Integer.Value.ofNat (.unsigned .w256) 0] =
         some locals at hLocals
       have hState := (Option.some.inj hLocals).symm
       subst locals
-      constructor
-      · rfl
-      · let context := Ora.Loop.directStorageContext emittedManifest env
-          emittedLoopSummary_1.variables
-        let actionState : Ora.Loop.StorageActionState := {
-          loop := {
-            locals := [Ora.Integer.Value.ofNat (.unsigned .w256) 0]
-            storage
-          }
-          entryStorage := Ora.Loop.storageStateFromEnv env true
+      refine ⟨rfl, by simp [Ora.Loop.headerFactsHoldInEnv], ?_⟩
+      let context := Ora.Loop.directStorageContext emittedManifest env
+        emittedLoopSummary_1.variables
+      let actionState : Ora.Loop.StorageActionState := {
+        loop := {
+          locals := [Ora.Integer.Value.ofNat (.unsigned .w256) 0]
+          storage
         }
-        let bound := context.withStoreViews
-          (env.setFree { file_id := 4294967294, pattern_id := 0 }
-            (.integer (Ora.Integer.Value.ofNat (.unsigned .w256) 0))) actionState
-        apply directFormulasHold_single_bool_true context
-          (Ora.Loop.storageStateFromEnv env true) actionState.loop 4 bound
-        · rfl
-        · exact emitted_term_4_lookup
+        entryStorage := Ora.Loop.storageStateFromEnv env true
+      }
+      let bound := context.withStoreViews
+        (env.setFree { file_id := 4294967294, pattern_id := 0 }
+          (.integer (Ora.Integer.Value.ofNat (.unsigned .w256) 0))) actionState
+      apply directFormulasHold_single_bool_true context
+        (Ora.Loop.storageStateFromEnv env true) actionState.loop 4 bound
+      · rfl
+      · exact emitted_term_4_lookup
     · simp only [Ora.Loop.LoopVC.BackedgeObligation, Ora.Loop.timelineEdge]
       intro edge current following hMember hTarget _ _ _ hNext
       simp only [List.mem_cons, List.not_mem_nil, or_false] at hMember
@@ -106,30 +105,29 @@ theorem discharge_q8 : emittedQuery_8 := by
             simp only [hEnv, Option.bind_eq_bind, Option.some_bind] at hLocals
             have hReady := Ora.Loop.bound_state_in_env_ready emittedManifest
               variables bound bindings locals hLocals
-            constructor
-            · exact hReady
-            · rcases locals with _ | ⟨value, tail⟩
-              · simp [Ora.Loop.stateReady, Ora.Loop.valuesMatchVariables] at hReady
-              · rcases tail with _ | ⟨extra, rest⟩
-                · rcases value with ⟨shape, bits⟩
-                  simp [Ora.Loop.stateReady, Ora.Loop.valuesMatchVariables,
-                    TyRef.integerShape?] at hReady
-                  subst shape
-                  let actionState : Ora.Loop.StorageActionState := {
-                    loop := {
-                      locals := [⟨.unsigned .w256, bits⟩]
-                      storage := result.state.loop.storage
-                    }
-                    entryStorage := Ora.Loop.storageStateFromEnv env true
+            refine ⟨hReady, by simp [Ora.Loop.headerFactsHoldInEnv], ?_⟩
+            rcases locals with _ | ⟨value, tail⟩
+            · simp [Ora.Loop.stateReady, Ora.Loop.valuesMatchVariables] at hReady
+            · rcases tail with _ | ⟨extra, rest⟩
+              · rcases value with ⟨shape, bits⟩
+                simp [Ora.Loop.stateReady, Ora.Loop.valuesMatchVariables,
+                  TyRef.integerShape?] at hReady
+                subst shape
+                let actionState : Ora.Loop.StorageActionState := {
+                  loop := {
+                    locals := [⟨.unsigned .w256, bits⟩]
+                    storage := result.state.loop.storage
                   }
-                  let formulaBound := context.withStoreViews
-                    (env.setFree { file_id := 4294967294, pattern_id := 0 }
-                      (.integer ⟨.unsigned .w256, bits⟩)) actionState
-                  apply directFormulasHold_single_bool_true context
-                    (Ora.Loop.storageStateFromEnv env true) actionState.loop 4 formulaBound
-                  · rfl
-                  · exact emitted_term_4_lookup
-                · simp [Ora.Loop.stateReady, Ora.Loop.valuesMatchVariables] at hReady
+                  entryStorage := Ora.Loop.storageStateFromEnv env true
+                }
+                let formulaBound := context.withStoreViews
+                  (env.setFree { file_id := 4294967294, pattern_id := 0 }
+                    (.integer ⟨.unsigned .w256, bits⟩)) actionState
+                apply directFormulasHold_single_bool_true context
+                  (Ora.Loop.storageStateFromEnv env true) actionState.loop 4 formulaBound
+                · rfl
+                · exact emitted_term_4_lookup
+              · simp [Ora.Loop.stateReady, Ora.Loop.valuesMatchVariables] at hReady
       · simp at hTarget
     · simp only [Ora.Loop.LoopVC.EdgeSafetyObligation, Ora.Loop.timelineEdge]
       intro edge state hMember _ _

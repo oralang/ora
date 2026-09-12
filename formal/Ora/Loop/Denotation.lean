@@ -993,6 +993,12 @@ def formulasHoldInEnv
     (formulas : List FormulaRef) : Prop :=
   ∀ formula ∈ formulas, formulaHoldsInEnv manifest env formula
 
+/-- Task 3 restricts these formulas to immutable context leaves, so their
+truth is independent of the changing loop state. -/
+def headerFactsHoldInEnv
+    (manifest : Manifest) (env : Env) (rows : List CanonicalHeaderFactRow) : Prop :=
+  ∀ row ∈ rows, formulaHoldsInEnv manifest env row.formula
+
 def integerFormulaValue?
     (manifest : Manifest)
     (env : Env)
@@ -1400,9 +1406,11 @@ def denoteLoopSummary? (manifest : Manifest) (base : Env) (row : SummaryRow) :
   if row.supported manifest then do
     let edges ← denoteEdges? manifest base row.variables row.post row.edges
     pure {
-      initial := fun state => valuesInitializeState manifest base row.variables row.init state
+      initial := fun state => headerFactsHoldInEnv manifest base row.headerFacts ∧
+        valuesInitializeState manifest base row.variables row.init state
       invariant := fun state =>
         stateReady row.variables state ∧
+          headerFactsHoldInEnv manifest base row.headerFacts ∧
           formulasHoldInState manifest base row.variables state row.invariants
       edges := edges
     }
@@ -1419,9 +1427,11 @@ def denoteLoopSummaryWithResolver?
     let edges ← denoteEdgesWithResolver? manifest rows resolver base row.variables row.post
       row.edges
     pure {
-      initial := fun state => valuesInitializeState manifest base row.variables row.init state
+      initial := fun state => headerFactsHoldInEnv manifest base row.headerFacts ∧
+        valuesInitializeState manifest base row.variables row.init state
       invariant := fun state =>
         stateReady row.variables state ∧
+          headerFactsHoldInEnv manifest base row.headerFacts ∧
           formulasHoldInState manifest base row.variables state row.invariants
       edges := edges
     }

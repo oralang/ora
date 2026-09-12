@@ -240,6 +240,7 @@ theorem discharge_q10 : emittedQuery_10 := by
         Option.bind_eq_bind, Option.some_bind, Option.pure_def,
         List.isEmpty, List.map, List.append, Bool.not_false, Bool.not_true,
         Bool.false_or, Bool.false_eq_true, hCounterNotEmpty, if_false]
+      refine ⟨by simp [Ora.Loop.headerFactsHoldInEnv], ?_⟩
       unfold Ora.Loop.directStoragePreheaderProducesInitial
       let context := Ora.Loop.directStoragePreheaderContext
         emittedManifest witness []
@@ -358,6 +359,7 @@ theorem discharge_q10 : emittedQuery_10 := by
       Bool.false_or, Bool.false_eq_true, hCounterNotEmpty, if_false]
     refine { base := ?_, backedge := ?_, edgeSafety := ?_, exit := ?_ }
     · intro state hInitial
+      rcases hInitial with ⟨hHeaderFacts, hInitial⟩
       change Ora.Loop.directStoragePreheaderProducesInitial
         (Ora.Loop.directStoragePreheaderContext emittedManifest env [])
         [Ora.Loop.TimelineEvent.storage (.read
@@ -367,7 +369,8 @@ theorem discharge_q10 : emittedQuery_10 := by
           { root := "counter", valueTy := .compilerTypeId 6 } (.term 0))]
         (Ora.Loop.directStoragePreheaderInitialState env) [.term 1] state at hInitial
       change Ora.Loop.stateReady emittedLoopSummary_1.variables state.locals ∧
-        Ora.Loop.directFormulasHold
+        Ora.Loop.headerFactsHoldInEnv emittedManifest env
+          emittedLoopSummary_1.headerFacts ∧ Ora.Loop.directFormulasHold
           (Ora.Loop.directStorageContext emittedManifest env
             emittedLoopSummary_1.variables)
           (Ora.Loop.storageStateFromEnv env true) state [.term 8]
@@ -408,7 +411,8 @@ theorem discharge_q10 : emittedQuery_10 := by
       · simp [Ora.Loop.stateReady, Ora.Loop.valuesMatchVariables,
           emittedLoopSummary_1, TyRef.integerShape?,
           integerShapeForCompilerTypeId_u256, Ora.Integer.Value.ofNat]
-      · intro formula hFormula
+      · refine ⟨hHeaderFacts, ?_⟩
+        intro formula hFormula
         simp only [List.mem_cons, List.not_mem_nil, or_false] at hFormula
         subst formula
         let context := Ora.Loop.directStorageContext emittedManifest env
@@ -478,6 +482,8 @@ theorem discharge_q10 : emittedQuery_10 := by
       simp only [List.mem_cons, List.not_mem_nil, or_false] at hMember
       rcases hMember with rfl | rfl
       · dsimp at hNext ⊢
+        rcases hInvariant with
+          ⟨hInvariantReady, hHeaderFacts, hInvariantFormulas⟩
         rcases hNext with ⟨result, locals, hExec, hLocals, rfl⟩
         let variables := emittedLoopSummary_1.variables
         let bindings := emittedLoopSummary_1.edges[0].nextState
@@ -518,12 +524,12 @@ theorem discharge_q10 : emittedQuery_10 := by
                                       simp [Ora.Loop.TimelineResult.comp,
                                         hRead0Empty, hRead1Empty] at hWritten
             have hCurrentSemantic :=
-              (counter_invariant_iff env current hInvariant.1).mp hInvariant.2
-            constructor
-            · exact hFollowingReady
+              (counter_invariant_iff env current hInvariantReady).mp
+                hInvariantFormulas
+            refine ⟨hFollowingReady, hHeaderFacts, ?_⟩
             apply (counter_invariant_iff env
-              { locals, storage := result.state.loop.storage }
-              hFollowingReady).mpr
+                { locals, storage := result.state.loop.storage }
+                hFollowingReady).mpr
             rw [hPreserved]
             exact hCurrentSemantic
       · simp [Ora.Loop.timelineEdge] at hTarget

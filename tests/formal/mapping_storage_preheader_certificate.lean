@@ -32,6 +32,26 @@ def witness : Env :=
     |>.setFree { file_id := 0, pattern_id := 1 } one)
     |>.setFree { file_id := 0, pattern_id := 2 } zero
 
+private theorem headerFacts_of_assumption
+    (env : Env)
+    (hAssumptions : assumptionsDenoteInEnv emittedManifest env
+      [emittedAssumptionRow_3]) :
+    headerFactsHoldInEnv emittedManifest env emittedLoopSummary_1.headerFacts := by
+  intro fact hFact
+  simp only [emittedLoopSummary_1, List.mem_cons, List.not_mem_nil, or_false] at hFact
+  subst fact
+  cases hDenotes : formulaDenotes? emittedManifest env (.term 2) with
+  | none =>
+      simp [assumptionsDenoteInEnv, assumptionsDenoteInEnv?,
+        assumptionDenotesInEnv?, assumptionAnd?, emittedAssumptionRow_3,
+        hDenotes] at hAssumptions
+  | some proposition =>
+      unfold formulaHoldsInEnv
+      rw [hDenotes]
+      simpa [assumptionsDenoteInEnv, assumptionsDenoteInEnv?,
+        assumptionDenotesInEnv?, assumptionAnd?, emittedAssumptionRow_3,
+        hDenotes] using hAssumptions
+
 theorem restrictStoragePreheaderLookup
     (bindings : List (FreeVarId × Value))
     (variables : List VariableRow)
@@ -294,14 +314,9 @@ theorem discharge_q11 : emittedQuery_11 := by
     simp only [directStorageSummarySupported, emittedLoopSummary_1, hSupported]
     decide
   constructor
-  · refine ⟨witness, {
-      locals := [Ora.Integer.Value.ofNat (.unsigned .w256) 0]
-      storage := (storageStateFromEnv witness true).set {
-        root := "values"
-        projections := [.mappingKey zero]
-      } zero
-    }, ?_, ?_, ?_⟩
-    · dsimp [witness, zero, one]
+  · have hWitnessAssumptions : assumptionsDenoteInEnv emittedManifest witness
+        [emittedAssumptionRow_3] := by
+      dsimp [witness, zero, one]
       simp only [assumptionsDenoteInEnv, assumptionsDenoteInEnv?,
         assumptionDenotesInEnv?, assumptionAnd?, emittedAssumptionRow_3,
         formulaDenotes?, denoteFormula?, denoteValue?, emitted_term_2_lookup,
@@ -312,6 +327,13 @@ theorem discharge_q11 : emittedQuery_11 := by
         Option.map_some', List.foldl, List.isEmpty, Bool.false_eq_true,
         beq_iff_eq, if_pos, if_false]
       simp
+    refine ⟨witness, {
+      locals := [Ora.Integer.Value.ofNat (.unsigned .w256) 0]
+      storage := (storageStateFromEnv witness true).set {
+        root := "values"
+        projections := [.mappingKey zero]
+      } zero
+    }, hWitnessAssumptions, ?_, ?_⟩
     · dsimp [witness, zero, one]
       simp [contextReady, emittedLoopSummary_1,
         Env.setFree, Env.lookupFree, lookupFreeBinding, TyRef.integerShape?,
@@ -325,6 +347,7 @@ theorem discharge_q11 : emittedQuery_11 := by
         Option.bind_eq_bind, Option.some_bind, Option.pure_def, List.isEmpty,
         List.map, List.append, Bool.not_false, Bool.not_true, Bool.false_or,
         Bool.false_eq_true, if_false]
+      refine ⟨headerFacts_of_assumption witness hWitnessAssumptions, ?_⟩
       unfold directStoragePreheaderProducesInitial
       let context := directStoragePreheaderContext emittedManifest witness
         emittedLoopSummary_1.contextVariables
@@ -561,6 +584,7 @@ theorem discharge_q11 : emittedQuery_11 := by
       Bool.not_true, Bool.false_or, Bool.false_eq_true, if_false]
     refine { base := ?_, backedge := ?_, edgeSafety := ?_, exit := ?_ }
     · intro state hInitial
+      rcases hInitial with ⟨hHeaderFacts, hInitial⟩
       change directStoragePreheaderProducesInitial
         (directStoragePreheaderContext emittedManifest env
           emittedLoopSummary_1.contextVariables)
@@ -606,24 +630,28 @@ theorem discharge_q11 : emittedQuery_11 := by
           Ora.Integer.Value.ofNat]
       constructor
       · exact hReady
-      · apply (mappingInvariantIff env
+      · constructor
+        · exact hHeaderFacts
+        · apply (mappingInvariantIff env
           { locals := [Ora.Integer.Value.ofNat (.unsigned .w256) 0], storage }
           observedKey hObserved hReady).mpr
-        rw [hObservedStorage]
-        generalize hValue : (storageStateFromEnv env true) {
-          root := "values"
-          projections := [.mappingKey (.integer observedKey)]
-        } = value
-        cases value with
-        | bool value => simp [hValue, Value.eqProp?]
-        | integer value =>
-            rcases value with ⟨shape, bits⟩
-            simp [hValue, Value.eqProp?, Ora.Integer.Value.eqProp?]
+          rw [hObservedStorage]
+          generalize hValue : (storageStateFromEnv env true) {
+            root := "values"
+            projections := [.mappingKey (.integer observedKey)]
+          } = value
+          cases value with
+          | bool value => simp [hValue, Value.eqProp?]
+          | integer value =>
+              rcases value with ⟨shape, bits⟩
+              simp [hValue, Value.eqProp?, Ora.Integer.Value.eqProp?]
     · intro edge current following hMember hTarget hInvariant _ _ hNext
       simp only [List.mem_cons, List.not_mem_nil, or_false] at hMember
       rcases hMember with rfl | rfl
       · dsimp at hNext ⊢
         rcases hNext with ⟨result, locals, hExec, hLocals, rfl⟩
+        rcases hInvariant with
+          ⟨hInvariantReady, hHeaderFacts, hInvariantFormulas⟩
         let variables := emittedLoopSummary_1.variables
         let bindings := emittedLoopSummary_1.edges[0].nextState
         let context := directStorageContext emittedManifest env variables
@@ -664,14 +692,16 @@ theorem discharge_q11 : emittedQuery_11 := by
                           hRead1Empty] at hWritten
             have hCurrentSemantic :=
               (mappingInvariantIff env current observedKey hObserved
-                hInvariant.1).mp hInvariant.2
+                hInvariantReady).mp hInvariantFormulas
             constructor
             · exact hReady
-            apply (mappingInvariantIff env
-              { locals, storage := result.state.loop.storage }
-              observedKey hObserved hReady).mpr
-            rw [hPreserved]
-            exact hCurrentSemantic
+            · constructor
+              · exact hHeaderFacts
+              · apply (mappingInvariantIff env
+                  { locals, storage := result.state.loop.storage }
+                  observedKey hObserved hReady).mpr
+                rw [hPreserved]
+                exact hCurrentSemantic
       · simp [timelineEdge] at hTarget
     · intro edge state hMember _ _
       simp only [List.mem_cons, List.not_mem_nil, or_false] at hMember

@@ -90,35 +90,10 @@ pub const ObligationSet = struct {
     fn loopArtifactAuthorityBlockReason(self: ObligationSet) ?ArtifactBlockReason {
         for (self.loop_summaries) |summary| {
             if (!self.loopSummaryRequiresLeanCertificate(summary.id)) continue;
-            // Task 3 does not give compiler-generated proofs authority over
-            // header facts. A manifest-backed external certificate keeps its
-            // existing authority because the facts are not denotational yet
-            // and the checked proof is rebound to the migrated LoopVC digest.
-            if (summary.header_facts.len != 0 and
-                !self.loopSummaryHasExternalLeanCertificate(summary.id))
-            {
-                return .header_fact_authority_unreviewed;
-            }
             if (self.timelineArtifactAuthorityBlockReason(summary, summary.preheader_timeline)) |reason| return reason;
             for (summary.edges) |edge| if (self.timelineArtifactAuthorityBlockReason(summary, edge.timeline)) |reason| return reason;
         }
         return null;
-    }
-
-    fn loopSummaryHasExternalLeanCertificate(self: ObligationSet, summary_id: Id) bool {
-        for (self.queries) |query| {
-            if (query.backend != .lean or query.kind != .loop_induction or
-                query.loop_summary_id != summary_id or query.discharges_query_id == null)
-            {
-                continue;
-            }
-            const artifact_id = query.proof_artifact_id orelse continue;
-            const artifact = self.proofArtifactById(artifact_id) orelse continue;
-            if (artifact.path == null or !self.queryHasValidProofArtifact(query)) continue;
-            const result = query.result orelse continue;
-            if (querySucceeded(query, result)) return true;
-        }
-        return false;
     }
 
     fn timelineArtifactAuthorityBlockReason(
@@ -1006,7 +981,6 @@ pub const ArtifactBlockReason = enum(u8) {
     storage_projection_authority_unreviewed,
     storage_child_frame_authority_unreviewed,
     dynamic_sequence_authority_unreviewed,
-    header_fact_authority_unreviewed,
     source_accounting_failure,
 };
 
@@ -4305,7 +4279,7 @@ test "dynamic sequence checks remain outside artifact authority" {
     }).artifactDecision());
 }
 
-test "header facts remain outside artifact authority until prover integration" {
+test "header facts use the ordinary mandatory Lean authority path" {
     const fact: LoopHeaderFactRow = .{
         .id = 0,
         .structural_key = "header-fact:0",
@@ -4335,44 +4309,9 @@ test "header facts remain outside artifact authority until prover integration" {
         .loop_summary_id = summary.id,
     };
     try std.testing.expectEqual(
-        ArtifactBlockReason.header_fact_authority_unreviewed,
-        (ObligationSet{ .queries = &.{query}, .loop_summaries = &.{summary} })
-            .loopArtifactAuthorityBlockReason().?,
-    );
-
-    const artifact: ProofArtifact = .{
-        .id = 3,
-        .owner = summary.owner,
-        .source = .generated(),
-        .module_name = "Ora.UserProof.HeaderFact",
-        .theorem_name = "discharge_q2",
-        .path = "proofs/HeaderFact.lean",
-    };
-    var lean_query = query;
-    lean_query.id = 4;
-    lean_query.backend = .lean;
-    lean_query.proof_requirement = .backend_result;
-    lean_query.proof_artifact_id = artifact.id;
-    lean_query.discharges_query_id = query.id;
-    lean_query.result = .{ .status = .proved };
-    try std.testing.expectEqual(
         @as(?ArtifactBlockReason, null),
-        (ObligationSet{
-            .queries = &.{ query, lean_query },
-            .loop_summaries = &.{summary},
-            .proof_artifacts = &.{artifact},
-        }).loopArtifactAuthorityBlockReason(),
-    );
-
-    var automatic_artifact = artifact;
-    automatic_artifact.path = null;
-    try std.testing.expectEqual(
-        ArtifactBlockReason.header_fact_authority_unreviewed,
-        (ObligationSet{
-            .queries = &.{ query, lean_query },
-            .loop_summaries = &.{summary},
-            .proof_artifacts = &.{automatic_artifact},
-        }).loopArtifactAuthorityBlockReason().?,
+        (ObligationSet{ .queries = &.{query}, .loop_summaries = &.{summary} })
+            .loopArtifactAuthorityBlockReason(),
     );
 }
 
