@@ -367,7 +367,10 @@ pub const Adapter = struct {
                 try self.applyLoopRead(read);
                 try self.appendSideConstraints(premises);
             },
-            .indexed_region_read => return error.InvalidLoopQuery,
+            .indexed_region_read => |read| {
+                try self.applyIndexedRegionRead(read);
+                try self.appendSideConstraints(premises);
+            },
             .storage_write => |write| {
                 try self.applyLoopWrite(write);
                 try self.appendSideConstraints(premises);
@@ -430,6 +433,39 @@ pub const Adapter = struct {
         }
         const info = try typeInfo(read.location.value_ty);
         const value = try self.selectLoopLocation(read.location, info, false);
+        try state.reads.append(self.allocator, .{ .id = read.result, .info = info, .value = value });
+    }
+
+    fn applyIndexedRegionRead(
+        self: *Adapter,
+        read: obligation.LoopIndexedRegionReadEvent,
+    ) EncodeError!void {
+        const state = self.loop_state orelse return error.InvalidLoopQuery;
+        for (state.reads.items) |binding| {
+            if (obligation.freeVarIdEql(binding.id, read.result)) return error.InvalidTimelineReadReference;
+        }
+        if (read.region != .calldata) return error.InvalidLoopQuery;
+        const info = try typeInfo(read.element_ty);
+        const index_id = switch (read.index.formula) {
+            .term => |id| id,
+            .origin_value => return error.InvalidLoopQuery,
+        };
+        if (!typeInfoIsU256(try staticTermTypeInfo(self.set, index_id))) return error.TypeMismatch;
+        const index = try self.encodeValueFormula(read.index.formula);
+        const array_sort = z3.Z3_mk_array_sort(
+            self.context.ctx,
+            try self.sortForType(u256TypeInfo()),
+            try self.sortForType(info),
+        );
+        try self.context.checkNoError();
+        const name = try std.fmt.allocPrint(self.allocator, "$ora.loop.region.f{d}.p{d}.w{d}{c}", .{
+            read.owner.file_id,                     read.owner.pattern_id, info.width,
+            @as(u8, if (info.signed) 's' else 'u'),
+        });
+        defer self.allocator.free(name);
+        const snapshot = try self.namedConst(name, array_sort);
+        const value = z3.Z3_mk_select(self.context.ctx, snapshot, index);
+        try self.context.checkNoError();
         try state.reads.append(self.allocator, .{ .id = read.result, .info = info, .value = value });
     }
 

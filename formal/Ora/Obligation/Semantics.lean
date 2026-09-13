@@ -34,6 +34,10 @@ inductive PlaceBindingKey where
 structure Env where
   freeBindings : List (FreeVarId × Value) := []
   placeValue : PlaceBindingKey → Value := fun _ => .bool false
+  indexedRegionValue : FreeVarId → Ora.Integer.Value → Ora.Spec.IntegerShape →
+      Ora.Obligation.Value :=
+    fun (_ : FreeVarId) (_ : Ora.Integer.Value) (_ : Ora.Spec.IntegerShape) =>
+      Value.bool false
   /-- Bound variables use De Bruijn order: head is index `0`. -/
   boundBindings : List Value := []
   result : Option Value := none

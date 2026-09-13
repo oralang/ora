@@ -168,6 +168,13 @@ theorem TimelineEvent.check_ne_storage
   intro hEqual
   cases hEqual
 
+theorem TimelineEvent.check_ne_indexedRead
+    (check : FormulaExpr) (read : IndexedRegionRead ValueExpr) :
+    TimelineEvent.check check ≠
+      (TimelineEvent.indexedRead read : EventOf FormulaExpr LocationExpr ValueExpr Child) := by
+  intro hEqual
+  cases hEqual
+
 theorem TimelineEvent.assume_ne_storage
     (assumption : FormulaExpr) (action : StorageAction LocationExpr ValueExpr) :
     TimelineEvent.assume assumption ≠

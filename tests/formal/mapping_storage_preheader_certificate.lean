@@ -658,7 +658,10 @@ theorem discharge_q11 : emittedQuery_11 := by
         change directStorageFinalLocals? context variables bindings result.state =
           some locals at hLocals
         unfold directStorageFinalLocals? at hLocals
-        cases hEnv : context.stateEnv? result.state with
+        cases hEnv : context.stateEnv? {
+          result.state with
+          reads := storageReadsForBindings bindings result.state.reads
+        } with
         | none => simp [hEnv] at hLocals
         | some bound =>
             simp only [hEnv, Option.bind_eq_bind, Option.some_bind] at hLocals

@@ -43,6 +43,21 @@ def directStorageLocation? (row : StorageLocationExprRow) : Option StorageLocati
       valueTy := row.valueTy
     }
 
+def directIndexedRegionKind : IndexedRegionKindRow → IndexedRegionKind
+  | .calldata => .calldata
+  | .memory => .memory
+
+def directIndexedRegionRead? (row : IndexedRegionReadEventRow) :
+    Option (IndexedRegionRead FormulaRef) := do
+  let elementType ← row.elementTy.integerShape?
+  pure {
+    id := row.result
+    region := directIndexedRegionKind row.region
+    owner := row.owner
+    index := row.index.formula
+    elementType
+  }
+
 def directStorageEvent? (row : TimelineEventRow) : Option (List DirectStorageEvent) :=
   match row.payload with
   | .pathAssumption event => some (event.formulas.map fun formula => .assume formula.formula)
@@ -53,7 +68,9 @@ def directStorageEvent? (row : TimelineEventRow) : Option (List DirectStorageEve
   | .storageWrite event => do
       let location ← directStorageLocation? event.location
       pure [.storage (.write location event.value.formula)]
-  | .indexedRegionRead _ | .summaryDependency _ => none
+  | .indexedRegionRead event => do
+      pure [.indexedRead (← directIndexedRegionRead? event)]
+  | .summaryDependency _ => none
 
 def directStorageTimeline? : List TimelineEventRow → Option (List DirectStorageEvent)
   | [] => some []
@@ -233,7 +250,19 @@ def directFormulasHold
 def directStorageSemantics (context : StorageFormulaContext) :
     TimelineSemantics FormulaRef StorageLocationExpr FormulaRef PEmpty := {
   storage := context.actionSemantics
-  evalFormula := context.evalFormula?
+  indexedRegion := {
+    snapshot := fun location => match location.region with
+      | .calldata => some (context.entryEnv.indexedRegionValue
+          location.owner location.index location.elementType)
+      | .memory => none
+    evalIndex := fun formula state => do
+      match ← context.evalValue? formula state with
+      | .integer value => some value
+      | .bool _ => none
+  }
+  -- Control formulas in this authority boundary are read-independent. Storage
+  -- write values still use `actionSemantics`, which observes bound read IDs.
+  evalFormula := fun formula state => context.evalFormula? formula { state with reads := [] }
   childRelation := fun child => nomatch child
   childFrame := fun child => nomatch child
 }
@@ -337,12 +366,28 @@ theorem direct_storage_preheader_initial_preserves_entry
   exact ⟨result, hExec,
     TimelineExec.preserves_entryStorage _ _ _ _ hExec, hStorage⟩
 
+def storageReadsForIds : List StorageReadId → List StorageReadBinding →
+    List StorageReadBinding
+  | [], _ => []
+  | _, [] => []
+  | ids, read :: rest =>
+      if ids.contains read.id then read :: storageReadsForIds ids rest
+      else storageReadsForIds ids rest
+
+def storageReadsForBindings
+    (bindings : List StateBindingRow)
+    (reads : List StorageReadBinding) : List StorageReadBinding :=
+  let used := bindings.flatMap StateBindingRow.readResults
+  storageReadsForIds used reads
+
 def directStorageFinalLocals?
     (context : StorageFormulaContext)
     (variables : List VariableRow)
     (bindings : List StateBindingRow)
     (state : StorageActionState) : Option (List Ora.Integer.Value) := do
-  let env ← context.stateEnv? state
+  let env ← context.stateEnv? {
+    state with reads := storageReadsForBindings bindings state.reads
+  }
   applyStateBindingsInEnv? context.manifest variables env bindings
 
 def directFormulaControlCompatible
@@ -427,7 +472,11 @@ def directStorageEventData (row : TimelineEventRow) : List DirectStorageEvent :=
         projections := event.location.projections.map directStorageProjectionData
         valueTy := event.location.valueTy
       })]
-  | .indexedRegionRead _ | .summaryDependency _ => []
+  | .indexedRegionRead event =>
+      match directIndexedRegionRead? event with
+      | some read => [.indexedRead read]
+      | none => []
+  | .summaryDependency _ => []
 
 def directStorageEvents (row : EdgeRow) : List DirectStorageEvent :=
   row.timeline.flatMap directStorageEventData
@@ -480,10 +529,19 @@ theorem directStorageCheck_mem_iff
             ih (dependencyCount := dependencyCount)
               (checkpointId := checkpointId)
       | indexedRegionRead read =>
-          simpa only [List.flatMap_cons, directStorageEventData,
-            timelineSafetyViewFrom, List.nil_append] using
-            ih (dependencyCount := dependencyCount)
-              (checkpointId := checkpointId)
+          cases hRead : directIndexedRegionRead? read with
+          | none =>
+              simpa only [List.flatMap_cons, directStorageEventData, hRead,
+                timelineSafetyViewFrom, List.nil_append] using
+                ih (dependencyCount := dependencyCount)
+                  (checkpointId := checkpointId)
+          | some resolved =>
+              simpa only [List.flatMap_cons, directStorageEventData, hRead,
+                List.mem_append, List.mem_singleton,
+                TimelineEvent.check_ne_indexedRead, false_or,
+                timelineSafetyViewFrom] using
+                ih (dependencyCount := dependencyCount)
+                  (checkpointId := checkpointId)
       | summaryDependency dependency =>
           simpa only [List.flatMap_cons, directStorageEventData,
             timelineSafetyViewFrom, List.nil_append] using
@@ -521,8 +579,6 @@ structure DirectStorageEdgeCompatible
   checkFormulaCompatible : ∀ formula,
     TimelineEvent.check formula ∈ directStorageEvents row →
       directFormulaControlCompatible manifest base variables formula
-  readOrderSupported :
-    timelineReadBeforeCheckSupported (directStorageEvents row) = true
   finalLocalsAfterTrace : ∀ current result locals,
     TimelineExec
       (directStorageSemantics (directStorageContext manifest base variables))
@@ -559,12 +615,6 @@ theorem DirectStorageEdgeCompatible.timelineSafety
       simp
     have hLocals := TimelineExec.preserves_locals _ _ _ _
       (by intro child; nomatch child) hExec
-    have hNoReads : ∀ event, event ∈ before → event.NoRead := by
-      apply timelineReadBeforeCheckSupported_no_read
-        (directStorageEvents row) proof.readOrderSupported before formula after
-      rw [proof.assumptionPrefix]
-      exact hEvents
-    have hReads := TimelineExec.preserves_reads _ _ _ _ hNoReads hExec
     have hCompatible := proof.checkFormulaCompatible formula hOriginal
     have hInitialControl := (hCompatible current
       (storageStateFromEnv base true)).mp hAtInitial
@@ -572,18 +622,7 @@ theorem DirectStorageEdgeCompatible.timelineSafety
         result.state.loop.locals formula := by
       rw [hLocals]
       exact hInitialControl
-    have hReadsEmpty : result.state.reads = [] := by
-      simpa using hReads
-    change timelineFormulaHolds
-      (directStorageSemantics (directStorageContext manifest base variables))
-      formula {
-        loop := result.state.loop
-        entryStorage := result.state.entryStorage
-        reads := result.state.reads
-      }
-    rw [hReadsEmpty]
-    exact (hCompatible result.state.loop result.state.entryStorage).mpr
-      hResultControl
+    exact (hCompatible result.state.loop result.state.entryStorage).mpr hResultControl
   · intro hAssumptions formula hMember
     exact (proof.pathFormulaCompatible formula hMember current
       (storageStateFromEnv base true)).mp (hAssumptions formula hMember)
@@ -756,21 +795,42 @@ theorem direct_storage_edges_denote
     (variables : List VariableRow)
     (successorPost : List FormulaRef)
     (rows : List EdgeRow)
-    (compatible : ∀ row, row ∈ rows →
-      DirectStorageEdgeCompatible manifest base variables successorPost row) :
+    (timelines : ∀ row, row ∈ rows →
+      directStorageTimeline? row.timeline = some (directStorageEvents row))
+    (targets : ∀ row, row ∈ rows →
+      denoteControlTarget? row.target = some (directStorageTarget row)) :
     ∃ edges,
       denoteDirectStorageEdges? manifest base variables successorPost rows =
         some edges := by
   induction rows with
   | nil => exact ⟨[], rfl⟩
   | cons row rest ih =>
-      have head := compatible row (by simp)
-      have tailCompatible : ∀ tail, tail ∈ rest →
-          DirectStorageEdgeCompatible manifest base variables successorPost tail := by
+      have tailTimelines : ∀ tail, tail ∈ rest →
+          directStorageTimeline? tail.timeline =
+            some (directStorageEvents tail) := by
         intro tail hMember
-        exact compatible tail (by simp [hMember])
-      rcases ih tailCompatible with ⟨tailEdges, hTail⟩
-      rcases head.denotes with ⟨headEdge, hHead⟩
+        exact timelines tail (by simp [hMember])
+      have tailTargets : ∀ tail, tail ∈ rest →
+          denoteControlTarget? tail.target =
+            some (directStorageTarget tail) := by
+        intro tail hMember
+        exact targets tail (by simp [hMember])
+      rcases ih tailTimelines tailTargets with ⟨tailEdges, hTail⟩
+      let headEdge := timelineEdge
+        (directStorageSemantics (directStorageContext manifest base variables))
+        (directStorageEvents row) (storageStateFromEnv base true)
+        (directStorageFinalLocals?
+          (directStorageContext manifest base variables) variables row.nextState)
+        (directStorageTarget row)
+        (fun state => directFormulasHold
+          (directStorageContext manifest base variables)
+          (storageStateFromEnv base true) state
+          (directTargetFormulas successorPost row))
+      have hHead : denoteDirectStorageEdge? manifest base variables
+          successorPost row = some headEdge := by
+        unfold denoteDirectStorageEdge?
+        rw [timelines row (by simp), targets row (by simp)]
+        rfl
       refine ⟨headEdge :: tailEdges, ?_⟩
       unfold denoteDirectStorageEdges?
       rw [hHead, hTail]
@@ -781,10 +841,10 @@ def directStorageSummarySupported (manifest : Manifest) (row : SummaryRow) : Boo
     (row.preheaderTimeline.isEmpty || row.preheaderProjectionComplete) &&
     (row.preheaderTimeline.any (fun event =>
       match event.payload with
-      | .storageRead _ | .storageWrite _ => true
+      | .storageRead _ | .indexedRegionRead _ | .storageWrite _ => true
       | _ => false) || row.edges.any (fun edge => edge.timeline.any fun event =>
       match event.payload with
-      | .storageRead _ | .storageWrite _ => true
+      | .storageRead _ | .indexedRegionRead _ | .storageWrite _ => true
       | _ => false)) &&
     row.edges.all (fun edge => edge.timeline.all fun event =>
       match event.payload with
@@ -819,11 +879,13 @@ theorem direct_storage_summary_denotes
     (row : SummaryRow)
     (hDirect : directStorageSummarySupported manifest row = true)
     (hEmpty : row.preheaderTimeline.isEmpty = true)
-    (hEdges : ∀ edge, edge ∈ row.edges →
-      DirectStorageEdgeCompatible manifest base row.variables row.post edge) :
+    (hTimelines : ∀ edge, edge ∈ row.edges →
+      directStorageTimeline? edge.timeline = some (directStorageEvents edge))
+    (hTargets : ∀ edge, edge ∈ row.edges →
+      denoteControlTarget? edge.target = some (directStorageTarget edge)) :
     ∃ summary, denoteDirectStorageLoopSummary? manifest base row = some summary := by
   rcases direct_storage_edges_denote manifest base row.variables row.post
-    row.edges hEdges with ⟨edges, hDenotes⟩
+    row.edges hTimelines hTargets with ⟨edges, hDenotes⟩
   let context := directStorageContext manifest base row.variables
   let entry := storageStateFromEnv base true
   let current := directStoragePreheaderState base row

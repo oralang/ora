@@ -99,7 +99,10 @@ theorem discharge_q8 : emittedQuery_8 := by
         change Ora.Loop.directStorageFinalLocals? context variables bindings result.state =
           some locals at hLocals
         unfold Ora.Loop.directStorageFinalLocals? at hLocals
-        cases hEnv : context.stateEnv? result.state with
+        cases hEnv : context.stateEnv? {
+          result.state with
+          reads := Ora.Loop.storageReadsForBindings bindings result.state.reads
+        } with
         | none => simp [hEnv] at hLocals
         | some bound =>
             simp only [hEnv, Option.bind_eq_bind, Option.some_bind] at hLocals

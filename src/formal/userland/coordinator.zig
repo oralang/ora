@@ -890,6 +890,7 @@ const AutomaticLoopProofReason = enum {
     automatic_assumptions_require_external_certificate,
     automatic_nested_summary_requires_external_certificate,
     automatic_storage_timeline_requires_external_certificate,
+    loop_indexed_region_read_formula_unreviewed,
     automatic_control_shape_unsupported,
     automatic_formula_reference_unsupported,
     automatic_term_kind_unsupported,
@@ -1008,6 +1009,14 @@ fn automaticDependencyVariable(
                 .id = read.result,
                 .name = "storage_read",
                 .ty = read.location.value_ty,
+            };
+        },
+        .indexed_region_read => |read| if (obligation.freeVarIdEql(read.result, id)) {
+            return .{
+                .index = 0,
+                .id = read.result,
+                .name = "indexed_region_read",
+                .ty = read.element_ty,
             };
         },
         .summary_dependency => |dependency| {
@@ -1254,14 +1263,14 @@ fn automaticValueUsesLoopVariable(
     };
 }
 
-fn timelineHasReadBeforeSafetyCheckpoint(events: []const obligation.LoopTimelineEvent) bool {
+fn timelineHasStorageReadBeforeSafetyCheckpoint(events: []const obligation.LoopTimelineEvent) bool {
     var later_checkpoint = false;
     var index = events.len;
     while (index > 0) {
         index -= 1;
         switch (events[index].payload) {
             .safety_checkpoint => later_checkpoint = true,
-            .storage_read, .indexed_region_read => if (later_checkpoint) return true,
+            .storage_read => if (later_checkpoint) return true,
             else => {},
         }
     }
@@ -1279,6 +1288,11 @@ fn automaticLoopPlan(
         return .{ .unsupported = .automatic_query_shape_unsupported };
     set.validateTermReferences() catch return .{ .unsupported = .automatic_query_shape_unsupported };
     set.validateIdReferences() catch return .{ .unsupported = .automatic_query_shape_unsupported };
+    if (set.loopSummaryArtifactAuthorityBlockReason(summary) ==
+        .loop_indexed_region_read_formula_unreviewed)
+    {
+        return .{ .unsupported = .loop_indexed_region_read_formula_unreviewed };
+    }
     if (!set.loopHeaderFactsMatchAssumptions(summary, query.assumption_ids))
         return .{ .unsupported = .automatic_assumptions_require_external_certificate };
     if (!summary.projectionSupported() or summary.edges.len < 2) {
@@ -1322,7 +1336,7 @@ fn automaticLoopPlan(
         return .{ .unsupported = reason };
     };
     for (summary.edges) |edge| {
-        if (timelineHasReadBeforeSafetyCheckpoint(edge.timeline)) {
+        if (timelineHasStorageReadBeforeSafetyCheckpoint(edge.timeline)) {
             return .{ .unsupported = .automatic_storage_timeline_requires_external_certificate };
         }
         var dependency_count: usize = 0;
@@ -1369,8 +1383,13 @@ fn automaticLoopPlan(
                 }
             },
             .storage_read => {},
-            .indexed_region_read => return .{
-                .unsupported = .automatic_storage_timeline_requires_external_certificate,
+            .indexed_region_read => |read| {
+                if (automaticValueReasonOnEdge(set, summary, edge, read.index.formula)) |reason| {
+                    return .{ .unsupported = reason };
+                }
+                if (automaticIntegerShape(read.element_ty) == null) {
+                    return .{ .unsupported = .automatic_integer_type_unsupported };
+                }
             },
         };
         if (edge.next_state.len != summary.variables.len) {
@@ -1517,11 +1536,26 @@ fn writeAutomaticLoopProof(
     try writer.writeAll("]\nattribute [local ora_loop_row] autoAssumptions");
     for (query.assumption_ids) |id| try writer.print(" emittedAssumptionRow_{d}", .{id});
     try writer.writeByte('\n');
-    try writer.print(
-        "theorem discharge_q{d} : emittedQuery_{d} := by ora_loop_auto\n" ++
-            "end\n",
-        .{ query.id, query.id },
-    );
+    if (!nested and obligation_to_lean.loopSummaryUsesDirectStorageCertificate(summary)) {
+        try writer.writeAll(
+            "private theorem autoScalarAuthorization : " ++
+                "Ora.Loop.loopProofAuthorizationFromAssumptions " ++
+                "emittedManifest autoAssumptions autoSummary := by\n" ++
+                "  set_option maxRecDepth 4096 in ora_loop_auto_plain\n",
+        );
+        try writer.print(
+            "theorem discharge_q{d} : emittedQuery_{d} := by\n" ++
+                "  ora_loop_auto_direct_storage_from autoScalarAuthorization\n" ++
+                "end\n",
+            .{ query.id, query.id },
+        );
+    } else {
+        try writer.print(
+            "theorem discharge_q{d} : emittedQuery_{d} := by ora_loop_auto\n" ++
+                "end\n",
+            .{ query.id, query.id },
+        );
+    }
 }
 
 fn markAutomaticTermClosure(
@@ -2022,6 +2056,47 @@ test "automatic loop proof source delegates to repository tactic deterministical
         first,
         1,
         "Ora.Loop.bound_state_ready",
+    ));
+
+    const storage_backedge_timeline = [_]obligation.LoopTimelineEvent{
+        backedge_timeline[0],
+        backedge_timeline[1],
+        .{
+            .id = 2,
+            .structural_key = "op:store",
+            .payload = .{ .storage_write = .{
+                .location = .{ .root = "values", .value_ty = u256_ty },
+                .value = .{ .formula = .{ .term = 1 } },
+            } },
+        },
+    };
+    var storage_edges = edges;
+    storage_edges[0].timeline = &storage_backedge_timeline;
+    var storage_summary = summaries[0];
+    storage_summary.edges = &storage_edges;
+    const storage_set: obligation.ObligationSet = .{
+        .terms = &terms,
+        .queries = &queries,
+        .loop_summaries = &.{storage_summary},
+    };
+    const storage_source = try buildAutomaticProofSource(
+        std.testing.allocator,
+        "Ora.Generated.Test",
+        storage_set,
+        &queries,
+    );
+    defer std.testing.allocator.free(storage_source);
+    try std.testing.expect(std.mem.containsAtLeast(
+        u8,
+        storage_source,
+        1,
+        "private theorem autoScalarAuthorization",
+    ));
+    try std.testing.expect(std.mem.containsAtLeast(
+        u8,
+        storage_source,
+        1,
+        "ora_loop_auto_direct_storage_from autoScalarAuthorization",
     ));
 }
 

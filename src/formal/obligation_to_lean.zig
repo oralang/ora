@@ -860,7 +860,7 @@ fn loopSummaryHasDependencies(summary: obligation.LoopSummaryRow) bool {
     return false;
 }
 
-fn loopSummaryUsesDirectStorageCertificate(summary: obligation.LoopSummaryRow) bool {
+pub fn loopSummaryUsesDirectStorageCertificate(summary: obligation.LoopSummaryRow) bool {
     var has_storage = false;
     for (summary.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
         .storage_read, .storage_write => has_storage = true,

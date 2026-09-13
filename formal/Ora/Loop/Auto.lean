@@ -265,18 +265,23 @@ macro "ora_loop_direct_formula_control_in"
             ($autoSummary).variables locals with
         | none =>
             simp only [ora_loop_row] at hBound
-            simp only [hBound, Option.none_bind]
+            simp only [ora_loop_row, hBound, Option.none_bind]
             simp
         | some bound =>
             simp only [ora_loop_row] at hBound
             simp only [hBound, Option.some_bind]
-            simp only [
-              Ora.Loop.StorageFormulaContext.formulaStorageReady,
-              Ora.Loop.StorageFormulaContext.termStorageReady,
-              Ora.Loop.StorageFormulaContext.withStoreViews,
-              ora_loop_data, formulaDenotes?, denoteFormula?, denoteValue?,
-              Env.lookupVar, Env.lookupFree]
-            exact Ora.Loop.option_prop_witness_iff _ })
+            set_option maxRecDepth 800 in
+              simp only [Ora.Loop.StorageFormulaContext.formulaStorageReady]
+            set_option maxRecDepth 800 in
+              simp only [Ora.Loop.StorageFormulaContext.termStorageReady,
+                ora_loop_data]
+            set_option maxRecDepth 800 in
+              simp only [Bool.not_true, Bool.false_eq_true, if_false,
+                Ora.Loop.StorageFormulaContext.withStoreViews,
+                formulaDenotes?, denoteFormula?, denoteValue?,
+                ora_loop_data, Env.lookupVar, Env.lookupFree]
+            set_option maxRecDepth 800 in
+              exact Ora.Loop.option_prop_witness_iff _ })
 
 /-- Connect store-independent preheader values to the scalar initializer.
 The generated row and term graph determine the proof; storage reads or type
@@ -305,6 +310,8 @@ macro "ora_loop_direct_timeline_reduce"
   `(tactic| simp only [ora_loop_row, Ora.Loop.EdgeRow.path_eq_timeline,
     Ora.Loop.timelinePathView, Ora.Loop.directStorageTimeline?,
     Ora.Loop.directStorageEvent?, Ora.Loop.directStorageLocation?,
+    Ora.Loop.directIndexedRegionKind, Ora.Loop.directIndexedRegionRead?,
+    ora_loop_integer_types,
     Ora.Loop.directStorageProjection?, Ora.Loop.directStorageProjections?,
     Ora.Loop.directStorageProjectionData,
     Ora.Loop.directStorageEventData, Ora.Loop.directStorageEvents,
@@ -314,6 +321,7 @@ macro "ora_loop_direct_timeline_reduce"
     Ora.Loop.TimelineEvent.assume.injEq,
     Ora.Loop.TimelineEvent.check_ne_assume,
     Ora.Loop.TimelineEvent.check_ne_storage,
+    Ora.Loop.TimelineEvent.check_ne_indexedRead,
     Ora.Loop.TimelineEvent.assume_ne_storage,
     List.flatMap, List.flatten, List.mem_append, List.mem_singleton,
     List.map, List.append, List.append_nil, List.append_assoc, List.mem_cons,
@@ -366,15 +374,19 @@ macro "ora_loop_direct_edge_compatible"
         intro formula hMember
         all_goals ora_loop_direct_timeline_reduce at hMember
         all_goals ora_loop_expand_membership formula hMember
-        all_goals ora_loop_direct_formula_control_in $autoSummary $env
+        ora_loop_all_goals (ora_loop_direct_formula_control_in $autoSummary $env)
       checkFormulaCompatible := by
         intro formula hMember
-        ora_loop_direct_timeline_reduce at hMember
-        ora_loop_expand_membership formula hMember
-        all_goals ora_loop_direct_formula_control_in $autoSummary $env
-      readOrderSupported := by
-        ora_loop_direct_timeline_reduce
-        decide
+        rw [Ora.Loop.directStorageCheck_mem_iff_row] at hMember
+        rcases hMember with ⟨checkpoint, hCheckpoint, hMember⟩
+        simp only [ora_loop_row, EdgeRow.safety_eq_timeline,
+          timelineSafetyView, timelineSafetyViewFrom,
+          List.mem_cons, List.not_mem_nil, or_false] at hCheckpoint
+        ora_loop_expand_membership checkpoint hCheckpoint
+        all_goals simp only [List.map, List.mem_cons, List.not_mem_nil, or_false]
+          at hMember
+        all_goals ora_loop_expand_membership formula hMember
+        ora_loop_all_goals (ora_loop_direct_formula_control_in $autoSummary $env)
       finalLocalsAfterTrace := by
         intro current result locals hExec hFinal
         have hLocals := Ora.Loop.TimelineExec.preserves_locals _ _ _ _
@@ -399,6 +411,7 @@ macro "ora_loop_direct_edge_compatible"
         unfold Ora.Loop.stateBindingsProduceState
         rw [← hLocals]
         unfold Ora.Loop.directStorageFinalLocals?
+          Ora.Loop.storageReadsForBindings Ora.Loop.storageReadsForIds
           Ora.Loop.StorageFormulaContext.stateEnv?
           Ora.Loop.directStorageContext at hFinal
         unfold Ora.Loop.applyStateBindingsInEnv? at hFinal
@@ -421,6 +434,8 @@ macro "ora_loop_direct_edge_compatible"
               Ora.Loop.evaluateIntegerFormulas?, Ora.Loop.integerFormulaValue?,
               formulaValue?, ora_loop_row, ora_loop_data, denoteValue?,
               Env.lookupVar, hLookup,
+              List.flatMap, List.map, List.flatten,
+              List.nil_append, List.append_nil,
               List.mem_cons, List.not_mem_nil, or_false,
               Option.bind_eq_bind, Option.some_bind, Option.none_bind,
               Option.pure_def, Option.map_some', Option.map_none'] at hFinal ⊢
@@ -431,7 +446,7 @@ macro "ora_loop_direct_edge_compatible"
         all_goals simp only [Ora.Loop.directTargetFormulas, ora_loop_row,
           List.mem_cons, List.not_mem_nil, or_false] at hMember
         all_goals ora_loop_expand_membership formula hMember
-        all_goals ora_loop_direct_formula_control_in $autoSummary $env
+        ora_loop_all_goals (ora_loop_direct_formula_control_in $autoSummary $env)
     } })
 
 macro "ora_loop_value_reduce" loc:(Lean.Parser.Tactic.location)? : tactic =>
@@ -876,6 +891,7 @@ macro tk:"ora_loop_auto_plain" : tactic => do
             ora_loop_prove_support_header_facts autoWitnessEnv
     · intro env hAssumptions hContext
       try simp only [Ora.Loop.contextReady, ora_loop_row,
+        TyRef.integerShape?, ora_loop_integer_types,
         List.forall_mem_cons, List.forall_mem_nil] at hContext
       ora_loop_normalize_context_shapes hContext
       ora_loop_unpack_conjunctions
@@ -1331,16 +1347,12 @@ macro tk:"ora_loop_auto_nested" : tactic => do
           all_goals subst_vars
           all_goals ora_loop_close) })
 
-macro tk:"ora_loop_auto_direct_storage" : tactic => do
+macro tk:"ora_loop_auto_direct_storage_from" hScalar:ident : tactic => do
   let autoSummary := Lean.mkIdentFrom tk `autoSummary
-  let autoAssumptions := Lean.mkIdentFrom tk `autoAssumptions
   let emittedManifest := Lean.mkIdentFrom tk `emittedManifest
   `(tactic| {
-    have hScalar : Ora.Loop.loopProofAuthorizationFromAssumptions
-        $emittedManifest $autoAssumptions $autoSummary := by
-      set_option maxRecDepth 4096 in ora_loop_auto_plain
     change Ora.Loop.directStorageLoopProofAuthorizationFromAssumptions
-      $emittedManifest $autoAssumptions $autoSummary
+      $emittedManifest _ $autoSummary
     have hDirect : Ora.Loop.directStorageSummarySupported
         $emittedManifest $autoSummary = true := by
       have hSupported : ($autoSummary).supported $emittedManifest = true := by
@@ -1351,23 +1363,31 @@ macro tk:"ora_loop_auto_direct_storage" : tactic => do
       decide
     have hPreheaderEmpty : ($autoSummary).preheaderTimeline.isEmpty = true := by
       simp only [ora_loop_row, List.isEmpty]
+    have hEdgeTimelines : ∀ edge, edge ∈ ($autoSummary).edges →
+        Ora.Loop.directStorageTimeline? edge.timeline =
+          some (Ora.Loop.directStorageEvents edge) := by
+      intro edge hMember
+      simp only [ora_loop_row, List.mem_cons, List.not_mem_nil, or_false]
+        at hMember
+      ora_loop_expand_membership edge hMember
+      all_goals rfl
+    have hEdgeTargets : ∀ edge, edge ∈ ($autoSummary).edges →
+        Ora.Loop.denoteControlTarget? edge.target =
+          some (Ora.Loop.directStorageTarget edge) := by
+      intro edge hMember
+      simp only [ora_loop_row, List.mem_cons, List.not_mem_nil, or_false]
+        at hMember
+      ora_loop_expand_membership edge hMember
+      all_goals rfl
     constructor
-    · rcases hScalar.1 with
+    · rcases $hScalar.1 with
         ⟨env, locals, hAssumptions, hContext, hInitial⟩
       refine ⟨env, {
         locals := locals
         storage := Ora.Loop.directStoragePreheaderState env $autoSummary
       }, hAssumptions, hContext, ?_⟩
-      have hEdgeCompatible : ∀ edge, edge ∈ ($autoSummary).edges →
-          Ora.Loop.DirectStorageEdgeCompatible $emittedManifest env
-            ($autoSummary).variables ($autoSummary).post edge := by
-        intro edge hMember
-        simp only [ora_loop_row, List.mem_cons, List.not_mem_nil, or_false]
-          at hMember
-        ora_loop_expand_membership edge hMember
-        all_goals ora_loop_direct_edge_compatible $autoSummary env
       rcases Ora.Loop.direct_storage_summary_denotes $emittedManifest env
-          $autoSummary hDirect hPreheaderEmpty hEdgeCompatible with
+          $autoSummary hDirect hPreheaderEmpty hEdgeTimelines hEdgeTargets with
           ⟨concreteVC, hConcrete⟩
       rw [hConcrete]
       unfold Ora.Loop.loopInitialPremises at hInitial
@@ -1384,7 +1404,7 @@ macro tk:"ora_loop_auto_direct_storage" : tactic => do
           · ora_loop_direct_initial_control
           · exact hScalarInitial
     · intro env hAssumptions hContext
-      have hScalarInduction := hScalar.2 env hAssumptions hContext
+      have hScalarInduction := $hScalar.2 env hAssumptions hContext
       unfold Ora.Loop.loopInductionObligationsAtEnv at hScalarInduction
       cases hAbstract : Ora.Loop.denoteLoopSummary?
           $emittedManifest env $autoSummary with
@@ -1400,7 +1420,7 @@ macro tk:"ora_loop_auto_direct_storage" : tactic => do
             ora_loop_expand_membership edge hMember
             all_goals ora_loop_direct_edge_compatible $autoSummary env
           rcases Ora.Loop.direct_storage_summary_denotes $emittedManifest env
-              $autoSummary hDirect hPreheaderEmpty hEdgeCompatible with
+              $autoSummary hDirect hPreheaderEmpty hEdgeTimelines hEdgeTargets with
               ⟨concreteVC, hConcrete⟩
           simp only [hConcrete]
           apply Ora.Loop.induction_obligations_of_refinement
@@ -1415,8 +1435,20 @@ macro tk:"ora_loop_auto_direct_storage" : tactic => do
             simp only [ora_loop_row, List.mem_cons, List.not_mem_nil,
               or_false] at hMember
             ora_loop_expand_membership formula hMember
-            all_goals ora_loop_direct_formula_control_in $autoSummary env
+            ora_loop_all_goals (ora_loop_direct_formula_control_in $autoSummary env)
           · exact hEdgeCompatible })
+
+macro tk:"ora_loop_auto_direct_storage" : tactic => do
+  let autoSummary := Lean.mkIdentFrom tk `autoSummary
+  let autoAssumptions := Lean.mkIdentFrom tk `autoAssumptions
+  let emittedManifest := Lean.mkIdentFrom tk `emittedManifest
+  let hScalar := Lean.mkIdentFrom tk `hScalar
+  `(tactic| {
+    have $hScalar : Ora.Loop.loopProofAuthorizationFromAssumptions
+        $emittedManifest $autoAssumptions $autoSummary := by
+      set_option maxRecDepth 4096 in ora_loop_auto_plain
+    ora_loop_auto_direct_storage_from $hScalar
+  })
 
 elab _tk:"ora_loop_auto" : tactic => do
   let goal ← getMainGoal

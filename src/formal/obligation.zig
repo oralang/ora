@@ -90,10 +90,76 @@ pub const ObligationSet = struct {
     fn loopArtifactAuthorityBlockReason(self: ObligationSet) ?ArtifactBlockReason {
         for (self.loop_summaries) |summary| {
             if (!self.loopSummaryRequiresLeanCertificate(summary.id)) continue;
-            if (self.timelineArtifactAuthorityBlockReason(summary, summary.preheader_timeline)) |reason| return reason;
-            for (summary.edges) |edge| if (self.timelineArtifactAuthorityBlockReason(summary, edge.timeline)) |reason| return reason;
+            if (self.loopSummaryArtifactAuthorityBlockReason(summary)) |reason| return reason;
         }
         return null;
+    }
+
+    pub fn loopSummaryArtifactAuthorityBlockReason(
+        self: ObligationSet,
+        summary: LoopSummaryRow,
+    ) ?ArtifactBlockReason {
+        for (summary.preheader_timeline) |event| if (event.payload == .indexed_region_read) {
+            return .dynamic_sequence_authority_unreviewed;
+        };
+        if (self.timelineArtifactAuthorityBlockReason(summary, summary.preheader_timeline)) |reason| return reason;
+        for (summary.edges) |edge| {
+            if (self.timelineArtifactAuthorityBlockReason(summary, edge.timeline)) |reason| return reason;
+            for ([_][]const FormulaRef{
+                summary.init_formulas,
+                summary.invariant_formulas,
+                summary.post_formulas,
+            }) |formulas| for (formulas) |formula| if (self.formulaUsesIndexedRead(
+                edge.timeline,
+                formula,
+            )) return .loop_indexed_region_read_formula_unreviewed;
+            for (edge.next_state) |binding| if (self.formulaUsesIndexedRead(
+                edge.timeline,
+                binding.value,
+            )) return .loop_indexed_region_read_formula_unreviewed;
+            for (edge.target_formulas) |formula| if (self.formulaUsesIndexedRead(
+                edge.timeline,
+                formula,
+            )) return .loop_indexed_region_read_formula_unreviewed;
+        }
+        return null;
+    }
+
+    fn formulaUsesIndexedRead(
+        self: ObligationSet,
+        timeline: []const LoopTimelineEvent,
+        formula: FormulaRef,
+    ) bool {
+        for (timeline) |event| if (event.payload == .indexed_region_read) {
+            if (self.formulaReferencesFreeVar(formula, event.payload.indexed_region_read.result)) return true;
+        };
+        return false;
+    }
+
+    fn expressionUsesIndexedRead(
+        self: ObligationSet,
+        timeline: []const LoopTimelineEvent,
+        expression: LoopFormulaExpr,
+    ) bool {
+        if (self.formulaUsesIndexedRead(timeline, expression.formula)) return true;
+        for (expression.read_results) |id| for (timeline) |event| switch (event.payload) {
+            .indexed_region_read => |read| if (freeVarIdEql(id, read.result)) return true,
+            else => {},
+        };
+        return false;
+    }
+
+    fn locationUsesIndexedRead(
+        self: ObligationSet,
+        timeline: []const LoopTimelineEvent,
+        location: LoopStorageLocationExpr,
+    ) bool {
+        for (location.projections) |projection| switch (projection) {
+            .field => {},
+            .fixed_index => |fixed| if (self.expressionUsesIndexedRead(timeline, fixed.index.value)) return true,
+            .mapping_key => |key| if (self.expressionUsesIndexedRead(timeline, key.value)) return true,
+        };
+        return false;
     }
 
     fn timelineArtifactAuthorityBlockReason(
@@ -101,20 +167,57 @@ pub const ObligationSet = struct {
         summary: LoopSummaryRow,
         timeline: []const LoopTimelineEvent,
     ) ?ArtifactBlockReason {
-        for (timeline) |event| switch (event.payload) {
-            .indexed_region_read => return .dynamic_sequence_authority_unreviewed,
-            .storage_read => |read| if (read.location.projections.len != 0 and
-                !self.reviewedStorageProjection(summary, timeline, read.location)) return .storage_projection_authority_unreviewed,
-            .storage_write => |write| if (write.location.projections.len != 0 and
-                !self.reviewedStorageProjection(summary, timeline, write.location)) return .storage_projection_authority_unreviewed,
+        for (timeline, 0..) |event, event_index| switch (event.payload) {
+            .indexed_region_read => |read| {
+                const matched = for (timeline[0..event_index]) |candidate| switch (candidate.payload) {
+                    .safety_checkpoint => |checkpoint| if (checkpoint.dynamic_index_bounds and
+                        std.mem.eql(u8, candidate.structural_key, read.checkpoint_structural_key)) break true,
+                    else => {},
+                } else false;
+                if (!matched) return .dynamic_sequence_authority_unreviewed;
+                if (self.expressionUsesIndexedRead(timeline, read.index)) {
+                    return .loop_indexed_region_read_formula_unreviewed;
+                }
+            },
+            .storage_read => |read| {
+                if (self.locationUsesIndexedRead(timeline, read.location)) {
+                    return .loop_indexed_region_read_formula_unreviewed;
+                }
+                if (read.location.projections.len != 0 and
+                    !self.reviewedStorageProjection(summary, timeline, read.location)) return .storage_projection_authority_unreviewed;
+            },
+            .storage_write => |write| {
+                if (self.locationUsesIndexedRead(timeline, write.location)) {
+                    return .loop_indexed_region_read_formula_unreviewed;
+                }
+                if (write.location.projections.len != 0 and
+                    !self.reviewedStorageProjection(summary, timeline, write.location)) return .storage_projection_authority_unreviewed;
+            },
             .summary_dependency => |dependency| if (self.loopSummaryClosureHasStorageEvents(
                 dependency.summary_id,
                 self.loop_summaries.len + 1,
             )) return .storage_child_frame_authority_unreviewed,
-            .safety_checkpoint => |checkpoint| if (checkpoint.dynamic_index_bounds) {
-                return .dynamic_sequence_authority_unreviewed;
+            .safety_checkpoint => |checkpoint| {
+                for (checkpoint.formulas) |formula| if (self.expressionUsesIndexedRead(timeline, formula)) {
+                    return .loop_indexed_region_read_formula_unreviewed;
+                };
+                if (checkpoint.dynamic_index_bounds) {
+                    const reviewed = for (timeline) |candidate| switch (candidate.payload) {
+                        .indexed_region_read => |read| if (std.mem.eql(
+                            u8,
+                            read.checkpoint_structural_key,
+                            event.structural_key,
+                        )) break true,
+                        else => {},
+                    } else false;
+                    if (!reviewed) return .dynamic_sequence_authority_unreviewed;
+                }
             },
-            .path_assumption => {},
+            .path_assumption => |path| for (path.formulas) |formula| {
+                if (self.expressionUsesIndexedRead(timeline, formula)) {
+                    return .loop_indexed_region_read_formula_unreviewed;
+                }
+            },
         };
         return null;
     }
@@ -125,12 +228,17 @@ pub const ObligationSet = struct {
         timeline: []const LoopTimelineEvent,
         location: LoopStorageLocationExpr,
     ) bool {
-        if (!summary.preheader_projection_complete or location.projections.len != 1) return false;
+        if (location.projections.len != 1) return false;
         return switch (location.projections[0]) {
-            .mapping_key => self.reviewedMappingProjection(summary, location),
+            .mapping_key => summary.preheader_projection_complete and
+                self.reviewedMappingProjection(summary, location),
             // The bounds validator ties this exact projected index and extent
             // to a preceding source-owned checkpoint in the same timeline.
-            .fixed_index => self.fixedIndexBoundsReason(timeline) == null,
+            // An empty incomplete preheader denotes an unconstrained current
+            // store in both provers; no entry-store equality is assumed.
+            .fixed_index => (summary.preheader_timeline.len == 0 or
+                summary.preheader_projection_complete) and
+                self.fixedIndexBoundsReason(timeline) == null,
             .field => false,
         };
     }
@@ -980,6 +1088,7 @@ pub const ArtifactBlockReason = enum(u8) {
     storage_projection_authority_unreviewed,
     storage_child_frame_authority_unreviewed,
     dynamic_sequence_authority_unreviewed,
+    loop_indexed_region_read_formula_unreviewed,
     source_accounting_failure,
 };
 
@@ -4214,6 +4323,17 @@ test "storage artifact authority admits reviewed mappings and bounded fixed indi
         }).loopArtifactAuthorityBlockReason(),
     );
 
+    var fixed_empty_preheader_summary = fixed_summary;
+    fixed_empty_preheader_summary.preheader_projection_complete = false;
+    try std.testing.expectEqual(
+        @as(?ArtifactBlockReason, null),
+        (ObligationSet{
+            .queries = &.{certificate_query},
+            .terms = &fixed_terms,
+            .loop_summaries = &.{fixed_empty_preheader_summary},
+        }).loopArtifactAuthorityBlockReason(),
+    );
+
     const mixed_projection = [_]LoopStorageProjection{
         index_projection[0],
         mapping_projection[0],
@@ -4263,12 +4383,14 @@ test "storage artifact authority admits reviewed mappings and bounded fixed indi
     );
 }
 
-test "dynamic sequence checks remain outside artifact authority" {
+test "dynamic sequence authority is limited to reviewed reads as data" {
     const ty: TypeRef = .{ .spelling = "u256" };
+    const read_id: FreeVarId = .{ .file_id = 1, .pattern_id = 3 };
     const terms = [_]Term{
         .{ .variable = .{ .free = .{ .id = .{ .file_id = 1, .pattern_id = 1 }, .name = "i", .ty = ty } } },
         .{ .variable = .{ .free = .{ .id = .{ .file_id = 1, .pattern_id = 2 }, .name = "values.len", .ty = ty } } },
         .{ .binary = .{ .op = .lt, .lhs = 0, .rhs = 1, .ty = ty } },
+        .{ .variable = .{ .free = .{ .id = read_id, .name = "read", .ty = ty } } },
     };
     const formulas = [_]LoopFormulaExpr{.{ .formula = .{ .term = 2 } }};
     const timeline = [_]LoopTimelineEvent{.{
@@ -4310,7 +4432,7 @@ test "dynamic sequence checks remain outside artifact authority" {
         .id = 0,
         .structural_key = "body/read",
         .payload = .{ .indexed_region_read = .{
-            .result = .{ .file_id = 1, .pattern_id = 3 },
+            .result = read_id,
             .region = .calldata,
             .owner = .{ .file_id = 1, .pattern_id = 4 },
             .index = .{ .formula = .{ .term = 0 } },
@@ -4330,6 +4452,75 @@ test "dynamic sequence checks remain outside artifact authority" {
             .queries = &.{query},
             .loop_summaries = &.{indexed_summary},
         }).loopArtifactAuthorityBlockReason().?,
+    );
+
+    const reviewed_timeline = [_]LoopTimelineEvent{
+        timeline[0],
+        .{
+            .id = 1,
+            .structural_key = "body/read",
+            .payload = indexed_timeline[0].payload,
+        },
+        .{
+            .id = 2,
+            .structural_key = "body/write",
+            .payload = .{ .storage_write = .{
+                .location = .{ .root = "output", .value_ty = ty },
+                .value = .{ .formula = .{ .term = 3 }, .read_results = &.{read_id} },
+            } },
+        },
+    };
+    var reviewed_summary = summary;
+    reviewed_summary.edges = &.{.{
+        .id = 0,
+        .structural_key = "body",
+        .timeline = &reviewed_timeline,
+    }};
+    const reviewed_set: ObligationSet = .{
+        .terms = &terms,
+        .queries = &.{query},
+        .loop_summaries = &.{reviewed_summary},
+    };
+    try std.testing.expectEqual(
+        @as(?ArtifactBlockReason, null),
+        reviewed_set.loopSummaryArtifactAuthorityBlockReason(reviewed_summary),
+    );
+
+    const read_next = [_]LoopStepAssignment{.{
+        .variable_index = 0,
+        .value = .{ .term = 3 },
+    }};
+    var formula_edges = [_]LoopEdgeRow{reviewed_summary.edges[0]};
+    formula_edges[0].next_state = &read_next;
+    var formula_summary = reviewed_summary;
+    formula_summary.edges = &formula_edges;
+    try std.testing.expectEqual(
+        ArtifactBlockReason.loop_indexed_region_read_formula_unreviewed,
+        reviewed_set.loopSummaryArtifactAuthorityBlockReason(formula_summary).?,
+    );
+
+    var invariant_summary = reviewed_summary;
+    invariant_summary.invariant_formulas = &.{.{ .term = 3 }};
+    try std.testing.expectEqual(
+        ArtifactBlockReason.loop_indexed_region_read_formula_unreviewed,
+        reviewed_set.loopSummaryArtifactAuthorityBlockReason(invariant_summary).?,
+    );
+
+    var formula_timeline = reviewed_timeline;
+    formula_timeline[2] = .{
+        .id = 2,
+        .structural_key = "body/read-check",
+        .payload = .{ .safety_checkpoint = .{
+            .formulas = &.{.{ .formula = .{ .term = 3 } }},
+        } },
+    };
+    var checkpoint_edges = [_]LoopEdgeRow{reviewed_summary.edges[0]};
+    checkpoint_edges[0].timeline = &formula_timeline;
+    var checkpoint_summary = reviewed_summary;
+    checkpoint_summary.edges = &checkpoint_edges;
+    try std.testing.expectEqual(
+        ArtifactBlockReason.loop_indexed_region_read_formula_unreviewed,
+        reviewed_set.loopSummaryArtifactAuthorityBlockReason(checkpoint_summary).?,
     );
 }
 

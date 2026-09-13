@@ -10548,6 +10548,7 @@ fn expectRepositoryLoopProofConstructionBlocked(
     source: []const u8,
     stem: []const u8,
     expected_certificate_count: usize,
+    expected_reason: []const u8,
 ) !void {
     std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
@@ -10582,7 +10583,7 @@ fn expectRepositoryLoopProofConstructionBlocked(
         u8,
         run.stdout,
         1,
-        "automatic_storage_timeline_requires_external_certificate",
+        expected_reason,
     ));
     try testing.expect(std.mem.containsAtLeast(
         u8,
@@ -10802,8 +10803,8 @@ test "repository tactic checks nested storage mutation but child frame authority
     );
 }
 
-test "dynamic sequence reads reach proof construction before reads-only authority" {
-    try expectRepositoryLoopProofConstructionBlocked(
+test "repository tactic certifies read-independent dynamic sequence timelines" {
+    try expectRepositoryStorageTacticDeterministic(
         "tests/formal/dynamic_sequence_loop_bounds.ora",
         "dynamic_sequence_loop_bounds",
         3,
@@ -10826,8 +10827,8 @@ test "indexed region reads project with canonical owners and independent exclusi
     try testing.expectEqual(obligation.ProofRequirement.lean_certificate, affine_query.proof_requirement);
     try testing.expect(affine_query.loop_vc_sha256 != null);
     try testing.expectEqual(
-        obligation.ArtifactBlockReason.dynamic_sequence_authority_unreviewed,
-        result.set.artifactDecision().blocked,
+        @as(?obligation.ArtifactBlockReason, null),
+        result.set.loopSummaryArtifactAuthorityBlockReason(affine),
     );
     var affine_read: ?obligation.LoopIndexedRegionReadEvent = null;
     var affine_read_position: ?usize = null;
@@ -10878,6 +10879,10 @@ test "indexed region reads project with canonical owners and independent exclusi
     };
     try testing.expectEqual(alias_reads.len, alias_read_count);
     try testing.expect(obligation.freeVarIdEql(alias_reads[0].owner, alias_reads[1].owner));
+    try testing.expectEqual(
+        obligation.ArtifactBlockReason.loop_indexed_region_read_formula_unreviewed,
+        result.set.loopSummaryArtifactAuthorityBlockReason(alias).?,
+    );
     const first_index = switch (alias_reads[0].index.formula) {
         .term => |id| switch (result.set.terms[id]) {
             .variable => |variable| switch (variable) {
@@ -10921,11 +10926,20 @@ test "indexed region reads project with canonical owners and independent exclusi
     try testing.expect(loopSummaryHasReason(call_body, .loop_has_call));
 }
 
-test "indexed region affine loop reaches proof construction with authority fenced" {
-    try expectRepositoryLoopProofConstructionBlocked(
+test "indexed region affine loop certifies automatically through the real CLI" {
+    try expectRepositoryStorageTacticDeterministic(
         "tests/formal/indexed_region_read_affine.ora",
         "indexed_region_read_affine",
         1,
+    );
+}
+
+test "indexed region read identities in loop formulas remain blocked by name" {
+    try expectRepositoryLoopProofConstructionBlocked(
+        "tests/formal/indexed_region_read_formula_unreviewed.ora",
+        "indexed_region_read_formula_unreviewed",
+        1,
+        "loop_indexed_region_read_formula_unreviewed",
     );
 }
 

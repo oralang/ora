@@ -331,7 +331,10 @@ theorem discharge_q17 : emittedQuery_17 := by
         change Ora.Loop.directStorageFinalLocals? context variables bindings
           result.state = some locals at hLocals
         unfold Ora.Loop.directStorageFinalLocals? at hLocals
-        cases hEnv : context.stateEnv? result.state with
+        cases hEnv : context.stateEnv? {
+          result.state with
+          reads := Ora.Loop.storageReadsForBindings bindings result.state.reads
+        } with
         | none => simp [hEnv] at hLocals
         | some bound =>
             simp only [hEnv, Option.bind_eq_bind, Option.some_bind] at hLocals
@@ -578,51 +581,31 @@ theorem discharge_q17 : emittedQuery_17 := by
         rcases Ora.Loop.bindState_some_of_stateReady env variables
             beforeResult.state.loop.locals hReady with
           ⟨localsBound, hLocalsBound⟩
-        let bound := context.withStoreViews
-          (Ora.Loop.bindStorageReads localsBound beforeResult.state.reads)
-          beforeResult.state
-        have hStateEnv : context.stateEnv? beforeResult.state = some bound := by
+        let controlState : Ora.Loop.StorageActionState := {
+          beforeResult.state with reads := []
+        }
+        let bound := context.withStoreViews localsBound controlState
+        have hStateEnv : context.stateEnv? controlState = some bound := by
           simp [context, Ora.Loop.StorageFormulaContext.stateEnv?,
-            Ora.Loop.directStorageContext, hLocalsBound, bound]
-        have hReadIds := Ora.Loop.TimelineExec.read_ids _ _ _ _ hExec
-        simp only [List.map_nil, List.nil_append] at hReadIds
+            Ora.Loop.directStorageContext, Ora.Loop.bindStorageReads,
+            hLocalsBound, controlState, bound]
         have hWriteFresh : { file_id := 0, pattern_id := 0 } ∉
-            beforeResult.state.reads.map Ora.Loop.StorageReadBinding.id := by
-          rw [hReadIds]
-          intro hBefore
-          have hTotal : { file_id := 0, pattern_id := 0 } ∈
-              Ora.Loop.timelineReadIdsOf
-                (before ++ .check formula :: after) := by
-            simp only [Ora.Loop.timelineReadIdsOf, List.flatMap_append,
-              List.mem_append]
-            exact Or.inl hBefore
-          rw [← hEvents] at hTotal
-          simp [Ora.Loop.timelineReadIdsOf,
-            Ora.Loop.TimelineEvent.readIds] at hTotal
+            controlState.reads.map Ora.Loop.StorageReadBinding.id := by
+          simp [controlState]
         have hObservedFresh : { file_id := 0, pattern_id := 1 } ∉
-            beforeResult.state.reads.map Ora.Loop.StorageReadBinding.id := by
-          rw [hReadIds]
-          intro hBefore
-          have hTotal : { file_id := 0, pattern_id := 1 } ∈
-              Ora.Loop.timelineReadIdsOf
-                (before ++ .check formula :: after) := by
-            simp only [Ora.Loop.timelineReadIdsOf, List.flatMap_append,
-              List.mem_append]
-            exact Or.inl hBefore
-          rw [← hEvents] at hTotal
-          simp [Ora.Loop.timelineReadIdsOf,
-            Ora.Loop.TimelineEvent.readIds] at hTotal
+            controlState.reads.map Ora.Loop.StorageReadBinding.id := by
+          simp [controlState]
         have hWriteLookup : bound.lookupFree { file_id := 0, pattern_id := 0 } =
             some (.integer writeKey) := by
           rw [Ora.Loop.directStorageContext_lookupFree_of_not_bound
-            emittedManifest env bound variables beforeResult.state
+            emittedManifest env bound variables controlState
             { file_id := 0, pattern_id := 0 }
             (by simp [variables, emittedLoopSummary_1]) hWriteFresh hStateEnv]
           exact hWriteKey
         have hObservedLookup : bound.lookupFree { file_id := 0, pattern_id := 1 } =
             some (.integer observedKey) := by
           rw [Ora.Loop.directStorageContext_lookupFree_of_not_bound
-            emittedManifest env bound variables beforeResult.state
+            emittedManifest env bound variables controlState
             { file_id := 0, pattern_id := 1 }
             (by simp [variables, emittedLoopSummary_1]) hObservedFresh hStateEnv]
           exact hObservedKey
@@ -632,7 +615,7 @@ theorem discharge_q17 : emittedQuery_17 := by
         rcases hCheck with rfl | rfl | rfl
         · refine ⟨observedBoundProposition,
               context.evalFormula_u256_lt_free_literal
-                beforeResult.state bound 125 126 127 observedKey
+                controlState bound 125 126 127 observedKey
                 (Ora.Integer.Value.ofNat (.unsigned .w256) 4)
                 observedBoundProposition (.compilerTypeId 6) hStateEnv
                 emitted_term_127_lookup ?_ ?_ ?_ ?_ (by decide)
@@ -650,7 +633,7 @@ theorem discharge_q17 : emittedQuery_17 := by
               emitted_term_126_lookup (by decide)
         · refine ⟨observedBoundProposition,
               context.evalFormula_u256_lt_free_literal
-                beforeResult.state bound 125 129 130 observedKey
+                controlState bound 125 129 130 observedKey
                 (Ora.Integer.Value.ofNat (.unsigned .w256) 4)
                 observedBoundProposition (.compilerTypeId 6) hStateEnv
                 emitted_term_130_lookup ?_ ?_ ?_ ?_ (by decide)
@@ -668,7 +651,7 @@ theorem discharge_q17 : emittedQuery_17 := by
               emitted_term_129_lookup (by decide)
         · refine ⟨writeBoundProposition,
               context.evalFormula_u256_lt_free_literal
-                beforeResult.state bound 132 133 134 writeKey
+                controlState bound 132 133 134 writeKey
                 (Ora.Integer.Value.ofNat (.unsigned .w256) 4)
                 writeBoundProposition (.compilerTypeId 6) hStateEnv
                 emitted_term_134_lookup ?_ ?_ ?_ ?_ (by decide)
