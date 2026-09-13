@@ -11,6 +11,7 @@ comptime {
     _ = @import("compiler.test.match.zig");
     _ = @import("compiler.test.misc.zig");
     _ = @import("compiler.test.oratosir.zig");
+    _ = @import("compiler.test.preflight.zig");
     _ = @import("compiler.test.sema_infra.zig");
     _ = @import("compiler.test.sema_regions.zig");
     _ = @import("compiler.test.sema_verify.zig");

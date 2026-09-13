@@ -1,5 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
+const compiler_test_preflight = @import("compiler.test.preflight.zig");
 const mlir = @import("mlir_c_api").c;
 const z3_verification = @import("ora_z3_verification");
 const ora_root = @import("ora_root");
@@ -30,7 +31,9 @@ const compilePackage = test_helpers.compilePackage;
 const compileText = test_helpers.compileText;
 const renderOraMlirForSource = test_helpers.renderOraMlirForSource;
 
-const ORA_BINARY_REL = "zig-out/bin/ora";
+// Formal CLI tests execute the exact artifact produced by this build graph;
+// they never trust an independently installed binary by pathname.
+const ORA_BINARY_REL = compiler_test_preflight.ora_binary_path;
 
 const MlirContextHandle = struct {
     ctx: mlir.MlirContext,

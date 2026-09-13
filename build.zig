@@ -1485,6 +1485,9 @@ pub fn build(b: *std.Build) void {
     compiler_test_mod.addImport("ora_types", ora_types_mod);
     compiler_test_mod.addImport("ora_lexer", ora_lexer_mod);
     compiler_test_mod.addImport("sinora", sinora_mod);
+    const compiler_test_options = b.addOptions();
+    compiler_test_options.addOptionPath("ora_binary_path", exe.getEmittedBin());
+    compiler_test_mod.addOptions("compiler_test_options", compiler_test_options);
     const compiler_tests = b.addTest(.{
         .root_module = compiler_test_mod,
         .filters = compilerTestFilters(
