@@ -1,0 +1,25 @@
+contract LoopHeaderRefinementAuto {
+    pub fn wide(limit: InRange<u256, 0, 4>) -> u256
+        requires limit <= 4
+    {
+        var i: u256 = 0;
+        while (i < limit)
+            invariant i <= limit
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+
+    pub fn narrow(limit: InRange<u32, 0, 4>) -> u32
+        requires limit <= 4
+    {
+        var i: u32 = 0;
+        while (i < limit)
+            invariant i <= limit
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+}

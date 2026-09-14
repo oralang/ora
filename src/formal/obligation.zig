@@ -59,7 +59,11 @@ pub const ObligationSet = struct {
                     else
                         .unknown_query };
                 }
-                if (!querySucceeded(query, result)) {
+                const retained_input_check = query.artifact_policy == .runtime_checked_input and
+                    query.kind == .guard_violate and query.backend == .z3 and
+                    query.loop_summary_id == null and query.proof_requirement == .backend_result and
+                    result.status == .sat;
+                if (!retained_input_check and !querySucceeded(query, result)) {
                     return .{ .blocked = if (query.backend == .lean) .lean_required_failure else .failed_query };
                 }
                 if (query.proof_requirement == .lean_certificate and
@@ -1057,6 +1061,8 @@ pub const Phase = enum(u8) {
 pub const ArtifactPolicy = enum(u8) {
     blocks_verified_artifacts,
     diagnostic_only,
+    /// Parameter GuardViolate SAT retains its runtime check; it is not a proof.
+    runtime_checked_input,
 };
 
 pub const ProofRequirement = enum(u8) {
@@ -4558,6 +4564,82 @@ test "header facts use the ordinary mandatory Lean authority path" {
         (ObligationSet{ .queries = &.{query}, .loop_summaries = &.{summary} })
             .loopArtifactAuthorityBlockReason(),
     );
+}
+
+test "refinement header retained input checks do not become proofs or bypass failures" {
+    const owner: Owner = .{ .function = .{ .name = "accept" } };
+    const guard: Obligation = .{
+        .id = 1,
+        .owner = owner,
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .{ .mlir_op = .{ .op_name = "ora.refinement_guard", .symbol = "accept" } },
+        .kind = .{ .runtime_guard = .{ .guard_id = "input", .formula = .{ .term = 0 } } },
+    };
+    const satisfy: VerificationQuery = .{
+        .id = 2,
+        .owner = owner,
+        .source = .generated(),
+        .phase = .report,
+        .origin = guard.origin,
+        .kind = .guard_satisfy,
+        .guard_id = "input",
+        .obligation_ids = &.{1},
+        .backend = .z3,
+        .result = .{ .status = .sat },
+    };
+    var violate = satisfy;
+    violate.id = 3;
+    violate.kind = .guard_violate;
+    violate.artifact_policy = .runtime_checked_input;
+    var queries = [_]VerificationQuery{ satisfy, violate };
+    const set: ObligationSet = .{
+        .queries = &queries,
+        .obligations = &.{guard},
+        .terms = &.{.{ .bool_lit = true }},
+    };
+    try std.testing.expect(set.artifactDecision().isAllowed());
+    try std.testing.expect(!querySucceeded(violate, violate.result.?));
+    const cases = [_]struct { result: ?VerificationQueryResult, reason: ArtifactBlockReason }{
+        .{ .result = null, .reason = .missing_proof },
+        .{ .result = .{ .status = .unknown }, .reason = .unknown_query },
+        .{ .result = .{ .status = .failed }, .reason = .failed_query },
+        .{ .result = .{ .status = .sat, .degraded = true }, .reason = .degraded_query },
+        .{ .result = .{ .status = .sat, .vacuous = true }, .reason = .vacuous_query },
+        .{ .result = .{ .status = .sat, .vacuity_unknown = true }, .reason = .unknown_query },
+    };
+    for (cases) |case| {
+        queries[1] = violate;
+        queries[1].result = case.result;
+        try expectArtifactBlocked(case.reason, set.artifactDecision());
+    }
+    queries[1] = violate;
+    queries[1].result = .{ .status = .unsat };
+    try std.testing.expect(set.artifactDecision().isAllowed());
+    queries[1] = violate;
+    queries[1].artifact_policy = .blocks_verified_artifacts;
+    try expectArtifactBlocked(.failed_query, set.artifactDecision());
+    queries[1] = violate;
+    queries[1].proof_requirement = .lean_certificate;
+    try expectArtifactBlocked(.failed_query, set.artifactDecision());
+    queries[1] = violate;
+    queries[1].backend = .lean;
+    try expectArtifactBlocked(.lean_required_failure, set.artifactDecision());
+    for ([_]VerificationQueryKind{ .obligation, .loop_base, .loop_invariant_step, .loop_body_safety, .loop_invariant_post }) |kind| {
+        queries[1] = violate;
+        queries[1].kind = kind;
+        try expectArtifactBlocked(.failed_query, set.artifactDecision());
+    }
+    queries[1] = violate;
+    queries[1].loop_summary_id = 99;
+    try expectArtifactBlocked(.invalid_dependency, set.artifactDecision());
+    queries[1] = violate;
+    queries[0].result = .{ .status = .unsat };
+    try expectArtifactBlocked(.failed_query, set.artifactDecision());
+    // Retaining a check cannot stand in for its missing satisfiability proof.
+    var missing_satisfy = set;
+    missing_satisfy.queries = &.{violate};
+    try expectArtifactBlocked(.missing_proof, missing_satisfy.artifactDecision());
 }
 
 test "diagnostic-only query carries accounting identity without artifact authority" {

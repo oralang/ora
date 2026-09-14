@@ -96,7 +96,16 @@ pub fn overlayPreparedQueryResults(
     for (base.queries) |query| {
         var match_index: ?usize = null;
         var duplicate = false;
+        // Base is a compatibility source for guards without an explicit row,
+        // never a competing proof selected by its result or position.
+        const explicit_guard_satisfy = query.kind == .guard_satisfy and blk: {
+            for (rows) |row| {
+                if (row.kind == .GuardSatisfy and queryMatchesPreparedRow(query, row)) break :blk true;
+            }
+            break :blk false;
+        };
         for (rows, 0..) |row, index| {
+            if (explicit_guard_satisfy and queryMatchesSourceGuardSatisfyRow(query, row)) continue;
             if (row_matched[index] and !queryCanSharePreparedRow(query, row)) continue;
             if (!queryMatchesPreparedRow(query, row)) continue;
             if (match_index != null) {
@@ -741,6 +750,82 @@ test "guard violate rows remain outside proof target formal identity" {
     };
 
     try std.testing.expect(queryMatchesPreparedRow(query, row));
+}
+
+test "refinement header guard matching preserves explicit authority and Base compatibility" {
+    const query: obligation.VerificationQuery = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "bounded" } },
+        .source = .{ .file = "bounds.ora", .line = 3, .column = 5 },
+        .phase = .ora_mlir,
+        .origin = .source,
+        .kind = .guard_satisfy,
+        .guard_id = "guard:bounds.ora:3:5:InRange:limit",
+    };
+    const set: obligation.ObligationSet = .{ .queries = &.{query} };
+    const base: z3_verification.PreparedQueryManifestRow = .{
+        .kind = .Base,
+        .function_name = "bounded",
+        .file = "bounds.ora",
+        .line = 3,
+        .column = 5,
+        .smtlib_hash = 11,
+        .result_status = .sat,
+    };
+    const explicit: z3_verification.PreparedQueryManifestRow = .{
+        .kind = .GuardSatisfy,
+        .function_name = "bounded",
+        .file = "bounds.ora",
+        .line = 3,
+        .column = 5,
+        .guard_id = query.guard_id,
+        .smtlib_hash = 22,
+        .result_status = .sat,
+    };
+
+    // Explicit results win in either order, including when Base is SAT but
+    // the explicit guard did not succeed. No status-dependent fallback.
+    const Case = struct {
+        status: z3_verification.QueryResultStatus,
+        decision: obligation.ArtifactDecision,
+    };
+    for ([_]Case{
+        .{ .status = .sat, .decision = .allowed },
+        .{ .status = .unknown, .decision = .{ .blocked = .unknown_query } },
+        .{ .status = .unsat, .decision = .{ .blocked = .failed_query } },
+    }) |case| {
+        var row = explicit;
+        row.result_status = case.status;
+        for ([_]bool{ false, true }) |reverse| {
+            const rows = if (reverse) [_]z3_verification.PreparedQueryManifestRow{ row, base } else .{ base, row };
+            var overlay = try overlayPreparedQueryResults(std.testing.allocator, set, &rows);
+            defer overlay.deinit();
+            try std.testing.expect(!overlay.set.hasBlockingDiagnostic());
+            try std.testing.expectEqual(@as(?u64, 22), overlay.set.queries[0].smtlib_hash);
+            try std.testing.expectEqualDeep(case.decision, overlay.set.artifactDecision());
+        }
+    }
+
+    var compatibility = try overlayPreparedQueryResults(std.testing.allocator, set, &.{base});
+    defer compatibility.deinit();
+    try std.testing.expect(!compatibility.set.hasBlockingDiagnostic());
+    try std.testing.expectEqual(@as(?u64, 11), compatibility.set.queries[0].smtlib_hash);
+    try std.testing.expectEqualDeep(obligation.ArtifactDecision.allowed, compatibility.set.artifactDecision());
+
+    // Duplicate exact rows still reject, as do duplicate compatibility rows
+    // when no explicit row exists. The precedence rule cannot hide ambiguity.
+    for ([_][]const z3_verification.PreparedQueryManifestRow{
+        &.{ base, explicit, explicit },
+        &.{ base, base },
+    }) |rows| {
+        var duplicate = try overlayPreparedQueryResults(std.testing.allocator, set, rows);
+        defer duplicate.deinit();
+        try std.testing.expectEqualDeep(
+            obligation.ArtifactDecision{ .blocked = .blocking_diagnostic },
+            duplicate.set.artifactDecision(),
+        );
+        try std.testing.expect(std.mem.indexOf(u8, duplicate.set.diagnostics[0].message, "multiple SMT prepared-query rows") != null);
+    }
 }
 
 test "canonical SMT hash crosscheck accepts matching supported formula row" {

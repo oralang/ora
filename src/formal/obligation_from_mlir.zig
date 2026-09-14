@@ -5442,6 +5442,9 @@ const Collector = struct {
         });
         try self.addQueryForOperation(.guard_satisfy, null, guard_id, id, owner, origin, source, op);
         try self.addQueryForOperation(.guard_violate, null, guard_id, id, owner, origin, source, op);
+        if (self.active_loop_depth == 0 and std.mem.eql(u8, try self.stringAttr(op, "ora.verification_context") orelse "", "parameter_refinement")) {
+            self.queries.items[self.queries.items.len - 1].artifact_policy = .runtime_checked_input;
+        }
     }
 
     fn addResourceOp(
@@ -6523,7 +6526,7 @@ const Collector = struct {
                     ty.* = .{ .compiler_type_id = type_id };
                     continue;
                 };
-                if (integerTypeWidth(mlir.oraValueGetType(value)) != info.width) {
+                if (!mlirIntegerCarrierHasWidth(mlir.oraValueGetType(value), info.width)) {
                     try self.addBlockingDiagnosticFmt(
                         .missing_type,
                         "parameter {d} compiler type id {d} disagrees with its MLIR width",
@@ -7528,6 +7531,10 @@ fn mlirTypeIsSupportedInteger(ty: mlir.MlirType) bool {
 }
 
 fn mlirIntegerCarrierHasWidth(ty: mlir.MlirType, expected_width: u16) bool {
+    if (mlir.oraTypeIsNull(ty)) return false;
+    // Refinements retain their base carrier; metadata must still match its exact width.
+    const base = mlir.oraRefinementTypeGetBaseType(ty);
+    if (!mlir.oraTypeIsNull(base)) return mlirIntegerCarrierHasWidth(base, expected_width);
     const width = integerTypeWidth(ty) orelse return false;
     return width == expected_width;
 }
@@ -9112,6 +9119,24 @@ test "loop integer carriers retain an exact semantic width cross-check" {
     try std.testing.expect(!mlirIntegerCarrierHasWidth(unsigned_256, 128));
     try std.testing.expect(mlirIntegerCarrierHasWidth(signed_128, 128));
     try std.testing.expect(!mlirIntegerCarrierHasWidth(boolean, 256));
+}
+
+test "refinement header carriers validate the actual base width" {
+    const context = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(context);
+    try std.testing.expect(mlir.oraDialectRegister(context));
+
+    const base = mlir.oraIntegerTypeGet(context, 256, false);
+    const refined = mlir.oraInRangeTypeGet(context, base, 0, 0, 0, 1, 0, 0, 0, 4);
+    const narrow = mlir.oraInRangeTypeGet(context, mlir.oraIntegerTypeGet(context, 32, false), 0, 0, 0, 0, 0, 0, 0, 4);
+    try std.testing.expect(!mlir.oraTypeIsNull(refined));
+    try std.testing.expect(!mlir.oraTypeIsNull(narrow));
+    try std.testing.expect(mlirIntegerCarrierHasWidth(refined, 256));
+    try std.testing.expect(!mlirIntegerCarrierHasWidth(refined, 32));
+    try std.testing.expect(mlirIntegerCarrierHasWidth(narrow, 32));
+    try std.testing.expect(!mlirIntegerCarrierHasWidth(narrow, 256));
+    try std.testing.expect(!mlirIntegerCarrierHasWidth(mlir.oraBoolTypeGet(context), 256));
+    try std.testing.expect(!mlirIntegerCarrierHasWidth(.{ .ptr = null }, 256));
 }
 
 fn resourceSiteComplete(site: Collector.ResourceCompletenessSite) bool {

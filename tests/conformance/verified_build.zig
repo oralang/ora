@@ -127,6 +127,13 @@ test "dynamic byte and string bounds execute in verified and no-verify builds" {
     try runner.runConformanceSpecWithExtraArgs(testing.allocator, source_path, spec_path, &.{});
 }
 
+test "refinement header input checks execute with Lean certificates and without verification" {
+    const source_path = "tests/formal/loop_header_refinement_auto.ora";
+    const spec_path = "tests/formal/loop_header_refinement_auto.spec.toml";
+    try runner.runConformanceSpecWithExtraArgs(testing.allocator, source_path, spec_path, &.{"--no-verify"});
+    try runner.runConformanceSpecWithExtraArgs(testing.allocator, source_path, spec_path, &.{"--lean-proofs"});
+}
+
 test "verified conformance manifest parser rejects unordered membership" {
     const text =
         schema ++ "\n" ++

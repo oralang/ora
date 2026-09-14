@@ -100,8 +100,16 @@ fn tryRunOraEmitWithExtraArgs(
     });
     defer process_io.deinit();
 
+    // Threaded defaults to an empty environment. Preserve tool discovery for
+    // Lean-backed runs without importing unrelated compiler-test overrides.
+    var environ = std.process.Environ.Map.init(allocator);
+    defer environ.deinit();
+    for ([_][:0]const u8{ "PATH", "HOME" }) |key| {
+        if (std.c.getenv(key)) |value| try environ.put(key, std.mem.span(value));
+    }
     const result = try std.process.run(allocator, process_io.io(), .{
         .argv = argv.items,
+        .environ_map = &environ,
         .stdout_limit = std.Io.Limit.limited(8 * 1024 * 1024),
         .stderr_limit = std.Io.Limit.limited(8 * 1024 * 1024),
     });

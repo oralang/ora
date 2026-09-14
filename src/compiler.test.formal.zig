@@ -12533,6 +12533,157 @@ test "repository tactic certifies dominating loop header facts deterministically
     );
 }
 
+test "refinement header parameter metadata still rejects a mismatched base width" {
+    const h = createContext();
+    defer destroyContext(h);
+    for ([_]u16{ 32, 128, 256 }) |width| {
+        const text = try std.fmt.allocPrint(testing.allocator,
+            \\module {{
+            \\  func.func @parameter(%arg0: !ora.in_range<i{d}, 0, 0, 0, 0, 0, 0, 0, 4>) attributes {{
+            \\    ora.param_names = ["limit"],
+            \\    ora.param_binding_ids = ["file:0:pattern:0"],
+            \\    ora.param_compiler_type_ids = [{d} : i256]
+            \\  }} {{
+            \\    func.return
+            \\  }}
+            \\}}
+        , .{ width, type_builtin.lookupBuiltinById(.u256).comptime_type_id });
+        defer testing.allocator.free(text);
+        const module = try parseModule(h.ctx, text);
+        defer mlir.oraModuleDestroy(module);
+        var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+        defer result.deinit();
+        try testing.expectEqual(width != 256, result.set.hasBlockingDiagnostic());
+        if (width != 256) {
+            var saw_mismatch = false;
+            for (result.set.diagnostics) |diagnostic| {
+                if (diagnostic.kind == .missing_type and
+                    std.mem.indexOf(u8, diagnostic.message, "disagrees with its MLIR width") != null)
+                    saw_mismatch = true;
+            }
+            try testing.expect(saw_mismatch);
+        }
+    }
+}
+
+test "refinement header facts preserve both positive-minimum assumptions" {
+    var result = try collectPackageObligations(testing.allocator, "tests/formal/loop_header_refinement_positive_minimum.ora");
+    defer result.deinit();
+    try testing.expect(!result.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), result.set.loop_summaries.len);
+    const summary = result.set.loop_summaries[0];
+    try testing.expect(summary.projectionSupported());
+    try testing.expectEqual(@as(usize, 2), summary.header_facts.len);
+    for (summary.header_facts) |fact| {
+        try testing.expectEqual(obligation.LoopHeaderFactSource.function_requires, fact.source_kind);
+        try testing.expect(fact.assumption_id != null);
+        try testing.expectEqual(@as(usize, 1), fact.stable_values.len);
+        try testing.expectEqualDeep(
+            obligation.TypeRef{ .compiler_type_id = type_builtin.lookupBuiltinById(.u256).comptime_type_id },
+            fact.stable_values[0].ty,
+        );
+    }
+}
+
+test "refinement header loops certify wide and narrow carriers deterministically" {
+    try expectRepositoryStorageTacticDeterministic(
+        "tests/formal/loop_header_refinement_auto.ora",
+        "loop_header_refinement_auto",
+        2,
+    );
+}
+
+test "refinement header satisfied requires do not erase input checks" {
+    var compilation = try compilePackage("tests/formal/loop_header_refinement_auto.ora");
+    defer compilation.deinit();
+    const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir.diagnostics.isEmpty());
+    var bindings = try test_helpers.collectFormalQueryBindingsForVerifier(testing.allocator, hir.module.raw_module);
+    defer {
+        bindings.formal_result.deinit();
+        testing.allocator.free(bindings.z3_bindings);
+    }
+    var verifier = try z3_verification.VerificationPass.init(testing.allocator);
+    defer verifier.deinit();
+    verifier.setFormalQueryBindings(bindings.z3_bindings);
+    var result = try verifier.runVerificationPass(hir.module.raw_module);
+    defer result.deinit();
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.proven_guard_ids.count());
+    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(
+        testing.allocator,
+        hir.context,
+        hir.module.raw_module,
+        &result.proven_guard_ids,
+        .{},
+    );
+    const rendered = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir.module.raw_module));
+    defer mlir.oraStringRefFree(rendered);
+    try testing.expectEqual(@as(usize, 2), std.mem.count(
+        u8,
+        rendered.data[0..rendered.length],
+        "ora.verification_context = \"refinement_guard\"",
+    ));
+}
+
+test "refinement header input policy is assigned only to parameter guard violation queries" {
+    const h = createContext();
+    defer destroyContext(h);
+    for ([_][]const u8{ "parameter_refinement", "refinement_conversion", "" }) |context| {
+        const text = try std.fmt.allocPrint(testing.allocator,
+            \\module {{
+            \\  func.func @checked(%flag: i1) {{
+            \\    "ora.refinement_guard"(%flag) <{{message = "guard"}}> {{ora.guard_id = "input", ora.verification_context = "{s}"}} : (i1) -> ()
+            \\    func.return
+            \\  }}
+            \\}}
+        , .{context});
+        defer testing.allocator.free(text);
+        const module = try parseModule(h.ctx, text);
+        defer mlir.oraModuleDestroy(module);
+        var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+        defer result.deinit();
+        try testing.expectEqual(@as(usize, 1), countQuery(result.set, .guard_violate));
+        for (result.set.queries) |query| {
+            const expected: obligation.ArtifactPolicy = if (query.kind == .guard_violate and
+                std.mem.eql(u8, context, "parameter_refinement")) .runtime_checked_input else .blocks_verified_artifacts;
+            try testing.expectEqual(expected, query.artifact_policy);
+        }
+        const dump = try dumpManifestToOwnedString(testing.allocator, result.set);
+        defer testing.allocator.free(dump);
+        try testing.expectEqual(
+            @as(usize, if (std.mem.eql(u8, context, "parameter_refinement")) 1 else 0),
+            std.mem.count(u8, dump, "\"artifact_policy\":\"runtime_checked_input\""),
+        );
+    }
+}
+
+test "refinement header positive minimum remains blocked on witness synthesis" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output = try pathFromTmpAlloc(testing.allocator, tmp, "blocked");
+    defer testing.allocator.free(output);
+    const run = try runProcessWithLeanPath(testing.allocator, &.{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=bytecode",
+        "--out-dir",
+        output,
+        "--lean-proofs",
+        "tests/formal/loop_header_refinement_positive_minimum.ora",
+    });
+    defer testing.allocator.free(run.stdout);
+    defer testing.allocator.free(run.stderr);
+    try expectExited(run, 1);
+    try testing.expect(std.mem.indexOf(u8, run.stdout, "certificate-required=1, excluded=0") != null);
+    try testing.expect(std.mem.indexOf(u8, run.stdout, "lean_proof_rejected") != null);
+    try testing.expectError(error.FileNotFound, tmp.dir.access(
+        std.testing.io,
+        "blocked/loop_header_refinement_positive_minimum.hex",
+        .{},
+    ));
+}
+
 test "unsupported loop header facts block bytecode with named exclusions" {
     std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
