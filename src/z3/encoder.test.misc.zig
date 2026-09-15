@@ -2723,7 +2723,7 @@ test "degradation reasons are capped and preserve encounter order" {
 }
 
 test "soundness loss kinds are structured and capped" {
-    comptime std.debug.assert(std.meta.fields(Encoder.SoundnessLoss).len > 10);
+    comptime std.debug.assert(@typeInfo(Encoder.SoundnessLoss).@"enum".field_names.len > 10);
 
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -2732,10 +2732,10 @@ test "soundness loss kinds are structured and capped" {
     defer encoder.deinit();
 
     // Pillar 4.5 self-introspection: labels are a stable machine-facing API.
-    inline for (std.meta.fields(Encoder.SoundnessLoss)) |field| {
-        const loss: Encoder.SoundnessLoss = @enumFromInt(field.value);
+    inline for (@typeInfo(Encoder.SoundnessLoss).@"enum".field_names) |field| {
+        const loss: Encoder.SoundnessLoss = @fromBackingInt(@intCast(@backingInt(@field(Encoder.SoundnessLoss, field))));
         const label = Encoder.soundnessLossLabel(loss);
-        try testing.expectEqualStrings(field.name, label);
+        try testing.expectEqualStrings(field, label);
         encoder.noteSoundnessLoss(loss, label);
     }
 

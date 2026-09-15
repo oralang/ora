@@ -6,7 +6,7 @@ pub const GAS: u64 = 50_000;
 pub const INPUT_SIZE: usize = 192;
 pub const OUTPUT_SIZE: usize = 64;
 
-const FIELD_ELEMENTS_PER_BLOB_WORD = [_]u8{0} ** 30 ++ [_]u8{ 0x10, 0x00 };
+const FIELD_ELEMENTS_PER_BLOB_WORD = @as([30]u8, @splat(0)) ++ [_]u8{ 0x10, 0x00 };
 const BLS_MODULUS = [_]u8{
     0x73, 0xed, 0xa7, 0x53, 0x29, 0x9d, 0x7d, 0x48,
     0x33, 0x39, 0xd8, 0x08, 0x09, 0xa1, 0xd8, 0x05,
@@ -51,12 +51,12 @@ pub fn execute(input: []const u8, output: []u8) !void {
 
 test "point evaluation rejects invalid input length" {
     var output: [OUTPUT_SIZE]u8 = undefined;
-    const short = [_]u8{0} ** (INPUT_SIZE - 1);
+    const short = @as([(INPUT_SIZE - 1)]u8, @splat(0));
     try std.testing.expectError(error.InvalidInput, execute(&short, &output));
 }
 
 test "point evaluation rejects versioned hash mismatch" {
-    var input = [_]u8{0} ** INPUT_SIZE;
+    var input = @as([INPUT_SIZE]u8, @splat(0));
     input[0] = 0xff;
     input[96] = 0xc0;
     var output: [OUTPUT_SIZE]u8 = undefined;
@@ -64,7 +64,7 @@ test "point evaluation rejects versioned hash mismatch" {
 }
 
 test "point evaluation verifies point-at-infinity proof case" {
-    var input = [_]u8{0} ** INPUT_SIZE;
+    var input = @as([INPUT_SIZE]u8, @splat(0));
     input[96] = 0xc0;
     input[144] = 0xc0;
 

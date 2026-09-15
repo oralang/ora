@@ -456,11 +456,11 @@ fn logicalRole(kind: ?z3_verification.AnnotationKind) ?obligation.LogicalRole {
 }
 
 test "formal logical role labels stay in lockstep with the obligation vocabulary" {
-    inline for (std.meta.fields(z3_verification.AnnotationKind)) |field| {
-        const kind: z3_verification.AnnotationKind = @enumFromInt(field.value);
+    inline for (@typeInfo(z3_verification.AnnotationKind).@"enum".field_names) |field| {
+        const kind: z3_verification.AnnotationKind = @fromBackingInt(@intCast(@backingInt(@field(z3_verification.AnnotationKind, field))));
         if (z3_verification.formalLogicalRoleLabel(kind)) |label| {
             if (std.meta.stringToEnum(obligation.LogicalRole, label) == null) {
-                std.debug.print("annotation kind {s} produces label '{s}' with no obligation.LogicalRole member\n", .{ field.name, label });
+                std.debug.print("annotation kind {s} produces label '{s}' with no obligation.LogicalRole member\n", .{ field, label });
                 return error.LogicalRoleVocabularyDrift;
             }
         }

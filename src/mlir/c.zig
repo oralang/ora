@@ -6,9 +6,7 @@
 //
 // ============================================================================
 
-pub const c = @cImport({
-    @cInclude("OraDialectC.h");
-});
+pub const c = @import("mlir_bindings");
 
 // Helper to free string returned from C API
 pub fn freeStringRef(str: c.MlirStringRef) void {

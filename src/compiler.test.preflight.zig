@@ -42,6 +42,6 @@ test "formal CLI binary matches the current build graph artifact" {
 test "formal CLI preflight rejects a different installed artifact" {
     try testing.expectError(
         error.StaleInstalledOraBinary,
-        requireCurrentInstalledBinary([_]u8{0} ** 32, [_]u8{1} ** 32),
+        requireCurrentInstalledBinary(@as([32]u8, @splat(0)), @as([32]u8, @splat(1))),
     );
 }

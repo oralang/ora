@@ -15,15 +15,16 @@ pub fn build(b: *std.Build) void {
     c_kzg_mod.linkLibrary(blst_lib);
     c_kzg_mod.addIncludePath(b.path("vendor/c-kzg-4844/src"));
     c_kzg_mod.addIncludePath(b.path("vendor/c-kzg-4844/blst/bindings"));
+    @import("c_bindings.zig").addImports(b, c_kzg_mod, target, optimize, ".");
     const rust_crypto_lib_path = b.path("target/release/libora_evm_crypto_wrappers.a");
 
     const bootstrap_crypto = b.addSystemCommand(&.{
         "cargo",
         "build",
         "--manifest-path",
-        b.path("Cargo.toml").getPath(b),
-        "--release",
     });
+    bootstrap_crypto.addFileArg(b.path("Cargo.toml"));
+    bootstrap_crypto.addArg("--release");
     bootstrap_crypto.setName("bootstrap-ora-evm-crypto");
 
     const evm_mod = b.addModule("ora_evm", .{
@@ -51,7 +52,7 @@ pub fn build(b: *std.Build) void {
     debug_probe_exe.step.dependOn(&bootstrap_crypto.step);
     b.installArtifact(debug_probe_exe);
     const run_debug_probe = b.addRunArtifact(debug_probe_exe);
-    if (b.args) |args| run_debug_probe.addArgs(args);
+    run_debug_probe.addPassthruArgs();
 
     if (debug_ui) {
         const vaxis_dep = b.dependency("vaxis", .{
@@ -75,7 +76,7 @@ pub fn build(b: *std.Build) void {
         debug_tui_exe.step.dependOn(&bootstrap_crypto.step);
         b.installArtifact(debug_tui_exe);
         const run_debug_tui = b.addRunArtifact(debug_tui_exe);
-        if (b.args) |args| run_debug_tui.addArgs(args);
+        run_debug_tui.addPassthruArgs();
 
         // DAP server (see src/debug_dap.zig). Imports debug_tui.zig
         // directly to reuse Session / SessionSeed / loadSeedFromConfig,
@@ -98,7 +99,7 @@ pub fn build(b: *std.Build) void {
         debug_dap_exe.step.dependOn(&bootstrap_crypto.step);
         b.installArtifact(debug_dap_exe);
         const run_debug_dap = b.addRunArtifact(debug_dap_exe);
-        if (b.args) |args| run_debug_dap.addArgs(args);
+        run_debug_dap.addPassthruArgs();
 
         const debug_tui_step = b.step("debug-tui", "Run the Ora EVM debugger TUI against emitted bytecode");
         debug_tui_step.dependOn(&run_debug_tui.step);
@@ -158,7 +159,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/bench/step_bench.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
             .imports = &.{
                 .{ .name = "ora_evm", .module = evm_mod },
             },

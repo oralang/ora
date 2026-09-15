@@ -488,8 +488,8 @@ test "kernel registry describes the blocking source-accounting phases" {
 }
 
 test "every executable kernel gate has an explicit audit-catalog identity" {
-    inline for (std.meta.fields(GateId)) |field| {
-        const id: GateId = @enumFromInt(field.value);
+    inline for (@typeInfo(GateId).@"enum".field_names) |field| {
+        const id: GateId = @fromBackingInt(@intCast(@backingInt(@field(GateId, field))));
         _ = auditGateId(id);
     }
 }

@@ -420,16 +420,16 @@ test "precision note kinds are structured and labeled" {
     var encoder = Encoder.init(&z3_ctx, testing.allocator);
     defer encoder.deinit();
 
-    inline for (std.meta.fields(Encoder.PrecisionNoteKind)) |field| {
-        const note: Encoder.PrecisionNoteKind = @enumFromInt(field.value);
+    inline for (@typeInfo(Encoder.PrecisionNoteKind).@"enum".field_names) |field| {
+        const note: Encoder.PrecisionNoteKind = @fromBackingInt(@intCast(@backingInt(@field(Encoder.PrecisionNoteKind, field))));
         const label = Encoder.precisionNoteLabel(note);
         try testing.expect(label.len > 0);
-        try testing.expectEqualStrings(field.name, label);
+        try testing.expectEqualStrings(field, label);
         encoder.notePrecision(note);
     }
 
     const notes = encoder.precisionNotes();
-    try testing.expectEqual(std.meta.fields(Encoder.PrecisionNoteKind).len, notes.len);
+    try testing.expectEqual(@typeInfo(Encoder.PrecisionNoteKind).@"enum".field_names.len, notes.len);
     try testing.expectEqual(Encoder.PrecisionNoteKind.path_precise_modifies_fallback_unavailable, notes[0]);
     try testing.expectEqual(Encoder.PrecisionNoteKind.precision_note_cap_exceeded, notes[1]);
 }

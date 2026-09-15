@@ -2034,7 +2034,7 @@ fn encodeAbiWordLocal(type_name: []const u8, value_text: []const u8, out_word: [
         const text = if (std.mem.startsWith(u8, value_text, "0x")) value_text[2..] else value_text;
         if (text.len > 40) return error.InvalidAddress;
         if (text.len % 2 != 0) return error.InvalidAddress;
-        var buf: [20]u8 = [_]u8{0} ** 20;
+        var buf: [20]u8 = @as([20]u8, @splat(0));
         const start = 20 - text.len / 2;
         _ = try std.fmt.hexToBytes(buf[start..], text);
         @memcpy(out_word[12..32], &buf);
@@ -2721,7 +2721,7 @@ fn printVerificationDiagnostics(stdout: anytype, diagnostics: []const z3_verific
         diagnostics.len,
         if (diagnostics.len != 1) @as([]const u8, "s") else "",
     });
-    try stdout.print("{s}\n", .{"=" ** 70});
+    try stdout.print("{s}\n", .{&@as([70]u8, @splat('='))});
 
     for (diagnostics, 0..) |diag, idx| {
         const parsed = parseGuardId(diag.guard_id);
@@ -2762,7 +2762,7 @@ fn printVerificationDiagnostics(stdout: anytype, diagnostics: []const z3_verific
         }
     }
 
-    try stdout.print("\n{s}\n", .{"-" ** 70});
+    try stdout.print("\n{s}\n", .{&@as([70]u8, @splat('-'))});
     // Print raw guard IDs for debugging.
     try stdout.print("debug: raw guard IDs:\n", .{});
     for (diagnostics) |diag| {
@@ -2827,7 +2827,7 @@ fn printVerificationErrors(stdout: anytype, errors: []const z3_verification.Veri
             if (errors.len != 1) @as([]const u8, "s") else "",
         });
     }
-    try stdout.print("{s}\n", .{"=" ** 70});
+    try stdout.print("{s}\n", .{&@as([70]u8, @splat('='))});
 
     for (errors, 0..) |err, idx| {
         try stdout.print("\n  {d}. {s}\n", .{ idx + 1, err.message });

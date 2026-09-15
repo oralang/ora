@@ -354,21 +354,21 @@ fn nestedTupleDecodeFixture(
 test "abi decode error ordinals are stable for runtime C++ mapping" {
     const DecodeError = abi_comptime_decoder.DecodeError;
 
-    try testing.expectEqual(@as(u32, 0), @intFromEnum(DecodeError.truncated_buffer));
-    try testing.expectEqual(@as(u32, 1), @intFromEnum(DecodeError.oversize_buffer));
-    try testing.expectEqual(@as(u32, 2), @intFromEnum(DecodeError.buffer_size_exceeded));
-    try testing.expectEqual(@as(u32, 3), @intFromEnum(DecodeError.non_canonical_padding));
-    try testing.expectEqual(@as(u32, 4), @intFromEnum(DecodeError.invalid_bool_value));
-    try testing.expectEqual(@as(u32, 5), @intFromEnum(DecodeError.invalid_address));
-    try testing.expectEqual(@as(u32, 6), @intFromEnum(DecodeError.invalid_fixed_bytes));
-    try testing.expectEqual(@as(u32, 7), @intFromEnum(DecodeError.enum_out_of_range));
-    try testing.expectEqual(@as(u32, 8), @intFromEnum(DecodeError.depth_limit_exceeded));
-    try testing.expectEqual(@as(u32, 9), @intFromEnum(DecodeError.array_length_exceeded));
-    try testing.expectEqual(@as(u32, 10), @intFromEnum(DecodeError.refinement_violation));
-    try testing.expectEqual(@as(u32, 11), @intFromEnum(DecodeError.non_canonical_encoding));
-    try testing.expectEqual(@as(u32, 12), @intFromEnum(DecodeError.invalid_offset));
-    try testing.expectEqual(@as(u32, 13), @intFromEnum(DecodeError.length_overflow));
-    try testing.expectEqual(@as(u32, 14), @intFromEnum(DecodeError.string_length_exceeded));
+    try testing.expectEqual(@as(u32, 0), @backingInt(DecodeError.truncated_buffer));
+    try testing.expectEqual(@as(u32, 1), @backingInt(DecodeError.oversize_buffer));
+    try testing.expectEqual(@as(u32, 2), @backingInt(DecodeError.buffer_size_exceeded));
+    try testing.expectEqual(@as(u32, 3), @backingInt(DecodeError.non_canonical_padding));
+    try testing.expectEqual(@as(u32, 4), @backingInt(DecodeError.invalid_bool_value));
+    try testing.expectEqual(@as(u32, 5), @backingInt(DecodeError.invalid_address));
+    try testing.expectEqual(@as(u32, 6), @backingInt(DecodeError.invalid_fixed_bytes));
+    try testing.expectEqual(@as(u32, 7), @backingInt(DecodeError.enum_out_of_range));
+    try testing.expectEqual(@as(u32, 8), @backingInt(DecodeError.depth_limit_exceeded));
+    try testing.expectEqual(@as(u32, 9), @backingInt(DecodeError.array_length_exceeded));
+    try testing.expectEqual(@as(u32, 10), @backingInt(DecodeError.refinement_violation));
+    try testing.expectEqual(@as(u32, 11), @backingInt(DecodeError.non_canonical_encoding));
+    try testing.expectEqual(@as(u32, 12), @backingInt(DecodeError.invalid_offset));
+    try testing.expectEqual(@as(u32, 13), @backingInt(DecodeError.length_overflow));
+    try testing.expectEqual(@as(u32, 14), @backingInt(DecodeError.string_length_exceeded));
 }
 
 test "abi comptime decoder propagates struct resolver failures" {
@@ -377,7 +377,7 @@ test "abi comptime decoder propagates struct resolver failures" {
     };
     const layout: abi_layout.LayoutNode = .{ .tuple = .{ .path = .{}, .elements = &layout_elements } };
     const target_type: compiler.sema.Type = .{ .struct_ = .{ .name = "Point" } };
-    const bytes = [_]u8{0} ** 32;
+    const bytes = @as([32]u8, @splat(0));
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

@@ -3398,7 +3398,7 @@ test "LoopVC digest covers every certificate-authority component class" {
         .id = 0,
         .structural_key = "body/op:4/scf.while",
         .summary_id = 2,
-        .loop_vc_sha256 = [_]u8{9} ** 32,
+        .loop_vc_sha256 = @as([32]u8, @splat(9)),
         .write_footprint = &footprint,
         .write_footprint_complete = true,
         .target = .successor,

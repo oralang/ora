@@ -123,7 +123,7 @@ const builtin_name_entries = blk: {
 const builtin_name_map = std.StaticStringMap(BuiltinTypeId).initComptime(builtin_name_entries);
 
 const builtin_by_comptime_type_id = blk: {
-    var specs = [_]?BuiltinTypeSpec{null} ** (primitive_comptime_type_id_max + 1);
+    var specs = @as([(primitive_comptime_type_id_max + 1)]?BuiltinTypeSpec, @splat(null));
     for (builtin_types) |spec| {
         specs[spec.comptime_type_id] = spec;
     }
@@ -182,7 +182,7 @@ pub fn lookupBuiltinByName(name: []const u8) ?BuiltinTypeSpec {
 }
 
 pub fn lookupBuiltinById(id: BuiltinTypeId) BuiltinTypeSpec {
-    return builtin_types[@intFromEnum(id)];
+    return builtin_types[@backingInt(id)];
 }
 
 pub fn lookupBuiltinByComptimeTypeId(type_id: u32) ?BuiltinTypeSpec {
@@ -266,7 +266,7 @@ pub fn isBuiltinTypeName(name: []const u8) bool {
 }
 
 fn assertBuiltinTable() void {
-    if (builtin_types.len != @typeInfo(BuiltinTypeId).@"enum".fields.len) {
+    if (builtin_types.len != @typeInfo(BuiltinTypeId).@"enum".field_names.len) {
         @compileError("builtin_types must have one row per BuiltinTypeId");
     }
     if (fixed_bytes_names.len != fixed_bytes_max_len) {
@@ -274,7 +274,7 @@ fn assertBuiltinTable() void {
     }
 
     for (builtin_types, 0..) |spec, index| {
-        if (@intFromEnum(spec.id) != index) {
+        if (@backingInt(spec.id) != index) {
             @compileError("builtin_types order must match BuiltinTypeId order");
         }
         if (spec.comptime_type_id < primitive_comptime_type_id_min or spec.comptime_type_id > primitive_comptime_type_id_max) {

@@ -590,8 +590,8 @@ fn containsId(ids: []const obligation.Id, id: obligation.Id) bool {
 }
 
 test "prepared query kind mapping is exhaustive" {
-    inline for (std.meta.fields(obligation.VerificationQueryKind)) |field| {
-        const kind: obligation.VerificationQueryKind = @enumFromInt(field.value);
+    inline for (@typeInfo(obligation.VerificationQueryKind).@"enum".field_names) |field| {
+        const kind: obligation.VerificationQueryKind = @fromBackingInt(@intCast(@backingInt(@field(obligation.VerificationQueryKind, field))));
         _ = queryKind(kind);
     }
 }
@@ -626,7 +626,7 @@ test "canonical LoopVC post queries extend accounting identity without solver au
     defer identity.deinit(std.testing.allocator);
 
     const obligation_ids = [_]obligation.Id{11};
-    const digest = [_]u8{0xa5} ** 32;
+    const digest = @as([32]u8, @splat(0xa5));
     const queries = [_]obligation.VerificationQuery{.{
         .id = 9,
         .owner = .{ .function = .{ .name = "run" } },

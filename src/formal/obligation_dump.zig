@@ -242,10 +242,10 @@ const CoverageSummary = struct {
     terms: u32 = 0,
     query_obligation_links: u32 = 0,
     proof_obligation_links: u32 = 0,
-    obligation_kinds: [enumFieldCount(obligation.KindTag)]u32 = [_]u32{0} ** enumFieldCount(obligation.KindTag),
-    formula_projection_by_kind: [enumFieldCount(obligation.KindTag)]FormulaProjectionCounts = [_]FormulaProjectionCounts{.{}} ** enumFieldCount(obligation.KindTag),
-    query_backends: [enumFieldCount(obligation.VerificationBackend)]u32 = [_]u32{0} ** enumFieldCount(obligation.VerificationBackend),
-    query_results: [enumFieldCount(obligation.VerificationQueryStatus)]u32 = [_]u32{0} ** enumFieldCount(obligation.VerificationQueryStatus),
+    obligation_kinds: [enumFieldCount(obligation.KindTag)]u32 = @as([enumFieldCount(obligation.KindTag)]u32, @splat(0)),
+    formula_projection_by_kind: [enumFieldCount(obligation.KindTag)]FormulaProjectionCounts = @as([enumFieldCount(obligation.KindTag)]FormulaProjectionCounts, @splat(.{})),
+    query_backends: [enumFieldCount(obligation.VerificationBackend)]u32 = @as([enumFieldCount(obligation.VerificationBackend)]u32, @splat(0)),
+    query_results: [enumFieldCount(obligation.VerificationQueryStatus)]u32 = @as([enumFieldCount(obligation.VerificationQueryStatus)]u32, @splat(0)),
     query_results_missing: u32 = 0,
     canonical_z3_coverage: CanonicalZ3Coverage = .{},
 
@@ -260,14 +260,14 @@ const CoverageSummary = struct {
         };
 
         for (set.obligations) |item| {
-            summary.obligation_kinds[@intFromEnum(std.meta.activeTag(item.kind))] += 1;
+            summary.obligation_kinds[@backingInt(std.meta.activeTag(item.kind))] += 1;
             summary.addFormulaProjection(item.kind);
         }
         for (set.queries) |query| {
-            summary.query_backends[@intFromEnum(query.backend)] += 1;
+            summary.query_backends[@backingInt(query.backend)] += 1;
             summary.query_obligation_links +|= saturatedLen(query.obligation_ids);
             if (query.result) |result| {
-                summary.query_results[@intFromEnum(result.status)] += 1;
+                summary.query_results[@backingInt(result.status)] += 1;
             } else {
                 summary.query_results_missing +|= 1;
             }
@@ -281,7 +281,7 @@ const CoverageSummary = struct {
     }
 
     fn addFormulaProjection(self: *CoverageSummary, kind: obligation.Kind) void {
-        const index = @intFromEnum(std.meta.activeTag(kind));
+        const index = @backingInt(std.meta.activeTag(kind));
         switch (kind) {
             .logical => |logical| self.formula_projection_by_kind[index].add(logical.formula),
             .runtime_guard => |guard| self.formula_projection_by_kind[index].add(guard.formula),
@@ -373,14 +373,14 @@ fn writeCoverageSummaryRecord(writer: anytype, set: obligation.ObligationSet) !v
 fn writeLoopSummaryCoverageRecord(writer: anytype, set: obligation.ObligationSet) !void {
     var supported: u32 = 0;
     var unsupported: u32 = 0;
-    var reason_counts = [_]u32{0} ** enumFieldCount(obligation.LoopUnsupportedReason);
+    var reason_counts = @as([enumFieldCount(obligation.LoopUnsupportedReason)]u32, @splat(0));
     for (set.loop_summaries) |loop| {
         if (loop.projectionSupported()) {
             supported +|= 1;
         } else {
             unsupported +|= 1;
         }
-        for (loop.unsupported_reasons) |reason| reason_counts[@intFromEnum(reason)] +|= 1;
+        for (loop.unsupported_reasons) |reason| reason_counts[@backingInt(reason)] +|= 1;
     }
 
     try writer.writeAll("{\"record\":\"loop_summary_coverage\"");
@@ -415,9 +415,9 @@ fn writeEnumCountObjectField(
 ) !void {
     try writeFieldPrefix(writer, name);
     try writer.writeByte('{');
-    inline for (@typeInfo(T).@"enum".fields, 0..) |field, index| {
+    inline for (@typeInfo(T).@"enum".field_names, 0..) |field, index| {
         if (index != 0) try writer.writeByte(',');
-        try writeJsonString(writer, field.name);
+        try writeJsonString(writer, field);
         try writer.writeByte(':');
         try writer.print("{d}", .{counts[index]});
     }
@@ -431,9 +431,9 @@ fn writeFormulaProjectionObjectField(
 ) !void {
     try writeFieldPrefix(writer, name);
     try writer.writeByte('{');
-    inline for (@typeInfo(obligation.KindTag).@"enum".fields, 0..) |field, index| {
+    inline for (@typeInfo(obligation.KindTag).@"enum".field_names, 0..) |field, index| {
         if (index != 0) try writer.writeByte(',');
-        try writeJsonString(writer, field.name);
+        try writeJsonString(writer, field);
         try writer.writeAll(":{\"term\":");
         try writer.print("{d}", .{counts[index].term});
         try writer.writeAll(",\"origin_value\":");
@@ -455,9 +455,9 @@ fn writeQueryResultCountObjectField(
     try writeFieldPrefix(writer, "query_results");
     try writer.writeAll("{\"missing\":");
     try writer.print("{d}", .{missing_count});
-    inline for (@typeInfo(obligation.VerificationQueryStatus).@"enum".fields, 0..) |field, index| {
+    inline for (@typeInfo(obligation.VerificationQueryStatus).@"enum".field_names, 0..) |field, index| {
         try writer.writeByte(',');
-        try writeJsonString(writer, field.name);
+        try writeJsonString(writer, field);
         try writer.writeByte(':');
         try writer.print("{d}", .{counts[index]});
     }
@@ -465,7 +465,7 @@ fn writeQueryResultCountObjectField(
 }
 
 fn enumFieldCount(comptime T: type) comptime_int {
-    return @typeInfo(T).@"enum".fields.len;
+    return @typeInfo(T).@"enum".field_names.len;
 }
 
 fn saturatedLen(items: anytype) u32 {

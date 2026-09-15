@@ -5193,37 +5193,37 @@ test "B5 unknown diagnostic reports Lean projection coverage when no recipe is a
 }
 
 test "formal query vocabulary matches Z3 prepared query vocabulary" {
-    inline for (std.meta.fields(z3_verification.QueryKind)) |field| {
-        const z3_kind: z3_verification.QueryKind = @enumFromInt(field.value);
+    inline for (@typeInfo(z3_verification.QueryKind).@"enum".field_names) |field| {
+        const z3_kind: z3_verification.QueryKind = @fromBackingInt(@intCast(@backingInt(@field(z3_verification.QueryKind, field))));
         const label = z3_verification.formalQueryKindLabel(z3_kind);
         const formal_kind = std.meta.stringToEnum(obligation.VerificationQueryKind, label) orelse return error.TestUnexpectedResult;
         try testing.expectEqualStrings(label, @tagName(formal_kind));
     }
 
-    inline for (std.meta.fields(obligation.VerificationQueryKind)) |field| {
-        const formal_kind: obligation.VerificationQueryKind = @enumFromInt(field.value);
+    inline for (@typeInfo(obligation.VerificationQueryKind).@"enum".field_names) |field| {
+        const formal_kind: obligation.VerificationQueryKind = @fromBackingInt(@intCast(@backingInt(@field(obligation.VerificationQueryKind, field))));
         // These are constructed from the canonical LoopVC after the legacy Z3
         // verifier has returned; neither is part of its prepared-query enum.
         if (comptime formal_kind == .loop_base or formal_kind == .loop_induction) continue;
         var found = false;
-        inline for (std.meta.fields(z3_verification.QueryKind)) |z3_field| {
-            const z3_kind: z3_verification.QueryKind = @enumFromInt(z3_field.value);
-            found = found or std.mem.eql(u8, field.name, z3_verification.formalQueryKindLabel(z3_kind));
+        inline for (@typeInfo(z3_verification.QueryKind).@"enum".field_names) |z3_field| {
+            const z3_kind: z3_verification.QueryKind = @fromBackingInt(@intCast(@backingInt(@field(z3_verification.QueryKind, z3_field))));
+            found = found or std.mem.eql(u8, field, z3_verification.formalQueryKindLabel(z3_kind));
         }
         try testing.expect(found);
     }
 }
 
 test "formal query fragments and solver logic match Z3 vocabulary" {
-    inline for (std.meta.fields(z3_verification.QueryFragment)) |field| {
-        const z3_fragment: z3_verification.QueryFragment = @enumFromInt(field.value);
+    inline for (@typeInfo(z3_verification.QueryFragment).@"enum".field_names) |field| {
+        const z3_fragment: z3_verification.QueryFragment = @fromBackingInt(@intCast(@backingInt(@field(z3_verification.QueryFragment, field))));
         const label = z3_verification.formalQueryFragmentLabel(z3_fragment);
         const formal_fragment = std.meta.stringToEnum(obligation.VerificationQueryFragment, label) orelse return error.TestUnexpectedResult;
         try testing.expectEqualStrings(label, @tagName(formal_fragment));
     }
 
-    inline for (std.meta.fields(z3_verification.QuerySolverLogic)) |field| {
-        const z3_logic: z3_verification.QuerySolverLogic = @enumFromInt(field.value);
+    inline for (@typeInfo(z3_verification.QuerySolverLogic).@"enum".field_names) |field| {
+        const z3_logic: z3_verification.QuerySolverLogic = @fromBackingInt(@intCast(@backingInt(@field(z3_verification.QuerySolverLogic, field))));
         const label = z3_verification.formalQuerySolverLogicLabel(z3_logic);
         const formal_logic = std.meta.stringToEnum(obligation.VerificationSolverLogic, label) orelse return error.TestUnexpectedResult;
         try testing.expectEqualStrings(label, @tagName(formal_logic));
@@ -5231,8 +5231,8 @@ test "formal query fragments and solver logic match Z3 vocabulary" {
 }
 
 test "formal logical and assumption roles match Z3 annotation vocabulary" {
-    inline for (std.meta.fields(z3_verification.AnnotationKind)) |field| {
-        const annotation: z3_verification.AnnotationKind = @enumFromInt(field.value);
+    inline for (@typeInfo(z3_verification.AnnotationKind).@"enum".field_names) |field| {
+        const annotation: z3_verification.AnnotationKind = @fromBackingInt(@intCast(@backingInt(@field(z3_verification.AnnotationKind, field))));
         if (z3_verification.formalLogicalRoleLabel(annotation)) |label| {
             const role = std.meta.stringToEnum(obligation.LogicalRole, label) orelse return error.TestUnexpectedResult;
             try testing.expectEqualStrings(label, @tagName(role));
@@ -5245,8 +5245,8 @@ test "formal logical and assumption roles match Z3 annotation vocabulary" {
 }
 
 test "formal imported pending obligation roles match Z3 source vocabulary" {
-    inline for (std.meta.fields(z3_verification.PendingObligationSourceKind)) |field| {
-        const source: z3_verification.PendingObligationSourceKind = @enumFromInt(field.value);
+    inline for (@typeInfo(z3_verification.PendingObligationSourceKind).@"enum".field_names) |field| {
+        const source: z3_verification.PendingObligationSourceKind = @fromBackingInt(@intCast(@backingInt(@field(z3_verification.PendingObligationSourceKind, field))));
         if (z3_verification.formalPendingObligationRoleLabel(source)) |label| {
             const role = std.meta.stringToEnum(obligation.LogicalRole, label) orelse return error.TestUnexpectedResult;
             try testing.expectEqualStrings(label, @tagName(role));
@@ -5255,8 +5255,8 @@ test "formal imported pending obligation roles match Z3 source vocabulary" {
 }
 
 test "formal pending constraint assumptions match Z3 source vocabulary" {
-    inline for (std.meta.fields(z3_verification.PendingConstraintSourceKind)) |field| {
-        const source: z3_verification.PendingConstraintSourceKind = @enumFromInt(field.value);
+    inline for (@typeInfo(z3_verification.PendingConstraintSourceKind).@"enum".field_names) |field| {
+        const source: z3_verification.PendingConstraintSourceKind = @fromBackingInt(@intCast(@backingInt(@field(z3_verification.PendingConstraintSourceKind, field))));
         if (z3_verification.formalPendingConstraintAssumptionKindLabel(source)) |label| {
             const kind = std.meta.stringToEnum(obligation.AssumptionKind, label) orelse return error.TestUnexpectedResult;
             try testing.expectEqualStrings(label, @tagName(kind));
@@ -13489,10 +13489,10 @@ test "source accounting transfers an abandoned fold only to its symbolic boundar
 }
 
 test "source-accounting syntax and spec-clause vocabularies are totality pins" {
-    try testing.expectEqual(@as(usize, 93), std.meta.fields(compiler.syntax.SyntaxKind).len);
-    try testing.expectEqual(@as(usize, 7), std.meta.fields(compiler.ast.SpecClauseKind).len);
-    inline for (std.meta.fields(compiler.ast.SpecClauseKind)) |field| {
-        const clause: compiler.ast.SpecClauseKind = @enumFromInt(field.value);
+    try testing.expectEqual(@as(usize, 93), @typeInfo(compiler.syntax.SyntaxKind).@"enum".field_names.len);
+    try testing.expectEqual(@as(usize, 7), @typeInfo(compiler.ast.SpecClauseKind).@"enum".field_names.len);
+    inline for (@typeInfo(compiler.ast.SpecClauseKind).@"enum".field_names) |field| {
+        const clause: compiler.ast.SpecClauseKind = @fromBackingInt(@intCast(@backingInt(@field(compiler.ast.SpecClauseKind, field))));
         const classification: ?source_accounting.SourceFactKind = switch (clause) {
             .requires => .requires,
             .guard => .guard,

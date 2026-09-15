@@ -349,7 +349,7 @@ fn writeJsonString(writer: anytype, value: []const u8) !void {
 }
 
 test "artifact catalog covers every artifact id exactly once" {
-    try std.testing.expectEqual(std.meta.fields(ArtifactId).len, artifacts.len);
+    try std.testing.expectEqual(@typeInfo(ArtifactId).@"enum".field_names.len, artifacts.len);
     for (artifacts, 0..) |artifact, index| {
         try std.testing.expectEqual(artifact.id, definition(artifact.id).id);
         try std.testing.expectEqualStrings(artifact.suffix, suffixes[index]);

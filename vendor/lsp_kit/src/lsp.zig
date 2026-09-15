@@ -129,7 +129,7 @@ pub const JsonRPCMessage = union(enum) {
                 _,
 
                 pub fn jsonStringify(code: Code, stream: anytype) @TypeOf(stream.*).Error!void {
-                    try stream.write(@intFromEnum(code));
+                    try stream.write(@backingInt(code));
                 }
             };
         };
@@ -259,10 +259,10 @@ pub const JsonRPCMessage = union(enum) {
         var fields: Fields = .{};
 
         for (source.object.keys(), source.object.values()) |field_name, field_source| {
-            inline for (std.meta.fields(Fields)) |field| {
-                const field_enum = comptime @field(std.meta.FieldEnum(Fields), field.name);
-                if (std.mem.eql(u8, field.name, field_name)) {
-                    @field(fields, field.name) = try Fields.parseFromValue(field_enum, allocator, field_source, options);
+            inline for (@typeInfo(Fields).@"struct".field_names) |field| {
+                const field_enum = comptime @field(std.meta.FieldEnum(Fields), field);
+                if (std.mem.eql(u8, field, field_name)) {
+                    @field(fields, field) = try Fields.parseFromValue(field_enum, allocator, field_source, options);
                     break;
                 }
             } else {
@@ -540,19 +540,19 @@ pub const JsonRPCMessage = union(enum) {
             \\{"id": "id", "jsonrpc": "2.0", "result": null, "error": {"code": 3, "message": "foo", "data": null}}
         , .{ .response = .{
             .id = .{ .string = "id" },
-            .result_or_error = .{ .@"error" = .{ .code = @enumFromInt(3), .message = "foo", .data = null } },
+            .result_or_error = .{ .@"error" = .{ .code = @fromBackingInt(@intCast(3)), .message = "foo", .data = null } },
         } }, .{});
         try testParse(
             \\{"id": "id", "jsonrpc": "2.0", "error": {"code": 42, "message": "bar", "data": true}}
         , .{ .response = .{
             .id = .{ .string = "id" },
-            .result_or_error = .{ .@"error" = .{ .code = @enumFromInt(42), .message = "bar", .data = .{ .bool = true } } },
+            .result_or_error = .{ .@"error" = .{ .code = @fromBackingInt(@intCast(42)), .message = "bar", .data = .{ .bool = true } } },
         } }, .{});
         try testParse(
             \\{"id": "id", "jsonrpc": "2.0", "error": {"code": 42, "message": "bar"}, "result": null}
         , .{ .response = .{
             .id = .{ .string = "id" },
-            .result_or_error = .{ .@"error" = .{ .code = @enumFromInt(42), .message = "bar", .data = null } },
+            .result_or_error = .{ .@"error" = .{ .code = @fromBackingInt(@intCast(42)), .message = "bar", .data = null } },
         } }, .{});
     }
 
@@ -1717,7 +1717,7 @@ test "bufPrintLogMessage - avoid buffer overflow" {
     var buffer: [128]u8 = undefined;
     const json_message = bufPrintLogMessage(
         &buffer,
-        @enumFromInt(42),
+        @fromBackingInt(@intCast(42)),
         "01234567890123456789012345678901234567890123456789",
         .{},
     );
@@ -1731,7 +1731,7 @@ test "bufPrintLogMessage - avoid buffer overflow with escape codes" {
     var buffer: [128]u8 = undefined;
     const json_message = bufPrintLogMessage(
         &buffer,
-        @enumFromInt(42),
+        @fromBackingInt(@intCast(42)),
         &@as(@TypeOf(buffer), @splat('\x00')),
         .{},
     );
@@ -2188,18 +2188,18 @@ pub fn Message(
             comptime Source: type,
         ) std.StaticStringMap(ParamsParserFunc(Params, Source)) {
             comptime {
-                const fields = std.meta.fields(Params);
+                const fields = @typeInfo(Params).@"union".field_names;
 
                 var kvs_list: [fields.len - 1]struct { []const u8, ParamsParserFunc(Params, Source) } = undefined;
 
                 var i: usize = 0;
                 for (fields) |field| {
-                    if (std.mem.eql(u8, field.name, "other"))
+                    if (std.mem.eql(u8, field, "other"))
                         continue;
 
                     const parse_func = struct {
                         fn parse(params_source: Source, allocator: std.mem.Allocator, options: std.json.ParseOptions) !Params {
-                            if (field.type == void) {
+                            if (@FieldType(Params, field) == void) {
                                 switch (Source) {
                                     std.json.Value => if (params_source != .null) {
                                         return error.UnexpectedToken;
@@ -2210,17 +2210,17 @@ pub fn Message(
                                         std.debug.assert(try params_source.next() == .null);
                                     },
                                 }
-                                return @unionInit(Params, field.name, if (field.type == void) {} else null);
+                                return @unionInit(Params, field, if (@FieldType(Params, field) == void) {} else null);
                             }
                             const params = switch (Source) {
-                                std.json.Value => try std.json.innerParseFromValue(field.type, allocator, params_source, options),
-                                else => try std.json.innerParse(field.type, allocator, params_source, options),
+                                std.json.Value => try std.json.innerParseFromValue(@FieldType(Params, field), allocator, params_source, options),
+                                else => try std.json.innerParse(@FieldType(Params, field), allocator, params_source, options),
                             };
-                            return @unionInit(Params, field.name, params);
+                            return @unionInit(Params, field, params);
                         }
                     }.parse;
 
-                    kvs_list[i] = .{ field.name, parse_func };
+                    kvs_list[i] = .{ field, parse_func };
                     i += 1;
                 }
 
@@ -2914,7 +2914,7 @@ test "Message.Response - with 'error' field" {
     const msg: ExampleMessage = .{
         .response = .{
             .id = .{ .number = 5 },
-            .result_or_error = .{ .@"error" = .{ .code = @enumFromInt(0), .message = "" } },
+            .result_or_error = .{ .@"error" = .{ .code = @fromBackingInt(@intCast(0)), .message = "" } },
         },
     };
     try testMessage(msg, "{ \"jsonrpc\": \"2.0\" , \"id\": 5            , \"error\": {\"code\": 0, \"message\": \"\"} }");
@@ -2940,7 +2940,7 @@ test "Message.Response - no 'id' field with 'error' field" {
     const msg: ExampleMessage = .{
         .response = .{
             .id = null,
-            .result_or_error = .{ .@"error" = .{ .code = @enumFromInt(0), .message = "" } },
+            .result_or_error = .{ .@"error" = .{ .code = @fromBackingInt(@intCast(0)), .message = "" } },
         },
     };
     try testMessage(msg, "{ \"jsonrpc\": \"2.0\"                        , \"error\": {\"code\": 0, \"message\": \"\"} }");
@@ -2957,7 +2957,7 @@ test "Message.Response - 'result' is null with 'error' field" {
     const msg: ExampleMessage = .{
         .response = .{
             .id = .{ .number = 5 },
-            .result_or_error = .{ .@"error" = .{ .code = @enumFromInt(0), .message = "" } },
+            .result_or_error = .{ .@"error" = .{ .code = @fromBackingInt(@intCast(0)), .message = "" } },
         },
     };
 

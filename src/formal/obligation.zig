@@ -1819,7 +1819,7 @@ test "loop summary dependencies are ordered bound and fail closed before denotat
         .value = .{ .term = 0 },
     }};
     const path_exprs = [_]LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
-    const digest = [_]u8{7} ** 32;
+    const digest = @as([32]u8, @splat(7));
     const dependency: LoopSummaryDependency = .{
         .id = 0,
         .structural_key = "body/op:4/scf.while",
@@ -1961,7 +1961,7 @@ test "loop summary dependencies are ordered bound and fail closed before denotat
     try set.validateLoopSummaryDependencies(outer);
 
     var stale = dependency;
-    stale.loop_vc_sha256 = [_]u8{8} ** 32;
+    stale.loop_vc_sha256 = @as([32]u8, @splat(8));
     var stale_timeline = outer_timeline;
     stale_timeline[1].payload.summary_dependency = stale;
     outer_edges[0].timeline = &stale_timeline;
@@ -2095,7 +2095,7 @@ test "ordered loop timeline schema rejects identity order and read-reference mut
         .id = 0,
         .structural_key = "body/child",
         .summary_id = 2,
-        .loop_vc_sha256 = [_]u8{7} ** 32,
+        .loop_vc_sha256 = @as([32]u8, @splat(7)),
         .write_footprint_complete = true,
         .target = .successor,
     };
@@ -3368,7 +3368,7 @@ test "artifact policy blocks invalid dependencies and missing proofs" {
 }
 
 test "artifact policy blocks a canonical loop Z3 row with no result" {
-    const digest = [_]u8{0} ** 32;
+    const digest = @as([32]u8, @splat(0));
     const summaries = [_]LoopSummaryRow{.{
         .id = 7,
         .owner = .{ .statement = .{ .function_name = "count", .ordinal = 0 } },
@@ -4366,7 +4366,7 @@ test "storage artifact authority admits reviewed mappings and bounded fixed indi
             .id = 0,
             .structural_key = "child/direct",
             .summary_id = 2,
-            .loop_vc_sha256 = [_]u8{0} ** 32,
+            .loop_vc_sha256 = @as([32]u8, @splat(0)),
             .write_footprint_complete = true,
             .target = .successor,
         } },

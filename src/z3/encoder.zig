@@ -577,7 +577,7 @@ pub const Encoder = struct {
     }
 
     fn allocPersistentMessage(self: *Encoder, message: []const u8) ![]const u8 {
-        const copy = try self.allocator.dupeZ(u8, message);
+        const copy = try self.allocator.dupeSentinel(u8, message, 0);
         try self.string_storage.append(self.allocator, copy[0 .. message.len + 1]);
         return copy[0..message.len];
     }
@@ -3124,7 +3124,7 @@ pub const Encoder = struct {
             // format as decimal string for Z3_mk_numeral
             const value_str = try std.fmt.allocPrint(self.allocator, "{d}", .{narrowed});
             defer self.allocator.free(value_str);
-            const value_z = try self.allocator.dupeZ(u8, value_str);
+            const value_z = try self.allocator.dupeSentinel(u8, value_str, 0);
             defer self.allocator.free(value_z);
             return z3.Z3_mk_numeral(self.context.ctx, value_z.ptr, sort);
         }
@@ -3141,7 +3141,7 @@ pub const Encoder = struct {
 
     /// Create Z3 variable (uninterpreted constant) from name and sort
     pub fn mkVariable(self: *Encoder, name: []const u8, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
-        const name_copy = try self.allocator.dupeZ(u8, name);
+        const name_copy = try self.allocator.dupeSentinel(u8, name, 0);
         errdefer self.allocator.free(name_copy);
         try self.string_storage.append(self.allocator, name_copy[0 .. name.len + 1]);
 
@@ -3206,7 +3206,7 @@ pub const Encoder = struct {
     }
 
     fn mkSymbol(self: *Encoder, name: []const u8) EncodeError!z3.Z3_symbol {
-        const name_copy = try self.allocator.dupeZ(u8, name);
+        const name_copy = try self.allocator.dupeSentinel(u8, name, 0);
         errdefer self.allocator.free(name_copy);
         try self.string_storage.append(self.allocator, name_copy[0 .. name.len + 1]);
         return z3.Z3_mk_string_symbol(self.context.ctx, name_copy);
@@ -3256,7 +3256,7 @@ pub const Encoder = struct {
     fn encodeUnsignedToSort(self: *Encoder, value: u64, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
         const value_str = try std.fmt.allocPrint(self.allocator, "{d}", .{value});
         defer self.allocator.free(value_str);
-        const value_z = try self.allocator.dupeZ(u8, value_str);
+        const value_z = try self.allocator.dupeSentinel(u8, value_str, 0);
         defer self.allocator.free(value_z);
         return z3.Z3_mk_numeral(self.context.ctx, value_z.ptr, sort);
     }
@@ -3264,7 +3264,7 @@ pub const Encoder = struct {
     fn encodeU256NumeralToSort(self: *Encoder, value: u256, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
         const value_str = try std.fmt.allocPrint(self.allocator, "{d}", .{value});
         defer self.allocator.free(value_str);
-        const value_z = try self.allocator.dupeZ(u8, value_str);
+        const value_z = try self.allocator.dupeSentinel(u8, value_str, 0);
         defer self.allocator.free(value_z);
         return z3.Z3_mk_numeral(self.context.ctx, value_z.ptr, sort);
     }
@@ -4648,10 +4648,11 @@ pub const Encoder = struct {
         const fallback_id = self.degraded_coercion_fallback_id;
         self.degraded_coercion_fallback_id +%= 1;
         var name_buf: [96]u8 = undefined;
-        const fallback_name = std.fmt.bufPrintZ(
+        const fallback_name = std.mem.printSentinel(
             &name_buf,
             "ora_degraded_coercion_fallback_{d}",
             .{fallback_id},
+            0,
         ) catch "ora_degraded_coercion_fallback_overflow";
         return z3.Z3_mk_const(
             self.context.ctx,

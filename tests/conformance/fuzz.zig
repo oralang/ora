@@ -340,13 +340,13 @@ fn validSignedI16Calldata(allocator: std.mem.Allocator, value: i16) ![]u8 {
 }
 
 fn wordForU256(value: u256) [32]u8 {
-    var word: [32]u8 = .{0} ** 32;
+    var word: [32]u8 = @splat(0);
     std.mem.writeInt(u256, &word, value, .big);
     return word;
 }
 
 fn wordForAddress(address: [20]u8) [32]u8 {
-    var word: [32]u8 = .{0} ** 32;
+    var word: [32]u8 = @splat(0);
     @memcpy(word[12..32], address[0..]);
     return word;
 }
@@ -509,7 +509,7 @@ fn rejectInvalidStaticWordMutations(
 }
 
 fn addressToU256(address: [20]u8) u256 {
-    var word: [32]u8 = .{0} ** 32;
+    var word: [32]u8 = @splat(0);
     @memcpy(word[12..32], address[0..]);
     return std.mem.readInt(u256, &word, .big);
 }

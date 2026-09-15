@@ -9,7 +9,7 @@ const obligation = @import("obligation.zig");
 const obligation_to_z3 = @import("obligation_to_z3.zig");
 const z3_verification = @import("ora_z3_verification");
 
-const shape_count = std.meta.fields(obligation_to_z3.CanonicalPromotionShape).len;
+const shape_count = @typeInfo(obligation_to_z3.CanonicalPromotionShape).@"enum".field_names.len;
 const loop_vc_index = shape_count;
 const unpromoted_index = shape_count + 1;
 const bucket_count = shape_count + 2;
@@ -36,7 +36,7 @@ const Summary = struct {
     required: u32 = 0,
 };
 
-const UnsupportedReasonCounts = [std.meta.fields(obligation_to_z3.CanonicalUnsupportedReason).len]u32;
+const UnsupportedReasonCounts = [@typeInfo(obligation_to_z3.CanonicalUnsupportedReason).@"enum".field_names.len]u32;
 
 const HashErrorCount = struct {
     name: []const u8,
@@ -80,7 +80,7 @@ fn promotionShapeName(shape: ?obligation_to_z3.CanonicalPromotionShape) []const 
 }
 
 fn promotionBucketIndex(shape: ?obligation_to_z3.CanonicalPromotionShape) usize {
-    return if (shape) |value| @intFromEnum(value) else unpromoted_index;
+    return if (shape) |value| @backingInt(value) else unpromoted_index;
 }
 
 fn measurementShapeName(
@@ -183,8 +183,8 @@ pub fn writeJson(
     set: obligation.ObligationSet,
 ) !void {
     var summary: Summary = .{};
-    var buckets: [bucket_count]Bucket = .{Bucket{}} ** bucket_count;
-    var unsupported_reasons: UnsupportedReasonCounts = .{0} ** std.meta.fields(obligation_to_z3.CanonicalUnsupportedReason).len;
+    var buckets: [bucket_count]Bucket = @as([bucket_count]Bucket, @splat(.{}));
+    var unsupported_reasons: UnsupportedReasonCounts = @as(UnsupportedReasonCounts, @splat(0));
     var hash_errors = HashErrorCounts{ .allocator = allocator };
     defer hash_errors.deinit();
 
@@ -312,7 +312,7 @@ pub fn writeJson(
             },
             .unsupported => |unsupported| {
                 reason = @tagName(unsupported);
-                unsupported_reasons[@intFromEnum(unsupported)] +|= 1;
+                unsupported_reasons[@backingInt(unsupported)] +|= 1;
                 bumpUnavailable(&summary, &buckets, query, shape);
             },
         }
@@ -337,9 +337,9 @@ pub fn writeJson(
     try writeSummary(writer, summary);
 
     try writer.writeAll(",\"shapes\":{");
-    inline for (std.meta.fields(obligation_to_z3.CanonicalPromotionShape), 0..) |field, i| {
+    inline for (@typeInfo(obligation_to_z3.CanonicalPromotionShape).@"enum".field_names, 0..) |field, i| {
         if (i != 0) try writer.writeByte(',');
-        try writeJsonString(writer, field.name);
+        try writeJsonString(writer, field);
         try writer.writeByte(':');
         try writeBucket(writer, buckets[i]);
     }
@@ -354,9 +354,9 @@ pub fn writeJson(
     try writer.writeByte('}');
 
     try writer.writeAll(",\"unsupported_reasons\":{");
-    inline for (std.meta.fields(obligation_to_z3.CanonicalUnsupportedReason), 0..) |field, i| {
+    inline for (@typeInfo(obligation_to_z3.CanonicalUnsupportedReason).@"enum".field_names, 0..) |field, i| {
         if (i != 0) try writer.writeByte(',');
-        try writeJsonString(writer, field.name);
+        try writeJsonString(writer, field);
         try writer.print(":{d}", .{unsupported_reasons[i]});
     }
     try writer.writeByte('}');

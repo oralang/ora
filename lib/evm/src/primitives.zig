@@ -10,7 +10,7 @@ pub const Address = struct {
     pub const Address = @This();
     const Self = @This();
 
-    pub const ZERO_ADDRESS: Self = .{ .bytes = [_]u8{0} ** 20 };
+    pub const ZERO_ADDRESS: Self = .{ .bytes = @as([20]u8, @splat(0)) };
     pub const ZERO = Self.ZERO_ADDRESS;
 
     bytes: [20]u8,
@@ -87,7 +87,7 @@ pub const Address = struct {
     }
 
     pub fn toAbiEncoded(address: Self) [32]u8 {
-        var result = [_]u8{0} ** 32;
+        var result = @as([32]u8, @splat(0));
         @memcpy(result[12..32], &address.bytes);
         return result;
     }
@@ -165,7 +165,7 @@ pub const Hash = struct {
     pub const SIZE: usize = 32;
     const Bytes = [SIZE]u8;
     pub const Hash = Bytes;
-    pub const ZERO: Bytes = [_]u8{0} ** SIZE;
+    pub const ZERO: Bytes = @as([SIZE]u8, @splat(0));
     pub const EMPTY_CODE_HASH: Bytes = .{
         0xc5, 0xd2, 0x46, 0x01, 0x86, 0xf7, 0x23, 0x3c,
         0x92, 0x7e, 0x7d, 0xb2, 0xdc, 0xc7, 0x03, 0xc0,
@@ -432,7 +432,7 @@ pub const Hardfork = enum {
     pub const DEFAULT = Hardfork.OSAKA;
 
     pub fn toInt(self: Hardfork) u32 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 
     pub fn isAtLeast(self: Hardfork, target: Hardfork) bool {
@@ -507,9 +507,9 @@ pub const Hardfork = enum {
         for (result, 0..) |*fork, i| {
             const offset: u32 = @intCast(i);
             fork.* = if (start_idx <= end_idx)
-                @enumFromInt(start_idx + offset)
+                @fromBackingInt(@intCast(start_idx + offset))
             else
-                @enumFromInt(start_idx - offset);
+                @fromBackingInt(@intCast(start_idx - offset));
         }
         return result;
     }
@@ -1038,7 +1038,7 @@ pub const BlockHeader = struct {
         state_root: Hash.Hash = Hash.ZERO,
         transactions_root: Hash.Hash = Hash.ZERO,
         receipts_root: Hash.Hash = Hash.ZERO,
-        logs_bloom: [BLOOM_SIZE]u8 = [_]u8{0} ** BLOOM_SIZE,
+        logs_bloom: [BLOOM_SIZE]u8 = @as([BLOOM_SIZE]u8, @splat(0)),
         difficulty: u256 = 0,
         number: u64 = 0,
         gas_limit: u64 = 0,
@@ -1046,7 +1046,7 @@ pub const BlockHeader = struct {
         timestamp: u64 = 0,
         extra_data: []const u8 = &.{},
         mix_hash: Hash.Hash = Hash.ZERO,
-        nonce: [NONCE_SIZE]u8 = [_]u8{0} ** NONCE_SIZE,
+        nonce: [NONCE_SIZE]u8 = @as([NONCE_SIZE]u8, @splat(0)),
         base_fee_per_gas: ?u256 = null,
         withdrawals_root: ?Hash.Hash = null,
         blob_gas_used: ?u64 = null,

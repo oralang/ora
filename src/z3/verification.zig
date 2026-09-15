@@ -7379,8 +7379,8 @@ fn parseForcedUnknownQuery(value: []const u8) !ForcedUnknownQuery {
     const query_id = try std.fmt.parseInt(usize, id_text, 10);
     if (query_id == 0) return error.InvalidForcedUnknownQuery;
 
-    inline for (std.meta.fields(QueryKind)) |field| {
-        const kind: QueryKind = @enumFromInt(field.value);
+    inline for (@typeInfo(QueryKind).@"enum".field_names) |field| {
+        const kind: QueryKind = @fromBackingInt(@intCast(@backingInt(@field(QueryKind, field))));
         if (std.mem.eql(u8, kind_text, formalQueryKindLabel(kind))) {
             return .{ .kind = kind, .query_id = query_id };
         }
@@ -11747,7 +11747,7 @@ test "query execution failure result includes captured Z3 API message" {
         .file = "/tmp/test.ora",
         .line = 12,
         .column = 4,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "verification: f [contract invariant]"),
     };
     defer query.deinit(testing.allocator);
@@ -11781,7 +11781,7 @@ test "prepared verification extracts z3 proofs into verification result" {
         .line = 12,
         .column = 4,
         .constraints = try testing.allocator.dupe(z3.Z3_ast, &[_]z3.Z3_ast{contradiction}),
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(assert false)\n(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(assert false)\n(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "proved [ensures]"),
     };
     defer query.deinit(testing.allocator);
@@ -13473,7 +13473,7 @@ test "clean guard violate proof without formal identity keeps runtime guard" {
         .file = "/tmp/test.ora",
         .line = 4,
         .column = 8,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "f guard guard:test:missing-formal [violate]"),
         .formal_match_status = .missing,
     };
@@ -13505,7 +13505,7 @@ test "guard erasure authorization refuses enclosing soundness loss" {
         .file = "/tmp/test.ora",
         .line = 4,
         .column = 8,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "f guard guard:test:degraded [violate]"),
         .formal_match_status = .matched,
     };
@@ -13537,7 +13537,7 @@ test "duplicate guard violate rows do not authorize guard erasure" {
             .file = "/tmp/test.ora",
             .line = 4,
             .column = 8,
-            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
             .log_prefix = try testing.allocator.dupe(u8, "f guard guard:test:duplicate [violate]"),
             .formal_match_status = .matched,
         },
@@ -13548,7 +13548,7 @@ test "duplicate guard violate rows do not authorize guard erasure" {
             .file = "/tmp/test.ora",
             .line = 5,
             .column = 8,
-            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
             .log_prefix = try testing.allocator.dupe(u8, "f guard guard:test:duplicate [violate]"),
             .formal_match_status = .matched,
         },
@@ -13581,7 +13581,7 @@ test "distinct guard violate rows authorize only the proven guard" {
             .file = "/tmp/test.ora",
             .line = 4,
             .column = 8,
-            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
             .log_prefix = try testing.allocator.dupe(u8, "f guard guard:test:proved [violate]"),
             .formal_match_status = .matched,
         },
@@ -13592,7 +13592,7 @@ test "distinct guard violate rows authorize only the proven guard" {
             .file = "/tmp/test.ora",
             .line = 5,
             .column = 8,
-            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
             .log_prefix = try testing.allocator.dupe(u8, "f guard guard:test:runtime [violate]"),
             .formal_match_status = .matched,
         },
@@ -14354,7 +14354,7 @@ test "prepared query result collection taints function on unknown base" {
             .file = "/tmp/test.ora",
             .line = 1,
             .column = 1,
-            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
             .log_prefix = try testing.allocator.dupe(u8, "verification: f [base]"),
         },
         .{
@@ -14364,7 +14364,7 @@ test "prepared query result collection taints function on unknown base" {
             .file = "/tmp/test.ora",
             .line = 2,
             .column = 1,
-            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
             .log_prefix = try testing.allocator.dupe(u8, "verification: f [contract invariant]"),
         },
     };
@@ -14418,8 +14418,8 @@ test "prepared query result collection fails closed on unknown for every query k
 
     // Pillar 4.5 self-introspection: every prepared solver-query kind must
     // surface Z3 UNKNOWN as a user-visible Unknown verification error.
-    inline for (std.meta.fields(QueryKind)) |field| {
-        const kind: QueryKind = @enumFromInt(field.value);
+    inline for (@typeInfo(QueryKind).@"enum".field_names) |field| {
+        const kind: QueryKind = @fromBackingInt(@intCast(@backingInt(@field(QueryKind, field))));
         const obligation_kind: ?AnnotationKind = switch (kind) {
             .Obligation => .Ensures,
             .LoopInvariantStep => .LoopInvariant,
@@ -14433,14 +14433,14 @@ test "prepared query result collection fails closed on unknown for every query k
         };
         var queries = [_]PreparedQuery{.{
             .kind = kind,
-            .function_name = field.name,
+            .function_name = field,
             .guard_id = guard_id,
             .obligation_kind = obligation_kind,
             .file = "/tmp/test.ora",
-            .line = @intCast(field.value + 1),
+            .line = @intCast(@backingInt(@field(QueryKind, field)) + 1),
             .column = 3,
-            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
-            .log_prefix = try std.fmt.allocPrint(testing.allocator, "verification: {s} [{s}]", .{ field.name, queryKindLabel(kind) }),
+            .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
+            .log_prefix = try std.fmt.allocPrint(testing.allocator, "verification: {s} [{s}]", .{ field, queryKindLabel(kind) }),
         }};
         defer queries[0].deinit(testing.allocator);
 
@@ -14452,7 +14452,7 @@ test "prepared query result collection fails closed on unknown for every query k
         try testing.expect(!collected.success);
         try testing.expectEqual(@as(usize, 1), collected.errors.items.len);
         try testing.expectEqual(errors.VerificationErrorType.Unknown, collected.errors.items[0].error_type);
-        try testing.expect(std.mem.containsAtLeast(u8, collected.errors.items[0].message, 1, field.name));
+        try testing.expect(std.mem.containsAtLeast(u8, collected.errors.items[0].message, 1, field));
     }
 
     const routed_cases = [_]struct {
@@ -14476,7 +14476,7 @@ test "prepared query result collection fails closed on unknown for every query k
             .file = "/tmp/test.ora",
             .line = @intCast(100 + idx),
             .column = 5,
-            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
             .log_prefix = try std.fmt.allocPrint(testing.allocator, "verification: routed-{d} [{s}]", .{ idx, queryKindLabel(case.kind) }),
         }};
         defer queries[0].deinit(testing.allocator);
@@ -14505,7 +14505,7 @@ test "result collection fails closed on inconclusive vacuity check" {
             .file = "/tmp/test.ora",
             .line = 7,
             .column = 3,
-            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
             .log_prefix = try testing.allocator.dupe(u8, "verification: f [ensures]"),
         },
     };
@@ -14559,7 +14559,7 @@ test "non-requires inconsistent assumptions do not prove or erase guard" {
         .line = 7,
         .column = 3,
         .tracked_assumptions = tracked_assumptions,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "verification: f guard guard:test:frame-vacuity [violate]"),
     }};
     defer queries[0].deinit(testing.allocator);
@@ -14607,7 +14607,7 @@ test "pure path-assume contradiction still proves dead guard path" {
         .column = 3,
         .constraints = try testing.allocator.dupe(z3.Z3_ast, &[_]z3.Z3_ast{path_assumption}),
         .tracked_assumptions = tracked_assumptions,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(assert false)\n(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(assert false)\n(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "verification: f guard guard:test:path-vacuity [violate]"),
         .formal_match_status = .matched,
     }};
@@ -14640,7 +14640,7 @@ test "prepared query result collection includes captured Z3 API message" {
             .file = "/tmp/test.ora",
             .line = 2,
             .column = 1,
-            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
             .log_prefix = try testing.allocator.dupe(u8, "verification: f [contract invariant]"),
         },
     };
@@ -14680,7 +14680,7 @@ test "prepared query result collection skips obligations on inconsistent base" {
             .file = "/tmp/test.ora",
             .line = 1,
             .column = 1,
-            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
             .log_prefix = try testing.allocator.dupe(u8, "verification: f [base]"),
         },
         .{
@@ -14690,7 +14690,7 @@ test "prepared query result collection skips obligations on inconsistent base" {
             .file = "/tmp/test.ora",
             .line = 2,
             .column = 1,
-            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
             .log_prefix = try testing.allocator.dupe(u8, "verification: f [contract invariant]"),
         },
     };
@@ -14762,7 +14762,7 @@ test "report loop-post discharge matches verifier result collection" {
             .line = 7,
             .column = 9,
             .references_loop_post_state = true,
-            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
             .log_prefix = try testing.allocator.dupe(u8, "countTo [ensures]"),
         },
         .{
@@ -14772,7 +14772,7 @@ test "report loop-post discharge matches verifier result collection" {
             .file = "/tmp/loop.ora",
             .line = 7,
             .column = 9,
-            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
             .log_prefix = try testing.allocator.dupe(u8, "countTo [invariant-post]"),
         },
     };
@@ -14801,7 +14801,7 @@ test "guard erasure agreement summary counts only clean unauthorized UNSAT rows"
         .file = "/tmp/guard.ora",
         .line = 1,
         .column = 1,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "guarded guard guard:matched [violate]"),
         .formal_match_status = .matched,
     };
@@ -14813,7 +14813,7 @@ test "guard erasure agreement summary counts only clean unauthorized UNSAT rows"
         .file = "/tmp/guard.ora",
         .line = 2,
         .column = 1,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "guarded guard guard:missing [violate]"),
         .formal_match_status = .missing,
     };
@@ -14825,7 +14825,7 @@ test "guard erasure agreement summary counts only clean unauthorized UNSAT rows"
         .file = "/tmp/guard.ora",
         .line = 3,
         .column = 1,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "guarded guard guard:ambiguous [violate]"),
         .formal_match_status = .ambiguous,
     };
@@ -14892,16 +14892,10 @@ test "rendered SMT report json includes degradation metadata" {
 
     // Pillar 4.5 self-introspection: every typed soundness-loss reason must
     // surface exactly once through the report JSON metadata path.
-    const soundness_loss_fields = std.meta.fields(Encoder.SoundnessLoss);
-    var soundness_losses: [soundness_loss_fields.len]Encoder.SoundnessLoss = undefined;
-    inline for (soundness_loss_fields, 0..) |field, idx| {
-        soundness_losses[idx] = @enumFromInt(field.value);
-    }
-    const precision_note_fields = std.meta.fields(Encoder.PrecisionNoteKind);
-    var precision_notes: [precision_note_fields.len]Encoder.PrecisionNoteKind = undefined;
-    inline for (precision_note_fields, 0..) |field, idx| {
-        precision_notes[idx] = @enumFromInt(field.value);
-    }
+    const soundness_loss_fields = comptime std.meta.fieldNames(Encoder.SoundnessLoss);
+    const soundness_losses = std.meta.tags(Encoder.SoundnessLoss).*;
+    const precision_note_fields = comptime std.meta.fieldNames(Encoder.PrecisionNoteKind);
+    const precision_notes = std.meta.tags(Encoder.PrecisionNoteKind).*;
 
     const summary = ReportSummary{
         .encoding_degraded = true,
@@ -14934,7 +14928,7 @@ test "rendered SMT report json includes degradation metadata" {
     const notes_body = json[notes_body_start..notes_body_end];
     try testing.expectEqual(precision_note_fields.len * 2, std.mem.count(u8, notes_body, "\""));
     inline for (precision_note_fields) |field| {
-        const needle = try std.fmt.allocPrint(testing.allocator, "\"{s}\"", .{field.name});
+        const needle = try std.fmt.allocPrint(testing.allocator, "\"{s}\"", .{field});
         defer testing.allocator.free(needle);
         try testing.expectEqual(@as(usize, 1), std.mem.count(u8, json, needle));
     }
@@ -14945,7 +14939,7 @@ test "rendered SMT report json includes degradation metadata" {
     const losses_body = json[losses_body_start..losses_body_end];
     try testing.expectEqual(soundness_loss_fields.len * 2, std.mem.count(u8, losses_body, "\""));
     inline for (soundness_loss_fields) |field| {
-        const needle = try std.fmt.allocPrint(testing.allocator, "\"{s}\"", .{field.name});
+        const needle = try std.fmt.allocPrint(testing.allocator, "\"{s}\"", .{field});
         defer testing.allocator.free(needle);
         try testing.expectEqual(@as(usize, 1), std.mem.count(u8, json, needle));
     }
@@ -15182,7 +15176,7 @@ test "rendered SMT report attributes precision events to matching proof errors" 
         .file = "test.ora",
         .line = 12,
         .column = 3,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "caller [ensures]"),
     };
     defer {
@@ -15251,7 +15245,7 @@ test "rendered SMT report json includes query fragment metadata" {
         .file = "/tmp/test.ora",
         .line = 12,
         .column = 3,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "f [ensures]"),
     };
     defer {
@@ -15305,7 +15299,7 @@ test "prepared query manifest from report runs includes result metadata" {
         .smtlib_hash = 99,
         .annotation_pure = true,
         .references_loop_post_state = true,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "f [ensures]"),
     }};
     defer queries[0].deinit(testing.allocator);
@@ -15342,7 +15336,7 @@ test "rendered SMT report json includes vacuous explain tags" {
         .file = "/tmp/test.ora",
         .line = 12,
         .column = 3,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "f [ensures]"),
     };
     defer {
@@ -15413,7 +15407,7 @@ test "rendered SMT report json includes vacuity_unknown flag" {
         .file = "/tmp/test.ora",
         .line = 12,
         .column = 3,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "f [ensures]"),
     };
     defer {
@@ -15461,7 +15455,7 @@ test "rendered SMT report json includes z3 proof metadata and proof payload" {
         .file = "/tmp/proved.ora",
         .line = 7,
         .column = 9,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "proved [ensures]"),
     };
     defer {
@@ -15511,7 +15505,7 @@ test "rendered SMT report markdown omits raw proof payloads" {
         .file = "/tmp/proved.ora",
         .line = 7,
         .column = 9,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "proved [ensures]"),
     };
     defer {
@@ -15563,7 +15557,7 @@ test "rendered SMT report json includes minimize core setting" {
         .file = "/tmp/core.ora",
         .line = 4,
         .column = 9,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "core [ensures]"),
     };
     defer {
@@ -15611,7 +15605,7 @@ test "rendered SMT report includes per-query core minimized flag" {
         .file = "/tmp/core.ora",
         .line = 4,
         .column = 9,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "core [ensures]"),
     };
     defer {
@@ -15672,7 +15666,7 @@ test "rendered SMT report includes verified_with_caveats" {
         .file = "/tmp/test.ora",
         .line = 12,
         .column = 3,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "f [ensures]"),
     };
     defer {
@@ -15731,7 +15725,7 @@ test "rendered SMT report markdown includes vacuity warning" {
         .file = "/tmp/test.ora",
         .line = 12,
         .column = 3,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "f [ensures]"),
     };
     defer {
@@ -15854,7 +15848,7 @@ test "missing tracked assumption proxy returns dedicated error" {
         .column = 3,
         .constraints = &.{},
         .tracked_assumptions = tracked_assumptions,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "f [ensures]"),
     };
     defer {
@@ -15877,7 +15871,7 @@ test "rendered SMT report json includes multi-requires explain tags and summary 
         .file = "/tmp/test.ora",
         .line = 20,
         .column = 5,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "g [contract invariant]"),
     };
     defer {
@@ -15938,7 +15932,7 @@ test "rendered SMT report json includes callee ensures explain tags" {
         .file = "/tmp/fail_callee_ensures_core.ora",
         .line = 17,
         .column = 9,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "useTrusted [contract invariant]"),
     };
     defer {
@@ -16010,7 +16004,7 @@ test "rendered SMT report json includes callee obligation explain tags" {
         .file = "/tmp/fail_callee_obligation_core.ora",
         .line = 10,
         .column = 9,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "useTrusted [contract invariant]"),
     };
     defer {
@@ -16111,7 +16105,7 @@ test "unknown errors map back to unknown queries in reports" {
         .file = "/tmp/test.ora",
         .line = 9,
         .column = 2,
-        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .smtlib_z = try testing.allocator.dupeSentinel(u8, "(check-sat)", 0),
         .log_prefix = try testing.allocator.dupe(u8, "verification: f [contract invariant]"),
     };
     defer {

@@ -82,7 +82,7 @@ test "Evm top-level call treats 0x13 as Prague/Osaka precompile, not empty accou
     try osaka_evm.init(testing.allocator, null, .OSAKA, null, primitives.ZERO_ADDRESS, 0, null);
     defer osaka_evm.deinit();
 
-    const fp2_zero = [_]u8{0} ** 128;
+    const fp2_zero = @as([128]u8, @splat(0));
     const osaka_result = osaka_evm.call(.{ .call = .{
         .caller = Address.fromU256(0xCA11E),
         .to = fp2_to_g2,

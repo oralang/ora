@@ -224,12 +224,12 @@ test "modexp small fast path does not overflow u64 multiplication" {
 test "modexp computes large exponentiation" {
     const base = [_]u8{2};
     const exp = [_]u8{0x7f};
-    const modulus = [_]u8{1} ++ ([_]u8{0} ** 16);
+    const modulus = [_]u8{1} ++ (@as([16]u8, @splat(0)));
 
     const out = try modexp(std.testing.allocator, &base, &exp, &modulus);
     defer std.testing.allocator.free(out);
 
-    var expected = [_]u8{0} ** 17;
+    var expected = @as([17]u8, @splat(0));
     expected[1] = 0x80;
     try std.testing.expectEqualSlices(u8, &expected, out);
 }

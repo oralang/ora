@@ -5,7 +5,7 @@
 //===----------------------------------------------------------------------===//
 //
 // This file provides Zig bindings to the Z3 SMT solver C API.
-// It uses `@cImport` to directly import Z3 headers, enabling formal
+// It uses build-time C translation to import Z3 headers, enabling formal
 // verification capabilities in the Ora compiler.
 //
 // Z3 is used for:
@@ -18,7 +18,7 @@
 
 /// Z3 C API bindings
 ///
-/// This uses Zig's `@cImport` to directly include Z3 headers.
+/// The build translates z3.h and supplies the resulting module.
 /// Z3 must be installed on the system or built from vendor/z3.
 ///
 /// Installation:
@@ -27,9 +27,7 @@
 /// - Windows: Download from https://github.com/Z3Prover/z3/releases
 ///
 /// Build will automatically detect Z3 and link against it.
-pub const c = @cImport({
-    @cInclude("z3.h");
-});
+pub const c = @import("z3_bindings");
 
 // Re-export commonly used Z3 types for convenience
 pub const Z3_context = c.Z3_context;

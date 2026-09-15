@@ -1403,7 +1403,7 @@ pub const Adapter = struct {
     }
 
     fn namedConst(self: *Adapter, raw_name: []const u8, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
-        const name = try self.allocator.dupeZ(u8, raw_name);
+        const name = try self.allocator.dupeSentinel(u8, raw_name, 0);
         defer self.allocator.free(name);
         const symbol = z3.Z3_mk_string_symbol(self.context.ctx, name.ptr);
         const ast = z3.Z3_mk_const(self.context.ctx, symbol, sort);
@@ -1733,7 +1733,7 @@ pub const Adapter = struct {
     fn integerLiteralForType(self: *Adapter, value: []const u8, info: TypeInfo) EncodeError!z3.Z3_ast {
         if (info.kind != .bitvector) return error.ExpectedBitVector;
         const sort = try self.sortForType(info);
-        const value_z = try self.allocator.dupeZ(u8, value);
+        const value_z = try self.allocator.dupeSentinel(u8, value, 0);
         defer self.allocator.free(value_z);
 
         const ast = z3.Z3_mk_numeral(self.context.ctx, value_z.ptr, sort);

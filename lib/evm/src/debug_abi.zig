@@ -215,7 +215,7 @@ const testing = std.testing;
 test "writeAbiWord: address renders as 0x prefix" {
     var buf: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
-    var word: [32]u8 = .{0} ** 32;
+    var word: [32]u8 = @as([32]u8, @splat(0));
     word[12] = 0xab;
     word[31] = 0xcd;
     try writeAbiWord(&writer, "address", &word);
@@ -225,12 +225,12 @@ test "writeAbiWord: address renders as 0x prefix" {
 test "writeAbiWord: bool" {
     var buf: [16]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
-    const false_word: [32]u8 = .{0} ** 32;
+    const false_word: [32]u8 = @as([32]u8, @splat(0));
     try writeAbiWord(&writer, "bool", &false_word);
     try testing.expectEqualStrings("false", buf[0..writer.end]);
 
     writer = .fixed(&buf);
-    var true_word: [32]u8 = .{0} ** 32;
+    var true_word: [32]u8 = @as([32]u8, @splat(0));
     true_word[31] = 1;
     try writeAbiWord(&writer, "bool", &true_word);
     try testing.expectEqualStrings("true", buf[0..writer.end]);
@@ -239,7 +239,7 @@ test "writeAbiWord: bool" {
 test "writeAbiWord: uint256 decimal" {
     var buf: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
-    var word: [32]u8 = .{0} ** 32;
+    var word: [32]u8 = @as([32]u8, @splat(0));
     word[31] = 42;
     try writeAbiWord(&writer, "uint256", &word);
     try testing.expectEqualStrings("42", buf[0..writer.end]);

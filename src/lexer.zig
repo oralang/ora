@@ -1424,7 +1424,7 @@ const CHAR_IDENTIFIER_CONTINUE = 0x40;
 
 // Pre-computed character classification table
 const char_table: [256]u8 = blk: {
-    var table: [256]u8 = [_]u8{0} ** 256;
+    var table: [256]u8 = @as([256]u8, @splat(0));
 
     // digits
     for ('0'..'9' + 1) |c| {

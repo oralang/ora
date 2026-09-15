@@ -304,7 +304,7 @@ fn appendStaticWord(
     encoding: abi_layout.StaticEncoding,
     value: ComptimeAbiValue,
 ) !void {
-    var word: [32]u8 = [_]u8{0} ** 32;
+    var word: [32]u8 = @as([32]u8, @splat(0));
     switch (encoding) {
         .uint => |bits| {
             const integer = try unsignedIntegerValue(value);
@@ -330,7 +330,7 @@ fn appendStaticWord(
 }
 
 fn appendAbiWord(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: u256) !void {
-    var word: [32]u8 = [_]u8{0} ** 32;
+    var word: [32]u8 = @as([32]u8, @splat(0));
     std.mem.writeInt(u256, word[0..32], value, .big);
     try out.appendSlice(allocator, &word);
 }

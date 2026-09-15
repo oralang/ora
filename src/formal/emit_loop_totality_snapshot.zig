@@ -448,7 +448,7 @@ fn timelineReason(mutation: TimelineMutation) ?obligation.LoopUnsupportedReason 
         .id = 0,
         .structural_key = "body/child",
         .summary_id = 2,
-        .loop_vc_sha256 = [_]u8{0} ** 32,
+        .loop_vc_sha256 = @as([32]u8, @splat(0)),
         .write_footprint_complete = true,
         .target = .successor,
     };
@@ -603,7 +603,7 @@ fn preheaderReason(mutation: PreheaderMutation) ?obligation.LoopUnsupportedReaso
             .id = 0,
             .structural_key = "preheader/child",
             .summary_id = 2,
-            .loop_vc_sha256 = [_]u8{0} ** 32,
+            .loop_vc_sha256 = @as([32]u8, @splat(0)),
             .write_footprint_complete = true,
             .target = .successor,
         } },

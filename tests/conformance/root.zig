@@ -531,12 +531,12 @@ test "conformance slot expressions compute domain-separated computed-storage slo
 }
 
 test "conformance static return comparison requires canonical narrow signed words" {
-    var zero_extended: [32]u8 = [_]u8{0} ** 32;
+    var zero_extended: [32]u8 = @splat(0);
     zero_extended[30] = 0xff;
     zero_extended[31] = 0xf9;
     try testing.expectError(error.NonCanonicalAbiReturn, abi.expectStaticReturn("int16", .{ .literal = "-7" }, &zero_extended));
 
-    var sign_extended: [32]u8 = [_]u8{0xff} ** 32;
+    var sign_extended: [32]u8 = @splat(0xff);
     sign_extended[30] = 0xff;
     sign_extended[31] = 0xf9;
     try abi.expectStaticReturn("int16", .{ .literal = "-7" }, &sign_extended);

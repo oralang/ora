@@ -464,25 +464,25 @@ pub fn renderDiagnostic(allocator: std.mem.Allocator, failure: FailureRow) ![]u8
 
 fn writeCountBreakdowns(allocator: std.mem.Allocator, writer: anytype, manifest: accounting.Manifest, result: Result) !void {
     try writer.writeAll(",\"expansions_by_disposition\":{");
-    inline for (std.meta.fields(accounting.ExpansionDisposition), 0..) |field, index| {
+    inline for (@typeInfo(accounting.ExpansionDisposition).@"enum".field_names, 0..) |field, index| {
         if (index != 0) try writer.writeByte(',');
-        const disposition: accounting.ExpansionDisposition = @enumFromInt(field.value);
+        const disposition: accounting.ExpansionDisposition = @fromBackingInt(@intCast(@backingInt(@field(accounting.ExpansionDisposition, field))));
         var count: usize = 0;
         for (manifest.inventory.expansions) |row| if (row.disposition == disposition) {
             count += 1;
         };
-        try writeJsonString(writer, field.name);
+        try writeJsonString(writer, field);
         try writer.print(":{d}", .{count});
     }
     try writer.writeAll("},\"uses_by_role\":{");
-    inline for (std.meta.fields(accounting.UseRole), 0..) |field, index| {
+    inline for (@typeInfo(accounting.UseRole).@"enum".field_names, 0..) |field, index| {
         if (index != 0) try writer.writeByte(',');
-        const role: accounting.UseRole = @enumFromInt(field.value);
+        const role: accounting.UseRole = @fromBackingInt(@intCast(@backingInt(@field(accounting.UseRole, field))));
         var count: usize = 0;
         for (manifest.inventory.uses) |row| if (row.role == role) {
             count += 1;
         };
-        try writeJsonString(writer, field.name);
+        try writeJsonString(writer, field);
         try writer.print(":{d}", .{count});
     }
     try writer.writeAll("},\"uses_by_fact_kind\":{");
@@ -491,21 +491,21 @@ fn writeCountBreakdowns(allocator: std.mem.Allocator, writer: anytype, manifest:
     for (manifest.inventory.typed_sites) |site| if (!site_kinds.contains(site.id)) {
         try site_kinds.put(site.id, site.kind);
     };
-    inline for (std.meta.fields(accounting.SourceFactKind), 0..) |field, index| {
+    inline for (@typeInfo(accounting.SourceFactKind).@"enum".field_names, 0..) |field, index| {
         if (index != 0) try writer.writeByte(',');
-        const kind: accounting.SourceFactKind = @enumFromInt(field.value);
+        const kind: accounting.SourceFactKind = @fromBackingInt(@intCast(@backingInt(@field(accounting.SourceFactKind, field))));
         var count: usize = 0;
         for (manifest.inventory.uses) |use| {
             const use_kind = site_kinds.get(use.site_id) orelse continue;
             if (use_kind == kind) count += 1;
         }
-        try writeJsonString(writer, field.name);
+        try writeJsonString(writer, field);
         try writer.print(":{d}", .{count});
     }
     try writer.writeAll("},\"handlings_by_kind\":{");
-    inline for (std.meta.fields(accounting.HandlingKind), 0..) |field, index| {
+    inline for (@typeInfo(accounting.HandlingKind).@"enum".field_names, 0..) |field, index| {
         if (index != 0) try writer.writeByte(',');
-        const kind: accounting.HandlingKind = @enumFromInt(field.value);
+        const kind: accounting.HandlingKind = @fromBackingInt(@intCast(@backingInt(@field(accounting.HandlingKind, field))));
         var count: usize = 0;
         for (manifest.comptime_evidence.handlings) |row| if (row.kind == kind) {
             count += 1;
@@ -513,18 +513,18 @@ fn writeCountBreakdowns(allocator: std.mem.Allocator, writer: anytype, manifest:
         for (manifest.symbolic.handlings) |row| if (row.kind == kind) {
             count += 1;
         };
-        try writeJsonString(writer, field.name);
+        try writeJsonString(writer, field);
         try writer.print(":{d}", .{count});
     }
     try writer.writeAll("},\"failures_by_code\":{");
-    inline for (std.meta.fields(FailureCode), 0..) |field, index| {
+    inline for (@typeInfo(FailureCode).@"enum".field_names, 0..) |field, index| {
         if (index != 0) try writer.writeByte(',');
-        const code: FailureCode = @enumFromInt(field.value);
+        const code: FailureCode = @fromBackingInt(@intCast(@backingInt(@field(FailureCode, field))));
         var count: usize = 0;
         for (result.failures) |row| if (row.code == code) {
             count += 1;
         };
-        try writeJsonString(writer, field.name);
+        try writeJsonString(writer, field);
         try writer.print(":{d}", .{count});
     }
     try writer.writeByte('}');
@@ -984,7 +984,7 @@ fn lessFailure(_: void, lhs: FailureRow, rhs: FailureRow) bool {
     const lp = failurePrecedence(lhs.code);
     const rp = failurePrecedence(rhs.code);
     if (lp != rp) return lp < rp;
-    if (@intFromEnum(lhs.code) != @intFromEnum(rhs.code)) return @intFromEnum(lhs.code) < @intFromEnum(rhs.code);
+    if (@backingInt(lhs.code) != @backingInt(rhs.code)) return @backingInt(lhs.code) < @backingInt(rhs.code);
     if (lhs.source == null and rhs.source != null) return true;
     if (lhs.source != null and rhs.source == null) return false;
     if (lhs.source != null and rhs.source != null) {
@@ -1279,7 +1279,7 @@ fn sortedSiteIndices(allocator: std.mem.Allocator, rows: []const accounting.Decl
             if (owner_order != .eq) return owner_order == .lt;
             if (left.range_start != right.range_start) return left.range_start < right.range_start;
             if (left.range_end != right.range_end) return left.range_end < right.range_end;
-            if (left.kind != right.kind) return @intFromEnum(left.kind) < @intFromEnum(right.kind);
+            if (left.kind != right.kind) return @backingInt(left.kind) < @backingInt(right.kind);
             if (left.ordinal != right.ordinal) return left.ordinal < right.ordinal;
             return self.rows[lhs].id < self.rows[rhs].id;
         }
@@ -1313,8 +1313,8 @@ fn validateTemplatesExpansionsAndUses(ctx: *Context) !void {
         var site_it = seen_sites.keyIterator();
         while (site_it.next()) |site_id| {
             const site = ctx.typedSite(site_id.*).?;
-            inline for (std.meta.fields(accounting.UseRole)) |role_field| {
-                const role: accounting.UseRole = @enumFromInt(role_field.value);
+            inline for (@typeInfo(accounting.UseRole).@"enum".field_names) |role_field| {
+                const role: accounting.UseRole = @fromBackingInt(@intCast(@backingInt(@field(accounting.UseRole, role_field))));
                 var expected_count: usize = 0;
                 for (accounting.templateRoles(site.kind, template.activation)) |expected| {
                     expected_count += @intFromBool(expected == role);
@@ -2390,13 +2390,13 @@ pub const FailureWitnessObservation = struct {
 };
 
 pub const FailureWitnesses = struct {
-    rows: [std.meta.fields(FailureCode).len]FailureWitnessObservation,
+    rows: [@typeInfo(FailureCode).@"enum".field_names.len]FailureWitnessObservation,
 };
 
 fn noteFailures(witnesses: *FailureWitnesses, result: Result) !void {
     if (result.failures.len > max_failure_witness_failures) return error.SourceAccountingFailureWitnessOverflow;
     for (result.failures) |row| {
-        const observation = &witnesses.rows[@intFromEnum(row.code)];
+        const observation = &witnesses.rows[@backingInt(row.code)];
         if (observation.observed) continue;
         observation.observed = true;
         observation.decision = result.decision;
@@ -2714,7 +2714,7 @@ test "duplicate and orphan terminal rows are rejected" {
 
 pub fn observeFailureWitnesses(allocator: std.mem.Allocator) !FailureWitnesses {
     var witnesses: FailureWitnesses = .{
-        .rows = [_]FailureWitnessObservation{.{}} ** std.meta.fields(FailureCode).len,
+        .rows = @as([@typeInfo(FailureCode).@"enum".field_names.len]FailureWitnessObservation, @splat(.{})),
     };
     const symbolic_base = acceptedSymbolicLoopFixture();
     const concrete_base = acceptedConcreteLoopFixture();
@@ -3079,9 +3079,9 @@ pub fn observeFailureWitnesses(allocator: std.mem.Allocator) !FailureWitnesses {
 
 test "every lifecycle-independent failure code has an executable witness" {
     const witnesses = try observeFailureWitnesses(std.testing.allocator);
-    inline for (std.meta.fields(FailureCode)) |field| {
-        const code: FailureCode = @enumFromInt(field.value);
-        const observation = witnesses.rows[@intFromEnum(code)];
+    inline for (@typeInfo(FailureCode).@"enum".field_names) |field| {
+        const code: FailureCode = @fromBackingInt(@intCast(@backingInt(@field(FailureCode, field))));
+        const observation = witnesses.rows[@backingInt(code)];
         if (!observation.observed) std.debug.print("missing source-accounting failure witness: {s}\n", .{@tagName(code)});
         try std.testing.expect(observation.observed);
         try std.testing.expectEqual(Decision.rejected, observation.decision);
@@ -3149,18 +3149,18 @@ test "source-accounting diagnostic rendering is pinned" {
 
 test "handling policy is total over every closed vocabulary row" {
     @setEvalBranchQuota(100_000);
-    inline for (std.meta.fields(accounting.CompilationMode)) |mode_field| {
-        const mode: accounting.CompilationMode = @enumFromInt(mode_field.value);
-        inline for (std.meta.fields(accounting.FactOrigin)) |origin_field| {
-            const origin: accounting.FactOrigin = @enumFromInt(origin_field.value);
-            inline for (std.meta.fields(accounting.SourceFactKind)) |kind_field| {
-                const kind: accounting.SourceFactKind = @enumFromInt(kind_field.value);
-                inline for (std.meta.fields(accounting.UseRole)) |role_field| {
-                    const role: accounting.UseRole = @enumFromInt(role_field.value);
-                    inline for (std.meta.fields(accounting.HandlingKind)) |handling_field| {
-                        const handling: accounting.HandlingKind = @enumFromInt(handling_field.value);
-                        inline for (std.meta.fields(accounting.ExpansionDisposition)) |disposition_field| {
-                            const disposition: accounting.ExpansionDisposition = @enumFromInt(disposition_field.value);
+    inline for (@typeInfo(accounting.CompilationMode).@"enum".field_names) |mode_field| {
+        const mode: accounting.CompilationMode = @fromBackingInt(@intCast(@backingInt(@field(accounting.CompilationMode, mode_field))));
+        inline for (@typeInfo(accounting.FactOrigin).@"enum".field_names) |origin_field| {
+            const origin: accounting.FactOrigin = @fromBackingInt(@intCast(@backingInt(@field(accounting.FactOrigin, origin_field))));
+            inline for (@typeInfo(accounting.SourceFactKind).@"enum".field_names) |kind_field| {
+                const kind: accounting.SourceFactKind = @fromBackingInt(@intCast(@backingInt(@field(accounting.SourceFactKind, kind_field))));
+                inline for (@typeInfo(accounting.UseRole).@"enum".field_names) |role_field| {
+                    const role: accounting.UseRole = @fromBackingInt(@intCast(@backingInt(@field(accounting.UseRole, role_field))));
+                    inline for (@typeInfo(accounting.HandlingKind).@"enum".field_names) |handling_field| {
+                        const handling: accounting.HandlingKind = @fromBackingInt(@intCast(@backingInt(@field(accounting.HandlingKind, handling_field))));
+                        inline for (@typeInfo(accounting.ExpansionDisposition).@"enum".field_names) |disposition_field| {
+                            const disposition: accounting.ExpansionDisposition = @fromBackingInt(@intCast(@backingInt(@field(accounting.ExpansionDisposition, disposition_field))));
                             _ = handlingPermitted(mode, origin, kind, role, handling, disposition);
                         }
                     }

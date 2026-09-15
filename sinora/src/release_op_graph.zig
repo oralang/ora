@@ -263,7 +263,7 @@ const ChannelState = struct {
 
 const EffectOrderTracker = struct {
     allocator: std.mem.Allocator,
-    channels: [effect_channels.len]ChannelState = [_]ChannelState{.{}} ** effect_channels.len,
+    channels: [effect_channels.len]ChannelState = @as([effect_channels.len]ChannelState, @splat(.{})),
     last_logs: ?OpNodeId = null,
 
     fn init(allocator: std.mem.Allocator) EffectOrderTracker {

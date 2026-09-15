@@ -41,7 +41,7 @@ test "verified conformance manifest pins all three build classes" {
     var counts = [_]usize{ 0, 0, 0 };
     for (manifest.entries, specs) |entry, spec_name| {
         try testing.expectEqualStrings(spec_name, entry.spec_name);
-        counts[@intFromEnum(entry.class)] += 1;
+        counts[@backingInt(entry.class)] += 1;
 
         const stem = spec_name[0 .. spec_name.len - ".spec.toml".len];
         const source_name = try std.fmt.allocPrint(allocator, "{s}.ora", .{stem});
@@ -71,9 +71,9 @@ test "verified conformance manifest pins all three build classes" {
         }
     }
 
-    try testing.expectEqual(@as(usize, 60), counts[@intFromEnum(runner.VerifiedBuildClass.same_bytecode)]);
-    try testing.expectEqual(@as(usize, 11), counts[@intFromEnum(runner.VerifiedBuildClass.rewritten)]);
-    try testing.expectEqual(@as(usize, 29), counts[@intFromEnum(runner.VerifiedBuildClass.unverifiable)]);
+    try testing.expectEqual(@as(usize, 60), counts[@backingInt(runner.VerifiedBuildClass.same_bytecode)]);
+    try testing.expectEqual(@as(usize, 11), counts[@backingInt(runner.VerifiedBuildClass.rewritten)]);
+    try testing.expectEqual(@as(usize, 29), counts[@backingInt(runner.VerifiedBuildClass.unverifiable)]);
 }
 
 test "resource rewrite executes with proved runtime checks kept" {
@@ -208,8 +208,8 @@ fn parseManifestEntries(allocator: std.mem.Allocator, text: []const u8) ![]Manif
 
 fn parseRejectionReason(text: []const u8) !runner.VerifiedRejectionReason {
     if (std.mem.eql(u8, text, "-")) return error.MissingUnverifiableReason;
-    inline for (std.meta.fields(runner.VerifiedRejectionReason)) |field| {
-        if (std.mem.eql(u8, text, field.name)) return @enumFromInt(field.value);
+    inline for (@typeInfo(runner.VerifiedRejectionReason).@"enum".field_names) |field| {
+        if (std.mem.eql(u8, text, field)) return @field(runner.VerifiedRejectionReason, field);
     }
     return error.InvalidUnverifiableReason;
 }

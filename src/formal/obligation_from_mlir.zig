@@ -3441,7 +3441,7 @@ const Collector = struct {
                 .id = @intCast(path.summary_dependencies.len),
                 .structural_key = dependency_key,
                 .summary_id = inner.id,
-                .loop_vc_sha256 = [_]u8{0} ** 32,
+                .loop_vc_sha256 = @as([32]u8, @splat(0)),
                 .write_footprint_complete = true,
                 .target = .successor,
             },
@@ -3512,7 +3512,7 @@ const Collector = struct {
             .id = @intCast(path.summary_dependency_keys.len),
             .structural_key = dependency_key,
             .summary_id = inner.id,
-            .loop_vc_sha256 = [_]u8{0} ** 32,
+            .loop_vc_sha256 = @as([32]u8, @splat(0)),
             .write_footprint_complete = true,
             .target = .successor,
         };
@@ -9083,7 +9083,7 @@ fn resourceProperties(op: obligation.ResourceOperation) []const obligation.Resou
 }
 
 fn resourcePropertyBit(property: obligation.ResourceProperty) u32 {
-    const shift: u5 = @intCast(@intFromEnum(property));
+    const shift: u5 = @intCast(@backingInt(property));
     return @as(u32, 1) << shift;
 }
 
@@ -9449,7 +9449,7 @@ test "direct-root timeline inventory compares every storage event field" {
         .id = 0,
         .structural_key = "op:10/scf.while",
         .summary_id = 99,
-        .loop_vc_sha256 = [_]u8{1} ** 32,
+        .loop_vc_sha256 = @as([32]u8, @splat(1)),
         .write_footprint = &footprint,
         .write_footprint_complete = true,
         .target = .successor,

@@ -5001,7 +5001,7 @@ fn hashLspRange(hasher: *std.hash.Wyhash, range: types.Range) void {
 }
 
 fn hashOptionalDiagnosticSeverity(hasher: *std.hash.Wyhash, severity: ?types.DiagnosticSeverity) void {
-    const value: u32 = if (severity) |item| @intFromEnum(item) else 0;
+    const value: u32 = if (severity) |item| @backingInt(item) else 0;
     hasher.update(std.mem.asBytes(&value));
 }
 
@@ -5260,10 +5260,10 @@ fn lspRangeEqual(a: types.Range, b: types.Range) bool {
 pub fn main(init: std.process.Init) !void {
     var debug_allocator = std.heap.DebugAllocator(.{}){};
     defer {
-        if (builtin.mode == .Debug) _ = debug_allocator.deinit();
+        if (builtin.mode == .debug) _ = debug_allocator.deinit();
     }
 
-    const backing_allocator = if (builtin.mode == .Debug)
+    const backing_allocator = if (builtin.mode == .debug)
         debug_allocator.allocator()
     else
         std.heap.smp_allocator;

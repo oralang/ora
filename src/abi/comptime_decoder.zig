@@ -282,7 +282,7 @@ fn decodeSignedWord(target_type: Type, word: *const [32]u8, bits: u16, mode: Dec
 
 fn decodeBoolWord(word: *const [32]u8, mode: DecodeMode) DecodeStep(CtValue) {
     if (mode == .permissive) return .{ .value = .{ .boolean = std.mem.readInt(u256, word, .big) != 0 } };
-    var prefix: [31]u8 = [_]u8{0} ** 31;
+    var prefix: [31]u8 = @as([31]u8, @splat(0));
     if (!std.mem.eql(u8, word[0..31], &prefix)) return .{ .err = .invalid_bool_value };
     return switch (word[31]) {
         0 => .{ .value = .{ .boolean = false } },
@@ -292,7 +292,7 @@ fn decodeBoolWord(word: *const [32]u8, mode: DecodeMode) DecodeStep(CtValue) {
 }
 
 fn decodeAddressWord(word: *const [32]u8, mode: DecodeMode) DecodeStep(CtValue) {
-    var prefix: [12]u8 = [_]u8{0} ** 12;
+    var prefix: [12]u8 = @as([12]u8, @splat(0));
     if (mode == .strict and !std.mem.eql(u8, word[0..12], &prefix)) return .{ .err = .invalid_address };
     return .{ .value = .{ .address = std.mem.readInt(u160, word[12..32], .big) } };
 }

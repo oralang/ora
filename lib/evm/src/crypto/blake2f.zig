@@ -115,13 +115,13 @@ test "blake2f compress rejects malformed sizes" {
     var out: [64]u8 = undefined;
     try std.testing.expectError(error.InvalidInput, compress(&[_]u8{}, &out));
 
-    var input = [_]u8{0} ** 213;
+    var input = @as([213]u8, @splat(0));
     var short_out: [63]u8 = undefined;
     try std.testing.expectError(error.InvalidOutputSize, compress(&input, &short_out));
 }
 
 test "blake2f compress is deterministic for exact EIP-152 frame" {
-    var input = [_]u8{0} ** 213;
+    var input = @as([213]u8, @splat(0));
     std.mem.writeInt(u32, input[0..][0..4], 12, .big);
     for (0..8) |i| {
         std.mem.writeInt(u64, input[4 + i * 8 ..][0..8], IV[i], .little);

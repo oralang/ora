@@ -865,12 +865,12 @@ fn firstUnsupported(results: anytype) CanonicalSupport {
 }
 
 test "canonical Z3 required promotion table covers every shape exactly once" {
-    const shape_count = std.meta.fields(CanonicalPromotionShape).len;
-    var seen: [shape_count]bool = .{false} ** shape_count;
+    const shape_count = @typeInfo(CanonicalPromotionShape).@"enum".field_names.len;
+    var seen: [shape_count]bool = @as([shape_count]bool, @splat(false));
     var rollout_count: usize = 0;
 
     for (canonical_promotion_table) |row| {
-        const index: usize = @intFromEnum(row.shape);
+        const index: usize = @backingInt(row.shape);
         try std.testing.expect(index < shape_count);
         try std.testing.expect(!seen[index]);
         seen[index] = true;

@@ -887,7 +887,7 @@ pub fn typeCheck(
     // it catches a *future* regression that re-introduces a silent `.unknown`. It
     // re-resolves every explicit type expression, so it is compiled out of release
     // builds and runs only under debug/test (CI exercises the whole corpus there).
-    if (comptime zig_builtin.mode == .Debug or zig_builtin.is_test) {
+    if (comptime zig_builtin.mode == .debug or zig_builtin.is_test) {
         try typechecker.checkNoSilentUnknownExplicitTypeAnnotations();
     }
 

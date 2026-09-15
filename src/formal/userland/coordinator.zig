@@ -2014,7 +2014,7 @@ test "automatic loop proof source delegates to repository tactic deterministical
             .post = &.{15},
         },
     }};
-    const digest = [_]u8{0xA5} ** 32;
+    const digest = @as([32]u8, @splat(0xA5));
     const owner: obligation.Owner = .{ .function = .{ .name = "countTo" } };
     const queries = [_]obligation.VerificationQuery{
         .{ .id = 10, .owner = owner, .source = .{}, .phase = .ora_mlir, .origin = .source, .proof_requirement = .lean_certificate, .kind = .loop_induction, .loop_summary_id = 1, .loop_vc_sha256 = digest },
@@ -2179,7 +2179,7 @@ test "automatic dependency variables are scoped to their declaring edge" {
         .id = 0,
         .structural_key = "op:2/scf.while",
         .summary_id = 2,
-        .loop_vc_sha256 = [_]u8{0} ** 32,
+        .loop_vc_sha256 = @as([32]u8, @splat(0)),
         .target = .successor,
     };
     const dependency_timeline = [_]obligation.LoopTimelineEvent{.{

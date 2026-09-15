@@ -281,15 +281,15 @@ const binary_op_spacing_table = [_]BinaryOpSpacing{
 };
 
 comptime {
-    const fields = @typeInfo(ora_lib.compiler.ast.nodes.BinaryOp).@"enum".fields;
+    const fields = @typeInfo(ora_lib.compiler.ast.nodes.BinaryOp).@"enum".field_names;
     if (fields.len != binary_op_spacing_table.len)
         @compileError("binary_op_spacing_table must cover every ast.BinaryOp variant");
     for (fields) |field| {
         var found = false;
         for (binary_op_spacing_table) |row| {
-            if (@intFromEnum(row.op) == field.value) found = true;
+            if (@backingInt(row.op) == @backingInt(@field(ora_lib.compiler.ast.nodes.BinaryOp, field))) found = true;
         }
-        if (!found) @compileError("binary_op_spacing_table missing op: " ++ field.name);
+        if (!found) @compileError("binary_op_spacing_table missing op: " ++ field);
     }
 }
 
