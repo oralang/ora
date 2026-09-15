@@ -12658,7 +12658,49 @@ test "refinement header input policy is assigned only to parameter guard violati
     }
 }
 
-test "refinement header positive minimum remains blocked on witness synthesis" {
+test "loop witness certifies the unchanged refinement positive minimum deterministically" {
+    try expectRepositoryStorageTacticDeterministic(
+        "tests/formal/loop_header_refinement_positive_minimum.ora",
+        "loop_header_refinement_positive_minimum",
+        1,
+    );
+}
+
+test "loop witness certifies narrow mixed and fallthrough environments deterministically" {
+    try expectRepositoryStorageTacticDeterministic(
+        "tests/formal/loop_witness_auto.ora",
+        "loop_witness_auto",
+        3,
+    );
+}
+
+test "loop witness does not discard an unhandled mixed environment assumption" {
+    try expectRepositoryLoopProofConstructionBlocked(
+        "tests/formal/fail_loop_witness_mixed.ora",
+        "fail_loop_witness_mixed",
+        1,
+        "automatic_loop_witness_rejected",
+    );
+}
+
+test "loop witness retains the default nested certificate path" {
+    try expectRepositoryStorageTacticDeterministic(
+        "tests/formal/nested_loop_relational.ora",
+        "nested_loop_relational",
+        2,
+    );
+}
+
+test "loop witness does not relax the nested inherited assumption policy" {
+    try expectRepositoryLoopProofConstructionBlocked(
+        "tests/formal/loop_witness_nested_requires_blocked.ora",
+        "loop_witness_nested_requires_blocked",
+        2,
+        "automatic_assumptions_require_external_certificate",
+    );
+}
+
+test "loop witness contradictory bounds cannot authorize bytecode" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const output = try pathFromTmpAlloc(testing.allocator, tmp, "blocked");
@@ -12670,16 +12712,16 @@ test "refinement header positive minimum remains blocked on witness synthesis" {
         "--out-dir",
         output,
         "--lean-proofs",
-        "tests/formal/loop_header_refinement_positive_minimum.ora",
+        "tests/formal/fail_loop_witness_contradiction.ora",
     });
     defer testing.allocator.free(run.stdout);
     defer testing.allocator.free(run.stderr);
     try expectExited(run, 1);
     try testing.expect(std.mem.indexOf(u8, run.stdout, "certificate-required=1, excluded=0") != null);
-    try testing.expect(std.mem.indexOf(u8, run.stdout, "lean_proof_rejected") != null);
+    try testing.expect(std.mem.indexOf(u8, run.stdout, "automatic_loop_witness_unavailable") != null);
     try testing.expectError(error.FileNotFound, tmp.dir.access(
         std.testing.io,
-        "blocked/loop_header_refinement_positive_minimum.hex",
+        "blocked/fail_loop_witness_contradiction.hex",
         .{},
     ));
 }

@@ -5,8 +5,8 @@ The tactic is proof search only.  It does not change denotation, eligibility,
 or artifact authority: Lean still checks the resulting term against the exact
 compiler-emitted `loopProofAuthorizationFromAssumptions` proposition.
 
-The generated call site must bind the exact local names `autoSummary` and
-`emittedManifest`.  The macros resolve those names deliberately; this is the
+The generated call site must bind `autoSummary`, `autoAssumptions`, and
+`emittedManifest`. The macros resolve those names deliberately; this is the
 stable Zig-to-Lean emission contract, not an implicit search convention.
 -/
 
@@ -25,6 +25,74 @@ register_simp_attr ora_loop_manifest
 register_simp_attr ora_loop_nested
 
 open Lean Elab Tactic Meta
+
+/-- Candidate search only: half-open mathematical intervals cannot wrap at a
+carrier boundary. Unsupported atoms contribute no bound, never a proof. -/
+def loopWitnessInterval? (op : Ora.Obligation.BinaryOp) (value : Nat)
+    (bounds : Nat × Nat) : Option (Nat × Nat) := do
+  let next := match op with
+    | .eq => (max bounds.1 value, min bounds.2 (value + 1))
+    | .lt => (bounds.1, min bounds.2 value)
+    | .le => (bounds.1, min bounds.2 (value + 1))
+    | .gt => (max bounds.1 (value + 1), bounds.2)
+    | .ge => (max bounds.1 value, bounds.2)
+    | _ => bounds
+  if next.1 < next.2 then some next else none
+
+def loopWitnessTermBounds? (manifest : Manifest) (loopVar : VariableRow) :
+    Nat → TermId → Nat × Nat → Option (Nat × Nat)
+  | 0, _, _ => none
+  | fuel + 1, id, bounds => do
+      let term ← manifest.terms[id]?
+      match term with
+      | .binary binary =>
+          if binary.op == .and_ then
+            let narrowed ← loopWitnessTermBounds? manifest loopVar fuel binary.lhs bounds
+            loopWitnessTermBounds? manifest loopVar fuel binary.rhs narrowed
+          else if ![.eq, .lt, .le, .gt, .ge].contains binary.op then
+            some bounds
+          else do
+            let lhs ← manifest.terms[binary.lhs]?
+            let rhs ← manifest.terms[binary.rhs]?
+            let pair := match lhs, rhs with
+              | .variable (.free free), .intLit literal => some (free, literal, false)
+              | .intLit literal, .variable (.free free) => some (free, literal, true)
+              | _, _ => none
+            match pair with
+            | none => some bounds
+            | some (free, literal, reverse) => do
+                if free.id != loopVar.id then return bounds
+                if free.ty != some loopVar.ty || literal.ty != some loopVar.ty then none
+                else if binary.op != .eq && binary.ty != some loopVar.ty then none
+                else do
+                  let shape ← loopVar.ty.integerShape?
+                  if shape.isSigned then none else do
+                    let value ← parseDecimalNat? literal.value
+                    if value ≥ 2 ^ shape.bits then none else
+                      let op := if reverse then match binary.op with
+                        | .lt => .gt | .le => .ge | .gt => .lt | .ge => .le
+                        | op => op
+                      else binary.op
+                      loopWitnessInterval? op value bounds
+      | _ => some bounds
+
+/-- Overrides only unsigned context bindings in a supplied support environment.
+All assumptions and the complete initial predicate still have to be proved;
+neither this data nor a successful interval intersection authorizes anything. -/
+def loopWitnessCandidate? (manifest : Manifest) (assumptions : List AssumptionRow)
+    (row : SummaryRow) (base : Env) : Option Env := do
+  let assumptionFormulas ← assumptions.mapM (·.formula)
+  let formulas := assumptionFormulas ++ row.headerFacts.map (·.formula)
+  let mut env := base
+  for loopVar in row.contextVariables do
+    let shape ← loopVar.ty.integerShape?
+    if !shape.isSigned then
+      let mut bounds := (0, 2 ^ shape.bits)
+      for formula in formulas do
+        let .term id := formula
+        bounds ← loopWitnessTermBounds? manifest loopVar (id + 1) id bounds
+      env := env.setFree loopVar.id (.integer (Ora.Integer.Value.ofNat shape bounds.1))
+  return env
 
 elab "ora_loop_all_goals" tac:tacticSeq : tactic => do
   let mut result : List MVarId := []
@@ -851,6 +919,68 @@ macro tk:"ora_loop_prove_base" : tactic => do
       | decide
       | ora_loop_linear_close })
 
+macro tk:"ora_loop_prove_witness" base:term : tactic => do
+  let autoSummary := Lean.mkIdentFrom tk `autoSummary
+  let emittedManifest := Lean.mkIdentFrom tk `emittedManifest
+  `(tactic| {
+    let autoWitnessEnv : Env := $base
+    have hInitialSome :
+        (Ora.Loop.initializeState? $emittedManifest autoWitnessEnv
+          ($autoSummary).variables ($autoSummary).init).isSome = true := by
+      dsimp [autoWitnessEnv]
+      try simp only [ora_loop_nested, SummaryRow.supportEnvIn,
+        dependencyVariables, findSummaryRow?, Option.pure_def,
+        Option.bind_eq_bind, Option.some_bind, Option.none_bind, if_pos, if_false]
+      ora_loop_reduce
+    cases hInitial : Ora.Loop.initializeState? $emittedManifest autoWitnessEnv
+        ($autoSummary).variables ($autoSummary).init with
+    | none =>
+        simp only [hInitial, Option.isSome, Bool.false_eq_true] at hInitialSome
+    | some initial =>
+        refine ⟨autoWitnessEnv, initial, ?_⟩
+        constructor
+        · ora_loop_reduce
+          all_goals decide
+        constructor
+        · dsimp [autoWitnessEnv]
+          intro loopVar hLoopVar
+          simp only [ora_loop_row, List.mem_cons, List.not_mem_nil, or_false] at hLoopVar
+          repeat' first | subst loopVar | rcases hLoopVar with hLoopVar | hLoopVar
+          all_goals try ora_loop_reduce
+          all_goals try exact ⟨_, rfl, rfl⟩
+        · first
+            | ora_loop_nested_reduce
+            | simp only [Ora.Loop.loopInitialPremises, Ora.Loop.denoteLoopSummary?,
+                ora_loop_supported, if_true, Ora.Loop.denoteEdges?,
+                Ora.Loop.denoteEdge?, Ora.Loop.denoteControlTarget?]
+          refine ⟨?_, hInitial⟩
+          ora_loop_prove_support_header_facts autoWitnessEnv })
+
+/-- Only the candidate is reduced to data. The original existential goal must
+be solved in full; failed default attempts restore every metavariable first. -/
+elab "ora_loop_witness" base:term : tactic => withMainContext do
+  let saved ← Tactic.saveState
+  try
+    withoutRecover <| evalTactic (← `(tactic| solve | ora_loop_prove_witness $base))
+    return
+  catch _ => saved.restore
+  let manifest := mkIdent `emittedManifest
+  let assumptions := mkIdent `autoAssumptions
+  let row := mkIdent `autoSummary
+  -- Emitted manifests are large lists. This allowance reduces candidate data
+  -- only; it does not enlarge the universal proof search or assume a result.
+  let candidate ← withOptions (fun options => options.setNat `maxRecDepth 4096) do
+    let candidate ← Term.elabTerm
+      (← `(loopWitnessCandidate? $manifest $assumptions $row $base)) none
+    withTransparency .all (Meta.reduce candidate)
+  unless candidate.isAppOfArity ``Option.some 2 do
+    throwError "automatic_loop_witness_unavailable: no typed interval candidate"
+  let value ← Term.exprToSyntax candidate.appArg!
+  try
+    withoutRecover <| evalTactic (← `(tactic| solve | ora_loop_prove_witness $value))
+  catch ex =>
+    throwError m!"automatic_loop_witness_rejected: all assumptions and the complete initial predicate are required\n{ex.toMessageData}"
+
 macro tk:"ora_loop_auto_plain" : tactic => do
   let autoSummary := Lean.mkIdentFrom tk `autoSummary
   let emittedManifest := Lean.mkIdentFrom tk `emittedManifest
@@ -858,37 +988,7 @@ macro tk:"ora_loop_auto_plain" : tactic => do
     have hSupported : ($autoSummary).supported $emittedManifest = true := by
       simp only [ora_loop_supported]
     constructor
-    · let autoWitnessEnv : Env := ($autoSummary).supportEnv
-      have hInitialSome :
-          (Ora.Loop.initializeState? $emittedManifest autoWitnessEnv
-            ($autoSummary).variables ($autoSummary).init).isSome = true := by
-        dsimp [autoWitnessEnv]
-        ora_loop_reduce
-      cases hInitial : Ora.Loop.initializeState? $emittedManifest autoWitnessEnv
-          ($autoSummary).variables ($autoSummary).init with
-      | none =>
-          simp only [hInitial, Option.isSome, Bool.false_eq_true] at hInitialSome
-      | some initial =>
-          refine ⟨autoWitnessEnv, initial, ?_⟩
-          constructor
-          · ora_loop_reduce
-            all_goals decide
-          constructor
-          · dsimp [autoWitnessEnv]
-            intro loopVar hLoopVar
-            simp only [ora_loop_row, List.mem_cons, List.not_mem_nil, or_false]
-              at hLoopVar
-            repeat' first
-              | subst loopVar
-              | rcases hLoopVar with hLoopVar | hLoopVar
-            all_goals try ora_loop_reduce
-            all_goals try exact ⟨_, rfl, rfl⟩
-          · simp only [Ora.Loop.loopInitialPremises,
-              Ora.Loop.denoteLoopSummary?, hSupported, if_true,
-              Ora.Loop.denoteEdges?, Ora.Loop.denoteEdge?,
-              Ora.Loop.denoteControlTarget?]
-            refine ⟨?_, hInitial⟩
-            ora_loop_prove_support_header_facts autoWitnessEnv
+    · ora_loop_witness ($autoSummary).supportEnv
     · intro env hAssumptions hContext
       try simp only [Ora.Loop.contextReady, ora_loop_row,
         TyRef.integerShape?, ora_loop_integer_types,
@@ -1210,45 +1310,7 @@ macro tk:"ora_loop_auto_nested" : tactic => do
         $emittedLoopSummaries = true := by
       simp only [ora_loop_nested]
     constructor
-    · let autoWitnessEnv : Env :=
-        ($autoSummary).supportEnvIn $emittedLoopSummaries
-      have hInitialSome :
-          (Ora.Loop.initializeState? $emittedManifest autoWitnessEnv
-            ($autoSummary).variables ($autoSummary).init).isSome = true := by
-        dsimp [autoWitnessEnv]
-        simp only [ora_loop_nested, Ora.Loop.SummaryRow.supportEnvIn,
-          Ora.Loop.dependencyVariables, Ora.Loop.findSummaryRow?,
-          Option.pure_def, Option.bind_eq_bind, Option.some_bind,
-          Option.none_bind, if_pos, if_false]
-        simp only [ora_loop_row]
-        ora_loop_reduce
-      cases hInitial : Ora.Loop.initializeState? $emittedManifest autoWitnessEnv
-          ($autoSummary).variables ($autoSummary).init with
-      | none =>
-          simp only [hInitial, Option.isSome, Bool.false_eq_true] at hInitialSome
-      | some initial =>
-          refine ⟨autoWitnessEnv, initial, ?_⟩
-          constructor
-          · ora_loop_reduce
-            all_goals decide
-          constructor
-          · dsimp [autoWitnessEnv]
-            intro loopVar hLoopVar
-            simp only [Ora.Loop.SummaryRow.supportEnvIn,
-              Ora.Loop.dependencyVariables, Ora.Loop.findSummaryRow?,
-              ora_loop_nested, Option.pure_def, Option.bind_eq_bind,
-              Option.some_bind, Option.none_bind, if_pos, if_false]
-              at hLoopVar ⊢
-            simp only [ora_loop_row, List.mem_cons, List.not_mem_nil, or_false]
-              at hLoopVar ⊢
-            repeat' first
-              | subst loopVar
-              | rcases hLoopVar with hLoopVar | hLoopVar
-            all_goals try ora_loop_reduce
-            all_goals try exact ⟨_, rfl, rfl⟩
-          · ora_loop_nested_reduce
-            refine ⟨?_, hInitial⟩
-            ora_loop_prove_support_header_facts autoWitnessEnv
+    · ora_loop_witness (($autoSummary).supportEnvIn $emittedLoopSummaries)
     · intro env hAssumptions hContext
       change Ora.Loop.loopInductionObligationsAtEnvIn
         $emittedManifest $emittedLoopSummaries env $autoSummary

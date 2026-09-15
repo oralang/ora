@@ -529,19 +529,13 @@ theorem directStorageCheck_mem_iff
             ih (dependencyCount := dependencyCount)
               (checkpointId := checkpointId)
       | indexedRegionRead read =>
-          cases hRead : directIndexedRegionRead? read with
-          | none =>
-              simpa only [List.flatMap_cons, directStorageEventData, hRead,
-                timelineSafetyViewFrom, List.nil_append] using
-                ih (dependencyCount := dependencyCount)
-                  (checkpointId := checkpointId)
-          | some resolved =>
-              simpa only [List.flatMap_cons, directStorageEventData, hRead,
-                List.mem_append, List.mem_singleton,
-                TimelineEvent.check_ne_indexedRead, false_or,
-                timelineSafetyViewFrom] using
-                ih (dependencyCount := dependencyCount)
-                  (checkpointId := checkpointId)
+          cases hRead : directIndexedRegionRead? read <;>
+            simpa only [List.flatMap_cons, directStorageEventData, hRead,
+              timelineSafetyViewFrom, List.nil_append, List.mem_append,
+              List.mem_singleton, TimelineEvent.check_ne_indexedRead,
+              false_or] using
+              ih (dependencyCount := dependencyCount)
+                (checkpointId := checkpointId)
       | summaryDependency dependency =>
           simpa only [List.flatMap_cons, directStorageEventData,
             timelineSafetyViewFrom, List.nil_append] using

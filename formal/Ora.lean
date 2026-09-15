@@ -75,6 +75,7 @@ import Ora.Loop.StorageCertificate
 import Ora.Loop.StorageTests
 import Ora.Loop.Denotation
 import Ora.Loop.Auto
+import Ora.Loop.AutoTests
 import Ora.Generated.LoopTotalitySnapshot
 import Ora.LoopTotalitySync
 import Ora.Resource.Model

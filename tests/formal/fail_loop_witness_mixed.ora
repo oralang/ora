@@ -1,0 +1,19 @@
+// The unhandled disequality must still be proved. Selecting zero for extra
+// cannot authorize this loop, even though the universal loop obligations hold.
+contract FailLoopWitnessMixed {
+    storage var observed: u256;
+
+    pub fn run(limit: u256, extra: u256)
+    requires limit >= 1
+    requires limit <= 4
+    requires extra != 0
+    {
+        var i: u256 = 0;
+        while (i < limit)
+        invariant i <= limit
+        {
+            observed = extra;
+            i = i + 1;
+        }
+    }
+}
