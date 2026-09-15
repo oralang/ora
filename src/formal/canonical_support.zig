@@ -134,6 +134,8 @@ const PromotionValueContext = enum(u8) {
     value,
 };
 
+// Optional visitor hooks must be public: Zig 0.17's @hasDecl does not discover
+// private methods, even in this file, and would silently take visitDefault.
 pub fn walkTerm(
     comptime Visitor: type,
     visitor: *Visitor,
@@ -243,7 +245,7 @@ const PromotionVisitor = struct {
         };
     }
 
-    fn visitUnary(self: *PromotionVisitor, set: obligation.ObligationSet, unary: obligation.UnaryTerm, fuel: usize, state: State) bool {
+    pub fn visitUnary(self: *PromotionVisitor, set: obligation.ObligationSet, unary: obligation.UnaryTerm, fuel: usize, state: State) bool {
         const child_context: PromotionValueContext = switch (unary.op) {
             .not => blk: {
                 self.features.connective_ops +|= 1;
@@ -257,7 +259,7 @@ const PromotionVisitor = struct {
         });
     }
 
-    fn visitBinary(self: *PromotionVisitor, set: obligation.ObligationSet, binary: obligation.BinaryTerm, fuel: usize, state: State) bool {
+    pub fn visitBinary(self: *PromotionVisitor, set: obligation.ObligationSet, binary: obligation.BinaryTerm, fuel: usize, state: State) bool {
         const child_context: PromotionValueContext = switch (binary.op) {
             .and_,
             .or_,
@@ -301,7 +303,7 @@ const PromotionVisitor = struct {
             walkTerm(PromotionVisitor, self, set, binary.rhs, fuel - 1, child_state);
     }
 
-    fn visitRefinementPredicate(self: *PromotionVisitor, set: obligation.ObligationSet, predicate: obligation.RefinementPredicateTerm, fuel: usize, state: State) bool {
+    pub fn visitRefinementPredicate(self: *PromotionVisitor, set: obligation.ObligationSet, predicate: obligation.RefinementPredicateTerm, fuel: usize, state: State) bool {
         if (refinement_builtin_map.get(predicate.name) == null) return false;
         self.features.refinement_ops +|= 1;
         const child_state: State = .{
@@ -315,7 +317,7 @@ const PromotionVisitor = struct {
         return true;
     }
 
-    fn visitQuantified(self: *PromotionVisitor, set: obligation.ObligationSet, quantified: obligation.QuantifiedTerm, fuel: usize, state: State) bool {
+    pub fn visitQuantified(self: *PromotionVisitor, set: obligation.ObligationSet, quantified: obligation.QuantifiedTerm, fuel: usize, state: State) bool {
         if (quantified.binder.origin == .function_param and quantified.condition != null) return false;
         if (quantified.binder.origin != .function_param) {
             self.features.quantifier_terms +|= 1;
@@ -420,7 +422,7 @@ const SupportVisitor = struct {
         };
     }
 
-    fn visitUnary(
+    pub fn visitUnary(
         self: *SupportVisitor,
         set: obligation.ObligationSet,
         unary: obligation.UnaryTerm,
@@ -431,7 +433,7 @@ const SupportVisitor = struct {
         return termCanonicalSupport(set, unary.operand, fuel - 1, state.scope);
     }
 
-    fn visitBinary(
+    pub fn visitBinary(
         self: *SupportVisitor,
         set: obligation.ObligationSet,
         binary: obligation.BinaryTerm,
@@ -442,7 +444,7 @@ const SupportVisitor = struct {
         return binaryCanonicalSupport(set, binary, fuel - 1, state.scope);
     }
 
-    fn visitRefinementPredicate(
+    pub fn visitRefinementPredicate(
         self: *SupportVisitor,
         set: obligation.ObligationSet,
         predicate: obligation.RefinementPredicateTerm,
@@ -453,7 +455,7 @@ const SupportVisitor = struct {
         return refinementPredicateCanonicalSupport(set, predicate, fuel - 1, state.scope);
     }
 
-    fn visitQuantified(
+    pub fn visitQuantified(
         self: *SupportVisitor,
         set: obligation.ObligationSet,
         quantified: obligation.QuantifiedTerm,
@@ -573,20 +575,20 @@ const ContainsResultVisitor = struct {
         return term == .result;
     }
 
-    fn visitOld(self: *ContainsResultVisitor, set: obligation.ObligationSet, operand: obligation.TermId, fuel: usize, state: State) bool {
+    pub fn visitOld(self: *ContainsResultVisitor, set: obligation.ObligationSet, operand: obligation.TermId, fuel: usize, state: State) bool {
         return walkTerm(ContainsResultVisitor, self, set, operand, fuel - 1, state);
     }
 
-    fn visitUnary(self: *ContainsResultVisitor, set: obligation.ObligationSet, unary: obligation.UnaryTerm, fuel: usize, state: State) bool {
+    pub fn visitUnary(self: *ContainsResultVisitor, set: obligation.ObligationSet, unary: obligation.UnaryTerm, fuel: usize, state: State) bool {
         return walkTerm(ContainsResultVisitor, self, set, unary.operand, fuel - 1, state);
     }
 
-    fn visitBinary(self: *ContainsResultVisitor, set: obligation.ObligationSet, binary: obligation.BinaryTerm, fuel: usize, state: State) bool {
+    pub fn visitBinary(self: *ContainsResultVisitor, set: obligation.ObligationSet, binary: obligation.BinaryTerm, fuel: usize, state: State) bool {
         return walkTerm(ContainsResultVisitor, self, set, binary.lhs, fuel - 1, state) or
             walkTerm(ContainsResultVisitor, self, set, binary.rhs, fuel - 1, state);
     }
 
-    fn visitRefinementPredicate(self: *ContainsResultVisitor, set: obligation.ObligationSet, predicate: obligation.RefinementPredicateTerm, fuel: usize, state: State) bool {
+    pub fn visitRefinementPredicate(self: *ContainsResultVisitor, set: obligation.ObligationSet, predicate: obligation.RefinementPredicateTerm, fuel: usize, state: State) bool {
         if (walkTerm(ContainsResultVisitor, self, set, predicate.value, fuel - 1, state)) return true;
         for (predicate.args) |arg| {
             if (walkTerm(ContainsResultVisitor, self, set, arg, fuel - 1, state)) return true;
@@ -594,7 +596,7 @@ const ContainsResultVisitor = struct {
         return false;
     }
 
-    fn visitQuantified(self: *ContainsResultVisitor, set: obligation.ObligationSet, quantified: obligation.QuantifiedTerm, fuel: usize, state: State) bool {
+    pub fn visitQuantified(self: *ContainsResultVisitor, set: obligation.ObligationSet, quantified: obligation.QuantifiedTerm, fuel: usize, state: State) bool {
         if (quantified.condition) |condition| {
             if (walkTerm(ContainsResultVisitor, self, set, condition, fuel - 1, state)) return true;
         }
@@ -690,18 +692,18 @@ const StaticTypeVisitor = struct {
         };
     }
 
-    fn visitOld(self: *StaticTypeVisitor, set: obligation.ObligationSet, operand: obligation.TermId, fuel: usize, state: State) EncodeError!TypeInfo {
+    pub fn visitOld(self: *StaticTypeVisitor, set: obligation.ObligationSet, operand: obligation.TermId, fuel: usize, state: State) EncodeError!TypeInfo {
         return walkTerm(StaticTypeVisitor, self, set, operand, fuel - 1, state);
     }
 
-    fn visitUnary(self: *StaticTypeVisitor, set: obligation.ObligationSet, unary: obligation.UnaryTerm, fuel: usize, state: State) EncodeError!TypeInfo {
+    pub fn visitUnary(self: *StaticTypeVisitor, set: obligation.ObligationSet, unary: obligation.UnaryTerm, fuel: usize, state: State) EncodeError!TypeInfo {
         return switch (unary.op) {
             .not => .{ .kind = .bool },
             .neg => walkTerm(StaticTypeVisitor, self, set, unary.operand, fuel - 1, state),
         };
     }
 
-    fn visitBinary(self: *StaticTypeVisitor, set: obligation.ObligationSet, nested: obligation.BinaryTerm, fuel: usize, state: State) EncodeError!TypeInfo {
+    pub fn visitBinary(self: *StaticTypeVisitor, set: obligation.ObligationSet, nested: obligation.BinaryTerm, fuel: usize, state: State) EncodeError!TypeInfo {
         return switch (nested.op) {
             .eq,
             .ne,
@@ -862,6 +864,20 @@ fn firstUnsupported(results: anytype) CanonicalSupport {
         }
     }
     return .supported;
+}
+
+test "canonical Z3 visitor overrides remain discoverable" {
+    inline for (.{ PromotionVisitor, SupportVisitor, ContainsResultVisitor, StaticTypeVisitor }) |Visitor| {
+        try std.testing.expect(@hasDecl(Visitor, "visitUnary"));
+        try std.testing.expect(@hasDecl(Visitor, "visitBinary"));
+    }
+    inline for (.{ PromotionVisitor, SupportVisitor, ContainsResultVisitor }) |Visitor| {
+        try std.testing.expect(@hasDecl(Visitor, "visitRefinementPredicate"));
+        try std.testing.expect(@hasDecl(Visitor, "visitQuantified"));
+    }
+    inline for (.{ ContainsResultVisitor, StaticTypeVisitor }) |Visitor| {
+        try std.testing.expect(@hasDecl(Visitor, "visitOld"));
+    }
 }
 
 test "canonical Z3 required promotion table covers every shape exactly once" {

@@ -7086,19 +7086,21 @@ const TypeChecker = struct {
             variants[index] = .{
                 .name = variant.name,
                 .payload_type = try self.resolveEnumVariantPayloadType(variant.payload, bindings),
-                .explicit_value = if (variant.value) |expr_id| self.explicitEnumValueFromExpr(expr_id) else null,
+                .explicit_value = if (variant.value) |expr_id| try self.explicitEnumValueFromExpr(expr_id) else null,
             };
         }
         return variants;
     }
 
-    fn explicitEnumValueFromExpr(self: *TypeChecker, expr_id: ast.ExprId) ?model.ExplicitEnumValue {
-        if (enumBytesLiteralText(self.file, expr_id)) |bytes| return .{ .bytes = bytes };
+    fn explicitEnumValueFromExpr(self: *TypeChecker, expr_id: ast.ExprId) !?model.ExplicitEnumValue {
+        // The retained type-check result outlives tainted const-eval results,
+        // which CompilerDb may clear before HIR consumes these enum values.
+        if (enumBytesLiteralText(self.file, expr_id)) |bytes| return .{ .bytes = try self.arena.dupe(u8, bytes) };
         const value = self.const_eval.values[expr_id.index()] orelse return null;
         return switch (value) {
-            .integer => |integer| .{ .integer = integer },
-            .boolean => |boolean| .{ .integer = BigInt.initSet(self.arena, @as(i64, @intFromBool(boolean))) catch return null },
-            .string => |string| .{ .string = string },
+            .integer => |integer| .{ .integer = try integer.cloneWithDifferentAllocator(self.arena) },
+            .boolean => |boolean| .{ .integer = try BigInt.initSet(self.arena, @as(i64, @intFromBool(boolean))) },
+            .string => |string| .{ .string = try self.arena.dupe(u8, string) },
             else => null,
         };
     }

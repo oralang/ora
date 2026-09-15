@@ -1636,10 +1636,44 @@ test "compiler lowers wide explicit values on instantiated generic enum declarat
 
     const hir_text = try renderHirTextForSource(source_text);
     defer testing.allocator.free(hir_text);
+    errdefer std.debug.print("wide generic enum HIR:\n{s}\n", .{hir_text});
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Choice__u256\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.variant_values = [-1 : i256]"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.variant_values = [0 : i256]"));
+}
+
+test "compiler retains instantiated generic enum declarations across consteval refresh" {
+    const source_text =
+        \\enum Number(comptime T: type) : u256 {
+        \\    value = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+        \\}
+        \\enum Label(comptime T: type) : string { value = "retained enum label" }
+        \\enum Bytes(comptime T: type) : bytes { value = hex"deadbeef" }
+        \\pub fn consume(number: Number<u256>, label: Label<u256>, raw: Bytes<u256>) {}
+    ;
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    // Check both after the tainted result was cleared by typeCheck and after
+    // it has been re-evaluated. Neither query order may change retained data.
+    for (0..2) |pass| {
+        if (pass != 0) _ = try compilation.db.constEval(compilation.root_module_id);
+        const number = typecheck.instantiatedEnumByName("Number__u256") orelse return error.TestUnexpectedResult;
+        const integer = number.variants[0].explicit_value orelse return error.TestUnexpectedResult;
+        try testing.expect(integer == .integer);
+        try testing.expectEqual(std.math.maxInt(u256), try integer.integer.toInt(u256));
+        const label = typecheck.instantiatedEnumByName("Label__u256") orelse return error.TestUnexpectedResult;
+        const string = label.variants[0].explicit_value orelse return error.TestUnexpectedResult;
+        try testing.expect(string == .string);
+        try testing.expectEqualStrings("retained enum label", string.string);
+        const raw = typecheck.instantiatedEnumByName("Bytes__u256") orelse return error.TestUnexpectedResult;
+        const bytes = raw.variants[0].explicit_value orelse return error.TestUnexpectedResult;
+        try testing.expect(bytes == .bytes);
+        try testing.expectEqualStrings("deadbeef", bytes.bytes);
+    }
 }
 
 test "compiler monomorphizes generic bitfield types on type use" {
