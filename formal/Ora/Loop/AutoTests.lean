@@ -262,4 +262,50 @@ end WithChild
 
 end WitnessTactic
 
+-- Bounds come from the operation, for arbitrary operands and carrier widths.
+example (value mask : BitVec 64) : (value &&& mask).toNat ≤ mask.toNat := by
+  ora_loop_linear_close
+example (value : BitVec 256) (i : Nat) (hi : i < 9) :
+    (value &&& 7).toNat + i < 16 := by
+  ora_loop_linear_close
+
+-- Guard sums must be rewritten in hypotheses as well as the goal, and only
+-- after proving the carrier cannot wrap from the available prefix bounds.
+example (i limit : BitVec 256) (hLimit : limit.toNat ≤ 6)
+    (hGuard : i.toNat < limit.toNat) : i.toNat ≤ (i + 1).toNat := by
+  ora_loop_close
+example (anchor i limit : BitVec 256) (hLimit : limit.toNat ≤ 6)
+    (hGuard : i.toNat < limit.toNat) :
+    (anchor &&& 3).toNat ≤ ((anchor &&& 3) + i).toNat := by
+  ora_loop_close
+example (anchor i limit : BitVec 256) (hLimit : limit.toNat ≤ 6)
+    (hGuard : i.toNat < limit.toNat)
+    (hSum : ((anchor &&& 3) + i).toNat < 8) :
+    (anchor &&& 3).toNat + i.toNat < 8 := by
+  ora_loop_linear_close
+set_option linter.unusedVariables false in
+example (i : BitVec 256) : True := by
+  fail_if_success have : i.toNat ≤ (i + 1).toNat := by ora_loop_close
+  trivial
+
+example (i limit : BitVec 256) (hGuard : i.toNat < limit.toNat) :
+    limit - i ≠ 0 := by ora_loop_close
+example (i limit : BitVec 64) (hGuard : i.toNat < limit.toNat) :
+    (limit - i).toNat ≠ 0 := by ora_loop_linear_close
+set_option linter.unusedVariables false in
+example (i limit : BitVec 256) : True := by
+  fail_if_success have : limit - i ≠ 0 := by ora_loop_close
+  trivial
+
+example (manifest : Manifest) (env : Env) (variables : List VariableRow)
+    (state : ScalarLoopState) : formulasHoldInState manifest env variables state [] := by
+  ora_loop_split_formulas
+
+example (manifest : Manifest) (env : Env) (variables : List VariableRow)
+    (invariant : ScalarLoopState → Prop) (formula : FormulaRef) :
+    ∀ locals, invariant locals →
+      timelineControlChecks (formulaHoldsInState manifest env variables locals)
+        ([.assume formula] : List DirectStorageEvent) := by
+  ora_loop_prefix_checks
+
 end Ora.Loop

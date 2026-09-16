@@ -500,10 +500,12 @@ const max_loop_projection_paths: usize = 256;
 const LoopValueSource = struct {
     value_id: usize,
     key: []const u8,
+    boolean_literal: ?bool = null,
 };
 
 const SemanticLoopPath = struct {
     key: []const u8,
+    in_guard: bool = false,
     path_formulas: []const obligation.FormulaRef = &.{},
     formula_overrides: []const Collector.LoopFormulaOverride = &.{},
     source_overrides: []const LoopValueSource = &.{},
@@ -521,6 +523,7 @@ const SemanticLoopPath = struct {
 
 const InventoryLoopPath = struct {
     key: []const u8,
+    in_guard: bool = false,
     source_overrides: []const LoopValueSource = &.{},
     state_source_keys: []const []const u8 = &.{},
     safety_checkpoints: []const LoopSafetyCheckpointKey = &.{},
@@ -678,6 +681,7 @@ const Collector = struct {
     allocator: std.mem.Allocator,
     options: CollectOptions,
     terms: std.ArrayList(obligation.Term) = .empty,
+    boolean_terms: [2]?obligation.TermId = .{ null, null },
     obligations: std.ArrayList(obligation.Obligation) = .empty,
     assumptions: std.ArrayList(obligation.Assumption) = .empty,
     queries: std.ArrayList(obligation.VerificationQuery) = .empty,
@@ -702,6 +706,7 @@ const Collector = struct {
     next_loop_summary_id: obligation.Id = 1,
     next_loop_variable_pattern_id: u32 = 0,
     use_loop_value_bindings: bool = false,
+    allow_short_circuit_predicates: bool = false,
     active_loop_depth: u32 = 0,
     next_ordinal: u32 = 0,
     function_param_names: []const []const u8 = &.{},
@@ -1103,6 +1108,9 @@ const Collector = struct {
     }
 
     fn discardTermsFrom(self: *Collector, start: usize) void {
+        for (&self.boolean_terms) |*cached| if (cached.*) |id| {
+            if (id >= start) cached.* = null;
+        };
         for (start..self.terms.items.len) |index| {
             _ = self.arithmetic_safety_terms.remove(@intCast(index));
         }
@@ -1917,8 +1925,15 @@ const Collector = struct {
 
         var semantic_terminals: std.ArrayList(SemanticLoopTerminal) = .empty;
         defer semantic_terminals.deinit(self.allocator);
+        // Previously unprojectable guards are executed as ordered branches,
+        // not flattened; established simple-guard rows keep their digest.
+        const structured_guard = draft.loop_kind == .scf_while and guard == .origin_value;
+        const first = mlir.oraBlockGetFirstOperation(if (structured_guard)
+            mlir.oraScfWhileOpGetBeforeBlock(draft.loop_op)
+        else
+            draft.body);
         const initial_path_key = "body/path";
-        const semantic_path: SemanticLoopPath = .{
+        const semantic_path: SemanticLoopPath = if (structured_guard) .{ .key = "guard", .in_guard = true } else .{
             .key = "body",
             .path_formulas = try appendFormula(self.allocator, &.{}, guard),
             .timeline = try appendLoopTimelineEvent(
@@ -1931,7 +1946,7 @@ const Collector = struct {
             ),
         };
         self.projectSemanticLoopSequence(
-            mlir.oraBlockGetFirstOperation(draft.body),
+            first,
             semantic_path,
             draft,
             summary,
@@ -1948,8 +1963,8 @@ const Collector = struct {
         var inventory_terminals: std.ArrayList(InventoryLoopTerminal) = .empty;
         defer inventory_terminals.deinit(self.allocator);
         self.inventoryLoopSequence(
-            mlir.oraBlockGetFirstOperation(draft.body),
-            .{
+            first,
+            if (structured_guard) .{ .key = "guard", .in_guard = true } else .{
                 .key = "body",
                 .timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, &.{}, .{
                     .structural_key = initial_path_key,
@@ -1976,7 +1991,10 @@ const Collector = struct {
                     summary.projection_completeness = .target_mismatch;
                     return;
                 },
-                else => return err,
+                else => {
+                    if (try self.recordLoopProjectionFailure(summary, err)) return;
+                    return err;
+                },
             };
             try projected.append(self.allocator, edge);
         }
@@ -1989,69 +2007,74 @@ const Collector = struct {
                     summary.projection_completeness = .target_mismatch;
                     return;
                 },
-                else => return err,
+                else => {
+                    if (try self.recordLoopProjectionFailure(summary, err)) return;
+                    return err;
+                },
             };
             try inventory.append(self.allocator, edge);
         }
 
-        const exit_bindings = try self.allocator.alloc(obligation.LoopStepAssignment, summary.variables.len);
-        for (summary.variables, exit_bindings) |variable, *binding| {
-            const id = variable.id orelse return;
-            const value = try self.addTerm(.{ .variable = .{ .free = .{
-                .id = id,
-                .name = variable.name orelse "",
-                .ty = variable.ty,
-            } } });
-            binding.* = .{
-                .variable_index = variable.index,
-                .target = id,
-                .source_key = try std.fmt.allocPrint(self.allocator, "loop-state:{d}", .{variable.index}),
-                .value = .{ .term = value },
+        if (!structured_guard) {
+            const exit_bindings = try self.allocator.alloc(obligation.LoopStepAssignment, summary.variables.len);
+            for (summary.variables, exit_bindings) |variable, *binding| {
+                const id = variable.id orelse return;
+                const value = try self.addTerm(.{ .variable = .{ .free = .{
+                    .id = id,
+                    .name = variable.name orelse "",
+                    .ty = variable.ty,
+                } } });
+                binding.* = .{
+                    .variable_index = variable.index,
+                    .target = id,
+                    .source_key = try std.fmt.allocPrint(self.allocator, "loop-state:{d}", .{variable.index}),
+                    .value = .{ .term = value },
+                };
+            }
+
+            const negated_guard: obligation.FormulaRef = switch (guard) {
+                .term => |term| .{ .term = try self.addTerm(.{ .unary = .{
+                    .op = .not,
+                    .operand = term,
+                } }) },
+                .origin_value => guard,
             };
-        }
+            const exit_path = try self.allocator.alloc(obligation.FormulaRef, 1);
+            exit_path[0] = negated_guard;
 
-        const negated_guard: obligation.FormulaRef = switch (guard) {
-            .term => |term| .{ .term = try self.addTerm(.{ .unary = .{
-                .op = .not,
-                .operand = term,
-            } }) },
-            .origin_value => guard,
-        };
-        const exit_path = try self.allocator.alloc(obligation.FormulaRef, 1);
-        exit_path[0] = negated_guard;
-
-        try projected.append(self.allocator, .{
-            .edge = .{
-                .id = @intCast(projected.items.len),
+            try projected.append(self.allocator, .{
+                .edge = .{
+                    .id = @intCast(projected.items.len),
+                    .structural_key = "guard/false-successor",
+                    .timeline = try appendLoopTimelineEvent(self.allocator, &.{}, .{
+                        .path_assumption = .{ .formulas = try loopFormulaExprs(self.allocator, exit_path) },
+                    }, "guard/false-successor/path"),
+                    .next_state = exit_bindings,
+                    .target = .successor,
+                },
+                .terminator_key = "guard/false-successor",
+                .safety_checkpoints = &.{},
+                .target_keys = &.{},
+                .effect_keys = &.{},
+                .state_source_keys = &.{},
+            });
+            const exit_source_keys = try self.allocator.alloc([]const u8, exit_bindings.len);
+            for (exit_bindings, exit_source_keys) |binding, *key| key.* = binding.source_key;
+            try inventory.append(self.allocator, .{
                 .structural_key = "guard/false-successor",
-                .timeline = try appendLoopTimelineEvent(self.allocator, &.{}, .{
-                    .path_assumption = .{ .formulas = try loopFormulaExprs(self.allocator, exit_path) },
-                }, "guard/false-successor/path"),
-                .next_state = exit_bindings,
                 .target = .successor,
-            },
-            .terminator_key = "guard/false-successor",
-            .safety_checkpoints = &.{},
-            .target_keys = &.{},
-            .effect_keys = &.{},
-            .state_source_keys = &.{},
-        });
-        const exit_source_keys = try self.allocator.alloc([]const u8, exit_bindings.len);
-        for (exit_bindings, exit_source_keys) |binding, *key| key.* = binding.source_key;
-        try inventory.append(self.allocator, .{
-            .structural_key = "guard/false-successor",
-            .target = .successor,
-            .terminator_key = "guard/false-successor",
-            .binding_source_keys = exit_source_keys,
-            .safety_checkpoints = &.{},
-            .target_keys = &.{},
-            .effect_keys = &.{},
-            .state_source_keys = &.{},
-            .timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, &.{}, .{
-                .structural_key = "guard/false-successor/path",
-                .tag = .path_assumption,
-            }),
-        });
+                .terminator_key = "guard/false-successor",
+                .binding_source_keys = exit_source_keys,
+                .safety_checkpoints = &.{},
+                .target_keys = &.{},
+                .effect_keys = &.{},
+                .state_source_keys = &.{},
+                .timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, &.{}, .{
+                    .structural_key = "guard/false-successor/path",
+                    .tag = .path_assumption,
+                }),
+            });
+        }
 
         summary.projection_completeness = compareLoopProjection(projected.items, inventory.items);
         if (summary.projection_completeness != .complete) {
@@ -2159,6 +2182,33 @@ const Collector = struct {
         var op = first;
         while (!mlir.oraOperationIsNull(op)) : (op = mlir.oraOperationGetNextInBlock(op)) {
             const name = operationName(op);
+            if (path.in_guard and !structuredGuardOperationSupported(op, name)) return error.LoopProjectionEffectUnsupported;
+            if (path.in_guard and std.mem.eql(u8, name, "scf.condition")) {
+                const values = try self.operationOperands(op);
+                if (values.len != summary.variables.len + 1) return error.UnsupportedLoopControlFlow;
+                for (values[1..], 0..) |value, index|
+                    if (value.ptr != mlir.oraBlockGetArgument(mlir.mlirOperationGetBlock(op), index).ptr) return error.UnsupportedLoopControlFlow;
+                const value = self.sourceLoopGuardValue(values[0]) orelse return error.UnsupportedLoopControlFlow;
+                const formula = try self.loopFormulaFromValueWithOverrides(value, path.formula_overrides, name, draft.symbol, draft.ordinal, 0);
+                for ([_]bool{ true, false }) |enters| {
+                    var branch = path;
+                    branch.key = try std.fmt.allocPrint(self.allocator, "{s}/condition:{s}", .{ path.key, if (enters) "true" else "false" });
+                    const condition = if (enters) formula else try self.negateFormula(formula);
+                    branch.path_formulas = try appendFormula(self.allocator, path.path_formulas, condition);
+                    const key = try std.fmt.allocPrint(self.allocator, "{s}/path", .{branch.key});
+                    branch.timeline = try appendLoopTimelineEvent(self.allocator, path.timeline, .{
+                        .path_assumption = .{ .formulas = try loopFormulaExprs(self.allocator, &.{condition}) },
+                    }, key);
+                    if (enters) {
+                        branch.in_guard = false;
+                        try self.projectSemanticLoopSequence(mlir.oraBlockGetFirstOperation(draft.body), branch, draft, summary, terminals);
+                    } else {
+                        if (terminals.items.len >= max_loop_projection_paths) return error.LoopProjectionPathLimitExceeded;
+                        try terminals.append(self.allocator, .{ .path = branch, .terminator_key = try self.operationStructuralKey(op, name), .yielded = values[1..] });
+                    }
+                }
+                return;
+            }
             if (std.mem.eql(u8, name, "ora.loop_control")) {
                 try self.appendSemanticLoopControlTerminal(op, path, draft, summary, terminals);
                 return;
@@ -2603,6 +2653,29 @@ const Collector = struct {
         var previous_op: mlir.MlirOperation = std.mem.zeroes(mlir.MlirOperation);
         while (!mlir.oraOperationIsNull(op)) : (op = mlir.oraOperationGetNextInBlock(op)) {
             const name = operationName(op);
+            if (path.in_guard and !structuredGuardOperationSupported(op, name)) return error.LoopProjectionEffectUnsupported;
+            if (path.in_guard and std.mem.eql(u8, name, "scf.condition")) {
+                const values = try self.operationOperands(op);
+                if (values.len != summary.variables.len + 1) return error.UnsupportedLoopControlFlow;
+                for (values[1..], 0..) |value, index|
+                    if (value.ptr != mlir.oraBlockGetArgument(mlir.mlirOperationGetBlock(op), index).ptr) return error.UnsupportedLoopControlFlow;
+                for ([_]bool{ true, false }) |enters| {
+                    var branch = path;
+                    branch.key = try std.fmt.allocPrint(self.allocator, "{s}/condition:{s}", .{ path.key, if (enters) "true" else "false" });
+                    branch.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, path.timeline_inventory, .{
+                        .structural_key = try std.fmt.allocPrint(self.allocator, "{s}/path", .{branch.key}),
+                        .tag = .path_assumption,
+                    });
+                    if (enters) {
+                        branch.in_guard = false;
+                        try self.inventoryLoopSequence(mlir.oraBlockGetFirstOperation(draft.body), branch, draft, summary, terminals);
+                    } else {
+                        if (terminals.items.len >= max_loop_projection_paths) return error.LoopProjectionPathLimitExceeded;
+                        try terminals.append(self.allocator, .{ .path = branch, .terminator_key = try self.operationStructuralKey(op, name), .yielded = values[1..] });
+                    }
+                }
+                return;
+            }
             if (std.mem.eql(u8, name, "ora.loop_control")) {
                 try self.appendInventoryLoopControlTerminal(op, path, draft, summary, terminals);
                 return;
@@ -3074,9 +3147,13 @@ const Collector = struct {
         );
         const branch_count: usize = @intCast(mlir.oraOperationGetNumRegions(op));
         if (branch_count == 0 or branch_count > 2) return error.UnsupportedLoopControlFlow;
+        if (branch_count == 1 and mlir.oraOperationGetNumResults(op) != 0) return error.UnsupportedLoopControlFlow;
         const op_key = try self.operationStructuralKey(op, "scf.if");
 
         for (0..branch_count) |branch_index| {
+            // The prefix remains on the selected path, including every earlier
+            // checkpoint. Only an already-bound literal selects a single arm.
+            if (condition == .term and self.termIsBoolLiteral(condition.term, branch_index != 0)) continue;
             var branch_path = path;
             branch_path.key = try std.fmt.allocPrint(
                 self.allocator,
@@ -3111,8 +3188,7 @@ const Collector = struct {
             }
         }
 
-        if (branch_count == 1) {
-            if (mlir.oraOperationGetNumResults(op) != 0) return error.UnsupportedLoopControlFlow;
+        if (branch_count == 1 and !(condition == .term and self.termIsBoolLiteral(condition.term, true))) {
             var false_path = path;
             false_path.key = try std.fmt.allocPrint(self.allocator, "{s}/{s}/else-implicit", .{ path.key, op_key });
             false_path.path_formulas = try appendFormula(
@@ -3144,8 +3220,11 @@ const Collector = struct {
         if (mlir.oraOperationGetNumOperands(op) == 0 or branch_count == 0 or branch_count > 2) {
             return error.UnsupportedLoopControlFlow;
         }
+        if (branch_count == 1 and mlir.oraOperationGetNumResults(op) != 0) return error.UnsupportedLoopControlFlow;
         const op_key = try self.operationStructuralKey(op, "scf.if");
+        const literal = inventoryBooleanLiteral(mlir.oraOperationGetOperand(op, 0), path.source_overrides);
         for (0..branch_count) |branch_index| {
+            if (literal) |value| if (value != (branch_index == 0)) continue;
             var branch_path = path;
             branch_path.key = try std.fmt.allocPrint(
                 self.allocator,
@@ -3171,8 +3250,7 @@ const Collector = struct {
                 try self.inventoryLoopSequence(mlir.oraOperationGetNextInBlock(op), continued, draft, summary, terminals);
             }
         }
-        if (branch_count == 1) {
-            if (mlir.oraOperationGetNumResults(op) != 0) return error.UnsupportedLoopControlFlow;
+        if (branch_count == 1 and literal != true) {
             var false_path = path;
             false_path.key = try std.fmt.allocPrint(self.allocator, "{s}/{s}/else-implicit", .{ path.key, op_key });
             false_path.timeline_inventory = try appendLoopTimelineInventoryEvent(self.allocator, false_path.timeline_inventory, .{
@@ -3398,6 +3476,7 @@ const Collector = struct {
             path.source_overrides = try appendValueSource(self.allocator, path.source_overrides, .{
                 .value_id = @intFromPtr(result.ptr),
                 .key = source_key,
+                .boolean_literal = inventoryBooleanLiteral(terminal.yielded[index], path.source_overrides),
             });
         }
         return path;
@@ -3561,7 +3640,7 @@ const Collector = struct {
         draft: LoopSummaryDraft,
         terminal: SemanticLoopTerminal,
     ) !ProjectedLoopEdge {
-        const target = if (terminal.control) |control| control.target else obligation.LoopControlTarget.backedge;
+        const target = if (terminal.control) |control| control.target else if (terminal.path.in_guard) obligation.LoopControlTarget.successor else .backedge;
         const is_return_target = target == .function_return or target == .error_return;
         if (!is_return_target and terminal.path.target_keys.len != 0) {
             return error.LoopTargetFormulaTargetMismatch;
@@ -3718,7 +3797,7 @@ const Collector = struct {
         draft: LoopSummaryDraft,
         terminal: InventoryLoopTerminal,
     ) !InventoryLoopEdge {
-        const target = if (terminal.control) |control| control.target else obligation.LoopControlTarget.backedge;
+        const target = if (terminal.control) |control| control.target else if (terminal.path.in_guard) obligation.LoopControlTarget.successor else .backedge;
         const is_return_target = target == .function_return or target == .error_return;
         if (!is_return_target and terminal.path.target_keys.len != 0) {
             return error.LoopTargetFormulaTargetMismatch;
@@ -4316,7 +4395,10 @@ const Collector = struct {
 
     fn negateFormula(self: *Collector, formula: obligation.FormulaRef) !obligation.FormulaRef {
         return switch (formula) {
-            .term => |term| .{ .term = try self.addTerm(.{ .unary = .{ .op = .not, .operand = term } }) },
+            .term => |term| .{ .term = try self.addTerm(if (self.terms.items[term] == .bool_lit)
+                .{ .bool_lit = !self.terms.items[term].bool_lit }
+            else
+                .{ .unary = .{ .op = .not, .operand = term } }) },
             .origin_value => formula,
         };
     }
@@ -4776,6 +4858,9 @@ const Collector = struct {
         symbol: ?[]const u8,
         ordinal: u32,
     ) ![]const obligation.FormulaRef {
+        const previous = self.allow_short_circuit_predicates;
+        self.allow_short_circuit_predicates = true;
+        defer self.allow_short_circuit_predicates = previous;
         const body = loopBodyBlock(op, loop_kind);
         if (mlir.oraBlockIsNull(body)) return &.{};
         var invariant_ops: std.ArrayList(mlir.MlirOperation) = .empty;
@@ -5993,6 +6078,9 @@ const Collector = struct {
         ordinal: u32,
         operand_index: u32,
     ) !?obligation.FormulaRef {
+        const previous = self.allow_short_circuit_predicates;
+        self.allow_short_circuit_predicates = true;
+        defer self.allow_short_circuit_predicates = previous;
         if (mlir.oraOperationGetNumOperands(op) <= operand_index) return null;
         const value = mlir.oraOperationGetOperand(op, operand_index);
         if (try self.termFromValue(value)) |term| {
@@ -6111,6 +6199,7 @@ const Collector = struct {
         if (std.mem.eql(u8, owner_name, "ora.map_get")) return try self.storageMapReadTerm(owner);
         if (std.mem.eql(u8, owner_name, "memref.load")) return try self.fixedArrayReadTerm(owner);
         if (std.mem.eql(u8, owner_name, "arith.constant")) return try self.constantTerm(owner, signed_override);
+        if (self.allow_short_circuit_predicates and std.mem.eql(u8, owner_name, "scf.if")) return try self.shortCircuitPredicateTerm(owner);
         if (std.mem.eql(u8, owner_name, "arith.trunci")) {
             return try self.truncatedIntegerLiteralTerm(owner, signed_override);
         }
@@ -6336,6 +6425,30 @@ const Collector = struct {
                 .keys = keys,
             };
         }
+    }
+
+    fn shortCircuitPredicateTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
+        if (!structuredGuardOperationSupported(op, "scf.if")) return null;
+        const block = singleRegionBlock(op, 0) orelse return null;
+        var child = mlir.oraBlockGetFirstOperation(block);
+        while (!mlir.oraOperationIsNull(child)) : (child = mlir.oraOperationGetNextInBlock(child)) {
+            const name = operationName(child);
+            if (std.mem.eql(u8, name, "scf.yield")) {
+                if (mlir.oraOperationGetNumOperands(child) != 1 or !mlir.oraOperationIsNull(mlir.oraOperationGetNextInBlock(child))) return null;
+                const lhs = (try self.termFromValue(mlir.oraOperationGetOperand(op, 0))) orelse return null;
+                const rhs = (try self.termFromValue(mlir.oraOperationGetOperand(child, 0))) orelse return null;
+                return try self.addTerm(.{ .binary = .{ .op = .and_, .lhs = lhs, .rhs = rhs } });
+            }
+            if (std.mem.eql(u8, name, "scf.if")) {
+                if (try self.shortCircuitPredicateTerm(child) == null) return null;
+            } else {
+                if (mlir.oraOperationGetNumRegions(child) != 0 or mlir.mlirOperationGetNumSuccessors(child) != 0) return null;
+                if (!preheaderPureValueOperationSupported(name) and !isLoopSafetyOperation(child, name) and
+                    !std.mem.eql(u8, name, "ora.sload") and
+                    !(std.mem.eql(u8, name, "memref.load") and inventoryMemrefLoadTargetsPersistentRoot(child))) return null;
+            }
+        }
+        return null;
     }
 
     fn constantTerm(self: *Collector, op: mlir.MlirOperation, signed_override: ?bool) anyerror!?obligation.TermId {
@@ -6989,8 +7102,10 @@ const Collector = struct {
     }
 
     fn addTerm(self: *Collector, term: obligation.Term) !obligation.TermId {
+        if (term == .bool_lit) if (self.boolean_terms[@intFromBool(term.bool_lit)]) |id| return id;
         const id: obligation.TermId = @intCast(self.terms.items.len);
         try self.terms.append(self.allocator, term);
+        if (term == .bool_lit) self.boolean_terms[@intFromBool(term.bool_lit)] = id;
         return id;
     }
 
@@ -8712,6 +8827,48 @@ fn headerPrivateSlot(value: mlir.MlirValue) bool {
     return true;
 }
 
+fn structuredGuardOperationSupported(op: mlir.MlirOperation, name: []const u8) bool {
+    if (std.mem.eql(u8, name, "scf.if")) {
+        if (mlir.oraOperationGetNumOperands(op) != 1 or mlir.oraOperationGetNumResults(op) != 1 or
+            mlir.oraOperationGetNumRegions(op) != 2 or !operationResultIsI1(op)) return false;
+        const block = singleRegionBlock(op, 1) orelse return false;
+        const literal = mlir.oraBlockGetFirstOperation(block);
+        if (mlir.oraOperationIsNull(literal) or !std.mem.eql(u8, operationName(literal), "arith.constant") or !operationResultIsI1(literal)) return false;
+        const text = mlir.oraIntegerAttrGetValueString(mlir.oraOperationGetAttributeByName(literal, strRef("value")));
+        defer if (text.data != null) mlir.oraStringRefFree(text);
+        if (text.data == null or !std.mem.eql(u8, text.data[0..text.length], "0")) return false;
+        const yield = mlir.oraOperationGetNextInBlock(literal);
+        return !mlir.oraOperationIsNull(yield) and std.mem.eql(u8, operationName(yield), "scf.yield") and
+            mlir.oraOperationGetNumOperands(yield) == 1 and mlir.oraOperationIsNull(mlir.oraOperationGetNextInBlock(yield)) and
+            mlir.oraOperationGetOperand(yield, 0).ptr == mlir.oraOperationGetResult(literal, 0).ptr;
+    }
+    return preheaderPureValueOperationSupported(name) or isLoopSafetyOperation(op, name) or
+        isRegionYield(name) or std.mem.eql(u8, name, "scf.condition") or dynamicLengthSourceValue(op) != null or
+        (std.mem.eql(u8, name, "memref.load") and mlir.oraOperationGetNumOperands(op) == 1 and
+            headerPrivateSlot(mlir.oraOperationGetOperand(op, 0)));
+}
+
+// The independent inventory follows actual yielded values and MLIR literals;
+// it does not consult the semantic walk's term table or branch decisions.
+fn inventoryBooleanLiteral(value: mlir.MlirValue, sources: []const LoopValueSource) ?bool {
+    var index = sources.len;
+    while (index != 0) {
+        index -= 1;
+        if (sources[index].value_id == @intFromPtr(value.ptr)) return sources[index].boolean_literal;
+    }
+    if (!mlir.oraValueIsAOpResult(value)) return null;
+    const owner = mlir.oraOpResultGetOwner(value);
+    if (!std.mem.eql(u8, operationName(owner), "arith.constant") or !operationResultIsI1(owner) or
+        hasAttr(owner, "ora.bound_variable")) return null;
+    const text = mlir.oraIntegerAttrGetValueString(mlir.oraOperationGetAttributeByName(owner, strRef("value")));
+    defer if (text.data != null) mlir.oraStringRefFree(text);
+    if (text.data == null) return null;
+    const literal = std.mem.trim(u8, text.data[0..text.length], " \t\n\r");
+    if (std.mem.eql(u8, literal, "0")) return false;
+    if (std.mem.eql(u8, literal, "1")) return true;
+    return null;
+}
+
 fn preheaderControlOperationUnsupported(op: mlir.MlirOperation, name: []const u8) bool {
     return std.mem.eql(u8, name, "scf.while") or std.mem.eql(u8, name, "scf.for") or
         std.mem.eql(u8, name, "ora.switch") or std.mem.eql(u8, name, "ora.switch_expr") or
@@ -9135,6 +9292,25 @@ fn expectedResourcePropertyMask(op: obligation.ResourceOperation) u32 {
         .destroy => resourcePropertyBit(.amount_non_negative) |
             resourcePropertyBit(.source_sufficient),
     };
+}
+
+test "loop blocker batch Boolean terms remain valid after preheader rollback" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var collector: Collector = .{ .allocator = arena.allocator(), .options = .{} };
+    const retained = try collector.addTerm(.{ .bool_lit = true });
+    const temporary = try collector.addTerm(.{ .bool_lit = false });
+    collector.discardTermsFrom(temporary);
+    const replacement = try collector.addTerm(.{ .int_lit = .{ .value = "7" } });
+    try std.testing.expectEqual(temporary, replacement);
+    const false_formula = try collector.negateFormula(.{ .term = retained });
+    try std.testing.expect(false_formula.term != replacement);
+    try std.testing.expectEqual(false, collector.terms.items[false_formula.term].bool_lit);
+    const true_formula = try collector.negateFormula(false_formula);
+    try std.testing.expectEqual(retained, true_formula.term);
+    collector.discardTermsFrom(0);
+    const false_again = try collector.addTerm(.{ .bool_lit = false });
+    try std.testing.expectEqual(false, collector.terms.items[false_again].bool_lit);
 }
 
 test "header prefix control slots reject nonlocal and escaping addresses" {

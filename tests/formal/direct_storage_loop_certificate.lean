@@ -7,7 +7,6 @@ attribute [local simp] emitted_manifest_wf emitted_terms_topological emitted_ter
 attribute [local simp] emitted_term_0_lookup emitted_term_1_lookup emitted_term_2_lookup
   emitted_term_3_lookup emitted_term_4_lookup emitted_term_5_lookup emitted_term_6_lookup
   emitted_term_7_lookup emitted_term_8_lookup emitted_term_9_lookup emitted_term_10_lookup
-  emitted_term_11_lookup
 
 theorem directFormulasHold_single_bool_true
     (context : Ora.Loop.StorageFormulaContext)

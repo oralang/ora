@@ -242,12 +242,79 @@ def TimelineSafe
       TimelineExec semantics beforeEvents initial beforeResult →
       timelineFormulaHolds semantics formula beforeResult.state
 
-def TimelineChecksHold
+/-- A proof-obligation fold, not an executor: each assumption scopes only the
+remaining checks. It supplies no values, states, transitions or authority. -/
+def timelineControlChecks (holds : FormulaExpr → Prop) :
+    List (EventOf FormulaExpr LocationExpr ValueExpr Child) → Prop
+  | [] => True
+  | .assume formula :: rest => holds formula → timelineControlChecks holds rest
+  | .check formula :: rest => holds formula ∧ timelineControlChecks holds rest
+  | _ :: rest => timelineControlChecks holds rest
+
+/-- Transport requires every admitted event execution to preserve `P`, and
+every relevant formula to agree with the control proposition in every such
+state. Neither premise can use a later path fact or a completed transition. -/
+theorem timelineSafe_of_control_checks
     (semantics : TimelineSemantics FormulaExpr LocationExpr ValueExpr Child)
+    (P : StorageActionState → Prop) (holds : FormulaExpr → Prop)
+    (hStep : ∀ event before result, P before →
+      TimelineEventExec semantics event before result → P result.state)
     (events : List (EventOf FormulaExpr LocationExpr ValueExpr Child))
-    (initial : StorageActionState) : Prop :=
-  ∀ formula, .check formula ∈ events →
-    timelineFormulaHolds semantics formula initial
+    (hFormula : ∀ formula,
+      (.assume formula ∈ events ∨ .check formula ∈ events) →
+      ∀ state, P state → (timelineFormulaHolds semantics formula state ↔ holds formula))
+    (initial : StorageActionState) (hInitial : P initial)
+    (hChecks : timelineControlChecks holds events) :
+    TimelineSafe semantics events initial := by
+  induction events generalizing initial with
+  | nil => intro before formula after hEvents; cases before <;> simp at hEvents
+  | cons event rest ih =>
+      intro before formula after hEvents result hExec
+      cases before with
+      | nil =>
+          simp only [List.nil_append, List.cons.injEq] at hEvents
+          rcases hEvents with ⟨rfl, rfl⟩
+          cases hExec
+          exact (hFormula formula (Or.inr (by simp)) initial hInitial).mpr hChecks.1
+      | cons head tail =>
+          simp only [List.cons_append, List.cons.injEq] at hEvents
+          rcases hEvents with ⟨rfl, hRest⟩
+          cases hExec with
+          | cons hEvent hTail =>
+              apply ih (fun f hMember => hFormula f
+                (hMember.imp (List.mem_cons_of_mem _) (List.mem_cons_of_mem _)))
+                _ (hStep _ _ _ hInitial hEvent) ?_ tail formula after hRest _ hTail
+              cases hEvent with
+              | assume hEval hHolds =>
+                  exact hChecks ((hFormula _ (Or.inl (by simp)) _ hInitial).mp
+                    ⟨_, hEval, hHolds⟩)
+              | check => exact hChecks.2
+              | storage | indexedRead | child => exact hChecks
+
+/-- Extract only assumptions actually executed. Stability is explicit; the
+result is not inferred from row membership or a declared effect inventory. -/
+theorem TimelineExec.control_assumptions
+    (semantics : TimelineSemantics FormulaExpr LocationExpr ValueExpr Child)
+    (P : StorageActionState → Prop) (holds : FormulaExpr → Prop)
+    (hStep : ∀ event before result, P before →
+      TimelineEventExec semantics event before result → P result.state)
+    (events : List (EventOf FormulaExpr LocationExpr ValueExpr Child))
+    (initial : StorageActionState) (result : TimelineResult)
+    (hInitial : P initial)
+    (hFormula : ∀ formula, .assume formula ∈ events →
+      ∀ state, P state → (timelineFormulaHolds semantics formula state → holds formula))
+    (hExec : TimelineExec semantics events initial result) :
+    ∀ formula, .assume formula ∈ events → holds formula := by
+  induction hExec with
+  | nil => simp
+  | cons hEvent hRest ih =>
+      intro formula hMember
+      rcases List.mem_cons.mp hMember with hHead | hTail
+      · subst hHead
+        cases hEvent with
+        | assume hEval hHolds => exact hFormula _ (by simp) _ hInitial ⟨_, hEval, hHolds⟩
+      · exact ih (hStep _ _ _ hInitial hEvent)
+          (fun f hf => hFormula f (List.mem_cons_of_mem _ hf)) formula hTail
 
 /-- A canonical leading path prefix is witnessed by execution at the exact
 entry state. Later storage reads cannot retroactively affect these formulas. -/
@@ -483,62 +550,6 @@ theorem TimelineExec.read_ids
       change following.state.reads.map StorageReadBinding.id = _
       rw [ih, TimelineEventExec.read_ids semantics event initial first hEvent]
       simp only [timelineReadIdsOf, List.flatMap_cons, List.append_assoc]
-
-/-- A check occurring after a canonical leading assumption block has that
-whole block in its execution prefix.  This is a list-shape fact only; it does
-not assign semantics to either assumptions or checks. -/
-theorem prefix_before_check_contains_leading_assumptions
-    (formulas : List FormulaExpr)
-    (rest before after : List (EventOf FormulaExpr LocationExpr ValueExpr Child))
-    (formula : FormulaExpr)
-    (hEvents : formulas.map TimelineEvent.assume ++ rest =
-      before ++ .check formula :: after) :
-    ∃ following, before = formulas.map TimelineEvent.assume ++ following := by
-  induction formulas generalizing rest before with
-  | nil => exact ⟨before, rfl⟩
-  | cons head tail ih =>
-      cases before with
-      | nil =>
-          simp only [List.map_cons, List.cons_append, List.nil_append] at hEvents
-          cases hEvents
-      | cons beforeHead beforeTail =>
-          simp only [List.map_cons, List.cons_append, List.cons.injEq] at hEvents
-          rcases hEvents with ⟨hHead, hTail⟩
-          subst beforeHead
-          rcases ih rest beforeTail hTail with ⟨following, rfl⟩
-          exact ⟨following, rfl⟩
-
-/-- Lift control-level path and checkpoint facts to an exact timeline whose
-canonical path assumptions form the leading prefix.  This theorem handles
-storage writes between assumptions and checks without replaying the action
-semantics.  Read-dependent checks require the corresponding read-binding
-bridge and are deliberately not hidden behind this no-read lemma. -/
-theorem timelineSafe_of_leading_control
-    (semantics : TimelineSemantics FormulaExpr LocationExpr ValueExpr Child)
-    (path : List FormulaExpr)
-    (rest : List (EventOf FormulaExpr LocationExpr ValueExpr Child))
-    (initial : StorageActionState)
-    (hFormulaStable : ∀ before formula after result,
-      path.map TimelineEvent.assume ++ rest =
-        before ++ .check formula :: after →
-      TimelineExec semantics before initial result →
-      timelineFormulaHolds semantics formula initial →
-      timelineFormulaHolds semantics formula result.state)
-    (hPath : (∀ formula ∈ path,
-      timelineFormulaHolds semantics formula initial) → Path)
-    (hChecks : Path →
-      TimelineChecksHold semantics (path.map TimelineEvent.assume ++ rest) initial) :
-    TimelineSafe semantics (path.map TimelineEvent.assume ++ rest) initial := by
-  intro before formula after hEvents beforeResult hExec
-  rcases prefix_before_check_contains_leading_assumptions
-      path rest before after formula hEvents with ⟨following, rfl⟩
-  have hLeading := TimelineExec.leading_assumptions_hold semantics path following
-    initial beforeResult hExec
-  have hControlPath := hPath hLeading
-  have hAtInitial := hChecks hControlPath formula (by
-    rw [hEvents]
-    simp)
-  exact hFormulaStable _ formula _ beforeResult hEvents hExec hAtInitial
 
 theorem TimelineExec.preserves_outside
     (semantics : TimelineSemantics FormulaExpr LocationExpr ValueExpr Child)

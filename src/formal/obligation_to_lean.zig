@@ -860,8 +860,22 @@ fn loopSummaryHasDependencies(summary: obligation.LoopSummaryRow) bool {
     return false;
 }
 
+pub fn loopSummaryNeedsPrefixSafety(summary: obligation.LoopSummaryRow) bool {
+    for (summary.edges) |edge| {
+        var checked = false;
+        for (edge.timeline) |event| switch (event.payload) {
+            .safety_checkpoint => checked = true,
+            .path_assumption => if (checked) {
+                return true;
+            },
+            else => {},
+        };
+    }
+    return false;
+}
+
 pub fn loopSummaryUsesDirectStorageCertificate(summary: obligation.LoopSummaryRow) bool {
-    var has_storage = false;
+    var has_storage = loopSummaryNeedsPrefixSafety(summary);
     for (summary.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
         .storage_read, .storage_write => has_storage = true,
         .summary_dependency => return false,
@@ -963,6 +977,10 @@ fn loopInductionQuerySemanticSupport(
     if (summary.validationReason()) |reason| {
         return .{ .unsupported = .{ .unsupported_loop_summary = reason } };
     }
+    // PEmpty child semantics cannot consume this mixed timeline. Never fall
+    // back to the scalar whole-path safety statement for interleaved checks.
+    if (loopSummaryNeedsPrefixSafety(summary) and loopSummaryHasDependencies(summary))
+        return .{ .unsupported = .{ .unsupported_loop_summary = .loop_prefix_checkpoint_dependency_unsupported } };
     if (set.fixedIndexBoundsReason(summary.preheader_timeline)) |reason| {
         return .{ .unsupported = .{ .unsupported_loop_summary = reason } };
     }

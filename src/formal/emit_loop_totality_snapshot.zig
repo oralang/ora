@@ -935,6 +935,40 @@ pub fn main(init: std.process.Init) !void {
         try writer.writeAll(if (outcome.assumptions) ", true)" else ", false)");
         try writer.writeAll(if (index + 1 == header_fact_cases.len) "\n" else ",\n");
     }
+    try writer.writeAll("]\n\ndef loopPrefixSafetyRows : List (List Bool × Bool) := [\n");
+    // All binary event orders through length three; true is a checkpoint,
+    // false is a path assumption. This pins order, not formula evaluation.
+    var first_prefix = true;
+    for (0..4) |len| for (0..(@as(usize, 1) << @intCast(len))) |bits| {
+        if (!first_prefix) try writer.writeAll(",\n");
+        first_prefix = false;
+        var events: [3]obligation.LoopTimelineEvent = undefined;
+        try writer.writeAll("  ([");
+        for (0..len) |index| {
+            const checked = (bits & (@as(usize, 1) << @intCast(index))) != 0;
+            events[index] = .{
+                .id = @intCast(index),
+                .structural_key = "prefix",
+                .payload = if (checked) .{ .safety_checkpoint = .{ .formulas = &.{} } } else .{ .path_assumption = .{ .formulas = &.{} } },
+            };
+            if (index != 0) try writer.writeAll(", ");
+            try writer.writeAll(if (checked) "true" else "false");
+        }
+        const row: obligation.LoopSummaryRow = .{
+            .id = 0,
+            .owner = .{ .function = .{ .name = "prefix" } },
+            .source = .{},
+            .phase = .ora_mlir,
+            .origin = .source,
+            .loop_source_op_id = 0,
+            .loop_kind = .scf_while,
+            .edges = &.{.{ .id = 0, .timeline = events[0..len] }},
+        };
+        try writer.writeAll(if (obligation_to_lean.loopSummaryNeedsPrefixSafety(row))
+            "], true)"
+        else
+            "], false)");
+    };
     try writer.writeAll("]\n\nend Ora.Generated\n");
     try writer.flush();
 }

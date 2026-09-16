@@ -1,0 +1,39 @@
+// Generic conjunctions: plain values, captured values, and checked RHS math.
+contract LoopCompoundGuards {
+    pub fn plain(limit: u256) -> u256
+    requires limit <= 6
+    {
+        var i: u256 = 0;
+        while (i < limit && i < 6)
+        invariant i <= limit
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+
+    pub fn nested(limit: u256) -> u256
+    requires limit <= 6
+    {
+        var i: u256 = 0;
+        while (i < limit && i < 6 && i < 5)
+        invariant i <= limit
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+
+    pub fn captured(limit: u256, anchor: u256) -> u256
+    requires limit <= 6
+    {
+        let offset: u256 = anchor & 3;
+        var i: u256 = 0;
+        while (i < limit && offset + i < 8)
+        invariant i <= limit
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+}

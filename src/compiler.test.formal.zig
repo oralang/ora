@@ -12548,6 +12548,112 @@ test "loop blocker batch header control slots retain requires and certify the re
     );
 }
 
+test "loop blocker batch compound guards retain ordered conditional checkpoints" {
+    var result = try collectPackageObligations(testing.allocator, "tests/formal/loop_compound_guards.ora");
+    defer result.deinit();
+    try testing.expectEqual(@as(usize, 3), result.set.loop_summaries.len);
+    for (result.set.loop_summaries) |summary| try testing.expect(summary.projectionSupported());
+    var staged = try collectPackageObligations(testing.allocator, "tests/formal/loop_compound_guard_staged_division.ora");
+    defer staged.deinit();
+    try testing.expectEqual(@as(usize, 1), staged.set.loop_summaries.len);
+    const summary = staged.set.loop_summaries[0];
+    try testing.expect(summary.projectionSupported());
+    var checked_exit = false;
+    var unchecked_exit = false;
+    for (summary.edges) |edge| {
+        if (edge.target != .successor) continue;
+        var checkpoint_count: usize = 0;
+        for (edge.timeline, 0..) |event, index| {
+            if (event.payload != .safety_checkpoint) continue;
+            checkpoint_count += 1;
+            // The branch premise precedes each RHS check; the final condition
+            // follows them, including when that condition selects the exit.
+            try testing.expect(index > 0 and index + 1 < edge.timeline.len);
+            try testing.expect(edge.timeline[0].payload == .path_assumption);
+        }
+        if (checkpoint_count == 0) unchecked_exit = true else {
+            checked_exit = true;
+            try testing.expectEqual(@as(usize, 2), checkpoint_count);
+        }
+    }
+    try testing.expect(checked_exit and unchecked_exit);
+    try expectRepositoryStorageTacticDeterministic("tests/formal/loop_compound_guards.ora", "loop_compound_guards", 3);
+    try expectRepositoryStorageTacticDeterministic("tests/formal/loop_compound_guard_staged_division.ora", "loop_compound_guard_staged_division", 1);
+}
+
+test "loop blocker batch checked compound guards certify storage writes" {
+    const source = "tests/formal/loop_compound_guard_storage.ora";
+    var result = try collectPackageObligations(testing.allocator, source);
+    defer result.deinit();
+    try testing.expectEqual(@as(usize, 1), result.set.loop_summaries.len);
+    const summary = result.set.loop_summaries[0];
+    try testing.expect(summary.projectionSupported());
+    try testing.expect(obligation_to_lean.loopSummaryUsesDirectStorageCertificate(summary));
+    var found_ordered_store = false;
+    for (summary.edges) |edge| {
+        var checked = false;
+        var branched_after_check = false;
+        for (edge.timeline) |event| switch (event.payload) {
+            .safety_checkpoint => checked = true,
+            .path_assumption => if (checked) {
+                branched_after_check = true;
+            },
+            .storage_write => if (branched_after_check) {
+                found_ordered_store = true;
+            },
+            else => {},
+        };
+    }
+    // An all-leading-paths transfer cannot justify this exact event order.
+    try testing.expect(found_ordered_store);
+    try expectRepositoryStorageTacticDeterministic(source, "loop_compound_guard_storage", 1);
+}
+
+test "loop blocker batch guard effects and late contradictions cannot authorize bytecode" {
+    var projected = try collectPackageObligations(testing.allocator, "tests/formal/fail_loop_compound_guard_effects.ora");
+    defer projected.deinit();
+    try testing.expectEqual(@as(usize, 2), projected.set.loop_summaries.len);
+    for (projected.set.loop_summaries) |summary| {
+        try testing.expect(!summary.projectionSupported());
+        try testing.expectEqual(obligation.LoopProjectionCompleteness.unsupported_effect, summary.projection_completeness);
+        try testing.expect(loopSummaryHasReason(summary, .loop_formula_unsupported));
+    }
+    for ([_][]const u8{ "fail_loop_compound_guard_effects", "fail_loop_compound_guard_late_false" }) |stem| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const output = try pathFromTmpAlloc(testing.allocator, tmp, "blocked");
+        defer testing.allocator.free(output);
+        const source = try std.fmt.allocPrint(testing.allocator, "tests/formal/{s}.ora", .{stem});
+        defer testing.allocator.free(source);
+        const run = try runProcessWithLeanPath(testing.allocator, &.{ ORA_BINARY_REL, "emit", "--emit=bytecode", "--out-dir", output, "--lean-proofs", source });
+        defer testing.allocator.free(run.stdout);
+        defer testing.allocator.free(run.stderr);
+        try expectExited(run, 1);
+        if (std.mem.eql(u8, stem, "fail_loop_compound_guard_late_false")) {
+            try testing.expect(std.mem.indexOf(u8, run.stdout, "Lean proof row rejected: lean_proof_rejected") != null);
+        }
+        const hex = try std.fmt.allocPrint(testing.allocator, "blocked/{s}.hex", .{stem});
+        defer testing.allocator.free(hex);
+        try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, hex, .{}));
+    }
+}
+
+test "loop blocker batch long conjunctions retain prefix checks without impossible combinations" {
+    var result = try collectPackageObligations(testing.allocator, "tests/formal/loop_long_compound_guard.ora");
+    defer result.deinit();
+    const summary = result.set.loop_summaries[0];
+    try testing.expect(summary.projectionSupported());
+    // Each short-circuit prefix retains both final condition outcomes. This
+    // preserves the body/check inventory even when a guard is always false.
+    try testing.expectEqual(@as(usize, 30), summary.edges.len);
+    var checked_exit = false;
+    for (summary.edges) |edge| {
+        if (edge.target == .successor and edge.safetyFormulaCount() >= 2) checked_exit = true;
+    }
+    try testing.expect(checked_exit);
+    try expectRepositoryStorageTacticDeterministic("tests/formal/loop_long_compound_guard.ora", "loop_long_compound_guard", 1);
+}
+
 test "refinement header parameter metadata still rejects a mismatched base width" {
     const h = createContext();
     defer destroyContext(h);

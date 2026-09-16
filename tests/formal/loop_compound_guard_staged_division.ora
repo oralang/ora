@@ -1,0 +1,15 @@
+// At loop exit limit - i is zero; the right operand is not evaluated then.
+// This must never be flattened into an unconditional division checkpoint.
+contract LoopCompoundGuardStagedDivision {
+    pub fn run(limit: u256) -> u256
+    requires limit <= 6
+    {
+        var i: u256 = 0;
+        while (i < limit && 12 / (limit - i) > 0)
+        invariant i <= limit
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+}

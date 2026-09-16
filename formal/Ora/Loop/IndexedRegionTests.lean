@@ -126,4 +126,29 @@ example : ¬ TimelineSafe timelineSemantics
   subst proposition
   exact hHolds
 
+/- The control fold retains source order, including across a read. These
+pins use the generic transfer rather than manufacturing a leading prefix. -/
+example (first check : Bool) (hCheck : first = true → check = true) :
+    TimelineSafe timelineSemantics
+      [.assume first, .indexedRead read, .check check, .assume false] state := by
+  apply timelineSafe_of_control_checks timelineSemantics (fun _ => True)
+    (fun formula => formula = true)
+  · intro _ _ _ _ _; trivial
+  · intro formula _ current _
+    change (∃ proposition, some (formula = true) = some proposition ∧ proposition) ↔ _
+    constructor
+    · rintro ⟨proposition, hEqual, hHolds⟩
+      exact (Option.some.inj hEqual).mpr hHolds
+    · intro hHolds; exact ⟨formula = true, rfl, hHolds⟩
+  · trivial
+  · simpa only [timelineControlChecks, implies_true, and_true] using hCheck
+
+example : ¬ timelineControlChecks (fun formula : Bool => formula = true)
+    ([.check false, .assume false] : List (EventOf Bool PEmpty Nat PEmpty)) := by
+  simp [timelineControlChecks]
+
+example : timelineControlChecks (fun formula : Bool => formula = true)
+    ([.assume false, .check false] : List (EventOf Bool PEmpty Nat PEmpty)) := by
+  simp [timelineControlChecks]
+
 end Ora.Loop

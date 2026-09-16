@@ -2278,6 +2278,7 @@ pub const LoopUnsupportedReason = enum(u8) {
     loop_summary_dependency_order_invalid,
     loop_summary_dependency_target_unsupported,
     loop_summary_dependency_value_out_of_scope,
+    loop_prefix_checkpoint_dependency_unsupported,
     loop_timeline_missing,
     loop_timeline_event_order_invalid,
     loop_timeline_event_identity_missing,

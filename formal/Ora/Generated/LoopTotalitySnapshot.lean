@@ -123,4 +123,21 @@ def loopHeaderFactValidationRows : List (String × Bool × Bool) := [
   ("owner_mismatch", true, false)
 ]
 
+def loopPrefixSafetyRows : List (List Bool × Bool) := [
+  ([], false),
+  ([false], false),
+  ([true], false),
+  ([false, false], false),
+  ([true, false], true),
+  ([false, true], false),
+  ([true, true], false),
+  ([false, false, false], false),
+  ([true, false, false], true),
+  ([false, true, false], true),
+  ([true, true, false], true),
+  ([false, false, true], false),
+  ([true, false, true], true),
+  ([false, true, true], false),
+  ([true, true, true], false)]
+
 end Ora.Generated

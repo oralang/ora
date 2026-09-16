@@ -9,7 +9,7 @@ underlying summary remains denotable, so those two rows intentionally separate
 target eligibility from summary denotation.
 -/
 
-import Ora.Loop.Denotation
+import Ora.Loop.StorageCertificate
 import Ora.Generated.LoopTotalitySnapshot
 
 namespace Ora.LoopTotalitySync
@@ -841,5 +841,16 @@ def unsupportedSummaryFails : RawRow → Bool
 theorem negative_shapes_fail_closed :
     loopTotalityRows.all unsupportedSummaryFails = true := by
   decide
+
+def prefixSafetyMatches (row : List Bool × Bool) : Bool :=
+  let timeline := row.1.map fun checked => ({
+    id := 0, structuralKey := "prefix"
+    payload := if checked then .safetyCheckpoint { formulas := [] }
+      else .pathAssumption { formulas := [] }
+  } : TimelineEventRow)
+  timelineNeedsPrefixSafety false timeline == row.2
+
+theorem loop_prefix_safety_routing_matches :
+    loopPrefixSafetyRows.all prefixSafetyMatches = true := by decide
 
 end Ora.LoopTotalitySync

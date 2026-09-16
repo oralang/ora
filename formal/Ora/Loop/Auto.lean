@@ -21,6 +21,7 @@ open Ora.Obligation
 register_simp_attr ora_loop_data
 register_simp_attr ora_loop_row
 register_simp_attr ora_loop_supported
+register_simp_attr ora_loop_shape
 register_simp_attr ora_loop_manifest
 register_simp_attr ora_loop_nested
 
@@ -296,8 +297,25 @@ macro "ora_loop_reduce" loc:(Lean.Parser.Tactic.location)? : tactic =>
 macro "ora_loop_split_formulas" loc:(Lean.Parser.Tactic.location)? : tactic =>
   `(tactic| simp only [ora_loop_row, EdgeRow.path_eq_timeline, timelinePathView,
     formulasHoldInState, formulasHoldInEnv,
-    List.forall_mem_cons, List.not_mem_nil, false_implies, and_true]
+    List.forall_mem_cons, List.not_mem_nil, false_implies, implies_true, and_true]
     $[$loc:location]?)
+
+/-- A literal-false path is impossible even before its state bindings are
+reduced. This avoids replaying transitions for short-circuit dead branches. -/
+theorem formulaHoldsInState_false_literal (manifest : Manifest) (base : Env)
+    (variables : List VariableRow) (state : ScalarLoopState) (id : TermId)
+    (hTerm : manifest.terms[id]? = some (.boolLit false)) :
+    formulaHoldsInState manifest base variables state (.term id) ↔ False := by
+  unfold formulaHoldsInState
+  cases hBound : bindState? base variables state <;>
+    simp [formulaDenotes?, denoteFormula?, hTerm]
+
+macro "ora_loop_false_path" h:ident : tactic =>
+  `(tactic| solve | simp (disch := simp only [ora_loop_data, reduceCtorEq]) only
+    [ora_loop_row, EdgeRow.path_eq_timeline, timelinePathView,
+      List.map, List.cons_append, List.nil_append,
+      formulasHoldInState, List.forall_mem_cons, List.forall_mem_nil,
+      formulaHoldsInState_false_literal, and_false, false_and] at $h:ident)
 
 macro "ora_loop_split_header_facts" h:ident : tactic =>
   `(tactic| simp only [headerFactsHoldInEnv, ora_loop_row,
@@ -315,7 +333,11 @@ scalar formula denotation. Any current or entry storage read prevents the
 closed reduction from finishing. -/
 macro "ora_loop_direct_formula_control_in"
     autoSummary:ident env:ident : tactic => do
-  `(tactic| {
+  `(tactic| first
+  | solve
+    | apply Ora.Loop.directFormulaControlCompatible_bool_literal
+      simp only [ora_loop_data]
+  | {
     unfold Ora.Loop.directFormulaControlCompatible
       Ora.Loop.timelineFormulaHolds Ora.Loop.formulaHoldsInState
     intro state entryStorage
@@ -429,32 +451,25 @@ elab "ora_loop_try_no_read_state"
       transformed := transformed ++ [goal]
   setGoals transformed
 
+syntax "ora_loop_prefix_checks" : tactic
+
 macro "ora_loop_direct_edge_compatible"
     autoSummary:ident env:ident : tactic => do
   `(tactic| {
     exact {
       timeline := by rfl
       targetDenotes := by rfl
-      assumptionPrefix := by
+      pathMatches := by
+        intro formula
         ora_loop_direct_timeline_reduce
-        all_goals rfl
-      pathFormulaCompatible := by
+        all_goals simp only [reduceCtorEq, false_or, or_false]
+      formulaCompatible := by
         intro formula hMember
-        all_goals ora_loop_direct_timeline_reduce at hMember
+        ora_loop_direct_timeline_reduce at hMember
+        try simp only [reduceCtorEq, false_or, or_false] at hMember
         all_goals ora_loop_expand_membership formula hMember
         ora_loop_all_goals (ora_loop_direct_formula_control_in $autoSummary $env)
-      checkFormulaCompatible := by
-        intro formula hMember
-        rw [Ora.Loop.directStorageCheck_mem_iff_row] at hMember
-        rcases hMember with ⟨checkpoint, hCheckpoint, hMember⟩
-        simp only [ora_loop_row, EdgeRow.safety_eq_timeline,
-          timelineSafetyView, timelineSafetyViewFrom,
-          List.mem_cons, List.not_mem_nil, or_false] at hCheckpoint
-        ora_loop_expand_membership checkpoint hCheckpoint
-        all_goals simp only [List.map, List.mem_cons, List.not_mem_nil, or_false]
-          at hMember
-        all_goals ora_loop_expand_membership formula hMember
-        ora_loop_all_goals (ora_loop_direct_formula_control_in $autoSummary $env)
+      controlChecks := by ora_loop_prefix_checks
       finalLocalsAfterTrace := by
         intro current result locals hExec hFinal
         have hLocals := Ora.Loop.TimelineExec.preserves_locals _ _ _ _
@@ -519,7 +534,7 @@ macro "ora_loop_direct_edge_compatible"
 
 macro "ora_loop_value_reduce" loc:(Lean.Parser.Tactic.location)? : tactic =>
   `(tactic| set_option maxRecDepth 1024 in
-    simp only [ora_loop_data, ora_loop_row, formulaValue?, formulaDenotes?,
+    simp only [*, ora_loop_data, ora_loop_row, formulaValue?, formulaDenotes?,
     denoteFormula?, denoteValue?, IntegerLiteralTerm.asInteger?,
     Ora.Integer.Value.ofNat, Ora.Integer.Value.relation?,
     Ora.Integer.Value.bitsFor?, Ora.Integer.Value.binary?,
@@ -608,13 +623,45 @@ macro "ora_loop_normalize" loc:(Lean.Parser.Tactic.location)? : tactic =>
     Bool.false_eq_true, and_true, true_and, implies_true]
     $[$loc:location]?)
 
+/-- Derive ordinary bounds for every natural bitwise conjunction encountered;
+no mask, term identity or source shape is selected by this search. -/
+elab "ora_loop_bitwise_bounds" : tactic => withMainContext do
+  let mut expressions := #[(← getMainTarget)]
+  for decl in ← getLCtx do
+    unless decl.isImplementationDetail do expressions := expressions.push decl.type
+  let seen ← IO.mkRef ({} : ExprSet)
+  for expression in expressions do
+    expression.forEach fun subexpression => do
+      let_expr HAnd.hAnd α _ _ _ lhs rhs := subexpression | return
+      unless α.isConstOf ``Nat do return
+      if (← seen.get).contains subexpression then return
+      seen.modify (·.insert subexpression)
+      for lemma in [``Nat.and_le_left, ``Nat.and_le_right] do
+        let proof ← mkAppOptM lemma #[some lhs, some rhs]
+        let goal ← (← getMainGoal).assert (← mkFreshUserName `hBitwiseBound)
+          (← inferType proof) proof
+        let (_, goal) ← goal.intro1
+        replaceMainGoal [goal]
+
+theorem bitvec_sub_toNat_of_le (x y : BitVec n) (h : y.toNat ≤ x.toNat) :
+    (x - y).toNat = x.toNat - y.toNat :=
+  BitVec.toNat_sub_of_le h
+
+macro "ora_loop_unsigned_bound" : tactic => `(tactic| (
+  try simp only [BitVec.toNat_and, BitVec.toNat_ofNat, Nat.reducePow, Nat.reduceMod]
+  omega))
+
 macro "ora_loop_linear_close" : tactic =>
   `(tactic| (
-    simp_all only [Ora.Integer.unsignedLt, Ora.Integer.unsignedLe,
+    try simp_all only [Ora.Integer.unsignedLt, Ora.Integer.unsignedLe,
       Ora.Integer.signedLt, Ora.Integer.signedLe,
       Ora.Integer.mathematicalValue, Ora.Spec.IntegerShape.isSigned,
       Ora.Spec.IntegerShape.bits, Ora.Spec.uintBits, Ora.Spec.sintBits,
-      BitVec.toNat_ofNat, Nat.reducePow, Nat.reduceMod]
+      ne_eq, BitVec.toNat_eq, BitVec.toNat_and, BitVec.ofNat_eq_ofNat, BitVec.toNat_ofNat,
+      Nat.reducePow, Nat.reduceMod]
+    ora_loop_bitwise_bounds
+    try simp (disch := ora_loop_unsigned_bound) only [BitVec.toNat_add_of_lt, bitvec_sub_toNat_of_le,
+      BitVec.toNat_and, BitVec.toNat_ofNat, Nat.reducePow, Nat.reduceMod] at *
     omega))
 
 macro "ora_loop_signed_add_safe" : tactic =>
@@ -652,7 +699,11 @@ macro "ora_loop_close" : tactic =>
          Ora.Integer.mathematicalValue, Ora.Integer.wrappingResult,
          Ora.Spec.IntegerShape.isSigned, Ora.Spec.IntegerShape.bits,
          Ora.Spec.uintBits, Ora.Spec.sintBits,
-         BitVec.toNat_ofNat, Nat.reducePow, Nat.reduceMod]
+         ne_eq, BitVec.toNat_eq, BitVec.toNat_and, BitVec.ofNat_eq_ofNat, BitVec.toNat_ofNat,
+         Nat.reducePow, Nat.reduceMod]
+       ora_loop_bitwise_bounds
+       try simp (disch := ora_loop_unsigned_bound) only [BitVec.toNat_add_of_lt, bitvec_sub_toNat_of_le,
+         BitVec.toNat_and, BitVec.toNat_ofNat, Nat.reducePow, Nat.reduceMod] at *
        first
        | apply bitvec_zero_toNat_le
        | (rw [BitVec.toNat_add_of_lt (by
@@ -697,6 +748,27 @@ macro "ora_loop_unpack_ready" ready:ident : tactic =>
     repeat' first | rcases $ready:ident with ⟨hShape, $ready:ident⟩
     subst_vars))
 
+macro_rules
+  | `(tactic| ora_loop_prefix_checks) => `(tactic| first
+    | solve
+      | intro locals hInvariant
+        try ora_loop_direct_timeline_reduce
+        simp only [Ora.Loop.timelineControlChecks, implies_true]
+    | {
+      intro locals hInvariant
+      rcases hInvariant with ⟨hReady, hHeaderFacts, hInvariant⟩
+      ora_loop_unpack_ready hReady
+      ora_loop_direct_timeline_reduce
+      simp only [Ora.Loop.timelineControlChecks]
+      ora_loop_split_header_facts hHeaderFacts
+      ora_loop_split_formulas at hInvariant
+      ora_loop_formula_context_reduce at hHeaderFacts hInvariant ⊢
+      ora_loop_value_reduce at hHeaderFacts hInvariant ⊢
+      try ora_loop_apply_context
+      ora_loop_normalize at hHeaderFacts hInvariant ⊢
+      repeat' first | intro hPrefix | apply And.intro
+      all_goals ora_loop_close })
+
 /- This reducer traverses the complete emitted nested-summary data.  Its local
 recursion allowance is isolated from the induction and arithmetic proof steps. -/
 macro "ora_loop_nested_reduce" : tactic =>
@@ -739,7 +811,10 @@ macro tk:"ora_loop_support" : tactic => do
   let autoSummary := Lean.mkIdentFrom tk `autoSummary
   let emittedManifest := Lean.mkIdentFrom tk `emittedManifest
   `(tactic| {
-    have hShape : ($autoSummary).shapeSupported = true := by decide
+    have hShape : ($autoSummary).shapeSupported = true := by
+      first
+      | solve | simp only [ora_loop_shape]
+      | decide +kernel
     have hFormulas : ($autoSummary).formulasDenotable $emittedManifest = true := by
       set_option maxRecDepth 4096 in
         simp only [ora_loop_data, ora_loop_row, Ora.Loop.SummaryRow.formulasDenotable,
@@ -1008,6 +1083,7 @@ macro tk:"ora_loop_auto_plain" : tactic => do
       unfold Ora.Loop.loopInductionObligationsAtEnv
         Ora.Loop.denoteLoopSummary?
       rw [hSupported]
+      clear hSupported
       unfold $autoSummary
       simp only [ora_loop_row, EdgeRow.path_eq_timeline,
         EdgeRow.safety_eq_timeline, timelinePathView, timelineSafetyView,
@@ -1017,8 +1093,10 @@ macro tk:"ora_loop_auto_plain" : tactic => do
       · ora_loop_prove_base
       · intro edge current following hMember hTarget hInvariant hPath hSafe hNext
         ora_loop_select_emitted_row edge hMember
-        all_goals dsimp at hTarget hInvariant hPath hSafe hNext ⊢
+        all_goals dsimp at hTarget
         all_goals try contradiction
+        all_goals try ora_loop_false_path hPath
+        all_goals dsimp at hInvariant hPath hSafe hNext ⊢
         all_goals (
           rcases hInvariant with ⟨hReady, hHeaderFacts, hInvariant⟩
           have hFactPremises := hHeaderFacts
@@ -1058,6 +1136,10 @@ macro tk:"ora_loop_auto_plain" : tactic => do
           all_goals ora_loop_close)
       · intro edge state hMember hInvariant hPath
         ora_loop_select_emitted_row edge hMember
+        all_goals try solve | simp only [ora_loop_row, EdgeRow.safety_eq_timeline,
+          timelineSafetyView, timelineSafetyViewFrom, Ora.Loop.safetyCheckpointsHold,
+          List.not_mem_nil, false_implies, implies_true]
+        all_goals try ora_loop_false_path hPath
         all_goals (
           dsimp at hInvariant hPath ⊢
           rcases hInvariant with ⟨hReady, hHeaderFacts, hInvariant⟩
@@ -1090,8 +1172,12 @@ macro tk:"ora_loop_auto_plain" : tactic => do
             all_goals ora_loop_close)
       · intro edge current following hMember hTarget hInvariant hPath hSafe hNext
         ora_loop_select_emitted_row edge hMember
-        all_goals dsimp at hTarget hInvariant hPath hSafe hNext ⊢
+        all_goals dsimp at hTarget
         all_goals try contradiction
+        -- Empty exit assertions need no transition reduction. Edge safety
+        -- remains a separate obligation, including unreachable exit paths.
+        all_goals try solve | ora_loop_split_formulas
+        all_goals dsimp at hInvariant hPath hSafe hNext ⊢
         all_goals (
           rcases hInvariant with ⟨hReady, hHeaderFacts, hInvariant⟩
           ora_loop_split_header_facts hHeaderFacts
@@ -1347,6 +1433,7 @@ macro tk:"ora_loop_auto_nested" : tactic => do
           all_goals (ora_loop_value_reduce at hInvariant hPath)
           all_goals try ora_loop_apply_context
           all_goals try (ora_loop_normalize at hHeaderFacts)
+          -- Context simplification may already normalize these hypotheses.
           all_goals try (ora_loop_normalize at hInvariant hPath)
           all_goals ora_loop_unpack_conjunctions
           simp only [Ora.Loop.environmentRelationsProduce] at hDependencies
@@ -1415,16 +1502,22 @@ macro tk:"ora_loop_auto_nested" : tactic => do
           all_goals subst_vars
           all_goals ora_loop_close) })
 
-macro tk:"ora_loop_auto_direct_storage_from" hScalar:ident : tactic => do
+macro tk:"ora_loop_auto_direct_storage_from" hScalar:ident hEdges:(ident)? : tactic => do
   let autoSummary := Lean.mkIdentFrom tk `autoSummary
   let emittedManifest := Lean.mkIdentFrom tk `emittedManifest
+  let hCachedEdges := Lean.mkIdentFrom tk `hCachedEdges
+  let prepareEdges ← match hEdges with
+    | some proof => `(tactic| have $hCachedEdges := $proof env hAssumptions hContext)
+    | none => `(tactic| have $hCachedEdges : True := True.intro)
   `(tactic| {
     change Ora.Loop.directStorageLoopProofAuthorizationFromAssumptions
       $emittedManifest _ $autoSummary
     have hDirect : Ora.Loop.directStorageSummarySupported
         $emittedManifest $autoSummary = true := by
       have hSupported : ($autoSummary).supported $emittedManifest = true := by
-        ora_loop_support
+        first
+        | solve | simp only [ora_loop_supported]
+        | ora_loop_support
       unfold Ora.Loop.directStorageSummarySupported
       rw [hSupported]
       simp only [Bool.true_and, ora_loop_row, List.any, List.all]
@@ -1473,6 +1566,8 @@ macro tk:"ora_loop_auto_direct_storage_from" hScalar:ident : tactic => do
           · exact hScalarInitial
     · intro env hAssumptions hContext
       have hScalarInduction := $hScalar.2 env hAssumptions hContext
+      $prepareEdges
+      ora_loop_prepare_context hContext
       unfold Ora.Loop.loopInductionObligationsAtEnv at hScalarInduction
       cases hAbstract : Ora.Loop.denoteLoopSummary?
           $emittedManifest env $autoSummary with
@@ -1481,12 +1576,18 @@ macro tk:"ora_loop_auto_direct_storage_from" hScalar:ident : tactic => do
           simp only [hAbstract] at hScalarInduction
           have hEdgeCompatible : ∀ edge, edge ∈ ($autoSummary).edges →
               Ora.Loop.DirectStorageEdgeCompatible $emittedManifest env
-                ($autoSummary).variables ($autoSummary).post edge := by
-            intro edge hMember
-            simp only [ora_loop_row, List.mem_cons, List.not_mem_nil, or_false]
-              at hMember
-            ora_loop_expand_membership edge hMember
-            all_goals ora_loop_direct_edge_compatible $autoSummary env
+                ($autoSummary).variables ($autoSummary).post edge
+                (fun locals => Ora.Loop.stateReady ($autoSummary).variables locals ∧
+                  Ora.Loop.headerFactsHoldInEnv $emittedManifest env ($autoSummary).headerFacts ∧
+                  Ora.Loop.formulasHoldInState $emittedManifest env
+                    ($autoSummary).variables locals ($autoSummary).invariants) := by
+            first
+            | exact $hCachedEdges
+            | intro edge hMember
+              simp only [ora_loop_row, List.mem_cons, List.not_mem_nil, or_false]
+                at hMember
+              ora_loop_expand_membership edge hMember
+              all_goals ora_loop_direct_edge_compatible $autoSummary env
           rcases Ora.Loop.direct_storage_summary_denotes $emittedManifest env
               $autoSummary hDirect hPreheaderEmpty hEdgeTimelines hEdgeTargets with
               ⟨concreteVC, hConcrete⟩

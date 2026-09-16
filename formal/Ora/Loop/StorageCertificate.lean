@@ -426,6 +426,26 @@ theorem option_prop_witness_iff (result : Option Prop) :
       · intro hHolds
         exact ⟨proposition, rfl, hHolds⟩
 
+theorem directFormulaControlCompatible_bool_literal
+    (manifest : Manifest) (base : Env) (variables : List VariableRow)
+    (id : TermId) (value : Bool)
+    (hTerm : manifest.terms[id]? = some (.boolLit value)) :
+    directFormulaControlCompatible manifest base variables (.term id) := by
+  unfold directFormulaControlCompatible timelineFormulaHolds formulaHoldsInState
+  intro state entryStorage
+  unfold directStorageSemantics StorageFormulaContext.evalFormula?
+    StorageFormulaContext.stateEnv? directStorageContext
+  simp only [bindStorageReads, List.foldl, Option.bind_eq_bind, Option.pure_def]
+  cases hBound : bindState? base variables state.locals <;>
+    simp [hBound, StorageFormulaContext.formulaStorageReady,
+      StorageFormulaContext.termStorageReady, formulaDenotes?, denoteFormula?,
+      hTerm, option_prop_witness_iff]
+  constructor
+  · rintro ⟨proposition, equal, holds⟩
+    exact equal.mpr holds
+  · intro holds
+    exact ⟨value = true, Iff.rfl, holds⟩
+
 theorem direct_formulas_control_compatible
     (manifest : Manifest)
     (base : Env)
@@ -481,74 +501,6 @@ def directStorageEventData (row : TimelineEventRow) : List DirectStorageEvent :=
 def directStorageEvents (row : EdgeRow) : List DirectStorageEvent :=
   row.timeline.flatMap directStorageEventData
 
-theorem directStorageCheck_mem_iff
-    (events : List TimelineEventRow)
-    (dependencyCount checkpointId : Nat)
-    (formula : FormulaRef) :
-    TimelineEvent.check formula ∈ events.flatMap directStorageEventData ↔
-      ∃ checkpoint,
-        checkpoint ∈ timelineSafetyViewFrom dependencyCount checkpointId events ∧
-          formula ∈ checkpoint.formulas := by
-  induction events generalizing dependencyCount checkpointId with
-  | nil => simp [timelineSafetyViewFrom]
-  | cons event rest ih =>
-      rcases event with ⟨id, key, payload⟩
-      cases payload with
-      | pathAssumption path =>
-          simp only [List.flatMap_cons, directStorageEventData,
-            timelineSafetyViewFrom, List.mem_append, List.mem_map,
-            TimelineEvent.check.injEq]
-          rw [ih dependencyCount checkpointId]
-          simp
-      | safetyCheckpoint checkpoint =>
-          simp only [List.flatMap_cons, directStorageEventData,
-            timelineSafetyViewFrom, List.mem_append, List.mem_map,
-            TimelineEvent.check.injEq, List.mem_cons]
-          rw [ih dependencyCount (checkpointId + 1)]
-          constructor
-          · rintro (⟨eventFormula, hMember, hEqual⟩ | hRest)
-            · subst formula
-              exact ⟨_, Or.inl rfl, List.mem_map.mpr ⟨eventFormula, hMember, rfl⟩⟩
-            · rcases hRest with ⟨row, rowMember, formulaMember⟩
-              exact ⟨row, Or.inr rowMember, formulaMember⟩
-          · rintro ⟨row, rfl | rowMember, formulaMember⟩
-            · rcases List.mem_map.mp formulaMember with
-                ⟨eventFormula, hMember, hEqual⟩
-              exact Or.inl ⟨eventFormula, hMember, hEqual⟩
-            · exact Or.inr ⟨row, rowMember, formulaMember⟩
-      | storageRead read =>
-          simpa only [List.flatMap_cons, directStorageEventData,
-            timelineSafetyViewFrom, List.mem_append, List.mem_singleton,
-            TimelineEvent.check_ne_storage, false_or] using
-            ih (dependencyCount := dependencyCount)
-              (checkpointId := checkpointId)
-      | storageWrite write =>
-          simpa only [List.flatMap_cons, directStorageEventData,
-            timelineSafetyViewFrom, List.mem_append, List.mem_singleton,
-            TimelineEvent.check_ne_storage, false_or] using
-            ih (dependencyCount := dependencyCount)
-              (checkpointId := checkpointId)
-      | indexedRegionRead read =>
-          cases hRead : directIndexedRegionRead? read <;>
-            simpa only [List.flatMap_cons, directStorageEventData, hRead,
-              timelineSafetyViewFrom, List.nil_append, List.mem_append,
-              List.mem_singleton, TimelineEvent.check_ne_indexedRead,
-              false_or] using
-              ih (dependencyCount := dependencyCount)
-                (checkpointId := checkpointId)
-      | summaryDependency dependency =>
-          simpa only [List.flatMap_cons, directStorageEventData,
-            timelineSafetyViewFrom, List.nil_append] using
-            ih (dependencyCount := dependencyCount + 1)
-              (checkpointId := checkpointId)
-
-theorem directStorageCheck_mem_iff_row
-    (row : EdgeRow) (formula : FormulaRef) :
-    TimelineEvent.check formula ∈ directStorageEvents row ↔
-      ∃ checkpoint,
-        checkpoint ∈ row.safetyCheckpoints ∧ formula ∈ checkpoint.formulas := by
-  exact directStorageCheck_mem_iff row.timeline 0 0 formula
-
 def directStorageTarget (row : EdgeRow) : ControlTarget :=
   match row.target with
   | .backedge => .backedge
@@ -562,17 +514,16 @@ structure DirectStorageEdgeCompatible
     (base : Env)
     (variables : List VariableRow)
     (successorPost : List FormulaRef)
-    (row : EdgeRow) : Prop where
+    (row : EdgeRow) (invariant : ScalarLoopState → Prop) : Prop where
   timeline : directStorageTimeline? row.timeline = some (directStorageEvents row)
   targetDenotes : denoteControlTarget? row.target = some (directStorageTarget row)
-  assumptionPrefix : directStorageEvents row =
-    row.path.map TimelineEvent.assume ++
-      (directStorageEvents row).drop row.path.length
-  pathFormulaCompatible : ∀ formula, formula ∈ row.path →
+  pathMatches : ∀ formula, .assume formula ∈ directStorageEvents row ↔ formula ∈ row.path
+  formulaCompatible : ∀ formula,
+    (.assume formula ∈ directStorageEvents row ∨ .check formula ∈ directStorageEvents row) →
     directFormulaControlCompatible manifest base variables formula
-  checkFormulaCompatible : ∀ formula,
-    TimelineEvent.check formula ∈ directStorageEvents row →
-      directFormulaControlCompatible manifest base variables formula
+  controlChecks : ∀ locals, invariant locals →
+    timelineControlChecks (formulaHoldsInState manifest base variables locals)
+      (directStorageEvents row)
   finalLocalsAfterTrace : ∀ current result locals,
     TimelineExec
       (directStorageSemantics (directStorageContext manifest base variables))
@@ -589,55 +540,29 @@ structure DirectStorageEdgeCompatible
       directFormulaControlCompatible manifest base variables formula
 
 theorem DirectStorageEdgeCompatible.timelineSafety
-    (proof : DirectStorageEdgeCompatible manifest base variables successorPost row)
+    (proof : DirectStorageEdgeCompatible manifest base variables successorPost row invariant)
     (current : LoopState)
-    (hReady : stateReady variables current.locals)
-    (hControlSafety :
-      formulasHoldInState manifest base variables current.locals row.path →
-        safetyCheckpointsHold manifest base variables current.locals []
-          row.safetyCheckpoints) :
+    (hInvariant : invariant current.locals) :
     TimelineSafe
       (directStorageSemantics (directStorageContext manifest base variables))
       (directStorageEvents row)
       { loop := current, entryStorage := storageStateFromEnv base true } := by
-  rw [proof.assumptionPrefix]
-  apply timelineSafe_of_leading_control
-    (Path := formulasHoldInState manifest base variables current.locals row.path)
-  · intro before formula after result hEvents hExec hAtInitial
-    have hOriginal : TimelineEvent.check formula ∈ directStorageEvents row := by
-      rw [proof.assumptionPrefix, hEvents]
-      simp
-    have hLocals := TimelineExec.preserves_locals _ _ _ _
-      (by intro child; nomatch child) hExec
-    have hCompatible := proof.checkFormulaCompatible formula hOriginal
-    have hInitialControl := (hCompatible current
-      (storageStateFromEnv base true)).mp hAtInitial
-    have hResultControl : formulaHoldsInState manifest base variables
-        result.state.loop.locals formula := by
-      rw [hLocals]
-      exact hInitialControl
-    exact (hCompatible result.state.loop result.state.entryStorage).mpr hResultControl
-  · intro hAssumptions formula hMember
-    exact (proof.pathFormulaCompatible formula hMember current
-      (storageStateFromEnv base true)).mp (hAssumptions formula hMember)
-  · intro hPath formula hMember
-    have hOriginal : TimelineEvent.check formula ∈ directStorageEvents row := by
-      rw [proof.assumptionPrefix]
-      exact hMember
-    rcases (directStorageCheck_mem_iff_row row formula).mp hOriginal with
-      ⟨checkpoint, hCheckpoint, hFormula⟩
-    have hScalar := safetyCheckpointsHold_no_dependencies_formula
-      manifest base variables current.locals row.safetyCheckpoints
-      checkpoint formula hReady (hControlSafety hPath) hCheckpoint hFormula
-    exact (proof.checkFormulaCompatible formula hOriginal current
-      (storageStateFromEnv base true)).mpr hScalar
+  apply timelineSafe_of_control_checks _ (fun state => state.loop.locals = current.locals)
+    (formulaHoldsInState manifest base variables current.locals)
+  · intro event before result hLocals hExec
+    exact (TimelineEventExec.preserves_locals _ _ _ _
+      (by intro child; nomatch child) hExec).trans hLocals
+  · intro formula hMember state hLocals
+    simpa only [hLocals] using
+      proof.formulaCompatible formula hMember state.loop state.entryStorage
+  · rfl
+  · exact proof.controlChecks current.locals hInvariant
 
 theorem DirectStorageEdgeCompatible.refinement
-    (proof : DirectStorageEdgeCompatible manifest base variables successorPost row)
     (abstractVC : LoopVC ScalarLoopState)
     (concreteVC : LoopVC LoopState)
-    (hAbstractReady : ∀ state,
-      abstractVC.invariant state → stateReady variables state) :
+    (proof : DirectStorageEdgeCompatible manifest base variables successorPost row
+      abstractVC.invariant) :
     Edge.Refinement abstractVC concreteVC (fun state => state.locals)
       {
         path := fun state =>
@@ -662,18 +587,20 @@ theorem DirectStorageEdgeCompatible.refinement
           (directTargetFormulas successorPost row))) := by
   apply timelineEdge_refinement
   · rfl
-  · intro state _ hAbstractInvariant hAbstractSafety
-    exact proof.timelineSafety state
-      (hAbstractReady state.locals hAbstractInvariant) hAbstractSafety
+  · intro state _ hAbstractInvariant _
+    exact proof.timelineSafety state hAbstractInvariant
   · intro current result hExec
-    rw [proof.assumptionPrefix] at hExec
-    have hAssumptions := TimelineExec.leading_assumptions_hold _ row.path
-      ((directStorageEvents row).drop row.path.length)
-      { loop := current, entryStorage := storageStateFromEnv base true }
-      result hExec
     intro formula hMember
-    exact (proof.pathFormulaCompatible formula hMember current
-      (storageStateFromEnv base true)).mp (hAssumptions formula hMember)
+    apply TimelineExec.control_assumptions _ (fun state => state.loop.locals = current.locals)
+      (formulaHoldsInState manifest base variables current.locals) ?_ _ _ _ rfl ?_ hExec
+      formula ((proof.pathMatches formula).mpr hMember)
+    · intro event before result hLocals hEvent
+      exact (TimelineEventExec.preserves_locals _ _ _ _
+        (by intro child; nomatch child) hEvent).trans hLocals
+    · intro f hMember state hLocals hHolds
+      have hControl := (proof.formulaCompatible f (Or.inl hMember)
+        state.loop state.entryStorage).mp hHolds
+      simpa only [hLocals] using hControl
   · intro current result locals hExec hLocals
     exact proof.finalLocalsAfterTrace current result locals hExec hLocals
   · intro following hAssertion
@@ -700,7 +627,7 @@ def denoteDirectStorageEdge?
     (fun state => directFormulasHold context entry state targetFormulas))
 
 theorem DirectStorageEdgeCompatible.denotes
-    (proof : DirectStorageEdgeCompatible manifest base variables successorPost row) :
+    (proof : DirectStorageEdgeCompatible manifest base variables successorPost row invariant) :
     ∃ edge,
       denoteDirectStorageEdge? manifest base variables successorPost row = some edge := by
   refine ⟨timelineEdge
@@ -733,10 +660,8 @@ theorem direct_storage_edges_refinements
     (rows : List EdgeRow)
     (abstractVC : LoopVC ScalarLoopState)
     (concreteVC : LoopVC LoopState)
-    (hAbstractReady : ∀ state,
-      abstractVC.invariant state → stateReady variables state)
     (compatible : ∀ row, row ∈ rows →
-      DirectStorageEdgeCompatible manifest base variables successorPost row)
+      DirectStorageEdgeCompatible manifest base variables successorPost row abstractVC.invariant)
     (abstractEdges : List (Edge ScalarLoopState))
     (concreteEdges : List (Edge LoopState))
     (hAbstract : denoteEdges? manifest base variables successorPost rows =
@@ -755,7 +680,7 @@ theorem direct_storage_edges_refinements
   | cons row rest ih =>
       have head := compatible row (by simp)
       have tailCompatible : ∀ tail, tail ∈ rest →
-          DirectStorageEdgeCompatible manifest base variables successorPost tail := by
+          DirectStorageEdgeCompatible manifest base variables successorPost tail abstractVC.invariant := by
         intro tail hMember
         exact compatible tail (by simp [hMember])
       unfold denoteEdges? at hAbstract
@@ -779,7 +704,7 @@ theorem direct_storage_edges_refinements
               subst concreteEdges
               apply LoopVC.EdgeRefinements.cons
               · simpa only [directTargetFormulas] using
-                  head.refinement abstractVC concreteVC hAbstractReady
+                  head.refinement abstractVC concreteVC
               · exact ih tailCompatible abstractRest concreteRest
                   hAbstractRest hConcreteRest
 
@@ -830,10 +755,19 @@ theorem direct_storage_edges_denote
       rw [hHead, hTail]
       rfl
 
+/-- Interleaved checks use the exact timeline even when no store is touched. -/
+def timelineNeedsPrefixSafety : Bool → List TimelineEventRow → Bool
+  | _, [] => false
+  | checked, event :: rest => match event.payload with
+    | .safetyCheckpoint _ => timelineNeedsPrefixSafety true rest
+    | .pathAssumption _ => checked || timelineNeedsPrefixSafety checked rest
+    | _ => timelineNeedsPrefixSafety checked rest
+
 def directStorageSummarySupported (manifest : Manifest) (row : SummaryRow) : Bool :=
   row.supported manifest &&
     (row.preheaderTimeline.isEmpty || row.preheaderProjectionComplete) &&
-    (row.preheaderTimeline.any (fun event =>
+    (row.edges.any (fun edge => timelineNeedsPrefixSafety false edge.timeline) ||
+      row.preheaderTimeline.any (fun event =>
       match event.payload with
       | .storageRead _ | .indexedRegionRead _ | .storageWrite _ => true
       | _ => false) || row.edges.any (fun edge => edge.timeline.any fun event =>
@@ -962,7 +896,10 @@ theorem direct_storage_summary_refinement
     (hInvariant : ∀ formula, formula ∈ row.invariants →
       directFormulaControlCompatible manifest base row.variables formula)
     (hEdges : ∀ edge, edge ∈ row.edges →
-      DirectStorageEdgeCompatible manifest base row.variables row.post edge) :
+      DirectStorageEdgeCompatible manifest base row.variables row.post edge
+        (fun locals => stateReady row.variables locals ∧
+          headerFactsHoldInEnv manifest base row.headerFacts ∧
+          formulasHoldInState manifest base row.variables locals row.invariants)) :
     LoopVC.Refinement abstractVC concreteVC (fun state => state.locals) := by
   unfold denoteLoopSummary? at hAbstract
   unfold denoteDirectStorageLoopSummary? at hConcrete
@@ -989,7 +926,6 @@ theorem direct_storage_summary_refinement
             invariant := ?_
             edges := direct_storage_edges_refinements manifest base row.variables
               row.post row.edges _ _
-              (fun _ (hInvariant : stateReady row.variables _ ∧ _) => hInvariant.1)
               hEdges abstractEdges concreteEdges
               hAbstractEdges hConcreteEdges
           }

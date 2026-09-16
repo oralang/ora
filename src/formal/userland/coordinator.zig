@@ -1082,10 +1082,10 @@ fn automaticValueShapeInScope(
         },
         .binary => |binary| {
             if (binary.op != .add and binary.op != .sub and
-                binary.op != .bit_and and binary.op != .bit_xor)
+                binary.op != .bit_and and binary.op != .bit_xor and binary.op != .div)
             {
                 return .{ .unsupported = switch (binary.op) {
-                    .mul, .pow, .shl, .shr, .div, .mod => .automatic_nonlinear_arithmetic,
+                    .mul, .pow, .shl, .shr, .mod => .automatic_nonlinear_arithmetic,
                     else => .automatic_term_kind_unsupported,
                 } };
             }
@@ -1093,6 +1093,8 @@ fn automaticValueShapeInScope(
                 return .{ .unsupported = .automatic_integer_type_missing };
             const result_shape = automaticIntegerShape(ty) orelse
                 return .{ .unsupported = .automatic_integer_type_unsupported };
+            if (binary.op == .div and result_shape.signed)
+                return .{ .unsupported = .automatic_nonlinear_arithmetic };
             const lhs = automaticValueShapeInScope(set, summary, edge, binary.lhs, fuel - 1);
             const lhs_shape = switch (lhs) {
                 .supported => |shape| shape,
@@ -1565,6 +1567,10 @@ fn writeAutomaticLoopProof(
         );
         try writeTermLookupAttributes(writer, "ora_loop_data", term_ids);
         try writeFreeVarEqualityFacts(writer, free_vars, .attributed_theorems);
+        try writer.writeAll(
+            "private theorem autoShape : autoSummary.shapeSupported = true := by decide +kernel\n" ++
+                "attribute [local ora_loop_shape] autoShape\n",
+        );
         try writer.print(
             "private theorem autoSummarySupported : " ++
                 "emittedLoopSummary_{d}.supported emittedManifest = true := by\n" ++
@@ -1584,14 +1590,44 @@ fn writeAutomaticLoopProof(
     try writer.writeByte('\n');
     if (!nested and obligation_to_lean.loopSummaryUsesDirectStorageCertificate(summary)) {
         try writer.writeAll(
-            "private theorem autoScalarAuthorization : " ++
+            \\private abbrev autoEdgeCompatible (env : Env) (edge : Ora.Loop.EdgeRow) : Prop :=
+            \\  Ora.Loop.DirectStorageEdgeCompatible emittedManifest env autoSummary.variables autoSummary.post edge
+            \\    (fun locals => Ora.Loop.stateReady autoSummary.variables locals ∧
+            \\      Ora.Loop.headerFactsHoldInEnv emittedManifest env autoSummary.headerFacts ∧
+            \\      Ora.Loop.formulasHoldInState emittedManifest env autoSummary.variables locals autoSummary.invariants)
+            \\
+        );
+        const context = "(env : Env)\n" ++
+            "    (hAssumptions : assumptionsDenoteInEnv emittedManifest env autoAssumptions)\n" ++
+            "    (hContext : Ora.Loop.contextReady env autoSummary.contextVariables)";
+        for (summary.edges, 0..) |_, index| try writer.print(
+            "private theorem autoEdgeCompatible_{d} {s} :\n" ++
+                "    autoEdgeCompatible env (autoSummary.edges.get ⟨{d}, by decide⟩) := by\n" ++
+                "  ora_loop_prepare_context hContext\n" ++
+                "  ora_loop_direct_edge_compatible autoSummary env\n",
+            .{ index, context, index },
+        );
+        try writer.print(
+            "private theorem autoEdgesCompatible {s} :\n" ++
+                "    ∀ edge, edge ∈ autoSummary.edges → autoEdgeCompatible env edge := by\n" ++
+                "  intro edge hMember\n" ++
+                "  simp only [ora_loop_row, List.mem_cons, List.not_mem_nil, or_false] at hMember\n" ++
+                "  rcases hMember with ",
+            .{context},
+        );
+        for (summary.edges, 0..) |_, index| try writer.writeAll(if (index == 0) "rfl" else " | rfl");
+        try writer.writeByte('\n');
+        for (summary.edges, 0..) |_, index| try writer.print("  · exact autoEdgeCompatible_{d} env hAssumptions hContext\n", .{index});
+        try writer.writeAll(
+            "set_option maxHeartbeats 500000 in\n" ++
+                "private theorem autoScalarAuthorization : " ++
                 "Ora.Loop.loopProofAuthorizationFromAssumptions " ++
                 "emittedManifest autoAssumptions autoSummary := by\n" ++
                 "  set_option maxRecDepth 4096 in ora_loop_auto_plain\n",
         );
         try writer.print(
             "theorem discharge_q{d} : emittedQuery_{d} := by\n" ++
-                "  ora_loop_auto_direct_storage_from autoScalarAuthorization\n" ++
+                "  ora_loop_auto_direct_storage_from autoScalarAuthorization autoEdgesCompatible\n" ++
                 "end\n",
             .{ query.id, query.id },
         );
@@ -1938,6 +1974,34 @@ fn printIds(writer: anytype, ids: []const obligation.Id) !void {
     try writer.writeByte(']');
 }
 
+test "loop blocker batch unsigned division eligibility retains type and operator boundaries" {
+    const summary: obligation.LoopSummaryRow = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "division" } },
+        .source = .{},
+        .phase = .ora_mlir,
+        .origin = .source,
+        .loop_source_op_id = 1,
+        .loop_kind = .scf_while,
+    };
+    for ([_]obligation.BinaryOp{ .div, .mod, .mul }) |op| {
+        for ([_][]const u8{ "u64", "u256", "i256" }) |name| {
+            const ty: obligation.TypeRef = .{ .spelling = name };
+            const terms = [_]obligation.Term{
+                .{ .int_lit = .{ .value = "1", .ty = ty } },
+                .{ .int_lit = .{ .value = "2", .ty = ty } },
+                .{ .binary = .{ .op = op, .lhs = 0, .rhs = 1, .ty = ty } },
+            };
+            const shape = automaticValueShape(.{ .terms = &terms }, summary, 2, 4);
+            try std.testing.expectEqual(op == .div and name[0] == 'u', shape == .supported);
+            if (shape == .unsupported) try std.testing.expectEqual(
+                AutomaticLoopProofReason.automatic_nonlinear_arithmetic,
+                shape.unsupported,
+            );
+        }
+    }
+}
+
 test "automatic proof failures retain stable named diagnostics" {
     const cases = [_]struct {
         err: anyerror,
@@ -2144,6 +2208,7 @@ test "automatic loop proof source delegates to repository tactic deterministical
         1,
         "ora_loop_auto_direct_storage_from autoScalarAuthorization",
     ));
+
     // Inherited eligibility uses the actual parent dependency, not merely a
     // same-function summary elsewhere in the manifest. Both queries keep IDs.
     const inherited_terms = terms ++ [_]obligation.Term{
