@@ -12533,6 +12533,21 @@ test "repository tactic certifies dominating loop header facts deterministically
     );
 }
 
+test "loop blocker batch header control slots retain requires and certify the real CLI" {
+    var result = try collectPackageObligations(testing.allocator, "tests/formal/loop_header_control_slots.ora");
+    defer result.deinit();
+    try testing.expectEqual(@as(usize, 1), result.set.loop_summaries.len);
+    const summary = result.set.loop_summaries[0];
+    try testing.expect(summary.projectionSupported());
+    try testing.expectEqual(@as(usize, 1), summary.header_facts.len);
+    try testing.expectEqual(obligation.LoopHeaderFactSource.function_requires, summary.header_facts[0].source_kind);
+    try expectRepositoryStorageTacticDeterministic(
+        "tests/formal/loop_header_control_slots.ora",
+        "loop_header_control_slots",
+        1,
+    );
+}
+
 test "refinement header parameter metadata still rejects a mismatched base width" {
     const h = createContext();
     defer destroyContext(h);

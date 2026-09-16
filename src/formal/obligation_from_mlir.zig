@@ -1280,6 +1280,13 @@ const Collector = struct {
     fn headerPrefixOperationSupported(self: *Collector, op: mlir.MlirOperation, name: []const u8) bool {
         if (preheaderPureValueOperationSupported(name) or dynamicLengthSourceValue(op) != null or
             isLoopSafetyOperation(op, name)) return true;
+        if (std.mem.eql(u8, name, "memref.alloca"))
+            return mlir.oraOperationGetNumResults(op) == 1 and
+                headerPrivateSlot(mlir.oraOperationGetResult(op, 0));
+        if (std.mem.eql(u8, name, "memref.store"))
+            return mlir.oraOperationGetNumOperands(op) == 2 and
+                headerPrivateSlot(mlir.oraOperationGetOperand(op, 1)) or
+                inventoryMemrefStoreTargetsPersistentRoot(op);
         if (std.mem.eql(u8, name, "ora.conditional_return")) {
             const regions: usize = @intCast(mlir.oraOperationGetNumRegions(op));
             for (0..regions) |region_index| {
@@ -8682,6 +8689,29 @@ fn directRootLoopEffectSupported(
     return false;
 }
 
+fn headerPrivateSlot(value: mlir.MlirValue) bool {
+    if (!mlir.oraValueIsAOpResult(value)) return false;
+    const allocation = mlir.oraOpResultGetOwner(value);
+    if (!std.mem.eql(u8, operationName(allocation), "memref.alloca") or
+        mlir.oraOperationGetNumOperands(allocation) != 0) return false;
+    const ty = mlir.oraValueGetType(value);
+    if (!mlir.oraTypeIsAMemRef(ty) or mlir.oraShapedTypeGetRank(ty) != 0) return false;
+    // Fresh rank-zero storage cannot alias immutable header inputs. Requiring
+    // every use to be a direct load/store also forbids passing its address on.
+    var use = mlir.mlirValueGetFirstUse(value);
+    while (!mlir.mlirOpOperandIsNull(use)) : (use = mlir.mlirOpOperandGetNextUse(use)) {
+        const user = mlir.mlirOpOperandGetOwner(use);
+        const name = operationName(user);
+        const count = mlir.oraOperationGetNumOperands(user);
+        if (std.mem.eql(u8, name, "memref.load") and count == 1 and
+            mlir.oraOperationGetOperand(user, 0).ptr == value.ptr) continue;
+        if (std.mem.eql(u8, name, "memref.store") and count == 2 and
+            mlir.oraOperationGetOperand(user, 1).ptr == value.ptr) continue;
+        return false;
+    }
+    return true;
+}
+
 fn preheaderControlOperationUnsupported(op: mlir.MlirOperation, name: []const u8) bool {
     return std.mem.eql(u8, name, "scf.while") or std.mem.eql(u8, name, "scf.for") or
         std.mem.eql(u8, name, "ora.switch") or std.mem.eql(u8, name, "ora.switch_expr") or
@@ -9105,6 +9135,59 @@ fn expectedResourcePropertyMask(op: obligation.ResourceOperation) u32 {
         .destroy => resourcePropertyBit(.amount_non_negative) |
             resourcePropertyBit(.source_sufficient),
     };
+}
+
+test "header prefix control slots reject nonlocal and escaping addresses" {
+    const context = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(context);
+    const registry = mlir.oraDialectRegistryCreate();
+    mlir.oraRegisterAllDialects(registry);
+    mlir.oraContextAppendDialectRegistry(context, registry);
+    mlir.oraDialectRegistryDestroy(registry);
+    mlir.oraContextLoadAllAvailableDialects(context);
+    const text =
+        \\module {
+        \\  func.func @prefix(%input: memref<i1>) -> memref<i1> {
+        \\    %false = arith.constant false
+        \\    %local = memref.alloca() : memref<i1>
+        \\    memref.store %false, %local[] : memref<i1>
+        \\    memref.store %false, %input[] : memref<i1>
+        \\    %array = memref.alloca() : memref<4xi1>
+        \\    %escape = memref.alloca() : memref<i1>
+        \\    memref.store %false, %escape[] : memref<i1>
+        \\    func.return %escape : memref<i1>
+        \\  }
+        \\}
+    ;
+    const module = mlir.oraModuleCreateParse(context, strRef(text));
+    try std.testing.expect(!mlir.oraModuleIsNull(module));
+    defer mlir.oraModuleDestroy(module);
+    const function = mlir.oraBlockGetFirstOperation(mlir.oraModuleGetBody(module));
+    const block = mlir.oraRegionGetFirstBlock(mlir.oraOperationGetRegion(function, 0));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var collector = Collector{ .allocator = arena.allocator(), .options = .{} };
+    // Local scalar slots are permitted; array, parameter and escaping slots
+    // must not enter through the new allowance. All baseline cases remain.
+    const expected = [_]struct { label: []const u8, operation: []const u8, supported: bool }{
+        .{ .label = "Boolean constant", .operation = "arith.constant", .supported = true },
+        .{ .label = "fresh rank-zero allocation", .operation = "memref.alloca", .supported = true },
+        .{ .label = "store to fresh local", .operation = "memref.store", .supported = true },
+        .{ .label = "store to nonlocal parameter", .operation = "memref.store", .supported = false },
+        .{ .label = "rank-one allocation", .operation = "memref.alloca", .supported = false },
+        .{ .label = "escaping allocation", .operation = "memref.alloca", .supported = false },
+        .{ .label = "store to escaping slot", .operation = "memref.store", .supported = false },
+        .{ .label = "address escape", .operation = "func.return", .supported = false },
+    };
+    var op = mlir.oraBlockGetFirstOperation(block);
+    for (expected) |pin| {
+        errdefer std.debug.print("header prefix pin failed: {s}\n", .{pin.label});
+        try std.testing.expect(!mlir.oraOperationIsNull(op));
+        try std.testing.expectEqualStrings(pin.operation, operationName(op));
+        try std.testing.expectEqual(pin.supported, collector.headerPrefixOperationSupported(op, operationName(op)));
+        op = mlir.oraOperationGetNextInBlock(op);
+    }
+    try std.testing.expect(mlir.oraOperationIsNull(op));
 }
 
 test "loop integer carriers retain an exact semantic width cross-check" {
