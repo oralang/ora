@@ -12691,39 +12691,72 @@ test "loop witness retains the default nested certificate path" {
     );
 }
 
-test "loop witness does not relax the nested inherited assumption policy" {
+test "loop witness certifies nested inherited assumptions deterministically" {
+    var result = try collectPackageObligations(
+        testing.allocator,
+        "tests/formal/loop_witness_nested_requires_auto.ora",
+    );
+    defer result.deinit();
+    var inherited: usize = 0;
+    for (result.set.loop_summaries) |summary| {
+        if (summary.header_facts.len != 0) continue;
+        inherited += 1;
+        try testing.expectEqual(@as(usize, 1), summary.query_ids.induction.len);
+        const query = obligation.findById(result.set.queries, summary.query_ids.induction[0]) orelse
+            return error.TestUnexpectedResult;
+        try testing.expectEqual(@as(usize, 2), query.assumption_ids.len);
+        // Eligibility must not turn inherited conditions into local fact rows
+        // or silently change the existing exact matcher.
+        try testing.expect(!result.set.loopHeaderFactsMatchAssumptions(summary, query.assumption_ids));
+    }
+    try testing.expectEqual(@as(usize, 2), inherited);
+    try expectRepositoryStorageTacticDeterministic(
+        "tests/formal/loop_witness_nested_requires_auto.ora",
+        "loop_witness_nested_requires_auto",
+        4,
+    );
+}
+
+test "loop witness retains all nested inherited assumptions" {
     try expectRepositoryLoopProofConstructionBlocked(
-        "tests/formal/loop_witness_nested_requires_blocked.ora",
-        "loop_witness_nested_requires_blocked",
+        "tests/formal/fail_loop_witness_nested_extra_assumption.ora",
+        "fail_loop_witness_nested_extra_assumption",
         2,
-        "automatic_assumptions_require_external_certificate",
+        "automatic_loop_witness_rejected",
     );
 }
 
 test "loop witness contradictory bounds cannot authorize bytecode" {
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const output = try pathFromTmpAlloc(testing.allocator, tmp, "blocked");
-    defer testing.allocator.free(output);
-    const run = try runProcessWithLeanPath(testing.allocator, &.{
-        ORA_BINARY_REL,
-        "emit",
-        "--emit=bytecode",
-        "--out-dir",
-        output,
-        "--lean-proofs",
-        "tests/formal/fail_loop_witness_contradiction.ora",
-    });
-    defer testing.allocator.free(run.stdout);
-    defer testing.allocator.free(run.stderr);
-    try expectExited(run, 1);
-    try testing.expect(std.mem.indexOf(u8, run.stdout, "certificate-required=1, excluded=0") != null);
-    try testing.expect(std.mem.indexOf(u8, run.stdout, "automatic_loop_witness_unavailable") != null);
-    try testing.expectError(error.FileNotFound, tmp.dir.access(
-        std.testing.io,
-        "blocked/fail_loop_witness_contradiction.hex",
-        .{},
-    ));
+    for ([_]struct { stem: []const u8, count: usize }{
+        .{ .stem = "fail_loop_witness_contradiction", .count = 1 },
+        .{ .stem = "fail_loop_witness_nested_contradiction", .count = 2 },
+    }) |case| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const output = try pathFromTmpAlloc(testing.allocator, tmp, "blocked");
+        defer testing.allocator.free(output);
+        const source = try std.fmt.allocPrint(testing.allocator, "tests/formal/{s}.ora", .{case.stem});
+        defer testing.allocator.free(source);
+        const summary = try std.fmt.allocPrint(testing.allocator, "certificate-required={d}, excluded=0", .{case.count});
+        defer testing.allocator.free(summary);
+        const hex = try std.fmt.allocPrint(testing.allocator, "blocked/{s}.hex", .{case.stem});
+        defer testing.allocator.free(hex);
+        const run = try runProcessWithLeanPath(testing.allocator, &.{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=bytecode",
+            "--out-dir",
+            output,
+            "--lean-proofs",
+            source,
+        });
+        defer testing.allocator.free(run.stdout);
+        defer testing.allocator.free(run.stderr);
+        try expectExited(run, 1);
+        try testing.expect(std.mem.indexOf(u8, run.stdout, summary) != null);
+        try testing.expect(std.mem.indexOf(u8, run.stdout, "automatic_loop_witness_unavailable") != null);
+        try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, hex, .{}));
+    }
 }
 
 test "unsupported loop header facts block bytecode with named exclusions" {

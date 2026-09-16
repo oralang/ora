@@ -583,6 +583,18 @@ elab "ora_loop_apply_context" : tactic => do
   evalTactic (← `(tactic| set_option maxRecDepth 4096 in
     simp_all only [Env.lookupFree, ora_loop_integer_types, Option.some.injEq]))
 
+-- Plain and dependency-bearing proofs consume the same typed input premise.
+macro "ora_loop_prepare_context" hContext:ident : tactic =>
+  `(tactic| (
+    try simp only [Ora.Loop.contextReady, ora_loop_row,
+      TyRef.integerShape?, ora_loop_integer_types,
+      List.forall_mem_cons, List.forall_mem_nil] at $hContext:ident
+    ora_loop_normalize_context_shapes $hContext:ident
+    ora_loop_unpack_conjunctions
+    ora_loop_unpack_integer_values
+    ora_loop_apply_context
+    subst_vars))
+
 macro "ora_loop_normalize" loc:(Lean.Parser.Tactic.location)? : tactic =>
   `(tactic| simp only [Value.eqProp?, Ora.Integer.Value.eqProp?,
     Ora.Integer.Value.relation?, Ora.Integer.Value.binary?,
@@ -990,14 +1002,7 @@ macro tk:"ora_loop_auto_plain" : tactic => do
     constructor
     · ora_loop_witness ($autoSummary).supportEnv
     · intro env hAssumptions hContext
-      try simp only [Ora.Loop.contextReady, ora_loop_row,
-        TyRef.integerShape?, ora_loop_integer_types,
-        List.forall_mem_cons, List.forall_mem_nil] at hContext
-      ora_loop_normalize_context_shapes hContext
-      ora_loop_unpack_conjunctions
-      ora_loop_unpack_integer_values
-      ora_loop_apply_context
-      subst_vars
+      ora_loop_prepare_context hContext
       change Ora.Loop.loopInductionObligationsAtEnv
         $emittedManifest env $autoSummary
       unfold Ora.Loop.loopInductionObligationsAtEnv
@@ -1312,6 +1317,7 @@ macro tk:"ora_loop_auto_nested" : tactic => do
     constructor
     · ora_loop_witness (($autoSummary).supportEnvIn $emittedLoopSummaries)
     · intro env hAssumptions hContext
+      ora_loop_prepare_context hContext
       change Ora.Loop.loopInductionObligationsAtEnvIn
         $emittedManifest $emittedLoopSummaries env $autoSummary
       ora_loop_nested_reduce
@@ -1341,7 +1347,7 @@ macro tk:"ora_loop_auto_nested" : tactic => do
           all_goals (ora_loop_value_reduce at hInvariant hPath)
           all_goals try ora_loop_apply_context
           all_goals try (ora_loop_normalize at hHeaderFacts)
-          all_goals (ora_loop_normalize at hInvariant hPath)
+          all_goals try (ora_loop_normalize at hInvariant hPath)
           all_goals ora_loop_unpack_conjunctions
           simp only [Ora.Loop.environmentRelationsProduce] at hDependencies
           ora_loop_reduce_environment_relations hDependencies
@@ -1373,7 +1379,7 @@ macro tk:"ora_loop_auto_nested" : tactic => do
           all_goals (ora_loop_value_reduce at hInvariant hPath)
           all_goals try ora_loop_apply_context
           all_goals try (ora_loop_normalize at hHeaderFacts)
-          all_goals (ora_loop_normalize at hInvariant hPath)
+          all_goals try (ora_loop_normalize at hInvariant hPath)
           all_goals ora_loop_unpack_conjunctions
           simp only [List.take, Ora.Loop.environmentRelationsProduce]
             at hDependencies

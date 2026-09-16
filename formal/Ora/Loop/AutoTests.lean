@@ -168,22 +168,77 @@ private def autoSummary : SummaryRow := {
   edges := [witnessEdge 0 .backedge, witnessEdge 1 .successor]
   projectionComplete := true
 }
-private def emittedLoopSummaries : List SummaryRow := [autoSummary]
 attribute [local ora_loop_row] autoAssumptions autoSummary
   stateVariable witnessVariable witnessVariableTerm witnessEdge witnessAssumption
-@[local ora_loop_nested] private theorem summaryCount :
-    emittedLoopSummaries.length = 1 := rfl
 
 @[local ora_loop_supported] private theorem supported :
     autoSummary.supported emittedManifest = true := by decide
-@[local ora_loop_nested] private theorem supportedIn :
-    autoSummary.supportedIn emittedManifest emittedLoopSummaries = true := by decide
+
+-- A setup helper must leave the proof goal to its caller, not create a block
+-- that demands a completed proof after unpacking the input context.
+example (env : Env) (hContext : contextReady env autoSummary.contextVariables) :
+    ∃ n : Nat, n + n = 2 := by
+  ora_loop_prepare_context hContext
+  exact ⟨1, rfl⟩
 
 -- The failed default must backtrack, not admit an alternative. The candidate
 -- then proves the original existential, including assumptions and initial state.
 example : loopSpecificationNonvacuous emittedManifest autoAssumptions autoSummary := by
   fail_if_success solve | ora_loop_prove_witness autoSummary.supportEnv
   ora_loop_witness autoSummary.supportEnv
+
+namespace WithChild
+
+private def childVariable : VariableRow := { witnessVariable 3 with index := 0 }
+private def childSummary : SummaryRow := {
+  WitnessTactic.autoSummary with
+  id := 1
+  variables := [childVariable]
+  edges := (WitnessTactic.autoSummary.edges).map fun edge =>
+    { edge with nextState := [{
+        variableIndex := 0
+        target := childVariable.id
+        sourceKey := "literal"
+        value := .term 1
+      }] }
+}
+private def childEvent : TimelineEventRow := {
+  id := 1
+  structuralKey := "child"
+  payload := .summaryDependency {
+    id := 0
+    structuralKey := "child"
+    summaryId := 1
+    target := .successor
+    writeFootprintComplete := true
+    -- Model fixture only; certificate digest binding is checked by CLI tests.
+    loopVcSha256 := "0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}
+private def autoSummary : SummaryRow := {
+  WitnessTactic.autoSummary with
+  edges := [{ witnessEdge 0 .backedge with timeline :=
+    (witnessEdge 0 .backedge).timeline ++ [childEvent] },
+    witnessEdge 1 .successor]
+}
+private def emittedLoopSummaries : List SummaryRow := [autoSummary, childSummary]
+attribute [local ora_loop_row] autoSummary childSummary childVariable childEvent
+@[local ora_loop_nested] private theorem summaryCount :
+    emittedLoopSummaries.length = 2 := rfl
+@[local ora_loop_nested] private theorem childFind :
+    findSummaryRow? emittedLoopSummaries 1 = some childSummary := rfl
+@[local ora_loop_nested] private theorem supportedIn :
+    autoSummary.supportedIn emittedManifest emittedLoopSummaries = true := by decide
+@[local ora_loop_nested] private theorem childSupportedIn :
+    childSummary.supportedIn emittedManifest emittedLoopSummaries = true := by decide
+@[local ora_loop_nested] private theorem childDenotes (base : Env) :
+    (denoteLoopSummaryWithFuel? 2 emittedManifest emittedLoopSummaries base childSummary).isSome = true := by
+  unfold denoteLoopSummaryWithFuel?
+  simp only [denoteLoopSummaryWithResolver?, childSupportedIn, if_true]
+  simp only [ora_loop_row, denoteEdgesWithResolver?, denoteEdgeWithResolver?,
+    EdgeRow.summaryDependencies, timelineDependencyView, denoteSummaryDependencies?,
+    denoteControlTarget?, Option.bind_eq_bind, Option.some_bind, Option.pure_def,
+    List.map, Option.isSome]
 
 private def checkedNestedWitness : Env :=
   (autoSummary.supportEnvIn emittedLoopSummaries).setFree (witnessVariable 0).id
@@ -192,28 +247,18 @@ private def checkedNestedWitness : Env :=
 example : loopWitnessCandidate? emittedManifest autoAssumptions autoSummary
     (autoSummary.supportEnvIn emittedLoopSummaries) = some checkedNestedWitness := rfl
 
--- Checks the candidate against the nested denotation's complete predicate;
--- this is model evidence, not a claim that the planner admits nested requires.
-example : loopSpecificationNonvacuousIn emittedManifest autoAssumptions
+-- Exercise the same automatic witness path as nested certificates, against
+-- the complete predicate. The CLI's separate assumption policy is unchanged.
+theorem nestedCandidateChecksInitial : loopSpecificationNonvacuousIn emittedManifest autoAssumptions
     emittedLoopSummaries autoSummary := by
-  refine ⟨checkedNestedWitness, [Ora.Integer.Value.ofNat (.unsigned .w256) 1], ?_, ?_, ?_⟩
-  · change ((1 : Nat) ≤ 1) ∧ True
-    decide
-  · intro loopVar hMember
-    have hVar : loopVar = witnessVariable 0 := by
-      simpa only [autoSummary, List.mem_cons, List.not_mem_nil, or_false] using hMember
-    subst loopVar
-    exact ⟨Ora.Integer.Value.ofNat (.unsigned .w256) 1, rfl, rfl⟩
-  · unfold loopInitialPremisesIn denoteLoopSummaryIn?
-    simp only [summaryCount, denoteLoopSummaryWithFuel?,
-      denoteLoopSummaryWithResolver?, supportedIn, if_true,
-      autoSummary, witnessEdge, denoteEdgesWithResolver?, denoteEdgeWithResolver?,
-      EdgeRow.summaryDependencies, timelineDependencyView, denoteSummaryDependencies?,
-      denoteControlTarget?, Option.bind_eq_bind, Option.some_bind, Option.pure_def]
-    constructor
-    · intro fact hMember
-      cases hMember
-    · rfl
+  fail_if_success solve | ora_loop_prove_witness (autoSummary.supportEnvIn emittedLoopSummaries)
+  ora_loop_witness (autoSummary.supportEnvIn emittedLoopSummaries)
+
+-- The positive input must not overwrite the child's independently bound state.
+example : checkedNestedWitness.lookupFree childVariable.id =
+    some (.integer (Ora.Integer.Value.ofNat (.unsigned .w256) 0)) := by decide
+
+end WithChild
 
 end WitnessTactic
 

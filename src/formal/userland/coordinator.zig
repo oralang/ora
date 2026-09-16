@@ -1277,6 +1277,46 @@ fn timelineHasStorageReadBeforeSafetyCheckpoint(events: []const obligation.LoopT
     return false;
 }
 
+// Called only after term/ID validation. This permits an automatic attempt;
+// every assumption still enters both prover queries and the complete witness.
+// An inherited requires is not a same-block fact: never manufacture such rows.
+fn automaticLoopAssumptionsSupported(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    assumption_ids: []const obligation.Id,
+) bool {
+    if (set.loopHeaderFactsMatchAssumptions(summary, assumption_ids)) return true;
+    if (summary.header_facts.len != 0 or summary.owner != .statement) return false;
+    for (set.loop_summaries) |parent| {
+        if (parent.id >= summary.id or parent.owner != .statement or
+            !std.mem.eql(u8, parent.owner.statement.function_name, summary.owner.statement.function_name) or
+            !parent.projectionSupported() or parent.query_ids.induction.len != 1) continue;
+        const query = obligation.findById(set.queries, parent.query_ids.induction[0]) orelse continue;
+        if (!std.mem.eql(obligation.Id, query.assumption_ids, assumption_ids) or
+            !set.loopHeaderFactsMatchAssumptions(parent, assumption_ids)) continue;
+        var captured = true;
+        for (parent.header_facts) |fact| {
+            if (fact.source_kind != .function_requires) continue;
+            for (fact.stable_values) |value| {
+                const expected = automaticIntegerShape(value.ty) orelse return false;
+                const found = for (summary.context_variables) |variable| {
+                    const id = variable.id orelse continue;
+                    if (!obligation.freeVarIdEql(id, value.id)) continue;
+                    const actual = automaticIntegerShape(variable.ty) orelse return false;
+                    if (expected.eql(actual)) break true;
+                } else false;
+                if (!found) captured = false;
+            }
+        }
+        if (!captured) continue;
+        for (parent.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
+            .summary_dependency => |dependency| if (dependency.summary_id == summary.id) return true,
+            else => {},
+        };
+    }
+    return false;
+}
+
 fn automaticLoopPlan(
     set: obligation.ObligationSet,
     query: obligation.VerificationQuery,
@@ -1293,7 +1333,7 @@ fn automaticLoopPlan(
     {
         return .{ .unsupported = .loop_indexed_region_read_formula_unreviewed };
     }
-    if (!set.loopHeaderFactsMatchAssumptions(summary, query.assumption_ids))
+    if (!automaticLoopAssumptionsSupported(set, summary, query.assumption_ids))
         return .{ .unsupported = .automatic_assumptions_require_external_certificate };
     if (!summary.projectionSupported() or summary.edges.len < 2) {
         return .{ .unsupported = .automatic_control_shape_unsupported };
@@ -1442,6 +1482,12 @@ fn writeAutomaticLoopProof(
     if (nested) {
         const summary_rows = try automaticSummaryClosure(allocator, set, summary);
         defer allocator.free(summary_rows);
+        // The denotation's fuel uses the whole emitted list, not this query's
+        // dependency closure. Match writeLoopSummaryDefinitions' row filter.
+        var emitted_summary_count: usize = 0;
+        for (set.loop_summaries) |row| {
+            if (row.projectionSupported()) emitted_summary_count += 1;
+        }
         for (summary_rows) |row| try writer.print(" emittedLoopSummary_{d}", .{row.id});
         try writer.writeByte('\n');
         if (set.terms.len > obligation_to_lean.lean_term_chunk_size) {
@@ -1456,7 +1502,7 @@ fn writeAutomaticLoopProof(
             "private theorem autoNestedSummaryCount : " ++
                 "emittedLoopSummaries.length = {d} := by rfl\n" ++
                 "attribute [local ora_loop_nested] autoNestedSummaryCount\n",
-            .{summary_rows.len},
+            .{emitted_summary_count},
         );
         for (summary_rows) |row| {
             try writer.print(
@@ -1506,7 +1552,7 @@ fn writeAutomaticLoopProof(
                     "Option.pure_def, Option.some_bind, Option.none_bind, Option.isSome, " ++
                     "if_pos, if_false, Bool.false_eq_true]\n" ++
                     "attribute [local ora_loop_nested] autoNestedDenotes_{d}\n",
-                .{ row.id, summary_rows.len, row.id, row.id, row.id },
+                .{ row.id, emitted_summary_count, row.id, row.id, row.id },
             );
         }
     } else {
@@ -2098,6 +2144,134 @@ test "automatic loop proof source delegates to repository tactic deterministical
         1,
         "ora_loop_auto_direct_storage_from autoScalarAuthorization",
     ));
+    // Inherited eligibility uses the actual parent dependency, not merely a
+    // same-function summary elsewhere in the manifest. Both queries keep IDs.
+    const inherited_terms = terms ++ [_]obligation.Term{
+        .{ .binary = .{ .op = .ge, .lhs = 2, .rhs = 5, .ty = u256_ty } },
+        .{ .int_lit = .{ .value = "4", .ty = u256_ty } },
+        .{ .binary = .{ .op = .le, .lhs = 2, .rhs = 11, .ty = u256_ty } },
+    };
+    const stable = [_]obligation.LoopHeaderFactValue{.{ .id = context_id, .ty = u256_ty }};
+    var facts: [2]obligation.LoopHeaderFactRow = undefined;
+    var assumptions: [3]obligation.Assumption = undefined;
+    for (&facts, 0..) |*fact, index| {
+        const key = ([_][]const u8{ "requires:lower", "requires:upper" })[index];
+        const term = ([_]obligation.TermId{ 10, 12 })[index];
+        fact.* = .{
+            .id = @intCast(index),
+            .structural_key = key,
+            .formula = .{ .term = term },
+            .source_kind = .function_requires,
+            .source = .{ .structural_key = key, .block_key = "entry", .position = @intCast(index) },
+            .target = .{ .structural_key = "parent", .block_key = "entry", .position = 4 },
+            .stable_values = &stable,
+            .assumption_id = @intCast(21 + index),
+        };
+        assumptions[index] = .{
+            .id = @intCast(21 + index),
+            .owner = owner,
+            .source = .{},
+            .phase = .ora_mlir,
+            .origin = .source,
+            .kind = .requires,
+            .formula = .{ .term = term },
+        };
+    }
+    assumptions[2] = assumptions[0];
+    assumptions[2].id = 23;
+    var parent = summaries[0];
+    parent.id = 0;
+    parent.owner = .{ .statement = .{ .function_name = "countTo", .ordinal = 0 } };
+    parent.header_facts = &facts;
+    parent.query_ids = .{ .base = &.{111}, .induction = &.{110}, .body_safety = &.{ 112, 113 }, .step = &.{114}, .post = &.{115} };
+    const parent_timeline = backedge_timeline ++ [_]obligation.LoopTimelineEvent{.{
+        .id = 2,
+        .structural_key = "child",
+        .payload = .{ .summary_dependency = .{
+            .id = 0,
+            .structural_key = "child",
+            .summary_id = 1,
+            .loop_vc_sha256 = digest,
+            .target = .successor,
+            .write_footprint_complete = true,
+        } },
+    }};
+    var parent_edges = edges;
+    parent_edges[0].timeline = &parent_timeline;
+    parent.edges = &parent_edges;
+    var child = summaries[0];
+    child.owner = .{ .statement = .{ .function_name = "countTo", .ordinal = 1 } };
+    var inherited_queries = queries ++ queries;
+    for (&inherited_queries, 0..) |*query, index| {
+        query.assumption_ids = &.{ 21, 22 };
+        if (index >= queries.len) {
+            query.id += 100;
+            query.loop_summary_id = 0;
+        }
+    }
+    const changed_context = [_]obligation.LoopVariable{.{
+        .index = 0,
+        .id = context_id,
+        .name = "n",
+        .ty = .{ .compiler_type_id = 3 },
+    }};
+    const Case = enum {
+        inherited,
+        no_dependency,
+        wrong_function,
+        missing_context,
+        wrong_input_type,
+        wrong_formula,
+        wrong_assumption_owner,
+        reordered_ids,
+        extra_ids,
+        missing_parent_query,
+        unmatched_parent,
+    };
+    for (std.meta.tags(Case)) |case| {
+        errdefer std.debug.print("inherited assumption case: {s}\n", .{@tagName(case)});
+        var rows = [_]obligation.LoopSummaryRow{ parent, child };
+        var case_queries = inherited_queries;
+        var case_assumptions = assumptions;
+        switch (case) {
+            .inherited => {},
+            .no_dependency => rows[0].edges = &edges,
+            .wrong_function => rows[0].owner = .{ .statement = .{ .function_name = "other", .ordinal = 0 } },
+            .missing_context => rows[1].context_variables = &.{},
+            .wrong_input_type => rows[1].context_variables = &changed_context,
+            .wrong_formula => case_assumptions[0].formula = .{ .term = 12 },
+            .wrong_assumption_owner => case_assumptions[0].owner = .{ .function = .{ .name = "other" } },
+            .reordered_ids => for (case_queries[0..queries.len]) |*query| {
+                query.assumption_ids = &.{ 22, 21 };
+            },
+            .extra_ids => for (case_queries[0..queries.len]) |*query| {
+                query.assumption_ids = &.{ 21, 22, 23 };
+            },
+            .missing_parent_query => rows[0].query_ids.induction = &.{999},
+            .unmatched_parent => rows[0].header_facts = &.{},
+        }
+        const inherited_set: obligation.ObligationSet = .{
+            .terms = &inherited_terms,
+            .assumptions = &case_assumptions,
+            .queries = &case_queries,
+            .loop_summaries = &rows,
+        };
+        if (case != .missing_parent_query) {
+            try inherited_set.validateTermReferences();
+            try inherited_set.validateIdReferences();
+        }
+        const result = automaticLoopPlan(inherited_set, case_queries[0]);
+        switch (result) {
+            .supported => try std.testing.expectEqual(Case.inherited, case),
+            .unsupported => |reason| {
+                try std.testing.expect(case != .inherited);
+                try std.testing.expectEqual(
+                    if (case == .missing_parent_query) AutomaticLoopProofReason.automatic_query_shape_unsupported else AutomaticLoopProofReason.automatic_assumptions_require_external_certificate,
+                    reason,
+                );
+            },
+        }
+    }
 }
 
 test "automatic proof environment includes storage projection keys" {

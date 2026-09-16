@@ -1,9 +1,8 @@
-// Existing planner boundary, not a witness failure: the child's inherited
-// function assumptions have no matching same-block header-fact rows.
-contract LoopWitnessNestedRequiresBlocked {
-    pub fn run(limit: u256) -> u256
+contract NestedWitnessExtraAssumption {
+    pub fn run(limit: u256, other: u256) -> u256
     requires limit >= 1
     requires limit <= 4
+    requires other != 0
     {
         var outer: u256 = 0;
         while (outer < limit)

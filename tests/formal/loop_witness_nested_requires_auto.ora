@@ -1,0 +1,41 @@
+// Both loops retain the same function assumptions; the child has no local
+// header-fact rows and inherits eligibility through its actual parent.
+contract LoopWitnessNestedRequires {
+    pub fn run(limit: u256) -> u256
+    requires limit >= 1
+    requires limit <= 4
+    {
+        var outer: u256 = 0;
+        while (outer < limit)
+        invariant outer <= limit
+        {
+            var inner: u256 = 0;
+            while (inner < 2)
+            invariant inner <= 2
+            {
+                inner = inner + 1;
+            }
+            outer = outer + 1;
+        }
+        return outer;
+    }
+
+    pub fn narrow(limit: u32) -> u32
+    requires limit > 2
+    requires limit < 7
+    {
+        var outer: u32 = 0;
+        while (outer < limit)
+        invariant outer <= limit
+        {
+            var inner: u32 = 0;
+            while (inner < 2)
+            invariant inner <= 2
+            {
+                inner = inner + 1;
+            }
+            outer = outer + 1;
+        }
+        return outer;
+    }
+}
