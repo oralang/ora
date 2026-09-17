@@ -762,8 +762,8 @@ def branchingTimelineSemantics :
     TimelineSemantics (StorageActionState → Prop) StorageLocation Value Unit where
   storage := resolvedStorageActionSemantics
   evalFormula := fun formula state => some (formula state)
-  childRelation := fun _ => branchingChildRelation
-  childFrame := fun _ => branchingChildFrame
+  childRelation := fun _ before => branchingChildRelation before.loop
+  childFrame := fun _ _ => branchingChildFrame
 
 /-- A checkpoint after a relational child is required for every admitted child
 result, not merely for one safe result. -/

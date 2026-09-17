@@ -19,6 +19,11 @@ namespace Ora.Loop
 
 open Ora.Obligation
 
+def storageValueMatchesTy : Value → TyRef → Bool
+  | .bool _, ty => ty.isBool
+  | .integer value, ty => ty.integerShape? == some value.shape
+
+
 /-- One ordered projection in a resolved semantic storage location.  Fixed
 array and mapping keys remain distinct even when their typed values agree. -/
 inductive StorageProjection where
@@ -58,10 +63,21 @@ def StorageState.set
     (storage.set written value) observed = storage observed := by
   simp [StorageState.set, hNe]
 
-/-- Loop-carried local values together with the current persistent store. -/
+inductive CallOutcome where
+  | success
+  | error : Nat → CallOutcome
+  deriving Repr, BEq, DecidableEq
+
+structure CallReturn where
+  outcome : CallOutcome
+  payload : List Value
+
+/-- Loop-carried locals and storage, with a typed terminal return channel.
+The exit timeline produces the payload together with this same final store. -/
 structure LoopState where
   locals : List Ora.Integer.Value
   storage : StorageState
+  returned : Option CallReturn := none
 
 /- Read results share the canonical owner-scoped free-variable namespace.  A
 plain counter would permit two functions or expansions to alias accidentally. -/

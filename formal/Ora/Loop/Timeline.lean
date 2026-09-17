@@ -9,8 +9,63 @@ prefix, so a false check cannot disappear by deleting a transition.
 -/
 
 import Ora.Loop.IndexedRegion
+import Ora.Loop.CallTypes
 
 namespace Ora.Loop
+open Ora.Obligation
+
+/-- A lexical loop exports only declared SSA results. The loop retains the
+function-entry snapshot; it does not start a new function-call scope. -/
+structure LoopResultBinding where
+  id : FreeVarId
+  index : Nat
+  ty : TyRef
+
+def loopResultBindings? (bindings : List LoopResultBinding) (following : LoopState) :
+    Option (List StorageReadBinding) := bindings.mapM fun binding => do
+  let value := Value.integer (← following.locals[binding.index]?)
+  if storageValueMatchesTy value binding.ty then some { id := binding.id, value } else none
+
+def resumeLoop? (bindings : List LoopResultBinding)
+    (caller : StorageActionState) (following : LoopState) : Option StorageActionState := do
+  if !(decide (caller.reads.map StorageReadBinding.id ++ bindings.map (·.id)).Nodup) then none
+  else pure ()
+  let results ← loopResultBindings? bindings following
+  return { caller with
+    loop := { caller.loop with storage := following.storage, returned := following.returned }
+    reads := caller.reads ++ results }
+
+theorem loopResultBindings_ids (bindings : List LoopResultBinding) (following : LoopState)
+    (results : List StorageReadBinding) (evaluated : loopResultBindings? bindings following = some results) :
+    results.map StorageReadBinding.id = bindings.map (·.id) := by
+  induction bindings generalizing results with
+  | nil => simpa [loopResultBindings?] using evaluated.symm
+  | cons binding rest ih =>
+    simp only [loopResultBindings?, List.mapM_cons, Option.bind_eq_bind] at evaluated
+    cases value : following.locals[binding.index]? with
+    | none => simp [value] at evaluated
+    | some val =>
+      simp [value] at evaluated
+      split at evaluated <;> simp_all
+      change ((loopResultBindings? rest following).bind fun tail =>
+        some ({ id := binding.id, value := Value.integer val } :: tail)) = some results at evaluated
+      cases tail : loopResultBindings? rest following <;> simp [tail] at evaluated
+      cases evaluated
+      simp [ih _ tail]
+
+theorem resumeLoop_effects (bindings : List LoopResultBinding) (caller : StorageActionState)
+    (following : LoopState) (resumed : StorageActionState)
+    (evaluated : resumeLoop? bindings caller following = some resumed) :
+    resumed.entryStorage = caller.entryStorage ∧ resumed.loop.locals = caller.loop.locals ∧
+    resumed.loop.storage = following.storage ∧ resumed.loop.returned = following.returned ∧
+    resumed.reads.map StorageReadBinding.id = caller.reads.map StorageReadBinding.id ++ bindings.map (·.id) ∧
+    ∃ appended, resumed.reads = caller.reads ++ appended := by
+  unfold resumeLoop? at evaluated
+  split at evaluated <;> simp_all
+  cases results : loopResultBindings? bindings following <;> simp [results] at evaluated
+  cases evaluated
+  exact ⟨rfl, rfl, rfl, rfl, by simp [loopResultBindings_ids _ _ _ results], _, rfl⟩
+
 
 /-- Canonical event order for an edge.  Formula, location, value, and child
 types remain abstract until the compiler manifest instantiates this model. -/
@@ -23,6 +78,8 @@ inductive TimelineEvent
   | indexedRead : IndexedRegionRead ValueExpr →
       TimelineEvent FormulaExpr LocationExpr ValueExpr Child
   | child : Child → TimelineEvent FormulaExpr LocationExpr ValueExpr Child
+  | childResult : Child → List LoopResultBinding → TimelineEvent FormulaExpr LocationExpr ValueExpr Child
+  | call : CallInvocation ValueExpr → TimelineEvent FormulaExpr LocationExpr ValueExpr Child
 
 /-- Meaning of the expressions and certified child relations carried by an
 edge timeline.  Every evaluator observes the exact state at its event. -/
@@ -32,8 +89,12 @@ structure TimelineSemantics
   indexedRegion : IndexedRegionReadSemantics ValueExpr :=
     IndexedRegionReadSemantics.unsupported
   evalFormula : FormulaExpr → StorageActionState → Option Prop
-  childRelation : Child → LoopState → LoopState → Prop
-  childFrame : ∀ child, CertifiedWriteFrame (childRelation child)
+  /-- A loop after a call observes the actual prefix reads and caller-entry
+  store. Its frame quantifies over stores with those bindings held fixed. -/
+  childRelation : Child → StorageActionState → LoopState → Prop
+  childFrame : ∀ child (context : StorageActionState), CertifiedWriteFrame
+    (fun before after => childRelation child { context with loop := before } after)
+  calls : String → Option CertifiedCall := fun _ => none
 
 /-- A relational execution result.  `writes` is an over-approximation for the
 exact execution: direct actions contribute their resolved locations and child
@@ -55,12 +116,14 @@ def TimelineEvent.NoRead :
     EventOf FormulaExpr LocationExpr ValueExpr Child → Prop
   | .storage (.read _ _) => False
   | .indexedRead _ => False
+  | .childResult _ _ | .call _ => False
   | _ => True
 
 def TimelineEvent.isRead :
     EventOf FormulaExpr LocationExpr ValueExpr Child → Bool
   | .storage (.read _ _) => true
   | .indexedRead _ => true
+  | .childResult _ _ | .call _ => true
   | _ => false
 
 def TimelineEvent.isCheck :
@@ -120,6 +183,11 @@ theorem timelineReadBeforeCheckSupported_no_read
             | assume => trivial
             | check => trivial
             | child => trivial
+            | call _ | childResult _ _ =>
+                have hHasCheck := timelineHasCheck_of_mem_check tail formula (by
+                  rw [hTail]; simp)
+                simp [timelineReadBeforeCheckSupported, TimelineEvent.isRead,
+                  hHasCheck] at hSupported
             | indexedRead read =>
                 have hHasCheck := timelineHasCheck_of_mem_check tail formula (by
                   rw [hTail]
@@ -147,6 +215,8 @@ def TimelineEvent.readIds :
     EventOf FormulaExpr LocationExpr ValueExpr Child → List StorageReadId
   | .storage (.read id _) => [id]
   | .indexedRead read => [read.id]
+  | .childResult _ bindings => bindings.map (·.id)
+  | .call invocation => invocation.results
   | _ => []
 
 def timelineReadIdsOf
@@ -205,10 +275,29 @@ inductive TimelineEventExec
       (hExec : IndexedRegionReadExec semantics.indexedRegion read state following) :
       TimelineEventExec semantics (.indexedRead read) state { state := following }
   | child {child state following}
-      (hRelation : semantics.childRelation child state.loop following) :
+      (hRelation : semantics.childRelation child state following) :
       TimelineEventExec semantics (.child child) state {
         state := { state with loop := following }
-        writes := (semantics.childFrame child).footprint
+        writes := (semantics.childFrame child state).footprint
+      }
+  | childResult {child bindings state following resumed}
+      (hRelation : semantics.childRelation child state following)
+      (hResume : resumeLoop? bindings state following = some resumed) :
+      TimelineEventExec semantics (.childResult child bindings) state {
+        state := resumed
+        writes := (semantics.childFrame child state).footprint
+      }
+  | call {call state callee arguments output}
+      (hResolve : semantics.calls call.callee = some callee)
+      (hArguments : callEvaluateValues? semantics.storage.evalValue call.arguments state =
+        some arguments)
+      (hRelation : callee.relation { arguments, storage := state.loop.storage } output)
+      (hOutcome : output.outcome = call.outcome)
+      (hArity : output.payload.length = call.results.length)
+      (hFresh : call.fresh state) :
+      TimelineEventExec semantics (.call call) state {
+        state := call.resume state output
+        writes := callee.footprint { arguments, storage := state.loop.storage }
       }
 
 /-- Relational execution of a timeline.  Composition retains the footprint of
@@ -241,6 +330,26 @@ def TimelineSafe
     ∀ beforeResult,
       TimelineExec semantics beforeEvents initial beforeResult →
       timelineFormulaHolds semantics formula beforeResult.state
+
+/-- A local checkpoint is proved before universally considering the next
+event result. This also applies when the event has no completed execution. -/
+theorem TimelineSafe.cons (semantics : TimelineSemantics F L V C)
+    (event : EventOf F L V C) (rest : List (EventOf F L V C)) (initial : StorageActionState)
+    (head : ∀ formula, event = .check formula → timelineFormulaHolds semantics formula initial)
+    (tail : ∀ result, TimelineEventExec semantics event initial result →
+      TimelineSafe semantics rest result.state) : TimelineSafe semantics (event :: rest) initial := by
+  intro before formula after events result trace
+  cases before with
+  | nil =>
+    simp only [List.nil_append, List.cons.injEq] at events
+    cases trace
+    exact head formula events.1
+  | cons first following =>
+    simp only [List.cons_append, List.cons.injEq] at events
+    rcases events with ⟨rfl, hRest⟩
+    cases trace with
+    | @cons _ _ _ firstResult restResult hEvent hTrace =>
+      exact tail firstResult hEvent following formula after hRest restResult hTrace
 
 /-- A proof-obligation fold, not an executor: each assumption scopes only the
 remaining checks. It supplies no values, states, transitions or authority. -/
@@ -289,7 +398,7 @@ theorem timelineSafe_of_control_checks
                   exact hChecks ((hFormula _ (Or.inl (by simp)) _ hInitial).mp
                     ⟨_, hEval, hHolds⟩)
               | check => exact hChecks.2
-              | storage | indexedRead | child => exact hChecks
+              | storage | indexedRead | child | childResult | call => exact hChecks
 
 /-- Extract only assumptions actually executed. Stability is explicit; the
 result is not inferred from row membership or a declared effect inventory. -/
@@ -357,6 +466,8 @@ theorem TimelineEventExec.preserves_entryStorage
   | indexedRead hRead =>
       exact (IndexedRegionReadExec.state_effects _ _ _ _ hRead).2.2.1
   | child => rfl
+  | childResult _ hResume => exact (resumeLoop_effects _ _ _ _ hResume).1
+  | call => rfl
 
 theorem TimelineEventExec.preserves_locals
     (semantics : TimelineSemantics FormulaExpr LocationExpr ValueExpr Child)
@@ -364,7 +475,7 @@ theorem TimelineEventExec.preserves_locals
     (initial : StorageActionState)
     (result : TimelineResult)
     (hChildPreserves : ∀ child before after,
-      semantics.childRelation child before after → after.locals = before.locals)
+      semantics.childRelation child before after → after.locals = before.loop.locals)
     (hExec : TimelineEventExec semantics event initial result) :
     result.state.loop.locals = initial.loop.locals := by
   cases hExec with
@@ -376,6 +487,8 @@ theorem TimelineEventExec.preserves_locals
       exact congrArg LoopState.locals
         (IndexedRegionReadExec.state_effects _ _ _ _ hRead).2.1
   | child hRelation => exact hChildPreserves _ _ _ hRelation
+  | childResult _ hResume => exact (resumeLoop_effects _ _ _ _ hResume).2.1
+  | call => rfl
 
 theorem TimelineEventExec.preserves_reads
     (semantics : TimelineSemantics FormulaExpr LocationExpr ValueExpr Child)
@@ -396,6 +509,7 @@ theorem TimelineEventExec.preserves_reads
             initial actionResult hAction
   | indexedRead => exact False.elim hNoRead
   | child => rfl
+  | childResult | call => exact False.elim hNoRead
 
 theorem TimelineEventExec.read_ids
     (semantics : TimelineSemantics FormulaExpr LocationExpr ValueExpr Child)
@@ -422,6 +536,12 @@ theorem TimelineEventExec.read_ids
       simpa [TimelineEvent.readIds] using
         (IndexedRegionReadExec.state_effects _ _ _ _ hRead).2.2.2
   | child => simp [TimelineEvent.readIds]
+  | childResult _ hResume => exact (resumeLoop_effects _ _ _ _ hResume).2.2.2.2.1
+  | call _ _ _ _ hArity _ =>
+      simp only [CallInvocation.resume, List.map_append, List.map_map,
+        TimelineEvent.readIds]
+      congr 1
+      simpa using List.map_fst_zip _ _ (by omega)
 
 theorem TimelineEventExec.preserves_outside
     (semantics : TimelineSemantics FormulaExpr LocationExpr ValueExpr Child)
@@ -442,8 +562,14 @@ theorem TimelineEventExec.preserves_outside
       exact congrArg (fun loop => loop.storage location)
         (IndexedRegionReadExec.state_effects _ _ _ _ hRead).2.1
   | @child child _ following hRelation =>
-      exact (semantics.childFrame child).preservesOutside initial.loop following
+      exact (semantics.childFrame child initial).preservesOutside initial.loop following
         hRelation location hOutside
+  | @childResult child bindings _ following resumed hRelation hResume =>
+      rw [(resumeLoop_effects _ _ _ _ hResume).2.2.1]
+      exact (semantics.childFrame child initial).preservesOutside initial.loop following
+        hRelation location hOutside
+  | call _ _ hRelation _ _ _ =>
+      exact CertifiedCall.preservesOutside _ _ _ hRelation location hOutside
 
 theorem TimelineEventExec.read_writes_false
     (semantics : TimelineSemantics FormulaExpr LocationExpr ValueExpr Child)
@@ -507,7 +633,7 @@ theorem TimelineExec.preserves_locals
     (initial : StorageActionState)
     (result : TimelineResult)
     (hChildPreserves : ∀ child before after,
-      semantics.childRelation child before after → after.locals = before.locals)
+      semantics.childRelation child before after → after.locals = before.loop.locals)
     (hExec : TimelineExec semantics events initial result) :
     result.state.loop.locals = initial.loop.locals := by
   induction hExec with
@@ -631,11 +757,13 @@ def timelineProducesLoopState
     (events : List (EventOf FormulaExpr LocationExpr ValueExpr Child))
     (evalFinalLocals : StorageActionState → Option (List Ora.Integer.Value))
     (initial : StorageActionState)
-    (following : LoopState) : Prop :=
-  ∃ result locals,
+    (following : LoopState)
+    (evalReturn : StorageActionState → Option (Option CallReturn) := fun _ => some none) : Prop :=
+  ∃ result locals returned,
     TimelineExec semantics events initial result ∧
     evalFinalLocals result.state = some locals ∧
-    following = { locals, storage := result.state.loop.storage }
+    evalReturn result.state = some returned ∧
+    following = { locals, storage := result.state.loop.storage, returned }
 
 theorem timelineProducesLoopState_preserves_entry_old
     (semantics : TimelineSemantics FormulaExpr LocationExpr ValueExpr Child)
@@ -649,7 +777,7 @@ theorem timelineProducesLoopState_preserves_entry_old
       TimelineExec semantics events initial result ∧
       result.state.entryStorage = initial.entryStorage ∧
       following.storage = result.state.loop.storage := by
-  rcases hProduces with ⟨result, locals, hExec, hLocals, rfl⟩
+  rcases hProduces with ⟨result, locals, returned, hExec, hLocals, hReturn, rfl⟩
   exact ⟨result, hExec, TimelineExec.preserves_entryStorage semantics events
     initial result hExec, rfl⟩
 
@@ -662,13 +790,15 @@ def timelineEdge
     (entryStorage : StorageState)
     (evalFinalLocals : StorageActionState → Option (List Ora.Integer.Value))
     (target : ControlTarget)
-    (targetAssertion : LoopState → Prop) : Edge LoopState where
+    (targetAssertion : LoopState → Prop)
+    (evalReturn : StorageActionState → Option (Option CallReturn) := fun _ => some none) :
+    Edge LoopState where
   path := fun _ => True
   safe := fun current => TimelineSafe semantics events {
     loop := current, entryStorage := entryStorage
   }
   next := fun current following => timelineProducesLoopState semantics events
-    evalFinalLocals { loop := current, entryStorage := entryStorage } following
+    evalFinalLocals { loop := current, entryStorage := entryStorage } following evalReturn
   target := target
   targetAssertion := targetAssertion
 
@@ -713,7 +843,7 @@ theorem timelineEdge_refinement
     exact hSafety state hInvariant hAbstractInvariant hAbstractSafety
   transition := by
     intro current following _ _ _ hProduces
-    rcases hProduces with ⟨result, locals, hExec, hLocals, rfl⟩
+    rcases hProduces with ⟨result, locals, returned, hExec, hLocals, hReturn, rfl⟩
     exact ⟨hPath current result hExec,
       hNext current result locals hExec hLocals⟩
   targetAssertion := hAssertion

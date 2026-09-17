@@ -318,10 +318,6 @@ theorem StorageFormulaContext.evalFormula_place_eq_old_self
       · intro hHolds
         exact ⟨proposition, rfl, hHolds⟩
 
-def storageValueMatchesTy : Value → TyRef → Bool
-  | .bool _, ty => ty.isBool
-  | .integer value, ty => ty.integerShape? == some value.shape
-
 structure TypedStorageFormula where
   formula : FormulaRef
   ty : TyRef
