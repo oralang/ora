@@ -955,18 +955,27 @@ pub const Adapter = struct {
             if (place.projection_domain != .mapping) return error.UnsupportedPlaceReadTerm;
             return self.selectLoopLocation(.{ .root = place.root, .value_ty = value_ty }, value_info, entry);
         }
-        if (place.keys.len != 1 or place.keys[0] != .parameter) return error.UnsupportedPlaceReadTerm;
-        const id = place.keys[0].parameter;
-        const state = self.loop_state orelse return error.InvalidLoopQuery;
-        const variable = for (state.summary.context_variables) |candidate| {
-            const candidate_id = candidate.id orelse continue;
-            if (obligation.freeVarIdEql(candidate_id, id)) break candidate;
-        } else return error.UnsupportedPlaceReadTerm;
-        const key_info = try typeInfo(variable.ty);
+        if (place.keys.len != 1) return error.UnsupportedPlaceReadTerm;
+        var key_info = u256TypeInfo();
+        const key = switch (place.keys[0]) {
+            .constant => |text| blk: {
+                if (place.projection_domain != .fixed_index or obligation.parseDecimalU256(text) == null) return error.UnsupportedPlaceReadTerm;
+                break :blk try self.integerLiteralForType(text, key_info);
+            },
+            .parameter => |id| blk: {
+                const state = self.loop_state orelse return error.InvalidLoopQuery;
+                const variable = for (state.summary.context_variables) |candidate| {
+                    const candidate_id = candidate.id orelse continue;
+                    if (obligation.freeVarIdEql(candidate_id, id)) break candidate;
+                } else return error.UnsupportedPlaceReadTerm;
+                key_info = try typeInfo(variable.ty);
+                break :blk try self.encodeFreeVariableIdentity(id, variable.ty);
+            },
+            else => return error.UnsupportedPlaceReadTerm,
+        };
         if (place.projection_domain == .fixed_index and !ct.typeInfoIsU256(key_info)) {
             return error.UnsupportedPlaceReadTerm;
         }
-        const key = try self.encodeFreeVariableIdentity(id, variable.ty);
         const resolved = try self.loopProjectedStoreAndKeyFromAst(
             place.root,
             switch (place.projection_domain) {

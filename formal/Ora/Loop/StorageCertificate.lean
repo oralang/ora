@@ -89,6 +89,11 @@ def directStorageResolvePlace
           some { root := place.root }
         else
           none
+    | [.constant text] => do
+        if place.projectionDomain != .fixedIndex then none else do
+          let index ← placeKeyConstantNat? text
+          pure { root := place.root, projections := [.fixedIndex
+            (.integer (Ora.Integer.Value.ofNat (.unsigned .w256) index))] }
     | [.parameter id] => do
         let key ← lookup id
         match place.projectionDomain with

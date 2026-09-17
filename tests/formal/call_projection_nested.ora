@@ -1,0 +1,12 @@
+contract Nested {
+    fn repeat(limit: u256) -> u256 requires limit <= 2 {
+        var i: u256 = 0;
+        while (i < limit) invariant i <= limit {
+            var j: u256 = 0;
+            while (j < 1) invariant j <= 1 { j = j +% 1; }
+            i = i +% 1;
+        }
+        return i;
+    }
+    pub fn run(limit: u256) -> u256 requires limit <= 2 { return repeat(limit); }
+}

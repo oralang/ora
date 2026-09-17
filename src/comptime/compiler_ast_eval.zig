@@ -910,6 +910,12 @@ const ConstEvaluator = struct {
                 };
             },
             .Binary => |binary| blk: {
+                // Scalar operators use one scalar walk, including its cache
+                // population for constant subexpressions of runtime values.
+                if (binary.op != .eq and binary.op != .ne) {
+                    const value = (try self.evalBinaryExpr(binary, use_cache)) orelse break :blk null;
+                    break :blk try self.constValueToCtValue(value);
+                }
                 if (try self.evalExprCtValueImpl(binary.lhs, use_cache, true)) |lhs| {
                     if (try self.evalExprCtValueImpl(binary.rhs, use_cache, true)) |rhs| {
                         break :blk switch (binary.op) {
@@ -943,7 +949,8 @@ const ConstEvaluator = struct {
 
     fn exprUsesConstFallbackForCtValue(self: *ConstEvaluator, expr_id: ast.ExprId) bool {
         return switch (self.file.expression(expr_id).*) {
-            .Call, .Unary, .Comptime => true,
+            .Call, .Unary, .Comptime, .Group => true,
+            .Binary => |binary| binary.op != .eq and binary.op != .ne,
             else => false,
         };
     }
@@ -2665,7 +2672,7 @@ const ConstEvaluator = struct {
     fn abiDecodeErr(self: *ConstEvaluator, err: abi_comptime_decoder.DecodeError) !CtValue {
         const err_value = CtValue{ .adt_val = .{
             .type_id = type_builtin.abi_decode_error_type_id,
-            .variant_id = @intFromEnum(err),
+            .variant_id = @backingInt(err),
             .payload = null,
         } };
         const payload_id = try self.env.heap.allocTupleOwned(try self.allocator.dupe(CtValue, &.{err_value}));

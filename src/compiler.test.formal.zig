@@ -10340,6 +10340,28 @@ test "canonical mapping preservation step rejects absent key inequality" {
     try testing.expect(checked);
 }
 
+test "certified call specifications resolve constant array places with exact old storage" {
+    var result = try collectPackageObligations(testing.allocator, "tests/formal/loop_constant_storage_place.ora");
+    defer result.deinit();
+    try testing.expectEqual(@as(usize, 2), result.set.loop_summaries.len);
+    var context = try z3_verification.Z3Context.init(testing.allocator);
+    defer context.deinit();
+    var adapter = obligation_to_z3.Adapter.init(&context, testing.allocator, result.set);
+    var checked: usize = 0;
+    for (result.set.queries) |query| {
+        if (query.kind != .loop_invariant_step or query.loop_summary_id == null) continue;
+        const summary = for (result.set.loop_summaries) |row| {
+            if (row.id == query.loop_summary_id.?) break row;
+        } else return error.TestUnexpectedResult;
+        try testing.expect(summary.projectionSupported());
+        const verdict = try adapter.checkLoopQueryForRow(query);
+        const preserves = std.mem.eql(u8, summary.owner.statement.function_name, "preserve");
+        try testing.expectEqual(if (preserves) obligation_to_z3.CheckStatus.proved else .disproved, verdict.status);
+        checked += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), checked);
+}
+
 test "canonical fixed-array preservation step rejects absent index inequality" {
     var result = try collectPackageObligations(
         testing.allocator,
@@ -12651,7 +12673,57 @@ test "loop blocker batch long conjunctions retain prefix checks without impossib
         if (edge.target == .successor and edge.safetyFormulaCount() >= 2) checked_exit = true;
     }
     try testing.expect(checked_exit);
+    var storage = try collectPackageObligations(testing.allocator, "tests/formal/loop_compound_storage_invariant.ora");
+    defer storage.deinit();
+    const preserved = storage.set.loop_summaries[0];
+    try testing.expect(preserved.projectionSupported());
+    try testing.expectEqual(@as(usize, 2), preserved.invariant_formulas.len);
+    for (preserved.invariant_formulas) |formula| try testing.expect(formula == .term);
+    var reads: usize = 0;
+    for (preserved.edges) |edge| for (edge.timeline) |event| {
+        if (event.payload == .storage_read) reads += 1;
+    };
+    try testing.expect(reads >= 4);
     try expectRepositoryStorageTacticDeterministic("tests/formal/loop_long_compound_guard.ora", "loop_long_compound_guard", 1);
+}
+
+test "certified call metadata retains private result and error payload signedness" {
+    var compilation = try compileText(
+        \\error Mixed(small: i8, wide: i256, flag: bool);
+        \\fn signedByte(x: i8) -> i8 { return x; }
+        \\fn unsignedByte(x: u8) -> u8 { return x; }
+        \\fn signedWord(x: i256) -> i256 { return x; }
+        \\fn boundedWord(x: InRange<u256, 0, 16>) -> InRange<u256, 0, 16> { return x; }
+        \\fn boolean(x: bool) -> bool { return x; }
+        \\fn empty() { }
+        \\fn fallible(x: i8) -> !i8 | Mixed {
+        \\    if (x < 0) { return Mixed(x, 0, false); }
+        \\    return x;
+        \\}
+    );
+    defer compilation.deinit();
+    const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir.diagnostics.isEmpty());
+    const cases = .{
+        .{ "signedByte", type_builtin.lookupBuiltinById(.i8).comptime_type_id },
+        .{ "unsignedByte", type_builtin.lookupBuiltinById(.u8).comptime_type_id },
+        .{ "signedWord", type_builtin.lookupBuiltinById(.i256).comptime_type_id },
+        .{ "boundedWord", type_builtin.lookupBuiltinById(.u256).comptime_type_id },
+        .{ "boolean", 0 },
+        .{ "empty", 0 },
+        .{ "fallible", type_builtin.lookupBuiltinById(.i8).comptime_type_id },
+    };
+    inline for (cases) |case| {
+        const function = findFunctionByName(hir.module.raw_module, case[0]) orelse return error.TestUnexpectedResult;
+        const attr = mlir.oraOperationGetAttributeByName(function, strRef("ora.return_compiler_type_id"));
+        try testing.expect(!mlir.oraAttributeIsNull(attr));
+        try testing.expectEqual(@as(i64, case[1]), mlir.oraIntegerAttrGetValueSInt(attr));
+    }
+    const declaration = findFirstOpByName(hir.module.raw_module, "ora.error.decl") orelse return error.TestUnexpectedResult;
+    const payload = mlir.oraOperationGetAttributeByName(declaration, strRef("ora.param_compiler_type_ids"));
+    try testing.expectEqual(@as(usize, 3), mlir.oraArrayAttrGetNumElements(payload));
+    const expected = [_]i64{ type_builtin.lookupBuiltinById(.i8).comptime_type_id, type_builtin.lookupBuiltinById(.i256).comptime_type_id, 0 };
+    for (expected, 0..) |id, index| try testing.expectEqual(id, mlir.oraIntegerAttrGetValueSInt(mlir.oraArrayAttrGetElement(payload, index)));
 }
 
 test "refinement header parameter metadata still rejects a mismatched base width" {
@@ -14526,4 +14598,251 @@ test "certified call rows generated module parses and checks shape" {
     defer testing.allocator.free(parsed.stdout);
     defer testing.allocator.free(parsed.stderr);
     try expectExited(parsed, 0);
+}
+
+fn collectCallProjection(allocator: std.mem.Allocator, path: []const u8) !obligation_from_mlir.CollectResult {
+    var compilation = try compilePackage(path);
+    defer compilation.deinit();
+    const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir.diagnostics.isEmpty());
+    return obligation_from_mlir.collect(allocator, hir.module.raw_module, .{ .project_calls = true });
+}
+
+test "G6 call projection covers the diagnosed function bodies" {
+    const names = [_][]const u8{ "leaf", "checked", "storage", "branch", "error", "callee_loop", "prefix", "loop_return", "callee_loop_value", "chain", "checked_branch", "nested", "error_storage" };
+    var complete = true;
+    for (names) |name| {
+        const path = try std.fmt.allocPrint(testing.allocator, "tests/formal/call_projection_{s}.ora", .{name});
+        defer testing.allocator.free(path);
+        var result = try collectCallProjection(testing.allocator, path);
+        defer result.deinit();
+        var valid = !result.set.hasBlockingDiagnostic() and result.set.function_summaries.len >= 2;
+        for (result.set.function_summaries) |row| valid = valid and row.projection_completeness == .complete and row.write_footprint_complete and row.paths.len != 0;
+        result.set.validateIdReferences() catch |err| {
+            std.debug.print("G6 {s}: validation {s}\n", .{ name, @errorName(err) });
+            valid = false;
+        };
+        result.set.validateTermReferences() catch |err| {
+            std.debug.print("G6 {s}: term validation {s}\n", .{ name, @errorName(err) });
+            valid = false;
+        };
+        if (std.mem.eql(u8, name, "prefix")) {
+            // G6 records the prefix call and its result. G7 owns the scoped
+            // entry facts; the existing proof-support validator must reject it.
+            const loop = result.set.loop_summaries[0];
+            try testing.expectEqualSlices(obligation.LoopUnsupportedReason, &.{.loop_header_fact_effect_unsupported}, loop.unsupported_reasons);
+            try testing.expect(loop.preheader_projection_complete);
+            var prefix_calls: usize = 0;
+            for (loop.preheader_timeline) |event| if (event.payload == .call) {
+                prefix_calls += 1;
+                try testing.expectEqual(@as(usize, 1), event.payload.call.arguments.len);
+                try testing.expectEqual(@as(usize, 1), event.payload.call.results.len);
+            };
+            try testing.expectEqual(@as(usize, 1), prefix_calls);
+            var requires: usize = 0;
+            for (result.set.function_summaries) |row| requires += row.assumption_ids.len;
+            try testing.expectEqual(@as(usize, 1), requires);
+            try testing.expectError(error.InvalidDependency, obligation_to_lean.validateCallDependencyDigests(result.set));
+        } else try obligation_to_lean.validateCallDependencyDigests(result.set);
+        if (!valid) {
+            std.debug.print("G6 {s}: functions={d}\n", .{ name, result.set.function_summaries.len });
+            for (result.set.diagnostics) |diagnostic| std.debug.print("  {s}\n", .{diagnostic.message});
+            for (result.set.loop_summaries) |loop| std.debug.print("  loop {d}: {any}, {any}\n", .{ loop.id, loop.projection_completeness, loop.unsupported_reasons });
+        }
+        complete = complete and valid;
+        if (valid) try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_relation_unsupported }, result.set.artifactDecision());
+    }
+    try testing.expect(complete);
+}
+
+test "G6 call projection mutations invalidate the enclosing call digest" {
+    const Mutation = enum { call, write, checkpoint, arm, order };
+    const cases = [_]struct { name: []const u8, mutation: Mutation }{
+        .{ .name = "chain", .mutation = .call },
+        .{ .name = "storage", .mutation = .write },
+        .{ .name = "checked", .mutation = .checkpoint },
+        .{ .name = "branch", .mutation = .arm },
+        .{ .name = "checked", .mutation = .order },
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    for (cases) |case| {
+        errdefer std.debug.print("G6 mutation {s} {any}\n", .{ case.name, case.mutation });
+        const file = try std.fmt.allocPrint(allocator, "tests/formal/call_projection_{s}.ora", .{case.name});
+        var result = try collectCallProjection(testing.allocator, file);
+        defer result.deinit();
+        try obligation_to_lean.validateCallDependencyDigests(result.set);
+        var changed = result.set;
+        const rows = try allocator.dupe(obligation.FunctionSummaryRow, result.set.function_summaries);
+        changed.function_summaries = rows;
+        var mutated = false;
+        outer: for (rows) |*row| {
+            if (case.mutation == .arm) {
+                if (row.paths.len < 2) continue;
+                row.paths = row.paths[0 .. row.paths.len - 1];
+                mutated = true;
+                break;
+            }
+            const paths = try allocator.dupe(obligation.FunctionPathRow, row.paths);
+            row.paths = paths;
+            for (paths) |*path| {
+                var matching: std.ArrayList(usize) = .empty;
+                for (path.timeline, 0..) |event, index| {
+                    const matches = switch (case.mutation) {
+                        .call => event.payload == .call,
+                        .write => event.payload == .storage_write,
+                        .checkpoint, .order => event.payload == .safety_checkpoint,
+                        .arm => unreachable,
+                    };
+                    if (matches) try matching.append(allocator, index);
+                }
+                if (matching.items.len < @as(usize, if (case.mutation == .order) 2 else 1)) continue;
+                var events = try allocator.dupe(obligation.LoopTimelineEvent, path.timeline);
+                if (case.mutation == .order) {
+                    std.mem.swap(obligation.LoopTimelineEvent, &events[matching.items[0]], &events[matching.items[1]]);
+                } else {
+                    const removed = matching.items[0];
+                    std.mem.copyForwards(obligation.LoopTimelineEvent, events[removed..], events[removed + 1 ..]);
+                    events = events[0 .. events.len - 1];
+                }
+                for (events, 0..) |*event, index| event.id = @intCast(index);
+                path.timeline = events;
+                mutated = true;
+                break :outer;
+            }
+        }
+        try testing.expect(mutated);
+        try testing.expectError(error.StaleCallDependency, obligation_to_lean.validateCallDependencyDigests(changed));
+    }
+}
+
+test "G6 call projection missing loop exports cannot authorize an artifact" {
+    var result = try collectCallProjection(testing.allocator, "tests/formal/call_projection_callee_loop_value.ora");
+    defer result.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var changed = result.set;
+    const rows = try allocator.dupe(obligation.FunctionSummaryRow, result.set.function_summaries);
+    changed.function_summaries = rows;
+    var mutated = false;
+    outer: for (rows) |*row| {
+        const paths = try allocator.dupe(obligation.FunctionPathRow, row.paths);
+        row.paths = paths;
+        for (paths) |*path| {
+            const events = try allocator.dupe(obligation.LoopTimelineEvent, path.timeline);
+            path.timeline = events;
+            for (events) |*event| if (event.payload == .summary_dependency and event.payload.summary_dependency.result_bindings.?.len != 0) {
+                event.payload.summary_dependency.result_bindings = &.{};
+                mutated = true;
+                break :outer;
+            };
+        }
+    }
+    try testing.expect(mutated);
+    try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .invalid_dependency }, changed.artifactDecision());
+}
+
+test "G6 call projection serializes deterministic Lean rows" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var combined = std.Io.Writer.Allocating.init(allocator);
+    try combined.writer.writeAll("import Ora.Obligation.Theorems\nimport Ora.Loop.StorageCertificate\n");
+    const cases = [_][]const u8{ "branch", "checked_branch", "error_storage", "loop_return", "callee_loop_value", "chain" };
+    for (cases, 0..) |name, index| {
+        const file = try std.fmt.allocPrint(allocator, "tests/formal/call_projection_{s}.ora", .{name});
+        var first = try collectCallProjection(testing.allocator, file);
+        defer first.deinit();
+        var second = try collectCallProjection(testing.allocator, file);
+        defer second.deinit();
+        for (first.set.function_summaries) |row| try testing.expectEqualSlices(
+            u8,
+            &(try obligation_to_lean.functionVcSha256(first.set, row.id)),
+            &(try obligation_to_lean.functionVcSha256(second.set, row.id)),
+        );
+        for (first.set.loop_summaries) |row| try testing.expectEqualSlices(
+            u8,
+            &(try obligation_to_lean.loopVcSha256(first.set, row.id)),
+            &(try obligation_to_lean.loopVcSha256(second.set, row.id)),
+        );
+        var source = std.Io.Writer.Allocating.init(allocator);
+        const namespace = try std.fmt.allocPrint(allocator, "Ora.Generated.G6.case_{d}", .{index});
+        // G6 serializes the projected rows and their exact loop queries.
+        // Legacy function obligations remain in first.set and keep their gate;
+        // their call-result consumption is a later gate, not a Lean premise.
+        var loop_queries: std.ArrayList(obligation.VerificationQuery) = .empty;
+        for (first.set.queries) |query| if (query.loop_summary_id != null) try loop_queries.append(allocator, query);
+        const rows: obligation.ObligationSet = .{ .terms = first.set.terms, .assumptions = first.set.assumptions, .queries = loop_queries.items, .loop_summaries = first.set.loop_summaries, .function_summaries = first.set.function_summaries };
+        try obligation_to_lean.writeModule(&source.writer, rows, .{ .namespace = namespace });
+        var lines = std.mem.splitScalar(u8, source.written(), '\n');
+        while (lines.next()) |line| if (!std.mem.startsWith(u8, line, "import ")) {
+            try combined.writer.print("{s}\n", .{line});
+        };
+        try combined.writer.print("example : {s}.emittedFunctionSummaries.all Ora.Loop.FunctionSummaryRow.shapeSupported = true := by decide\n", .{namespace});
+    }
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try pathFromTmpAlloc(allocator, tmp, "G6ProjectedRows.lean");
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = combined.written() });
+    const checked = try runLeanFileForTest(testing.allocator, path);
+    defer testing.allocator.free(checked.stdout);
+    defer testing.allocator.free(checked.stderr);
+    try expectExited(checked, 0);
+}
+
+test "G6 call projection rejects uninitialized private loads inside a loop" {
+    const h = createContext();
+    defer destroyContext(h);
+    const body =
+        \\module {
+        \\  func.func @repeat() attributes {ora.return_compiler_type_id = 0 : i64} {
+        \\    %zero = arith.constant 0 : i256
+        \\    %one = arith.constant 1 : i256
+        \\    %result = scf.while (%i = %zero) : (i256) -> i256 {
+        \\      %guard = arith.cmpi ult, %i, %one : i256
+        \\      scf.condition(%guard) %i : i256
+        \\    } do {
+        \\    ^bb0(%i: i256):
+        \\      %inv = arith.cmpi ule, %i, %one : i256
+        \\      ora.invariant %inv : i1
+        \\      %slot = memref.alloca() : memref<i256>
+        \\      memref.store %i, %slot[] : memref<i256>
+        \\      %read = memref.load %slot[] : memref<i256>
+        \\      %next = ora.add_wrapping %i, %one {ora.integer_signed = false} : i256, i256 -> i256
+        \\      scf.yield %next : i256
+        \\    } attributes {ora.loop_control_manifest = [], ora.result_integer_signed_0 = false, ora.result_name_0 = "i"} loc("ora.stmt.3"("ora.origin_stmt.3"("g6-slot.ora":3:1)))
+        \\    func.return
+        \\  }
+        \\  func.func @caller() attributes {ora.return_compiler_type_id = 0 : i64} { func.call @repeat() : () -> ()
+        \\    func.return }
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var good = true;
+    for ([_]bool{ false, true }) |boolean| {
+        const typed = if (boolean) try std.mem.replaceOwned(u8, arena.allocator(), body, "memref<i256>", "memref<i1>") else body;
+        const initialized = if (boolean) try std.mem.replaceOwned(u8, arena.allocator(), typed, "memref.store %i,", "memref.store %inv,") else typed;
+        const store = if (boolean) "memref.store %inv, %slot[] : memref<i1>" else "memref.store %i, %slot[] : memref<i256>";
+        const uninitialized = try std.mem.replaceOwned(u8, arena.allocator(), initialized, store, "");
+        const baseline_module = try parseModule(h.ctx, initialized);
+        defer mlir.oraModuleDestroy(baseline_module);
+        var baseline = try obligation_from_mlir.collect(testing.allocator, baseline_module, .{ .project_calls = true });
+        defer baseline.deinit();
+        try testing.expect(!baseline.set.hasBlockingDiagnostic());
+        try baseline.set.validateIdReferences();
+        try testing.expect(baseline.set.loop_summaries[0].projectionSupported());
+        const module = try parseModule(h.ctx, uninitialized);
+        defer mlir.oraModuleDestroy(module);
+        if (obligation_from_mlir.collect(testing.allocator, module, .{ .project_calls = true })) |collected| {
+            var result = collected;
+            defer result.deinit();
+            const rejected = result.set.hasBlockingDiagnostic() or !result.set.loop_summaries[0].projectionSupported();
+            if (!rejected) std.debug.print("G6 uninitialized loop slot remains accepted: {s}\n", .{if (boolean) "bool" else "u256"});
+            good = good and rejected;
+        } else |err| try testing.expectEqual(error.CallPrivateSlotUninitialized, err);
+    }
+    try testing.expect(good);
 }

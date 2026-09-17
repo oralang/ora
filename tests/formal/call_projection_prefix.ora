@@ -1,0 +1,8 @@
+contract Prefix {
+    fn identity(x: u256) -> u256 { return x; }
+    pub fn run(limit: u256) requires limit <= 2 {
+        let bound: u256 = identity(limit);
+        var i: u256 = 0;
+        while (i < bound) invariant i <= bound { i = i +% 1; }
+    }
+}

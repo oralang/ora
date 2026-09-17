@@ -9,6 +9,8 @@
 #define ORA_DIALECT_C_H
 
 #include "mlir-c/IR.h"
+#include "mlir-c/BuiltinAttributes.h"
+#include "mlir-c/BuiltinTypes.h"
 #include "mlir-c/Pass.h"
 #include "mlir-c/Support.h"
 #include <stdint.h>

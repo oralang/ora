@@ -1,0 +1,10 @@
+contract Branch {
+    fn select(x: u256) -> u256 {
+        if (x == 0) { return 7; }
+        match (x) { 1 => { return 9; } _ => { return 11; } }
+    }
+    pub fn run(input: u256) {
+        var i: u256 = 0;
+        while (i < 1) invariant i <= 1 { let selected: u256 = select(input); i = i +% 1; }
+    }
+}

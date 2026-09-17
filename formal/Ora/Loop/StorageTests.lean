@@ -484,6 +484,26 @@ def fixedDomainTestPlace (key : PlaceKey) : PlaceRef :=
   { root := "values", region := .storage, projectionDomain := .fixedIndex,
     keys := [key] }
 
+example : directStorageResolvePlace (fun _ => none)
+    (fixedDomainTestPlace (.constant "15")) = some
+      (fixedTestLocation "values" (.integer (Ora.Integer.Value.ofNat (.unsigned .w256) 15))) := by decide
+
+example : directStorageResolvePlace (fun _ => none)
+    (mappingDomainTestPlace (.constant "15")) = none := by decide
+
+example : (["", "-1", "+1", "0x1", "1_0"].map
+      (fun text => (directStorageResolvePlace (fun _ => none)
+        (fixedDomainTestPlace (.constant text))).isNone)).all id = true := by decide
+
+example : directStorageResolvePlace (fun _ => none)
+    (fixedDomainTestPlace (.constant
+      "115792089237316195423570985008687907853269984665640564039457584007913129639936")) = none := by decide
+
+example : directStorageResolvePlace (fun _ => none)
+    (fixedDomainTestPlace (.constant
+      "115792089237316195423570985008687907853269984665640564039457584007913129639935")) = some
+      (fixedTestLocation "values" (.integer (Ora.Integer.Value.ofNat (.unsigned .w256) (2^256 - 1)))) := by decide
+
 example :
     (mappingDomainTestPlace (.constant "1") ==
       fixedDomainTestPlace (.constant "1")) = false := by

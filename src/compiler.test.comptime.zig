@@ -2927,6 +2927,62 @@ test "compiler raw const eval leaves recursive comptime call unresolved under lo
     try testing.expect(consteval.diagnostics.items.items.len >= 1);
 }
 
+test "compiler const eval runtime conjunction does not exhaust a later constant budget" {
+    for ([_]bool{ false, true }) |grouped| {
+        var source_text: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer source_text.deinit();
+        try source_text.writer.writeAll("pub fn bounded(x: u256) -> bool { return ");
+        if (grouped) for (0..24) |_| try source_text.writer.writeByte('(');
+        for (0..24) |index| {
+            if (index != 0) try source_text.writer.writeAll(" && ");
+            try source_text.writer.print("x <= {d}", .{100 + index});
+            if (grouped) try source_text.writer.writeByte(')');
+        }
+        try source_text.writer.writeAll("; }\ncomptime const SENTINEL: u256 = 7;\n");
+        var compilation = try compileText(source_text.written());
+        defer compilation.deinit();
+        const module = compilation.db.sources.module(compilation.root_module_id);
+        const file = try compilation.db.astFile(module.file_id);
+        var evaluated = try compiler.comptime_eval.constEval(testing.allocator, file, .{
+            .config = .{ .max_steps = 1000 },
+        });
+        defer evaluated.deinit();
+        try testing.expect(evaluated.diagnostics.isEmpty());
+        const sentinel = file.item(file.root_items[1]).Constant;
+        try testing.expectEqual(@as(i128, 7), try evaluated.values[sentinel.value.index()].?.integer.toInt(i128));
+        const function = file.item(file.root_items[0]).Function;
+        const returned = file.statement(file.body(function.body).statements[0]).Return.value.?;
+        try testing.expect(evaluated.values[returned.index()] == null);
+    }
+}
+
+test "compiler const eval runtime storage shift retains its typed operands" {
+    var compilation = try compileText(
+        \\contract Bits {
+        \\    storage var keys: u256;
+        \\    pub fn shift(key: u256) requires(key < 256) {
+        \\        keys = keys | (@cast(u256, 1) << key);
+        \\    }
+        \\}
+    );
+    defer compilation.deinit();
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const file = try compilation.db.astFile(module.file_id);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+    for (file.expressions) |expression| {
+        if (expression != .Binary or expression.Binary.op != .shl) continue;
+        const shift = expression.Binary;
+        try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.exprType(shift.lhs).kind());
+        try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.exprType(shift.rhs).kind());
+    }
+    const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir.diagnostics.isEmpty());
+    const hir_text = try hir.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "checked shift amount out of range"));
+}
+
 test "compiler const eval reports explicit step-limit diagnostics" {
     const source_text =
         \\pub fn sum() -> u256 {

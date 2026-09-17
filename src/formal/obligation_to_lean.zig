@@ -250,55 +250,105 @@ fn writeFunctionSummaryDefinitions(writer: anytype, set: obligation.ObligationSe
 /// Verify the mixed function/loop DAG before trusting stored dependency hashes.
 /// A function containing a loop and that loop calling the function is a cycle.
 pub fn validateCallDependencyDigests(set: obligation.ObligationSet) !void {
+    return visitCallDependencies(set, null);
+}
+
+/// Only the collector calls this with its owned, mutable rows and timelines.
+/// Reuse the checked DAG traversal; bind after all terms and bodies are final.
+pub fn bindCollectedCallDependencies(allocator: std.mem.Allocator, set: obligation.ObligationSet) !void {
+    try visitCallDependencies(set, allocator);
+    for (@constCast(set.queries)) |*query| if (query.loop_summary_id) |id| {
+        query.loop_vc_sha256 = try loopVcSha256(set, id);
+        query.artifact_policy = .blocks_verified_artifacts;
+        if (query.kind == .loop_induction) query.proof_requirement = .lean_certificate;
+    };
+    // Binding is provisional until the ordinary validators accept every row.
+    try set.validateTermReferences();
+    try set.validateIdReferences();
+}
+
+fn visitCallDependencies(set: obligation.ObligationSet, binding: ?std.mem.Allocator) !void {
     if (set.function_summaries.len == 0) return;
     const marks = try std.heap.page_allocator.alloc(u2, set.function_summaries.len + set.loop_summaries.len);
     defer std.heap.page_allocator.free(marks);
     @memset(marks, 0);
-    for (0..marks.len) |node| try visitCertificateDependencies(set, marks, node);
+    for (0..marks.len) |node| try visitCertificateDependencies(set, marks, node, binding);
 }
 
-fn visitCertificateDependencies(set: obligation.ObligationSet, marks: []u2, node: usize) anyerror!void {
+fn visitCertificateDependencies(set: obligation.ObligationSet, marks: []u2, node: usize, binding: ?std.mem.Allocator) anyerror!void {
     if (marks[node] == 1) return error.CyclicCallDependency;
     if (marks[node] == 2) return;
     marks[node] = 1;
     if (node < set.function_summaries.len) {
-        for (set.function_summaries[node].paths) |path| try visitTimelineDependencies(set, marks, path.timeline);
+        for (set.function_summaries[node].paths) |path| try visitTimelineDependencies(set, marks, path.timeline, binding);
+        if (binding) |allocator| {
+            const row = &@constCast(set.function_summaries)[node];
+            var footprint: std.ArrayList(obligation.PlaceRef) = .empty;
+            for (row.paths) |path| try appendTimelineFootprint(allocator, set, path.timeline, &footprint);
+            row.write_footprint = try footprint.toOwnedSlice(allocator);
+            row.write_footprint_complete = row.projection_completeness == .complete;
+        }
     } else {
         const row = set.loop_summaries[node - set.function_summaries.len];
-        try visitTimelineDependencies(set, marks, row.preheader_timeline);
-        for (row.edges) |edge| try visitTimelineDependencies(set, marks, edge.timeline);
+        try visitTimelineDependencies(set, marks, row.preheader_timeline, binding);
+        for (row.edges) |edge| try visitTimelineDependencies(set, marks, edge.timeline, binding);
     }
     marks[node] = 2;
 }
 
-fn visitTimelineDependencies(set: obligation.ObligationSet, marks: []u2, events: []const obligation.LoopTimelineEvent) !void {
-    for (events) |event| switch (event.payload) {
+fn visitTimelineDependencies(set: obligation.ObligationSet, marks: []u2, events: []const obligation.LoopTimelineEvent, binding: ?std.mem.Allocator) !void {
+    for (events, 0..) |event, event_index| switch (event.payload) {
         .call => |invocation| {
             const node = for (set.function_summaries, 0..) |row, index| {
                 if (row.id == invocation.callee_summary_id) break index;
             } else return error.InvalidDependency;
             const callee = set.function_summaries[node];
-            if (callee.projection_completeness != .complete or !callee.write_footprint_complete) return error.InvalidDependency;
-            try visitCertificateDependencies(set, marks, node);
+            if (callee.projection_completeness != .complete or (binding == null and !callee.write_footprint_complete)) return error.InvalidDependency;
+            try visitCertificateDependencies(set, marks, node, binding);
             const digest = try functionVcSha256(set, invocation.callee_summary_id);
-            if (!std.mem.eql(u8, &digest, &invocation.callee_vc_sha256)) return error.StaleCallDependency;
+            if (binding != null) @constCast(events)[event_index].payload.call.callee_vc_sha256 = digest else if (!std.mem.eql(u8, &digest, &invocation.callee_vc_sha256)) return error.StaleCallDependency;
         },
         .summary_dependency => |dependency| {
             const node = for (set.loop_summaries, 0..) |row, index| {
                 if (row.id == dependency.summary_id) break index;
             } else return error.InvalidDependency;
             const child = set.loop_summaries[node];
-            if (!child.projectionSupported()) return error.InvalidDependency;
+            if (binding == null and !child.projectionSupported()) return error.InvalidDependency;
+            if (child.projection_completeness != .complete) return error.InvalidDependency;
             const target_exists = for (child.edges) |edge| {
                 if (edge.target == dependency.target) break true;
             } else false;
             if (!target_exists) return error.InvalidDependency;
-            try visitCertificateDependencies(set, marks, set.function_summaries.len + node);
+            try visitCertificateDependencies(set, marks, set.function_summaries.len + node, binding);
             const digest = try loopVcSha256(set, dependency.summary_id);
-            if (!std.mem.eql(u8, &digest, &dependency.loop_vc_sha256)) return error.StaleCallDependency;
+            if (binding) |allocator| {
+                const bound = &@constCast(events)[event_index].payload.summary_dependency;
+                var footprint: std.ArrayList(obligation.PlaceRef) = .empty;
+                for (child.edges) |edge| try appendTimelineFootprint(allocator, set, edge.timeline, &footprint);
+                bound.write_footprint = try footprint.toOwnedSlice(allocator);
+                bound.write_footprint_complete = true;
+                bound.loop_vc_sha256 = digest;
+            } else if (!std.mem.eql(u8, &digest, &dependency.loop_vc_sha256)) return error.StaleCallDependency;
         },
         else => {},
     };
+}
+
+fn appendTimelineFootprint(allocator: std.mem.Allocator, set: obligation.ObligationSet, events: []const obligation.LoopTimelineEvent, footprint: *std.ArrayList(obligation.PlaceRef)) !void {
+    for (events) |event| {
+        const places: []const obligation.PlaceRef = switch (event.payload) {
+            .storage_write => |write| &.{.{ .region = .storage, .root = write.location.root }},
+            .call => |call| (obligation.findById(set.function_summaries, call.callee_summary_id) orelse return error.InvalidDependency).write_footprint,
+            .summary_dependency => |child| child.write_footprint,
+            else => &.{},
+        };
+        for (places) |place| {
+            const present = for (footprint.items) |previous| {
+                if (std.mem.eql(u8, previous.root, place.root)) break true;
+            } else false;
+            if (!present) try footprint.append(allocator, .{ .region = .storage, .root = place.root });
+        }
+    }
 }
 
 /// Deterministic identity for the exact LoopVC proof input. The complete term

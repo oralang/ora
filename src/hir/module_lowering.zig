@@ -815,15 +815,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                         resolved[index]
                     else
                         self.typecheck.pattern_types[parameter.pattern.index()].type;
-                    const base_type = support.unwrapRefinementSemaType(param_type);
-                    const compiler_type_id: u32 = switch (base_type) {
-                        .integer => |integer| if (integer.builtinSpec()) |spec| spec.comptime_type_id else 0,
-                        else => 0,
-                    };
-                    param_type_id_attrs[index] = mlir.oraIntegerAttrCreateI64FromType(
-                        reprIntegerType(self.context),
-                        @intCast(compiler_type_id),
-                    );
+                    param_type_id_attrs[index] = @This().formalIntegerTypeAttr(self, param_type);
                 }
                 mlir.oraOperationSetAttributeByName(
                     op,
@@ -842,6 +834,13 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 );
             }
 
+            const semantic_return = concrete_return_type orelse self.typecheck.body_types[function.body.index()];
+            const payload_type = switch (semantic_return) {
+                .error_union => |error_union| error_union.payload_type.*,
+                else => semantic_return,
+            };
+            mlir.oraOperationSetAttributeByName(op, strRef("ora.return_compiler_type_id"), @This().formalIntegerTypeAttr(self, payload_type));
+
             if (return_type != null and self.errorUnionRequiresWideCarrier(concrete_return_type orelse self.typecheck.body_types[function.body.index()])) {
                 mlir.oraOperationSetAttributeByName(op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.context, true));
             }
@@ -856,6 +855,14 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             var function_lowerer = FunctionLowerer.init(self, item_id, specialized_function, op, return_type);
             function_lowerer.extra_verification_clauses = try @This().traitVerificationClausesForImplMethod(self, item_id);
             try function_lowerer.lower();
+        }
+
+        fn formalIntegerTypeAttr(self: *Lowerer, ty: sema.Type) mlir.MlirAttribute {
+            const id: u32 = switch (support.unwrapRefinementSemaType(ty)) {
+                .integer => |integer| if (integer.builtinSpec()) |spec| spec.comptime_type_id else 0,
+                else => 0,
+            };
+            return mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.context), @intCast(id));
         }
 
         fn attachFormalSourceExpansionAttrs(
@@ -1913,6 +1920,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             if (error_decl.parameters.len > 0) {
                 const param_names = try self.allocator.alloc(mlir.MlirAttribute, error_decl.parameters.len);
                 const param_type_attrs = try self.allocator.alloc(mlir.MlirAttribute, error_decl.parameters.len);
+                const param_type_ids = try self.allocator.alloc(mlir.MlirAttribute, error_decl.parameters.len);
+                defer self.allocator.free(param_type_ids);
                 for (error_decl.parameters, 0..) |param, index| {
                     const pattern = self.file.pattern(param.pattern).*;
                     const param_name = switch (pattern) {
@@ -1921,9 +1930,11 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     };
                     param_names[index] = mlir.oraStringAttrCreate(self.context, strRef(param_name));
                     param_type_attrs[index] = mlir.oraTypeAttrCreateFromType(self.lowerTypeExpr(param.type_expr));
+                    param_type_ids[index] = @This().formalIntegerTypeAttr(self, param_types[index]);
                 }
                 try attrs.append(self.allocator, mlir.oraNamedAttributeGet(identifier(self.context, "ora.param_names"), mlir.oraArrayAttrCreate(self.context, @intCast(param_names.len), param_names.ptr)));
                 try attrs.append(self.allocator, mlir.oraNamedAttributeGet(identifier(self.context, "ora.param_types"), mlir.oraArrayAttrCreate(self.context, @intCast(param_type_attrs.len), param_type_attrs.ptr)));
+                try attrs.append(self.allocator, mlir.oraNamedAttributeGet(identifier(self.context, "ora.param_compiler_type_ids"), mlir.oraArrayAttrCreate(self.context, @intCast(param_type_ids.len), param_type_ids.ptr)));
             }
 
             const op = mlir.oraErrorDeclOpCreate(
