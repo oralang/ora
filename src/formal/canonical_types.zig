@@ -120,6 +120,8 @@ pub const EncodeError = std.mem.Allocator.Error || error{
     ExpectedBool,
     InvalidCharacter,
     InvalidDependency,
+    InvalidFunctionShape,
+    InvalidCallSignature,
     InvalidRefinementArity,
     InvalidTermReference,
     InvalidTimelineReadReference,

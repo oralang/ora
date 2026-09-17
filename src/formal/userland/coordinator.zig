@@ -703,6 +703,7 @@ fn collectLoopSummaryFreeVars(
     for (summary.invariant_formulas) |formula| try set.collectFormulaFreeVars(allocator, formula, ids);
     for (summary.edges) |edge| {
         for (edge.timeline) |event| switch (event.payload) {
+            .call => return error.UnsupportedLoopCall,
             .path_assumption, .safety_checkpoint => |formulas| for (formulas.formulas) |formula| {
                 try set.collectFormulaFreeVars(allocator, formula.formula, ids);
             },
@@ -889,6 +890,7 @@ const AutomaticLoopProofReason = enum {
     automatic_query_shape_unsupported,
     automatic_assumptions_require_external_certificate,
     automatic_nested_summary_requires_external_certificate,
+    automatic_call_relation_unsupported,
     automatic_storage_timeline_requires_external_certificate,
     loop_indexed_region_read_formula_unreviewed,
     automatic_control_shape_unsupported,
@@ -1383,6 +1385,7 @@ fn automaticLoopPlan(
         }
         var dependency_count: usize = 0;
         for (edge.timeline) |event| switch (event.payload) {
+            .call => return .{ .unsupported = .automatic_call_relation_unsupported },
             .summary_dependency => |dependency| {
                 dependency_count += 1;
                 if (dependency_count > 1) return .{
@@ -1695,6 +1698,7 @@ fn markAutomaticSummaryClosure(
     for (summary.invariant_formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
     for (summary.edges) |edge| {
         for (edge.timeline) |event| switch (event.payload) {
+            .call => return error.UnsupportedLoopCall,
             .path_assumption, .safety_checkpoint => |formulas| for (formulas.formulas) |formula| {
                 try markAutomaticFormulaClosure(set, formula.formula, marked);
             },
@@ -1858,6 +1862,7 @@ fn projectionForQuery(set: obligation.ObligationSet, query: obligation.Verificat
                 },
                 .storage_write => |write| summary.addFormula(write.value.formula),
                 .indexed_region_read => |read| summary.addFormula(read.index.formula),
+                .call => |invocation| for (invocation.arguments) |argument| summary.addFormula(argument.value.formula),
                 .storage_read, .summary_dependency => {},
             };
             for (edge.target_formulas) |formula| summary.addFormula(formula);

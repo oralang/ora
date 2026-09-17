@@ -82,6 +82,13 @@ const cases = [_]Mutation{
 
 const TimelineMutation = enum {
     supported,
+    child_results,
+    child_results_empty,
+    child_results_type,
+    child_results_parameter,
+    child_results_previous,
+    child_results_duplicate,
+    child_results_index,
     timeline_missing,
     event_order_invalid,
     event_identity_missing,
@@ -120,6 +127,69 @@ const IndexedRegionMutation = enum {
     index_read_foreign,
     index_read_forward,
 };
+
+const CallMutation = enum {
+    supported,
+    result_duplicate,
+    result_alias_parameter,
+    result_forward,
+    result_foreign,
+    result_index,
+    argument_type,
+    result_type,
+    empty_digest,
+    two_results,
+    void_result,
+};
+
+fn callReason(mutation: CallMutation) ?obligation.LoopUnsupportedReason {
+    const result_id: obligation.FreeVarId = .{ .file_id = 10, .pattern_id = 90 };
+    const second_id: obligation.FreeVarId = .{ .file_id = 10, .pattern_id = 91 };
+    const b: obligation.TypeRef = .{ .spelling = "bool" };
+    const value: obligation.LoopFormulaExpr = .{ .formula = .{ .term = 1 }, .read_results = &.{result_id} };
+    var results = [_]obligation.LoopVariable{
+        .{ .index = 0, .id = result_id, .ty = b }, .{ .index = 1, .id = second_id, .ty = b },
+    };
+    var arguments = [_]obligation.LoopTypedFormula{.{ .value = .{ .formula = .{ .term = 1 } }, .ty = b }};
+    switch (mutation) {
+        .result_duplicate => results[1].id = result_id,
+        .result_alias_parameter => results[0].id = loop_id,
+        .result_forward => arguments[0].value = value,
+        .result_foreign => arguments[0].value.read_results = &.{other_id},
+        .result_index => results[0].index = 1,
+        .argument_type => arguments[0].ty = .{ .spelling = "" },
+        .result_type => results[0].ty = .{ .spelling = "" },
+        else => {},
+    }
+    const result_count: usize = switch (mutation) {
+        .two_results, .result_duplicate => 2,
+        .void_result => 0,
+        else => 1,
+    };
+    const events = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "call",
+        .payload = .{ .call = .{
+            .callee_summary_id = 1,
+            .callee_vc_sha256 = @splat(if (mutation == .empty_digest) 0 else 0x11),
+            .arguments = &arguments,
+            .outcome = .success,
+            .results = results[0..result_count],
+        } },
+    }};
+    const summary: obligation.LoopSummaryRow = .{
+        .id = 100,
+        .owner = .{ .function = .{ .name = "run" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .loop_source_op_id = 0,
+        .loop_kind = .scf_while,
+        .context_variables = &.{.{ .index = 0, .id = loop_id, .ty = b }},
+        .preheader_timeline = &events,
+    };
+    return summary.preheaderTimelineValidationReason();
+}
 
 const indexed_region_cases = std.meta.tags(IndexedRegionMutation);
 
@@ -513,8 +583,20 @@ fn timelineReason(mutation: TimelineMutation) ?obligation.LoopUnsupportedReason 
         dependency_event,
     };
     var timeline_slice: []const obligation.LoopTimelineEvent = &timeline;
+    var results = [_]obligation.LoopVariable{
+        .{ .index = 0, .id = foreign_id, .ty = ty_u256 },
+        .{ .index = 1, .id = .{ .file_id = 10, .pattern_id = 92 }, .ty = ty_u256 },
+    };
     switch (mutation) {
         .supported => {},
+        .child_results, .child_results_empty, .child_results_type, .child_results_parameter, .child_results_previous, .child_results_duplicate, .child_results_index => {
+            if (mutation == .child_results_type) results[0].ty = .{ .spelling = "" };
+            if (mutation == .child_results_parameter) results[0].id = loop_id;
+            if (mutation == .child_results_previous) results[0].id = read_id;
+            if (mutation == .child_results_duplicate) results[1].id = results[0].id;
+            if (mutation == .child_results_index) results[1].index = 0;
+            timeline[4].payload.summary_dependency.result_bindings = results[0..if (mutation == .child_results_empty) 0 else 2];
+        },
         .timeline_missing => timeline_slice = &.{},
         .event_order_invalid => timeline[1].id = 7,
         .event_identity_missing => timeline[1].structural_key = "",
@@ -901,6 +983,15 @@ pub fn main(init: std.process.Init) !void {
             try writeLeanString(writer, "");
         }
         try writer.writeAll(if (index + 1 == timeline_cases.len) ")\n" else "),\n");
+    }
+    try writer.writeAll("]\n\ndef callTimelineValidationRows : List (String × String) := [\n");
+    for (std.meta.tags(CallMutation), 0..) |mutation, index| {
+        if (index != 0) try writer.writeAll(",\n");
+        try writer.writeAll("  (");
+        try writeLeanString(writer, @tagName(mutation));
+        try writer.writeAll(", ");
+        try writeLeanString(writer, if (callReason(mutation)) |reason| @tagName(reason) else "");
+        try writer.writeByte(')');
     }
     try writer.writeAll("]\n\ndef loopPreheaderValidationRows : List (String × String) := [\n");
     for (preheader_cases, 0..) |mutation, index| {

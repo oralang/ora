@@ -8515,7 +8515,7 @@ test "formal obligation MLIR adapter emits evidence-backed frame for parameter d
 
     const dump = try dumpManifestToOwnedString(testing.allocator, result.set);
     defer testing.allocator.free(dump);
-    try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"schema_version\":8"));
+    try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"schema_version\":9"));
     try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"relation\":\"read_preserved_by_key_evidence\""));
     try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"evidence\":[{\"kind\":\"free_var_disequality\""));
     try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"key_index\":0"));
@@ -9475,13 +9475,13 @@ test "formal report coverage summarizes representative MLIR obligation classes" 
     const report = try dumpManifestToOwnedString(testing.allocator, result.set);
     defer testing.allocator.free(report);
 
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"artifact_decision\",\"schema_version\":8,\"status\":\"blocked\",\"reason\":\"missing_proof\"}"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":8,\"assumptions\":1,\"obligations\":12,\"queries\":13"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"artifact_decision\",\"schema_version\":9,\"status\":\"blocked\",\"reason\":\"missing_proof\"}"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":9,\"assumptions\":1,\"obligations\":12,\"queries\":13"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_obligation_links\":12"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"obligation_kinds\":{\"logical\":4,\"runtime_guard\":1,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":1,\"resource\":5,\"quantifier\":1,\"filtered_input\":0,\"backend_fact\":0}"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_backends\":{\"unspecified\":13,\"z3\":0,\"lean\":0}"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_results\":{\"missing\":13,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":8"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":9"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"logical\",\"role\":\"ensures\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"arithmetic_safety\":\"addition_overflow\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"arithmetic_safety\":\"division_by_zero\""));
@@ -9490,7 +9490,7 @@ test "formal report coverage summarizes representative MLIR obligation classes" 
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"resource\",\"op\":\"move\",\"domain\":\"TokenUnit\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"property\":\"conservation\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"quantifier\",\"quantifier\":\"forall\""));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"query\",\"schema_version\":8"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"query\",\"schema_version\":9"));
 }
 
 test "formal loop summary rows are source-owner scoped scalar data" {
@@ -9547,8 +9547,8 @@ test "formal loop summary rows are source-owner scoped scalar data" {
     const repeated_report = try dumpManifestToOwnedString(testing.allocator, result.set);
     defer testing.allocator.free(repeated_report);
     try testing.expectEqualStrings(report, repeated_report);
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"loop_summary_coverage\",\"schema_version\":8"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"loop_summary\",\"schema_version\":8"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"loop_summary_coverage\",\"schema_version\":9"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"loop_summary\",\"schema_version\":9"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"edges\":[{\"id\":0"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"target\":\"backedge\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"target\":\"successor\""));
@@ -14334,8 +14334,8 @@ test "formal report coverage includes representative source contracts" {
     {
         const report = try dumpManifestToOwnedString(testing.allocator, logical.set);
         defer testing.allocator.free(report);
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":8"));
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":8"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":9"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":9"));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"role\":\"ensures\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"role\":\"assert\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"arithmetic_safety\":\"subtraction_overflow\""));
@@ -14350,7 +14350,7 @@ test "formal report coverage includes representative source contracts" {
     {
         const report = try dumpManifestToOwnedString(testing.allocator, resource.set);
         defer testing.allocator.free(report);
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":8"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":9"));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"effect_frame\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"resource\",\"op\":\"move\",\"domain\":\"TokenUnit\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"property\":\"conservation\""));
@@ -14362,7 +14362,7 @@ test "formal report coverage includes representative source contracts" {
     {
         const report = try dumpManifestToOwnedString(testing.allocator, quantifier.set);
         defer testing.allocator.free(report);
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":8"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":9"));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"quantifier\",\"quantifier\":\"forall\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"binder_type\":{\"tag\":\"spelling\",\"value\":\"u256\"}"));
     }
@@ -14461,4 +14461,69 @@ test "formal obligation MLIR adapter fails closed on malformed guard marker" {
     try testing.expectEqual(@as(usize, 0), result.set.obligations.len);
     try testing.expectEqual(@as(usize, 0), result.set.queries.len);
     try testing.expectEqual(@as(usize, 1), result.set.diagnostics.len);
+}
+
+test "certified call rows generated module parses and checks shape" {
+    const ty: obligation.TypeRef = .{ .spelling = "bool" };
+    const result_id: obligation.FreeVarId = .{ .file_id = 81, .pattern_id = 1 };
+    const terms = [_]obligation.Term{
+        .{ .bool_lit = true },
+        .{ .variable = .{ .free = .{ .id = result_id, .name = "result", .ty = ty } } },
+    };
+    const literal: obligation.LoopTypedFormula = .{ .ty = ty, .value = .{ .formula = .{ .term = 0 } } };
+    const leaf: obligation.FunctionSummaryRow = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "leaf", .contract = "Calls" } },
+        .source = .generated(),
+        .origin = .source,
+        .structural_key = "Calls/leaf",
+        .outcomes = &.{.{ .outcome = .{ .error_return = 7 }, .types = &.{ty} }},
+        .paths = &.{.{ .id = 0, .structural_key = "return", .returns = .{ .direct = .{
+            .outcome = .{ .error_return = 7 },
+            .values = &.{literal},
+        } } }},
+        .write_footprint_complete = true,
+        .projection_completeness = .complete,
+    };
+    const digest = try obligation_to_lean.functionVcSha256(.{ .terms = &terms, .function_summaries = &.{leaf} }, 1);
+    const events = [_]obligation.LoopTimelineEvent{.{ .id = 0, .structural_key = "caller/call", .payload = .{ .call = .{
+        .callee_summary_id = 1,
+        .callee_vc_sha256 = digest,
+        .outcome = .{ .error_return = 7 },
+        .results = &.{.{ .index = 0, .id = result_id, .ty = ty }},
+    } } }};
+    const caller: obligation.FunctionSummaryRow = .{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "caller" } },
+        .source = .generated(),
+        .origin = .source,
+        .structural_key = "caller",
+        .outcomes = leaf.outcomes,
+        .paths = &.{.{ .id = 0, .structural_key = "caller/return", .timeline = &events, .returns = .{ .direct = .{
+            .outcome = .{ .error_return = 7 },
+            .values = &.{.{ .ty = ty, .value = .{
+                .formula = .{ .term = 1 },
+                .read_results = &.{result_id},
+            } }},
+        } } }},
+        .write_footprint_complete = true,
+        .projection_completeness = .complete,
+    };
+    var source = std.Io.Writer.Allocating.init(testing.allocator);
+    defer source.deinit();
+    try obligation_to_lean.writeModule(&source.writer, .{ .terms = &terms, .function_summaries = &.{ leaf, caller } }, .{
+        .namespace = "Ora.Generated.CallRows",
+    });
+    try source.writer.writeAll(
+        "example : Ora.Generated.CallRows.emittedFunctionSummaries.all Ora.Loop.FunctionSummaryRow.shapeSupported = true := by decide\n",
+    );
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try pathFromTmpAlloc(testing.allocator, tmp, "CallRows.lean");
+    defer testing.allocator.free(path);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = source.written() });
+    const parsed = try runLeanFileForTest(testing.allocator, path);
+    defer testing.allocator.free(parsed.stdout);
+    defer testing.allocator.free(parsed.stderr);
+    try expectExited(parsed, 0);
 }

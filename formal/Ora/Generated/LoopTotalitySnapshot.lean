@@ -42,12 +42,19 @@ def loopTotalityRows : List (String × String × Bool × String × Bool) := [
   ("query_id_mismatch", "query_id_mismatch", false, "loop_summary_query_mismatch", true)
 ]
 
-def loopTimelineEventTags : List String := ["path_assumption", "safety_checkpoint", "storage_read", "indexed_region_read", "storage_write", "summary_dependency"]
+def loopTimelineEventTags : List String := ["path_assumption", "safety_checkpoint", "storage_read", "indexed_region_read", "storage_write", "summary_dependency", "call"]
 
 def loopStorageProjectionTags : List String := ["field", "fixed_index", "mapping_key"]
 
 def loopTimelineValidationRows : List (String × String) := [
   ("supported", ""),
+  ("child_results", ""),
+  ("child_results_empty", ""),
+  ("child_results_type", "loop_call_binding_invalid"),
+  ("child_results_parameter", "loop_storage_read_identity_duplicate"),
+  ("child_results_previous", "loop_storage_read_identity_duplicate"),
+  ("child_results_duplicate", "loop_storage_read_identity_duplicate"),
+  ("child_results_index", "loop_call_binding_invalid"),
   ("timeline_missing", "loop_timeline_missing"),
   ("event_order_invalid", "loop_timeline_event_order_invalid"),
   ("event_identity_missing", "loop_timeline_event_identity_missing"),
@@ -64,6 +71,19 @@ def loopTimelineValidationRows : List (String × String) := [
   ("dependency_target_unsupported", "loop_summary_dependency_target_unsupported"),
   ("body_safety_missing", "loop_body_safety_missing")
 ]
+
+def callTimelineValidationRows : List (String × String) := [
+  ("supported", ""),
+  ("result_duplicate", "loop_storage_read_identity_duplicate"),
+  ("result_alias_parameter", "loop_storage_read_identity_duplicate"),
+  ("result_forward", "loop_storage_read_identity_forward"),
+  ("result_foreign", "loop_storage_read_identity_foreign"),
+  ("result_index", "loop_call_binding_invalid"),
+  ("argument_type", "loop_call_binding_invalid"),
+  ("result_type", "loop_call_binding_invalid"),
+  ("empty_digest", "loop_call_digest_missing"),
+  ("two_results", ""),
+  ("void_result", "")]
 
 def loopPreheaderValidationRows : List (String × String) := [
   ("supported", ""),

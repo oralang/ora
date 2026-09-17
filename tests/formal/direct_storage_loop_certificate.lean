@@ -91,7 +91,7 @@ theorem discharge_q8 : emittedQuery_8 := by
       simp only [List.mem_cons, List.not_mem_nil, or_false] at hMember
       rcases hMember with rfl | rfl
       · dsimp at hNext ⊢
-        rcases hNext with ⟨result, locals, hExec, hLocals, rfl⟩
+        rcases hNext with ⟨result, locals, returned, hExec, hLocals, hReturn, rfl⟩
         let variables := emittedLoopSummary_1.variables
         let bindings := emittedLoopSummary_1.edges[0].nextState
         let context := Ora.Loop.directStorageContext emittedManifest env variables

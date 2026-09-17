@@ -375,6 +375,7 @@ pub const Adapter = struct {
                 try self.applyLoopWrite(write);
                 try self.appendSideConstraints(premises);
             },
+            .call => return error.InvalidLoopQuery,
             .summary_dependency => |dependency| try self.appendLoopSummaryDependencyPremise(
                 premises,
                 parent_edge orelse return error.InvalidLoopQuery,
@@ -488,6 +489,7 @@ pub const Adapter = struct {
         parent_edge: obligation.LoopEdgeRow,
         dependency: obligation.LoopSummaryDependency,
     ) EncodeError!void {
+        if (dependency.result_bindings != null) return error.InvalidLoopQuery;
         const inner = obligation.findById(self.set.loop_summaries, dependency.summary_id) orelse
             return error.UnknownLoopSummary;
         if (!inner.projectionSupported()) return error.InvalidLoopQuery;
@@ -532,7 +534,7 @@ pub const Adapter = struct {
                 exit_edge,
                 nested,
             ),
-            .storage_read, .indexed_region_read, .storage_write => return error.InvalidLoopQuery,
+            .storage_read, .indexed_region_read, .storage_write, .call => return error.InvalidLoopQuery,
         };
 
         const raw_following = try self.encodeBindingValues(

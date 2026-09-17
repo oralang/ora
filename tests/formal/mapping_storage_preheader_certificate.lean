@@ -649,7 +649,7 @@ theorem discharge_q11 : emittedQuery_11 := by
       simp only [List.mem_cons, List.not_mem_nil, or_false] at hMember
       rcases hMember with rfl | rfl
       · dsimp at hNext ⊢
-        rcases hNext with ⟨result, locals, hExec, hLocals, rfl⟩
+        rcases hNext with ⟨result, locals, returned, hExec, hLocals, hReturn, rfl⟩
         rcases hInvariant with
           ⟨hInvariantReady, hHeaderFacts, hInvariantFormulas⟩
         let variables := emittedLoopSummary_1.variables

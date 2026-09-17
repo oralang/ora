@@ -211,7 +211,7 @@ theorem discharge_q9 : emittedQuery_9 := by
       rcases hMember with rfl | rfl
       · dsimp at hNext ⊢
         rcases hInvariant with ⟨hInvariantReady, hHeaderFacts, hInvariantFormulas⟩
-        rcases hNext with ⟨result, locals, hExec, hLocals, rfl⟩
+        rcases hNext with ⟨result, locals, returned, hExec, hLocals, hReturn, rfl⟩
         let variables := emittedLoopSummary_1.variables
         let bindings := emittedLoopSummary_1.edges[0].nextState
         let context := Ora.Loop.directStorageContext emittedManifest env variables

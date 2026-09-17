@@ -246,10 +246,28 @@ def timelineEdgeForMutation : String → EdgeRow
           timelineWriteEvent,
           { timelineSafetyEvent with payload := .safetyCheckpoint { formulas := [] } },
           timelineDependencyEvent] }
-  | _ => timelineBaseEdge
+  | mutation =>
+      if ["child_results", "child_results_empty", "child_results_type", "child_results_parameter",
+          "child_results_previous", "child_results_duplicate", "child_results_index"].contains mutation then
+        let first : VariableRow := {
+          index := 0
+          id := if mutation == "child_results_parameter" then loopId
+            else if mutation == "child_results_previous" then timelineReadId else timelineForeignId
+          ty := if mutation == "child_results_type" then .spelling "" else .compilerTypeId 6 }
+        let second : VariableRow := {
+          index := if mutation == "child_results_index" then 0 else 1
+          id := if mutation == "child_results_duplicate" then first.id else { file_id := 10, pattern_id := 92 }
+          ty := .compilerTypeId 6 }
+        { timelineBaseEdge with timeline := [timelinePathEvent, timelineReadEvent,
+            timelineWriteEvent, timelineSafetyEvent,
+            { timelineDependencyEvent with payload := .summaryDependency {
+              timelineDependency with resultBindings := some (if mutation == "child_results_empty" then [] else [first, second]) } }] }
+      else timelineBaseEdge
 
 def timelineMutationNames : List String := [
-  "supported", "timeline_missing", "event_order_invalid",
+  "supported", "child_results", "child_results_empty", "child_results_type",
+  "child_results_parameter", "child_results_previous", "child_results_duplicate",
+  "child_results_index", "timeline_missing", "event_order_invalid",
   "event_identity_missing", "event_identity_duplicate", "path_missing",
   "storage_root_missing", "storage_projection_invalid",
   "storage_type_invalid", "read_identity_duplicate", "read_identity_foreign",
@@ -271,8 +289,51 @@ def timelineValidationRowMatches : String × String → Bool
 theorem loop_timeline_event_tags_pinned :
     loopTimelineEventTags == ["path_assumption", "safety_checkpoint",
       "storage_read", "indexed_region_read", "storage_write",
-      "summary_dependency"] := by
+      "summary_dependency", "call"] := by
   decide
+
+def callMutationNames : List String := [
+  "supported", "result_duplicate", "result_alias_parameter", "result_forward", "result_foreign",
+  "result_index", "argument_type", "result_type", "empty_digest", "two_results", "void_result"
+]
+
+def callTimelineForMutation (mutation : String) : List TimelineEventRow :=
+  let result : VariableRow := {
+    index := if mutation == "result_index" then 1 else 0
+    id := if mutation == "result_alias_parameter" then loopId else timelineReadId
+    ty := .spelling (if mutation == "result_type" then "" else "bool")
+  }
+  let second : VariableRow := {
+    index := 1
+    id := if mutation == "result_duplicate" then timelineReadId else timelineForeignId
+    ty := .spelling "bool"
+  }
+  [{
+    id := 0, structuralKey := "call"
+    payload := .call {
+      calleeSummaryId := 1
+      calleeVcSha256 := String.mk (List.replicate 64 (if mutation == "empty_digest" then '0' else '1'))
+      arguments := [{
+        value := {
+          formula := .term 1
+          readResults := if mutation == "result_forward" then [timelineReadId]
+            else if mutation == "result_foreign" then [otherId] else []
+        }
+        ty := .spelling (if mutation == "argument_type" then "" else "bool")
+      }]
+      outcome := .success
+      results := if mutation == "void_result" then []
+        else if mutation == "two_results" || mutation == "result_duplicate" then [result, second]
+        else [result]
+    }
+  }]
+
+def expectedCallTimelineRows : List (String × String) := callMutationNames.map fun mutation =>
+  (mutation, ((preheaderTimelineReason? [loopId] (callTimelineForMutation mutation)).map
+    TimelineShapeReason.name).getD "")
+
+theorem call_timeline_validation_matches :
+    callTimelineValidationRows == expectedCallTimelineRows := by decide
 
 theorem loop_storage_projection_tags_pinned :
     loopStorageProjectionTags == ["field", "fixed_index", "mapping_key"] := by

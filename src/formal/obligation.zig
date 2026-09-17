@@ -13,7 +13,7 @@ const timeline_validation = @import("loop_timeline_validation.zig").Validator(@T
 pub const Id = u32;
 pub const TermId = u32;
 
-pub const obligation_dump_schema_version: u32 = 8;
+pub const obligation_dump_schema_version: u32 = 9;
 pub const proof_certificate_schema_version: u32 = 2;
 
 pub const ObligationSet = struct {
@@ -25,6 +25,7 @@ pub const ObligationSet = struct {
     /// certificate before verified artifacts may be emitted. Function
     /// postconditions enrich the induction theorem but do not arm the gate.
     loop_summaries: []const LoopSummaryRow = &.{},
+    function_summaries: []const FunctionSummaryRow = &.{},
     proof_artifacts: []const ProofArtifact = &.{},
     diagnostics: []const ObligationDiagnostic = &.{},
     terms: []const Term = &.{},
@@ -42,6 +43,9 @@ pub const ObligationSet = struct {
         }
         self.validateTermReferences() catch return .{ .blocked = .invalid_dependency };
         self.validateIdReferences() catch return .{ .blocked = .invalid_dependency };
+        // Canonical call rows acquire authority only through the joint function
+        // certificate consumer; ordinary obligation proofs cannot discharge them.
+        if (self.function_summaries.len != 0) return .{ .blocked = .call_relation_unsupported };
         if (self.loopArtifactAuthorityBlockReason()) |reason| {
             return .{ .blocked = reason };
         }
@@ -108,6 +112,7 @@ pub const ObligationSet = struct {
         };
         if (self.timelineArtifactAuthorityBlockReason(summary, summary.preheader_timeline)) |reason| return reason;
         for (summary.edges) |edge| {
+            if (edge.return_value != null) return .call_relation_unsupported;
             if (self.timelineArtifactAuthorityBlockReason(summary, edge.timeline)) |reason| return reason;
             for ([_][]const FormulaRef{
                 summary.init_formulas,
@@ -172,6 +177,7 @@ pub const ObligationSet = struct {
         timeline: []const LoopTimelineEvent,
     ) ?ArtifactBlockReason {
         for (timeline, 0..) |event, event_index| switch (event.payload) {
+            .call => return .call_relation_unsupported,
             .indexed_region_read => |read| {
                 const matched = for (timeline[0..event_index]) |candidate| switch (candidate.payload) {
                     .safety_checkpoint => |checkpoint| if (checkpoint.dynamic_index_bounds and
@@ -197,10 +203,13 @@ pub const ObligationSet = struct {
                 if (write.location.projections.len != 0 and
                     !self.reviewedStorageProjection(summary, timeline, write.location)) return .storage_projection_authority_unreviewed;
             },
-            .summary_dependency => |dependency| if (self.loopSummaryClosureHasStorageEvents(
-                dependency.summary_id,
-                self.loop_summaries.len + 1,
-            )) return .storage_child_frame_authority_unreviewed,
+            .summary_dependency => |dependency| {
+                if (dependency.result_bindings != null) return .call_relation_unsupported;
+                if (self.loopSummaryClosureHasStorageEvents(
+                    dependency.summary_id,
+                    self.loop_summaries.len + 1,
+                )) return .storage_child_frame_authority_unreviewed;
+            },
             .safety_checkpoint => |checkpoint| {
                 for (checkpoint.formulas) |formula| if (self.expressionUsesIndexedRead(timeline, formula)) {
                     return .loop_indexed_region_read_formula_unreviewed;
@@ -296,7 +305,7 @@ pub const ObligationSet = struct {
         if (remaining == 0) return true;
         const summary = findById(self.loop_summaries, summary_id) orelse return true;
         for (summary.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
-            .storage_read, .storage_write => return true,
+            .storage_read, .storage_write, .call => return true,
             .summary_dependency => |dependency| if (self.loopSummaryClosureHasStorageEvents(
                 dependency.summary_id,
                 remaining - 1,
@@ -330,6 +339,7 @@ pub const ObligationSet = struct {
             for (summary.header_facts) |fact| try self.validateFormulaRef(fact.formula);
             try self.validateLoopTimelineTermReferences(summary.preheader_timeline);
             for (summary.edges) |edge| {
+                if (edge.return_value) |value| try self.validateCallReturn(edge.timeline, value);
                 for (edge.target_formulas) |formula| try self.validateFormulaRef(formula);
                 for (edge.next_state) |binding| try self.validateFormulaRef(binding.value);
                 try self.validateLoopTimelineTermReferences(edge.timeline);
@@ -342,6 +352,14 @@ pub const ObligationSet = struct {
             }
             for (summary.post_formulas) |formula| try self.validateFormulaRef(formula);
         }
+        for (self.function_summaries) |summary| for (summary.paths) |path| {
+            try self.validateLoopTimelineTermReferences(path.timeline);
+            try self.validateCallReturn(path.timeline, path.returns);
+        };
+    }
+
+    fn validateCallReturn(self: ObligationSet, events: []const LoopTimelineEvent, value: CallReturnExpr) !void {
+        if (value == .direct) for (value.direct.values) |item| try self.validateLoopFormulaExpr(events, events.len, item.value);
     }
 
     fn validateLoopTimelineTermReferences(
@@ -362,6 +380,7 @@ pub const ObligationSet = struct {
                 try self.validateLoopFormulaExpr(events, event_index, write.value);
             },
             .summary_dependency => {},
+            .call => |invocation| for (invocation.arguments) |argument| try self.validateLoopFormulaExpr(events, event_index, argument.value),
         };
     }
 
@@ -424,7 +443,7 @@ pub const ObligationSet = struct {
                 return error.InvalidTimelineReadReference;
             }
         }
-        for (events) |event| if (loopTimelineReadId(event.payload)) |read_id| {
+        for (events) |event| for (0..loopTimelineReadCount(event.payload)) |result_index| if (loopTimelineReadId(event.payload, result_index)) |read_id| {
             if (!self.formulaReferencesFreeVar(expression.formula, read_id)) continue;
             if (!freeVarInList(read_id, expression.read_results)) {
                 return error.InvalidTimelineReadReference;
@@ -581,12 +600,18 @@ pub const ObligationSet = struct {
     }
 
     pub fn validateIdReferences(self: ObligationSet) !void {
+        for (self.function_summaries, 0..) |summary, index| {
+            for (self.function_summaries[0..index]) |previous| if (previous.id == summary.id) return error.InvalidDependency;
+            try self.validateFunctionSummary(summary);
+        }
         for (self.loop_summaries, 0..) |summary, summary_index| {
             for (self.loop_summaries[0..summary_index]) |previous| {
                 if (previous.id == summary.id) return error.InvalidDependency;
             }
             try self.validateLoopSummaryDependencies(summary);
             try self.validateLoopQueryIds(summary);
+            try self.validateCallReferences(summary.preheader_timeline);
+            for (summary.edges) |edge| try self.validateCallReferences(edge.timeline);
         }
         for (self.obligations) |item| {
             for (item.dependencies) |id| {
@@ -647,6 +672,62 @@ pub const ObligationSet = struct {
                 }
             }
         }
+    }
+
+    fn validateFunctionSummary(self: ObligationSet, row: FunctionSummaryRow) !void {
+        if (row.owner != .function or row.structural_key.len == 0 or row.outcomes.len == 0 or row.paths.len == 0) return error.InvalidFunctionShape;
+        for (row.parameters, 0..) |parameter, index| {
+            if (parameter.id == null or parameter.index != index or !typeRefExplicit(parameter.ty)) return error.InvalidCallSignature;
+            for (row.parameters[0..index]) |previous| if (freeVarIdEql(previous.id.?, parameter.id.?)) return error.InvalidCallSignature;
+        }
+        for (row.outcomes, 0..) |outcome, index| {
+            for (outcome.types) |ty| if (!typeRefExplicit(ty)) return error.InvalidCallSignature;
+            for (row.outcomes[0..index]) |previous| if (std.meta.eql(previous.outcome, outcome.outcome)) return error.InvalidCallSignature;
+        }
+        for (row.assumption_ids, 0..) |id, index| {
+            if (containsId(row.assumption_ids[0..index], id)) return error.InvalidDependency;
+            const assumption = findById(self.assumptions, id) orelse return error.InvalidDependency;
+            if (assumption.kind != .requires or !functionOwnerEqual(assumption.owner, row.owner)) return error.InvalidDependency;
+        }
+        for (self.assumptions) |assumption| if (assumption.kind == .requires and functionOwnerEqual(assumption.owner, row.owner)) {
+            if (!containsId(row.assumption_ids, assumption.id)) return error.InvalidDependency;
+        };
+        for (row.write_footprint) |place| if (place.region != .storage or place.root.len == 0) return error.InvalidFunctionShape;
+        for (row.paths, 0..) |path, index| {
+            if (path.id != index or path.structural_key.len == 0) return error.InvalidFunctionShape;
+            for (path.timeline) |event| if (event.payload == .summary_dependency and
+                event.payload.summary_dependency.result_bindings == null) return error.InvalidFunctionShape;
+            for (row.paths[0..index]) |previous| if (std.mem.eql(u8, previous.structural_key, path.structural_key)) return error.InvalidFunctionShape;
+            if (timeline_validation.scopedTimelineReason(row.parameters, &.{}, path.timeline, false, true) != null or
+                timeline_validation.returnReason(path.timeline, path.returns) != null or self.fixedIndexBoundsReason(path.timeline) != null) return error.InvalidFunctionShape;
+            try self.validateCallReferences(path.timeline);
+            if (path.returns == .direct) {
+                const direct = path.returns.direct;
+                const types = callOutcomeTypes(row, direct.outcome) orelse return error.InvalidCallSignature;
+                if (types.len != direct.values.len) return error.InvalidCallSignature;
+                for (types, direct.values) |ty, value| if (!typeRefEqual(ty, value.ty)) return error.InvalidCallSignature;
+            }
+        }
+    }
+
+    fn validateCallReferences(self: ObligationSet, events: []const LoopTimelineEvent) !void {
+        for (events) |event| if (event.payload == .summary_dependency) {
+            const dependency = event.payload.summary_dependency;
+            if (dependency.result_bindings) |bindings| {
+                const child = findById(self.loop_summaries, dependency.summary_id) orelse return error.InvalidDependency;
+                for (bindings) |binding| {
+                    if (binding.index >= child.variables.len or !typeRefEqual(binding.ty, child.variables[binding.index].ty))
+                        return error.InvalidCallSignature;
+                }
+            }
+        } else if (event.payload == .call) {
+            const invocation = event.payload.call;
+            const callee = findById(self.function_summaries, invocation.callee_summary_id) orelse return error.InvalidDependency;
+            const types = callOutcomeTypes(callee, invocation.outcome) orelse return error.InvalidCallSignature;
+            if (invocation.arguments.len != callee.parameters.len or invocation.results.len != types.len) return error.InvalidCallSignature;
+            for (invocation.arguments, callee.parameters) |argument, parameter| if (!typeRefEqual(argument.ty, parameter.ty)) return error.InvalidCallSignature;
+            for (invocation.results, types) |result, ty| if (!typeRefEqual(result.ty, ty)) return error.InvalidCallSignature;
+        };
     }
 
     fn validateLoopSummaryDependencies(self: ObligationSet, summary: LoopSummaryRow) !void {
@@ -1083,6 +1164,7 @@ pub const ArtifactDecision = union(enum) {
 };
 
 pub const ArtifactBlockReason = enum(u8) {
+    call_relation_unsupported,
     blocking_diagnostic,
     invalid_dependency,
     unknown_query,
@@ -1552,6 +1634,83 @@ pub const LoopStorageWriteEvent = struct {
     value: LoopFormulaExpr,
 };
 
+pub const CallOutcome = union(enum) { success, error_return: u32 };
+
+pub const CallOutcomeShape = struct {
+    outcome: CallOutcome,
+    types: []const TypeRef = &.{},
+};
+
+/// Each path selects one outcome of the SAME callee execution. The independent
+/// inventory must cover every source outcome; returned values are fresh caller
+/// bindings, while the callee's parameter identities stay in its own scope.
+pub const LoopCallEvent = struct {
+    callee_summary_id: Id,
+    callee_vc_sha256: [32]u8,
+    arguments: []const LoopTypedFormula = &.{},
+    outcome: CallOutcome,
+    results: []const LoopVariable = &.{},
+};
+
+pub const CallReturnExpr = union(enum) {
+    direct: struct { outcome: CallOutcome, values: []const LoopTypedFormula = &.{} },
+    /// Forward the outcome and payload produced by the terminating child loop,
+    /// retaining the storage from that very execution.
+    loop_exit,
+};
+
+pub const FunctionPathRow = struct {
+    id: u32,
+    structural_key: []const u8,
+    timeline: []const LoopTimelineEvent = &.{},
+    returns: CallReturnExpr,
+};
+
+pub const FunctionQueryIds = struct {
+    safety: []const Id = &.{},
+    certificate: ?Id = null,
+};
+
+pub const FunctionSummaryRow = struct {
+    id: Id,
+    owner: Owner,
+    source: SourceRef,
+    origin: Origin,
+    structural_key: []const u8,
+    parameters: []const LoopVariable = &.{},
+    outcomes: []const CallOutcomeShape = &.{},
+    assumption_ids: []const Id = &.{},
+    paths: []const FunctionPathRow = &.{},
+    /// Derived from complete operation inventories, including dependencies.
+    write_footprint: []const PlaceRef = &.{},
+    write_footprint_complete: bool = false,
+    projection_completeness: LoopProjectionCompleteness = .control_manifest_missing,
+    query_ids: FunctionQueryIds = .{},
+};
+
+pub fn callOutcomeTypes(row: FunctionSummaryRow, outcome: CallOutcome) ?[]const TypeRef {
+    for (row.outcomes) |shape| if (std.meta.eql(shape.outcome, outcome)) return shape.types;
+    return null;
+}
+
+pub fn typeRefEqual(lhs: TypeRef, rhs: TypeRef) bool {
+    if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
+    return switch (lhs) {
+        .spelling => |name| std.mem.eql(u8, name, rhs.spelling),
+        .compiler_type_id => |id| id == rhs.compiler_type_id,
+    };
+}
+
+fn optionalStringEqual(lhs: ?[]const u8, rhs: ?[]const u8) bool {
+    if (lhs == null or rhs == null) return lhs == null and rhs == null;
+    return std.mem.eql(u8, lhs.?, rhs.?);
+}
+
+fn functionOwnerEqual(lhs: Owner, rhs: Owner) bool {
+    return lhs == .function and rhs == .function and std.mem.eql(u8, lhs.function.name, rhs.function.name) and
+        optionalStringEqual(lhs.function.module, rhs.function.module) and optionalStringEqual(lhs.function.contract, rhs.function.contract);
+}
+
 pub const LoopTimelineEventTag = enum(u8) {
     path_assumption,
     safety_checkpoint,
@@ -1559,6 +1718,7 @@ pub const LoopTimelineEventTag = enum(u8) {
     indexed_region_read,
     storage_write,
     summary_dependency,
+    call,
 };
 
 pub const LoopTimelineEventPayload = union(LoopTimelineEventTag) {
@@ -1568,12 +1728,25 @@ pub const LoopTimelineEventPayload = union(LoopTimelineEventTag) {
     indexed_region_read: LoopIndexedRegionReadEvent,
     storage_write: LoopStorageWriteEvent,
     summary_dependency: LoopSummaryDependency,
+    call: LoopCallEvent,
 };
 
-pub fn loopTimelineReadId(payload: LoopTimelineEventPayload) ?FreeVarId {
+pub fn loopTimelineReadCount(payload: LoopTimelineEventPayload) usize {
+    return switch (payload) {
+        .storage_read, .indexed_region_read => 1,
+        .call => |invocation| invocation.results.len,
+        .summary_dependency => |dependency| if (dependency.result_bindings) |bindings| bindings.len else 0,
+        else => 0,
+    };
+}
+
+pub fn loopTimelineReadId(payload: LoopTimelineEventPayload, index: usize) ?FreeVarId {
+    if (index >= loopTimelineReadCount(payload)) return null;
     return switch (payload) {
         .storage_read => |read| read.result,
         .indexed_region_read => |read| read.result,
+        .call => |invocation| invocation.results[index].id,
+        .summary_dependency => |dependency| dependency.result_bindings.?[index].id,
         else => null,
     };
 }
@@ -1597,6 +1770,8 @@ pub const LoopEdgeRow = struct {
     /// Edge-specific assertion for function and error returns. Ordinary loop
     /// successors use `LoopSummaryRow.post_formulas`; backedges carry none.
     target_formulas: []const FormulaRef = &.{},
+    /// Evaluated after this exact edge timeline, together with its final store.
+    return_value: ?CallReturnExpr = null,
 
     pub fn safetyFormulaCount(self: LoopEdgeRow) usize {
         var count: usize = 0;
@@ -1634,6 +1809,9 @@ pub const LoopSummaryDependency = struct {
     write_footprint_complete: bool = false,
     /// Exact terminating control relation consumed from the inner summary.
     target: LoopControlTarget,
+    /// None retains scalar nested-state composition. Some exports typed child
+    /// variable indices to fresh caller identities, preserving caller locals.
+    result_bindings: ?[]const LoopVariable = null,
 
     pub fn targetSupported(self: LoopSummaryDependency) bool {
         return switch (self.target) {
@@ -2218,6 +2396,10 @@ pub const LoopQueryIds = struct {
 };
 
 pub const LoopUnsupportedReason = enum(u8) {
+    loop_call_digest_missing,
+    loop_call_binding_invalid,
+    loop_call_return_invalid,
+    loop_call_relation_unsupported,
     loop_has_storage_write,
     loop_has_storage_read,
     loop_has_call,
@@ -2882,7 +3064,7 @@ fn stringSlicesEql(lhs: []const []const u8, rhs: []const []const u8) bool {
     return true;
 }
 
-fn parseDecimalU256(value: []const u8) ?u256 {
+pub fn parseDecimalU256(value: []const u8) ?u256 {
     if (value.len == 0) return null;
     for (value) |byte| {
         if (byte < '0' or byte > '9') return null;

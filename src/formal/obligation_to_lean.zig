@@ -47,17 +47,20 @@ pub const SemanticUnsupportedReason = union(enum) {
 pub fn writeDataModule(writer: anytype, set: obligation.ObligationSet, options: Options) !void {
     try set.validateTermReferences();
     try set.validateIdReferences();
+    try validateCallDependencyDigests(set);
 
-    try writeModulePreamble(writer, "Ora.Obligation.Manifest", options.namespace, false);
+    try writeModulePreamble(writer, "Ora.Obligation.Manifest", options.namespace, set.function_summaries.len != 0);
     try writeManifestRows(writer, set, false);
     try writeManifestDefinition(writer);
     try writeRowDefinitions(writer, set, false);
+    try writeFunctionSummaryDefinitions(writer, set);
     try writeNamespaceEnd(writer, options.namespace);
 }
 
 pub fn writeModule(writer: anytype, set: obligation.ObligationSet, options: Options) !void {
     try set.validateTermReferences();
     try set.validateIdReferences();
+    try validateCallDependencyDigests(set);
 
     try writeModulePreamble(writer, "Ora.Obligation.Theorems", options.namespace, true);
     try writeManifestRows(writer, set, options.proof_surface);
@@ -66,6 +69,7 @@ pub fn writeModule(writer: anytype, set: obligation.ObligationSet, options: Opti
     try writeManifestWfTheorem(writer, set.terms);
     try writeTermsTopologicalTheorem(writer, set.terms);
     try writeLoopSummaryDefinitions(writer, set);
+    try writeFunctionSummaryDefinitions(writer, set);
     try writeSemanticDefinitions(writer, set, options.proof_surface);
     try writeNamespaceEnd(writer, options.namespace);
 }
@@ -227,12 +231,96 @@ fn writeLoopSummaryDefinitions(writer: anytype, set: obligation.ObligationSet) !
     try writer.writeAll("]\n\n");
 }
 
+fn writeFunctionSummaryDefinitions(writer: anytype, set: obligation.ObligationSet) !void {
+    if (set.function_summaries.len == 0) return;
+    for (set.function_summaries) |row| {
+        try writer.print("def emittedFunctionSummary_{d} : Ora.Loop.FunctionSummaryRow :=\n  ", .{row.id});
+        try writeFunctionSummaryRow(writer, row);
+        const digest = std.fmt.bytesToHex(try functionVcSha256(set, row.id), .lower);
+        try writer.print("\n\ndef emittedFunctionVcSha256_{d} : String := \"{s}\"\n\n", .{ row.id, &digest });
+    }
+    try writer.writeAll("def emittedFunctionSummaries : List Ora.Loop.FunctionSummaryRow := [");
+    for (set.function_summaries, 0..) |row, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writer.print("emittedFunctionSummary_{d}", .{row.id});
+    }
+    try writer.writeAll("]\n\n");
+}
+
+/// Verify the mixed function/loop DAG before trusting stored dependency hashes.
+/// A function containing a loop and that loop calling the function is a cycle.
+pub fn validateCallDependencyDigests(set: obligation.ObligationSet) !void {
+    if (set.function_summaries.len == 0) return;
+    const marks = try std.heap.page_allocator.alloc(u2, set.function_summaries.len + set.loop_summaries.len);
+    defer std.heap.page_allocator.free(marks);
+    @memset(marks, 0);
+    for (0..marks.len) |node| try visitCertificateDependencies(set, marks, node);
+}
+
+fn visitCertificateDependencies(set: obligation.ObligationSet, marks: []u2, node: usize) anyerror!void {
+    if (marks[node] == 1) return error.CyclicCallDependency;
+    if (marks[node] == 2) return;
+    marks[node] = 1;
+    if (node < set.function_summaries.len) {
+        for (set.function_summaries[node].paths) |path| try visitTimelineDependencies(set, marks, path.timeline);
+    } else {
+        const row = set.loop_summaries[node - set.function_summaries.len];
+        try visitTimelineDependencies(set, marks, row.preheader_timeline);
+        for (row.edges) |edge| try visitTimelineDependencies(set, marks, edge.timeline);
+    }
+    marks[node] = 2;
+}
+
+fn visitTimelineDependencies(set: obligation.ObligationSet, marks: []u2, events: []const obligation.LoopTimelineEvent) !void {
+    for (events) |event| switch (event.payload) {
+        .call => |invocation| {
+            const node = for (set.function_summaries, 0..) |row, index| {
+                if (row.id == invocation.callee_summary_id) break index;
+            } else return error.InvalidDependency;
+            const callee = set.function_summaries[node];
+            if (callee.projection_completeness != .complete or !callee.write_footprint_complete) return error.InvalidDependency;
+            try visitCertificateDependencies(set, marks, node);
+            const digest = try functionVcSha256(set, invocation.callee_summary_id);
+            if (!std.mem.eql(u8, &digest, &invocation.callee_vc_sha256)) return error.StaleCallDependency;
+        },
+        .summary_dependency => |dependency| {
+            const node = for (set.loop_summaries, 0..) |row, index| {
+                if (row.id == dependency.summary_id) break index;
+            } else return error.InvalidDependency;
+            const child = set.loop_summaries[node];
+            if (!child.projectionSupported()) return error.InvalidDependency;
+            const target_exists = for (child.edges) |edge| {
+                if (edge.target == dependency.target) break true;
+            } else false;
+            if (!target_exists) return error.InvalidDependency;
+            try visitCertificateDependencies(set, marks, set.function_summaries.len + node);
+            const digest = try loopVcSha256(set, dependency.summary_id);
+            if (!std.mem.eql(u8, &digest, &dependency.loop_vc_sha256)) return error.StaleCallDependency;
+        },
+        else => {},
+    };
+}
+
 /// Deterministic identity for the exact LoopVC proof input. The complete term
 /// table is included deliberately: it may over-invalidate a certificate when
 /// an unrelated term changes, but it cannot retain a certificate after a
 /// referenced term changes.
 pub fn loopVcSha256(set: obligation.ObligationSet, summary_id: obligation.Id) ![32]u8 {
-    return loopVcSha256InDomain(set, summary_id, "ora-loop-vc-v3\n");
+    return loopVcSha256InDomain(set, summary_id, "ora-loop-vc-v4\n");
+}
+
+pub fn functionVcSha256(set: obligation.ObligationSet, summary_id: obligation.Id) ![32]u8 {
+    const row = obligation.findById(set.function_summaries, summary_id) orelse return error.InvalidDependency;
+    var canonical = std.Io.Writer.Allocating.init(std.heap.page_allocator);
+    defer canonical.deinit();
+    try canonical.writer.writeAll("ora-function-vc-v1\n");
+    try writeCanonicalTerms(&canonical.writer, set.terms);
+    try writeAssumptionRowsByIds(&canonical.writer, set, row.assumption_ids);
+    try canonical.writer.writeByte('\n');
+    try writeFunctionSummaryRow(&canonical.writer, row);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(canonical.written(), &digest, .{});
+    return digest;
 }
 
 fn loopVcSha256InDomain(
@@ -403,6 +491,12 @@ fn writeLoopEdges(writer: anytype, edges: []const obligation.LoopEdgeRow) !void 
         } else "unresolved");
         try writer.writeAll(", targetFormulas := ");
         try writeFormulaList(writer, edge.target_formulas);
+        try writer.writeAll(", returnValue := ");
+        if (edge.return_value) |value| {
+            try writer.writeAll("some (");
+            try writeCallReturnExpr(writer, value);
+            try writer.writeByte(')');
+        } else try writer.writeAll("none");
         try writer.writeAll(" }");
     }
     try writer.writeByte(']');
@@ -443,6 +537,79 @@ fn writeLoopTypedFormulaRow(writer: anytype, expression: obligation.LoopTypedFor
     try writer.writeAll(", ty := ");
     try writeTypeRef(writer, expression.ty);
     try writer.writeAll(" }");
+}
+
+fn writeTypedFormulaList(writer: anytype, values: []const obligation.LoopTypedFormula) !void {
+    try writer.writeByte('[');
+    for (values, 0..) |value, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writeLoopTypedFormulaRow(writer, value);
+    }
+    try writer.writeByte(']');
+}
+
+fn writeCallOutcome(writer: anytype, outcome: obligation.CallOutcome) !void {
+    switch (outcome) {
+        .success => try writer.writeAll(".success"),
+        .error_return => |id| try writer.print(".error {d}", .{id}),
+    }
+}
+
+fn writeCallReturnExpr(writer: anytype, value: obligation.CallReturnExpr) !void {
+    switch (value) {
+        .direct => |direct| {
+            try writer.writeAll(".direct (");
+            try writeCallOutcome(writer, direct.outcome);
+            try writer.writeAll(") ");
+            try writeTypedFormulaList(writer, direct.values);
+        },
+        .loop_exit => try writer.writeAll(".loopExit"),
+    }
+}
+
+fn writeFunctionSummaryRow(writer: anytype, row: obligation.FunctionSummaryRow) !void {
+    try writer.print("{{ id := {d}, owner := ", .{row.id});
+    try writeLeanString(writer, ownerName(row.owner));
+    if (row.owner != .function) return error.InvalidFunctionShape;
+    try writer.writeAll(", moduleName := ");
+    try writeOptionalLeanString(writer, row.owner.function.module);
+    try writer.writeAll(", contractName := ");
+    try writeOptionalLeanString(writer, row.owner.function.contract);
+    try writer.writeAll(", structuralKey := ");
+    try writeLeanString(writer, row.structural_key);
+    try writer.writeAll(", parameters := ");
+    try writeLoopVariables(writer, row.parameters);
+    try writer.writeAll(", outcomes := [");
+    for (row.outcomes, 0..) |outcome, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writer.writeAll("{ outcome := ");
+        try writeCallOutcome(writer, outcome.outcome);
+        try writer.writeAll(", types := [");
+        for (outcome.types, 0..) |ty, type_index| {
+            if (type_index != 0) try writer.writeAll(", ");
+            try writeTypeRef(writer, ty);
+        }
+        try writer.writeAll("] }");
+    }
+    try writer.writeAll("], assumptionIds := ");
+    try writeIdList(writer, row.assumption_ids);
+    try writer.writeAll(", paths := [");
+    for (row.paths, 0..) |path, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writer.print("{{ id := {d}, structuralKey := ", .{path.id});
+        try writeLeanString(writer, path.structural_key);
+        try writer.writeAll(", timeline := ");
+        try writeLoopTimeline(writer, path.timeline);
+        try writer.writeAll(", returns := ");
+        try writeCallReturnExpr(writer, path.returns);
+        try writer.writeAll(" }");
+    }
+    try writer.writeAll("], writeFootprint := ");
+    try writePlaceRefList(writer, row.write_footprint);
+    try writer.print(", writeFootprintComplete := {s}, projectionComplete := {s} }}", .{
+        if (row.write_footprint_complete) "true" else "false",
+        if (row.projection_completeness == .complete) "true" else "false",
+    });
 }
 
 fn writeLoopStorageLocationRow(
@@ -497,6 +664,11 @@ fn writeLoopSummaryDependency(
     try writePlaceRefList(writer, dependency.write_footprint);
     try writer.writeAll(", writeFootprintComplete := ");
     try writer.writeAll(if (dependency.write_footprint_complete) "true" else "false");
+    try writer.writeAll(", resultBindings := ");
+    if (dependency.result_bindings) |bindings| {
+        try writer.writeAll("some ");
+        try writeLoopVariables(writer, bindings);
+    } else try writer.writeAll("none");
     try writer.writeAll(" }");
 }
 
@@ -552,6 +724,18 @@ fn writeLoopTimeline(writer: anytype, events: []const obligation.LoopTimelineEve
             .summary_dependency => |dependency| {
                 try writer.writeAll("summaryDependency ");
                 try writeLoopSummaryDependency(writer, dependency);
+            },
+            .call => |call| {
+                const digest = std.fmt.bytesToHex(call.callee_vc_sha256, .lower);
+                try writer.print("call {{ calleeSummaryId := {d}, calleeVcSha256 := ", .{call.callee_summary_id});
+                try writeLeanString(writer, &digest);
+                try writer.writeAll(", arguments := ");
+                try writeTypedFormulaList(writer, call.arguments);
+                try writer.writeAll(", outcome := ");
+                try writeCallOutcome(writer, call.outcome);
+                try writer.writeAll(", results := ");
+                try writeLoopVariables(writer, call.results);
+                try writer.writeAll(" }");
             },
         }
         try writer.writeAll(" }");
@@ -977,6 +1161,15 @@ fn loopInductionQuerySemanticSupport(
     if (summary.validationReason()) |reason| {
         return .{ .unsupported = .{ .unsupported_loop_summary = reason } };
     }
+    for (summary.preheader_timeline) |event| if (event.payload == .call or
+        (event.payload == .summary_dependency and event.payload.summary_dependency.result_bindings != null))
+        return .{ .unsupported = .{ .unsupported_loop_summary = .loop_call_relation_unsupported } };
+    for (summary.edges) |edge| {
+        if (edge.return_value != null) return .{ .unsupported = .{ .unsupported_loop_summary = .loop_call_relation_unsupported } };
+        for (edge.timeline) |event| if (event.payload == .call or
+            (event.payload == .summary_dependency and event.payload.summary_dependency.result_bindings != null))
+            return .{ .unsupported = .{ .unsupported_loop_summary = .loop_call_relation_unsupported } };
+    }
     // PEmpty child semantics cannot consume this mixed timeline. Never fall
     // back to the scalar whole-path safety statement for interleaved checks.
     if (loopSummaryNeedsPrefixSafety(summary) and loopSummaryHasDependencies(summary))
@@ -1077,7 +1270,7 @@ fn loopInductionQuerySemanticSupport(
                 }
             },
             .summary_dependency => dependency_count += 1,
-            .storage_read, .indexed_region_read, .storage_write => {},
+            .storage_read, .indexed_region_read, .storage_write, .call => {},
         };
         for (edge.target_formulas) |formula| {
             if (formulaReferencesSummaryDependencyVariable(set, summary, formula)) {
@@ -3098,7 +3291,7 @@ test "LoopVC digest covers every certificate-authority component class" {
         .loop_summaries = &summaries,
     };
     const baseline = try loopVcSha256(set, 1);
-    const old_domain_digest = try loopVcSha256InDomain(set, 1, "ora-loop-vc-v2\n");
+    const old_domain_digest = try loopVcSha256InDomain(set, 1, "ora-loop-vc-v3\n");
     try std.testing.expect(!std.mem.eql(u8, &baseline, &old_domain_digest));
 
     const HeaderFactMutation = enum {
@@ -3489,6 +3682,18 @@ test "LoopVC digest covers every certificate-authority component class" {
         .loop_summaries = &changed_summaries,
     }, 1))));
 
+    changed_edges[1].target_formulas = &.{.{ .term = 9 }};
+    changed_edges[1].return_value = .{ .direct = .{ .outcome = .success, .values = &.{.{
+        .ty = int_ty,
+        .value = .{ .formula = .{ .term = 1 } },
+    }} } };
+    try std.testing.expect(!std.mem.eql(u8, &return_target_baseline, &(try loopVcSha256(.{
+        .terms = &terms,
+        .assumptions = &assumptions,
+        .queries = &queries,
+        .loop_summaries = &changed_summaries,
+    }, 1))));
+
     var changed_variables = variables;
     changed_variables[0].ty = .{ .spelling = "i256" };
     changed_summary = summary;
@@ -3518,4 +3723,273 @@ test "LoopVC digest covers every certificate-authority component class" {
         .queries = &queries,
         .loop_summaries = &summaries,
     }, 1))));
+}
+
+test "certified call rows bind signatures ordered results returns and dependency digests" {
+    const b: obligation.TypeRef = .{ .spelling = "bool" };
+    const a: obligation.FreeVarId = .{ .file_id = 81, .pattern_id = 1 };
+    const z: obligation.FreeVarId = .{ .file_id = 81, .pattern_id = 2 };
+    const variables = [_]obligation.LoopVariable{
+        .{ .index = 0, .id = a, .ty = b }, .{ .index = 1, .id = z, .ty = b },
+    };
+    const terms = [_]obligation.Term{
+        .{ .bool_lit = true },
+        .{ .variable = .{ .free = .{ .id = a, .name = "a", .ty = b } } },
+        .{ .variable = .{ .free = .{ .id = z, .name = "z", .ty = b } } },
+    };
+    const literal: obligation.LoopTypedFormula = .{ .value = .{ .formula = .{ .term = 0 } }, .ty = b };
+    const first: obligation.LoopTypedFormula = .{ .value = .{ .formula = .{ .term = 1 }, .read_results = &.{a} }, .ty = b };
+    const second: obligation.LoopTypedFormula = .{ .value = .{ .formula = .{ .term = 2 }, .read_results = &.{z} }, .ty = b };
+    const leaf: obligation.FunctionSummaryRow = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "leaf", .contract = "Calls" } },
+        .source = .generated(),
+        .origin = .source,
+        .structural_key = "Calls/leaf",
+        .outcomes = &.{.{ .outcome = .success, .types = &.{ b, b } }},
+        .paths = &.{.{ .id = 0, .structural_key = "return", .returns = .{ .direct = .{ .outcome = .success, .values = &.{ literal, literal } } } }},
+        .write_footprint_complete = true,
+        .projection_completeness = .complete,
+    };
+    const digest = try functionVcSha256(.{ .terms = &terms, .function_summaries = &.{leaf} }, leaf.id);
+    var events = [_]obligation.LoopTimelineEvent{
+        .{ .id = 0, .structural_key = "caller/call", .payload = .{ .call = .{
+            .callee_summary_id = 1,
+            .callee_vc_sha256 = digest,
+            .outcome = .success,
+            .results = &variables,
+        } } },
+        .{ .id = 1, .structural_key = "caller/check", .payload = .{ .safety_checkpoint = .{ .formulas = &.{first.value} } } },
+    };
+    var paths = [_]obligation.FunctionPathRow{.{ .id = 0, .structural_key = "caller/return", .timeline = &events, .returns = .{ .direct = .{ .outcome = .success, .values = &.{ first, second } } } }};
+    var rows = [_]obligation.FunctionSummaryRow{ leaf, .{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "caller" } },
+        .source = .generated(),
+        .origin = .source,
+        .structural_key = "caller",
+        .outcomes = leaf.outcomes,
+        .paths = &paths,
+        .write_footprint_complete = true,
+        .projection_completeness = .complete,
+    } };
+    const set: obligation.ObligationSet = .{ .terms = &terms, .function_summaries = &rows };
+    try set.validateTermReferences();
+    try set.validateIdReferences();
+    try validateCallDependencyDigests(set);
+    try std.testing.expectEqual(obligation.ArtifactBlockReason.call_relation_unsupported, set.artifactDecision().blocked);
+    var rendered = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer rendered.deinit();
+    try writeModule(&rendered.writer, set, .{ .namespace = "Ora.Generated.CallRows" });
+    for ([_][]const u8{ "emittedFunctionSummary_2", "emittedFunctionVcSha256_1", "calleeSummaryId := 1", "calleeVcSha256 :=", "contractName := some \"Calls\"", "returns := .direct", "readResults :=" }) |text| {
+        try std.testing.expect(std.mem.containsAtLeast(u8, rendered.written(), 1, text));
+    }
+    var dumped = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer dumped.deinit();
+    try @import("obligation_dump.zig").writeJsonLines(&dumped.writer, set);
+    for ([_][]const u8{ "\"schema_version\":9", "\"record\":\"function_summary\"", "\"function_vc_sha256\":", "\"callee_summary_id\":1", "\"callee_vc_sha256\":", "\"returns\":{\"tag\":\"direct\"", "\"results\":[", "\"write_footprint_complete\":true" }) |text| {
+        try std.testing.expect(std.mem.containsAtLeast(u8, dumped.written(), 1, text));
+    }
+    var records = std.mem.splitScalar(u8, dumped.written(), '\n');
+    while (records.next()) |line| {
+        if (line.len == 0) continue;
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, line, .{});
+        parsed.deinit();
+    }
+    const baseline = try functionVcSha256(set, 2);
+    const saved = events[0].payload.call;
+    events[0].payload.call.callee_vc_sha256[0] ^= 1;
+    try std.testing.expectError(error.StaleCallDependency, validateCallDependencyDigests(set));
+    try std.testing.expect(!std.mem.eql(u8, &baseline, &(try functionVcSha256(set, 2))));
+    events[0].payload.call = saved;
+    events[0].payload.call.callee_summary_id = 2;
+    try std.testing.expectError(error.CyclicCallDependency, validateCallDependencyDigests(set));
+    events[0].payload.call = saved;
+    events[0].payload.call.callee_summary_id = 99;
+    try std.testing.expectError(error.InvalidDependency, set.validateIdReferences());
+    events[0].payload.call = saved;
+    events[0].payload.call.outcome = .{ .error_return = 7 };
+    try std.testing.expectError(error.InvalidCallSignature, set.validateIdReferences());
+    events[0].payload.call = saved;
+    events[0].payload.call.arguments = &.{first};
+    try std.testing.expectError(error.InvalidTimelineReadReference, set.validateTermReferences());
+    try std.testing.expectError(error.InvalidFunctionShape, set.validateIdReferences());
+    events[0].payload.call = saved;
+    events[0].payload.call.arguments = &.{literal};
+    try std.testing.expectError(error.InvalidCallSignature, set.validateIdReferences());
+    events[0].payload.call = saved;
+    events[0].payload.call.results = variables[0..1];
+    try std.testing.expectError(error.InvalidFunctionShape, set.validateIdReferences());
+    paths[0].returns.direct.values = &.{ literal, literal };
+    try std.testing.expectError(error.InvalidCallSignature, set.validateIdReferences());
+    paths[0].returns.direct.values = &.{ first, second };
+    events[0].payload.call = saved;
+    var malformed = variables;
+    malformed[1].id = a;
+    events[0].payload.call.results = &malformed;
+    try std.testing.expectError(error.InvalidFunctionShape, set.validateIdReferences());
+    malformed = variables;
+    malformed[1].id = null;
+    try std.testing.expectError(error.InvalidFunctionShape, set.validateIdReferences());
+    malformed = variables;
+    malformed[1].ty = .{ .spelling = "u8" };
+    try std.testing.expectError(error.InvalidCallSignature, set.validateIdReferences());
+    events[0].payload.call = saved;
+    paths[0].returns.direct.values = &.{ literal, .{ .value = .{ .formula = .{ .term = 2 } }, .ty = b } };
+    try std.testing.expectError(error.InvalidTimelineReadReference, set.validateTermReferences());
+    paths[0].returns.direct.values = &.{first};
+    try std.testing.expectError(error.InvalidCallSignature, set.validateIdReferences());
+    paths[0].returns = .loop_exit;
+    try std.testing.expectError(error.InvalidFunctionShape, set.validateIdReferences());
+    paths[0].returns = .{ .direct = .{ .outcome = .success, .values = &.{ first, second } } };
+    const caller = rows[1];
+    const Mutation = enum { owner, module_name, contract, identity, parameters, outcomes, assumption, footprint, frame_complete, projection, path, returned, call_argument, call_result, call_outcome, terms };
+    for (std.meta.tags(Mutation)) |mutation| {
+        var changed_terms = terms;
+        var changed_set = set;
+        switch (mutation) {
+            .owner => rows[1].owner.function.name = "renamed",
+            .module_name => rows[1].owner.function.module = "other",
+            .contract => rows[1].owner.function.contract = "other",
+            .identity => rows[1].structural_key = "other",
+            .parameters => rows[1].parameters = variables[0..1],
+            .outcomes => rows[1].outcomes = &.{.{ .outcome = .{ .error_return = 7 }, .types = &.{b} }},
+            .assumption => {
+                rows[1].assumption_ids = &.{7};
+                changed_set.assumptions = &.{.{ .id = 7, .owner = caller.owner, .source = .generated(), .origin = .source, .phase = .sema, .kind = .requires, .formula = .{ .term = 0 } }};
+            },
+            .footprint => rows[1].write_footprint = &.{.{ .root = "flag", .region = .storage }},
+            .frame_complete => rows[1].write_footprint_complete = false,
+            .projection => rows[1].projection_completeness = .effect_mismatch,
+            .path => paths[0].structural_key = "changed",
+            .returned => paths[0].returns.direct.values = &.{ second, first },
+            .call_argument => events[0].payload.call.arguments = &.{literal},
+            .call_result => events[0].payload.call.results = variables[0..1],
+            .call_outcome => events[0].payload.call.outcome = .{ .error_return = 7 },
+            .terms => {
+                changed_terms[0] = .{ .bool_lit = false };
+                changed_set.terms = &changed_terms;
+            },
+        }
+        try std.testing.expect(!std.mem.eql(u8, &baseline, &(try functionVcSha256(changed_set, 2))));
+        rows[1] = caller;
+        paths[0].structural_key = "caller/return";
+        paths[0].returns = .{ .direct = .{ .outcome = .success, .values = &.{ first, second } } };
+        events[0].payload.call = saved;
+    }
+    var assumptions = [_]obligation.Assumption{.{ .id = 7, .owner = leaf.owner, .source = .generated(), .origin = .source, .phase = .sema, .kind = .requires, .formula = .{ .term = 0 } }};
+    var with_assumptions = set;
+    with_assumptions.assumptions = &assumptions;
+    try std.testing.expectError(error.InvalidDependency, with_assumptions.validateIdReferences());
+    rows[0].assumption_ids = &.{7};
+    try with_assumptions.validateIdReferences();
+    assumptions[0].owner.function.contract = "Foreign";
+    try std.testing.expectError(error.InvalidDependency, with_assumptions.validateIdReferences());
+    assumptions[0].owner = leaf.owner;
+    rows[0].assumption_ids = &.{ 7, 7 };
+    try std.testing.expectError(error.InvalidDependency, with_assumptions.validateIdReferences());
+    rows[0] = leaf;
+    const loop_id: obligation.FreeVarId = .{ .file_id = 81, .pattern_id = 3 };
+    const path_event: obligation.LoopTimelineEvent = .{ .id = 0, .structural_key = "loop/path", .payload = .{
+        .path_assumption = .{ .formulas = &.{literal.value} },
+    } };
+    const invocation_event: obligation.LoopTimelineEvent = .{ .id = 1, .structural_key = "loop/call", .payload = .{ .call = saved } };
+    const binding: obligation.LoopStepAssignment = .{ .variable_index = 0, .target = loop_id, .source_key = "next", .value = .{ .term = 0 } };
+    const loop: obligation.LoopSummaryRow = .{
+        .id = 3,
+        .owner = leaf.owner,
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .loop_source_op_id = 3,
+        .loop_kind = .scf_while,
+        .projection_completeness = .complete,
+        .variables = &.{.{ .index = 0, .id = loop_id, .ty = b }},
+        .edges = &.{
+            .{ .id = 0, .structural_key = "loop/body", .target = .backedge, .timeline = &.{ path_event, invocation_event }, .next_state = &.{binding} },
+            .{ .id = 1, .structural_key = "loop/exit", .target = .successor, .timeline = &.{path_event}, .next_state = &.{binding} },
+        },
+    };
+    try std.testing.expect(loop.projectionSupported());
+    rows[0].paths = &.{.{ .id = 0, .structural_key = "leaf/loop", .returns = leaf.paths[0].returns, .timeline = &.{.{
+        .id = 0,
+        .structural_key = "leaf/loop",
+        .payload = .{ .summary_dependency = .{
+            .id = 0,
+            .structural_key = "leaf/loop",
+            .summary_id = 3,
+            .loop_vc_sha256 = digest,
+            .target = .successor,
+            .write_footprint_complete = true,
+        } },
+    }} }};
+    var mixed_graph = set;
+    mixed_graph.loop_summaries = &.{loop};
+    try std.testing.expectError(error.CyclicCallDependency, validateCallDependencyDigests(mixed_graph));
+    // Lexical-loop results are explicit caller bindings, distinct from the
+    // scalar nested-state form. Every serialized binding affects the digest.
+    var exported = [_]obligation.LoopVariable{variables[0]};
+    var resume_events = [_]obligation.LoopTimelineEvent{
+        rows[0].paths[0].timeline[0],
+        .{ .id = 1, .structural_key = "leaf/result-check", .payload = .{ .safety_checkpoint = .{ .formulas = &.{first.value} } } },
+    };
+    resume_events[0].payload.summary_dependency.result_bindings = &exported;
+    rows[0].paths = &.{.{ .id = 0, .structural_key = "leaf/loop", .returns = leaf.paths[0].returns, .timeline = &resume_events }};
+    var result_loop = loop;
+    result_loop.edges = &.{
+        .{ .id = 0, .structural_key = "loop/body", .target = .backedge, .timeline = &.{path_event}, .next_state = &.{binding} },
+        loop.edges[1],
+    };
+    result_loop.query_ids = .{ .base = &.{20}, .induction = &.{21}, .body_safety = &.{ 22, 23 }, .step = &.{24}, .post = &.{25} };
+    mixed_graph.loop_summaries = &.{result_loop};
+    const query_kinds = [_]obligation.VerificationQueryKind{ .loop_base, .loop_induction, .loop_body_safety, .loop_body_safety, .loop_invariant_step, .loop_invariant_post };
+    var loop_queries: [query_kinds.len]obligation.VerificationQuery = undefined;
+    for (query_kinds, 0..) |kind, index| loop_queries[index] = .{
+        .id = @intCast(20 + index),
+        .owner = loop.owner,
+        .source = .generated(),
+        .origin = .source,
+        .phase = .report,
+        .kind = kind,
+        .loop_summary_id = loop.id,
+        .loop_edge_id = if (index < 2) null else if (index == 3 or index == 5) 1 else 0,
+        .backend = if (kind == .loop_induction) .unspecified else .z3,
+        .proof_requirement = if (kind == .loop_induction) .lean_certificate else .backend_result,
+        .artifact_policy = .blocks_verified_artifacts,
+    };
+    mixed_graph.queries = &loop_queries;
+    const child_digest = try loopVcSha256(mixed_graph, loop.id);
+    for (&loop_queries) |*query| query.loop_vc_sha256 = child_digest;
+    resume_events[0].payload.summary_dependency.loop_vc_sha256 = child_digest;
+    try mixed_graph.validateTermReferences();
+    try mixed_graph.validateIdReferences();
+    const bound_digest = try functionVcSha256(mixed_graph, 1);
+    exported[0].index = 1;
+    try std.testing.expectError(error.InvalidCallSignature, mixed_graph.validateIdReferences());
+    try std.testing.expect(!std.mem.eql(u8, &bound_digest, &(try functionVcSha256(mixed_graph, 1))));
+    exported[0] = variables[0];
+    exported[0].ty = .{ .spelling = "u8" };
+    try std.testing.expectError(error.InvalidCallSignature, mixed_graph.validateIdReferences());
+    try std.testing.expect(!std.mem.eql(u8, &bound_digest, &(try functionVcSha256(mixed_graph, 1))));
+    exported[0] = variables[1];
+    exported[0].index = 0;
+    try std.testing.expectError(error.InvalidFunctionShape, mixed_graph.validateIdReferences());
+    try std.testing.expect(!std.mem.eql(u8, &bound_digest, &(try functionVcSha256(mixed_graph, 1))));
+    exported[0] = variables[0];
+    resume_events[0].payload.summary_dependency.result_bindings = &.{};
+    const empty_digest = try functionVcSha256(mixed_graph, 1);
+    resume_events[0].payload.summary_dependency.result_bindings = null;
+    try std.testing.expectError(error.InvalidFunctionShape, mixed_graph.validateIdReferences());
+    try std.testing.expect(!std.mem.eql(u8, &empty_digest, &(try functionVcSha256(mixed_graph, 1))));
+    resume_events[0].payload.summary_dependency.result_bindings = &exported;
+    events[0].payload.call.callee_vc_sha256 = try functionVcSha256(mixed_graph, 1);
+    try validateCallDependencyDigests(mixed_graph);
+    var loop_rendered = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer loop_rendered.deinit();
+    try writeModule(&loop_rendered.writer, mixed_graph, .{ .namespace = "Ora.Generated.LoopResultRows" });
+    try std.testing.expect(std.mem.containsAtLeast(u8, loop_rendered.written(), 1, "resultBindings := some [{ index := 0"));
+    var loop_dumped = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer loop_dumped.deinit();
+    try @import("obligation_dump.zig").writeJsonLines(&loop_dumped.writer, mixed_graph);
+    try std.testing.expect(std.mem.containsAtLeast(u8, loop_dumped.written(), 1, "\"result_bindings\":[{\"index\":0"));
 }

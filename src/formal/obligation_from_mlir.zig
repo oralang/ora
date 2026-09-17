@@ -8166,7 +8166,7 @@ fn effectTimelineInventoryEql(
 
 fn timelineInventoryHasStorageEvent(inventory: []const LoopTimelineInventoryEvent) bool {
     for (inventory) |item| switch (item.tag) {
-        .storage_read, .storage_write => return true,
+        .storage_read, .storage_write, .call => return true,
         else => {},
     };
     return false;
@@ -8198,6 +8198,7 @@ fn timelineMatchesInventory(
                     !optionalTypeRefEql(read.element_ty, item.indexed_element_ty) or
                     !optionalStringEql(read.checkpoint_structural_key, item.indexed_checkpoint_key)) return false;
             },
+            .call => return false,
             .summary_dependency => |dependency| if (!optionalDependencyEql(dependency, item.summary_dependency)) return false,
             .path_assumption, .safety_checkpoint => {},
         }
@@ -8317,6 +8318,13 @@ fn optionalDependencyEql(
         left.write_footprint.len != right.write_footprint.len) return false;
     for (left.write_footprint, right.write_footprint) |left_place, right_place| {
         if (!obligation.placeRefEql(left_place, right_place)) return false;
+    }
+    if (left.result_bindings == null or right.result_bindings == null)
+        return left.result_bindings == null and right.result_bindings == null;
+    if (left.result_bindings.?.len != right.result_bindings.?.len) return false;
+    for (left.result_bindings.?, right.result_bindings.?) |a, b| {
+        if (a.index != b.index or !std.meta.eql(a.id, b.id) or
+            !optionalStringEqual(a.name, b.name) or !obligation.typeRefEqual(a.ty, b.ty)) return false;
     }
     return true;
 }
@@ -8578,7 +8586,7 @@ fn formulasContainOriginValue(formulas: []const obligation.FormulaRef) bool {
 
 fn loopTimelineHasPersistentStorageEvent(timeline: []const obligation.LoopTimelineEvent) bool {
     for (timeline) |event| switch (event.payload) {
-        .storage_read, .storage_write => return true,
+        .storage_read, .storage_write, .call => return true,
         .path_assumption, .safety_checkpoint, .indexed_region_read, .summary_dependency => {},
     };
     return false;
@@ -8594,6 +8602,9 @@ fn loopTimelineContainsOriginValue(timeline: []const obligation.LoopTimelineEven
         },
         .indexed_region_read => |read| if (read.index.formula == .origin_value) return true,
         .storage_write => |write| if (write.value.formula == .origin_value) return true,
+        .call => |invocation| for (invocation.arguments) |argument| {
+            if (argument.value.formula == .origin_value) return true;
+        },
         .storage_read, .summary_dependency => {},
     };
     return false;

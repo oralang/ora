@@ -70,7 +70,7 @@ def directStorageEvent? (row : TimelineEventRow) : Option (List DirectStorageEve
       pure [.storage (.write location event.value.formula)]
   | .indexedRegionRead event => do
       pure [.indexedRead (← directIndexedRegionRead? event)]
-  | .summaryDependency _ => none
+  | .summaryDependency _ | .call _ => none
 
 def directStorageTimeline? : List TimelineEventRow → Option (List DirectStorageEvent)
   | [] => some []
@@ -496,7 +496,7 @@ def directStorageEventData (row : TimelineEventRow) : List DirectStorageEvent :=
       match directIndexedRegionRead? event with
       | some read => [.indexedRead read]
       | none => []
-  | .summaryDependency _ => []
+  | .summaryDependency _ | .call _ => []
 
 def directStorageEvents (row : EdgeRow) : List DirectStorageEvent :=
   row.timeline.flatMap directStorageEventData
@@ -776,7 +776,7 @@ def directStorageSummarySupported (manifest : Manifest) (row : SummaryRow) : Boo
       | _ => false)) &&
     row.edges.all (fun edge => edge.timeline.all fun event =>
       match event.payload with
-      | .summaryDependency _ => false
+      | .summaryDependency _ | .call _ => false
       | _ => true)
 
 def denoteDirectStorageLoopSummary?
