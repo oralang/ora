@@ -761,6 +761,7 @@ const Collector = struct {
     next_loop_summary_id: obligation.Id = 1,
     next_loop_variable_pattern_id: u32 = 0,
     use_loop_value_bindings: bool = false,
+    project_entry_facts: bool = false,
     allow_short_circuit_predicates: bool = false,
     active_loop_depth: u32 = 0,
     next_ordinal: u32 = 0,
@@ -1011,6 +1012,7 @@ const Collector = struct {
             row.structural_key = try self.operationStructuralKey(op, "func.func");
             row.origin = mlirOrigin("func.func", self.function.runtime_symbol, self.function.projection.ordinal);
             row.assumption_ids = try self.assumptionIdsForLoopOwner(row.owner);
+            try self.projectFunctionEntryFacts(&row, op);
             var semantic: std.ArrayList(SemanticLoopTerminal) = .empty;
             var inventory: std.ArrayList(InventoryLoopTerminal) = .empty;
             const first = mlir.oraBlockGetFirstOperation(self.function.entry_block);
@@ -1041,6 +1043,34 @@ const Collector = struct {
             row.projection_completeness = .complete;
             self.function_summaries.items[index] = row;
         }
+    }
+
+    fn projectFunctionEntryFacts(self: *Collector, row: *obligation.FunctionSummaryRow, function: mlir.MlirOperation) !void {
+        var parent = mlir.mlirOperationGetParentOperation(function);
+        while (!mlir.oraOperationIsNull(parent) and !std.mem.eql(u8, operationName(parent), "ora.contract"))
+            parent = mlir.mlirOperationGetParentOperation(parent);
+        if (mlir.oraOperationIsNull(parent)) return;
+        row.entry_scope = try self.operationStructuralKey(parent, "ora.contract");
+        var selected: std.ArrayList(obligation.Id) = .empty;
+        for (self.obligations.items) |fact| if (row.ownsEntryInvariant(fact)) {
+            try selected.append(self.allocator, fact.id);
+        };
+        // Independently inventory actual declarations, not the selected rows.
+        const block = singleRegionBlock(parent, 0) orelse return error.CallEntryScopeUnsupported;
+        var op = mlir.oraBlockGetFirstOperation(block);
+        var inventory: std.ArrayList(obligation.Id) = .empty;
+        while (!mlir.oraOperationIsNull(op)) : (op = mlir.oraOperationGetNextInBlock(op)) {
+            if (!std.mem.eql(u8, operationName(op), "ora.invariant")) continue;
+            const ordinal = self.operationOrdinal(op) orelse return error.CallEntryInventoryMismatch;
+            const before = inventory.items.len;
+            for (self.obligations.items) |fact| {
+                if (fact.origin != .mlir_op or fact.origin.mlir_op.ordinal != ordinal) continue;
+                try inventory.append(self.allocator, fact.id);
+            }
+            if (inventory.items.len != before + 1) return error.CallEntryInventoryMismatch;
+        }
+        if (!std.mem.eql(obligation.Id, selected.items, inventory.items)) return error.CallEntryInventoryMismatch;
+        row.entry_invariant_ids = try selected.toOwnedSlice(self.allocator);
     }
 
     fn projectFunctionReturn(self: *Collector, terminal: SemanticLoopTerminal, row: obligation.FunctionSummaryRow) !struct { value: obligation.CallReturnExpr, inventory: ReturnInventory } {
@@ -1764,6 +1794,10 @@ const Collector = struct {
     }
 
     fn headerPrefixOperationSupported(self: *Collector, op: mlir.MlirOperation, name: []const u8) bool {
+        if (self.options.project_calls and std.mem.eql(u8, name, "func.call")) {
+            _ = self.callDeclaration(op) catch return false;
+            return true; // Header leaves remain parameters/constants/immutable lengths.
+        }
         if (preheaderPureValueOperationSupported(name) or dynamicLengthSourceValue(op) != null or
             isLoopSafetyOperation(op, name)) return true;
         if (std.mem.eql(u8, name, "memref.alloca"))
@@ -6033,6 +6067,20 @@ const Collector = struct {
         ordinal: u32,
         role: obligation.LogicalRole,
     ) !void {
+        var owner = self.ownerFor(symbol);
+        var logical_role = role;
+        const parent = mlir.mlirOperationGetParentOperation(op);
+        if (self.options.project_calls and std.mem.eql(u8, op_name, "ora.invariant") and
+            !mlir.oraOperationIsNull(parent) and std.mem.eql(u8, operationName(parent), "ora.contract"))
+        {
+            const kind = (try self.stringAttr(op, "ora.source_fact_kind")) orelse return error.CallEntrySourceMissing;
+            if (!std.mem.eql(u8, kind, "contract_invariant") or (try self.u32Attr(op, "ora.source_fact_id")) == null) return error.CallEntrySourceMissing;
+            owner = .{ .contract = try self.operationStructuralKey(parent, "ora.contract") };
+            logical_role = .contract_invariant;
+        }
+        const previous_entry_facts = self.project_entry_facts;
+        self.project_entry_facts = self.options.project_calls and logical_role == .contract_invariant and owner == .contract;
+        defer self.project_entry_facts = previous_entry_facts;
         const formula = (try self.formulaOperand(op, op_name, symbol, ordinal, 0)) orelse {
             try self.addMissingFormulaDiagnostic(op_name, symbol, ordinal);
             return;
@@ -6046,7 +6094,6 @@ const Collector = struct {
                 return error.MissingLoopPostFormula;
         } else null;
         const origin = mlirOrigin(op_name, symbol, ordinal);
-        const owner = self.ownerFor(symbol);
         const id = self.nextId();
         const source = try self.sourceForOperation(op);
 
@@ -6057,7 +6104,7 @@ const Collector = struct {
             .phase = .ora_mlir,
             .origin = origin,
             .kind = .{ .logical = .{
-                .role = role,
+                .role = logical_role,
                 .formula = formula,
             } },
             // Loop invariant and body-safety authorization is owned by the
@@ -6080,7 +6127,7 @@ const Collector = struct {
                 try self.recordActiveLoopBodySafetySite(op, body_formula);
             }
         }
-        try self.addQueryForOperation(.obligation, role, null, id, owner, origin, source, op);
+        try self.addQueryForOperation(.obligation, logical_role, null, id, owner, origin, source, op);
         if (loop_post_formula) |post_formula| {
             try self.attachLoopPostFormulas(
                 owner,
@@ -6142,6 +6189,9 @@ const Collector = struct {
         ordinal: u32,
         kind: obligation.AssumptionKind,
     ) !void {
+        const previous_entry_facts = self.project_entry_facts;
+        self.project_entry_facts = self.options.project_calls and kind == .requires;
+        defer self.project_entry_facts = previous_entry_facts;
         const formula = (try self.formulaOperand(op, op_name, symbol, ordinal, 0)) orelse {
             try self.addMissingFormulaDiagnostic(op_name, symbol, ordinal);
             return;
@@ -6936,21 +6986,21 @@ const Collector = struct {
         if (!mlirTypeIsSupportedInteger(self.operationResultType(op, 0))) return null;
         const root = try self.stringAttr(op, "global") orelse return null;
         // Function queries require an independently proven stable place. A
-        // LoopVC instead denotes this term against its explicit current store.
+        // LoopVC and scoped entry facts instead use their explicit storage state.
         if (!self.canProjectStablePlace(.{ .root = root, .region = .storage }) and
-            !self.use_loop_value_bindings) return null;
+            !self.use_loop_value_bindings and !self.project_entry_facts) return null;
         return try self.placeReadTerm(root);
     }
 
     fn storageMapReadTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
         if (!mlirTypeIsSupportedInteger(self.operationResultType(op, 0))) return null;
         const place = (try self.storageMapReadPlaceFromMapGet(op)) orelse return null;
-        if (!self.canProjectStablePlace(place) and !self.canProjectLoopCurrentMappingPlace(place)) return null;
+        if (!self.canProjectStablePlace(place) and !self.canProjectLoopCurrentMappingPlace(place) and !self.project_entry_facts) return null;
         return try self.placeReadTermFromPlace(place);
     }
 
     fn fixedArrayReadTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
-        if (!self.use_loop_value_bindings or
+        if ((!self.use_loop_value_bindings and !self.project_entry_facts) or
             !mlirTypeIsSupportedInteger(self.operationResultType(op, 0))) return null;
         const place = (try self.fixedArrayReadPlaceFromLoad(op)) orelse return null;
         return try self.placeReadTermFromPlace(place);
@@ -6972,6 +7022,9 @@ const Collector = struct {
     fn oldTerm(self: *Collector, op: mlir.MlirOperation) anyerror!?obligation.TermId {
         if (mlir.oraOperationGetNumOperands(op) != 1) return null;
         if (!mlirTypeIsSupportedInteger(self.operationResultType(op, 0))) return null;
+        if (self.project_entry_facts) return try self.addTerm(.{
+            .old = (try self.termFromValue(mlir.oraOperationGetOperand(op, 0))) orelse return null,
+        });
         if (self.function.has_external_call) return null;
         if (!self.function.write_slots_complete) return null;
         const write_slots = self.function.write_slots orelse return null;
@@ -11258,4 +11311,66 @@ test "G6 call projection checks private initialization independently in both sca
     };
     try std.testing.expect(cycle_named);
     try std.testing.expectEqual(obligation.ArtifactDecision{ .blocked = .blocking_diagnostic }, cyclic.set.artifactDecision());
+}
+
+test "G7 source entry inventory rejects changed or missing canonical declarations" {
+    const context = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(context);
+    const registry = mlir.oraDialectRegistryCreate();
+    mlir.oraRegisterAllDialects(registry);
+    mlir.oraContextAppendDialectRegistry(context, registry);
+    mlir.oraDialectRegistryDestroy(registry);
+    mlir.oraContextLoadAllAvailableDialects(context);
+    try std.testing.expect(mlir.oraDialectRegister(context));
+    const source =
+        \\module {
+        \\  ora.contract @Local {
+        \\    %yes = arith.constant true
+        \\    "ora.invariant"(%yes) {ora.source_fact_id = 1 : i64, ora.source_fact_kind = "contract_invariant"} : (i1) -> ()
+        \\    "ora.invariant"(%yes) {ora.source_fact_id = 2 : i64, ora.source_fact_kind = "contract_invariant"} : (i1) -> ()
+        \\    func.func @leaf() attributes {ora.return_compiler_type_id = 0 : i64} { ora.return }
+        \\  }
+        \\  ora.contract @Foreign {
+        \\    %no = arith.constant false
+        \\    "ora.invariant"(%no) {ora.source_fact_id = 3 : i64, ora.source_fact_kind = "contract_invariant"} : (i1) -> ()
+        \\  }
+        \\}
+    ;
+    const Mutation = enum { unchanged, removed, owner, role, origin, reordered, duplicate, foreign_added };
+    const mutations = [_]Mutation{ .unchanged, .removed, .owner, .role, .origin, .reordered, .duplicate, .foreign_added };
+    for (mutations) |mutation| {
+        const module = mlir.oraModuleCreateParse(context, strRef(source));
+        try std.testing.expect(!mlir.oraModuleIsNull(module));
+        defer mlir.oraModuleDestroy(module);
+        var memory = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer memory.deinit();
+        var collector = Collector{ .allocator = memory.allocator(), .options = .{ .project_calls = true } };
+        try collector.indexCallDeclarations(mlir.oraModuleGetOperation(module));
+        try collector.walkOperation(mlir.oraModuleGetOperation(module), null);
+        try std.testing.expectEqual(@as(usize, 3), collector.obligations.items.len);
+        const function = collector.call_declarations.items[0];
+        const index = try collector.requireFunctionRow(function);
+        var row = collector.function_summaries.items[index];
+        switch (mutation) {
+            .unchanged => {},
+            .removed => _ = collector.obligations.orderedRemove(0),
+            .owner => collector.obligations.items[0].owner = .{ .contract = "foreign" },
+            .role => collector.obligations.items[0].kind.logical.role = .assert,
+            .origin => collector.obligations.items[0].origin.mlir_op.ordinal += 1,
+            .reordered => std.mem.swap(obligation.Obligation, &collector.obligations.items[0], &collector.obligations.items[1]),
+            .duplicate => try collector.obligations.append(memory.allocator(), collector.obligations.items[0]),
+            .foreign_added => collector.obligations.items[2].owner = collector.obligations.items[0].owner,
+        }
+        errdefer std.debug.print("G7 entry inventory {s}\n", .{@tagName(mutation)});
+        if (mutation == .unchanged) {
+            try collector.projectFunctionEntryFacts(&row, function);
+            try std.testing.expectEqualSlices(obligation.Id, &.{ collector.obligations.items[0].id, collector.obligations.items[1].id }, row.entry_invariant_ids);
+        } else try std.testing.expectError(error.CallEntryInventoryMismatch, collector.projectFunctionEntryFacts(&row, function));
+    }
+    const malformed = try std.mem.replaceOwned(u8, std.testing.allocator, source, "contract_invariant", "unrelated");
+    defer std.testing.allocator.free(malformed);
+    const module = mlir.oraModuleCreateParse(context, strRef(malformed));
+    try std.testing.expect(!mlir.oraModuleIsNull(module));
+    defer mlir.oraModuleDestroy(module);
+    try std.testing.expectError(error.CallEntrySourceMissing, collect(std.testing.allocator, module, .{ .project_calls = true }));
 }

@@ -245,6 +245,8 @@ structure FunctionSummaryRow where
   parameters : List VariableRow := []
   outcomes : List CallOutcomeShapeRow := []
   assumptionIds : List Nat := []
+  entryScope : Option String := none
+  entryInvariantIds : List Nat := []
   paths : List FunctionPathRow := []
   writeFootprint : List PlaceRef := []
   writeFootprintComplete : Bool := false
@@ -522,6 +524,27 @@ def FunctionSummaryRow.shapeSupported (row : FunctionSummaryRow) : Bool :=
       match path.returns with
       | .direct outcome values => row.outcomeTypes? outcome == some (values.map (·.ty))
       | .loopExit => true
+
+/-- Source entry facts are exact scoped references, never an ambient premise.
+Contract facts retain their obligation identity; they do not become requires. -/
+def FunctionSummaryRow.entryFormulas? (row : FunctionSummaryRow)
+    (manifest : Manifest) : Option (List FormulaRef) := do
+  if row.entryScope == some "" || !(decide row.assumptionIds.Nodup) ||
+      !(decide row.entryInvariantIds.Nodup) then none else pure ()
+  let required := manifest.assumptions.filter fun fact =>
+    fact.functionOwner && fact.owner == row.owner && fact.moduleName == row.moduleName &&
+      fact.contractName == row.contractName && fact.kind == .requires
+  if required.map (·.id) != row.assumptionIds then none else pure ()
+  let invariants := manifest.obligations.filter fun fact =>
+    fact.contractOwner && some fact.owner == row.entryScope && match fact.kind with
+      | .logical .contractInvariant _ => true
+      | _ => false
+  if invariants.map (·.id) != row.entryInvariantIds then none else pure ()
+  let requires ← required.mapM (·.formula)
+  let facts ← invariants.mapM fun fact => match fact.kind with
+    | .logical .contractInvariant formula => some formula
+    | _ => none
+  pure (requires ++ facts)
 
 structure SafetyCheckpointRow where
   id : Nat

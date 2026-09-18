@@ -363,9 +363,10 @@ pub fn functionVcSha256(set: obligation.ObligationSet, summary_id: obligation.Id
     const row = obligation.findById(set.function_summaries, summary_id) orelse return error.InvalidDependency;
     var canonical = std.Io.Writer.Allocating.init(std.heap.page_allocator);
     defer canonical.deinit();
-    try canonical.writer.writeAll("ora-function-vc-v1\n");
+    try canonical.writer.writeAll("ora-function-vc-v2\n");
     try writeCanonicalTerms(&canonical.writer, set.terms);
     try writeAssumptionRowsByIds(&canonical.writer, set, row.assumption_ids);
+    for (row.entry_invariant_ids) |id| try writeObligationRow(&canonical.writer, obligation.findById(set.obligations, id) orelse return error.InvalidDependency);
     try canonical.writer.writeByte('\n');
     try writeFunctionSummaryRow(&canonical.writer, row);
     var digest: [32]u8 = undefined;
@@ -643,6 +644,10 @@ fn writeFunctionSummaryRow(writer: anytype, row: obligation.FunctionSummaryRow) 
     }
     try writer.writeAll("], assumptionIds := ");
     try writeIdList(writer, row.assumption_ids);
+    try writer.writeAll(", entryScope := ");
+    try writeOptionalLeanString(writer, row.entry_scope);
+    try writer.writeAll(", entryInvariantIds := ");
+    try writeIdList(writer, row.entry_invariant_ids);
     try writer.writeAll(", paths := [");
     for (row.paths, 0..) |path, index| {
         if (index != 0) try writer.writeAll(", ");
@@ -965,6 +970,16 @@ fn writeAssumptionRow(writer: anytype, row: obligation.Assumption) !void {
     try writer.print("{d}", .{row.id});
     try writer.writeAll(", owner := ");
     try writeLeanString(writer, ownerName(row.owner));
+    if (row.owner == .function) {
+        if (row.owner.function.module) |name| {
+            try writer.writeAll(", moduleName := some ");
+            try writeLeanString(writer, name);
+        }
+        if (row.owner.function.contract) |name| {
+            try writer.writeAll(", contractName := some ");
+            try writeLeanString(writer, name);
+        }
+    } else try writer.writeAll(", functionOwner := false");
     try writer.writeAll(", kind := .");
     try writer.writeAll(assumptionKindName(row.kind));
     try writer.writeAll(", formula := ");
@@ -983,6 +998,7 @@ fn writeObligationRow(writer: anytype, row: obligation.Obligation) !void {
     try writer.print("{d}", .{row.id});
     try writer.writeAll(", owner := ");
     try writeLeanString(writer, ownerName(row.owner));
+    if (row.owner == .contract) try writer.writeAll(", contractOwner := true");
     try writer.writeAll(", kind := ");
     try writeObligationKind(writer, row.kind);
     try writer.writeAll(" }");
@@ -3802,6 +3818,16 @@ test "certified call rows bind signatures ordered results returns and dependency
         .projection_completeness = .complete,
     };
     const digest = try functionVcSha256(.{ .terms = &terms, .function_summaries = &.{leaf} }, leaf.id);
+    var old_domain = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer old_domain.deinit();
+    try old_domain.writer.writeAll("ora-function-vc-v1\n");
+    try writeCanonicalTerms(&old_domain.writer, &terms);
+    try writeAssumptionRowsByIds(&old_domain.writer, .{}, &.{});
+    try old_domain.writer.writeByte('\n');
+    try writeFunctionSummaryRow(&old_domain.writer, leaf);
+    var old_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(old_domain.written(), &old_digest, .{});
+    try std.testing.expect(!std.mem.eql(u8, &digest, &old_digest));
     var events = [_]obligation.LoopTimelineEvent{
         .{ .id = 0, .structural_key = "caller/call", .payload = .{ .call = .{
             .callee_summary_id = 1,
@@ -3837,7 +3863,7 @@ test "certified call rows bind signatures ordered results returns and dependency
     var dumped = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer dumped.deinit();
     try @import("obligation_dump.zig").writeJsonLines(&dumped.writer, set);
-    for ([_][]const u8{ "\"schema_version\":9", "\"record\":\"function_summary\"", "\"function_vc_sha256\":", "\"callee_summary_id\":1", "\"callee_vc_sha256\":", "\"returns\":{\"tag\":\"direct\"", "\"results\":[", "\"write_footprint_complete\":true" }) |text| {
+    for ([_][]const u8{ "\"entry_scope\":null", "\"entry_invariant_ids\":[]", "\"schema_version\":10", "\"record\":\"function_summary\"", "\"function_vc_sha256\":", "\"callee_summary_id\":1", "\"callee_vc_sha256\":", "\"returns\":{\"tag\":\"direct\"", "\"results\":[", "\"write_footprint_complete\":true" }) |text| {
         try std.testing.expect(std.mem.containsAtLeast(u8, dumped.written(), 1, text));
     }
     var records = std.mem.splitScalar(u8, dumped.written(), '\n');

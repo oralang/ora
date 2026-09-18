@@ -1,0 +1,15 @@
+contract EntryScope {
+    storage var saved: u256;
+    invariant bounded(saved <= 10);
+    fn entryLeaf(value: u256) -> u256 requires value <= 4 { return value; }
+    pub fn entryRun(limit: u256) requires limit <= 4 {
+        let bound: u256 = entryLeaf(limit);
+        var i: u256 = 0;
+        while (i < bound) invariant i <= bound { i = i +% 1; }
+    }
+}
+
+contract ForeignScope {
+    invariant foreign_false(0 == 1);
+    pub fn unrelatedEntry() {}
+}

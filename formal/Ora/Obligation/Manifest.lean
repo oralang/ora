@@ -343,6 +343,9 @@ inductive ProofArtifactKind where
 structure AssumptionRow where
   id : Id
   owner : String
+  functionOwner : Bool := true
+  moduleName : Option String := none
+  contractName : Option String := none
   kind : AssumptionKind
   formula : Option FormulaRef := none
   deriving Repr, BEq, DecidableEq
@@ -350,6 +353,7 @@ structure AssumptionRow where
 structure ObligationRow where
   id : Id
   owner : String
+  contractOwner : Bool := false
   kind : ObligationKind
   deriving Repr, BEq, DecidableEq
 

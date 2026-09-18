@@ -13,7 +13,7 @@ const timeline_validation = @import("loop_timeline_validation.zig").Validator(@T
 pub const Id = u32;
 pub const TermId = u32;
 
-pub const obligation_dump_schema_version: u32 = 9;
+pub const obligation_dump_schema_version: u32 = 10;
 pub const proof_certificate_schema_version: u32 = 2;
 
 pub const ObligationSet = struct {
@@ -684,14 +684,19 @@ pub const ObligationSet = struct {
             for (outcome.types) |ty| if (!typeRefExplicit(ty)) return error.InvalidCallSignature;
             for (row.outcomes[0..index]) |previous| if (std.meta.eql(previous.outcome, outcome.outcome)) return error.InvalidCallSignature;
         }
-        for (row.assumption_ids, 0..) |id, index| {
-            if (containsId(row.assumption_ids[0..index], id)) return error.InvalidDependency;
-            const assumption = findById(self.assumptions, id) orelse return error.InvalidDependency;
-            if (assumption.kind != .requires or !functionOwnerEqual(assumption.owner, row.owner)) return error.InvalidDependency;
-        }
+        var required: usize = 0;
         for (self.assumptions) |assumption| if (assumption.kind == .requires and functionOwnerEqual(assumption.owner, row.owner)) {
-            if (!containsId(row.assumption_ids, assumption.id)) return error.InvalidDependency;
+            if (required >= row.assumption_ids.len or row.assumption_ids[required] != assumption.id or assumption.formula == null) return error.InvalidDependency;
+            required += 1;
         };
+        if (required != row.assumption_ids.len) return error.InvalidDependency;
+        if (row.entry_scope) |scope| if (scope.len == 0) return error.InvalidDependency;
+        var invariants: usize = 0;
+        for (self.obligations) |fact| if (row.ownsEntryInvariant(fact)) {
+            if (invariants >= row.entry_invariant_ids.len or row.entry_invariant_ids[invariants] != fact.id) return error.InvalidDependency;
+            invariants += 1;
+        };
+        if (invariants != row.entry_invariant_ids.len) return error.InvalidDependency;
         for (row.write_footprint) |place| if (place.region != .storage or place.root.len == 0) return error.InvalidFunctionShape;
         for (row.paths, 0..) |path, index| {
             if (path.id != index or path.structural_key.len == 0) return error.InvalidFunctionShape;
@@ -1680,12 +1685,20 @@ pub const FunctionSummaryRow = struct {
     parameters: []const LoopVariable = &.{},
     outcomes: []const CallOutcomeShape = &.{},
     assumption_ids: []const Id = &.{},
+    entry_scope: ?[]const u8 = null,
+    entry_invariant_ids: []const Id = &.{},
     paths: []const FunctionPathRow = &.{},
     /// Derived from complete operation inventories, including dependencies.
     write_footprint: []const PlaceRef = &.{},
     write_footprint_complete: bool = false,
     projection_completeness: LoopProjectionCompleteness = .control_manifest_missing,
     query_ids: FunctionQueryIds = .{},
+
+    pub fn ownsEntryInvariant(row: FunctionSummaryRow, fact: Obligation) bool {
+        const scope = row.entry_scope orelse return false;
+        return fact.owner == .contract and std.mem.eql(u8, fact.owner.contract, scope) and
+            fact.kind == .logical and fact.kind.logical.role == .contract_invariant;
+    }
 };
 
 pub fn callOutcomeTypes(row: FunctionSummaryRow, outcome: CallOutcome) ?[]const TypeRef {

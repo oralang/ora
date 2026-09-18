@@ -161,6 +161,31 @@ def directStorageContext
   resolvePlace := directStorageResolvePlace
 }
 
+def FunctionSummaryRow.callSignature (row : FunctionSummaryRow) : CallSignature := {
+  parameters := row.parameters.map fun parameter => (parameter.id, parameter.ty)
+  results := row.outcomeTypes?
+}
+
+/-- Only callee arguments and the invocation store enter this predicate.
+Both current and old storage start at that store; no caller environment enters. -/
+def FunctionSummaryRow.entryFactsHold (row : FunctionSummaryRow)
+    (manifest : Manifest) (input : CallInput) : Prop :=
+  match row.entryFormulas? manifest, row.callSignature.entry? input with
+  | some formulas, some initial =>
+      let base := bindStorageReads Env.empty initial.reads
+      ∀ formula ∈ formulas,
+        ((directStorageContext manifest base []).evalFormula? formula initial).getD False
+  | _, _ => False
+
+theorem FunctionSummaryRow.entryFactsHold_requires_inputTyped
+    (row : FunctionSummaryRow) (manifest : Manifest) (input : CallInput)
+    (facts : row.entryFactsHold manifest input) : row.callSignature.inputTyped input = true := by
+  cases typed : row.callSignature.inputTyped input with
+  | true => rfl
+  | false =>
+      cases selected : row.entryFormulas? manifest <;>
+        simp [entryFactsHold, CallSignature.entry?, typed, selected] at facts
+
 /-- A function-context value not shadowed by a loop variable or timeline read
 keeps the same identity in the exact environment used to resolve storage
 locations.  Mapping-frame proofs use this lemma instead of replaying the two

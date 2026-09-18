@@ -8515,7 +8515,7 @@ test "formal obligation MLIR adapter emits evidence-backed frame for parameter d
 
     const dump = try dumpManifestToOwnedString(testing.allocator, result.set);
     defer testing.allocator.free(dump);
-    try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"schema_version\":9"));
+    try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"schema_version\":10"));
     try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"relation\":\"read_preserved_by_key_evidence\""));
     try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"evidence\":[{\"kind\":\"free_var_disequality\""));
     try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"key_index\":0"));
@@ -9475,13 +9475,13 @@ test "formal report coverage summarizes representative MLIR obligation classes" 
     const report = try dumpManifestToOwnedString(testing.allocator, result.set);
     defer testing.allocator.free(report);
 
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"artifact_decision\",\"schema_version\":9,\"status\":\"blocked\",\"reason\":\"missing_proof\"}"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":9,\"assumptions\":1,\"obligations\":12,\"queries\":13"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"artifact_decision\",\"schema_version\":10,\"status\":\"blocked\",\"reason\":\"missing_proof\"}"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":10,\"assumptions\":1,\"obligations\":12,\"queries\":13"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_obligation_links\":12"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"obligation_kinds\":{\"logical\":4,\"runtime_guard\":1,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":1,\"resource\":5,\"quantifier\":1,\"filtered_input\":0,\"backend_fact\":0}"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_backends\":{\"unspecified\":13,\"z3\":0,\"lean\":0}"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_results\":{\"missing\":13,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":9"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":10"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"logical\",\"role\":\"ensures\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"arithmetic_safety\":\"addition_overflow\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"arithmetic_safety\":\"division_by_zero\""));
@@ -9490,7 +9490,7 @@ test "formal report coverage summarizes representative MLIR obligation classes" 
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"resource\",\"op\":\"move\",\"domain\":\"TokenUnit\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"property\":\"conservation\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"quantifier\",\"quantifier\":\"forall\""));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"query\",\"schema_version\":9"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"query\",\"schema_version\":10"));
 }
 
 test "formal loop summary rows are source-owner scoped scalar data" {
@@ -9547,8 +9547,8 @@ test "formal loop summary rows are source-owner scoped scalar data" {
     const repeated_report = try dumpManifestToOwnedString(testing.allocator, result.set);
     defer testing.allocator.free(repeated_report);
     try testing.expectEqualStrings(report, repeated_report);
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"loop_summary_coverage\",\"schema_version\":9"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"loop_summary\",\"schema_version\":9"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"loop_summary_coverage\",\"schema_version\":10"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"loop_summary\",\"schema_version\":10"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"edges\":[{\"id\":0"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"target\":\"backedge\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"target\":\"successor\""));
@@ -14406,8 +14406,8 @@ test "formal report coverage includes representative source contracts" {
     {
         const report = try dumpManifestToOwnedString(testing.allocator, logical.set);
         defer testing.allocator.free(report);
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":9"));
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":9"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":10"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":10"));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"role\":\"ensures\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"role\":\"assert\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"arithmetic_safety\":\"subtraction_overflow\""));
@@ -14422,7 +14422,7 @@ test "formal report coverage includes representative source contracts" {
     {
         const report = try dumpManifestToOwnedString(testing.allocator, resource.set);
         defer testing.allocator.free(report);
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":9"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":10"));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"effect_frame\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"resource\",\"op\":\"move\",\"domain\":\"TokenUnit\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"property\":\"conservation\""));
@@ -14434,7 +14434,7 @@ test "formal report coverage includes representative source contracts" {
     {
         const report = try dumpManifestToOwnedString(testing.allocator, quantifier.set);
         defer testing.allocator.free(report);
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":9"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":10"));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"quantifier\",\"quantifier\":\"forall\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"binder_type\":{\"tag\":\"spelling\",\"value\":\"u256\"}"));
     }
@@ -14608,6 +14608,61 @@ fn collectCallProjection(allocator: std.mem.Allocator, path: []const u8) !obliga
     return obligation_from_mlir.collect(allocator, hir.module.raw_module, .{ .project_calls = true });
 }
 
+test "G7 source entry facts retain exact contract declarations and prefix calls" {
+    for ([_][]const u8{ "tests/formal/call_projection_prefix.ora", "tests/formal/call_entry_scopes.ora" }) |path| {
+        var result = try collectCallProjection(testing.allocator, path);
+        defer result.deinit();
+        errdefer {
+            std.debug.print("G7 fixture {s}\n", .{path});
+            for (result.set.diagnostics) |diagnostic| std.debug.print("  {s}\n", .{diagnostic.message});
+        }
+        try testing.expect(!result.set.hasBlockingDiagnostic());
+        try testing.expectEqual(@as(usize, 2), result.set.function_summaries.len);
+        for (result.set.loop_summaries) |loop| {
+            try testing.expect(!loopSummaryHasReason(loop, .loop_header_fact_effect_unsupported));
+            try testing.expect(loop.preheader_projection_complete);
+            try testing.expect(loop.projectionSupported());
+        }
+        const scoped = std.mem.endsWith(u8, path, "call_entry_scopes.ora");
+        for (result.set.function_summaries) |row| {
+            try testing.expect(row.entry_scope != null);
+            try testing.expectEqual(@as(usize, if (scoped) 1 else 0), row.entry_invariant_ids.len);
+            if (scoped) {
+                const fact = obligation.findById(result.set.obligations, row.entry_invariant_ids[0]).?;
+                try testing.expectEqual(obligation.LogicalRole.contract_invariant, fact.kind.logical.role);
+                try testing.expectEqualStrings(row.entry_scope.?, fact.owner.contract);
+                try testing.expectEqual(@as(usize, 1), row.assumption_ids.len);
+                var source_bound = false;
+                for (result.source_fact_bindings) |binding| {
+                    if (!std.mem.eql(u8, binding.kind, "contract_invariant")) continue;
+                    if (std.mem.eql(u8, binding.owner_key.?, "module/contract:EntryScope")) {
+                        try testing.expectEqualSlices(obligation.Id, binding.obligation_ids, row.entry_invariant_ids);
+                        source_bound = true;
+                    } else for (binding.obligation_ids) |id| try testing.expect(id != fact.id);
+                }
+                try testing.expect(source_bound);
+            }
+        }
+        try result.set.validateIdReferences();
+        try result.set.validateTermReferences();
+        try obligation_to_lean.validateCallDependencyDigests(result.set);
+        try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_relation_unsupported }, result.set.artifactDecision());
+        var source = std.Io.Writer.Allocating.init(testing.allocator);
+        defer source.deinit();
+        try obligation_to_lean.writeModule(&source.writer, result.set, .{ .namespace = "Ora.Generated.EntryScope", .proof_surface = true });
+        try source.writer.writeAll("example : Ora.Generated.EntryScope.emittedFunctionSummaries.all (fun row => (row.entryFormulas? Ora.Generated.EntryScope.emittedManifest).isSome) = true := by decide\n");
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const lean_path = try pathFromTmpAlloc(testing.allocator, tmp, "EntryScope.lean");
+        defer testing.allocator.free(lean_path);
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = lean_path, .data = source.written() });
+        const parsed = try runLeanFileForTest(testing.allocator, lean_path);
+        defer testing.allocator.free(parsed.stdout);
+        defer testing.allocator.free(parsed.stderr);
+        try expectExited(parsed, 0);
+    }
+}
+
 test "G6 call projection covers the diagnosed function bodies" {
     const names = [_][]const u8{ "leaf", "checked", "storage", "branch", "error", "callee_loop", "prefix", "loop_return", "callee_loop_value", "chain", "checked_branch", "nested", "error_storage" };
     var complete = true;
@@ -14627,10 +14682,9 @@ test "G6 call projection covers the diagnosed function bodies" {
             valid = false;
         };
         if (std.mem.eql(u8, name, "prefix")) {
-            // G6 records the prefix call and its result. G7 owns the scoped
-            // entry facts; the existing proof-support validator must reject it.
+            // G7 transports immutable header leaves past the fully inventoried call.
             const loop = result.set.loop_summaries[0];
-            try testing.expectEqualSlices(obligation.LoopUnsupportedReason, &.{.loop_header_fact_effect_unsupported}, loop.unsupported_reasons);
+            try testing.expectEqualSlices(obligation.LoopUnsupportedReason, &.{}, loop.unsupported_reasons);
             try testing.expect(loop.preheader_projection_complete);
             var prefix_calls: usize = 0;
             for (loop.preheader_timeline) |event| if (event.payload == .call) {
@@ -14642,7 +14696,7 @@ test "G6 call projection covers the diagnosed function bodies" {
             var requires: usize = 0;
             for (result.set.function_summaries) |row| requires += row.assumption_ids.len;
             try testing.expectEqual(@as(usize, 1), requires);
-            try testing.expectError(error.InvalidDependency, obligation_to_lean.validateCallDependencyDigests(result.set));
+            try obligation_to_lean.validateCallDependencyDigests(result.set);
         } else try obligation_to_lean.validateCallDependencyDigests(result.set);
         if (!valid) {
             std.debug.print("G6 {s}: functions={d}\n", .{ name, result.set.function_summaries.len });
@@ -14845,4 +14899,180 @@ test "G6 call projection rejects uninitialized private loads inside a loop" {
         } else |err| try testing.expectEqual(error.CallPrivateSlotUninitialized, err);
     }
     try testing.expect(good);
+}
+
+test "G7 source entry rows agree with Lean on scoped rejection and bind every fact" {
+    const owner: obligation.Owner = .{ .function = .{ .name = "leaf", .module = "m", .contract = "C" } };
+    const base: obligation.FunctionSummaryRow = .{
+        .id = 1,
+        .owner = owner,
+        .source = .generated(),
+        .origin = .source,
+        .structural_key = "leaf",
+        .assumption_ids = &.{ 1, 2 },
+        .entry_scope = "contract:1",
+        .entry_invariant_ids = &.{ 3, 4 },
+        .outcomes = &.{.{ .outcome = .success, .types = &.{} }},
+        .paths = &.{.{ .id = 0, .structural_key = "return", .returns = .{ .direct = .{ .outcome = .success } } }},
+        .projection_completeness = .complete,
+        .write_footprint_complete = true,
+    };
+    const required = [_]obligation.Assumption{
+        .{ .id = 1, .owner = owner, .source = .generated(), .phase = .ora_mlir, .origin = .source, .kind = .requires, .formula = .{ .term = 0 } },
+        .{ .id = 2, .owner = owner, .source = .generated(), .phase = .ora_mlir, .origin = .source, .kind = .requires, .formula = .{ .term = 0 } },
+        .{ .id = 6, .owner = .{ .function = .{ .name = "leaf", .module = "m", .contract = "D" } }, .source = .generated(), .phase = .ora_mlir, .origin = .source, .kind = .requires, .formula = .{ .term = 1 } },
+    };
+    const facts = [_]obligation.Obligation{
+        .{ .id = 3, .owner = .{ .contract = "contract:1" }, .source = .generated(), .phase = .ora_mlir, .origin = .source, .kind = .{ .logical = .{ .role = .contract_invariant, .formula = .{ .term = 0 } } } },
+        .{ .id = 4, .owner = .{ .contract = "contract:1" }, .source = .generated(), .phase = .ora_mlir, .origin = .source, .kind = .{ .logical = .{ .role = .contract_invariant, .formula = .{ .term = 0 } } } },
+        .{ .id = 5, .owner = .{ .contract = "contract:2" }, .source = .generated(), .phase = .ora_mlir, .origin = .source, .kind = .{ .logical = .{ .role = .contract_invariant, .formula = .{ .term = 1 } } } },
+    };
+    var row = base;
+    var assumptions = required;
+    var obligations = facts;
+    const set: obligation.ObligationSet = .{ .terms = &.{ .{ .bool_lit = true }, .{ .bool_lit = false } }, .assumptions = &assumptions, .obligations = &obligations, .function_summaries = (&row)[0..1] };
+    const digest = try obligation_to_lean.functionVcSha256(set, 1);
+    var source = std.Io.Writer.Allocating.init(testing.allocator);
+    defer source.deinit();
+    try obligation_to_lean.writeModule(&source.writer, set, .{ .namespace = "Ora.Generated.G7Entry" });
+    try source.writer.writeAll("namespace Ora.Generated.G7Entry\n");
+    const Mutation = enum { exact, requires_missing, requires_duplicate, requires_reordered, requires_foreign, module_foreign, requires_owner_tag, requires_kind, requires_no_formula, invariant_missing, invariant_duplicate, invariant_reordered, invariant_foreign, invariant_unknown, invariant_kind, invariant_owner_tag, scope_null, scope_empty, scope_foreign, requires_false, invariant_false };
+    const cases = [_]struct { mutation: Mutation, row: []const u8 = "emittedFunctionSummary_1", manifest: []const u8 = "emittedManifest", valid: bool = false }{
+        .{ .mutation = .exact, .valid = true },
+        .{ .mutation = .requires_missing, .row = "{ emittedFunctionSummary_1 with assumptionIds := [1] }" },
+        .{ .mutation = .requires_duplicate, .row = "{ emittedFunctionSummary_1 with assumptionIds := [1, 1] }" },
+        .{ .mutation = .requires_reordered, .row = "{ emittedFunctionSummary_1 with assumptionIds := [2, 1] }" },
+        .{ .mutation = .requires_foreign, .row = "{ emittedFunctionSummary_1 with assumptionIds := [1, 6] }" },
+        .{ .mutation = .module_foreign, .row = "{ emittedFunctionSummary_1 with moduleName := some \"foreign\" }" },
+        .{ .mutation = .requires_owner_tag, .manifest = "{ emittedManifest with assumptions := [{ emittedAssumptionRow_1 with functionOwner := false }, emittedAssumptionRow_2, emittedAssumptionRow_6] }" },
+        .{ .mutation = .requires_kind, .manifest = "{ emittedManifest with assumptions := [{ emittedAssumptionRow_1 with kind := .assume }, emittedAssumptionRow_2, emittedAssumptionRow_6] }" },
+        .{ .mutation = .requires_no_formula, .manifest = "{ emittedManifest with assumptions := [{ emittedAssumptionRow_1 with formula := none }, emittedAssumptionRow_2, emittedAssumptionRow_6] }" },
+        .{ .mutation = .invariant_missing, .row = "{ emittedFunctionSummary_1 with entryInvariantIds := [3] }" },
+        .{ .mutation = .invariant_duplicate, .row = "{ emittedFunctionSummary_1 with entryInvariantIds := [3, 3] }" },
+        .{ .mutation = .invariant_reordered, .row = "{ emittedFunctionSummary_1 with entryInvariantIds := [4, 3] }" },
+        .{ .mutation = .invariant_foreign, .row = "{ emittedFunctionSummary_1 with entryInvariantIds := [3, 5] }" },
+        .{ .mutation = .invariant_unknown, .row = "{ emittedFunctionSummary_1 with entryInvariantIds := [3, 99] }" },
+        .{ .mutation = .invariant_kind, .manifest = "{ emittedManifest with obligations := [{ emittedObligationRow_3 with kind := .logical .assert_ (.term 0) }, emittedObligationRow_4, emittedObligationRow_5] }" },
+        .{ .mutation = .invariant_owner_tag, .manifest = "{ emittedManifest with obligations := [{ emittedObligationRow_3 with contractOwner := false }, emittedObligationRow_4, emittedObligationRow_5] }" },
+        .{ .mutation = .scope_null, .row = "{ emittedFunctionSummary_1 with entryScope := none }" },
+        .{ .mutation = .scope_empty, .row = "{ emittedFunctionSummary_1 with entryScope := some \"\" }" },
+        .{ .mutation = .scope_foreign, .row = "{ emittedFunctionSummary_1 with entryScope := some \"contract:2\" }" },
+        .{ .mutation = .requires_false, .valid = true, .manifest = "{ emittedManifest with assumptions := [{ emittedAssumptionRow_1 with formula := some (.term 1) }, emittedAssumptionRow_2, emittedAssumptionRow_6] }" },
+        .{ .mutation = .invariant_false, .valid = true, .manifest = "{ emittedManifest with obligations := [{ emittedObligationRow_3 with kind := .logical .contractInvariant (.term 1) }, emittedObligationRow_4, emittedObligationRow_5] }" },
+    };
+    for (cases) |case| {
+        row = base;
+        assumptions = required;
+        obligations = facts;
+        switch (case.mutation) {
+            .exact => {},
+            .requires_missing => row.assumption_ids = &.{1},
+            .requires_duplicate => row.assumption_ids = &.{ 1, 1 },
+            .requires_reordered => row.assumption_ids = &.{ 2, 1 },
+            .requires_foreign => row.assumption_ids = &.{ 1, 6 },
+            .module_foreign => row.owner.function.module = "foreign",
+            .requires_owner_tag => assumptions[0].owner = .{ .module = "leaf" },
+            .requires_kind => assumptions[0].kind = .assume,
+            .requires_no_formula => assumptions[0].formula = null,
+            .invariant_missing => row.entry_invariant_ids = &.{3},
+            .invariant_duplicate => row.entry_invariant_ids = &.{ 3, 3 },
+            .invariant_reordered => row.entry_invariant_ids = &.{ 4, 3 },
+            .invariant_foreign => row.entry_invariant_ids = &.{ 3, 5 },
+            .invariant_unknown => row.entry_invariant_ids = &.{ 3, 99 },
+            .invariant_kind => obligations[0].kind.logical.role = .assert,
+            .invariant_owner_tag => obligations[0].owner = .{ .function = .{ .name = "contract:1" } },
+            .scope_null => row.entry_scope = null,
+            .scope_empty => row.entry_scope = "",
+            .scope_foreign => row.entry_scope = "contract:2",
+            .requires_false => assumptions[0].formula = .{ .term = 1 },
+            .invariant_false => obligations[0].kind.logical.formula = .{ .term = 1 },
+        }
+        errdefer std.debug.print("G7 entry mutation {s}\n", .{@tagName(case.mutation)});
+        if (case.valid) try set.validateIdReferences() else try testing.expectError(error.InvalidDependency, set.validateIdReferences());
+        if (case.mutation != .exact and case.mutation != .invariant_unknown) {
+            const changed = try obligation_to_lean.functionVcSha256(set, 1);
+            try testing.expect(!std.mem.eql(u8, &digest, &changed));
+        }
+        try source.writer.print("example : (({s} : Ora.Loop.FunctionSummaryRow).entryFormulas? ({s} : Ora.Obligation.Manifest)).isSome = {s} := by decide\n", .{ case.row, case.manifest, if (case.valid) "true" else "false" });
+    }
+    try source.writer.writeAll("end Ora.Generated.G7Entry\n");
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try pathFromTmpAlloc(testing.allocator, tmp, "G7Rows.lean");
+    defer testing.allocator.free(path);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = source.written() });
+    const checked = try runLeanFileForTest(testing.allocator, path);
+    defer testing.allocator.free(checked.stdout);
+    defer testing.allocator.free(checked.stderr);
+    try expectExited(checked, 0);
+}
+
+test "G7 source entry prefix calls preserve only immutable header facts" {
+    var positive = try collectCallProjection(testing.allocator, "tests/formal/call_entry_prefix_storage.ora");
+    defer positive.deinit();
+    try testing.expect(!positive.set.hasBlockingDiagnostic());
+    const loop = positive.set.loop_summaries[0];
+    try testing.expect(loop.projectionSupported());
+    try testing.expectEqual(@as(usize, 1), loop.header_facts.len);
+    var call_count: usize = 0;
+    for (loop.preheader_timeline) |event| if (event.payload == .call) {
+        call_count += 1;
+        const callee = obligation.findById(positive.set.function_summaries, event.payload.call.callee_summary_id).?;
+        try testing.expectEqual(@as(usize, 1), callee.write_footprint.len);
+        try testing.expectEqualStrings("saved", callee.write_footprint[0].root);
+    };
+    try testing.expectEqual(@as(usize, 1), call_count);
+    try positive.set.validateIdReferences();
+    try obligation_to_lean.validateCallDependencyDigests(positive.set);
+    var negative = try collectCallProjection(testing.allocator, "tests/formal/call_entry_prefix_storage_fact_blocked.ora");
+    defer negative.deinit();
+    try testing.expect(loopSummaryHasReason(negative.set.loop_summaries[0], .loop_header_fact_type_unsupported));
+    try testing.expectEqual(@as(usize, 0), negative.set.loop_summaries[0].header_facts.len);
+    try testing.expect(countAssumption(negative.set, .requires) > 0);
+    try testing.expectError(error.InvalidDependency, obligation_to_lean.validateCallDependencyDigests(negative.set));
+}
+
+test "G7 source entry storage mode is scoped and retains invocation old" {
+    const h = createContext();
+    defer destroyContext(h);
+    const text =
+        \\module {
+        \\  ora.contract @EntryStorage {
+        \\    ora.global "counter" : !ora.int<256, false>
+        \\    %current = ora.sload "counter" : !ora.int<256, false>
+        \\    %old = ora.old %current : !ora.int<256, false> -> !ora.int<256, false>
+        \\    %entry = ora.cmp "eq", %current, %old : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\    "ora.invariant"(%entry) {ora.source_fact_id = 1 : i64, ora.source_fact_kind = "contract_invariant"} : (i1) -> ()
+        \\    func.func @mutating() attributes {ora.write_slots = ["counter"], ora.write_slots_complete = true} {
+        \\      %value = ora.sload "counter" : !ora.int<256, false>
+        \\      %condition = ora.cmp "eq", %value, %value : !ora.int<256, false>, !ora.int<256, false> -> i1
+        \\      "ora.requires"(%condition) : (i1) -> ()
+        \\      "ora.assert"(%condition) : (i1) -> ()
+        \\      func.return
+        \\    }
+        \\  }
+        \\}
+    ;
+    const module = try parseModule(h.ctx, text);
+    defer mlir.oraModuleDestroy(module);
+    var projected = try obligation_from_mlir.collect(testing.allocator, module, .{ .project_calls = true });
+    defer projected.deinit();
+    const invariant = projected.set.obligations[0];
+    try testing.expectEqual(obligation.LogicalRole.contract_invariant, invariant.kind.logical.role);
+    const formula = projected.set.terms[invariant.kind.logical.formula.term].binary;
+    try testing.expect(projected.set.terms[formula.lhs] == .place_read);
+    try testing.expect(projected.set.terms[formula.rhs] == .old);
+    try testing.expect(projected.set.terms[projected.set.terms[formula.rhs].old] == .place_read);
+    try testing.expect(projected.set.assumptions[0].formula.? == .term);
+    var body_assert: usize = 0;
+    for (projected.set.obligations) |fact| if (fact.kind == .logical and fact.kind.logical.role == .assert) {
+        body_assert += 1;
+        try testing.expect(fact.kind.logical.formula == .origin_value);
+    };
+    try testing.expectEqual(@as(usize, 1), body_assert);
+    var baseline = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer baseline.deinit();
+    try testing.expectEqual(obligation.LogicalRole.invariant, baseline.set.obligations[0].kind.logical.role);
+    try testing.expect(baseline.set.obligations[0].kind.logical.formula == .origin_value);
+    try testing.expect(baseline.set.assumptions[0].formula.? == .origin_value);
 }
