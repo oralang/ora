@@ -205,6 +205,7 @@ pub const Z3_mk_ge = c.Z3_mk_ge;
 
 // Sort queries
 pub const Z3_get_sort = c.Z3_get_sort;
+pub const Z3_is_eq_sort = c.Z3_is_eq_sort;
 pub const Z3_get_sort_kind = c.Z3_get_sort_kind;
 pub const Z3_get_bv_sort_size = c.Z3_get_bv_sort_size;
 pub const Z3_get_array_sort_domain = c.Z3_get_array_sort_domain;

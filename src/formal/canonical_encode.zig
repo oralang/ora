@@ -6,6 +6,7 @@ const z3 = z3_verification.z3_c;
 const Context = z3_verification.Z3Context;
 const Solver = z3_verification.Z3Solver;
 const obligation = @import("obligation.zig");
+const canonical_digest = @import("obligation_to_lean.zig");
 const fixture = @import("formal_test_fixture.zig");
 const ct = @import("canonical_types.zig");
 const support = @import("canonical_support.zig");
@@ -55,6 +56,7 @@ const LoopRead = struct {
 const LoopRoot = struct {
     name: []const u8,
     key: z3.Z3_ast,
+    ty: obligation.TypeRef,
 };
 
 const LoopEncodeState = struct {
@@ -63,6 +65,7 @@ const LoopEncodeState = struct {
     reads: std.ArrayList(LoopRead) = .empty,
     roots: std.ArrayList(LoopRoot) = .empty,
     preheader_starts_at_entry: bool = false,
+    returned: bool = false,
 
     fn deinit(self: *LoopEncodeState, allocator: std.mem.Allocator) void {
         for (self.stores.items) |store| allocator.free(store.domain);
@@ -79,6 +82,10 @@ pub const Adapter = struct {
     query_state: ?*CanonicalQueryState,
     loop_state: ?*LoopEncodeState = null,
     use_free_variable_identity_names: bool = false,
+    function_vc_qf: bool = false,
+    function_row: ?obligation.FunctionSummaryRow = null,
+    call_scope: u32 = 0,
+    fresh_index: u32 = 0,
 
     pub const EncodeTermState = struct {
         expected: ?TypeInfo = null,
@@ -98,6 +105,238 @@ pub const Adapter = struct {
             .set = set,
             .query_state = null,
         };
+    }
+
+    pub const FunctionVC = struct {
+        function_id: obligation.Id,
+        function_vc_sha256: [32]u8,
+        entry: z3.Z3_ast,
+        safety: z3.Z3_ast,
+        joint: z3.Z3_ast,
+    };
+
+    /// Output symbols belong to one joint relation; consumers must assert that
+    /// relation before using any of its outcome, payload or store projections.
+    pub fn functionOutput(self: *Adapter, id: obligation.Id, label: []const u8, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
+        const name = try std.fmt.allocPrint(self.allocator, "$ora.function.{d}.{s}.{d}", .{ id, label, self.call_scope });
+        defer self.allocator.free(name);
+        return self.namedConst(name, sort);
+    }
+
+    pub fn encodeFunctionVC(self: *Adapter, id: obligation.Id, expected: [32]u8) !FunctionVC {
+        try self.set.validateTermReferences();
+        try self.set.validateIdReferences();
+        try canonical_digest.validateCallDependencyDigests(self.set);
+        const row = obligation.findById(self.set.function_summaries, id) orelse return error.InvalidDependency;
+        if (row.projection_completeness != .complete or !row.write_footprint_complete) return error.FunctionVCProjectionIncomplete;
+        const digest = try canonical_digest.functionVcSha256(self.set, id);
+        if (!std.mem.eql(u8, &digest, &expected)) return error.FunctionVCDigestMismatch;
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const previous = self.*;
+        defer self.* = previous;
+        self.allocator = arena.allocator();
+        var query_state: CanonicalQueryState = .{};
+        self.query_state = &query_state;
+        self.use_free_variable_identity_names = true;
+        self.function_vc_qf = true;
+        self.call_scope = 0;
+        self.fresh_index = 0;
+        const initial: LoopEncodeState = .{ .summary = undefined, .preheader_starts_at_entry = true };
+        var vc = try self.functionRelation(row, initial);
+        vc.function_vc_sha256 = digest;
+        return vc;
+    }
+
+    fn functionRelation(self: *Adapter, row: obligation.FunctionSummaryRow, input: LoopEncodeState) EncodeError!FunctionVC {
+        if (row.projection_completeness != .complete or !row.write_footprint_complete) return error.FunctionVCProjectionIncomplete;
+        const previous = self.loop_state;
+        const previous_function = self.function_row;
+        defer self.loop_state = previous;
+        defer self.function_row = previous_function;
+        self.function_row = row;
+        const edges = try self.allocator.alloc(obligation.LoopEdgeRow, row.paths.len);
+        for (row.paths, edges) |path, *edge| edge.* = .{ .id = path.id, .timeline = path.timeline };
+        var initial = input;
+        initial.summary = .{
+            .id = row.id,
+            .owner = row.owner,
+            .source = row.source,
+            .phase = .report,
+            .origin = row.origin,
+            .loop_source_op_id = null,
+            .loop_kind = .other,
+            .context_variables = row.parameters,
+            .edges = edges,
+        };
+        self.loop_state = &initial;
+        // Declaration follows actual operations without evaluating future indices.
+        for (row.paths) |path| try self.storageDomains(path.timeline, false);
+        var entries: std.ArrayList(z3.Z3_ast) = .empty;
+        try self.appendLoopAssumptions(&entries, row.assumption_ids);
+        for (row.entry_invariant_ids) |fact_id| {
+            const fact = obligation.findById(self.set.obligations, fact_id) orelse return error.InvalidDependency;
+            try self.appendFormulaPremises(&entries, &.{obligation.kindFormula(fact.kind) orelse return error.MissingFormula});
+        }
+        try self.appendSideConstraints(&entries);
+        var vc: FunctionVC = .{ .function_id = row.id, .function_vc_sha256 = undefined, .entry = self.conjunction(entries.items), .safety = z3.Z3_mk_true(self.context.ctx), .joint = z3.Z3_mk_false(self.context.ctx) };
+        for (row.paths, edges) |path, edge| {
+            var state = try self.cloneState(initial);
+            self.loop_state = &state;
+            const trace = (try self.appendLoopTimeline(&entries, path.timeline, edge, true)).?;
+            var branch: std.ArrayList(z3.Z3_ast) = .empty;
+            try branch.appendSlice(self.allocator, trace.prefix);
+            try self.bindReturn(&branch, path.returns);
+            for (state.stores.items) |storage| try branch.append(self.allocator, z3.Z3_mk_eq(self.context.ctx, try self.storageOutput(row.id, storage), storage.current));
+            try self.appendSideConstraints(&branch);
+            vc.joint = z3.Z3_mk_or(self.context.ctx, 2, &[_]z3.Z3_ast{ vc.joint, self.conjunction(branch.items) });
+            vc.safety = z3.Z3_mk_and(self.context.ctx, 2, &[_]z3.Z3_ast{ vc.safety, trace.safety });
+        }
+        try self.context.checkNoError();
+        return vc;
+    }
+
+    fn conjunction(self: *Adapter, values: []const z3.Z3_ast) z3.Z3_ast {
+        return z3.Z3_mk_and(self.context.ctx, @intCast(values.len), values.ptr);
+    }
+
+    fn cloneState(self: *Adapter, state: LoopEncodeState) EncodeError!LoopEncodeState {
+        var copy = state;
+        copy.stores = try state.stores.clone(self.allocator);
+        copy.roots = try state.roots.clone(self.allocator);
+        copy.reads = try state.reads.clone(self.allocator);
+        return copy;
+    }
+
+    fn bindReturn(self: *Adapter, branch: *std.ArrayList(z3.Z3_ast), expression: obligation.CallReturnExpr) EncodeError!void {
+        if (expression == .loop_exit) {
+            if (!self.loop_state.?.returned) return error.InvalidLoopQuery;
+            return;
+        }
+        const row = self.function_row orelse return error.InvalidLoopQuery;
+        const returned = expression.direct;
+        const arm = for (row.outcomes, 0..) |shape, index| {
+            if (std.meta.eql(shape.outcome, returned.outcome)) break index;
+        } else return error.InvalidCallSignature;
+        if (returned.values.len != row.outcomes[arm].types.len) return error.InvalidCallSignature;
+        try branch.append(self.allocator, try self.selectOutcome(row, returned.outcome));
+        for (returned.values, 0..) |value, index| {
+            if (!obligation.typeRefEqual(value.ty, row.outcomes[arm].types[index])) return error.InvalidCallSignature;
+            const actual = try self.typedValue(value);
+            try branch.append(self.allocator, z3.Z3_mk_eq(self.context.ctx, try self.payloadOutput(row, arm, index), actual));
+        }
+        self.loop_state.?.returned = true;
+    }
+
+    fn typedValue(self: *Adapter, value: obligation.LoopTypedFormula) EncodeError!z3.Z3_ast {
+        const term = switch (value.value.formula) {
+            .term => |term| term,
+            else => return error.UnsupportedOriginValue,
+        };
+        return self.encodeTermIdWithExpected(term, try typeInfo(value.ty), true);
+    }
+
+    fn selectOutcome(self: *Adapter, row: obligation.FunctionSummaryRow, outcome: obligation.CallOutcome) EncodeError!z3.Z3_ast {
+        const arm = for (row.outcomes, 0..) |shape, index| {
+            if (std.meta.eql(shape.outcome, outcome)) break index;
+        } else return error.InvalidCallSignature;
+        const sort = try self.sortForType(u256TypeInfo());
+        return z3.Z3_mk_eq(self.context.ctx, try self.functionOutput(row.id, "outcome", sort), z3.Z3_mk_unsigned_int64(self.context.ctx, @intCast(arm), sort));
+    }
+
+    fn payloadOutput(self: *Adapter, row: obligation.FunctionSummaryRow, arm: usize, index: usize) EncodeError!z3.Z3_ast {
+        const label = try std.fmt.allocPrint(self.allocator, "arm{d}.value{d}", .{ arm, index });
+        return self.functionOutput(row.id, label, try self.sortForType(try typeInfo(row.outcomes[arm].types[index])));
+    }
+
+    fn storageOutput(self: *Adapter, id: obligation.Id, storage: LoopStore) EncodeError!z3.Z3_ast {
+        const label = try std.fmt.allocPrint(self.allocator, "store.{s}.{s}.{d}.{any}", .{ storage.domain, @tagName(storage.info.kind), storage.info.width, storage.info.signed });
+        return self.functionOutput(id, label, z3.Z3_get_sort(self.context.ctx, storage.current));
+    }
+
+    fn freshValue(self: *Adapter, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
+        self.fresh_index += 1;
+        const name = try std.fmt.allocPrint(self.allocator, "$ora.call.fresh.{d}", .{self.fresh_index});
+        return self.namedConst(name, sort);
+    }
+
+    fn storageDomains(self: *Adapter, timeline: []const obligation.LoopTimelineEvent, havoc: bool) EncodeError!void {
+        for (timeline) |event| switch (event.payload) {
+            .storage_read => |read| _ = try self.functionStorageDomain(read.location),
+            .storage_write => |write| {
+                const store = try self.functionStorageDomain(write.location);
+                if (havoc) store.current = if (write.location.projections.len == 0)
+                    z3.Z3_mk_store(self.context.ctx, store.current, try self.loopRootKey(write.location), try self.freshValue(try self.sortForType(store.info)))
+                else
+                    try self.freshValue(z3.Z3_get_sort(self.context.ctx, store.current));
+            },
+            .call => |call| {
+                const row = obligation.findById(self.set.function_summaries, call.callee_summary_id) orelse return error.InvalidDependency;
+                for (row.paths) |path| try self.storageDomains(path.timeline, havoc);
+            },
+            .summary_dependency => |dependency| {
+                const row = obligation.findById(self.set.loop_summaries, dependency.summary_id) orelse return error.UnknownLoopSummary;
+                for (row.edges) |edge| try self.storageDomains(edge.timeline, havoc);
+            },
+            .indexed_region_read => if (self.function_vc_qf) {
+                return error.FunctionVCDependencyUnsupported;
+            },
+            else => {},
+        };
+    }
+
+    fn functionStorageDomain(self: *Adapter, location: obligation.LoopStorageLocationExpr) EncodeError!*LoopStore {
+        const info = try typeInfo(location.value_ty);
+        if (location.projections.len == 0) {
+            _ = try self.loopRootKey(location);
+            return self.loopStore(info, u256TypeInfo(), "direct");
+        }
+        if (location.projections.len != 1) return error.InvalidLoopQuery;
+        switch (location.projections[0]) {
+            .field => |field| {
+                const domain = try std.fmt.allocPrint(self.allocator, "field.{s}.{s}", .{ location.root, field });
+                defer self.allocator.free(domain);
+                return self.loopStore(info, u256TypeInfo(), domain);
+            },
+            .fixed_index => |index| {
+                return (try self.loopProjectedStoreAndKeyFromAst(location.root, "fixed", null, try typeInfo(index.index.ty), info)).store;
+            },
+            .mapping_key => |key| {
+                return (try self.loopProjectedStoreAndKeyFromAst(location.root, "mapping", null, try typeInfo(key.ty), info)).store;
+            },
+        }
+    }
+
+    pub fn checkFunctionSafety(self: *Adapter, id: obligation.Id, expected: [32]u8, query_id: obligation.Id) !struct { function_vc_sha256: [32]u8, query: obligation.VerificationQuery } {
+        const vc = try self.encodeFunctionVC(id, expected);
+        const row = obligation.findById(self.set.function_summaries, id).?;
+        var solver = try Solver.initForLogic(self.context, self.allocator, "QF_AUFBV");
+        defer solver.deinit();
+        try solver.assertChecked(vc.entry);
+        const base = try solver.checkChecked();
+        const constraints = [_]z3.Z3_ast{ vc.entry, z3.Z3_mk_not(self.context.ctx, vc.safety) };
+        try self.context.checkNoError();
+        try solver.assertChecked(constraints[1]);
+        const status = try solver.checkChecked();
+        const hash = try self.loopQueryHash(&constraints, .qf_aufbv);
+        return .{ .function_vc_sha256 = vc.function_vc_sha256, .query = .{
+            .id = query_id,
+            .owner = row.owner,
+            .source = row.source,
+            .phase = .report,
+            .origin = row.origin,
+            .backend = .z3,
+            .kind = .obligation,
+            .assumption_ids = row.assumption_ids,
+            .solver_logic = .qf_aufbv,
+            .constraint_count = hash.constraint_count,
+            .smtlib_hash = hash.smtlib_hash,
+            .result = .{ .status = switch (status) {
+                z3.Z3_L_FALSE => .proved,
+                z3.Z3_L_TRUE => .failed,
+                else => .unknown,
+            }, .vacuous = base == z3.Z3_L_FALSE, .vacuity_unknown = base == z3.Z3_L_UNDEF },
+        } };
     }
 
     pub fn checkObligation(self: *Adapter, id: obligation.Id) EncodeError!CheckStatus {
@@ -237,11 +476,38 @@ pub const Adapter = struct {
         try constraints.append(self.allocator, negated_goal);
     }
 
-    fn appendLoopQueryConstraints(
+    fn appendLoopQueryConstraints(self: *Adapter, destination: *std.ArrayList(z3.Z3_ast), query: obligation.VerificationQuery) EncodeError!void {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const previous = self.*;
+        defer self.* = previous;
+        self.allocator = arena.allocator();
+        var constraints: std.ArrayList(z3.Z3_ast) = .empty;
+        try self.buildLoopQueryConstraints(&constraints, query);
+        try destination.appendSlice(previous.allocator, constraints.items);
+    }
+
+    fn functionOwnersEqual(lhs: obligation.Owner, rhs: obligation.Owner) bool {
+        if (lhs != .function or rhs != .function or !std.mem.eql(u8, lhs.function.name, rhs.function.name)) return false;
+        const left = [_]?[]const u8{ lhs.function.module, lhs.function.contract };
+        const right = [_]?[]const u8{ rhs.function.module, rhs.function.contract };
+        for (left, right) |a, b| if ((a == null) != (b == null) or !std.mem.eql(u8, a orelse "", b orelse "")) return false;
+        return true;
+    }
+
+    fn buildLoopQueryConstraints(
         self: *Adapter,
         constraints: *std.ArrayList(z3.Z3_ast),
         query: obligation.VerificationQuery,
     ) EncodeError!void {
+        if (self.set.function_summaries.len != 0) {
+            canonical_digest.validateCallDependencyDigests(self.set) catch return error.InvalidDependency;
+            self.function_vc_qf = true;
+            for (self.set.function_summaries) |row| if (functionOwnersEqual(row.owner, query.owner)) {
+                if (self.function_row != null) return error.InvalidDependency;
+                self.function_row = row;
+            };
+        }
         const summary_id = query.loop_summary_id orelse return error.InvalidLoopQuery;
         const summary = obligation.findById(self.set.loop_summaries, summary_id) orelse
             return error.UnknownLoopSummary;
@@ -262,6 +528,26 @@ pub const Adapter = struct {
         self.use_free_variable_identity_names = true;
         defer self.use_free_variable_identity_names = false;
 
+        // Preheader exports are symbolic inputs to induction steps. Only the
+        // base query executes that prefix; no callee facts are invented here.
+        if (self.function_vc_qf and query.kind != .loop_base) {
+            for (summary.preheader_timeline) |event| for (0..obligation.loopTimelineReadCount(event.payload)) |index| {
+                const id = obligation.loopTimelineReadId(event.payload, index) orelse return error.InvalidDependency;
+                const ty = switch (event.payload) {
+                    .storage_read => |read| read.location.value_ty,
+                    .indexed_region_read => |read| read.element_ty,
+                    .call => |call| call.results[index].ty,
+                    .summary_dependency => |dependency| dependency.result_bindings.?[index].ty,
+                    else => unreachable,
+                };
+                try self.bindValue(.{ .index = 0, .id = id, .ty = ty }, try self.encodeFreeVariableIdentity(id, ty));
+            };
+        }
+        // A prefix call may be the only operation touching a domain. Declare
+        // it before capturing callee entry and propagating its final arrays.
+        try self.storageDomains(summary.preheader_timeline, false);
+        for (summary.edges) |edge| try self.storageDomains(edge.timeline, false);
+        try self.appendSideConstraints(constraints);
         try self.appendLoopAssumptions(constraints, query.assumption_ids);
         for (summary.header_facts) |fact|
             try self.appendFormulaPremises(constraints, &.{fact.formula});
@@ -341,6 +627,7 @@ pub const Adapter = struct {
         const premises = if (collect_safety_goal) &prefix else constraints;
         var safety = z3.Z3_mk_true(self.context.ctx);
         try self.context.checkNoError();
+        _ = parent_edge;
         for (timeline) |event| switch (event.payload) {
             .path_assumption => |path| for (path.formulas) |expression| {
                 try self.appendFormulaPremises(premises, &.{expression.formula});
@@ -375,12 +662,17 @@ pub const Adapter = struct {
                 try self.applyLoopWrite(write);
                 try self.appendSideConstraints(premises);
             },
-            .call => return error.InvalidLoopQuery,
-            .summary_dependency => |dependency| try self.appendLoopSummaryDependencyPremise(
-                premises,
-                parent_edge orelse return error.InvalidLoopQuery,
-                dependency,
-            ),
+            .call, .summary_dependency => {
+                var relation: std.ArrayList(z3.Z3_ast) = .empty;
+                const ready = switch (event.payload) {
+                    .call => |call| try self.composeCall(&relation, call),
+                    .summary_dependency => |dependency| try self.composeLoop(&relation, dependency),
+                    else => unreachable,
+                };
+                if (collect_safety_goal) safety = z3.Z3_mk_and(self.context.ctx, 2, &[_]z3.Z3_ast{ safety, try self.implyFromPremises(premises.items, ready) });
+                try premises.append(self.allocator, ready);
+                try premises.appendSlice(self.allocator, relation.items);
+            },
         };
         if (!collect_safety_goal) {
             prefix.deinit(self.allocator);
@@ -483,91 +775,96 @@ pub const Adapter = struct {
         try self.context.checkNoError();
     }
 
-    fn appendLoopSummaryDependencyPremise(
-        self: *Adapter,
-        constraints: *std.ArrayList(z3.Z3_ast),
-        parent_edge: obligation.LoopEdgeRow,
-        dependency: obligation.LoopSummaryDependency,
-    ) EncodeError!void {
-        if (dependency.result_bindings != null) return error.InvalidLoopQuery;
-        const inner = obligation.findById(self.set.loop_summaries, dependency.summary_id) orelse
-            return error.UnknownLoopSummary;
-        if (!inner.projectionSupported()) return error.InvalidLoopQuery;
-        const exit_edge = uniqueLoopEdgeForTarget(inner, dependency.target) orelse
-            return error.InvalidLoopQuery;
-
-        // `initial` is existential in CertifiedControlRelation. Evaluating
-        // the exact init values retains their typing and checked-operation
-        // side conditions without inventing a relation to the exit state.
-        const initial_values = try self.encodeFormulaValues(constraints, inner.init_formulas);
-        self.allocator.free(initial_values);
-
-        const current_values = try self.allocator.alloc(z3.Z3_ast, inner.variables.len);
-        defer self.allocator.free(current_values);
-        for (inner.variables, current_values, 0..) |variable, *value, variable_index| {
-            const name = try std.fmt.allocPrint(
-                self.allocator,
-                "$ora.loop.dep.s{d}.d{d}.e{d}.v{d}.current",
-                .{ dependency.summary_id, dependency.id, parent_edge.id, variable_index },
-            );
-            defer self.allocator.free(name);
-            value.* = try self.namedConst(name, try self.sortForType(try typeInfo(variable.ty)));
-        }
-
-        try self.appendSubstitutedLoopPremises(
-            constraints,
-            inner.variables,
-            current_values,
-            inner.invariant_formulas,
-        );
-        for (exit_edge.timeline) |event| switch (event.payload) {
-            .path_assumption, .safety_checkpoint => |formulas| for (formulas.formulas) |formula| {
-                try self.appendSubstitutedLoopPremises(
-                    constraints,
-                    inner.variables,
-                    current_values,
-                    &.{formula.formula},
-                );
-            },
-            .summary_dependency => |nested| try self.appendLoopSummaryDependencyPremise(
-                constraints,
-                exit_edge,
-                nested,
-            ),
-            .storage_read, .indexed_region_read, .storage_write, .call => return error.InvalidLoopQuery,
+    fn bindValue(self: *Adapter, variable: obligation.LoopVariable, value: z3.Z3_ast) EncodeError!void {
+        if (!z3.Z3_is_eq_sort(self.context.ctx, z3.Z3_get_sort(self.context.ctx, value), try self.sortForType(try typeInfo(variable.ty)))) return error.TypeMismatch;
+        const bound: LoopRead = .{ .id = variable.id orelse return error.InvalidLoopQuery, .info = try typeInfo(variable.ty), .value = value };
+        for (self.loop_state.?.reads.items) |*read| if (obligation.freeVarIdEql(read.id, bound.id)) {
+            read.* = bound;
+            return;
         };
-
-        const raw_following = try self.encodeBindingValues(
-            constraints,
-            inner.variables,
-            exit_edge.next_state,
-        );
-        defer self.allocator.free(raw_following);
-        for (inner.variables, raw_following) |variable, raw_value| {
-            const following_value = try self.encodeFreeVariableIdentity(
-                variable.id orelse return error.InvalidLoopQuery,
-                variable.ty,
-            );
-            const substituted = try self.substituteLoopVariables(raw_value, inner.variables, current_values);
-            const equality = z3.Z3_mk_eq(self.context.ctx, following_value, substituted);
-            try self.context.checkNoError();
-            try constraints.append(self.allocator, equality);
-        }
+        try self.loop_state.?.reads.append(self.allocator, bound);
     }
 
-    fn appendSubstitutedLoopPremises(
-        self: *Adapter,
-        constraints: *std.ArrayList(z3.Z3_ast),
-        variables: []const obligation.LoopVariable,
-        replacements: []const z3.Z3_ast,
-        formulas: []const obligation.FormulaRef,
-    ) EncodeError!void {
-        for (formulas) |formula| {
-            const raw = try self.encodeFormula(formula);
-            try self.appendSideConstraints(constraints);
-            const substituted = try self.substituteLoopVariables(raw, variables, replacements);
-            try constraints.append(self.allocator, substituted);
+    fn composeCall(self: *Adapter, relation: *std.ArrayList(z3.Z3_ast), call: obligation.LoopCallEvent) EncodeError!z3.Z3_ast {
+        const row = obligation.findById(self.set.function_summaries, call.callee_summary_id) orelse return error.InvalidDependency;
+        const caller = self.loop_state.?;
+        var input = try self.cloneState(caller.*);
+        input.reads = .empty;
+        input.returned = false;
+        for (input.stores.items) |*store| store.entry = store.current;
+        for (row.parameters, call.arguments) |parameter, argument| {
+            const value = try self.typedValue(argument);
+            try input.reads.append(self.allocator, .{ .id = parameter.id.?, .info = try typeInfo(parameter.ty), .value = value });
         }
+        try self.appendSideConstraints(relation);
+        const previous_scope = self.call_scope;
+        defer self.call_scope = previous_scope;
+        self.fresh_index += 1;
+        self.call_scope = self.fresh_index;
+        const vc = try self.functionRelation(row, input);
+        const ready = z3.Z3_mk_and(self.context.ctx, 2, &[_]z3.Z3_ast{ vc.entry, vc.safety });
+        try relation.appendSlice(self.allocator, &.{ vc.joint, try self.selectOutcome(row, call.outcome) });
+        const arm = for (row.outcomes, 0..) |shape, index| {
+            if (std.meta.eql(shape.outcome, call.outcome)) break index;
+        } else return error.InvalidCallSignature;
+        for (call.results, 0..) |result, index| try self.bindValue(result, try self.payloadOutput(row, arm, index));
+        for (caller.stores.items) |*store| store.current = try self.storageOutput(row.id, store.*);
+        return ready;
+    }
+
+    /// Abstract exits use the existing invariant rule. Their authority remains
+    /// conditional on the separately checked, digest-bound LoopVC obligations.
+    fn composeLoop(self: *Adapter, relation: *std.ArrayList(z3.Z3_ast), dependency: obligation.LoopSummaryDependency) EncodeError!z3.Z3_ast {
+        const inner = obligation.findById(self.set.loop_summaries, dependency.summary_id) orelse return error.UnknownLoopSummary;
+        if (!inner.projectionSupported() or !dependency.targetSupported()) return error.InvalidLoopQuery;
+        const caller = self.loop_state.?;
+        var ready: std.ArrayList(z3.Z3_ast) = .empty;
+        for (inner.query_ids.induction) |id| {
+            const query = obligation.findById(self.set.queries, id) orelse return error.InvalidDependency;
+            try self.appendLoopAssumptions(&ready, query.assumption_ids);
+        }
+        for (inner.header_facts) |fact| try self.appendFormulaPremises(&ready, &.{fact.formula});
+        const initial_values = try self.encodeFormulaValues(&ready, inner.init_formulas);
+        var current = try self.cloneState(caller.*);
+        current.summary = inner;
+        self.loop_state = &current;
+        defer self.loop_state = caller;
+        for (inner.variables, initial_values) |variable, value| try self.bindValue(variable, value);
+        if (dependency.result_bindings != null) try self.appendFormulaPremises(&ready, inner.invariant_formulas);
+        for (inner.variables) |variable| try self.bindValue(variable, try self.freshValue(try self.sortForType(try typeInfo(variable.ty))));
+        for (inner.edges) |edge| try self.storageDomains(edge.timeline, true);
+        var output = try self.cloneState(caller.*);
+        const bindings = dependency.result_bindings orelse inner.variables;
+        const values = try self.allocator.alloc(z3.Z3_ast, bindings.len);
+        for (bindings, values) |binding, *value| value.* = try self.freshValue(try self.sortForType(try typeInfo(binding.ty)));
+        for (output.stores.items) |*store| store.current = try self.freshValue(z3.Z3_get_sort(self.context.ctx, store.current));
+        var choices: std.ArrayList(z3.Z3_ast) = .empty;
+        for (inner.edges) |edge| {
+            if (edge.target != dependency.target) continue;
+            var state = try self.cloneState(current);
+            self.loop_state = &state;
+            var branch: std.ArrayList(z3.Z3_ast) = .empty;
+            try self.appendFormulaPremises(&branch, inner.invariant_formulas);
+            _ = try self.appendLoopTimeline(&branch, edge.timeline, edge, false);
+            const following = try self.encodeBindingValues(&branch, inner.variables, edge.next_state);
+            for (bindings, values) |binding, value| try branch.append(self.allocator, z3.Z3_mk_eq(self.context.ctx, value, following[binding.index]));
+            if (dependency.result_bindings != null) {
+                if (edge.return_value) |returned| try self.bindReturn(&branch, returned);
+            }
+            if (dependency.result_bindings != null and (dependency.target == .function_return or dependency.target == .error_return)) {
+                if (!state.returned) return error.InvalidLoopQuery;
+                output.returned = true;
+            }
+            for (state.stores.items, output.stores.items) |store, exported| try branch.append(self.allocator, z3.Z3_mk_eq(self.context.ctx, exported.current, store.current));
+            try self.appendSideConstraints(&branch);
+            try choices.append(self.allocator, self.conjunction(branch.items));
+        }
+        if (choices.items.len == 0) return error.InvalidLoopQuery;
+        try relation.append(self.allocator, z3.Z3_mk_or(self.context.ctx, @intCast(choices.items.len), choices.items.ptr));
+        self.loop_state = &output;
+        for (bindings, values) |binding, value| try self.bindValue(binding, value);
+        caller.* = output;
+        return self.conjunction(ready.items);
     }
 
     fn appendLoopAssumptions(
@@ -875,6 +1172,7 @@ pub const Adapter = struct {
     ) EncodeError!z3.Z3_ast {
         _ = set;
         _ = state;
+        if (self.function_vc_qf) return error.FunctionVCQuantified;
         return self.encodeQuantified(quantified, fuel);
     }
 
@@ -930,6 +1228,7 @@ pub const Adapter = struct {
 
     fn loopRootTypeRef(self: *Adapter, root: []const u8) EncodeError!obligation.TypeRef {
         const state = self.loop_state orelse return error.InvalidLoopQuery;
+        for (state.roots.items) |root_type| if (std.mem.eql(u8, root_type.name, root)) return root_type.ty;
         for (state.summary.preheader_timeline) |event| switch (event.payload) {
             .storage_read => |read| if (std.mem.eql(u8, read.location.root, root)) return read.location.value_ty,
             .storage_write => |write| if (std.mem.eql(u8, write.location.root, root)) return write.location.value_ty,
@@ -969,7 +1268,7 @@ pub const Adapter = struct {
                     if (obligation.freeVarIdEql(candidate_id, id)) break candidate;
                 } else return error.UnsupportedPlaceReadTerm;
                 key_info = try typeInfo(variable.ty);
-                break :blk try self.encodeFreeVariableIdentity(id, variable.ty);
+                break :blk try self.encodeVariable(.{ .free = .{ .id = id, .name = "", .ty = variable.ty } });
             },
             else => return error.UnsupportedPlaceReadTerm,
         };
@@ -1069,7 +1368,7 @@ pub const Adapter = struct {
             try self.context.checkNoError();
             try query_state.side_constraints.append(self.allocator, distinct);
         }
-        try state.roots.append(self.allocator, .{ .name = location.root, .key = key });
+        try state.roots.append(self.allocator, .{ .name = location.root, .key = key, .ty = location.value_ty });
         return key;
     }
 
@@ -1239,6 +1538,19 @@ pub const Adapter = struct {
             if (!typeInfoEql(read.info, try typeInfo(ty))) return error.TypeMismatch;
             return read.value;
         };
+        if (self.function_vc_qf) {
+            // Callees have only their declared parameters and preceding
+            // timeline bindings; an undeclared caller identity is not a symbol.
+            const state = self.loop_state orelse return error.InvalidLoopQuery;
+            var declared = false;
+            for ([_][]const obligation.LoopVariable{ state.summary.context_variables, state.summary.variables }) |variables| for (variables) |candidate| {
+                const id = candidate.id orelse continue;
+                if (!obligation.freeVarIdEql(id, free.id)) continue;
+                if (!typeInfoEql(try typeInfo(candidate.ty), try typeInfo(ty))) return error.TypeMismatch;
+                declared = true;
+            };
+            if (!declared) return error.FunctionVCVariableOutOfScope;
+        }
         if (self.use_free_variable_identity_names) {
             return self.encodeFreeVariableIdentity(free.id, ty);
         }
@@ -1778,19 +2090,6 @@ fn findLoopEdge(
 ) ?obligation.LoopEdgeRow {
     for (summary.edges) |edge| if (edge.id == edge_id) return edge;
     return null;
-}
-
-fn uniqueLoopEdgeForTarget(
-    summary: obligation.LoopSummaryRow,
-    target: obligation.LoopControlTarget,
-) ?obligation.LoopEdgeRow {
-    var matched: ?obligation.LoopEdgeRow = null;
-    for (summary.edges) |edge| {
-        if (edge.target != target) continue;
-        if (matched != null) return null;
-        matched = edge;
-    }
-    return matched;
 }
 
 fn expectCanonicalSupported(set: obligation.ObligationSet, query: obligation.VerificationQuery) !void {
@@ -2986,4 +3285,421 @@ test "canonical Z3 hash contract sorts stored assumptions by formal id" {
     const reversed = try adapter.queryHash(5);
     try std.testing.expectEqual(forward.constraint_count, reversed.constraint_count);
     try std.testing.expectEqual(forward.smtlib_hash, reversed.smtlib_hash);
+}
+
+test "G9b FunctionVC binds one outcome payload and final store with real safety results" {
+    const allocator = std.testing.allocator;
+    var context = try Context.init(allocator);
+    defer context.deinit();
+    const ty: obligation.TypeRef = .{ .spelling = "u256" };
+    const input_id: obligation.FreeVarId = .{ .file_id = 91, .pattern_id = 1 };
+    var terms = [_]obligation.Term{
+        .{ .variable = .{ .free = .{ .id = input_id, .name = "input", .ty = ty } } },
+        .{ .int_lit = .{ .value = "0", .ty = ty } },
+        .{ .int_lit = .{ .value = "1", .ty = ty } },
+        .{ .int_lit = .{ .value = "2", .ty = ty } },
+        .{ .binary = .{ .op = .eq, .lhs = 0, .rhs = 1 } },
+        .{ .unary = .{ .op = .not, .operand = 4 } },
+        .{ .bool_lit = true },
+        .{ .bool_lit = false },
+    };
+    var left = [_]obligation.LoopTimelineEvent{
+        .{ .id = 0, .structural_key = "then/path", .payload = .{ .path_assumption = .{ .formulas = &.{.{ .formula = .{ .term = 4 } }} } } },
+        .{ .id = 1, .structural_key = "then/check", .payload = .{ .safety_checkpoint = .{ .formulas = &.{.{ .formula = .{ .term = 6 } }} } } },
+        .{ .id = 2, .structural_key = "then/write", .payload = .{ .storage_write = .{ .location = .{ .root = "balance", .value_ty = ty }, .value = .{ .formula = .{ .term = 2 } } } } },
+    };
+    var right = [_]obligation.LoopTimelineEvent{
+        .{ .id = 0, .structural_key = "else/path", .payload = .{ .path_assumption = .{ .formulas = &.{.{ .formula = .{ .term = 5 } }} } } },
+        .{ .id = 1, .structural_key = "else/write", .payload = .{ .storage_write = .{ .location = .{ .root = "balance", .value_ty = ty }, .value = .{ .formula = .{ .term = 3 } } } } },
+    };
+    const success: obligation.CallReturnExpr = .{ .direct = .{ .outcome = .success, .values = &.{.{ .ty = ty, .value = .{ .formula = .{ .term = 2 } } }} } };
+    const failure: obligation.CallReturnExpr = .{ .direct = .{ .outcome = .{ .error_return = 42 }, .values = &.{.{ .ty = ty, .value = .{ .formula = .{ .term = 3 } } }} } };
+    var paths = [_]obligation.FunctionPathRow{
+        .{ .id = 0, .structural_key = "then", .timeline = &left, .returns = success },
+        .{ .id = 1, .structural_key = "else", .timeline = &right, .returns = failure },
+    };
+    var row: obligation.FunctionSummaryRow = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "choose", .contract = "Joint" } },
+        .source = .generated(),
+        .origin = .source,
+        .structural_key = "Joint/choose",
+        .parameters = &.{.{ .index = 0, .id = input_id, .ty = ty }},
+        .outcomes = &.{ .{ .outcome = .success, .types = &.{ty} }, .{ .outcome = .{ .error_return = 42 }, .types = &.{ty} } },
+        .paths = &paths,
+        .projection_completeness = .complete,
+        .write_footprint_complete = true,
+        .write_footprint = &.{.{ .root = "balance", .region = .storage }},
+    };
+    var set: obligation.ObligationSet = .{ .terms = &terms, .function_summaries = (&row)[0..1] };
+    var adapter = Adapter.init(&context, allocator, set);
+    const digest = try canonical_digest.functionVcSha256(set, row.id);
+    const vc = try adapter.encodeFunctionVC(row.id, digest);
+    const checked = try adapter.checkFunctionSafety(row.id, digest, 101);
+    try std.testing.expectEqualSlices(u8, &digest, &vc.function_vc_sha256);
+    try std.testing.expectEqualSlices(u8, &digest, &checked.function_vc_sha256);
+    try std.testing.expectEqual(@as(@TypeOf(checked.query.result.?.status), .proved), checked.query.result.?.status);
+    try std.testing.expect(!checked.query.result.?.vacuous);
+    try std.testing.expect(checked.query.smtlib_hash != null);
+    try std.testing.expectEqual(checked.query.smtlib_hash, (try adapter.checkFunctionSafety(row.id, digest, 101)).query.smtlib_hash);
+
+    const sort = try adapter.sortForType(u256TypeInfo());
+    const array_sort = z3.Z3_mk_array_sort(context.ctx, sort, sort);
+    const outcome = try adapter.functionOutput(row.id, "outcome", sort);
+    const payload = try adapter.functionOutput(row.id, "arm0.value0", sort);
+    const error_payload = try adapter.functionOutput(row.id, "arm1.value0", sort);
+    const output_store = try adapter.functionOutput(row.id, "store.direct.bitvector.256.false", array_sort);
+    const balance_key = try adapter.namedConst("$ora.loop.root.balance", sort);
+    const balance = z3.Z3_mk_select(context.ctx, output_store, balance_key);
+    const one = try adapter.integerLiteralForType("1", u256TypeInfo());
+    const two = try adapter.integerLiteralForType("2", u256TypeInfo());
+    const zero = try adapter.integerLiteralForType("0", u256TypeInfo());
+    const cases = [_]struct { arm: z3.Z3_ast, value: z3.Z3_ast, actual: z3.Z3_ast, store: z3.Z3_ast, expected: z3.Z3_lbool }{
+        .{ .arm = zero, .value = one, .actual = payload, .store = one, .expected = z3.Z3_L_TRUE },
+        .{ .arm = zero, .value = two, .actual = payload, .store = one, .expected = z3.Z3_L_FALSE },
+        .{ .arm = zero, .value = one, .actual = payload, .store = two, .expected = z3.Z3_L_FALSE },
+        .{ .arm = one, .value = two, .actual = error_payload, .store = two, .expected = z3.Z3_L_TRUE },
+        .{ .arm = one, .value = one, .actual = error_payload, .store = two, .expected = z3.Z3_L_FALSE },
+        .{ .arm = two, .value = two, .actual = error_payload, .store = two, .expected = z3.Z3_L_FALSE },
+    };
+    for (cases) |case| {
+        var solver = try Solver.initForLogic(&context, allocator, "QF_AUFBV");
+        defer solver.deinit();
+        try solver.assertChecked(vc.joint);
+        try solver.assertChecked(z3.Z3_mk_eq(context.ctx, outcome, case.arm));
+        try solver.assertChecked(z3.Z3_mk_eq(context.ctx, case.actual, case.value));
+        try solver.assertChecked(z3.Z3_mk_eq(context.ctx, balance, case.store));
+        try std.testing.expectEqual(case.expected, try solver.checkChecked());
+        const text = std.mem.span(z3.Z3_solver_to_string(context.ctx, solver.solver));
+        try std.testing.expect(std.mem.indexOf(u8, text, "forall") == null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "exists") == null);
+    }
+    var query = checked.query;
+    set.queries = (&query)[0..1];
+    row.query_ids.safety = &.{101};
+    try std.testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_relation_unsupported }, set.artifactDecision());
+    for ([_]struct { result: ?obligation.VerificationQueryResult, reason: obligation.ArtifactBlockReason }{
+        .{ .result = null, .reason = .call_z3_relation_missing },
+        .{ .result = .{ .status = .proved, .degraded = true }, .reason = .degraded_query },
+        .{ .result = .{ .status = .proved, .vacuous = true }, .reason = .vacuous_query },
+        .{ .result = .{ .status = .unknown }, .reason = .unknown_query },
+        .{ .result = .{ .status = .failed }, .reason = .failed_query },
+    }) |case| {
+        query.result = case.result;
+        try std.testing.expectEqual(obligation.ArtifactDecision{ .blocked = case.reason }, set.artifactDecision());
+    }
+    query = checked.query;
+    terms[2].int_lit.value = "9";
+    try std.testing.expectError(error.FunctionVCDigestMismatch, adapter.encodeFunctionVC(row.id, digest));
+    terms[2].int_lit.value = "1";
+    row.projection_completeness = .unavailable;
+    try std.testing.expectError(error.FunctionVCProjectionIncomplete, adapter.encodeFunctionVC(row.id, digest));
+    row.projection_completeness = .complete;
+}
+
+test "G9b FunctionVC keeps prefix safety independent of returns and detects vacuity" {
+    const allocator = std.testing.allocator;
+    var context = try Context.init(allocator);
+    defer context.deinit();
+    const ty: obligation.TypeRef = .{ .spelling = "u256" };
+    const terms = [_]obligation.Term{
+        .{ .bool_lit = true }, .{ .bool_lit = false }, .{ .int_lit = .{ .value = "1", .ty = ty } },
+    };
+    var events = [_]obligation.LoopTimelineEvent{
+        .{ .id = 0, .structural_key = "check", .payload = .{ .safety_checkpoint = .{ .formulas = &.{.{ .formula = .{ .term = 1 } }} } } },
+        .{ .id = 1, .structural_key = "late-false", .payload = .{ .path_assumption = .{ .formulas = &.{.{ .formula = .{ .term = 1 } }} } } },
+    };
+    const paths = [_]obligation.FunctionPathRow{.{ .id = 0, .structural_key = "body", .timeline = &events, .returns = .{ .direct = .{
+        .outcome = .success,
+        .values = &.{.{ .ty = ty, .value = .{ .formula = .{ .term = 2 } } }},
+    } } }};
+    var row: obligation.FunctionSummaryRow = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "check" } },
+        .source = .generated(),
+        .origin = .source,
+        .structural_key = "check",
+        .outcomes = &.{.{ .outcome = .success, .types = &.{ty} }},
+        .paths = &paths,
+        .projection_completeness = .complete,
+        .write_footprint_complete = true,
+    };
+    var set: obligation.ObligationSet = .{ .terms = &terms, .function_summaries = (&row)[0..1] };
+    var adapter = Adapter.init(&context, allocator, set);
+    const digest = try canonical_digest.functionVcSha256(set, row.id);
+    const vc = try adapter.encodeFunctionVC(row.id, digest);
+    var query = (try adapter.checkFunctionSafety(row.id, digest, 101)).query;
+    try std.testing.expectEqual(@as(@TypeOf(query.result.?.status), .failed), query.result.?.status);
+    var solver = try Solver.initForLogic(&context, allocator, "QF_AUFBV");
+    defer solver.deinit();
+    try solver.assertChecked(vc.joint);
+    try std.testing.expectEqual(z3.Z3_L_FALSE, try solver.checkChecked());
+    row.query_ids.safety = &.{101};
+    set.queries = (&query)[0..1];
+    try std.testing.expectEqual(obligation.ArtifactDecision{ .blocked = .failed_query }, set.artifactDecision());
+    const check = events[0].payload;
+    events[0].payload = events[1].payload;
+    events[1].payload = check;
+    const reordered = try canonical_digest.functionVcSha256(set, row.id);
+    query = (try adapter.checkFunctionSafety(row.id, reordered, 101)).query;
+    try std.testing.expectEqual(@as(@TypeOf(query.result.?.status), .proved), query.result.?.status);
+    try std.testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_relation_unsupported }, set.artifactDecision());
+
+    const assumes = [_]obligation.Assumption{.{
+        .id = 1,
+        .owner = row.owner,
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .requires,
+        .formula = .{ .term = 1 },
+    }};
+    row.assumption_ids = &.{1};
+    set.assumptions = &assumes;
+    adapter.set = set;
+    const inconsistent = try canonical_digest.functionVcSha256(set, row.id);
+    query = (try adapter.checkFunctionSafety(row.id, inconsistent, 101)).query;
+    try std.testing.expect(query.result.?.vacuous);
+    try std.testing.expectEqual(obligation.ArtifactDecision{ .blocked = .vacuous_query }, set.artifactDecision());
+}
+
+test "G9b FunctionVC rejects active quantifiers and malformed typed returns without state leakage" {
+    const allocator = std.testing.allocator;
+    var context = try Context.init(allocator);
+    defer context.deinit();
+    const ty: obligation.TypeRef = .{ .spelling = "u256" };
+    const terms = [_]obligation.Term{
+        .{ .bool_lit = true },
+        .{ .int_lit = .{ .value = "1", .ty = ty } },
+        .{ .quantified = .{ .quantifier = .forall, .binder = .{ .name = "x", .ty = ty }, .body = 0 } },
+    };
+    var event: obligation.LoopTimelineEvent = .{
+        .id = 0,
+        .structural_key = "check",
+        .payload = .{ .safety_checkpoint = .{ .formulas = &.{.{ .formula = .{ .term = 2 } }} } },
+    };
+    var value: obligation.LoopTypedFormula = .{ .ty = ty, .value = .{ .formula = .{ .term = 1 } } };
+    const path: obligation.FunctionPathRow = .{
+        .id = 0,
+        .structural_key = "return",
+        .timeline = (&event)[0..1],
+        .returns = .{ .direct = .{ .outcome = .success, .values = (&value)[0..1] } },
+    };
+    var shape: obligation.CallOutcomeShape = .{ .outcome = .success, .types = &.{ty} };
+    const row: obligation.FunctionSummaryRow = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "one" } },
+        .source = .generated(),
+        .origin = .source,
+        .structural_key = "one",
+        .outcomes = (&shape)[0..1],
+        .paths = (&path)[0..1],
+        .projection_completeness = .complete,
+        .write_footprint_complete = true,
+    };
+    const set: obligation.ObligationSet = .{ .terms = &terms, .function_summaries = (&row)[0..1] };
+    var adapter = Adapter.init(&context, allocator, set);
+    const quantified = try canonical_digest.functionVcSha256(set, row.id);
+    try std.testing.expectError(error.FunctionVCQuantified, adapter.encodeFunctionVC(row.id, quantified));
+    try std.testing.expect(!adapter.function_vc_qf);
+    try std.testing.expect(adapter.loop_state == null and adapter.query_state == null);
+    event.payload.safety_checkpoint.formulas = &.{.{ .formula = .{ .term = 0 } }};
+    const clean = try canonical_digest.functionVcSha256(set, row.id);
+    _ = try adapter.checkFunctionSafety(row.id, clean, 101);
+    value.ty = .{ .spelling = "u128" };
+    try std.testing.expectError(error.InvalidCallSignature, adapter.encodeFunctionVC(row.id, clean));
+    shape.types = &.{value.ty};
+    const wrong = try canonical_digest.functionVcSha256(set, row.id);
+    try std.testing.expectError(error.TypeMismatch, adapter.encodeFunctionVC(row.id, wrong));
+    try std.testing.expect(!adapter.function_vc_qf);
+    try std.testing.expect(adapter.loop_state == null and adapter.query_state == null);
+}
+
+test "G9b FunctionVC preserves entry storage previous reads and unwritten locations" {
+    const allocator = std.testing.allocator;
+    var context = try Context.init(allocator);
+    defer context.deinit();
+    const ty: obligation.TypeRef = .{ .spelling = "u256" };
+    const input: obligation.FreeVarId = .{ .file_id = 92, .pattern_id = 1 };
+    const read: obligation.FreeVarId = .{ .file_id = 92, .pattern_id = 2 };
+    const terms = [_]obligation.Term{
+        .{ .variable = .{ .free = .{ .id = input, .name = "input", .ty = ty } } },
+        .{ .place_read = .{ .root = "value", .region = .storage } },
+        .{ .old = 1 },
+        .{ .variable = .{ .free = .{ .id = read, .name = "previous", .ty = ty } } },
+        .{ .binary = .{ .op = .eq, .lhs = 2, .rhs = 3 } },
+        .{ .binary = .{ .op = .eq, .lhs = 1, .rhs = 0 } },
+    };
+    const events = [_]obligation.LoopTimelineEvent{
+        .{ .id = 0, .structural_key = "read", .payload = .{ .storage_read = .{ .result = read, .location = .{ .root = "value", .value_ty = ty } } } },
+        .{ .id = 1, .structural_key = "write", .payload = .{ .storage_write = .{ .location = .{ .root = "value", .value_ty = ty }, .value = .{ .formula = .{ .term = 0 } } } } },
+        .{ .id = 2, .structural_key = "check", .payload = .{ .safety_checkpoint = .{ .formulas = &.{
+            .{ .formula = .{ .term = 4 }, .read_results = &.{read} }, .{ .formula = .{ .term = 5 } },
+        } } } },
+    };
+    const row: obligation.FunctionSummaryRow = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "replace" } },
+        .source = .generated(),
+        .origin = .source,
+        .structural_key = "replace",
+        .parameters = &.{.{ .index = 0, .id = input, .ty = ty }},
+        .outcomes = &.{.{ .outcome = .success, .types = &.{ ty, ty, ty } }},
+        .projection_completeness = .complete,
+        .write_footprint_complete = true,
+        .write_footprint = &.{.{ .root = "value", .region = .storage }},
+        .paths = &.{.{ .id = 0, .structural_key = "return", .timeline = &events, .returns = .{ .direct = .{
+            .outcome = .success,
+            .values = &.{
+                .{ .ty = ty, .value = .{ .formula = .{ .term = 2 } } },
+                .{ .ty = ty, .value = .{ .formula = .{ .term = 3 }, .read_results = &.{read} } },
+                .{ .ty = ty, .value = .{ .formula = .{ .term = 1 } } },
+            },
+        } } }},
+    };
+    const set: obligation.ObligationSet = .{ .terms = &terms, .function_summaries = (&row)[0..1] };
+    var adapter = Adapter.init(&context, allocator, set);
+    const digest = try canonical_digest.functionVcSha256(set, row.id);
+    const checked = try adapter.checkFunctionSafety(row.id, digest, 101);
+    try std.testing.expectEqual(@as(@TypeOf(checked.query.result.?.status), .proved), checked.query.result.?.status);
+    const vc = try adapter.encodeFunctionVC(row.id, digest);
+    const sort = try adapter.sortForType(u256TypeInfo());
+    const array_sort = z3.Z3_mk_array_sort(context.ctx, sort, sort);
+    const old_store = try adapter.namedConst("$ora.loop.store.bv256u.entry", array_sort);
+    const final_store = try adapter.functionOutput(row.id, "store.direct.bitvector.256.false", array_sort);
+    const key = try adapter.namedConst("$ora.loop.root.value", sort);
+    const other = try adapter.namedConst("outside", sort);
+    const input_value = try adapter.encodeFreeVariableIdentity(input, ty);
+    const old_value = z3.Z3_mk_select(context.ctx, old_store, key);
+    var solver = try Solver.initForLogic(&context, allocator, "QF_AUFBV");
+    defer solver.deinit();
+    for ([_]z3.Z3_ast{ old_value, old_value, input_value }, 0..) |expected, index| {
+        try solver.resetChecked();
+        try solver.assertChecked(vc.joint);
+        const label = try std.fmt.allocPrint(allocator, "arm0.value{d}", .{index});
+        defer allocator.free(label);
+        const actual = try adapter.functionOutput(row.id, label, sort);
+        try solver.assertChecked(z3.Z3_mk_not(context.ctx, z3.Z3_mk_eq(context.ctx, actual, expected)));
+        try std.testing.expectEqual(z3.Z3_L_FALSE, try solver.checkChecked());
+    }
+    try solver.resetChecked();
+    try solver.assertChecked(vc.joint);
+    try solver.assertChecked(z3.Z3_mk_not(context.ctx, z3.Z3_mk_eq(context.ctx, key, other)));
+    try solver.assertChecked(z3.Z3_mk_not(context.ctx, z3.Z3_mk_eq(context.ctx, z3.Z3_mk_select(context.ctx, old_store, other), z3.Z3_mk_select(context.ctx, final_store, other))));
+    try std.testing.expectEqual(z3.Z3_L_FALSE, try solver.checkChecked());
+}
+
+test "G9b prefix-only callee writes cannot become an unchanged caller store" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var context = try Context.init(allocator);
+    defer context.deinit();
+    const ty: obligation.TypeRef = .{ .spelling = "u256" };
+    const id: obligation.FreeVarId = .{ .file_id = 99, .pattern_id = 1 };
+    const read_id: obligation.FreeVarId = .{ .file_id = 99, .pattern_id = 2 };
+    const terms = [_]obligation.Term{
+        .{ .int_lit = .{ .value = "0", .ty = ty } },
+        .{ .int_lit = .{ .value = "1", .ty = ty } },
+        .{ .bool_lit = true },
+        .{ .variable = .{ .free = .{ .id = id, .name = "i", .ty = ty } } },
+        .{ .variable = .{ .free = .{ .id = read_id, .name = "captured", .ty = ty } } },
+        .{ .place_read = .{ .root = "counter", .region = .storage } },
+        .{ .old = 5 },
+        .{ .binary = .{ .op = .eq, .lhs = 4, .rhs = 6 } },
+        .{ .binary = .{ .op = .eq, .lhs = 4, .rhs = 1 } },
+    };
+    const location: obligation.LoopStorageLocationExpr = .{ .root = "counter", .value_ty = ty };
+    const write: obligation.LoopTimelineEvent = .{ .id = 0, .structural_key = "write", .payload = .{ .storage_write = .{ .location = location, .value = .{ .formula = .{ .term = 1 } } } } };
+    var leaf: obligation.FunctionSummaryRow = .{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "put" } },
+        .source = .generated(),
+        .origin = .source,
+        .structural_key = "put",
+        .outcomes = &.{.{ .outcome = .success }},
+        .paths = &.{.{ .id = 0, .structural_key = "put/path", .timeline = &.{write}, .returns = .{ .direct = .{ .outcome = .success } } }},
+        .projection_completeness = .complete,
+        .write_footprint_complete = true,
+        .write_footprint = &.{.{ .root = "counter", .region = .storage }},
+    };
+    var prefix = [_]obligation.LoopTimelineEvent{
+        .{ .id = 0, .structural_key = "call", .payload = .{ .call = .{ .callee_summary_id = 2, .callee_vc_sha256 = @splat(0), .outcome = .success } } },
+        .{ .id = 1, .structural_key = "read", .payload = .{ .storage_read = .{ .result = read_id, .location = location } } },
+        .{ .id = 2, .structural_key = "check", .payload = .{ .safety_checkpoint = .{ .formulas = &.{.{ .formula = .{ .term = 7 }, .read_results = &.{read_id} }} } } },
+    };
+    const variable: obligation.LoopVariable = .{ .index = 0, .id = id, .ty = ty };
+    const binding: obligation.LoopStepAssignment = .{ .variable_index = 0, .target = id, .source_key = "i", .value = .{ .term = 3 } };
+    var summary: obligation.LoopSummaryRow = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "caller" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .loop_source_op_id = 1,
+        .loop_kind = .scf_while,
+        .variables = &.{variable},
+        .init_formulas = &.{.{ .term = 0 }},
+        .invariant_formulas = &.{.{ .term = 2 }},
+        .preheader_timeline = &prefix,
+        .preheader_projection_complete = true,
+        .projection_completeness = .complete,
+        .query_ids = .{ .base = &.{10}, .induction = &.{11}, .body_safety = &.{ 12, 13 }, .step = &.{14}, .post = &.{15} },
+        .edges = &.{ .{ .id = 0, .structural_key = "backedge", .timeline = &.{.{ .id = 0, .structural_key = "path", .payload = .{ .path_assumption = .{ .formulas = &.{.{ .formula = .{ .term = 2 } }} } } }}, .next_state = &.{binding}, .target = .backedge }, .{ .id = 1, .structural_key = "exit", .timeline = &.{.{ .id = 0, .structural_key = "path", .payload = .{ .path_assumption = .{ .formulas = &.{.{ .formula = .{ .term = 2 } }} } } }}, .next_state = &.{binding}, .target = .successor } },
+    };
+    const query: obligation.VerificationQuery = .{
+        .id = 10,
+        .owner = summary.owner,
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .backend = .z3,
+        .kind = .loop_base,
+        .loop_summary_id = 1,
+    };
+    var queries = [_]obligation.VerificationQuery{ query, query, query, query, query, query };
+    const kinds = [_]obligation.VerificationQueryKind{ .loop_base, .loop_induction, .loop_body_safety, .loop_body_safety, .loop_invariant_step, .loop_invariant_post };
+    const edges = [_]?u32{ null, null, 0, 1, 0, 1 };
+    for (&queries, kinds, edges, 0..) |*item, kind, edge, index| {
+        item.id = @intCast(10 + index);
+        item.kind = kind;
+        item.loop_edge_id = edge;
+    }
+    queries[1].backend = .unspecified;
+    queries[1].proof_requirement = .lean_certificate;
+    const set: obligation.ObligationSet = .{ .terms = &terms, .function_summaries = (&leaf)[0..1], .loop_summaries = (&summary)[0..1], .queries = &queries };
+    try canonical_digest.bindCollectedCallDependencies(allocator, set);
+    var adapter = Adapter.init(&context, allocator, set);
+    try std.testing.expectEqual(CheckStatus.disproved, (try adapter.checkLoopQueryForRow(queries[0])).status);
+    // The same prefix must prove the real write, not merely reject everything.
+    prefix[2].payload.safety_checkpoint.formulas = &.{.{ .formula = .{ .term = 8 }, .read_results = &.{read_id} }};
+    try canonical_digest.bindCollectedCallDependencies(allocator, set);
+    try std.testing.expectEqual(CheckStatus.proved, (try adapter.checkLoopQueryForRow(queries[0])).status);
+}
+
+test "G9b callee formulas cannot import an undeclared caller identity" {
+    const allocator = std.testing.allocator;
+    var context = try Context.init(allocator);
+    defer context.deinit();
+    const ty: obligation.TypeRef = .{ .spelling = "u256" };
+    const parameter: obligation.FreeVarId = .{ .file_id = 101, .pattern_id = 1 };
+    const foreign: obligation.FreeVarId = .{ .file_id = 101, .pattern_id = 2 };
+    var terms = [_]obligation.Term{.{ .variable = .{ .free = .{ .id = foreign, .name = "caller_value", .ty = ty } } }};
+    const row: obligation.FunctionSummaryRow = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "callee" } },
+        .source = .generated(),
+        .origin = .source,
+        .structural_key = "callee",
+        .parameters = &.{.{ .index = 0, .id = parameter, .ty = ty }},
+        .outcomes = &.{.{ .outcome = .success, .types = &.{ty} }},
+        .paths = &.{.{ .id = 0, .structural_key = "callee/path", .returns = .{ .direct = .{ .outcome = .success, .values = &.{.{ .ty = ty, .value = .{ .formula = .{ .term = 0 } } }} } } }},
+        .projection_completeness = .complete,
+        .write_footprint_complete = true,
+    };
+    const set: obligation.ObligationSet = .{ .terms = &terms, .function_summaries = (&row)[0..1] };
+    var adapter = Adapter.init(&context, allocator, set);
+    try std.testing.expectError(error.FunctionVCVariableOutOfScope, adapter.encodeFunctionVC(row.id, try canonical_digest.functionVcSha256(set, row.id)));
+    terms[0].variable.free.id = parameter;
+    _ = try adapter.encodeFunctionVC(row.id, try canonical_digest.functionVcSha256(set, row.id));
 }

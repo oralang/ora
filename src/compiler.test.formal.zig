@@ -15519,3 +15519,170 @@ test "G7 source entry storage mode is scoped and retains invocation old" {
     try testing.expect(baseline.set.obligations[0].kind.logical.formula == .origin_value);
     try testing.expect(baseline.set.assumptions[0].formula.? == .origin_value);
 }
+
+test "G9b canonical leaf safety binds the independently kernel checked custody digest" {
+    const allocator = testing.allocator;
+    var compilation = try compilePackage("tests/formal/call_adapter_leaf.ora");
+    defer compilation.deinit();
+    const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+    var manifest = try proof_check.prepareCallCustody(allocator, hir.module.raw_module, "Ora.Generated.Obligations.G9a");
+    defer manifest.deinit();
+    const leaf = try callCustodyLeaf(manifest.collected.set);
+    const proof = try callCustodyLeafProof(allocator, leaf);
+    defer allocator.free(proof);
+    const input = try callCustodyInput(manifest, proof);
+    const env = try callCustodyTestEnviron(allocator);
+    defer env.block.deinit(allocator);
+    var output = std.Io.Writer.Allocating.init(allocator);
+    defer output.deinit();
+    var receipt = try proof_check.checkCallCustody(allocator, hir.module.raw_module, "Ora.Generated.Obligations.G9a", input, env, &output.writer);
+    defer receipt.deinit();
+    var projected = try collectCallProjection(allocator, "tests/formal/call_adapter_leaf.ora");
+    defer projected.deinit();
+    const independent_leaf = try callCustodyLeaf(projected.set);
+    const digest = try obligation_to_lean.functionVcSha256(projected.set, independent_leaf.id);
+    var context = try z3_verification.Z3Context.init(allocator);
+    defer context.deinit();
+    var adapter = obligation_to_z3.Adapter.init(&context, allocator, projected.set);
+    const checked = try adapter.checkFunctionSafety(independent_leaf.id, digest, 100001);
+    try testing.expectEqualSlices(u8, &receipt.function_vc_sha256, &checked.function_vc_sha256);
+    try testing.expectEqual(@as(@TypeOf(checked.query.result.?.status), .proved), checked.query.result.?.status);
+    var isolated_row = independent_leaf;
+    isolated_row.query_ids.safety = &.{100001};
+    var isolated = projected.set;
+    isolated.function_summaries = (&isolated_row)[0..1];
+    isolated.loop_summaries = &.{};
+    isolated.queries = &.{checked.query};
+    try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_relation_unsupported }, isolated.artifactDecision());
+    var stale = digest;
+    stale[0] ^= 1;
+    try testing.expectError(error.FunctionVCDigestMismatch, adapter.checkFunctionSafety(independent_leaf.id, stale, 100001));
+}
+
+test "G9b projected call and loop dependencies prepare real queries behind the final fence" {
+    const cases = [_][]const u8{ "storage", "error_storage", "chain", "callee_loop_value", "loop_return", "nested", "prefix" };
+    for (cases) |name| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const file = try std.fmt.allocPrint(allocator, "tests/formal/call_projection_{s}.ora", .{name});
+        var projected = try collectCallProjection(testing.allocator, file);
+        defer projected.deinit();
+        try testing.expect(!projected.set.hasBlockingDiagnostic());
+        var context = try z3_verification.Z3Context.init(allocator);
+        defer context.deinit();
+        var adapter = obligation_to_z3.Adapter.init(&context, allocator, projected.set);
+        var queries: std.ArrayList(obligation.VerificationQuery) = .empty;
+        try queries.appendSlice(allocator, projected.set.queries);
+        const rows = try allocator.dupe(obligation.FunctionSummaryRow, projected.set.function_summaries);
+        for (rows, 0..) |*row, index| {
+            errdefer std.debug.print("G9b {s}/{s}\n", .{ name, row.owner.function.name });
+            const digest = try obligation_to_lean.functionVcSha256(projected.set, row.id);
+            const id: obligation.Id = @intCast(100001 + index);
+            const checked = try adapter.checkFunctionSafety(row.id, digest, id);
+            try testing.expectEqualSlices(u8, &digest, &checked.function_vc_sha256);
+            try testing.expectEqual(@as(@TypeOf(checked.query.result.?.status), .proved), checked.query.result.?.status);
+            try testing.expect(!checked.query.result.?.vacuous and !checked.query.result.?.vacuity_unknown);
+            try testing.expect(checked.query.smtlib_hash != null);
+            try queries.append(allocator, checked.query);
+            row.query_ids.safety = try allocator.dupe(obligation.Id, &.{id});
+        }
+        for (projected.set.queries) |query| {
+            if (query.loop_summary_id == null or query.backend != .z3) continue;
+            errdefer std.debug.print("G9b {s} loop query {d} {s}\n", .{ name, query.id, @tagName(query.kind) });
+            const checked = try adapter.checkLoopQueryForRow(query);
+            try testing.expectEqual(@as(@TypeOf(checked.status), .proved), checked.status);
+        }
+        var prepared = projected.set;
+        prepared.function_summaries = rows;
+        prepared.queries = queries.items;
+        try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_z3_relation_missing }, projected.set.artifactDecision());
+        try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_relation_unsupported }, prepared.artifactDecision());
+    }
+}
+
+test "G9b composed calls retain invocation storage reads and returning loop frames" {
+    var projected = try collectCallProjection(testing.allocator, "tests/formal/call_canonical_state.ora");
+    defer projected.deinit();
+    try testing.expect(!projected.set.hasBlockingDiagnostic());
+    var context = try z3_verification.Z3Context.init(testing.allocator);
+    defer context.deinit();
+    var adapter = obligation_to_z3.Adapter.init(&context, testing.allocator, projected.set);
+    try testing.expectEqual(@as(usize, 4), projected.set.function_summaries.len);
+    const z3 = z3_verification.z3_c;
+    for (projected.set.function_summaries) |row| {
+        errdefer std.debug.print("G9b state {s}\n", .{row.owner.function.name});
+        const checked = try adapter.checkFunctionSafety(row.id, try obligation_to_lean.functionVcSha256(projected.set, row.id), 100001);
+        try testing.expectEqual(@as(@TypeOf(checked.query.result.?.status), .proved), checked.query.result.?.status);
+        try testing.expect(!checked.query.result.?.vacuous);
+        const vc = try adapter.encodeFunctionVC(row.id, checked.function_vc_sha256);
+        var solver = try z3_verification.Z3Solver.initForLogic(&context, testing.allocator, "QF_AUFBV");
+        defer solver.deinit();
+        try solver.assertChecked(vc.entry);
+        try solver.assertChecked(vc.joint);
+        try testing.expectEqual(z3.Z3_L_TRUE, try solver.checkChecked());
+        if (std.mem.eql(u8, row.owner.function.name, "sequential")) {
+            const sort = z3.Z3_mk_bv_sort(context.ctx, 256);
+            const payload = try adapter.functionOutput(row.id, "arm0.value0", sort);
+            try solver.assertChecked(z3.Z3_mk_not(context.ctx, z3.Z3_mk_eq(context.ctx, payload, z3.Z3_mk_unsigned_int64(context.ctx, 1, sort))));
+            try testing.expectEqual(z3.Z3_L_FALSE, try solver.checkChecked());
+        }
+    }
+    for (projected.set.queries) |query| {
+        if (query.loop_summary_id == null or query.backend != .z3) continue;
+        const checked = try adapter.checkLoopQueryForRow(query);
+        try testing.expectEqual(@as(@TypeOf(checked.status), .proved), checked.status);
+    }
+}
+
+test "G9b callee preconditions cannot disappear behind a missing success return" {
+    var projected = try collectCallProjection(testing.allocator, "tests/formal/call_canonical_precondition.ora");
+    defer projected.deinit();
+    try testing.expect(!projected.set.hasBlockingDiagnostic());
+    var context = try z3_verification.Z3Context.init(testing.allocator);
+    defer context.deinit();
+    var adapter = obligation_to_z3.Adapter.init(&context, testing.allocator, projected.set);
+    var rejected: usize = 0;
+    for (projected.set.function_summaries) |row| {
+        const checked = try adapter.checkFunctionSafety(row.id, try obligation_to_lean.functionVcSha256(projected.set, row.id), 100001);
+        if (std.mem.eql(u8, row.owner.function.name, "run")) {
+            try testing.expectEqual(@as(@TypeOf(checked.query.result.?.status), .failed), checked.query.result.?.status);
+            rejected += 1;
+        } else try testing.expectEqual(@as(@TypeOf(checked.query.result.?.status), .proved), checked.query.result.?.status);
+        try testing.expect(!checked.query.result.?.vacuous);
+    }
+    try testing.expectEqual(@as(usize, 1), rejected);
+}
+
+test "G9b refreshed loop digests cannot hide a malformed exported return" {
+    for ([_]bool{ false, true }) |wrong_type| {
+        var projected = try collectCallProjection(testing.allocator, "tests/formal/call_projection_loop_return.ora");
+        defer projected.deinit();
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var changed = false;
+        outer: for (@constCast(projected.set.loop_summaries)) |*loop| {
+            for (@constCast(loop.edges)) |*edge| {
+                const returned = edge.return_value orelse continue;
+                if (returned != .direct or returned.direct.values.len == 0) continue;
+                const values = try allocator.dupe(obligation.LoopTypedFormula, returned.direct.values);
+                if (wrong_type) values[0].ty = .{ .spelling = "bool" };
+                edge.return_value = .{ .direct = .{ .outcome = returned.direct.outcome, .values = if (wrong_type) values else &.{} } };
+                changed = true;
+                break :outer;
+            }
+        }
+        try testing.expect(changed);
+        // Refresh every dependent selector: rejection must be semantic, not a
+        // stale metadata failure masking an unchecked loop-return signature.
+        try obligation_to_lean.bindCollectedCallDependencies(allocator, projected.set);
+        const row = for (projected.set.function_summaries) |candidate| {
+            if (std.mem.eql(u8, candidate.owner.function.name, "select")) break candidate;
+        } else return error.MissingG9bFunction;
+        var context = try z3_verification.Z3Context.init(allocator);
+        defer context.deinit();
+        var adapter = obligation_to_z3.Adapter.init(&context, allocator, projected.set);
+        try testing.expectError(error.InvalidCallSignature, adapter.encodeFunctionVC(row.id, try obligation_to_lean.functionVcSha256(projected.set, row.id)));
+    }
+}
