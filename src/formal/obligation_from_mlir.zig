@@ -26,12 +26,16 @@ pub const CollectResult = struct {
     runtime_owner_bindings: []const RuntimeOwnerBinding = &.{},
     runtime_check_producers: []const RuntimeCheckProducer = &.{},
     state_effect_producers: []const StateEffectProducer = &.{},
+    function_ops: []const usize = &.{},
+    call_bindings: []const CallSiteBinding = &.{},
 
     pub fn deinit(self: *CollectResult) void {
         self.arena.deinit();
         self.* = undefined;
     }
 };
+
+pub const CallSiteBinding = struct { source_op_id: usize, function_id: obligation.Id };
 
 pub const RuntimeOwnerBinding = struct {
     source_op_id: usize,
@@ -273,6 +277,7 @@ pub fn collect(
             .loop_summaries = collector.loop_summaries.items,
             .function_summaries = collector.function_summaries.items,
         }) catch |err| try collector.addBlockingDiagnosticFmt(.invalid_dependency, "call_projection_{s}", .{@errorName(err)});
+        try armLeanLoopCertificateRequirements(&collector);
     }
 
     const set: obligation.ObligationSet = .{
@@ -285,9 +290,20 @@ pub fn collect(
         .diagnostics = try collector.diagnostics.toOwnedSlice(collector.allocator),
     };
 
+    const function_ops = try collector.allocator.alloc(usize, collector.function_ops.items.len);
+    for (collector.function_ops.items, function_ops) |op, *id| id.* = @intFromPtr(op.ptr);
+    var call_bindings: std.ArrayList(CallSiteBinding) = .empty;
+    for (collector.call_sites.items) |site| {
+        const callee = collector.callDeclaration(site) catch continue;
+        for (function_ops, set.function_summaries) |op, row| if (op == @intFromPtr(callee.ptr)) {
+            try call_bindings.append(collector.allocator, .{ .source_op_id = @intFromPtr(site.ptr), .function_id = row.id });
+        };
+    }
     return .{
         .arena = arena,
         .set = set,
+        .function_ops = function_ops,
+        .call_bindings = try call_bindings.toOwnedSlice(collector.allocator),
         .query_bindings = try collector.query_bindings.toOwnedSlice(collector.allocator),
         .source_fact_bindings = try collector.source_fact_bindings.toOwnedSlice(collector.allocator),
         .runtime_owner_bindings = try collector.runtime_owner_bindings.toOwnedSlice(collector.allocator),
@@ -303,6 +319,7 @@ fn armLeanLoopCertificateRequirements(collector: *Collector) !void {
         .assumptions = collector.assumptions.items,
         .queries = collector.queries.items,
         .loop_summaries = collector.loop_summaries.items,
+        .function_summaries = collector.function_summaries.items,
         .diagnostics = collector.diagnostics.items,
     };
     for (collector.queries.items) |*query| {
@@ -1869,6 +1886,9 @@ const Collector = struct {
                 result.formula_overrides = path.formula_overrides;
                 continue;
             }
+            if (self.options.project_calls and
+                ((std.mem.eql(u8, name, "memref.alloca") and mlir.oraOperationGetNumResults(op) == 1 and headerPrivateSlot(mlir.oraOperationGetResult(op, 0))) or
+                    (std.mem.eql(u8, name, "memref.store") and mlir.oraOperationGetNumOperands(op) == 2 and headerPrivateSlot(mlir.oraOperationGetOperand(op, 1))))) continue;
             if (preheaderControlOperationUnsupported(op, name)) return error.LoopPreheaderControlUnsupported;
 
             const effect = mlir.oraOperationGetMemoryEffectKind(op);
@@ -2145,6 +2165,13 @@ const Collector = struct {
                 if (signature.outcomes.len != 1) return error.LoopPreheaderControlUnsupported;
                 const path = try self.inventoryCall(op, .{ .key = "prefix", .timeline_inventory = result.event_inventory }, signature.outcomes[0]);
                 result.event_inventory = path.timeline_inventory;
+                previous_op = op;
+                continue;
+            }
+            if (self.options.project_calls and
+                ((std.mem.eql(u8, name, "memref.alloca") and mlir.oraOperationGetNumResults(op) == 1 and headerPrivateSlot(mlir.oraOperationGetResult(op, 0))) or
+                    (std.mem.eql(u8, name, "memref.store") and mlir.oraOperationGetNumOperands(op) == 2 and headerPrivateSlot(mlir.oraOperationGetOperand(op, 1)))))
+            {
                 previous_op = op;
                 continue;
             }
@@ -10427,6 +10454,45 @@ test "header prefix control slots reject nonlocal and escaping addresses" {
         op = mlir.oraOperationGetNextInBlock(op);
     }
     try std.testing.expect(mlir.oraOperationIsNull(op));
+}
+
+test "G9c private preheaders retain the G2 boundary in both walks" {
+    const context = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(context);
+    const registry = mlir.oraDialectRegistryCreate();
+    mlir.oraRegisterAllDialects(registry);
+    mlir.oraContextAppendDialectRegistry(context, registry);
+    mlir.oraDialectRegistryDestroy(registry);
+    mlir.oraContextLoadAllAvailableDialects(context);
+    const cases = [_]struct { prefix: []const u8, returned: []const u8 = "%input", supported: bool }{
+        .{ .prefix = "%slot = memref.alloca() : memref<i1>", .supported = true },
+        .{ .prefix = "%slot = memref.alloca() : memref<i1>\n memref.store %false, %slot[] : memref<i1>", .supported = true },
+        .{ .prefix = "memref.store %false, %input[] : memref<i1>", .supported = false },
+        .{ .prefix = "%slot = memref.alloca() : memref<4xi1>", .supported = false },
+        .{ .prefix = "%slot = memref.alloca() : memref<i1>", .returned = "%slot", .supported = false },
+        .{ .prefix = "%slot = memref.alloca() : memref<i1>\n memref.store %false, %slot[] : memref<i1>\n %read = memref.load %slot[] : memref<i1>", .supported = false },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const source = try std.fmt.allocPrint(arena.allocator(), "module {{ func.func @prefix(%input: memref<i1>) -> memref<i1> {{ %false = arith.constant false\n {s}\n func.return {s} : memref<i1> }} }}", .{ case.prefix, case.returned });
+        const module = mlir.oraModuleCreateParse(context, strRef(source));
+        try std.testing.expect(!mlir.oraModuleIsNull(module));
+        defer mlir.oraModuleDestroy(module);
+        const function = mlir.oraBlockGetFirstOperation(mlir.oraModuleGetBody(module));
+        const block = functionEntryBlock(function);
+        const anchor = mlir.oraBlockGetTerminator(block);
+        for ([_]bool{ false, true }) |project_calls| {
+            var collector = Collector{ .allocator = arena.allocator(), .options = .{} };
+            try collector.walkOperation(mlir.oraModuleGetOperation(module), null);
+            collector.function.entry_block = block;
+            collector.options.project_calls = project_calls;
+            const projected = if (collector.projectLoopPreheader(anchor, "prefix", 0)) |_| true else |_| false;
+            const inventoried = if (collector.inventoryLoopPreheader(anchor)) |_| true else |_| false;
+            try std.testing.expectEqual(project_calls and case.supported, projected);
+            try std.testing.expectEqual(project_calls and case.supported, inventoried);
+        }
+    }
 }
 
 test "loop integer carriers retain an exact semantic width cross-check" {

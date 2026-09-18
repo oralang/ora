@@ -181,6 +181,9 @@ def CallAdapterManifest.loop (manifest : CallAdapterManifest)
     let target ← adapterRequire (denoteControlTarget? edge.target) "call_adapter_loop_target"
     return adapterLoopEdge manifest.formulas dependencies row edge events target
   return fun base caller =>
+    -- Capture inherited reads once. Live loop locals must shadow this entry
+    -- environment; replaying caller reads after binding locals would undo that.
+    let base := bindStorageReads base caller.reads
     let initialContext := { directStorageContext manifest.formulas base [] with
       bindLocals := fun env _ => some env }
     let facts := contextReady base row.contextVariables ∧
@@ -194,7 +197,7 @@ def CallAdapterManifest.loop (manifest : CallAdapterManifest)
       invariant := fun current => facts ∧ stateReady row.variables current.locals ∧
         directFormulasHold (directStorageContext manifest.formulas base row.variables)
           caller.entryStorage current row.invariants
-      edges := edges.map (fun edge => edge base caller) }
+      edges := edges.map (fun edge => edge base { caller with reads := [] }) }
 
 def adapterLoopRelation (vc : AdapterLoopVC) (env : Env) (target : ControlTarget)
     (caller : StorageActionState) (following : LoopState) : Prop :=
@@ -255,5 +258,22 @@ def CallAdapterCertificates.addLoop (previous : CallAdapterCertificates manifest
   ⟨{ previous.dependencies with loops :=
       (adapterKey row.id digest, adapterLoopCertificate vc frames) :: previous.dependencies.loops },
     .loop previous.checked digest row vc bound proof frames⟩
+
+/-- Supplied loop authorization keeps universal induction separate from a
+witness for the entire initial predicate. Function installation alone supplies
+neither this witness nor the compiler's separately checked LoopVC queries. -/
+structure AdapterLoopProof (manifest : CallAdapterManifest) (digest : String)
+    (row : SummaryRow) where
+  previous : CallAdapterCertificates manifest
+  vc : AdapterLoopVC
+  bound : manifest.loop previous.dependencies digest row = .ok vc
+  induction : ∀ env caller, (vc env caller).InductionObligations
+  frames : ∀ (env : Env) (target : ControlTarget) (caller : StorageActionState), CertifiedWriteFrame
+    (fun before after => adapterLoopRelation vc env target { caller with loop := before } after)
+  witness : ∃ env caller initial, (vc env caller).initial initial
+
+def AdapterLoopProof.install (proof : AdapterLoopProof manifest digest row) :
+    CallAdapterCertificates manifest :=
+  proof.previous.addLoop digest row proof.vc proof.bound proof.induction proof.frames
 
 end Ora.Loop

@@ -173,6 +173,27 @@ pub fn overlayPreparedQueryResults(
     );
 
     var merged = base;
+    if (base.function_summaries.len != 0) {
+        const functions = try arena_allocator.dupe(obligation.FunctionSummaryRow, base.function_summaries);
+        var next: obligation.Id = 1;
+        for (queries.items) |query| next = @max(next, query.id + 1);
+        if (canonical_context == null) canonical_context = try z3_verification.Z3Context.init(arena_allocator);
+        var adapter = obligation_to_z3.Adapter.init(&canonical_context.?, arena_allocator, base);
+        for (functions) |*function| {
+            const digest = try obligation_to_lean.functionVcSha256(base, function.id);
+            const checked = try adapter.checkFunctionSafety(function.id, digest, next);
+            var safety = checked.query;
+            safety.function_summary_id = function.id;
+            safety.function_vc_sha256 = digest;
+            try queries.append(arena_allocator, safety);
+            function.query_ids.safety = try arena_allocator.dupe(obligation.Id, &.{next});
+            next += 1;
+            function.query_ids.certificate = next;
+            try queries.append(arena_allocator, .{ .id = next, .owner = function.owner, .source = function.source, .phase = .report, .origin = function.origin, .kind = .obligation, .assumption_ids = function.assumption_ids, .proof_requirement = .lean_certificate, .function_summary_id = function.id, .function_vc_sha256 = digest });
+            next += 1;
+        }
+        merged.function_summaries = functions;
+    }
     merged.queries = try queries.toOwnedSlice(arena_allocator);
     merged.diagnostics = try diagnostics.toOwnedSlice(arena_allocator);
 

@@ -81,8 +81,14 @@ pub fn writeCallCustodyModule(writer: anytype, set: obligation.ObligationSet, na
     if (set.hasBlockingDiagnostic()) return error.CallCustodyProjectionRejected;
     if (set.function_summaries.len == 0) return error.CallCustodyFunctionsMissing;
     for (set.loop_summaries) |row| if (!row.projectionSupported()) return error.CallCustodyProjectionRejected;
+    // Unrelated native obligations remain required by artifactDecision. Every
+    // fact used by a call certificate must survive the Lean proof surface.
+    for (set.function_summaries) |row| {
+        for (row.assumption_ids) |id| if (!assumptionWritableInProofSurface(obligation.findById(set.assumptions, id) orelse return error.InvalidDependency)) return error.CallCustodyEntryFormulaUnsupported;
+        for (row.entry_invariant_ids) |id| if (!obligationWritableInProofSurface(obligation.findById(set.obligations, id) orelse return error.InvalidDependency)) return error.CallCustodyEntryFormulaUnsupported;
+    }
     try writer.writeAll("import Ora.Loop.CallAdapter\n");
-    try writeModule(writer, set, .{ .namespace = namespace });
+    try writeModule(writer, set, .{ .namespace = namespace, .proof_surface = true });
     try writer.print("\nnamespace {s}\n\ndef emittedCallManifest : Ora.Loop.CallAdapterManifest := {{\n  formulas := emittedManifest\n  functions := [", .{namespace});
     for (set.function_summaries, 0..) |row, index| {
         if (index != 0) try writer.writeAll(", ");
@@ -103,7 +109,17 @@ pub fn writeCallCustodyModule(writer: anytype, set: obligation.ObligationSet, na
             .{ row.id, row.id, row.id },
         );
     }
+    for (set.loop_summaries) |row| if (loopUsesCallAdapter(set, row)) {
+        try writer.print("def emittedCallLoop_{d} : Prop :=\n  Nonempty (Ora.Loop.AdapterLoopProof emittedCallManifest emittedLoopVcSha256_{d} emittedLoopSummary_{d})\n\n", .{ row.id, row.id, row.id });
+    };
     try writeNamespaceEnd(writer, namespace);
+}
+
+pub fn loopUsesCallAdapter(set: obligation.ObligationSet, row: obligation.LoopSummaryRow) bool {
+    if (row.owner != .statement) return false;
+    for (set.function_summaries) |function| if (function.owner == .function and
+        std.mem.eql(u8, function.owner.function.name, row.owner.statement.function_name)) return true;
+    return false;
 }
 
 fn writeTermLookupTheorems(writer: anytype, terms: []const obligation.Term) !void {
@@ -1058,6 +1074,8 @@ fn writeSemanticDefinitions(writer: anytype, set: obligation.ObligationSet, proo
     }
 
     for (set.queries) |query| {
+        if (query.function_summary_id != null) continue;
+        if (query.loop_summary_id) |id| if (loopUsesCallAdapter(set, obligation.findById(set.loop_summaries, id).?)) continue;
         if (!try querySupportsSemantics(set, query)) continue;
         if (!emitted_any) {
             try writer.writeAll("-- Semantic proposition names for proof attachment.\n");
@@ -1259,6 +1277,7 @@ fn loopInductionQuerySemanticSupport(
     if (summary.validationReason()) |reason| {
         return .{ .unsupported = .{ .unsupported_loop_summary = reason } };
     }
+    if (loopUsesCallAdapter(set, summary)) return .supported;
     for (summary.preheader_timeline) |event| if (event.payload == .call or
         (event.payload == .summary_dependency and event.payload.summary_dependency.result_bindings != null))
         return .{ .unsupported = .{ .unsupported_loop_summary = .loop_call_relation_unsupported } };
@@ -3895,7 +3914,7 @@ test "certified call rows bind signatures ordered results returns and dependency
     var dumped = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer dumped.deinit();
     try @import("obligation_dump.zig").writeJsonLines(&dumped.writer, set);
-    for ([_][]const u8{ "\"entry_scope\":null", "\"entry_invariant_ids\":[]", "\"schema_version\":10", "\"record\":\"function_summary\"", "\"function_vc_sha256\":", "\"callee_summary_id\":1", "\"callee_vc_sha256\":", "\"returns\":{\"tag\":\"direct\"", "\"results\":[", "\"write_footprint_complete\":true" }) |text| {
+    for ([_][]const u8{ "\"entry_scope\":null", "\"entry_invariant_ids\":[]", "\"schema_version\":11", "\"record\":\"function_summary\"", "\"function_vc_sha256\":", "\"callee_summary_id\":1", "\"callee_vc_sha256\":", "\"returns\":{\"tag\":\"direct\"", "\"results\":[", "\"write_footprint_complete\":true" }) |text| {
         try std.testing.expect(std.mem.containsAtLeast(u8, dumped.written(), 1, text));
     }
     var records = std.mem.splitScalar(u8, dumped.written(), '\n');

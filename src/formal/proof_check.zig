@@ -201,7 +201,35 @@ pub fn applyInlineProofRows(
 const ApplyRowsOptions = struct {
     quiet: bool = false,
     inline_proof_source: ?[]const u8 = null,
+    call_custody: bool = false,
 };
+
+/// External rows only select targets. Expected bodies and digests come from a
+/// fresh pair of HIR inventories, exactly as in checkCallCustody.
+pub fn applyCallProofRows(allocator: std.mem.Allocator, module: @import("mlir_c_api").c.MlirModule, set: obligation.ObligationSet, rows: []const ProofRow, namespace: []const u8, process_environ: std.process.Environ, stdout: anytype) !ApplyResult {
+    try set.validateTermReferences();
+    try set.validateIdReferences();
+    var fresh = try prepareCallCustody(allocator, module, namespace);
+    defer fresh.deinit();
+    if (fresh.collected.set.function_summaries.len != set.function_summaries.len or fresh.collected.set.loop_summaries.len != set.loop_summaries.len) return error.CallCustodyManifestMismatch;
+    for (set.function_summaries) |row| {
+        const expected = try obligation_to_lean.functionVcSha256(fresh.collected.set, row.id);
+        if (!std.mem.eql(u8, &expected, &try obligation_to_lean.functionVcSha256(set, row.id))) return error.CallCustodyFunctionDigestMismatch;
+        for (set.queries) |query| if (query.function_summary_id == row.id) {
+            if (!std.meta.eql(query.function_vc_sha256, @as(?[32]u8, expected))) return error.CallCustodyFunctionDigestMismatch;
+        };
+    }
+    for (set.loop_summaries) |row| {
+        const expected = try obligation_to_lean.loopVcSha256(fresh.collected.set, row.id);
+        if (!std.mem.eql(u8, &expected, &try obligation_to_lean.loopVcSha256(set, row.id))) return error.CallCustodyManifestMismatch;
+        for (set.queries) |query| if (query.loop_summary_id == row.id) {
+            if (!std.meta.eql(query.loop_vc_sha256, @as(?[32]u8, expected))) return error.CallCustodyLoopDigestMismatch;
+            const target = obligation.findById(fresh.collected.set.queries, query.discharges_query_id orelse query.id) orelse return error.CallCustodyLoopTargetMismatch;
+            if (!obligation.proofTargetIdentityEqual(query, target)) return error.CallCustodyLoopTargetMismatch;
+        };
+    }
+    return applyRows(allocator, set, rows, namespace, fresh.source, process_environ, stdout, .{ .call_custody = true });
+}
 
 fn applyRows(
     allocator: std.mem.Allocator,
@@ -213,6 +241,7 @@ fn applyRows(
     stdout: anytype,
     options: ApplyRowsOptions,
 ) !ApplyResult {
+    if (set.function_summaries.len != 0 and !options.call_custody) return error.CallCustodyManifestMismatch;
     const io = std.Io.Threaded.global_single_threaded.io();
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
@@ -303,6 +332,8 @@ fn applyRows(
             .loop_summary_id = target_query.loop_summary_id,
             .loop_edge_id = target_query.loop_edge_id,
             .loop_vc_sha256 = target_query.loop_vc_sha256,
+            .function_summary_id = target_query.function_summary_id,
+            .function_vc_sha256 = target_query.function_vc_sha256,
             .result = .{ .status = .proved },
         });
         try checker_rows.append(arena_allocator, .{
@@ -319,6 +350,8 @@ fn applyRows(
                 .unsupported => false,
             },
             .loop_summary_id = target_query.loop_summary_id,
+            .call_function_id = target_query.function_summary_id,
+            .call_loop_id = if (target_query.loop_summary_id) |id| if (obligation_to_lean.loopUsesCallAdapter(set, obligation.findById(set.loop_summaries, id).?)) id else null else null,
             .target_smtlib_hash = target_query.smtlib_hash,
             .target_constraint_count = target_query.constraint_count,
             // A path names user-authored source that is checked in the same
@@ -340,6 +373,8 @@ fn applyRows(
             .target_constraint_count = target_query.constraint_count,
             .loop_summary_id = target_query.loop_summary_id,
             .loop_vc_sha256 = target_query.loop_vc_sha256,
+            .function_summary_id = target_query.function_summary_id,
+            .function_vc_sha256 = target_query.function_vc_sha256,
         });
     }
 
@@ -390,8 +425,8 @@ fn applyRows(
 
 fn validateProofTarget(target_query: obligation.VerificationQuery) !void {
     if (target_query.artifact_policy == .diagnostic_only) return error.ProofRowTargetNotEligible;
-    if (target_query.kind == .loop_induction) {
-        if (target_query.loop_summary_id == null) return error.ProofRowLoopSummaryMissing;
+    if (target_query.kind == .loop_induction or target_query.function_summary_id != null) {
+        if (target_query.loop_summary_id == null and target_query.function_summary_id == null) return error.ProofRowLoopSummaryMissing;
         if (target_query.obligation_ids.len != 0 or
             target_query.backend != .unspecified or
             target_query.result != null or
@@ -479,6 +514,7 @@ const CheckedProofRow = struct {
     zig_semantic_supported: bool = false,
     loop_summary_id: ?obligation.Id = null,
     call_function_id: ?obligation.Id = null,
+    call_loop_id: ?obligation.Id = null,
     target_smtlib_hash: ?u64 = null,
     target_constraint_count: u32 = 0,
     import_module: bool = true,
@@ -511,6 +547,8 @@ const CertificateRow = struct {
     target_constraint_count: u32,
     loop_summary_id: ?obligation.Id = null,
     loop_vc_sha256: ?[32]u8 = null,
+    function_summary_id: ?obligation.Id = null,
+    function_vc_sha256: ?[32]u8 = null,
 };
 
 fn buildCertificateJson(
@@ -602,10 +640,16 @@ fn buildCertificateJsonWithLeanVersion(
         } else {
             try writer.writeAll("null");
         }
+        try writer.writeAll(",\n      \"function_summary_id\": ");
+        if (row.function_summary_id) |id| try writer.print("{d}", .{id}) else try writer.writeAll("null");
+        try writer.writeAll(",\n      \"function_vc_sha256\": ");
+        if (row.function_vc_sha256) |digest| try writeJsonString(writer, &std.fmt.bytesToHex(digest, .lower)) else try writer.writeAll("null");
         try writer.writeAll(",\n      \"authorization_claim\": ");
         try writeJsonString(
             writer,
-            if (row.loop_summary_id != null)
+            if (row.function_summary_id != null)
+                "certified_call_installation"
+            else if (row.loop_summary_id != null)
                 "loop_induction_and_nonvacuity"
             else
                 "query_proof",
@@ -1093,6 +1137,8 @@ fn buildLeanCheckerSourceWithInlineProofs(
                 "theorem check_query_{d}_{d} : {s}.emittedCallCustody_{d} := by\n  exact {s}\n\n",
                 .{ row.query_id, index, generated_namespace, function_id, row.theorem_name },
             );
+        } else if (row.call_loop_id) |loop_id| {
+            try writer.print("theorem check_query_{d}_{d} : {s}.emittedCallLoop_{d} := by\n  exact {s}\n\n", .{ row.query_id, index, generated_namespace, loop_id, row.theorem_name });
         } else if (row.loop_summary_id != null) {
             try writer.print(
                 \\theorem check_query_{d}_{d} :
@@ -1802,7 +1848,7 @@ test "proof certificate JSON exposes stable schema fields" {
     );
     defer allocator.free(certificate);
 
-    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"schema_version\": 2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"schema_version\": 3") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"version\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"hash_algorithm\": \"sha256\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"checker_source_identity\": \"canonical_scratch_modules\"") != null);

@@ -19,6 +19,7 @@ pub const EncodeError = canonical_types.EncodeError;
 pub const encodeErrorReason = canonical_types.encodeErrorReason;
 
 pub const Adapter = canonical_encode.Adapter;
+pub const NativeCalls = canonical_encode.NativeCalls;
 
 pub const queryCanonicalSupport = canonical_support.queryCanonicalSupport;
 pub const queryCanonicalPromotionShape = canonical_support.queryCanonicalPromotionShape;

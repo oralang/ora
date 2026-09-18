@@ -25,6 +25,8 @@ const mlir = mlir_c_api.c;
 const Context = Z3Context;
 const Solver = Z3Solver;
 const Encoder = @import("encoder.zig").Encoder;
+pub const CertifiedCallEncoder = Encoder;
+pub const CertifiedCallProvider = Encoder.CertifiedCallProvider;
 const errors = @import("errors.zig");
 const mlir_helpers = @import("mlir_helpers.zig");
 const refinements = @import("ora_types").refinement_semantics;
@@ -367,6 +369,10 @@ pub const VerificationPass = struct {
 
     pub fn setFormalQueryBindings(self: *VerificationPass, bindings: []const FormalQueryBinding) void {
         self.formal_query_bindings = bindings;
+    }
+
+    pub fn setCertifiedCalls(self: *VerificationPass, provider: CertifiedCallProvider) void {
+        self.encoder.certified_calls = provider;
     }
 
     pub fn deinit(self: *VerificationPass) void {
@@ -2229,6 +2235,9 @@ pub const VerificationPass = struct {
         // ora.struct_init) whose defining constraints were just discarded.
         // Clear expression caches so later annotation encoding re-materializes
         // those constraints instead of reusing under-constrained ASTs.
+        if ((std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")) and try self.encoder.certifiedCallee(op) != null) {
+            try self.active_path_assumptions.append(.{ .condition = self.encoder.encodeAnd(leaked_constraints), .extra_constraints = &.{}, .owned_extra_constraints = false });
+        }
         self.encoder.invalidateValueCaches();
     }
 
@@ -2964,6 +2973,12 @@ pub const VerificationPass = struct {
 
             var body_obligation_list = ManagedArrayList(z3.Z3_ast).init(self.allocator);
             defer body_obligation_list.deinit();
+            var body_prefix = ManagedArrayList(z3.Z3_ast).init(self.allocator);
+            defer body_prefix.deinit();
+            const previous_prefix = self.encoder.obligation_prefix;
+            defer self.encoder.obligation_prefix = previous_prefix;
+            if (self.encoder.certified_calls != null) self.encoder.obligation_prefix = self.encoder.encodeAnd(&.{});
+            const calls_before_body = self.encoder.certified_evidence.items.len;
             const body_anchor_op = self.lastLoopInvariantSourceOpForLoop(annotation_indices, parent_op) orelse source_op;
             var body_op = mlir.oraOperationGetNextInBlock(body_anchor_op);
             while (!mlir.oraOperationIsNull(body_op) and body_op.ptr != terminator.ptr) : (body_op = mlir.oraOperationGetNextInBlock(body_op)) {
@@ -2972,7 +2987,9 @@ pub const VerificationPass = struct {
                 defer if (transient_constraints.len > 0) self.allocator.free(transient_constraints);
                 const transient_obligations = try self.encoder.takeObligations(self.allocator);
                 defer if (transient_obligations.len > 0) self.allocator.free(transient_obligations);
-                try addConstraintSlice(&body_obligation_list, transient_obligations);
+                try addConstraintSlice(&body_prefix, transient_constraints);
+                try body_obligation_list.appendSlice(transient_obligations);
+                if (self.encoder.obligation_prefix != null) self.encoder.obligation_prefix = self.encoder.encodeAnd(body_prefix.items);
             }
             self.encoder.value_map.clearRetainingCapacity();
             self.encoder.value_map_old.clearRetainingCapacity();
@@ -2988,12 +3005,18 @@ pub const VerificationPass = struct {
                 try self.encoder.bindValue(after_arg, try self.encoder.encodeValue(yielded_value));
             }
 
-            const body_condition = blk: {
+            const raw_body_condition = blk: {
                 if (try self.encoder.tryEncodeAssertCondition(source_op, .Current)) |specialized| {
                     break :blk specialized;
                 }
                 break :blk try self.encoder.encodeValue(condition_value);
             };
+            // Each earlier safety check keeps only its own prefix. The full
+            // call relation guards the step goal, never those earlier checks.
+            const body_condition = if (self.encoder.certified_evidence.items.len != calls_before_body)
+                self.encoder.encodeImplies(self.encoder.encodeAnd(body_prefix.items), raw_body_condition)
+            else
+                raw_body_condition;
 
             var extra_constraint_list = ManagedArrayList(z3.Z3_ast).init(self.allocator);
             defer extra_constraint_list.deinit();
@@ -3397,6 +3420,7 @@ pub const VerificationPass = struct {
             .arena = arena,
             .rows = rows,
             .source_accounting_rows = source_accounting_rows,
+            .certified_calls = try arena_allocator.dupe(Encoder.CertifiedCallEvidence, self.encoder.certified_evidence.items),
         };
     }
 
@@ -3925,6 +3949,7 @@ pub const VerificationPass = struct {
         status: GuardErasureProofStatus,
         duplicate_guard_id: bool,
     ) bool {
+        if (self.encoder.certified_evidence.items.len != 0) return false;
         if (!self.guardErasureEnclosingResultHealthy()) return false;
         if (!guardErasureCleanProof(status)) return false;
         if (query.kind != .GuardViolate) return false;
@@ -7479,6 +7504,7 @@ pub const PreparedQueryManifest = struct {
     arena: std.heap.ArenaAllocator,
     rows: []const PreparedQueryManifestRow,
     source_accounting_rows: []const prepared_query.Row,
+    certified_calls: []const Encoder.CertifiedCallEvidence = &.{},
 
     pub fn deinit(self: *PreparedQueryManifest) void {
         self.arena.deinit();

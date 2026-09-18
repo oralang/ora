@@ -3295,7 +3295,7 @@ test "B3 lean proofs unblock source-level unknown without erasing runtime guard"
     defer allocator.free(valid_hex_path);
     const valid_cert = try readFileAllocForTest(allocator, valid_cert_path);
     defer allocator.free(valid_cert);
-    try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"schema_version\": 2"));
+    try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"schema_version\": 3"));
     try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"proof_count\": 1"));
     try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"axioms\""));
     try testing.expect(!std.mem.containsAtLeast(u8, valid_cert, 1, "sorryAx"));
@@ -3405,7 +3405,7 @@ test "automatic Lean proofs unblock unknown without runtime-check authority" {
     defer allocator.free(certificate_path);
     const certificate = try readFileAllocForTest(allocator, certificate_path);
     defer allocator.free(certificate);
-    try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"schema_version\": 2"));
+    try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"schema_version\": 3"));
     var certificate_digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(certificate, &certificate_digest, .{});
     const certificate_hash = try std.fmt.allocPrint(allocator, "{x}", .{certificate_digest});
@@ -3590,7 +3590,7 @@ test "B6 storage Lean proof fixture proves read-only old collapse without erasin
     defer allocator.free(valid_hex_path);
     const valid_cert = try readFileAllocForTest(allocator, valid_cert_path);
     defer allocator.free(valid_cert);
-    try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"schema_version\": 2"));
+    try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"schema_version\": 3"));
     try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"proof_count\": 1"));
     try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"axioms\""));
     try testing.expect(!std.mem.containsAtLeast(u8, valid_cert, 1, "sorryAx"));
@@ -3802,7 +3802,7 @@ test "B6 storage path Lean proof unblocks constant map read old collapse" {
     defer allocator.free(valid_hex_path);
     const valid_cert = try readFileAllocForTest(allocator, valid_cert_path);
     defer allocator.free(valid_cert);
-    try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"schema_version\": 2"));
+    try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"schema_version\": 3"));
     try testing.expect(!std.mem.containsAtLeast(u8, valid_cert, 1, "sorryAx"));
     const valid_sir = try readFileAllocForTest(allocator, valid_sir_path);
     defer allocator.free(valid_sir);
@@ -4059,7 +4059,7 @@ test "B6 storage key evidence Lean proof unblocks structural frame gate" {
     defer allocator.free(valid_hex_path);
     const valid_cert = try readFileAllocForTest(allocator, valid_cert_path);
     defer allocator.free(valid_cert);
-    try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"schema_version\": 2"));
+    try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"schema_version\": 3"));
     try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"proof_count\": 2"));
     try testing.expect(!std.mem.containsAtLeast(u8, valid_cert, 1, "sorryAx"));
     const valid_sir = try readFileAllocForTest(allocator, valid_sir_path);
@@ -4280,7 +4280,7 @@ test "B6 signed comparison Lean proof unblocks source-level unknown" {
     defer allocator.free(valid_hex_path);
     const valid_cert = try readFileAllocForTest(allocator, valid_cert_path);
     defer allocator.free(valid_cert);
-    try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"schema_version\": 2"));
+    try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"schema_version\": 3"));
     try testing.expect(!std.mem.containsAtLeast(u8, valid_cert, 1, "sorryAx"));
     const valid_hex = try readFileAllocForTest(allocator, valid_hex_path);
     defer allocator.free(valid_hex);
@@ -4395,7 +4395,7 @@ test "B6 div rem Lean proof unblocks source-level unknown" {
     defer allocator.free(valid_hex_path);
     const valid_cert = try readFileAllocForTest(allocator, valid_cert_path);
     defer allocator.free(valid_cert);
-    try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"schema_version\": 2"));
+    try testing.expect(std.mem.containsAtLeast(u8, valid_cert, 1, "\"schema_version\": 3"));
     try testing.expect(!std.mem.containsAtLeast(u8, valid_cert, 1, "sorryAx"));
     const valid_hex = try readFileAllocForTest(allocator, valid_hex_path);
     defer allocator.free(valid_hex);
@@ -8516,7 +8516,7 @@ test "formal obligation MLIR adapter emits evidence-backed frame for parameter d
 
     const dump = try dumpManifestToOwnedString(testing.allocator, result.set);
     defer testing.allocator.free(dump);
-    try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"schema_version\":10"));
+    try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"schema_version\":11"));
     try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"relation\":\"read_preserved_by_key_evidence\""));
     try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"evidence\":[{\"kind\":\"free_var_disequality\""));
     try testing.expect(std.mem.containsAtLeast(u8, dump, 1, "\"key_index\":0"));
@@ -9476,13 +9476,13 @@ test "formal report coverage summarizes representative MLIR obligation classes" 
     const report = try dumpManifestToOwnedString(testing.allocator, result.set);
     defer testing.allocator.free(report);
 
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"artifact_decision\",\"schema_version\":10,\"status\":\"blocked\",\"reason\":\"missing_proof\"}"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":10,\"assumptions\":1,\"obligations\":12,\"queries\":13"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"artifact_decision\",\"schema_version\":11,\"status\":\"blocked\",\"reason\":\"missing_proof\"}"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":11,\"assumptions\":1,\"obligations\":12,\"queries\":13"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_obligation_links\":12"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"obligation_kinds\":{\"logical\":4,\"runtime_guard\":1,\"type_wf\":0,\"type_relation\":0,\"region_relation\":0,\"effect_frame\":1,\"resource\":5,\"quantifier\":1,\"filtered_input\":0,\"backend_fact\":0}"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_backends\":{\"unspecified\":13,\"z3\":0,\"lean\":0}"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"query_results\":{\"missing\":13,\"sat\":0,\"unsat\":0,\"unknown\":0,\"proved\":0,\"failed\":0}"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":10"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":11"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"logical\",\"role\":\"ensures\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"arithmetic_safety\":\"addition_overflow\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"arithmetic_safety\":\"division_by_zero\""));
@@ -9491,7 +9491,7 @@ test "formal report coverage summarizes representative MLIR obligation classes" 
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"resource\",\"op\":\"move\",\"domain\":\"TokenUnit\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"property\":\"conservation\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"quantifier\",\"quantifier\":\"forall\""));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"query\",\"schema_version\":10"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"query\",\"schema_version\":11"));
 }
 
 test "formal loop summary rows are source-owner scoped scalar data" {
@@ -9548,8 +9548,8 @@ test "formal loop summary rows are source-owner scoped scalar data" {
     const repeated_report = try dumpManifestToOwnedString(testing.allocator, result.set);
     defer testing.allocator.free(repeated_report);
     try testing.expectEqualStrings(report, repeated_report);
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"loop_summary_coverage\",\"schema_version\":10"));
-    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"loop_summary\",\"schema_version\":10"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"loop_summary_coverage\",\"schema_version\":11"));
+    try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"loop_summary\",\"schema_version\":11"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"edges\":[{\"id\":0"));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"target\":\"backedge\""));
     try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"target\":\"successor\""));
@@ -11754,6 +11754,7 @@ test "nested loop artifact authority requires the exact child certificate" {
         .origin = parent_target.origin,
         .backend = .lean,
         .kind = .loop_induction,
+        .logical_role = parent_target.logical_role,
         .assumption_ids = parent_target.assumption_ids,
         .proof_artifact_id = artifacts[0].id,
         .discharges_query_id = parent_target.id,
@@ -11769,6 +11770,7 @@ test "nested loop artifact authority requires the exact child certificate" {
         .origin = child_target.origin,
         .backend = .lean,
         .kind = .loop_induction,
+        .logical_role = child_target.logical_role,
         .assumption_ids = child_target.assumption_ids,
         .proof_artifact_id = artifacts[1].id,
         .discharges_query_id = child_target.id,
@@ -11787,6 +11789,10 @@ test "nested loop artifact authority requires the exact child certificate" {
         obligation.ArtifactDecision.allowed,
         decided_set.artifactDecision(),
     );
+
+    decided_queries[result.set.queries.len + 1].logical_role = null;
+    try testing.expectEqual(obligation.ArtifactBlockReason.lean_required_failure, decided_set.artifactDecision().blocked);
+    decided_queries[result.set.queries.len + 1].logical_role = child_target.logical_role;
 
     decided_set.queries = decided_queries[0 .. decided_queries.len - 1];
     try testing.expectEqual(
@@ -14407,8 +14413,8 @@ test "formal report coverage includes representative source contracts" {
     {
         const report = try dumpManifestToOwnedString(testing.allocator, logical.set);
         defer testing.allocator.free(report);
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":10"));
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":10"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":11"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"record\":\"assumption\",\"schema_version\":11"));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"role\":\"ensures\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"role\":\"assert\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"arithmetic_safety\":\"subtraction_overflow\""));
@@ -14423,7 +14429,7 @@ test "formal report coverage includes representative source contracts" {
     {
         const report = try dumpManifestToOwnedString(testing.allocator, resource.set);
         defer testing.allocator.free(report);
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":10"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":11"));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"effect_frame\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"resource\",\"op\":\"move\",\"domain\":\"TokenUnit\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"property\":\"conservation\""));
@@ -14435,7 +14441,7 @@ test "formal report coverage includes representative source contracts" {
     {
         const report = try dumpManifestToOwnedString(testing.allocator, quantifier.set);
         defer testing.allocator.free(report);
-        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":10"));
+        try testing.expect(std.mem.containsAtLeast(u8, report, 1, "{\"record\":\"coverage_summary\",\"schema_version\":11"));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"kind\":{\"tag\":\"quantifier\",\"quantifier\":\"forall\""));
         try testing.expect(std.mem.containsAtLeast(u8, report, 1, "\"binder_type\":{\"tag\":\"spelling\",\"value\":\"u256\"}"));
     }
@@ -14609,6 +14615,504 @@ fn collectCallProjection(allocator: std.mem.Allocator, path: []const u8) !obliga
     return obligation_from_mlir.collect(allocator, hir.module.raw_module, .{ .project_calls = true });
 }
 
+test "G9c external proof recipe names every function and adapter loop target without authority" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const manifest = try pathFromTmpAlloc(allocator, tmp, "empty.proofs.json");
+    defer allocator.free(manifest);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "empty.proofs.json", .data = "{\"schema_version\":1,\"proofs\":[]}" });
+    const option = try std.fmt.allocPrint(allocator, "--lean-proofs={s}", .{manifest});
+    defer allocator.free(option);
+    const out = try pathFromTmpAlloc(allocator, tmp, "out");
+    defer allocator.free(out);
+    const result = try runProcess(allocator, &.{ ORA_BINARY_REL, "emit", option, "--emit=smt-report,bytecode", "--out-dir", out, "tests/formal/call_projection_callee_loop_value.ora" });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    errdefer std.debug.print("G9c recipe: {s}\n{s}\n", .{ result.stdout, result.stderr });
+    try expectExited(result, 1);
+    try testing.expect(std.mem.indexOf(u8, result.stdout, "EmptyProofRows") != null);
+    for ([_][]const u8{ ".emittedCallCustody_1", ".emittedCallCustody_2", ".emittedCallLoop_1" }) |target|
+        try testing.expect(std.mem.indexOf(u8, result.stdout, target) != null);
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, result.stdout, "proof row: query_id="));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/call_projection_callee_loop_value.hex", .{}));
+    const source = try pathFromTmpAlloc(allocator, tmp, "out/call_projection_callee_loop_value.lean.obligations.lean");
+    defer allocator.free(source);
+    const checked = try runLeanFileForTest(allocator, source);
+    defer allocator.free(checked.stdout);
+    defer allocator.free(checked.stderr);
+    try expectExited(checked, 0);
+}
+
+test "G9c native certified calls prepare both prover targets without authority" {
+    const allocator = testing.allocator;
+    for ([_][]const u8{ "callee_loop_value", "loop_return", "storage", "error_storage", "prefix" }) |name| {
+        errdefer std.debug.print("G9c native case {s}\n", .{name});
+        const path = try std.fmt.allocPrint(allocator, "tests/formal/call_projection_{s}.ora", .{name});
+        defer allocator.free(path);
+        var compilation = try compilePackage(path);
+        defer compilation.deinit();
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir.diagnostics.isEmpty());
+        var fresh = try proof_check.prepareCallCustody(allocator, hir.module.raw_module, "Ora.Generated.Obligations.G9a");
+        defer fresh.deinit();
+        if (std.mem.eql(u8, name, "loop_return")) {
+            try testing.expect(fresh.collected.set.loop_summaries[0].preheader_projection_complete);
+            const source = try std.mem.concat(allocator, u8, &.{
+                fresh.source,
+                "\nopen Ora.Generated.Obligations.G9a\nexample : (emittedCallManifest.loop {} emittedLoopVcSha256_1 emittedLoopSummary_1).map (fun _ => ()) = .ok () := by rfl\n",
+            });
+            defer allocator.free(source);
+            var tmp = testing.tmpDir(.{});
+            defer tmp.cleanup();
+            const lean_path = try pathFromTmpAlloc(allocator, tmp, "LoopReturnBinding.lean");
+            defer allocator.free(lean_path);
+            try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = lean_path, .data = source });
+            const checked = try runLeanFileForTest(allocator, lean_path);
+            defer allocator.free(checked.stdout);
+            defer allocator.free(checked.stderr);
+            try expectExited(checked, 0);
+        }
+        var native: obligation_to_z3.NativeCalls = .{ .set = fresh.collected.set, .function_ops = fresh.collected.function_ops, .source_fact_bindings = fresh.collected.source_fact_bindings };
+        var pass = try z3_verification.VerificationPass.init(allocator);
+        defer pass.deinit();
+        const bindings = try test_helpers.z3FormalQueryBindingsFromFormalForTest(allocator, fresh.collected.query_bindings);
+        defer allocator.free(bindings);
+        pass.setFormalQueryBindings(bindings);
+        pass.setCertifiedCalls(native.provider());
+        var manifest = try pass.collectPreparedQueryManifest(hir.module.raw_module);
+        defer manifest.deinit();
+        try testing.expect(manifest.certified_calls.len > 0);
+        var identity = try source_accounting_from_z3.collectPreparedIdentity(allocator, manifest.source_accounting_rows);
+        defer identity.deinit(allocator);
+        var result = try pass.runVerificationPass(hir.module.raw_module);
+        defer result.deinit();
+        try testing.expect(result.success);
+        var report = try pass.buildSmtReport(hir.module.raw_module, path, &result);
+        defer report.deinit(allocator);
+        var overlay = try obligation_from_z3.overlayPreparedQueryResults(allocator, fresh.collected.set, report.query_manifest.?.rows);
+        defer overlay.deinit();
+        try overlay.set.validateIdReferences();
+        try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_lean_custody_missing }, overlay.set.artifactDecision());
+        for (overlay.set.function_summaries) |row| {
+            const query = obligation.findById(overlay.set.queries, row.query_ids.safety[0]).?;
+            try testing.expectEqual(@as(?obligation.Id, row.id), query.function_summary_id);
+            try testing.expectEqualSlices(u8, &try obligation_to_lean.functionVcSha256(fresh.collected.set, row.id), &query.function_vc_sha256.?);
+            try testing.expect(query.smtlib_hash != null);
+            try testing.expectEqual(obligation.VerificationQueryStatus.proved, query.result.?.status);
+            try testing.expectEqual(obligation.ProofRequirement.lean_certificate, obligation.findById(overlay.set.queries, row.query_ids.certificate.?).?.proof_requirement);
+        }
+    }
+}
+
+test "G9c native call results storage and preconditions remain joint and prefix staged" {
+    const cases = [_]struct { source: []const u8, succeeds: bool }{
+        .{ .source = "contract C { fn next(x: u256) -> u256 { return x +% 1; } pub fn run(x: u256) { var i: u256 = 0; while (i < 1) invariant i <= 1 { let a: u256 = next(x); let b: u256 = next(a); assert(b == x +% 2); i = i +% 1; } } }", .succeeds = true },
+        .{ .source = "contract C { fn next(x: u256) -> u256 { return x +% 1; } pub fn run(x: u256) { var i: u256 = 0; while (i < 1) invariant i <= 1 { let a: u256 = next(x); let b: u256 = next(a); assert(b == a); i = i +% 1; } } }", .succeeds = false },
+        .{ .source = "contract C { storage var n: u256; fn next() -> u256 { let before: u256 = n; n = before +% 1; return before; } pub fn run() { var i: u256 = 0; while (i < 1) invariant i <= 1 { n = 0; let a: u256 = next(); let b: u256 = next(); assert(a == 0); assert(b == 1); assert(n == 2); i = i +% 1; } } }", .succeeds = true },
+        .{ .source = "contract C { storage var n: u256; fn next() -> u256 { let before: u256 = n; n = before +% 1; return before; } pub fn run() { var i: u256 = 0; while (i < 1) invariant i <= 1 { n = 0; let a: u256 = next(); let b: u256 = next(); assert(b == 0); i = i +% 1; } } }", .succeeds = false },
+        .{ .source = "contract C { fn leaf(x: u256) -> u256 requires x > 0 { return x; } pub fn run() { var i: u256 = 0; while (i < 1) invariant i <= 1 { let value: u256 = leaf(0); if (value == 1) { assert(true); } i = i +% 1; } } }", .succeeds = false },
+        .{ .source = "contract C { fn leaf(x: u256) -> u256 requires x > 0 requires x < 3 { return x + 1; } pub fn run(x: u256) requires x > 0 requires x < 3 { var i: u256 = 0; while (i < 1) invariant i <= 1 { let value: u256 = leaf(x); assert(value == x + 1); i = i +% 1; } } }", .succeeds = true },
+    };
+    for (cases, 0..) |case, index| {
+        errdefer std.debug.print("G9c native matrix case {d}\n", .{index});
+        var compilation = try compileText(case.source);
+        defer compilation.deinit();
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir.diagnostics.isEmpty());
+        var projected = try obligation_from_mlir.collect(testing.allocator, hir.module.raw_module, .{ .project_calls = true });
+        defer projected.deinit();
+        try testing.expect(!projected.set.hasBlockingDiagnostic());
+        var native: obligation_to_z3.NativeCalls = .{ .set = projected.set, .function_ops = projected.function_ops, .source_fact_bindings = projected.source_fact_bindings };
+        var pass = try z3_verification.VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        pass.setCertifiedCalls(native.provider());
+        var prepared = try pass.collectPreparedQueryManifest(hir.module.raw_module);
+        defer prepared.deinit();
+        try testing.expect(prepared.certified_calls.len > 0);
+        var identity = try source_accounting_from_z3.collectPreparedIdentity(testing.allocator, prepared.source_accounting_rows);
+        defer identity.deinit(testing.allocator);
+        var result = try pass.runVerificationPass(hir.module.raw_module);
+        defer result.deinit();
+        try testing.expectEqual(case.succeeds, result.success);
+        try testing.expectEqual(@as(usize, 0), result.proven_guard_ids.count());
+    }
+}
+
+test "G9c nested call cannot erase an earlier native loop safety checkpoint" {
+    const allocator = testing.allocator;
+    for ([_]bool{ false, true }) |unsafe| {
+        const source = try std.fmt.allocPrint(allocator, "contract C {{ fn spin(limit: u256) -> u256 requires limit == 0 {{ var j: u256 = 0; while (j <= limit) invariant j <= limit {{ j = j; }} return j; }} " ++
+            "pub fn run(x: u256, limit: u256) requires limit == 0 {{ var i: u256 = 0; while (i < 1) invariant i <= 1 {{ if (x > 0) {{ assert(x {s} 0); let value: u256 = spin(limit); }} i = i +% 1; }} }} }}", .{if (unsafe) "==" else ">"});
+        defer allocator.free(source);
+        var compilation = try compileText(source);
+        defer compilation.deinit();
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        var projected = try obligation_from_mlir.collect(allocator, hir.module.raw_module, .{ .project_calls = true });
+        defer projected.deinit();
+        try testing.expect(!projected.set.hasBlockingDiagnostic());
+        var native: obligation_to_z3.NativeCalls = .{ .set = projected.set, .function_ops = projected.function_ops, .source_fact_bindings = projected.source_fact_bindings };
+        var pass = try z3_verification.VerificationPass.init(allocator);
+        defer pass.deinit();
+        pass.setCertifiedCalls(native.provider());
+        var result = try pass.runVerificationPass(hir.module.raw_module);
+        defer result.deinit();
+        var report = try pass.buildSmtReport(hir.module.raw_module, "test.ora", &result);
+        defer report.deinit(allocator);
+        var checked: usize = 0;
+        var failed = false;
+        for (report.query_manifest.?.rows) |row| {
+            if (!std.mem.eql(u8, row.function_name, "run") or row.kind != .LoopBodySafety) continue;
+            checked += 1;
+            try testing.expect(row.result_status == .sat or row.result_status == .unsat);
+            failed = failed or row.result_status == .sat;
+        }
+        try testing.expect(checked > 0);
+        try testing.expectEqual(unsafe, failed);
+    }
+}
+
+test "G9c canonical loop step remains required independently of native call summaries" {
+    const allocator = testing.allocator;
+    for ([_]u8{ 1, 2 }) |increment| {
+        const source = try std.fmt.allocPrint(allocator, "contract C {{ fn repeat(limit: u256) -> u256 requires limit <= 2 ensures result <= limit {{ var i: u256 = 0; while (i < limit) invariant i <= limit {{ i = i +% {d}; }} return i; }} pub fn run(limit: u256) -> u256 requires limit <= 2 ensures result <= limit {{ return repeat(limit); }} }}", .{increment});
+        defer allocator.free(source);
+        var compilation = try compileText(source);
+        defer compilation.deinit();
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        var projected = try obligation_from_mlir.collect(allocator, hir.module.raw_module, .{ .project_calls = true });
+        defer projected.deinit();
+        try testing.expect(!projected.set.hasBlockingDiagnostic());
+        var native: obligation_to_z3.NativeCalls = .{ .set = projected.set, .function_ops = projected.function_ops, .source_fact_bindings = projected.source_fact_bindings };
+        var pass = try z3_verification.VerificationPass.init(allocator);
+        defer pass.deinit();
+        const bindings = try test_helpers.z3FormalQueryBindingsFromFormalForTest(allocator, projected.query_bindings);
+        defer allocator.free(bindings);
+        pass.setFormalQueryBindings(bindings);
+        pass.setCertifiedCalls(native.provider());
+        var result = try pass.runVerificationPass(hir.module.raw_module);
+        defer result.deinit();
+        var report = try pass.buildSmtReport(hir.module.raw_module, "test.ora", &result);
+        defer report.deinit(allocator);
+        var overlay = try obligation_from_z3.overlayPreparedQueryResults(allocator, projected.set, report.query_manifest.?.rows);
+        defer overlay.deinit();
+        var steps: usize = 0;
+        for (overlay.set.queries) |query| {
+            if (query.kind != .loop_invariant_step or query.loop_summary_id == null) continue;
+            steps += 1;
+            try testing.expect(query.smtlib_hash != null);
+            try testing.expectEqual(if (increment == 1) obligation.VerificationQueryStatus.proved else .failed, query.result.?.status);
+            try testing.expect(!query.result.?.vacuous and !query.result.?.vacuity_unknown);
+        }
+        try testing.expectEqual(@as(usize, 1), steps);
+    }
+}
+
+test "G9c supplied function proof checks against fresh HIR and exact FunctionVC targets" {
+    const allocator = testing.allocator;
+    var compilation = try compilePackage("tests/formal/call_adapter_leaf.ora");
+    defer compilation.deinit();
+    const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+    var fresh = try proof_check.prepareCallCustody(allocator, hir.module.raw_module, "Ora.Generated.Obligations.G9a");
+    defer fresh.deinit();
+    var overlay = try obligation_from_z3.overlayPreparedQueryResults(allocator, fresh.collected.set, &.{});
+    defer overlay.deinit();
+    const leaf = try callCustodyLeaf(overlay.set);
+    const source = try callCustodyLeafProof(allocator, leaf);
+    defer allocator.free(source);
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try pathFromTmpAlloc(allocator, tmp, "Supplied.lean");
+    defer allocator.free(path);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = source });
+    const row: proof_check.ProofRow = .{ .query_id = leaf.query_ids.certificate.?, .obligation_ids = &.{}, .assumption_ids = leaf.assumption_ids, .module_name = "CustodyProof", .theorem_name = "CustodyProof.accepted", .path = path, .inline_source = true };
+    const env = try callCustodyTestEnviron(allocator);
+    defer env.block.deinit(allocator);
+    var output = std.Io.Writer.Allocating.init(allocator);
+    defer output.deinit();
+    errdefer std.debug.print("G9c supplied checker: {s}\n", .{output.written()});
+    var checked = try proof_check.applyCallProofRows(allocator, hir.module.raw_module, overlay.set, &.{row}, "Ora.Generated.Obligations.G9a", env, &output.writer);
+    defer checked.deinit();
+    const proof = checked.set.queries[checked.set.queries.len - 1];
+    try testing.expectEqual(@as(?obligation.Id, leaf.id), proof.function_summary_id);
+    try testing.expectEqualSlices(u8, &try obligation_to_lean.functionVcSha256(fresh.collected.set, leaf.id), &proof.function_vc_sha256.?);
+    try testing.expect(checked.set.artifactDecision() == .blocked);
+    try testing.expect(std.mem.indexOf(u8, checked.certificate_json, "certified_call_installation") != null);
+    const targets = try allocator.dupe(obligation.VerificationQuery, overlay.set.queries);
+    defer allocator.free(targets);
+    var stale = overlay.set;
+    stale.queries = targets;
+    for (targets) |*target| {
+        if (target.function_summary_id == leaf.id) target.function_vc_sha256.?[0] ^= 1;
+    }
+    try testing.expectError(error.CallCustodyFunctionDigestMismatch, proof_check.applyCallProofRows(allocator, hir.module.raw_module, stale, &.{row}, "Ora.Generated.Obligations.G9a", env, &output.writer));
+}
+
+test "G9c complete supplied certificates bind every loop and function target to fresh HIR" {
+    const allocator = testing.allocator;
+    const fixtures = [_]struct { stem: []const u8, namespace: []const u8 }{
+        .{ .stem = "call_adapter_leaf", .namespace = "Ora.Generated.Obligations.Source_call_adapter_leaf_a1f737dc97a8081" },
+        .{ .stem = "call_projection_callee_loop_value", .namespace = "Ora.Generated.Obligations.Source_call_projection_callee_loop_value_9b67d620b2daaec5" },
+        .{ .stem = "call_projection_loop_return", .namespace = "Ora.Generated.Obligations.Source_call_projection_loop_return_6670e546cbd63471" },
+    };
+    for (fixtures) |fixture| {
+        errdefer std.debug.print("G9c complete fixture {s}\n", .{fixture.stem});
+        const path = try std.fmt.allocPrint(allocator, "tests/formal/{s}.ora", .{fixture.stem});
+        defer allocator.free(path);
+        var compilation = try compilePackage(path);
+        defer compilation.deinit();
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        var fresh = try proof_check.prepareCallCustody(allocator, hir.module.raw_module, fixture.namespace);
+        defer fresh.deinit();
+        var native: obligation_to_z3.NativeCalls = .{ .set = fresh.collected.set, .function_ops = fresh.collected.function_ops, .source_fact_bindings = fresh.collected.source_fact_bindings };
+        var pass = try z3_verification.VerificationPass.init(allocator);
+        defer pass.deinit();
+        const bindings = try test_helpers.z3FormalQueryBindingsFromFormalForTest(allocator, fresh.collected.query_bindings);
+        defer allocator.free(bindings);
+        pass.setFormalQueryBindings(bindings);
+        pass.setCertifiedCalls(native.provider());
+        var prepared = try pass.collectPreparedQueryManifest(hir.module.raw_module);
+        defer prepared.deinit();
+        try testing.expect(prepared.certified_calls.len > 0);
+        var result = try pass.runVerificationPass(hir.module.raw_module);
+        defer result.deinit();
+        try testing.expect(result.success);
+        try testing.expectEqual(@as(usize, 0), result.proven_guard_ids.count());
+        var report = try pass.buildSmtReport(hir.module.raw_module, path, &result);
+        defer report.deinit(allocator);
+        var overlay = try obligation_from_z3.overlayPreparedQueryResults(allocator, fresh.collected.set, report.query_manifest.?.rows);
+        defer overlay.deinit();
+        const manifest_path = try std.fmt.allocPrint(allocator, "tests/formal/{s}.proofs.json", .{fixture.stem});
+        defer allocator.free(manifest_path);
+        const bytes = try readFileAllocForTest(allocator, manifest_path);
+        defer allocator.free(bytes);
+        var manifest = try @import("formal/proof_manifest.zig").parseProofManifestJson(allocator, bytes);
+        defer manifest.deinit();
+        const env = try callCustodyTestEnviron(allocator);
+        defer env.block.deinit(allocator);
+        var output = std.Io.Writer.Allocating.init(allocator);
+        defer output.deinit();
+        errdefer std.debug.print("{s}\n", .{output.written()});
+        // Mutate only the native receipt/join, keeping real prepared Z3 rows.
+        // Neither an absent binding nor an empty canonical registry can hide a use.
+        const receipts = try allocator.dupe(@TypeOf(report.query_manifest.?.certified_calls[0]), report.query_manifest.?.certified_calls);
+        defer allocator.free(receipts);
+        try testing.expect(receipts.len > 0);
+        for (0..5) |mutation| {
+            @memcpy(receipts, report.query_manifest.?.certified_calls);
+            var mismatched = report;
+            mismatched.query_manifest.?.certified_calls = receipts;
+            var collected = fresh.collected;
+            switch (mutation) {
+                0 => receipts[0].source_op_id = 0,
+                1 => receipts[0].function_id = 0,
+                2 => receipts[0].digest[0] ^= 1,
+                3 => collected.call_bindings = &.{},
+                4 => collected.set.function_summaries = &.{},
+                else => unreachable,
+            }
+            const expected = switch (mutation) {
+                2 => error.CallInvocationDigestMismatch,
+                4 => error.InvalidDependency,
+                else => error.CallInvocationBindingMissing,
+            };
+            try testing.expectError(expected, @import("formal/userland/coordinator.zig").coordinate(
+                allocator,
+                path,
+                &collected,
+                mismatched,
+                .{ .manifest = manifest_path },
+                .{ .process_environ = env, .module = hir.module.raw_module },
+                &output.writer,
+            ));
+        }
+        var checked = try proof_check.applyCallProofRows(allocator, hir.module.raw_module, overlay.set, manifest.rows, fixture.namespace, env, &output.writer);
+        defer checked.deinit();
+        try testing.expectEqual(@as(usize, 3), checked.applied_count);
+        try testing.expectEqual(obligation.ArtifactDecision.allowed, checked.set.artifactDecision());
+        try g9cProofFailureMatrix(allocator, checked.set);
+        try testing.expect(std.mem.indexOf(u8, checked.certificate_json, "sorryAx") == null);
+        try testing.expect(std.mem.indexOf(u8, checked.certificate_json, "Classical.choice") == null);
+        const queries = try allocator.dupe(obligation.VerificationQuery, overlay.set.queries);
+        defer allocator.free(queries);
+        var stale = overlay.set;
+        stale.queries = queries;
+        for (queries) |*query| if (query.loop_summary_id == 1) {
+            query.loop_vc_sha256.?[0] ^= 1;
+        };
+        // All loop queries agree with one another; only fresh HIR can reject this stale identity.
+        try stale.validateIdReferences();
+        try testing.expectError(error.CallCustodyLoopDigestMismatch, proof_check.applyCallProofRows(allocator, hir.module.raw_module, stale, manifest.rows, fixture.namespace, env, &output.writer));
+        for ([_]u8{ 0, 1, 2 }) |mutation| {
+            const extra = [_]obligation.Id{if (overlay.set.assumptions.len > 0) overlay.set.assumptions[0].id else 0};
+            @memcpy(queries, overlay.set.queries);
+            for (queries) |*query| if (query.loop_summary_id == 1) {
+                switch (mutation) {
+                    0 => query.owner = .{ .function = .{ .name = "foreign" } },
+                    1 => query.logical_role = .requires,
+                    2 => query.assumption_ids = if (query.assumption_ids.len > 0) &.{} else &extra,
+                    else => unreachable,
+                }
+            };
+            if (mutation == 2 and overlay.set.assumptions.len == 0) continue;
+            try stale.validateIdReferences();
+            try testing.expectError(if (mutation == 2) error.CallCustodyManifestMismatch else error.CallCustodyLoopTargetMismatch, proof_check.applyCallProofRows(allocator, hir.module.raw_module, stale, manifest.rows, fixture.namespace, env, &output.writer));
+        }
+    }
+}
+
+test "G9c external CLI rejects mixed cycles and external calls before native encoding" {
+    const allocator = testing.allocator;
+    const cases = [_]struct { source: []const u8, reason: []const u8 }{
+        .{ .source = "contract C { fn repeat() { var i: u256 = 0; while (i < 1) invariant i <= 1 { repeat(); i = i +% 1; } } pub fn run() { repeat(); } }", .reason = "call_projection_CyclicCallDependency" },
+        .{ .source = "extern trait Hook { call fn ping(self) -> bool; } error ExternalCallFailed; contract C { storage var hook: address; fn invoke() -> !u256 | ExternalCallFailed { let ok: bool = try external<Hook>(hook, gas: 50000).ping(); return 1; } pub fn run(x: u256) -> !u256 | ExternalCallFailed { var i: u256 = 0; while (i < 1) invariant i <= 1 { let value: u256 = try invoke(); i = i +% 1; } return i; } }", .reason = "call_projection_CallExternalUnsupported" },
+    };
+    for (cases) |case| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "rejected.ora", .data = case.source });
+        const path = try pathFromTmpAlloc(allocator, tmp, "rejected.ora");
+        defer allocator.free(path);
+        const out = try pathFromTmpAlloc(allocator, tmp, "out");
+        defer allocator.free(out);
+        const result = try runProcess(allocator, &.{ ORA_BINARY_REL, "emit", "--lean-proofs=tests/formal/call_adapter_leaf.proofs.json", "--emit=smt-report,bytecode", "--out-dir", out, path });
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+        errdefer std.debug.print("G9c named rejection {s}\n{s}\n{s}\n", .{ case.reason, result.stdout, result.stderr });
+        try expectExited(result, 1);
+        try testing.expect(std.mem.indexOf(u8, result.stdout, case.reason) != null);
+        try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/rejected.hex", .{}));
+    }
+}
+
+test "G9c external CLI requires every supplied proof before emitting bytecode" {
+    const allocator = testing.allocator;
+    for ([_][]const u8{ "call_adapter_leaf", "call_projection_callee_loop_value", "call_projection_loop_return" }) |stem| {
+        const source_path = try std.fmt.allocPrint(allocator, "tests/formal/{s}.ora", .{stem});
+        defer allocator.free(source_path);
+        const original_path = try std.fmt.allocPrint(allocator, "tests/formal/{s}.proofs.json", .{stem});
+        defer allocator.free(original_path);
+        const bytes = try readFileAllocForTest(allocator, original_path);
+        defer allocator.free(bytes);
+        var manifest = try @import("formal/proof_manifest.zig").parseProofManifestJson(allocator, bytes);
+        defer manifest.deinit();
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        // Positive; independently omit each LoopVC or FunctionVC row; stale proof content.
+        for (0..5) |case| {
+            var rows: std.ArrayList(proof_check.ProofRow) = .empty;
+            defer rows.deinit(allocator);
+            for (manifest.rows, 0..) |row, index| {
+                if (case > 0 and case < 4 and index == case - 1) continue;
+                var selected = row;
+                if (case == 4) selected.content_sha256 = "0000000000000000000000000000000000000000000000000000000000000000";
+                try rows.append(allocator, selected);
+            }
+            const json = try std.json.Stringify.valueAlloc(allocator, .{ .schema_version = 1, .proofs = rows.items }, .{});
+            defer allocator.free(json);
+            const manifest_name = try std.fmt.allocPrint(allocator, "proofs-{d}.json", .{case});
+            defer allocator.free(manifest_name);
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = manifest_name, .data = json });
+            const manifest_path = try pathFromTmpAlloc(allocator, tmp, manifest_name);
+            defer allocator.free(manifest_path);
+            const option = try std.fmt.allocPrint(allocator, "--lean-proofs={s}", .{manifest_path});
+            defer allocator.free(option);
+            const out_name = try std.fmt.allocPrint(allocator, "out-{d}", .{case});
+            defer allocator.free(out_name);
+            const out = try pathFromTmpAlloc(allocator, tmp, out_name);
+            defer allocator.free(out);
+            const result = try runProcessWithLeanPath(allocator, &.{ ORA_BINARY_REL, "emit", option, "--emit=smt-report,sir-text,bytecode", "--out-dir", out, source_path });
+            defer allocator.free(result.stdout);
+            defer allocator.free(result.stderr);
+            errdefer std.debug.print("G9c CLI {s} case {d}\n{s}\n{s}\n", .{ stem, case, result.stdout, result.stderr });
+            try expectExited(result, if (case == 0) 0 else 1);
+            const hex_path = try std.fmt.allocPrint(allocator, "{s}/{s}.hex", .{ out_name, stem });
+            defer allocator.free(hex_path);
+            if (case == 0) {
+                try tmp.dir.access(std.testing.io, hex_path, .{});
+                try testing.expect(std.mem.indexOf(u8, result.stdout, "Lean dispatcher userland proof accepted") != null);
+                if (std.mem.eql(u8, stem, "call_projection_callee_loop_value")) {
+                    const reference = try pathFromTmpAlloc(allocator, tmp, "runtime-reference");
+                    defer allocator.free(reference);
+                    const unchecked = try runProcess(allocator, &.{ ORA_BINARY_REL, "emit", "--no-verify", "--emit=sir-text,bytecode", "--out-dir", reference, source_path });
+                    defer allocator.free(unchecked.stdout);
+                    defer allocator.free(unchecked.stderr);
+                    try expectExited(unchecked, 0);
+                    for ([_][]const u8{ "sir", "hex" }) |extension| {
+                        const verified_path = try std.fmt.allocPrint(allocator, "{s}/{s}.{s}", .{ out, stem, extension });
+                        defer allocator.free(verified_path);
+                        const reference_path = try std.fmt.allocPrint(allocator, "{s}/{s}.{s}", .{ reference, stem, extension });
+                        defer allocator.free(reference_path);
+                        const verified = try readFileAllocForTest(allocator, verified_path);
+                        defer allocator.free(verified);
+                        const retained = try readFileAllocForTest(allocator, reference_path);
+                        defer allocator.free(retained);
+                        try testing.expectEqualStrings(retained, verified);
+                        if (std.mem.eql(u8, extension, "sir")) try testing.expect(std.mem.count(u8, verified, "revert 0x0 0x0") >= 2);
+                    }
+                }
+            } else {
+                try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, hex_path, .{}));
+                const reason = if (case == 4) "ProofRowDigestMismatch" else if (case == 1) "lean_required_failure" else "call_lean_custody_missing";
+                try testing.expect(std.mem.indexOf(u8, result.stdout, reason) != null or std.mem.indexOf(u8, result.stderr, reason) != null);
+            }
+        }
+    }
+}
+
+// Constructed result mutations, not solver-produced UNKNOWN/timeouts. Each starts
+// from actual Z3 results and a complete kernel-checked supplied certificate set.
+fn g9cProofFailureMatrix(allocator: std.mem.Allocator, accepted: obligation.ObligationSet) !void {
+    const queries = try allocator.dupe(obligation.VerificationQuery, accepted.queries);
+    defer allocator.free(queries);
+    var changed = accepted;
+    changed.queries = queries;
+    for (accepted.queries, 0..) |query, index| {
+        if (query.loop_summary_id == null and query.function_summary_id == null) continue;
+        if (query.backend == .z3) {
+            const missing: obligation.ArtifactBlockReason = if (query.function_summary_id != null) .call_z3_relation_missing else .call_loop_obligation_missing;
+            const cases = [_]struct { result: ?obligation.VerificationQueryResult, expected: obligation.ArtifactBlockReason }{
+                .{ .result = null, .expected = missing },
+                .{ .result = .{ .status = .proved, .degraded = true }, .expected = .degraded_query },
+                .{ .result = .{ .status = .proved, .vacuous = true }, .expected = .vacuous_query },
+                .{ .result = .{ .status = .proved, .vacuity_unknown = true }, .expected = .unknown_query },
+                .{ .result = .{ .status = .unknown }, .expected = .unknown_query },
+                .{ .result = .{ .status = .failed }, .expected = .failed_query },
+            };
+            for (cases) |case| {
+                @memcpy(queries, accepted.queries);
+                queries[index].result = case.result;
+                errdefer std.debug.print("G9c mutated query {d} expected {s}\n", .{ query.id, @tagName(case.expected) });
+                try testing.expectEqual(obligation.ArtifactDecision{ .blocked = case.expected }, changed.artifactDecision());
+            }
+            @memcpy(queries, accepted.queries);
+            queries[index].smtlib_hash = null;
+            try testing.expectEqual(obligation.ArtifactDecision{ .blocked = missing }, changed.artifactDecision());
+            if (query.function_summary_id != null) {
+                @memcpy(queries, accepted.queries);
+                queries[index].function_vc_sha256.?[0] ^= 1;
+                try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_digest_mismatch }, changed.artifactDecision());
+            }
+        } else if (query.backend == .lean) {
+            const missing: obligation.ArtifactBlockReason = if (query.function_summary_id != null) .call_lean_custody_missing else .lean_required_failure;
+            for ([_]u8{ 0, 1, 2, 3 }) |mutation| {
+                @memcpy(queries, accepted.queries);
+                switch (mutation) {
+                    0 => queries[index].result = null,
+                    1 => queries[index].result = .{ .status = .failed },
+                    2 => queries[index].proof_artifact_id = null,
+                    3 => queries[index].artifact_policy = .diagnostic_only,
+                    else => unreachable,
+                }
+                try testing.expectEqual(obligation.ArtifactDecision{ .blocked = missing }, changed.artifactDecision());
+            }
+        }
+    }
+    @memcpy(queries, accepted.queries);
+    changed.proof_artifacts = &.{};
+    try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .invalid_dependency }, changed.artifactDecision());
+}
+
 fn callCustodyLeafProof(allocator: std.mem.Allocator, row: obligation.FunctionSummaryRow) ![]const u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
@@ -14719,20 +15223,6 @@ test "G9a custody kernel checks a live compiler manifest deterministically witho
     try testing.expect(std.mem.indexOf(u8, first.checker_source, ".emittedCallCustody_") != null);
     try testing.expect(std.mem.indexOf(u8, first.checker_source, "emittedVerifiedQuery_") == null);
     try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_z3_relation_missing }, manifest.collected.set.artifactDecision());
-    const evidence = ".zig-cache/g9a-custody-evidence";
-    try std.Io.Dir.cwd().createDirPath(std.testing.io, evidence);
-    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = evidence ++ "/Manifest.lean", .data = manifest.source });
-    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = evidence ++ "/Proof.lean", .data = proof });
-    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = evidence ++ "/Checker.lean", .data = first.checker_source });
-    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = evidence ++ "/CanonicalChecker.lean", .data = first.canonical_checker_source });
-    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = evidence ++ "/Agreement.lean", .data = first.agreement_source });
-    var receipt = std.Io.Writer.Allocating.init(allocator);
-    defer receipt.deinit();
-    try receipt.writer.print("function={d}\nfunction_vc_sha256={s}\nmanifest_sha256={s}\nproof_sha256={s}\nchecker_sha256={s}\n", .{
-        first.function_id,                              std.fmt.bytesToHex(first.function_vc_sha256, .lower), std.fmt.bytesToHex(first.manifest_sha256, .lower),
-        std.fmt.bytesToHex(first.proof_sha256, .lower), std.fmt.bytesToHex(first.checker_sha256, .lower),
-    });
-    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = evidence ++ "/receipt.txt", .data = receipt.written() });
 }
 
 test "G9a custody rejects stale foreign and forged manifests before kernel ingestion" {
@@ -14878,7 +15368,7 @@ test "G9a custody retains live projection and source entry scope rejections" {
     }
 }
 
-test "G9a custody requires Z3 evidence and retains the final fence even for forged successes" {
+test "G9a custody requires Z3 evidence and requires checked custody even for forged successes" {
     var result = try collectCallProjection(testing.allocator, "tests/formal/call_adapter_leaf.ora");
     defer result.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -14913,8 +15403,8 @@ test "G9a custody requires Z3 evidence and retains the final fence even for forg
         .{ .value = .{ .status = .proved, .vacuous = true }, .reason = .vacuous_query },
         .{ .value = .{ .status = .proved, .vacuity_unknown = true }, .reason = .unknown_query },
         .{ .value = .{ .status = .failed }, .reason = .failed_query },
-        // Neither arbitrary successes nor a custody receipt implement G9b/G9c.
-        .{ .value = .{ .status = .proved }, .reason = .call_relation_unsupported },
+        // Arbitrary successes and an uninstalled custody receipt confer no authority.
+        .{ .value = .{ .status = .proved }, .reason = .call_lean_custody_missing },
     };
     for (cases) |case| {
         extra[0].result = case.value;
@@ -14928,7 +15418,7 @@ test "G9a custody requires Z3 evidence and retains the final fence even for forg
     try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_z3_relation_missing }, set.artifactDecision());
     extra[0] = original;
     extra[0].owner = .{ .function = .{ .name = "foreign" } };
-    try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_z3_relation_missing }, set.artifactDecision());
+    try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_identity_mismatch }, set.artifactDecision());
     extra[0] = original;
     extra[0].artifact_policy = .diagnostic_only;
     try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_z3_relation_missing }, set.artifactDecision());
@@ -15026,9 +15516,6 @@ test "G8 call adapter binds compiler emitted rows without artifact authority" {
     defer tmp.cleanup();
     const path = try pathFromTmpAlloc(testing.allocator, tmp, "G8ProjectedAdapter.lean");
     defer testing.allocator.free(path);
-    // Preserve the generated kernel input outside disposable checker scratch for review custody.
-    try std.Io.Dir.cwd().createDirPath(std.testing.io, ".zig-cache/g8-adapter-evidence");
-    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = ".zig-cache/g8-adapter-evidence/G8ProjectedAdapter.lean", .data = source.written() });
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = source.written() });
     const checked = try runLeanFileForTest(testing.allocator, path);
     defer testing.allocator.free(checked.stdout);
@@ -15246,7 +15733,7 @@ test "G6 call projection serializes deterministic Lean rows" {
     defer arena.deinit();
     const allocator = arena.allocator();
     var combined = std.Io.Writer.Allocating.init(allocator);
-    try combined.writer.writeAll("import Ora.Obligation.Theorems\nimport Ora.Loop.StorageCertificate\n");
+    try combined.writer.writeAll("import Ora.Loop.CallAdapter\n");
     const cases = [_][]const u8{ "branch", "checked_branch", "error_storage", "loop_return", "callee_loop_value", "chain" };
     for (cases, 0..) |name, index| {
         const file = try std.fmt.allocPrint(allocator, "tests/formal/call_projection_{s}.ora", .{name});
@@ -15266,13 +15753,9 @@ test "G6 call projection serializes deterministic Lean rows" {
         );
         var source = std.Io.Writer.Allocating.init(allocator);
         const namespace = try std.fmt.allocPrint(allocator, "Ora.Generated.G6.case_{d}", .{index});
-        // G6 serializes the projected rows and their exact loop queries.
-        // Legacy function obligations remain in first.set and keep their gate;
-        // their call-result consumption is a later gate, not a Lean premise.
-        var loop_queries: std.ArrayList(obligation.VerificationQuery) = .empty;
-        for (first.set.queries) |query| if (query.loop_summary_id != null) try loop_queries.append(allocator, query);
-        const rows: obligation.ObligationSet = .{ .terms = first.set.terms, .assumptions = first.set.assumptions, .queries = loop_queries.items, .loop_summaries = first.set.loop_summaries, .function_summaries = first.set.function_summaries };
-        try obligation_to_lean.writeModule(&source.writer, rows, .{ .namespace = namespace });
+        // Armed post queries reference source ensures rows. Use the complete
+        // custody input instead of dropping obligations from a query subset.
+        try obligation_to_lean.writeCallCustodyModule(&source.writer, first.set, namespace);
         var lines = std.mem.splitScalar(u8, source.written(), '\n');
         while (lines.next()) |line| if (!std.mem.startsWith(u8, line, "import ")) {
             try combined.writer.print("{s}\n", .{line});
@@ -15553,13 +16036,13 @@ test "G9b canonical leaf safety binds the independently kernel checked custody d
     isolated.function_summaries = (&isolated_row)[0..1];
     isolated.loop_summaries = &.{};
     isolated.queries = &.{checked.query};
-    try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_relation_unsupported }, isolated.artifactDecision());
+    try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_lean_custody_missing }, isolated.artifactDecision());
     var stale = digest;
     stale[0] ^= 1;
     try testing.expectError(error.FunctionVCDigestMismatch, adapter.checkFunctionSafety(independent_leaf.id, stale, 100001));
 }
 
-test "G9b projected call and loop dependencies prepare real queries behind the final fence" {
+test "G9b projected call and loop dependencies prepare real queries without checked custody" {
     const cases = [_][]const u8{ "storage", "error_storage", "chain", "callee_loop_value", "loop_return", "nested", "prefix" };
     for (cases) |name| {
         var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -15597,7 +16080,7 @@ test "G9b projected call and loop dependencies prepare real queries behind the f
         prepared.function_summaries = rows;
         prepared.queries = queries.items;
         try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_z3_relation_missing }, projected.set.artifactDecision());
-        try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_relation_unsupported }, prepared.artifactDecision());
+        try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_lean_custody_missing }, prepared.artifactDecision());
     }
 }
 

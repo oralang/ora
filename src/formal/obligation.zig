@@ -13,8 +13,8 @@ const timeline_validation = @import("loop_timeline_validation.zig").Validator(@T
 pub const Id = u32;
 pub const TermId = u32;
 
-pub const obligation_dump_schema_version: u32 = 10;
-pub const proof_certificate_schema_version: u32 = 2;
+pub const obligation_dump_schema_version: u32 = 11;
+pub const proof_certificate_schema_version: u32 = 3;
 
 pub const ObligationSet = struct {
     obligations: []const Obligation = &.{},
@@ -74,8 +74,8 @@ pub const ObligationSet = struct {
                     return .{ .blocked = .lean_required_failure };
                 }
             } else {
-                const is_loop_owned_z3 = query.backend == .z3 and query.loop_summary_id != null;
-                if (!is_loop_owned_z3 and self.hasSuccessfulLeanProofForQuery(query)) continue;
+                const canonical_z3 = query.backend == .z3 and (query.loop_summary_id != null or query.function_summary_id != null);
+                if (!canonical_z3 and self.hasSuccessfulLeanProofForQuery(query)) continue;
                 return .{ .blocked = if (query.backend == .lean or query.proof_requirement == .lean_certificate)
                     .lean_required_failure
                 else
@@ -94,28 +94,89 @@ pub const ObligationSet = struct {
     }
 
     fn callArtifactAuthorityBlockReason(self: ObligationSet) ?ArtifactBlockReason {
-        if (self.function_summaries.len == 0) return null;
-        // A Lean custody receipt cannot replace independent function-safety
-        // queries. G9a emits none: the Z3 conjunct is required and unsatisfied.
         for (self.function_summaries) |row| {
-            if (row.query_ids.safety.len == 0) return .call_z3_relation_missing;
-            for (row.query_ids.safety) |id| {
-                const query = findById(self.queries, id) orelse return .call_z3_relation_missing;
-                if (query.backend != .z3 or query.loop_summary_id != null or
-                    query.artifact_policy != .blocks_verified_artifacts or
-                    !functionOwnerEqual(query.owner, row.owner) or query.smtlib_hash == null)
-                    return .call_z3_relation_missing;
-                const result = query.result orelse return .call_z3_relation_missing;
-                if (result.degraded) return .degraded_query;
-                if (result.vacuous) return .vacuous_query;
-                if (result.vacuity_unknown or result.status == .unknown) return .unknown_query;
-                if (!querySucceeded(query, result)) return .failed_query;
+            if (self.callFunctionAuthorityBlockReason(row)) |reason| return reason;
+            for (row.paths) |path| for (path.timeline) |event| {
+                if (self.callEventAuthorityBlockReason(event)) |reason| return reason;
+            };
+        }
+        return null;
+    }
+
+    fn independentZ3BlockReason(query: VerificationQuery, missing: ArtifactBlockReason) ?ArtifactBlockReason {
+        if (query.backend != .z3 or query.smtlib_hash == null or
+            query.artifact_policy != .blocks_verified_artifacts or query.proof_requirement != .backend_result) return missing;
+        const result = query.result orelse return missing;
+        if (result.degraded) return .degraded_query;
+        if (result.vacuous) return .vacuous_query;
+        if (result.vacuity_unknown or result.status == .unknown) return .unknown_query;
+        if (!querySucceeded(query, result)) return .failed_query;
+        return null;
+    }
+
+    fn callFunctionAuthorityBlockReason(self: ObligationSet, row: FunctionSummaryRow) ?ArtifactBlockReason {
+        if (row.projection_completeness != .complete or !row.write_footprint_complete) return .call_relation_unsupported;
+        if (row.query_ids.safety.len == 0) return .call_z3_relation_missing;
+        for (row.query_ids.safety) |id| {
+            const query = findById(self.queries, id) orelse return .call_z3_relation_missing;
+            if (!functionOwnerEqual(query.owner, row.owner)) return .call_identity_mismatch;
+            if (independentZ3BlockReason(query, .call_z3_relation_missing)) |reason| return reason;
+        }
+        const target = findById(self.queries, row.query_ids.certificate orelse return .call_lean_custody_missing) orelse return .call_lean_custody_missing;
+        const digest = target.function_vc_sha256 orelse return .call_identity_mismatch;
+        if (target.function_summary_id != row.id or target.loop_summary_id != null or target.discharges_query_id != null or
+            target.backend != .unspecified or target.proof_requirement != .lean_certificate or target.result != null or
+            target.artifact_policy != .blocks_verified_artifacts or target.kind != .obligation or target.logical_role != null or
+            target.obligation_ids.len != 0 or !functionOwnerEqual(target.owner, row.owner) or
+            !equalIdSlices(target.assumption_ids, row.assumption_ids)) return .call_identity_mismatch;
+        for (row.query_ids.safety) |id| {
+            const query = findById(self.queries, id) orelse return .call_z3_relation_missing;
+            if (query.function_summary_id != row.id or query.loop_summary_id != null or query.discharges_query_id != null or
+                query.kind != .obligation or query.logical_role != null or query.obligation_ids.len != 0 or
+                !functionOwnerEqual(query.owner, row.owner) or !equalIdSlices(query.assumption_ids, row.assumption_ids)) return .call_identity_mismatch;
+            if (!std.meta.eql(query.function_vc_sha256, @as(?[32]u8, digest))) return .call_digest_mismatch;
+        }
+        if (!self.hasSuccessfulLeanProofForQuery(target)) return .call_lean_custody_missing;
+        return null;
+    }
+
+    fn callLoopAuthorityBlockReason(self: ObligationSet, summary: LoopSummaryRow, expected: ?[32]u8) ?ArtifactBlockReason {
+        if (!summary.projectionSupported() or !summary.preheader_projection_complete or summary.owner != .statement) return .call_relation_unsupported;
+        const owner = for (self.function_summaries) |row| {
+            if (row.owner == .function and std.mem.eql(u8, row.owner.function.name, summary.owner.statement.function_name)) break row;
+        } else return .call_relation_unsupported;
+        if (self.callFunctionAuthorityBlockReason(owner)) |reason| return reason;
+        if (summary.query_ids.induction.len != 1) return .call_loop_obligation_missing;
+        const induction = findById(self.queries, summary.query_ids.induction[0]) orelse return .call_loop_obligation_missing;
+        const digest = induction.loop_vc_sha256 orelse return .call_identity_mismatch;
+        if (expected) |wanted| if (!std.mem.eql(u8, &wanted, &digest)) return .call_digest_mismatch;
+        self.validateLoopQueryIds(summary) catch return .call_loop_obligation_missing;
+        for (self.queries) |query| {
+            if (query.loop_summary_id != summary.id or query.discharges_query_id != null) continue;
+            if (query.owner != .function or !std.mem.eql(u8, query.owner.function.name, summary.owner.statement.function_name)) return .call_identity_mismatch;
+            if (query.kind != .loop_induction) {
+                if (independentZ3BlockReason(query, .call_loop_obligation_missing)) |reason| return reason;
             }
         }
-        // Necessary query checks above are not FunctionVC authentication. G9b
-        // must supply that binding, and G9c must consume both it and Lean custody
-        // for the same digest. Until then even forged success rows grant nothing.
-        return .call_relation_unsupported;
+        if (!self.hasSuccessfulLeanProofForQuery(induction)) return .lean_required_failure;
+        return null;
+    }
+
+    fn callEventAuthorityBlockReason(self: ObligationSet, event: LoopTimelineEvent) ?ArtifactBlockReason {
+        switch (event.payload) {
+            .call => |call| {
+                const callee = findById(self.function_summaries, call.callee_summary_id) orelse return .call_relation_unsupported;
+                if (self.callFunctionAuthorityBlockReason(callee)) |reason| return reason;
+                const target = findById(self.queries, callee.query_ids.certificate.?).?;
+                if (!std.meta.eql(target.function_vc_sha256, @as(?[32]u8, call.callee_vc_sha256))) return .call_digest_mismatch;
+            },
+            .summary_dependency => |dependency| {
+                const child = findById(self.loop_summaries, dependency.summary_id) orelse return .call_loop_obligation_missing;
+                if (self.callLoopAuthorityBlockReason(child, dependency.loop_vc_sha256)) |reason| return reason;
+            },
+            else => {},
+        }
+        return null;
     }
 
     fn loopArtifactAuthorityBlockReason(self: ObligationSet) ?ArtifactBlockReason {
@@ -135,7 +196,7 @@ pub const ObligationSet = struct {
         };
         if (self.timelineArtifactAuthorityBlockReason(summary, summary.preheader_timeline)) |reason| return reason;
         for (summary.edges) |edge| {
-            if (edge.return_value != null) return .call_relation_unsupported;
+            if (edge.return_value != null) if (self.callLoopAuthorityBlockReason(summary, null)) |reason| return reason;
             if (self.timelineArtifactAuthorityBlockReason(summary, edge.timeline)) |reason| return reason;
             for ([_][]const FormulaRef{
                 summary.init_formulas,
@@ -200,7 +261,10 @@ pub const ObligationSet = struct {
         timeline: []const LoopTimelineEvent,
     ) ?ArtifactBlockReason {
         for (timeline, 0..) |event, event_index| switch (event.payload) {
-            .call => return .call_relation_unsupported,
+            .call => {
+                if (self.callEventAuthorityBlockReason(event)) |reason| return reason;
+                if (self.callLoopAuthorityBlockReason(summary, null)) |reason| return reason;
+            },
             .indexed_region_read => |read| {
                 const matched = for (timeline[0..event_index]) |candidate| switch (candidate.payload) {
                     .safety_checkpoint => |checkpoint| if (checkpoint.dynamic_index_bounds and
@@ -227,7 +291,11 @@ pub const ObligationSet = struct {
                     !self.reviewedStorageProjection(summary, timeline, write.location)) return .storage_projection_authority_unreviewed;
             },
             .summary_dependency => |dependency| {
-                if (dependency.result_bindings != null) return .call_relation_unsupported;
+                if (dependency.result_bindings != null) {
+                    if (self.callEventAuthorityBlockReason(event)) |reason| return reason;
+                    if (self.callLoopAuthorityBlockReason(summary, null)) |reason| return reason;
+                    continue;
+                }
                 if (self.loopSummaryClosureHasStorageEvents(
                     dependency.summary_id,
                     self.loop_summaries.len + 1,
@@ -694,6 +762,13 @@ pub const ObligationSet = struct {
                     }
                 }
             }
+            if (query.function_summary_id) |id| {
+                const function = findById(self.function_summaries, id) orelse return error.InvalidDependency;
+                if (query.loop_summary_id != null or query.kind != .obligation or query.function_vc_sha256 == null or
+                    !functionOwnerEqual(query.owner, function.owner) or !equalIdSlices(query.assumption_ids, function.assumption_ids)) return error.InvalidDependency;
+                const target = query.discharges_query_id orelse query.id;
+                if (!containsId(function.query_ids.safety, target) and function.query_ids.certificate != target) return error.InvalidDependency;
+            } else if (query.function_vc_sha256 != null) return error.InvalidDependency;
         }
     }
 
@@ -941,7 +1016,7 @@ pub const ObligationSet = struct {
         // LoopVC authorization requires independent success from both proof
         // backends. A Lean certificate may never replace an inconclusive Z3
         // result for a loop-owned query.
-        if (query.loop_summary_id != null) return false;
+        if (query.loop_summary_id != null or query.function_summary_id != null) return false;
         if (query.obligation_ids.len == 0) return false;
         return self.hasSuccessfulLeanProofForQuery(query);
     }
@@ -950,9 +1025,7 @@ pub const ObligationSet = struct {
         for (self.queries) |candidate| {
             if (candidate.backend != .lean) continue;
             if (candidate.discharges_query_id != target.id) continue;
-            if (candidate.loop_summary_id != target.loop_summary_id) continue;
-            if (!equalIdSlices(candidate.obligation_ids, target.obligation_ids)) continue;
-            if (!equalIdSlices(candidate.assumption_ids, target.assumption_ids)) continue;
+            if (!proofTargetIdentityEqual(candidate, target)) continue;
             if (!self.queryHasValidProofArtifact(candidate)) continue;
             const result = candidate.result orelse continue;
             if (querySucceeded(candidate, result)) return true;
@@ -964,7 +1037,7 @@ pub const ObligationSet = struct {
         if (query.backend != .lean) return false;
         const artifact_id = query.proof_artifact_id orelse return false;
         const artifact = self.proofArtifactById(artifact_id) orelse return false;
-        return equalIdSlices(artifact.obligation_ids, query.obligation_ids);
+        return ownerEqual(artifact.owner, query.owner) and equalIdSlices(artifact.obligation_ids, query.obligation_ids);
     }
 };
 
@@ -1014,6 +1087,9 @@ pub const VerificationQuery = struct {
     /// SHA-256 of the canonical LoopVC data, its term table, and the exact
     /// assumptions used by the loop-induction target.
     loop_vc_sha256: ?[32]u8 = null,
+    /// Compiler-owned FunctionVC identity; never a LoopVC or solver hash.
+    function_summary_id: ?Id = null,
+    function_vc_sha256: ?[32]u8 = null,
     result: ?VerificationQueryResult = null,
 };
 
@@ -1194,6 +1270,10 @@ pub const ArtifactDecision = union(enum) {
 pub const ArtifactBlockReason = enum(u8) {
     call_relation_unsupported,
     call_z3_relation_missing,
+    call_lean_custody_missing,
+    call_loop_obligation_missing,
+    call_identity_mismatch,
+    call_digest_mismatch,
     blocking_diagnostic,
     invalid_dependency,
     unknown_query,
@@ -1743,9 +1823,31 @@ fn optionalStringEqual(lhs: ?[]const u8, rhs: ?[]const u8) bool {
     return std.mem.eql(u8, lhs.?, rhs.?);
 }
 
-fn functionOwnerEqual(lhs: Owner, rhs: Owner) bool {
+pub fn functionOwnerEqual(lhs: Owner, rhs: Owner) bool {
     return lhs == .function and rhs == .function and std.mem.eql(u8, lhs.function.name, rhs.function.name) and
         optionalStringEqual(lhs.function.module, rhs.function.module) and optionalStringEqual(lhs.function.contract, rhs.function.contract);
+}
+
+fn ownerEqual(lhs: Owner, rhs: Owner) bool {
+    if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
+    return switch (lhs) {
+        .module => |name| std.mem.eql(u8, name, rhs.module),
+        .contract => |name| std.mem.eql(u8, name, rhs.contract),
+        .function => functionOwnerEqual(lhs, rhs),
+        .statement => |item| item.ordinal == rhs.statement.ordinal and std.mem.eql(u8, item.function_name, rhs.statement.function_name),
+        .trait_method => |item| std.mem.eql(u8, item.trait_name, rhs.trait_method.trait_name) and std.mem.eql(u8, item.method_name, rhs.trait_method.method_name) and optionalStringEqual(item.impl_name, rhs.trait_method.impl_name),
+        .backend => |item| item.component == rhs.backend.component and std.mem.eql(u8, item.name, rhs.backend.name),
+    };
+}
+
+/// A checked proof may differ in backend/result, never in the target it proves.
+pub fn proofTargetIdentityEqual(lhs: VerificationQuery, rhs: VerificationQuery) bool {
+    return ownerEqual(lhs.owner, rhs.owner) and lhs.kind == rhs.kind and lhs.logical_role == rhs.logical_role and
+        optionalStringEqual(lhs.guard_id, rhs.guard_id) and lhs.artifact_policy == rhs.artifact_policy and
+        equalIdSlices(lhs.obligation_ids, rhs.obligation_ids) and equalIdSlices(lhs.assumption_ids, rhs.assumption_ids) and
+        lhs.loop_summary_id == rhs.loop_summary_id and lhs.loop_edge_id == rhs.loop_edge_id and
+        std.meta.eql(lhs.loop_vc_sha256, rhs.loop_vc_sha256) and lhs.function_summary_id == rhs.function_summary_id and
+        std.meta.eql(lhs.function_vc_sha256, rhs.function_vc_sha256);
 }
 
 pub const LoopTimelineEventTag = enum(u8) {

@@ -40,19 +40,22 @@ def events (id : Nat) : List AdapterEvent := [.assume (.ordinary (.inl (.term id
 def context (env : Env) : StorageFormulaContext := directStorageContext manifest.formulas env row.variables
 def semantics (env : Env) := (adapterSemantics {} (context env)).withCallChecks
 def facts (env : Env) (caller : StorageActionState) : Prop :=
-  contextReady env [] ∧ headerFactsHoldInEnv manifest.formulas env [] ∧
-    adapterEntryFacts manifest.formulas functionRow env caller.entryStorage ∧
+  contextReady (bindStorageReads env caller.reads) [] ∧
+    headerFactsHoldInEnv manifest.formulas (bindStorageReads env caller.reads) [] ∧
+    adapterEntryFacts manifest.formulas functionRow (bindStorageReads env caller.reads) caller.entryStorage ∧
     ∀ edge ∈ row.edges, (caller.reads.map (·.id) ++ timelineReadIds edge.timeline).Nodup
 def vc : AdapterLoopVC := fun env caller => {
   initial := fun initial => facts env caller ∧
     stateReady row.variables initial.locals ∧
     directInitialValuesAfterPreheader? {
-      directStorageContext manifest.formulas env [] with bindLocals := fun env _ => some env
+      directStorageContext manifest.formulas (bindStorageReads env caller.reads) [] with bindLocals := fun env _ => some env
     } caller row.init = some initial.locals ∧ initial.storage = caller.loop.storage ∧ initial.returned = none
   invariant := fun current => facts env caller ∧
-    stateReady row.variables current.locals ∧ directFormulasHold (context env) caller.entryStorage current [.term 0]
-  edges := [adapterLoopEdge manifest.formulas {} row back (events 2) .backedge env caller,
-    adapterLoopEdge manifest.formulas {} row done (events 0) .functionReturn env caller] }
+    stateReady row.variables current.locals ∧ directFormulasHold (context (bindStorageReads env caller.reads)) caller.entryStorage current [.term 0]
+  edges := [adapterLoopEdge manifest.formulas {} row back (events 2) .backedge
+      (bindStorageReads env caller.reads) { caller with reads := [] },
+    adapterLoopEdge manifest.formulas {} row done (events 0) .functionReturn
+      (bindStorageReads env caller.reads) { caller with reads := [] }] }
 
 theorem bound : manifest.loop {} digest row = .ok vc := by rfl
 
@@ -147,21 +150,21 @@ theorem nextShape (env : Env) (caller : StorageActionState) (edge : EdgeRow) (te
     exact ⟨rfl, rfl⟩
 
 theorem proof (env : Env) (caller : StorageActionState) : (vc env caller).InductionObligations where
-  base := fun _ initial => ⟨initial.1, initial.2.1, formulasTrue env _ _ initial.2.1⟩
+  base := fun _ initial => ⟨initial.1, initial.2.1, formulasTrue (bindStorageReads env caller.reads) _ _ initial.2.1⟩
   backedge := by
     intro edge current following member target invariant path safe next
     simp only [vc, List.mem_cons, List.not_mem_nil, or_false] at member
     rcases member with rfl | rfl
-    · have shape := nextShape env caller back 2 (Or.inl rfl) current following invariant.2.1 next
+    · have shape := nextShape (bindStorageReads env caller.reads) { caller with reads := [] } back 2 (Or.inl rfl) current following invariant.2.1 next
       have ready : stateReady row.variables following.locals := by rw [shape.1]; rfl
-      exact ⟨invariant.1, ready, formulasTrue env _ _ ready⟩
+      exact ⟨invariant.1, ready, formulasTrue (bindStorageReads env caller.reads) _ _ ready⟩
     · cases target
   edgeSafety := by
     intro edge current member invariant path
     simp only [vc, List.mem_cons, List.not_mem_nil, or_false] at member
     rcases member with rfl | rfl
-    · exact edgeSafety env caller back 2 (Or.inl rfl) current invariant.2.1
-    · exact edgeSafety env caller done 0 (Or.inr rfl) current invariant.2.1
+    · exact edgeSafety (bindStorageReads env caller.reads) { caller with reads := [] } back 2 (Or.inl rfl) current invariant.2.1
+    · exact edgeSafety (bindStorageReads env caller.reads) { caller with reads := [] } done 0 (Or.inr rfl) current invariant.2.1
   exit := by
     intro edge current following member target invariant path safe next
     simp only [vc, List.mem_cons, List.not_mem_nil, or_false] at member
@@ -185,13 +188,13 @@ theorem storagePreserved (env : Env) (caller : StorageActionState) (target : Con
         have ready := (readyAt current reached).2.1
         simp only [vc, List.mem_cons, List.not_mem_nil, or_false] at member
         rcases member with rfl | rfl
-        · exact (nextShape env caller back 2 (Or.inl rfl) current following ready next).2.trans ih
+        · exact (nextShape (bindStorageReads env caller.reads) { caller with reads := [] } back 2 (Or.inl rfl) current following ready next).2.trans ih
         · cases target
   have ready := (readyAt current reached).2.1
   simp only [vc, List.mem_cons, List.not_mem_nil, or_false] at member
   rcases member with rfl | rfl
   · exact False.elim (notBackedge targetEq.symm)
-  · exact (nextShape env caller done 0 (Or.inr rfl) current following ready next).2.trans
+  · exact (nextShape (bindStorageReads env caller.reads) { caller with reads := [] } done 0 (Or.inr rfl) current following ready next).2.trans
       (preserved.trans initialized.2.2.2.1)
 
 def frames (env : Env) (target : ControlTarget) (caller : StorageActionState) :
@@ -213,9 +216,9 @@ theorem returnedTrue (env : Env) (caller : StorageActionState) (following : Loop
   rcases member with rfl | rfl
   · cases targetEq
   · rcases next with ⟨result, trace, finish⟩
-    rw [traceState env 0 { caller with loop := current } result trace] at finish
-    have values := localValues env { caller with loop := current } ready
-    have returned := returnValue env { caller with loop := current } ready
+    rw [traceState (bindStorageReads env caller.reads) 0 { caller with loop := current, reads := [] } result trace] at finish
+    have values := localValues (bindStorageReads env caller.reads) { caller with loop := current, reads := [] } ready
+    have returned := returnValue (bindStorageReads env caller.reads) { caller with loop := current, reads := [] } ready
     dsimp [context] at values returned
     dsimp only [done, adapterReturn, List.map] at finish
     rw [values] at finish
@@ -233,6 +236,22 @@ theorem initialized (env : Env) (caller : StorageActionState)
   · intro edge member
     simp only [row, List.mem_cons, List.not_mem_nil, or_false] at member
     rcases member with rfl | rfl <;> simpa [timelineReadIds, back, done] using fresh
+
+def supplied : AdapterLoopProof manifest digest row where
+  previous := CallAdapterCertificates.empty manifest
+  vc := vc
+  bound := bound
+  induction := proof
+  frames := frames
+  witness := by
+    let store : StorageState := fun _ => .bool false
+    let caller : StorageActionState := { loop := { locals := [], storage := store }, entryStorage := store }
+    obtain ⟨initial, valid⟩ := initialized Env.empty caller (by simp [caller])
+    exact ⟨Env.empty, caller, initial, valid⟩
+
+example : supplied.install.dependencies.loops.length = 1 := rfl
+
+#print axioms supplied
 
 def child : AdapterChild := (adapterLoopCertificate vc frames, .functionReturn)
 def functionEvents : List AdapterEvent :=
@@ -341,19 +360,20 @@ theorem nonemptyLoop (env : Env) (caller : StorageActionState)
     (fresh : (caller.reads.map (·.id)).Nodup) :
     ∃ initial following, (vc env caller).ControlRelation .functionReturn initial following := by
   rcases initialized env caller fresh with ⟨initial, hInitial⟩
-  let state : StorageActionState := { caller with loop := initial }
-  rcases envBound env state hInitial.2.1 with ⟨bound, hBound⟩
-  have eval := StorageFormulaContext.evalFormula_bool_true (context env) state bound 0 hBound rfl
+  let state : StorageActionState := { caller with loop := initial, reads := [] }
+  let captured := bindStorageReads env caller.reads
+  rcases envBound captured state hInitial.2.1 with ⟨bound, hBound⟩
+  have eval := StorageFormulaContext.evalFormula_bool_true (context captured) state bound 0 hBound rfl
   let result := ({ state } : TimelineResult).comp { state }
-  have trace : TimelineExec (semantics env) (events 0) state result :=
+  have trace : TimelineExec (semantics captured) (events 0) state result :=
     .cons (.assume eval trivial) (.nil _)
   refine ⟨initial, { locals := [zero], storage := initial.storage, returned := some { outcome := .success, payload := [.bool true] } }, by decide, hInitial,
-    initial, adapterLoopEdge manifest.formulas {} row done (events 0) .functionReturn env caller,
+    initial, adapterLoopEdge manifest.formulas {} row done (events 0) .functionReturn captured { caller with reads := [] },
     .refl _, by simp [vc], rfl, trivial,
-    edgeSafety env caller done 0 (Or.inr rfl) initial hInitial.2.1, ?_⟩
+    edgeSafety captured { caller with reads := [] } done 0 (Or.inr rfl) initial hInitial.2.1, ?_⟩
   refine ⟨result, trace, ?_⟩
-  have values := localValues env state hInitial.2.1
-  have returned := returnValue env state hInitial.2.1
+  have values := localValues captured state hInitial.2.1
+  have returned := returnValue captured state hInitial.2.1
   dsimp [context] at values returned
   dsimp only [done, adapterReturn, List.map, result, TimelineResult.comp]
   rw [values]
@@ -405,3 +425,59 @@ example : ({ manifest with functions := [(functionDigest, functionRow), (digest,
 #print axioms edgeSafety
 
 end Ora.Loop.CallAdapterLoopTests
+
+namespace Ora.Loop.CallAdapterReadScopeTests
+open Ora.Obligation CallAdapterLoopTests
+
+def limit : FreeVarId := { file_id := 90, pattern_id := 2 }
+def value (n : Nat) : Ora.Integer.Value := .ofNat (.unsigned .w8) n
+def scopedRow : SummaryRow := { row with
+  contextVariables := [{ index := 0, id := limit, ty := .spelling "u8" }]
+  init := [.term 0], invariants := [.term 4]
+  edges := [{ back with
+    timeline := [{ id := 0, structuralKey := "i<limit", payload := .pathAssumption { formulas := [{ formula := .term 3 }] } }]
+    nextState := [{ assignment with value := .term 1 }] }, { done with
+    timeline := [{ id := 0, structuralKey := "i>=limit", payload := .pathAssumption { formulas := [{ formula := .term 5 }] } }]
+    nextState := [{ assignment with value := .term 1 }]
+    returnValue := some (.direct .success [{ value := { formula := .term 6 }, ty := .spelling "bool" }]) }] }
+def scopedManifest : CallAdapterManifest := { manifest with
+  loops := [(digest, scopedRow)]
+  formulas := { terms := [
+    .intLit { value := "0", ty := some (.spelling "u8") },
+    .variable (.free { id := ident, name := "i", ty := some (.spelling "u8") }),
+    .variable (.free { id := limit, name := "limit", ty := some (.spelling "u8") }),
+    .binary { op := .lt, lhs := 1, rhs := 2, ty := some (.spelling "u8") },
+    .binary { op := .le, lhs := 1, rhs := 2, ty := some (.spelling "u8") },
+    .unary { op := .not_, operand := 3 }, .boolLit true] } }
+def scopedVc : AdapterLoopVC := (scopedManifest.loop {} digest scopedRow).toOption.get (by decide)
+def base : Env := Env.empty.setFree limit (.integer (value 100))
+def store : StorageState := fun _ => .bool false
+def caller : StorageActionState := {
+  loop := { locals := [], storage := store }, entryStorage := store
+  reads := [{ id := limit, value := .integer (value 2) },
+    { id := ident, value := .integer (value 0) }] }
+def current (n : Nat) : LoopState := { locals := [value n], storage := store }
+
+-- The invariant sees the invocation's limit, even when the ambient binding differs.
+theorem inheritedReadConstrainsInvariant : ¬ (scopedVc base caller).invariant (current 3) := by
+  intro valid
+  rcases valid.2.2 (.term 4) (by simp [scopedRow]) with ⟨proposition, evaluated, holds⟩
+  change some ((3 : Nat) ≤ 2) = some proposition at evaluated
+  have impossible : (3 : Nat) ≤ 2 := (Option.some.inj evaluated).mpr holds
+  omega
+
+-- The guard sees live i = 2, not the caller's stale read i = 0.
+theorem liveLocalShadowsInheritedRead (following : LoopState) :
+    ¬ ((scopedVc base caller).edges[0]'(by decide)).next (current 2) following := by
+  rintro ⟨result, trace, _⟩
+  cases trace with
+  | cons event rest =>
+    cases event with
+    | assume evaluated holds =>
+      change some ((2 : Nat) < 2) = some _ at evaluated
+      have impossible : (2 : Nat) < 2 := (Option.some.inj evaluated).mpr holds
+      omega
+
+#print axioms inheritedReadConstrainsInvariant
+#print axioms liveLocalShadowsInheritedRead
+end Ora.Loop.CallAdapterReadScopeTests

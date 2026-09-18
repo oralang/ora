@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "proofs": [
+    {
+      "query_id": 9,
+      "obligation_ids": [],
+      "assumption_ids": [
+        1
+      ],
+      "module_name": "G9cSuppliedRepeat",
+      "theorem_name": "G9cSuppliedRepeat.loopAuthorization",
+      "path": "tests/formal/call_projection_callee_loop_value.lean",
+      "content_sha256": null,
+      "inline_source": true
+    },
+    {
+      "query_id": 18,
+      "obligation_ids": [],
+      "assumption_ids": [
+        1
+      ],
+      "module_name": "G9cSuppliedRepeat",
+      "theorem_name": "G9cSuppliedRepeat.custody",
+      "path": "tests/formal/call_projection_callee_loop_value.lean",
+      "content_sha256": null,
+      "inline_source": true
+    },
+    {
+      "query_id": 20,
+      "obligation_ids": [],
+      "assumption_ids": [
+        12
+      ],
+      "module_name": "G9cSuppliedRepeat",
+      "theorem_name": "G9cSuppliedRepeat.callerCustody",
+      "path": "tests/formal/call_projection_callee_loop_value.lean",
+      "content_sha256": null,
+      "inline_source": true
+    }
+  ]
+}

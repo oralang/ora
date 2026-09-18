@@ -25,6 +25,7 @@ const runtime_checks = @import("mlir/runtime_checks.zig");
 const formal_obligation = @import("formal/obligation.zig");
 const formal_obligation_dump = @import("formal/obligation_dump.zig");
 const formal_obligation_from_mlir = @import("formal/obligation_from_mlir.zig");
+const FormalNativeCalls = @import("formal/obligation_to_z3.zig").NativeCalls;
 const formal_obligation_from_z3 = @import("formal/obligation_from_z3.zig");
 const formal_canonical_z3_measure = @import("formal/canonical_z3_measure.zig");
 const formal_kernel_registry = @import("formal/kernel/registry.zig");
@@ -5063,7 +5064,13 @@ fn runMlirEmitAdvanced(
 
     // Source accounting consumes this pre-optimization manifest in every
     // compilation mode, even when verification is explicitly disabled.
-    formal_result_for_smt_report = try formal_obligation_from_mlir.collect(allocator, final_module, .{});
+    formal_result_for_smt_report = try formal_obligation_from_mlir.collect(allocator, final_module, .{ .project_calls = needs_external_lean_proof_gate });
+    if (needs_external_lean_proof_gate and formal_result_for_smt_report.?.set.hasBlockingDiagnostic()) {
+        try formal_userland_coordinator.printBlockingDiagnostics(stdout, formal_result_for_smt_report.?.set);
+        try stdout.flush();
+        return error.VerificationFailed;
+    }
+    var native_calls: FormalNativeCalls = .{ .set = formal_result_for_smt_report.?.set, .function_ops = formal_result_for_smt_report.?.function_ops, .source_fact_bindings = formal_result_for_smt_report.?.source_fact_bindings };
     const formal_output_dir = formalArtifactOutputDir(mlir_options);
     const formal_display_dir = mlir_options.artifact_display_dir orelse formal_output_dir;
     try writeLoopInductionReport(
@@ -5104,6 +5111,7 @@ fn runMlirEmitAdvanced(
         // prepared GuardViolate rows can authorize erasure fail-closed.
         z3_formal_query_bindings = try z3FormalQueryBindingsFromFormal(allocator, formal_result_for_smt_report.?.query_bindings);
         verifier.setFormalQueryBindings(z3_formal_query_bindings);
+        if (native_calls.function_ops.len != 0) verifier.setCertifiedCalls(native_calls.provider());
 
         // Capture the verifier's actual matched prepared-query identities for
         // the source-accounting gate. Formal pre-verifier rows alone carry no
@@ -5271,6 +5279,7 @@ fn runMlirEmitAdvanced(
                 .artifact_display_dir = formal_display_dir,
                 .process_environ = mlir_options.process_environ,
                 .suppress_artifact_logs = mlir_options.suppress_artifact_logs,
+                .module = final_module,
             },
             stdout,
         ) catch |err| blk: {
@@ -5290,7 +5299,7 @@ fn runMlirEmitAdvanced(
         try stdout.writeAll("error: Lean userland obligation proof gate rejected the contract\n");
         verification_failed = true;
     }
-    if (needs_automatic_lean_proof_gate and !lean_artifact_gate_allowed) {
+    if (needs_lean_proof_gate and !lean_artifact_gate_allowed) {
         if (pending_smt_report) |*report| {
             formal_userland_coordinator.emitUnknownRecipe(
                 allocator,

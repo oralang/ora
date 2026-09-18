@@ -131,13 +131,61 @@ pub const Encoder = struct {
         }
     };
 
-    const CallSlotState = struct {
+    pub const CallSlotState = struct {
         name: []const u8,
         pre: z3.Z3_ast,
         sort: z3.Z3_sort,
         is_write: bool,
         post: ?z3.Z3_ast = null,
     };
+
+    pub const CertifiedCallEvidence = struct { source_op_id: usize, function_id: u32, digest: [32]u8 };
+    pub const CertifiedCallRelation = struct { ready: z3.Z3_ast, joint: z3.Z3_ast, evidence: CertifiedCallEvidence };
+    pub const CertifiedCallProvider = struct {
+        data: *anyopaque,
+        function_ops: []const usize,
+        instantiate: *const fn (*anyopaque, *Encoder, mlir.MlirOperation, usize, []const z3.Z3_ast, []CallSlotState, []?z3.Z3_ast) anyerror!CertifiedCallRelation,
+    };
+
+    pub fn certifiedCallee(self: *Encoder, op: mlir.MlirOperation) EncodeError!?usize {
+        const provider = self.certified_calls orelse return null;
+        const callee = try self.getOpaqueCalleeKey(op);
+        defer self.allocator.free(callee);
+        const function = self.function_ops.get(callee) orelse return null;
+        for (provider.function_ops, 0..) |id, index| if (id == @intFromPtr(function.ptr)) return index;
+        return null;
+    }
+
+    pub fn certifiedOutcome(self: *Encoder, op: mlir.MlirOperation, error_id: ?u32, values: []const z3.Z3_ast) !?z3.Z3_ast {
+        if (mlir.oraOperationGetNumResults(op) == 0) return if (error_id == null and values.len == 0) null else error.UnsupportedOperation;
+        const ty = mlir.oraValueGetType(mlir.oraOperationGetResult(op, 0));
+        const success = mlir.oraErrorUnionTypeGetSuccessType(ty);
+        if (mlir.oraTypeIsNull(success)) {
+            if (error_id != null or values.len != 1 or !z3.Z3_is_eq_sort(self.context.ctx, z3.Z3_get_sort(self.context.ctx, values[0]), try self.encodeMLIRType(ty))) return error.UnsupportedOperation;
+            return values[0];
+        }
+        const union_sort = try self.getErrorUnionSort(ty, success);
+        if (error_id) |id| {
+            for (union_sort.error_variants) |variant| {
+                const name = errorVariantSymbolName(variant) orelse return error.UnsupportedOperation;
+                if (self.lookupErrorDeclId(op, name) != id) continue;
+                const payload = if (try self.getProductSort(variant.payload_type)) |product| blk: {
+                    if (values.len != z3.Z3_get_arity(self.context.ctx, product.ctor)) return error.UnsupportedOperation;
+                    for (values, 0..) |value, index| if (!z3.Z3_is_eq_sort(self.context.ctx, z3.Z3_get_sort(self.context.ctx, value), z3.Z3_get_domain(self.context.ctx, product.ctor, @intCast(index)))) return error.UnsupportedOperation;
+                    break :blk z3.Z3_mk_app(self.context.ctx, product.ctor, @intCast(values.len), values.ptr);
+                } else if (values.len == 0 and try self.errorPayloadFieldCount(variant.payload_type) == 0)
+                    try self.encodeUnsignedToSort(id, variant.payload_sort)
+                else
+                    return error.UnsupportedOperation;
+                return z3.Z3_mk_app(self.context.ctx, variant.ctor, 1, &[_]z3.Z3_ast{payload});
+            }
+        } else {
+            const payload = if (values.len == 1) values[0] else if (values.len == 0 and mlir.oraTypeIsANone(success)) try self.encodeUnsignedToSort(0, union_sort.ok_sort) else return error.UnsupportedOperation;
+            if (!z3.Z3_is_eq_sort(self.context.ctx, z3.Z3_get_sort(self.context.ctx, payload), union_sort.ok_sort)) return error.UnsupportedOperation;
+            return z3.Z3_mk_app(self.context.ctx, union_sort.ok_ctor, 1, &[_]z3.Z3_ast{payload});
+        }
+        return error.UnsupportedOperation;
+    }
 
     const EffectPathSegments = struct {
         root: []const u8,
@@ -272,6 +320,10 @@ pub const Encoder = struct {
         }
     };
 
+    certified_calls: ?CertifiedCallProvider = null,
+    certified_invocation: u32 = 0,
+    certified_evidence: std.ArrayList(CertifiedCallEvidence) = .empty,
+    obligation_prefix: ?z3.Z3_ast = null,
     context: *Context,
     allocator: std.mem.Allocator,
     verify_calls: bool,
@@ -2350,6 +2402,7 @@ pub const Encoder = struct {
     }
 
     pub fn deinit(self: *Encoder) void {
+        self.certified_evidence.deinit(self.allocator);
         var it = self.global_map.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -3410,8 +3463,17 @@ pub const Encoder = struct {
             }
         else
             null;
+        // Loop replay captures the prefix at the checkpoint, including inside
+        // a branch; a later call's absent return cannot erase this obligation.
+        var staged = guarded_obligation;
+        if (self.obligation_prefix) |prefix| {
+            var condition = prefix;
+            for (self.branch_merge_constraints.items) |record| condition = self.encodeAnd(&.{ condition, record.ast });
+            for (self.pending_constraints.items) |record| condition = self.encodeAnd(&.{ condition, record.ast });
+            staged = self.encodeImplies(condition, staged);
+        }
         self.pending_obligations.append(self.allocator, .{
-            .ast = guarded_obligation,
+            .ast = staged,
             .imported_callee_name = stored_callee_name,
             .imported_source_fact_id = imported_source_fact_id,
             .source_kind = source_kind,
@@ -3438,7 +3500,7 @@ pub const Encoder = struct {
         self.addObligationWithSource(obligation, imported_callee_name, imported_source_fact_id, .imported_callee_ensures);
     }
 
-    fn addCalleePrecondition(
+    pub fn addCalleePrecondition(
         self: *Encoder,
         obligation: z3.Z3_ast,
         callee_name: []const u8,
@@ -4975,7 +5037,7 @@ pub const Encoder = struct {
         if (try self.resolveCalleeName(mlir_op)) |callee| {
             defer self.allocator.free(callee);
             if (self.function_ops.get(callee)) |func_op| {
-                if (!self.functionMayWriteTrackedState(func_op)) return;
+                if (try self.certifiedCallee(mlir_op) == null and !self.functionMayWriteTrackedState(func_op)) return;
             }
         }
         const operands = try self.encodeOperationOperandsWithMode(mlir_op, .Current);
@@ -7998,6 +8060,10 @@ pub const Encoder = struct {
         if (mode == .Current) {
             if (self.value_map.get(result_id)) |cached| {
                 return cached;
+            }
+            if (try self.certifiedCallee(mlir_op) != null) {
+                try self.materializeCallSummaryCurrent(mlir_op, operands);
+                return self.value_map.get(result_id) orelse error.UnsupportedOperation;
             }
             if (self.function_ops.get(callee)) |func_op| {
                 if (try self.tryInlinePureCallResult(mlir_op, callee, func_op, operands, result_index, mode)) |inlined| {
@@ -14613,9 +14679,10 @@ pub const Encoder = struct {
         defer self.allocator.free(callee);
         const func_op = self.function_ops.get(callee);
         const num_results: usize = @intCast(mlir.oraOperationGetNumResults(mlir_op));
+        const certified_index = try self.certifiedCallee(mlir_op);
 
         if (func_op) |fop| {
-            if (num_results == 0 and try self.materializeInlineVoidFunctionState(mlir_op, callee, fop, operands)) {
+            if (certified_index == null and num_results == 0 and try self.materializeInlineVoidFunctionState(mlir_op, callee, fop, operands)) {
                 try self.materialized_calls.put(call_id, {});
                 return;
             }
@@ -14716,7 +14783,17 @@ pub const Encoder = struct {
         defer self.allocator.free(result_exprs);
         for (0..num_results) |i| result_exprs[i] = null;
 
-        if (func_op) |fop| {
+        if (certified_index) |index| {
+            const provider = self.certified_calls.?;
+            const relation = provider.instantiate(provider.data, self, mlir_op, index, operands, slots.items, result_exprs) catch |err| {
+                self.noteSoundnessLossAtOp(.inexact_call_summary, mlir_op, @errorName(err));
+                return error.UnsupportedOperation;
+            };
+            self.addObligation(relation.ready);
+            // A missing return must not make a failed prefix precondition UNSAT.
+            self.addConstraintWithSource(self.encodeImplies(relation.ready, relation.joint), .binding, "certified call joint relation");
+            try self.certified_evidence.append(self.allocator, relation.evidence);
+        } else if (func_op) |fop| {
             var summarized = false;
             if (!self.functionMayWriteTrackedState(fop) and slots.items.len == 0 and num_results > 0) {
                 for (0..num_results) |i| {
@@ -14747,6 +14824,7 @@ pub const Encoder = struct {
             }
             const result_id = @intFromPtr(result_value.ptr);
             try self.value_map.put(result_id, encoded);
+            if (certified_index != null) try self.bindValue(result_value, encoded);
         }
 
         if (self.verify_state) {

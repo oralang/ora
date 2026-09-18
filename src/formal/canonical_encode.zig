@@ -39,6 +39,75 @@ const queryCanonicalPromotionShape = support.queryCanonicalPromotionShape;
 const queryCanonicalRequiredModePromoted = support.queryCanonicalRequiredModePromoted;
 const queryCanonicalSupport = support.queryCanonicalSupport;
 
+/// A native invocation binds only actual arguments and operation-derived roots.
+/// This provider reuses functionRelation; it imports neither prover's verdict.
+pub const NativeCalls = struct {
+    set: obligation.ObligationSet,
+    function_ops: []const usize,
+    source_fact_bindings: []const @import("obligation_from_mlir.zig").SourceFactOpBinding,
+
+    pub fn provider(self: *NativeCalls) z3_verification.CertifiedCallProvider {
+        return .{ .data = self, .function_ops = self.function_ops, .instantiate = instantiate };
+    }
+
+    fn instantiate(data: *anyopaque, native: *z3_verification.CertifiedCallEncoder, op: @import("mlir_c_api").c.MlirOperation, index: usize, arguments: []const z3.Z3_ast, slots: []z3_verification.CertifiedCallEncoder.CallSlotState, results: []?z3.Z3_ast) !z3_verification.CertifiedCallEncoder.CertifiedCallRelation {
+        const self: *NativeCalls = @ptrCast(@alignCast(data));
+        try self.set.validateIdReferences();
+        try canonical_digest.validateCallDependencyDigests(self.set);
+        if (index >= self.set.function_summaries.len) return error.InvalidDependency;
+        const row = self.set.function_summaries[index];
+        if (arguments.len != row.parameters.len or results.len > 1) return error.InvalidCallSignature;
+        var arena = std.heap.ArenaAllocator.init(native.allocator);
+        defer arena.deinit();
+        var adapter = Adapter.init(native.context, arena.allocator(), self.set);
+        var query_state: CanonicalQueryState = .{};
+        adapter.query_state = &query_state;
+        adapter.use_free_variable_identity_names = true;
+        adapter.function_vc_qf = true;
+        adapter.native_slots = slots;
+        adapter.call_scope = try std.math.add(u32, native.certified_invocation, 1);
+        adapter.fresh_index = adapter.call_scope;
+        var initial: LoopEncodeState = .{ .summary = undefined, .preheader_starts_at_entry = true };
+        adapter.loop_state = &initial;
+        for (row.parameters, arguments) |parameter, argument| try adapter.bindValue(parameter, argument);
+        for (row.paths) |path| try adapter.storageDomains(path.timeline, false);
+        for (initial.roots.items) |root| {
+            const slot = for (slots) |candidate| {
+                if (std.mem.eql(u8, candidate.name, root.name)) break candidate;
+            } else return error.FunctionVCVariableOutOfScope;
+            const store = try adapter.loopStore(try typeInfo(root.ty), u256TypeInfo(), "direct");
+            store.entry = z3.Z3_mk_store(native.context.ctx, store.entry, root.key, slot.pre);
+            store.current = store.entry;
+        }
+        const vc = try adapter.functionRelation(row, initial);
+        for (row.assumption_ids, vc.requires) |id, condition| {
+            const source_id = for (self.source_fact_bindings) |binding| {
+                if (std.mem.indexOfScalar(obligation.Id, binding.assumption_ids, id) != null) break binding.source_fact_id;
+            } else return error.CallPreconditionSourceMissing;
+            native.addCalleePrecondition(condition, row.owner.function.name, source_id);
+        }
+        native.certified_invocation = adapter.fresh_index;
+        for (row.outcomes, 0..) |arm, arm_index| {
+            const payload = try arena.allocator().alloc(z3.Z3_ast, arm.types.len);
+            for (payload, 0..) |*value, value_index| value.* = try adapter.payloadOutput(row, arm_index, value_index);
+            const value = try native.certifiedOutcome(op, if (arm.outcome == .error_return) arm.outcome.error_return else null, payload);
+            if (value) |actual| results[0] = if (results[0]) |previous| z3.Z3_mk_ite(native.context.ctx, try adapter.selectOutcome(row, arm.outcome), actual, previous) else actual;
+        }
+        for (slots) |*slot| {
+            slot.is_write = for (row.write_footprint) |place| {
+                if (std.mem.eql(u8, place.root, slot.name)) break true;
+            } else false;
+            slot.post = slot.pre;
+            for (initial.roots.items) |root| if (std.mem.eql(u8, root.name, slot.name)) {
+                const store = try adapter.loopStore(try typeInfo(root.ty), u256TypeInfo(), "direct");
+                slot.post = z3.Z3_mk_select(native.context.ctx, try adapter.storageOutput(row.id, store.*), root.key);
+            };
+        }
+        try native.context.checkNoError();
+        return .{ .ready = z3.Z3_mk_and(native.context.ctx, 2, &[_]z3.Z3_ast{ vc.entry, vc.safety }), .joint = vc.joint, .evidence = .{ .source_op_id = @intFromPtr(op.ptr), .function_id = row.id, .digest = try canonical_digest.functionVcSha256(self.set, row.id) } };
+    }
+};
+
 const LoopStore = struct {
     info: TypeInfo,
     index_info: TypeInfo,
@@ -86,6 +155,7 @@ pub const Adapter = struct {
     function_row: ?obligation.FunctionSummaryRow = null,
     call_scope: u32 = 0,
     fresh_index: u32 = 0,
+    native_slots: ?[]const z3_verification.CertifiedCallEncoder.CallSlotState = null,
 
     pub const EncodeTermState = struct {
         expected: ?TypeInfo = null,
@@ -111,6 +181,7 @@ pub const Adapter = struct {
         function_id: obligation.Id,
         function_vc_sha256: [32]u8,
         entry: z3.Z3_ast,
+        requires: []const z3.Z3_ast,
         safety: z3.Z3_ast,
         joint: z3.Z3_ast,
     };
@@ -173,13 +244,19 @@ pub const Adapter = struct {
         // Declaration follows actual operations without evaluating future indices.
         for (row.paths) |path| try self.storageDomains(path.timeline, false);
         var entries: std.ArrayList(z3.Z3_ast) = .empty;
-        try self.appendLoopAssumptions(&entries, row.assumption_ids);
+        const requires = try self.allocator.alloc(z3.Z3_ast, row.assumption_ids.len);
+        for (row.assumption_ids, requires) |id, *condition| {
+            var facts: std.ArrayList(z3.Z3_ast) = .empty;
+            try self.appendLoopAssumptions(&facts, &.{id});
+            condition.* = self.conjunction(facts.items);
+            try entries.append(self.allocator, condition.*);
+        }
         for (row.entry_invariant_ids) |fact_id| {
             const fact = obligation.findById(self.set.obligations, fact_id) orelse return error.InvalidDependency;
             try self.appendFormulaPremises(&entries, &.{obligation.kindFormula(fact.kind) orelse return error.MissingFormula});
         }
         try self.appendSideConstraints(&entries);
-        var vc: FunctionVC = .{ .function_id = row.id, .function_vc_sha256 = undefined, .entry = self.conjunction(entries.items), .safety = z3.Z3_mk_true(self.context.ctx), .joint = z3.Z3_mk_false(self.context.ctx) };
+        var vc: FunctionVC = .{ .function_id = row.id, .function_vc_sha256 = undefined, .entry = self.conjunction(entries.items), .requires = requires, .safety = z3.Z3_mk_true(self.context.ctx), .joint = z3.Z3_mk_false(self.context.ctx) };
         for (row.paths, edges) |path, edge| {
             var state = try self.cloneState(initial);
             self.loop_state = &state;
@@ -286,6 +363,7 @@ pub const Adapter = struct {
     }
 
     fn functionStorageDomain(self: *Adapter, location: obligation.LoopStorageLocationExpr) EncodeError!*LoopStore {
+        if (self.native_slots != null and location.projections.len != 0) return error.FunctionVCDependencyUnsupported;
         const info = try typeInfo(location.value_ty);
         if (location.projections.len == 0) {
             _ = try self.loopRootKey(location);
@@ -1359,6 +1437,15 @@ pub const Adapter = struct {
         if (location.root.len == 0) return error.InvalidLoopQuery;
         const state = self.loop_state orelse return error.InvalidLoopQuery;
         for (state.roots.items) |root| if (std.mem.eql(u8, root.name, location.root)) return root.key;
+        if (self.native_slots) |slots| {
+            for (slots, 0..) |slot, index| if (std.mem.eql(u8, slot.name, location.root)) {
+                if (!z3.Z3_is_eq_sort(self.context.ctx, slot.sort, try self.sortForType(try typeInfo(location.value_ty)))) return error.TypeMismatch;
+                const key = z3.Z3_mk_unsigned_int64(self.context.ctx, @intCast(index), try self.sortForType(u256TypeInfo()));
+                try state.roots.append(self.allocator, .{ .name = location.root, .key = key, .ty = location.value_ty });
+                return key;
+            };
+            return error.FunctionVCVariableOutOfScope;
+        }
         const name = try std.fmt.allocPrint(self.allocator, "$ora.loop.root.{s}", .{location.root});
         defer self.allocator.free(name);
         const key = try self.namedConst(name, try self.sortForType(u256TypeInfo()));
@@ -3377,7 +3464,7 @@ test "G9b FunctionVC binds one outcome payload and final store with real safety 
     var query = checked.query;
     set.queries = (&query)[0..1];
     row.query_ids.safety = &.{101};
-    try std.testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_relation_unsupported }, set.artifactDecision());
+    try std.testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_lean_custody_missing }, set.artifactDecision());
     for ([_]struct { result: ?obligation.VerificationQueryResult, reason: obligation.ArtifactBlockReason }{
         .{ .result = null, .reason = .call_z3_relation_missing },
         .{ .result = .{ .status = .proved, .degraded = true }, .reason = .degraded_query },
@@ -3443,7 +3530,7 @@ test "G9b FunctionVC keeps prefix safety independent of returns and detects vacu
     const reordered = try canonical_digest.functionVcSha256(set, row.id);
     query = (try adapter.checkFunctionSafety(row.id, reordered, 101)).query;
     try std.testing.expectEqual(@as(@TypeOf(query.result.?.status), .proved), query.result.?.status);
-    try std.testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_relation_unsupported }, set.artifactDecision());
+    try std.testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_lean_custody_missing }, set.artifactDecision());
 
     const assumes = [_]obligation.Assumption{.{
         .id = 1,

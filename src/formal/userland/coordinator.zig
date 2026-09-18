@@ -29,6 +29,7 @@ pub const Options = struct {
     artifact_display_dir: ?[]const u8 = null,
     process_environ: std.process.Environ,
     suppress_artifact_logs: bool = false,
+    module: ?@import("mlir_c_api").c.MlirModule = null,
 };
 
 /// Userland proofs may authorize artifact emission only. This type
@@ -92,6 +93,10 @@ pub fn emitUnknownRecipe(
     var unavailable_count: usize = 0;
     for (context.merged_result.set.queries) |query| {
         if (!isLeanProofTarget(query)) continue;
+        if (query.function_summary_id != null) {
+            recipe_count += 1;
+            continue;
+        }
         const projection = projectionForQuery(context.merged_result.set, query);
         const semantic_support = obligation_to_lean.querySemanticSupport(context.merged_result.set, query);
         if (projection.hasOpaqueFormula() or !semanticSupportAvailable(semantic_support)) {
@@ -108,6 +113,7 @@ pub fn emitUnknownRecipe(
         try stdout.writeAll("Lean proof recipe unavailable for some required userland obligations:\n");
         for (context.merged_result.set.queries) |query| {
             if (!isLeanProofTarget(query)) continue;
+            if (query.function_summary_id != null) continue;
             const projection = projectionForQuery(context.merged_result.set, query);
             const semantic_support = obligation_to_lean.querySemanticSupport(context.merged_result.set, query);
             if (!projection.hasOpaqueFormula() and semanticSupportAvailable(semantic_support)) continue;
@@ -135,7 +141,7 @@ pub fn emitUnknownRecipe(
 
     const source = renderObligationsSource(
         allocator,
-        context.merged_result.set,
+        if (formal_result.set.function_summaries.len != 0) formal_result.set else context.merged_result.set,
         context.generated_namespace,
     ) catch |err| switch (err) {
         error.UnsupportedOriginValue, error.UnsupportedObligationKind => {
@@ -156,14 +162,21 @@ pub fn emitUnknownRecipe(
     for (context.merged_result.set.queries) |query| {
         if (!isLeanProofTarget(query)) continue;
         const projection = projectionForQuery(context.merged_result.set, query);
-        if (projection.hasOpaqueFormula() or
-            !semanticSupportAvailable(obligation_to_lean.querySemanticSupport(context.merged_result.set, query))) continue;
-        try stdout.print("  - query: emittedQuery_{d} (", .{query.id});
+        if (query.function_summary_id == null and (projection.hasOpaqueFormula() or
+            !semanticSupportAvailable(obligation_to_lean.querySemanticSupport(context.merged_result.set, query)))) continue;
+        const adapter_loop = if (query.loop_summary_id) |id|
+            obligation_to_lean.loopUsesCallAdapter(context.merged_result.set, obligation.findById(context.merged_result.set.loop_summaries, id).?)
+        else
+            false;
+        const target_id = query.function_summary_id orelse (if (adapter_loop) query.loop_summary_id.? else query.id);
+        const target_name = if (query.function_summary_id != null) "emittedCallCustody" else if (adapter_loop) "emittedCallLoop" else "emittedQuery";
+        try stdout.print("  - query: {s}_{d} (", .{ target_name, target_id });
         try printRecipeSource(stdout, query.source);
-        try stdout.print(")\n    theorem shape: theorem discharge_q{d} : {s}.emittedQuery_{d} := by ...\n    proof row: query_id={d}, obligation_ids=", .{
+        try stdout.print(")\n    theorem shape: theorem discharge_q{d} : {s}.{s}_{d} := by ...\n    proof row: query_id={d}, obligation_ids=", .{
             query.id,
             context.generated_namespace,
-            query.id,
+            target_name,
+            target_id,
             query.id,
         });
         try printIds(stdout, query.obligation_ids);
@@ -195,6 +208,14 @@ fn collectContext(
     smt_report: z3_verification.SmtReportArtifacts,
 ) !ObligationContext {
     const query_manifest = smt_report.query_manifest orelse return error.MissingPreparedQueryManifest;
+    for (query_manifest.certified_calls) |used| {
+        const bound = for (formal_result.call_bindings) |binding| {
+            if (binding.source_op_id == used.source_op_id and binding.function_id == used.function_id) break true;
+        } else false;
+        if (!bound) return error.CallInvocationBindingMissing;
+        const digest = try obligation_to_lean.functionVcSha256(formal_result.set, used.function_id);
+        if (!std.mem.eql(u8, &digest, &used.digest)) return error.CallInvocationDigestMismatch;
+    }
     var merged_result = try obligation_from_z3.overlayPreparedQueryResults(
         allocator,
         formal_result.set,
@@ -220,7 +241,7 @@ fn buildContext(
     errdefer context.deinit();
     context.obligations_source = try renderObligationsSource(
         allocator,
-        context.merged_result.set,
+        if (formal_result.set.function_summaries.len != 0) formal_result.set else context.merged_result.set,
         context.generated_namespace,
     );
     return context;
@@ -233,7 +254,7 @@ fn renderObligationsSource(
 ) ![]const u8 {
     var out = std.Io.Writer.Allocating.init(allocator);
     errdefer out.deinit();
-    try obligation_to_lean.writeModule(&out.writer, set, .{
+    if (set.function_summaries.len != 0) try obligation_to_lean.writeCallCustodyModule(&out.writer, set, generated_namespace) else try obligation_to_lean.writeModule(&out.writer, set, .{
         .namespace = generated_namespace,
         .proof_surface = true,
     });
@@ -262,15 +283,18 @@ fn coordinateManifest(
     var parsed_manifest = try proof_manifest.parseProofManifestJson(allocator, manifest_bytes);
     defer parsed_manifest.deinit();
 
-    var applied = try proof_check.applyProofRows(
-        allocator,
-        context.merged_result.set,
-        parsed_manifest.rows,
-        context.generated_namespace,
-        context.obligations_source.?,
-        options.process_environ,
-        stdout,
-    );
+    var applied: ?proof_check.ApplyResult = if (context.merged_result.set.function_summaries.len != 0)
+        try proof_check.applyCallProofRows(allocator, options.module orelse return error.CallCustodyHIRMissing, context.merged_result.set, parsed_manifest.rows, context.generated_namespace, options.process_environ, stdout)
+    else
+        try proof_check.applyProofRows(
+            allocator,
+            context.merged_result.set,
+            parsed_manifest.rows,
+            context.generated_namespace,
+            context.obligations_source.?,
+            options.process_environ,
+            stdout,
+        );
     defer if (applied) |*result| result.deinit();
 
     const decided_set = if (applied) |*result| result.set else context.merged_result.set;
@@ -361,7 +385,7 @@ fn writeCertificate(
     }
 }
 
-fn printBlockingDiagnostics(stdout: anytype, set: obligation.ObligationSet) !void {
+pub fn printBlockingDiagnostics(stdout: anytype, set: obligation.ObligationSet) !void {
     var printed_header = false;
     for (set.diagnostics) |diagnostic| {
         if (!diagnostic.blocks_artifacts) continue;
@@ -418,12 +442,12 @@ fn isPlainUnknownTarget(query: obligation.VerificationQuery) bool {
 }
 
 fn isLeanProofTarget(query: obligation.VerificationQuery) bool {
-    if (query.kind == .loop_induction) {
+    if (query.kind == .loop_induction or query.function_summary_id != null) {
         return query.artifact_policy == .blocks_verified_artifacts and
             query.proof_requirement == .lean_certificate and
             query.backend == .unspecified and
             query.result == null and
-            query.loop_summary_id != null and
+            (query.loop_summary_id != null or query.function_summary_id != null) and
             query.obligation_ids.len == 0;
     }
     if (isPlainUnknownTarget(query)) return true;
