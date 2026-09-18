@@ -13,6 +13,7 @@ const obligation_from_mlir = @import("formal/obligation_from_mlir.zig");
 const obligation_from_z3 = @import("formal/obligation_from_z3.zig");
 const obligation_to_lean = @import("formal/obligation_to_lean.zig");
 const obligation_to_z3 = @import("formal/obligation_to_z3.zig");
+const proof_check = @import("formal/proof_check.zig");
 const artifact_catalog = @import("formal/shared/artifact_catalog.zig");
 const source_accounting = @import("formal/shared/source_accounting.zig");
 const source_accounting_gate = @import("formal/kernel/source_accounting_gate.zig");
@@ -14608,6 +14609,331 @@ fn collectCallProjection(allocator: std.mem.Allocator, path: []const u8) !obliga
     return obligation_from_mlir.collect(allocator, hir.module.raw_module, .{ .project_calls = true });
 }
 
+fn callCustodyLeafProof(allocator: std.mem.Allocator, row: obligation.FunctionSummaryRow) ![]const u8 {
+    var source = std.Io.Writer.Allocating.init(allocator);
+    defer source.deinit();
+    try source.writer.print(
+        "namespace CustodyProof\nopen Ora.Loop Ora.Obligation Ora.Generated.Obligations.G9a\n" ++
+            "def adapter := emittedCallManifest\ndef row := emittedFunctionSummary_{d}\n" ++
+            "def digest := emittedFunctionVcSha256_{d}\ndef returnedTerm : Nat := {d}\n",
+        .{ row.id, row.id, row.paths[0].returns.direct.values[0].value.formula.term },
+    );
+    try source.writer.writeAll(
+        \\def body : AdapterBody := {
+        \\  signature := row.callSignature
+        \\  requires := row.entryFactsHold emittedManifest
+        \\  paths := [{ events := [], returns := .direct .success [.term returnedTerm] }]
+        \\  semantics := fun _ => (adapterSemantics {}
+        \\    (directStorageContext emittedManifest Env.empty [])).withCallChecks }
+        \\theorem bound : adapter.function {} digest row = .ok body := by rfl
+        \\theorem certificate : body.Certificate where
+        \\  safety := by
+        \\    intro input typed requires initial entry path member before formula after events
+        \\    simp only [body, List.mem_singleton] at member
+        \\    subst path
+        \\    simp at events
+        \\  calls := by
+        \\    intro input typed requires initial entry path member before invocation after events
+        \\    simp only [body, List.mem_singleton] at member
+        \\    subst path
+        \\    simp at events
+        \\  loopResults := by
+        \\    intro input typed requires initial entry path member before child bindings after events
+        \\    simp only [body, List.mem_singleton] at member
+        \\    subst path
+        \\    simp at events
+        \\  returns := by
+        \\    intro input initial path result typed requires entry member trace
+        \\    simp only [body, List.mem_singleton] at member
+        \\    subst path
+        \\    cases trace
+        \\    change row.callSignature.inputTyped input = true at typed
+        \\    simp only [body, CallSignature.entry?, typed, if_true, Option.some.injEq] at entry
+        \\    subst initial
+        \\    refine ⟨{ outcome := .success, payload := [.integer (Ora.Integer.Value.ofNat (.unsigned .w256) 1)] }, ?_, ?_⟩
+        \\    · rfl
+        \\    · rfl
+        \\def installed := (CallAdapterCertificates.empty adapter).addFunction digest row body bound certificate
+    );
+    try source.writer.print("\ntheorem accepted : emittedCallCustody_{d} := ⟨installed, rfl⟩\nend CustodyProof\n", .{row.id});
+    return allocator.dupe(u8, source.written());
+}
+
+fn callCustodyTestEnviron(allocator: std.mem.Allocator) !std.process.Environ {
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+    const home_path = std.c.getenv("HOME") orelse return error.MissingTestHome;
+    try env.put("HOME", std.mem.span(home_path));
+    const path_arg = try leanPathEnvArgForTest(allocator);
+    defer allocator.free(path_arg);
+    try env.put("PATH", path_arg["PATH=".len..]);
+    return .{ .block = try env.createPosixBlock(allocator, .{}) };
+}
+
+fn callCustodyLeaf(set: obligation.ObligationSet) !obligation.FunctionSummaryRow {
+    for (set.function_summaries) |row| if (std.mem.eql(u8, row.owner.function.name, "yes")) return row;
+    return error.MissingAdapterLeaf;
+}
+
+fn callCustodyInput(manifest: proof_check.CallCustodyManifest, proof: []const u8) !proof_check.CallCustodyInput {
+    const row = try callCustodyLeaf(manifest.collected.set);
+    return .{
+        .function_id = row.id,
+        .function_vc_sha256 = try obligation_to_lean.functionVcSha256(manifest.collected.set, row.id),
+        .manifest_sha256 = manifest.sha256,
+        .theorem_name = "CustodyProof.accepted",
+        .proof_source = proof,
+    };
+}
+
+test "G9a custody kernel checks a live compiler manifest deterministically without authority" {
+    const allocator = testing.allocator;
+    var compilation = try compilePackage("tests/formal/call_adapter_leaf.ora");
+    defer compilation.deinit();
+    const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir.diagnostics.isEmpty());
+    const module = hir.module.raw_module;
+    var manifest = try proof_check.prepareCallCustody(allocator, module, "Ora.Generated.Obligations.G9a");
+    defer manifest.deinit();
+    var repeated = try proof_check.prepareCallCustody(allocator, module, "Ora.Generated.Obligations.G9a");
+    defer repeated.deinit();
+    try testing.expectEqualStrings(manifest.source, repeated.source);
+    try testing.expectEqualSlices(u8, &manifest.sha256, &repeated.sha256);
+    const proof = try callCustodyLeafProof(allocator, try callCustodyLeaf(manifest.collected.set));
+    defer allocator.free(proof);
+    const input = try callCustodyInput(manifest, proof);
+    const env = try callCustodyTestEnviron(allocator);
+    defer env.block.deinit(allocator);
+    var output = std.Io.Writer.Allocating.init(allocator);
+    defer output.deinit();
+    errdefer std.debug.print("G9a checker: {s}\n", .{output.written()});
+    var first = try proof_check.checkCallCustody(allocator, module, "Ora.Generated.Obligations.G9a", input, env, &output.writer);
+    defer first.deinit();
+    var second = try proof_check.checkCallCustody(allocator, module, "Ora.Generated.Obligations.G9a", input, env, &output.writer);
+    defer second.deinit();
+    try testing.expectEqualSlices(u8, &first.manifest_sha256, &input.manifest_sha256);
+    try testing.expectEqualSlices(u8, &first.function_vc_sha256, &input.function_vc_sha256);
+    try testing.expectEqualSlices(u8, &first.proof_sha256, &second.proof_sha256);
+    try testing.expectEqualSlices(u8, &first.checker_sha256, &second.checker_sha256);
+    for (first.axioms) |axiom| try testing.expect(std.mem.eql(u8, axiom, "propext") or std.mem.eql(u8, axiom, "Quot.sound"));
+    try testing.expect(std.mem.indexOf(u8, first.checker_source, ".emittedCallCustody_") != null);
+    try testing.expect(std.mem.indexOf(u8, first.checker_source, "emittedVerifiedQuery_") == null);
+    try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_z3_relation_missing }, manifest.collected.set.artifactDecision());
+    const evidence = ".zig-cache/g9a-custody-evidence";
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, evidence);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = evidence ++ "/Manifest.lean", .data = manifest.source });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = evidence ++ "/Proof.lean", .data = proof });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = evidence ++ "/Checker.lean", .data = first.checker_source });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = evidence ++ "/CanonicalChecker.lean", .data = first.canonical_checker_source });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = evidence ++ "/Agreement.lean", .data = first.agreement_source });
+    var receipt = std.Io.Writer.Allocating.init(allocator);
+    defer receipt.deinit();
+    try receipt.writer.print("function={d}\nfunction_vc_sha256={s}\nmanifest_sha256={s}\nproof_sha256={s}\nchecker_sha256={s}\n", .{
+        first.function_id,                              std.fmt.bytesToHex(first.function_vc_sha256, .lower), std.fmt.bytesToHex(first.manifest_sha256, .lower),
+        std.fmt.bytesToHex(first.proof_sha256, .lower), std.fmt.bytesToHex(first.checker_sha256, .lower),
+    });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = evidence ++ "/receipt.txt", .data = receipt.written() });
+}
+
+test "G9a custody rejects stale foreign and forged manifests before kernel ingestion" {
+    const allocator = testing.allocator;
+    var compilation = try compilePackage("tests/formal/call_adapter_leaf.ora");
+    defer compilation.deinit();
+    const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+    const module = hir.module.raw_module;
+    var manifest = try proof_check.prepareCallCustody(allocator, module, "Ora.Generated.Obligations.G9a");
+    defer manifest.deinit();
+    const original = try callCustodyInput(manifest, "theorem irrelevant : True := True.intro");
+    const env = try callCustodyTestEnviron(allocator);
+    defer env.block.deinit(allocator);
+    var output = std.Io.Writer.Allocating.init(allocator);
+    defer output.deinit();
+    var changed = original;
+    changed.function_id = std.math.maxInt(obligation.Id);
+    try testing.expectError(error.CallCustodyFunctionMissing, proof_check.checkCallCustody(allocator, module, "Ora.Generated.Obligations.G9a", changed, env, &output.writer));
+    changed = original;
+    changed.function_vc_sha256[0] ^= 1;
+    try testing.expectError(error.CallCustodyFunctionDigestMismatch, proof_check.checkCallCustody(allocator, module, "Ora.Generated.Obligations.G9a", changed, env, &output.writer));
+    changed = original;
+    changed.manifest_sha256[0] ^= 1;
+    try testing.expectError(error.CallCustodyManifestMismatch, proof_check.checkCallCustody(allocator, module, "Ora.Generated.Obligations.G9a", changed, env, &output.writer));
+    changed = original;
+    changed.proof_source = "";
+    try testing.expectError(error.CallCustodyProofMissing, proof_check.checkCallCustody(allocator, module, "Ora.Generated.Obligations.G9a", changed, env, &output.writer));
+    try testing.expectError(error.CallCustodyManifestMismatch, proof_check.checkCallCustody(allocator, module, "Ora.Generated.Obligations.Foreign", original, env, &output.writer));
+    // Omitting the caller body leaves the leaf's canonical digest unchanged.
+    // Rehashing this forged manifest still cannot authenticate it to live HIR.
+    var forged = manifest.collected.set;
+    const leaf = try callCustodyLeaf(forged);
+    forged.function_summaries = &.{leaf};
+    var source = std.Io.Writer.Allocating.init(allocator);
+    defer source.deinit();
+    try obligation_to_lean.writeCallCustodyModule(&source.writer, forged, "Ora.Generated.Obligations.G9a");
+    changed = original;
+    std.crypto.hash.sha2.Sha256.hash(source.written(), &changed.manifest_sha256, .{});
+    try testing.expectError(error.CallCustodyManifestMismatch, proof_check.checkCallCustody(allocator, module, "Ora.Generated.Obligations.G9a", changed, env, &output.writer));
+    try testing.expectEqual(@as(usize, 0), output.written().len);
+}
+
+test "G9a custody rejects missing installation foreign proofs and forbidden axioms" {
+    const allocator = testing.allocator;
+    var compilation = try compilePackage("tests/formal/call_adapter_leaf.ora");
+    defer compilation.deinit();
+    const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+    var manifest = try proof_check.prepareCallCustody(allocator, hir.module.raw_module, "Ora.Generated.Obligations.G9a");
+    defer manifest.deinit();
+    const id = (try callCustodyLeaf(manifest.collected.set)).id;
+    const proofs = [_][]const u8{
+        // Valid theorem, wrong certificate proposition.
+        "theorem CustodyProof.accepted : True := True.intro\n",
+        // A certified empty registry proves no requested installation.
+        "theorem CustodyProof.accepted : Ora.Generated.Obligations.G9a.emittedCallCustody_{d} := ⟨Ora.Loop.CallAdapterCertificates.empty _, rfl⟩\n",
+        "theorem CustodyProof.accepted : Ora.Generated.Obligations.G9a.emittedCallCustody_{d} := by sorry\n",
+    };
+    const env = try callCustodyTestEnviron(allocator);
+    defer env.block.deinit(allocator);
+    inline for (proofs, 0..) |template, index| {
+        const proof = if (index == 0) try allocator.dupe(u8, template) else try std.fmt.allocPrint(allocator, template, .{id});
+        defer allocator.free(proof);
+        var output = std.Io.Writer.Allocating.init(allocator);
+        defer output.deinit();
+        const input = try callCustodyInput(manifest, proof);
+        try testing.expectError(error.LeanProofCheckFailed, proof_check.checkCallCustody(allocator, hir.module.raw_module, "Ora.Generated.Obligations.G9a", input, env, &output.writer));
+        try testing.expect(std.mem.indexOf(u8, output.written(), "lean_proof_rejected") != null);
+        if (index == 2) try testing.expect(std.mem.indexOf(u8, output.written(), "sorryAx") != null);
+        try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_z3_relation_missing }, manifest.collected.set.artifactDecision());
+    }
+}
+
+test "G9a custody recollects changed HIR and rejects a transplanted certificate" {
+    const allocator = testing.allocator;
+    const source = try readFileAllocForTest(allocator, "tests/formal/call_adapter_leaf.ora");
+    defer allocator.free(source);
+    const changed_source = try std.mem.replaceOwned(u8, allocator, source, "return 1;", "return 2;");
+    defer allocator.free(changed_source);
+    var original = try compileText(source);
+    defer original.deinit();
+    var changed = try compileText(changed_source);
+    defer changed.deinit();
+    const before = try original.db.lowerToHir(original.root_module_id);
+    const after = try changed.db.lowerToHir(changed.root_module_id);
+    try testing.expect(before.diagnostics.isEmpty() and after.diagnostics.isEmpty());
+    var old_manifest = try proof_check.prepareCallCustody(allocator, before.module.raw_module, "Ora.Generated.Obligations.G9a");
+    defer old_manifest.deinit();
+    var new_manifest = try proof_check.prepareCallCustody(allocator, after.module.raw_module, "Ora.Generated.Obligations.G9a");
+    defer new_manifest.deinit();
+    const proof = try callCustodyLeafProof(allocator, try callCustodyLeaf(old_manifest.collected.set));
+    defer allocator.free(proof);
+    const env = try callCustodyTestEnviron(allocator);
+    defer env.block.deinit(allocator);
+    var output = std.Io.Writer.Allocating.init(allocator);
+    defer output.deinit();
+    try testing.expectError(error.CallCustodyFunctionDigestMismatch, proof_check.checkCallCustody(
+        allocator,
+        after.module.raw_module,
+        "Ora.Generated.Obligations.G9a",
+        try callCustodyInput(old_manifest, proof),
+        env,
+        &output.writer,
+    ));
+    // Refreshing both hashes cannot make the old semantic proof prove return 2.
+    try testing.expectError(error.LeanProofCheckFailed, proof_check.checkCallCustody(
+        allocator,
+        after.module.raw_module,
+        "Ora.Generated.Obligations.G9a",
+        try callCustodyInput(new_manifest, proof),
+        env,
+        &output.writer,
+    ));
+}
+
+test "G9a custody requires installation of the requested root rather than any certificate" {
+    const allocator = testing.allocator;
+    var compilation = try compilePackage("tests/formal/call_adapter_leaf.ora");
+    defer compilation.deinit();
+    const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+    var manifest = try proof_check.prepareCallCustody(allocator, hir.module.raw_module, "Ora.Generated.Obligations.G9a");
+    defer manifest.deinit();
+    const proof = try callCustodyLeafProof(allocator, try callCustodyLeaf(manifest.collected.set));
+    defer allocator.free(proof);
+    var input = try callCustodyInput(manifest, proof);
+    const caller = for (manifest.collected.set.function_summaries) |row| {
+        if (row.id != input.function_id) break row;
+    } else return error.MissingCallCustodyCaller;
+    input.function_id = caller.id;
+    input.function_vc_sha256 = try obligation_to_lean.functionVcSha256(manifest.collected.set, caller.id);
+    const env = try callCustodyTestEnviron(allocator);
+    defer env.block.deinit(allocator);
+    var output = std.Io.Writer.Allocating.init(allocator);
+    defer output.deinit();
+    try testing.expectError(error.LeanProofCheckFailed, proof_check.checkCallCustody(allocator, hir.module.raw_module, "Ora.Generated.Obligations.G9a", input, env, &output.writer));
+}
+
+test "G9a custody retains live projection and source entry scope rejections" {
+    for ([_][]const u8{ "tests/formal/call_adapter_bool_return_blocked.ora", "tests/formal/call_entry_prefix_storage_fact_blocked.ora" }) |path| {
+        var compilation = try compilePackage(path);
+        defer compilation.deinit();
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expectError(error.CallCustodyProjectionRejected, proof_check.prepareCallCustody(testing.allocator, hir.module.raw_module, "Ora.Generated.Obligations.G9a"));
+    }
+}
+
+test "G9a custody requires Z3 evidence and retains the final fence even for forged successes" {
+    var result = try collectCallProjection(testing.allocator, "tests/formal/call_adapter_leaf.ora");
+    defer result.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var set = result.set;
+    const rows = try allocator.dupe(obligation.FunctionSummaryRow, set.function_summaries);
+    set.function_summaries = rows;
+    const queries = try allocator.alloc(obligation.VerificationQuery, set.queries.len + rows.len);
+    @memcpy(queries[0..set.queries.len], set.queries);
+    const extra = queries[set.queries.len..];
+    for (rows, extra, 0..) |*row, *query, index| {
+        const id: obligation.Id = @intCast(100000 + index);
+        row.query_ids.safety = try allocator.dupe(obligation.Id, &.{id});
+        query.* = .{
+            .id = id,
+            .owner = row.owner,
+            .source = row.source,
+            .phase = .report,
+            .origin = row.origin,
+            .kind = .obligation,
+            .backend = .z3,
+            .smtlib_hash = 1,
+            .result = .{ .status = .proved },
+        };
+    }
+    set.queries = queries;
+    const cases = [_]struct { value: ?obligation.VerificationQueryResult, reason: obligation.ArtifactBlockReason }{
+        .{ .value = null, .reason = .call_z3_relation_missing },
+        .{ .value = .{ .status = .unknown }, .reason = .unknown_query },
+        .{ .value = .{ .status = .proved, .degraded = true }, .reason = .degraded_query },
+        .{ .value = .{ .status = .proved, .vacuous = true }, .reason = .vacuous_query },
+        .{ .value = .{ .status = .proved, .vacuity_unknown = true }, .reason = .unknown_query },
+        .{ .value = .{ .status = .failed }, .reason = .failed_query },
+        // Neither arbitrary successes nor a custody receipt implement G9b/G9c.
+        .{ .value = .{ .status = .proved }, .reason = .call_relation_unsupported },
+    };
+    for (cases) |case| {
+        extra[0].result = case.value;
+        try testing.expectEqual(obligation.ArtifactDecision{ .blocked = case.reason }, set.artifactDecision());
+    }
+    const original = extra[0];
+    extra[0].backend = .lean;
+    try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_z3_relation_missing }, set.artifactDecision());
+    extra[0] = original;
+    extra[0].smtlib_hash = null;
+    try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_z3_relation_missing }, set.artifactDecision());
+    extra[0] = original;
+    extra[0].owner = .{ .function = .{ .name = "foreign" } };
+    try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_z3_relation_missing }, set.artifactDecision());
+    extra[0] = original;
+    extra[0].artifact_policy = .diagnostic_only;
+    try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_z3_relation_missing }, set.artifactDecision());
+}
+
 test "G8 call adapter binds compiler emitted rows without artifact authority" {
     var first = try collectCallProjection(testing.allocator, "tests/formal/call_adapter_leaf.ora");
     defer first.deinit();
@@ -14618,7 +14944,7 @@ test "G8 call adapter binds compiler emitted rows without artifact authority" {
     try first.set.validateIdReferences();
     try first.set.validateTermReferences();
     try obligation_to_lean.validateCallDependencyDigests(first.set);
-    try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_relation_unsupported }, first.set.artifactDecision());
+    try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_z3_relation_missing }, first.set.artifactDecision());
     var emitted = std.Io.Writer.Allocating.init(testing.allocator);
     defer emitted.deinit();
     var repeated = std.Io.Writer.Allocating.init(testing.allocator);
@@ -14763,7 +15089,7 @@ test "G7 source entry facts retain exact contract declarations and prefix calls"
         try result.set.validateIdReferences();
         try result.set.validateTermReferences();
         try obligation_to_lean.validateCallDependencyDigests(result.set);
-        try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_relation_unsupported }, result.set.artifactDecision());
+        try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_z3_relation_missing }, result.set.artifactDecision());
         var source = std.Io.Writer.Allocating.init(testing.allocator);
         defer source.deinit();
         try obligation_to_lean.writeModule(&source.writer, result.set, .{ .namespace = "Ora.Generated.EntryScope", .proof_surface = true });
@@ -14821,7 +15147,7 @@ test "G6 call projection covers the diagnosed function bodies" {
             for (result.set.loop_summaries) |loop| std.debug.print("  loop {d}: {any}, {any}\n", .{ loop.id, loop.projection_completeness, loop.unsupported_reasons });
         }
         complete = complete and valid;
-        if (valid) try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_relation_unsupported }, result.set.artifactDecision());
+        if (valid) try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_z3_relation_missing }, result.set.artifactDecision());
     }
     try testing.expect(complete);
 }

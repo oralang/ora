@@ -74,6 +74,38 @@ pub fn writeModule(writer: anytype, set: obligation.ObligationSet, options: Opti
     try writeNamespaceEnd(writer, options.namespace);
 }
 
+/// Separate custody target: installation of the requested certified function,
+/// including its transitive dependencies. This is not loop authorization or a
+/// nonvacuity claim, and does not change the canonical manifest/digest formats.
+pub fn writeCallCustodyModule(writer: anytype, set: obligation.ObligationSet, namespace: []const u8) !void {
+    if (set.hasBlockingDiagnostic()) return error.CallCustodyProjectionRejected;
+    if (set.function_summaries.len == 0) return error.CallCustodyFunctionsMissing;
+    for (set.loop_summaries) |row| if (!row.projectionSupported()) return error.CallCustodyProjectionRejected;
+    try writer.writeAll("import Ora.Loop.CallAdapter\n");
+    try writeModule(writer, set, .{ .namespace = namespace });
+    try writer.print("\nnamespace {s}\n\ndef emittedCallManifest : Ora.Loop.CallAdapterManifest := {{\n  formulas := emittedManifest\n  functions := [", .{namespace});
+    for (set.function_summaries, 0..) |row, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writer.print("(emittedFunctionVcSha256_{d}, emittedFunctionSummary_{d})", .{ row.id, row.id });
+    }
+    try writer.writeAll("]\n  loops := [");
+    for (set.loop_summaries, 0..) |row, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writer.print("(emittedLoopVcSha256_{d}, emittedLoopSummary_{d})", .{ row.id, row.id });
+    }
+    try writer.writeAll("] }\n\n");
+    for (set.function_summaries) |row| {
+        try writer.print(
+            "def emittedCallCustody_{d} : Prop :=\n" ++
+                "  ∃ certificates : Ora.Loop.CallAdapterCertificates emittedCallManifest,\n" ++
+                "    certificates.dependencies.calls.any (fun item =>\n" ++
+                "      item.1 == Ora.Loop.adapterKey {d} emittedFunctionVcSha256_{d}) = true\n\n",
+            .{ row.id, row.id, row.id },
+        );
+    }
+    try writeNamespaceEnd(writer, namespace);
+}
+
 fn writeTermLookupTheorems(writer: anytype, terms: []const obligation.Term) !void {
     if (terms.len > lean_term_chunk_size) {
         const chunk_count = leanTermChunkCount(terms.len);
@@ -3853,7 +3885,7 @@ test "certified call rows bind signatures ordered results returns and dependency
     try set.validateTermReferences();
     try set.validateIdReferences();
     try validateCallDependencyDigests(set);
-    try std.testing.expectEqual(obligation.ArtifactBlockReason.call_relation_unsupported, set.artifactDecision().blocked);
+    try std.testing.expectEqual(obligation.ArtifactBlockReason.call_z3_relation_missing, set.artifactDecision().blocked);
     var rendered = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer rendered.deinit();
     try writeModule(&rendered.writer, set, .{ .namespace = "Ora.Generated.CallRows" });

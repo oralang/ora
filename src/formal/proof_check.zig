@@ -51,6 +51,104 @@ pub const ApplyResult = struct {
 
 pub const ProofRow = proof_manifest.ProofRow;
 
+pub const CallCustodyInput = struct {
+    function_id: obligation.Id,
+    function_vc_sha256: [32]u8,
+    manifest_sha256: [32]u8,
+    theorem_name: []const u8,
+    proof_source: []const u8,
+};
+
+pub const CallCustodyManifest = struct {
+    collected: @import("obligation_from_mlir.zig").CollectResult,
+    source: []const u8,
+    sha256: [32]u8,
+
+    pub fn deinit(self: *CallCustodyManifest) void {
+        self.collected.deinit();
+        self.* = undefined;
+    }
+};
+
+/// Preparation and checking both start from canonical HIR. Neither accepts a
+/// caller-built ObligationSet or treats projection-completeness bits as evidence.
+pub fn prepareCallCustody(allocator: std.mem.Allocator, module: @import("mlir_c_api").c.MlirModule, namespace: []const u8) !CallCustodyManifest {
+    _ = try namespaceSuffix(namespace);
+    var collected = try @import("obligation_from_mlir.zig").collect(allocator, module, .{ .project_calls = true });
+    errdefer collected.deinit();
+    var source = std.Io.Writer.Allocating.init(collected.arena.allocator());
+    try obligation_to_lean.writeCallCustodyModule(&source.writer, collected.set, namespace);
+    var digest: [32]u8 = undefined;
+    Sha256.hash(source.written(), &digest, .{});
+    return .{ .collected = collected, .source = source.written(), .sha256 = digest };
+}
+
+/// A custody receipt is deliberately not a successful VerificationQuery. It
+/// records a kernel-checked installation, without claiming Z3, nonvacuity, or
+/// caller consumption. No artifactDecision path consumes this receipt in G9a.
+pub const CallCustodyReceipt = struct {
+    arena: std.heap.ArenaAllocator,
+    function_id: obligation.Id,
+    function_vc_sha256: [32]u8,
+    manifest_sha256: [32]u8,
+    proof_sha256: [32]u8,
+    checker_sha256: [32]u8,
+    checker_source: []const u8,
+    canonical_checker_source: []const u8,
+    agreement_source: []const u8,
+    axioms: []const []const u8,
+
+    pub fn deinit(self: *CallCustodyReceipt) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+pub fn checkCallCustody(
+    allocator: std.mem.Allocator,
+    module: @import("mlir_c_api").c.MlirModule,
+    namespace: []const u8,
+    input: CallCustodyInput,
+    process_environ: std.process.Environ,
+    stdout: anytype,
+) !CallCustodyReceipt {
+    var manifest = try prepareCallCustody(allocator, module, namespace);
+    defer manifest.deinit();
+    const set = manifest.collected.set;
+    _ = obligation.findById(set.function_summaries, input.function_id) orelse return error.CallCustodyFunctionMissing;
+    const digest = try obligation_to_lean.functionVcSha256(set, input.function_id);
+    if (!std.mem.eql(u8, &digest, &input.function_vc_sha256)) return error.CallCustodyFunctionDigestMismatch;
+    if (!std.mem.eql(u8, &manifest.sha256, &input.manifest_sha256)) return error.CallCustodyManifestMismatch;
+    if (input.proof_source.len == 0) return error.CallCustodyProofMissing;
+    try validateLeanTheoremPath(input.theorem_name);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const checked = try runLeanChecker(allocator, namespace, manifest.source, &.{.{
+        .query_id = input.function_id,
+        .module_name = "Ora.CallCustodyProof",
+        .theorem_name = input.theorem_name,
+        .call_function_id = input.function_id,
+        .import_module = false,
+    }}, input.proof_source, process_environ, stdout, false, arena.allocator());
+    if (checked.axiom_audits.len != 1) return error.LeanAxiomAuditMissing;
+    var proof_digest: [32]u8 = undefined;
+    var checker_digest: [32]u8 = undefined;
+    Sha256.hash(input.proof_source, &proof_digest, .{});
+    Sha256.hash(checked.canonical_source, &checker_digest, .{});
+    return .{
+        .arena = arena,
+        .function_id = input.function_id,
+        .function_vc_sha256 = digest,
+        .manifest_sha256 = manifest.sha256,
+        .proof_sha256 = proof_digest,
+        .checker_sha256 = checker_digest,
+        .checker_source = checked.checked_source,
+        .canonical_checker_source = checked.canonical_source,
+        .agreement_source = checked.canonical_agreement_source,
+        .axioms = checked.axiom_audits[0].axioms,
+    };
+}
+
 pub fn applyProofRows(
     allocator: std.mem.Allocator,
     set: obligation.ObligationSet,
@@ -380,6 +478,7 @@ const CheckedProofRow = struct {
     z3_proof_compatible: bool = false,
     zig_semantic_supported: bool = false,
     loop_summary_id: ?obligation.Id = null,
+    call_function_id: ?obligation.Id = null,
     target_smtlib_hash: ?u64 = null,
     target_constraint_count: u32 = 0,
     import_module: bool = true,
@@ -989,7 +1088,12 @@ fn buildLeanCheckerSourceWithInlineProofs(
         );
     }
     for (rows, 0..) |row, index| {
-        if (row.loop_summary_id != null) {
+        if (row.call_function_id) |function_id| {
+            try writer.print(
+                "theorem check_query_{d}_{d} : {s}.emittedCallCustody_{d} := by\n  exact {s}\n\n",
+                .{ row.query_id, index, generated_namespace, function_id, row.theorem_name },
+            );
+        } else if (row.loop_summary_id != null) {
             try writer.print(
                 \\theorem check_query_{d}_{d} :
                 \\    {s}.emittedVerifiedQuery_{d} := by

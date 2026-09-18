@@ -905,10 +905,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     proof_check_test_mod.addImport("ora_types", ora_types_mod);
+    proof_check_test_mod.addImport("ora_z3_verification", z3_verification_mod);
     const proof_check_tests = b.addTest(.{
         .name = "formal-proof-check-tests",
         .root_module = proof_check_test_mod,
     });
+    linkZ3Libraries(b, proof_check_tests, z3_step, target);
     const proof_check_tests_run = b.addRunArtifact(proof_check_tests);
     test_step.dependOn(&proof_check_tests_run.step);
 

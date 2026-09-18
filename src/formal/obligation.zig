@@ -43,9 +43,7 @@ pub const ObligationSet = struct {
         }
         self.validateTermReferences() catch return .{ .blocked = .invalid_dependency };
         self.validateIdReferences() catch return .{ .blocked = .invalid_dependency };
-        // Canonical call rows acquire authority only through the joint function
-        // certificate consumer; ordinary obligation proofs cannot discharge them.
-        if (self.function_summaries.len != 0) return .{ .blocked = .call_relation_unsupported };
+        if (self.callArtifactAuthorityBlockReason()) |reason| return .{ .blocked = reason };
         if (self.loopArtifactAuthorityBlockReason()) |reason| {
             return .{ .blocked = reason };
         }
@@ -93,6 +91,31 @@ pub const ObligationSet = struct {
         }
 
         return .allowed;
+    }
+
+    fn callArtifactAuthorityBlockReason(self: ObligationSet) ?ArtifactBlockReason {
+        if (self.function_summaries.len == 0) return null;
+        // A Lean custody receipt cannot replace independent function-safety
+        // queries. G9a emits none: the Z3 conjunct is required and unsatisfied.
+        for (self.function_summaries) |row| {
+            if (row.query_ids.safety.len == 0) return .call_z3_relation_missing;
+            for (row.query_ids.safety) |id| {
+                const query = findById(self.queries, id) orelse return .call_z3_relation_missing;
+                if (query.backend != .z3 or query.loop_summary_id != null or
+                    query.artifact_policy != .blocks_verified_artifacts or
+                    !functionOwnerEqual(query.owner, row.owner) or query.smtlib_hash == null)
+                    return .call_z3_relation_missing;
+                const result = query.result orelse return .call_z3_relation_missing;
+                if (result.degraded) return .degraded_query;
+                if (result.vacuous) return .vacuous_query;
+                if (result.vacuity_unknown or result.status == .unknown) return .unknown_query;
+                if (!querySucceeded(query, result)) return .failed_query;
+            }
+        }
+        // Necessary query checks above are not FunctionVC authentication. G9b
+        // must supply that binding, and G9c must consume both it and Lean custody
+        // for the same digest. Until then even forged success rows grant nothing.
+        return .call_relation_unsupported;
     }
 
     fn loopArtifactAuthorityBlockReason(self: ObligationSet) ?ArtifactBlockReason {
@@ -1170,6 +1193,7 @@ pub const ArtifactDecision = union(enum) {
 
 pub const ArtifactBlockReason = enum(u8) {
     call_relation_unsupported,
+    call_z3_relation_missing,
     blocking_diagnostic,
     invalid_dependency,
     unknown_query,
