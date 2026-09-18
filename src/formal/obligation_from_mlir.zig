@@ -962,11 +962,24 @@ const Collector = struct {
     fn callConnectedFunction(self: *Collector, function: mlir.MlirOperation) bool {
         if (!self.options.project_calls) return false;
         for (self.call_sites.items) |site| {
-            if (containingFunction(site).ptr == function.ptr) return true;
             const callee = self.callDeclaration(site) catch continue;
             if (callee.ptr == function.ptr) return true;
         }
+        for (self.call_sites.items) |site| if (containingFunction(site).ptr == function.ptr)
+            return callerHasScalarParameters(function);
         return false;
+    }
+
+    // An ordinary caller's slice is not a callee signature participant. Keep
+    // that caller on the existing verifier path; actual callees still pass
+    // callSignature unconditionally, including calls which pass a slice.
+    fn callerHasScalarParameters(function: mlir.MlirOperation) bool {
+        const block = functionEntryBlock(function);
+        if (mlir.oraBlockIsNull(block)) return false;
+        for (0..@intCast(mlir.oraBlockGetNumArguments(block))) |index| {
+            if (integerTypeWidth(mlir.oraValueGetType(mlir.oraBlockGetArgument(block, index))) == null) return false;
+        }
+        return true;
     }
 
     fn requireFunctionRow(self: *Collector, op: mlir.MlirOperation) !usize {
@@ -1004,7 +1017,8 @@ const Collector = struct {
             const op = self.function_ops.items[index];
             for (self.call_sites.items) |site| {
                 const callee = self.callDeclaration(site) catch continue;
-                if (callee.ptr == op.ptr) _ = try self.requireFunctionRow(containingFunction(site));
+                const caller = containingFunction(site);
+                if (callee.ptr == op.ptr and self.callConnectedFunction(caller)) _ = try self.requireFunctionRow(caller);
             }
             self.function = self.function_contexts.get(@intFromPtr(op.ptr)) orelse return error.MissingCallBody;
             if (self.function.has_external_call) return error.CallExternalUnsupported;
@@ -2459,7 +2473,8 @@ const Collector = struct {
         defer semantic_terminals.deinit(self.allocator);
         // Previously unprojectable guards are executed as ordered branches,
         // not flattened; established simple-guard rows keep their digest.
-        const structured_guard = draft.loop_kind == .scf_while and (self.options.project_calls or guard == .origin_value);
+        const structured_guard = draft.loop_kind == .scf_while and
+            (self.callConnectedFunction(containingFunction(draft.loop_op)) or guard == .origin_value);
         const first = mlir.oraBlockGetFirstOperation(if (structured_guard)
             mlir.oraScfWhileOpGetBeforeBlock(draft.loop_op)
         else

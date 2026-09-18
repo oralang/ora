@@ -15686,3 +15686,38 @@ test "G9b refreshed loop digests cannot hide a malformed exported return" {
         try testing.expectError(error.InvalidCallSignature, adapter.encodeFunctionVC(row.id, try obligation_to_lean.functionVcSha256(projected.set, row.id)));
     }
 }
+
+test "G9c caller boundary retains ordinary slice loops without scalarizing the caller" {
+    var compilation = try compilePackage("tests/formal/call_projection_slice_caller.ora");
+    defer compilation.deinit();
+    const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+    var ordinary = try obligation_from_mlir.collect(testing.allocator, hir.module.raw_module, .{});
+    defer ordinary.deinit();
+    var projected = try obligation_from_mlir.collect(testing.allocator, hir.module.raw_module, .{ .project_calls = true });
+    defer projected.deinit();
+    try testing.expect(!ordinary.set.hasBlockingDiagnostic());
+    try testing.expect(!projected.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 0), projected.set.function_summaries.len);
+    try testing.expectEqual(@as(usize, 1), projected.set.loop_summaries.len);
+    try testing.expect(projected.set.loop_summaries[0].projectionSupported());
+    try testing.expectEqualSlices(
+        u8,
+        &(try obligation_to_lean.loopVcSha256(ordinary.set, ordinary.set.loop_summaries[0].id)),
+        &(try obligation_to_lean.loopVcSha256(projected.set, projected.set.loop_summaries[0].id)),
+    );
+}
+
+test "G9c caller boundary permits scalar actuals from a slice caller and rejects slice actuals" {
+    var projected = try collectCallProjection(testing.allocator, "tests/formal/call_projection_slice_scalar_argument.ora");
+    defer projected.deinit();
+    try testing.expect(!projected.set.hasBlockingDiagnostic());
+    try testing.expectEqual(@as(usize, 1), projected.set.function_summaries.len);
+    const callee = projected.set.function_summaries[0];
+    try testing.expectEqualStrings("repeat", callee.owner.function.name);
+    try testing.expectEqual(@as(usize, 1), callee.parameters.len);
+    try projected.set.validateIdReferences();
+    try testing.expectError(error.InvalidCallSignature, collectCallProjection(
+        testing.allocator,
+        "tests/formal/call_projection_slice_argument_blocked.ora",
+    ));
+}

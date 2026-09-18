@@ -1,0 +1,8 @@
+contract SliceArgument {
+    fn repeat(items: slice[u256]) -> u256 {
+        var i: u256 = 0;
+        while (i < items.len) invariant(i <= items.len) { i = i +% 1; }
+        return i;
+    }
+    pub fn run(items: slice[u256]) -> u256 { return repeat(items); }
+}
