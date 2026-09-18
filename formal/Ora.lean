@@ -70,6 +70,7 @@ import Ora.Loop.IndexedRegion
 import Ora.Loop.Timeline
 import Ora.Loop.Call
 import Ora.Loop.CallTests
+import Ora.Loop.CallAdapterSafetyTests
 import Ora.Loop.IndexedRegionTests
 import Ora.Loop.HeaderFacts
 import Ora.Loop.StorageDenotation

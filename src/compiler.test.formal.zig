@@ -14608,6 +14608,123 @@ fn collectCallProjection(allocator: std.mem.Allocator, path: []const u8) !obliga
     return obligation_from_mlir.collect(allocator, hir.module.raw_module, .{ .project_calls = true });
 }
 
+test "G8 call adapter binds compiler emitted rows without artifact authority" {
+    var first = try collectCallProjection(testing.allocator, "tests/formal/call_adapter_leaf.ora");
+    defer first.deinit();
+    var second = try collectCallProjection(testing.allocator, "tests/formal/call_adapter_leaf.ora");
+    defer second.deinit();
+    errdefer for (first.set.diagnostics) |diagnostic| std.debug.print("G8: {s}\n", .{diagnostic.message});
+    try testing.expect(!first.set.hasBlockingDiagnostic());
+    try first.set.validateIdReferences();
+    try first.set.validateTermReferences();
+    try obligation_to_lean.validateCallDependencyDigests(first.set);
+    try testing.expectEqual(obligation.ArtifactDecision{ .blocked = .call_relation_unsupported }, first.set.artifactDecision());
+    var emitted = std.Io.Writer.Allocating.init(testing.allocator);
+    defer emitted.deinit();
+    var repeated = std.Io.Writer.Allocating.init(testing.allocator);
+    defer repeated.deinit();
+    try obligation_to_lean.writeModule(&emitted.writer, first.set, .{ .namespace = "Ora.Generated.G8" });
+    try obligation_to_lean.writeModule(&repeated.writer, second.set, .{ .namespace = "Ora.Generated.G8" });
+    try testing.expectEqualStrings(emitted.written(), repeated.written());
+    var leaf: ?obligation.FunctionSummaryRow = null;
+    for (first.set.function_summaries) |row| if (std.mem.eql(u8, row.owner.function.name, "yes")) {
+        leaf = row;
+    };
+    const row = leaf orelse return error.MissingAdapterLeaf;
+    try testing.expectEqual(@as(usize, 1), row.parameters.len);
+    try testing.expectEqual(@as(usize, 1), row.paths.len);
+    try testing.expectEqual(@as(usize, 0), row.paths[0].timeline.len);
+    const formula = row.paths[0].returns.direct.values[0].value.formula.term;
+    var source = std.Io.Writer.Allocating.init(testing.allocator);
+    defer source.deinit();
+    try source.writer.writeAll("import Ora.Loop.CallAdapter\n");
+    try source.writer.writeAll(emitted.written());
+    try source.writer.writeAll("\nnamespace Ora.Generated.G8\nopen Ora.Loop Ora.Obligation\ndef adapter : CallAdapterManifest := { formulas := emittedManifest, loops := [");
+    for (first.set.loop_summaries, 0..) |loop, index| {
+        if (index != 0) try source.writer.writeAll(", ");
+        try source.writer.print("(emittedLoopVcSha256_{d}, emittedLoopSummary_{d})", .{ loop.id, loop.id });
+    }
+    try source.writer.writeAll("], functions := [");
+    for (first.set.function_summaries, 0..) |function, index| {
+        if (index != 0) try source.writer.writeAll(", ");
+        try source.writer.print("(emittedFunctionVcSha256_{d}, emittedFunctionSummary_{d})", .{ function.id, function.id });
+    }
+    try source.writer.print("] }}\ndef row := emittedFunctionSummary_{d}\ndef digest := emittedFunctionVcSha256_{d}\ndef returnedTerm : Nat := {d}\n", .{ row.id, row.id, formula });
+    try source.writer.writeAll(
+        \\def body : AdapterBody := {
+        \\  signature := row.callSignature
+        \\  requires := row.entryFactsHold emittedManifest
+        \\  paths := [{ events := [], returns := .direct .success [.term returnedTerm] }]
+        \\  semantics := fun _ => (adapterSemantics {}
+        \\    (directStorageContext emittedManifest Env.empty [])).withCallChecks }
+        \\theorem bound : adapter.function {} digest row = .ok body := by rfl
+        \\theorem certificate : body.Certificate where
+        \\  safety := by
+        \\    intro input typed requires initial entry path member before formula after events
+        \\    simp only [body, List.mem_singleton] at member
+        \\    subst path
+        \\    simp at events
+        \\  calls := by
+        \\    intro input typed requires initial entry path member before invocation after events
+        \\    simp only [body, List.mem_singleton] at member
+        \\    subst path
+        \\    simp at events
+        \\  loopResults := by
+        \\    intro input typed requires initial entry path member before child bindings after events
+        \\    simp only [body, List.mem_singleton] at member
+        \\    subst path
+        \\    simp at events
+        \\  returns := by
+        \\    intro input initial path result typed requires entry member trace
+        \\    simp only [body, List.mem_singleton] at member
+        \\    subst path
+        \\    cases trace
+        \\    change row.callSignature.inputTyped input = true at typed
+        \\    simp only [body, CallSignature.entry?, typed, if_true, Option.some.injEq] at entry
+        \\    subst initial
+        \\    refine ⟨{ outcome := .success, payload := [.integer (Ora.Integer.Value.ofNat (.unsigned .w256) 1)] }, ?_, ?_⟩
+        \\    · rfl
+        \\    · rfl
+        \\def installed := (CallAdapterCertificates.empty adapter).addFunction digest row body bound certificate
+        \\example : (adapter.function {} (String.mk (List.replicate 64 '0')) row).map (fun _ => ()) =
+        \\    .error "call_adapter_function_digest_mismatch" := by rfl
+        \\example : (adapter.function {} digest { row with owner := "foreign" }).map (fun _ => ()) =
+        \\    .error "call_adapter_function_foreign" := by rfl
+        \\example : ({ adapter with functions := [("malformed", row)] }.function {} "malformed" row).map (fun _ => ()) =
+        \\    .error "call_adapter_manifest_malformed" := by rfl
+        \\#print axioms installed
+        \\end Ora.Generated.G8
+        \\
+    );
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try pathFromTmpAlloc(testing.allocator, tmp, "G8ProjectedAdapter.lean");
+    defer testing.allocator.free(path);
+    // Preserve the generated kernel input outside disposable checker scratch for review custody.
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, ".zig-cache/g8-adapter-evidence");
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = ".zig-cache/g8-adapter-evidence/G8ProjectedAdapter.lean", .data = source.written() });
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = source.written() });
+    const checked = try runLeanFileForTest(testing.allocator, path);
+    defer testing.allocator.free(checked.stdout);
+    defer testing.allocator.free(checked.stderr);
+    try expectExited(checked, 0);
+}
+
+test "G8 call adapter retains captured bool projection rejection" {
+    try testing.expectError(error.InvalidCallSignature, collectCallProjection(testing.allocator, "tests/formal/call_adapter_bool_parameter_blocked.ora"));
+}
+
+test "G8 call adapter retains bool return projection rejection" {
+    var result = try collectCallProjection(testing.allocator, "tests/formal/call_adapter_bool_return_blocked.ora");
+    defer result.deinit();
+    try testing.expect(result.set.hasBlockingDiagnostic());
+    var named = false;
+    for (result.set.diagnostics) |diagnostic| if (std.mem.eql(u8, diagnostic.message, "call_projection_InvalidCallReturn")) {
+        named = true;
+    };
+    try testing.expect(named);
+}
+
 test "G7 source entry facts retain exact contract declarations and prefix calls" {
     for ([_][]const u8{ "tests/formal/call_projection_prefix.ora", "tests/formal/call_entry_scopes.ora" }) |path| {
         var result = try collectCallProjection(testing.allocator, path);
