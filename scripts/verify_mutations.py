@@ -6,12 +6,17 @@ Each case starts from a contract that should verify. The script applies one
 semantic mutation and expects the verifier to reject the mutant. A mutant that
 still verifies is a soundness regression signal: the verifier accepted a
 contract whose stated property no longer follows from the implementation.
+
+Named loop-boundary cases require Z3 acceptance of the original and rejection
+of the mutant, while default verification denies bytecode for both. These are
+mutation checks, not claims of accepted Lean loop certificates.
 """
 
 from __future__ import annotations
 
 import argparse
 import dataclasses
+import json
 import os
 import pathlib
 import subprocess
@@ -326,6 +331,7 @@ class MutationCase:
     replace: str
     reason: str
     covers: tuple[str, ...] = ()
+    default_loop_exclusion: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -515,6 +521,7 @@ CASES = (
         find="ensures(counter == n)",
         replace="ensures(counter == n + 1)",
         reason="loop-invariant-derived postcondition overclaims the final counter value",
+        default_loop_exclusion="loop_header_fact_type_unsupported",
     ),
     MutationCase(
         name="loop_invariant_body_corruption",
@@ -523,6 +530,7 @@ CASES = (
         find="counter = counter + 1;",
         replace="counter = counter + 2;",
         reason="loop body no longer preserves the invariant-derived postcondition",
+        default_loop_exclusion="loop_header_fact_type_unsupported",
     ),
     MutationCase(
         name="state_invariant_precondition_removed",
@@ -663,6 +671,27 @@ def print_failure_output(result: subprocess.CompletedProcess[str]) -> None:
         print(result.stderr[-4000:], file=sys.stderr)
 
 
+def loop_boundary_matches(
+    result: subprocess.CompletedProcess[str], artifact_dir: pathlib.Path, reason: str, z3_success: bool
+) -> bool:
+    output = result.stdout + result.stderr
+    if result.returncode == 0 or reason not in output or "Lean proof gate cannot cover every runtime loop" not in output:
+        return False
+    reports = list(artifact_dir.rglob("*.smt.report.json"))
+    if emitted_hex_artifacts(artifact_dir) or len(reports) != 1:
+        return False
+    report = json.loads(reports[0].read_text())
+    summary = report["summary"]
+    return (
+        report["verification"]["success"] is z3_success
+        and summary["total_queries"] > 0
+        and summary["encoding_degraded"] is False
+        and summary["soundness_losses"] == []
+        and all(summary[key] == 0 for key in ("unknown", "vacuous", "vacuity_unknown", "inconsistent_bases"))
+        and (summary["failed_obligations"] == 0 if z3_success else summary["failed_obligations"] > 0)
+    )
+
+
 def run_case(case: MutationCase, compiler: pathlib.Path, tmpdir: pathlib.Path, timeout: int) -> bool:
     original_path = tmpdir / f"{case.name}.original.ora"
     mutant_path = tmpdir / f"{case.name}.mutant.ora"
@@ -672,7 +701,11 @@ def run_case(case: MutationCase, compiler: pathlib.Path, tmpdir: pathlib.Path, t
     mutant_path.write_text(mutate(case), encoding="utf-8")
 
     original = run_verifier(compiler, original_path, original_artifacts, timeout)
-    if original.returncode != 0:
+    original_valid = (
+        loop_boundary_matches(original, original_artifacts, case.default_loop_exclusion, True)
+        if case.default_loop_exclusion else original.returncode == 0
+    )
+    if not original_valid:
         print(f"[fail] {case.name}: original contract did not verify", file=sys.stderr)
         print_failure_output(original)
         return False
@@ -683,7 +716,14 @@ def run_case(case: MutationCase, compiler: pathlib.Path, tmpdir: pathlib.Path, t
         print(f"       file: {mutant_path}", file=sys.stderr)
         return False
 
-    print(f"[pass] {case.name}: mutant rejected")
+    if case.default_loop_exclusion:
+        if not loop_boundary_matches(mutant, mutant_artifacts, case.default_loop_exclusion, False):
+            print(f"[fail] {case.name}: missing independent Z3 rejection or default loop exclusion", file=sys.stderr)
+            print_failure_output(mutant)
+            return False
+        print(f"[pass] {case.name}: Z3 mutant rejected; original and mutant loop artifacts blocked")
+    else:
+        print(f"[pass] {case.name}: mutant rejected")
     return True
 
 

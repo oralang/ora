@@ -488,6 +488,26 @@ test "parse lean proofs path" {
     try std.testing.expectEqualStrings("proofs.json", parsed_eq.lean_proofs_path.?);
 }
 
+test "parse default verification preserves explicit opt out and proof request identity" {
+    const automatic = try parseArgs(&.{"input.ora"});
+    try std.testing.expect(automatic.verify_z3);
+    // The driver selects mandatory loop proofs after collecting runtime loops.
+    try std.testing.expectEqual(LeanProofMode.none, automatic.lean_proofs_mode);
+    try std.testing.expect(!automatic.lean_proofs_requested);
+    const unchecked = try parseArgs(&.{ "--no-verify", "input.ora" });
+    try std.testing.expect(!unchecked.verify_z3);
+    try std.testing.expectEqual(LeanProofMode.none, unchecked.lean_proofs_mode);
+    for ([_][]const []const u8{
+        &.{ "--no-verify", "--lean-proofs", "input.ora" },
+        &.{ "--lean-proofs", "--no-verify", "input.ora" },
+    }) |args| {
+        const conflicting = try parseArgs(args);
+        try std.testing.expect(!conflicting.verify_z3);
+        try std.testing.expect(conflicting.lean_proofs_requested);
+        try std.testing.expectEqual(LeanProofMode.userland, conflicting.lean_proofs_mode);
+    }
+}
+
 test "parse lean proofs as gate flag before source path" {
     const args = [_][]const u8{ "--lean-proofs", "input.ora" };
     const parsed = try parseArgs(args[0..]);

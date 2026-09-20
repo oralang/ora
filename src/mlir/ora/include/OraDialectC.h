@@ -119,6 +119,9 @@ extern "C"
     MLIR_CAPI_EXPORTED MlirLocation oraOperationGetLocation(MlirOperation op);
     MLIR_CAPI_EXPORTED MlirRegion oraOperationGetRegion(MlirOperation op, size_t index);
 
+    /// Detect call-interface and Ora external-call operations in every nested region.
+    MLIR_CAPI_EXPORTED bool oraOperationContainsCall(MlirOperation op);
+
     typedef enum OraOperationMemoryEffectKind
     {
         ORA_OPERATION_MEMORY_EFFECT_UNKNOWN = 0,

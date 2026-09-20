@@ -402,6 +402,7 @@ macro "ora_loop_direct_timeline_reduce"
     Ora.Loop.directStorageEvent?, Ora.Loop.directStorageLocation?,
     Ora.Loop.directIndexedRegionKind, Ora.Loop.directIndexedRegionRead?,
     ora_loop_integer_types,
+    Option.bind_eq_bind, Option.some_bind, Option.none_bind, Option.pure_def,
     Ora.Loop.directStorageProjection?, Ora.Loop.directStorageProjections?,
     Ora.Loop.directStorageProjectionData,
     Ora.Loop.directStorageEventData, Ora.Loop.directStorageEvents,
@@ -1166,7 +1167,9 @@ macro tk:"ora_loop_auto_plain" : tactic => do
             all_goals ora_loop_value_reduce at hInvariant hPath ⊢
             all_goals try ora_loop_apply_context
             all_goals try (ora_loop_normalize at hHeaderFacts)
-            all_goals ora_loop_normalize at hInvariant hPath ⊢
+            -- Context reduction may already normalize a checkpoint completely.
+            -- The following closure still has to prove the unchanged goal.
+            all_goals try (ora_loop_normalize at hInvariant hPath ⊢)
             all_goals ora_loop_unpack_conjunctions
             all_goals subst_vars
             all_goals ora_loop_close)

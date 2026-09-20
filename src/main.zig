@@ -2549,14 +2549,14 @@ fn printUsage(io: std.Io) !void {
     try stdout.print("  --mlir-debug=<list>    - MLIR diagnostics: statistics (other pass debug options reserved)\n", .{});
     try stdout.print("  --mlir-run-sir-framework-canonicalizer - Compatibility flag; SIR framework canonicalizer/DCE now runs by default\n", .{});
     try stdout.print("\nAnalysis Options:\n", .{});
-    try stdout.print("  --verify               - Run Z3 verification on MLIR annotations (default)\n", .{});
+    try stdout.print("  --verify               - Run Z3 and required Lean verification (default)\n", .{});
     try stdout.print("  --verify=basic|full    - Verification mode (default: full)\n", .{});
-    try stdout.print("  --no-verify            - Disable Z3 verification (emit mode only)\n", .{});
+    try stdout.print("  --no-verify            - Disable verification; retain runtime checks (emit mode only)\n", .{});
     try stdout.print("  --verify-stats         - Print Z3 query stats summary\n", .{});
     try stdout.print("  --explain              - Enable unsat-core explain mode for SMT verification\n", .{});
     try stdout.print("  --z3-proofs            - Emit raw Z3 proof objects in SMT reports/debug output (slower)\n", .{});
     try stdout.print("  --keep-proved-checks   - Keep SMT-proved guards/requires/ensures/invariants as runtime checks (falsification harness)\n", .{});
-    try stdout.print("  --lean-proofs[=mode]   - Run Lean gates; userland is the contract-level mode (default)\n", .{});
+    try stdout.print("  --lean-proofs[=mode]   - Run explicit userland Lean gates; required loop proofs run by default\n", .{});
     try stdout.print("                           kernel/both are rejected by the contract CLI; use zig build check-formal-sync\n", .{});
     try stdout.print("                           Legacy: --lean-proofs <proofs.json> supplies external proof rows\n", .{});
     try stdout.print("  --measure-canonical-z3 - Emit canonical-vs-live SMT hash measurement JSON\n", .{});
@@ -4717,8 +4717,10 @@ fn runCompilerMlirEmit(
     var formal = try formal_obligation_from_mlir.collect(allocator, lowering.module.raw_module, .{});
     defer formal.deinit();
     const formal_output_dir = formalArtifactOutputDir(mlir_options);
-    try writeLoopInductionReport(allocator, file_path, formal_output_dir, formal.set);
-    try printLoopInductionSummary(stdout, formal.set);
+    if (mlir_options.verify_z3) {
+        try writeLoopInductionReport(allocator, file_path, formal_output_dir, formal.set);
+        try printLoopInductionSummary(stdout, formal.set);
+    }
     const const_eval = try compilation.db.constEval(compilation.root_module_id);
     var source_accounting_result = formal_source_accounting_pipeline.run(
         allocator,
@@ -5014,7 +5016,7 @@ fn runMlirEmitAdvanced(
     const cfg_mode_is_ora = if (mlir_options.emit_cfg_mode) |mode| std.ascii.eqlIgnoreCase(mode, "ora") else false;
     const cfg_mode_is_sir = if (mlir_options.emit_cfg_mode) |mode| std.ascii.eqlIgnoreCase(mode, "sir") else false;
     const cfg_mode_is_sir_diff = if (mlir_options.emit_cfg_mode) |mode| std.ascii.eqlIgnoreCase(mode, "sir-diff") else false;
-    const needs_userland_lean_gate = mlir_options.lean_proofs_mode.includesUserland();
+    const needs_userland_lean_gate = mlir_options.verify_z3 and mlir_options.lean_proofs_mode.includesUserland();
     if (mlir_options.lean_proofs_mode.includesKernel()) {
         try stdout.print("error: --lean-proofs=kernel/both is not wired into contract compilation yet; run `zig build check-formal-sync` for compiler-kernel Lean checks.\n", .{});
         try stdout.flush();
@@ -5073,15 +5075,18 @@ fn runMlirEmitAdvanced(
     var native_calls: FormalNativeCalls = .{ .set = formal_result_for_smt_report.?.set, .function_ops = formal_result_for_smt_report.?.function_ops, .source_fact_bindings = formal_result_for_smt_report.?.source_fact_bindings };
     const formal_output_dir = formalArtifactOutputDir(mlir_options);
     const formal_display_dir = mlir_options.artifact_display_dir orelse formal_output_dir;
-    try writeLoopInductionReport(
-        allocator,
-        file_path,
-        formal_output_dir,
-        formal_result_for_smt_report.?.set,
-    );
-    try printLoopInductionSummary(stdout, formal_result_for_smt_report.?.set);
+    if (mlir_options.verify_z3) {
+        try writeLoopInductionReport(
+            allocator,
+            file_path,
+            formal_output_dir,
+            formal_result_for_smt_report.?.set,
+        );
+        try printLoopInductionSummary(stdout, formal_result_for_smt_report.?.set);
+    }
     const has_mandatory_loop_lean_gate = mlir_options.verify_z3 and
-        formal_result_for_smt_report.?.set.hasLeanCertificateRequirements();
+        (formal_result_for_smt_report.?.set.loop_summaries.len != 0 or
+            formal_result_for_smt_report.?.set.hasLeanCertificateRequirements());
     if (has_mandatory_loop_lean_gate) {
         needs_lean_proof_gate = true;
         needs_automatic_lean_proof_gate = !needs_external_lean_proof_gate;

@@ -1559,7 +1559,7 @@ const Collector = struct {
         if (body_facts.has_indexed_region_write) {
             try appendLoopReason(&reasons, self.allocator, .loop_indexed_region_write_unreviewed);
         }
-        if (body_facts.has_call) try appendLoopReason(&reasons, self.allocator, .loop_has_call);
+        if (mlir.oraOperationContainsCall(op)) try appendLoopReason(&reasons, self.allocator, .loop_has_call);
         if (body_facts.has_external_call) try appendLoopReason(&reasons, self.allocator, .loop_has_external_call);
         if (body_facts.has_resource_operation) try appendLoopReason(&reasons, self.allocator, .loop_has_resource_operation);
         if (body_facts.has_break_or_continue) try appendLoopReason(&reasons, self.allocator, .loop_has_break_or_continue);

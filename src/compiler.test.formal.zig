@@ -36,6 +36,211 @@ const renderOraMlirForSource = test_helpers.renderOraMlirForSource;
 // they never trust an independently installed binary by pathname.
 const ORA_BINARY_REL = compiler_test_preflight.ora_binary_path;
 
+test "v1 closure empty automatic target lists retain the actual artifact decision" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_]bool{ false, true }) |valid| {
+        const source = try std.fmt.allocPrint(
+            allocator,
+            "contract DefaultProofGateProbe {{ pub fn echo(input: u256) -> u256 ensures result == {s} {{ return input; }} }}",
+            .{if (valid) "input" else "0"},
+        );
+        defer allocator.free(source);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "zero_targets.ora", .data = source });
+        const path = try pathFromTmpAlloc(allocator, tmp, "zero_targets.ora");
+        defer allocator.free(path);
+        for ([_]bool{ false, true }) |explicit| {
+            const relative = try std.fmt.allocPrint(allocator, "zero-{s}-{s}", .{ if (valid) "valid" else "false", if (explicit) "explicit" else "default" });
+            defer allocator.free(relative);
+            const output = try pathFromTmpAlloc(allocator, tmp, relative);
+            defer allocator.free(output);
+            var args: std.ArrayList([]const u8) = .empty;
+            defer args.deinit(allocator);
+            try args.appendSlice(allocator, &.{ ORA_BINARY_REL, "emit", "--emit=smt-report,bytecode", "--out-dir", output });
+            if (explicit) try args.append(allocator, "--lean-proofs");
+            try args.append(allocator, path);
+            const run = try runProcessWithLeanPath(allocator, args.items);
+            defer allocator.free(run.stdout);
+            defer allocator.free(run.stderr);
+            errdefer std.debug.print("zero targets valid={} explicit={}\n{s}\n{s}", .{ valid, explicit, run.stdout, run.stderr });
+            try expectExited(run, if (valid) 0 else 1);
+            const hex = try std.fmt.allocPrint(allocator, "{s}/zero_targets.hex", .{relative});
+            defer allocator.free(hex);
+            if (valid) {
+                try tmp.dir.access(std.testing.io, hex, .{});
+            } else {
+                try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, hex, .{}));
+                try testing.expect(std.mem.indexOf(u8, run.stdout, if (explicit) "failed_query" else "failed to prove ensures in echo") != null);
+            }
+        }
+    }
+}
+
+test "v1 closure default loop free verification retains source assertions and invariants" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_]bool{ true, false }) |valid| {
+        const source = try std.fmt.allocPrint(
+            allocator,
+            "contract LoopFree {{ storage var x: u256 = 0; invariant bounded(x <= 100); pub fn set(v: u256) requires({s}) {{ assert(v <= 100, \"bound\"); x = v; }} }}",
+            .{if (valid) "v <= 100" else "true"},
+        );
+        defer allocator.free(source);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "loop_free.ora", .data = source });
+        const path = try pathFromTmpAlloc(allocator, tmp, "loop_free.ora");
+        defer allocator.free(path);
+        const relative = if (valid) "valid" else "invalid";
+        const output = try pathFromTmpAlloc(allocator, tmp, relative);
+        defer allocator.free(output);
+        const run = try runProcessWithLeanPath(allocator, &.{ ORA_BINARY_REL, "emit", "--emit=smt-report,bytecode", "--out-dir", output, path });
+        defer allocator.free(run.stdout);
+        defer allocator.free(run.stderr);
+        errdefer std.debug.print("loop-free valid={}\n{s}\n{s}", .{ valid, run.stdout, run.stderr });
+        try expectExited(run, if (valid) 0 else 1);
+        const hex = try std.fmt.allocPrint(allocator, "{s}/loop_free.hex", .{relative});
+        defer allocator.free(hex);
+        if (valid) {
+            try tmp.dir.access(std.testing.io, hex, .{});
+        } else {
+            try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, hex, .{}));
+            try testing.expect(std.mem.indexOf(u8, run.stdout, "failed to prove contract invariant") != null);
+            try testing.expect(std.mem.indexOf(u8, run.stdout, "Z3: rejected") != null);
+        }
+    }
+}
+
+test "v1 closure false supported loops block default emission beside call exclusions" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_]bool{ false, true }) |mixed| {
+        const source = try std.fmt.allocPrint(
+            allocator,
+            "contract MixedLoopFailure {{ fn leaf(input: u256) -> u256 {{ return input; }} pub fn run(input: u256) -> u256 {{ {s} var j: u256 = 1; while (j < 2) invariant j == 0 {{ j = j +% 1; }} return j; }} }}",
+            .{if (mixed) "var i: u256 = 0; while (i < 1) invariant i <= 1 { let value: u256 = leaf(input); i = i +% 1; }" else ""},
+        );
+        defer allocator.free(source);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "false_invariant.ora", .data = source });
+        const path = try pathFromTmpAlloc(allocator, tmp, "false_invariant.ora");
+        defer allocator.free(path);
+        const relative = if (mixed) "mixed" else "supported";
+        const output = try pathFromTmpAlloc(allocator, tmp, relative);
+        defer allocator.free(output);
+        const run = try runProcessWithLeanPath(allocator, &.{ ORA_BINARY_REL, "emit", "--emit=smt-report,bytecode", "--out-dir", output, path });
+        defer allocator.free(run.stdout);
+        defer allocator.free(run.stderr);
+        errdefer std.debug.print("false invariant mixed={}\n{s}\n{s}", .{ mixed, run.stdout, run.stderr });
+        try expectExited(run, 1);
+        try testing.expect(std.mem.indexOf(u8, run.stdout, "failed to prove invariant in run") != null);
+        try testing.expect(std.mem.indexOf(u8, run.stdout, "Z3: rejected") != null);
+        try testing.expectEqual(mixed, std.mem.indexOf(u8, run.stdout, "unsupported_call_in_loop:") != null);
+        const hex = try std.fmt.allocPrint(allocator, "{s}/false_invariant.hex", .{relative});
+        defer allocator.free(hex);
+        try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, hex, .{}));
+    }
+}
+
+test "v1 closure detects calls in complete loop regions and blocks default emission" {
+    const allocator = testing.allocator;
+    const cases = [_]struct { body: []const u8, loops: usize }{
+        .{ .body = "while (i < 2) invariant i <= 2 { if (i == input) { let value: u256 = leaf(input); } i = i +% 1; }", .loops = 1 },
+        .{ .body = "while (i < 2) invariant i <= 2 { match (input) { 0 -> { if (i == 0) { let value: u256 = leaf(input); } } else -> {} } i = i +% 1; }", .loops = 1 },
+        .{ .body = "while (i < 2) invariant i <= 2 { var j: u256 = 0; while (j < 2) invariant j <= 2 { let value: u256 = leaf(input); j = j +% 1; } i = i +% 1; }", .loops = 2 },
+        .{ .body = "while (i < leaf(input)) invariant i <= input { i = i +% 1; }", .loops = 1 },
+    };
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for (cases, 0..) |case, index| {
+        const source = try std.fmt.allocPrint(
+            allocator,
+            "contract CallDetector {{ fn leaf(input: u256) -> u256 {{ return input; }} pub fn run(input: u256) -> u256 {{ var i: u256 = 0; {s} return i; }} }}",
+            .{case.body},
+        );
+        defer allocator.free(source);
+        const stem = try std.fmt.allocPrint(allocator, "detector_{d}", .{index});
+        defer allocator.free(stem);
+        const name = try std.fmt.allocPrint(allocator, "{s}.ora", .{stem});
+        defer allocator.free(name);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = source });
+        const path = try pathFromTmpAlloc(allocator, tmp, name);
+        defer allocator.free(path);
+        var projected = try collectPackageObligations(allocator, path);
+        defer projected.deinit();
+        try testing.expectEqual(case.loops, projected.set.loop_summaries.len);
+        for (projected.set.loop_summaries) |summary| try testing.expect(loopSummaryHasReason(summary, .loop_has_call));
+        const output = try pathFromTmpAlloc(allocator, tmp, stem);
+        defer allocator.free(output);
+        const run = try runProcessWithLeanPath(allocator, &.{ ORA_BINARY_REL, "emit", "--emit=smt-report,bytecode", "--out-dir", output, path });
+        defer allocator.free(run.stdout);
+        defer allocator.free(run.stderr);
+        errdefer std.debug.print("detector {d}\n{s}\n{s}", .{ index, run.stdout, run.stderr });
+        try expectExited(run, 1);
+        try testing.expectEqual(case.loops, std.mem.count(u8, run.stdout, "unsupported_call_in_loop:"));
+        const hex = try std.fmt.allocPrint(allocator, "{s}/{s}.hex", .{ stem, stem });
+        defer allocator.free(hex);
+        try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, hex, .{}));
+        const report_name = try std.fmt.allocPrint(allocator, "{s}/{s}.formal.loops.json", .{ stem, stem });
+        defer allocator.free(report_name);
+        const report = try tmp.dir.readFileAlloc(std.testing.io, report_name, allocator, .limited(1024 * 1024));
+        defer allocator.free(report);
+        try testing.expectEqual(case.loops, std.mem.count(u8, report, "\"verification_reason\":\"unsupported_call_in_loop\""));
+        try testing.expectEqual(case.loops, std.mem.count(u8, report, "\"verification_status\":\"not_verified\""));
+    }
+}
+
+test "v1 closure MLIR call inventory distinguishes indirect external and pure builtins" {
+    const h = createContext();
+    defer destroyContext(h);
+    const module = try parseModule(h.ctx,
+        \\module {
+        \\  func.func private @leaf()
+        \\  func.func @direct() { func.call @leaf() : () -> ()
+        \\    func.return }
+        \\  func.func @indirect(%callee: () -> ()) { func.call_indirect %callee() : () -> ()
+        \\    func.return }
+        \\  func.func @external(%target: i256, %gas: i256, %data: i256) {
+        \\    %ok, %ret = "ora.external_call"(%target, %gas, %data) {call_kind = "call", trait_name = "T", method_name = "m"} : (i256, i256, i256) -> (i1, i256)
+        \\    func.return }
+        \\  func.func @caller() { %v = "ora.evm.caller"() : () -> i256
+        \\    func.return }
+        \\  func.func @callvalue() { %v = "ora.evm.callvalue"() : () -> i256
+        \\    func.return }
+        \\}
+    );
+    defer mlir.oraModuleDestroy(module);
+    var function = mlir.oraOperationGetNextInBlock(mlir.oraBlockGetFirstOperation(mlir.oraModuleGetBody(module)));
+    for ([_]bool{ true, true, true, false, false }) |expected| {
+        try testing.expectEqual(expected, mlir.oraOperationContainsCall(function));
+        function = mlir.oraOperationGetNextInBlock(function);
+    }
+}
+
+test "v1 closure default proves a loop and opt out suppresses loop verification claims" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const verified_output = try pathFromTmpAlloc(allocator, tmp, "verified");
+    defer allocator.free(verified_output);
+    const verified = try runProcessWithLeanPath(allocator, &.{ ORA_BINARY_REL, "emit", "--emit=bytecode", "--out-dir", verified_output, "tests/formal/scalar_loop_induction.ora" });
+    defer allocator.free(verified.stdout);
+    defer allocator.free(verified.stderr);
+    try expectExited(verified, 0);
+    try testing.expect(std.mem.indexOf(u8, verified.stdout, "kernel-checked certificates: 1") != null);
+    const unchecked_output = try pathFromTmpAlloc(allocator, tmp, "unchecked");
+    defer allocator.free(unchecked_output);
+    const unchecked = try runProcessWithLeanPath(allocator, &.{ ORA_BINARY_REL, "emit", "--no-verify", "--emit=bytecode", "--out-dir", unchecked_output, "tests/formal/call_adapter_leaf.ora" });
+    defer allocator.free(unchecked.stdout);
+    defer allocator.free(unchecked.stderr);
+    try expectExited(unchecked, 0);
+    try tmp.dir.access(std.testing.io, "unchecked/call_adapter_leaf.hex", .{});
+    try testing.expect(std.mem.indexOf(u8, unchecked.stdout, "Lean scalar-loop induction") == null);
+    inline for (.{ ".formal.loops.json", ".lean.proof.json", ".lean.dispatcher.proof.json" }) |suffix| {
+        try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "unchecked/call_adapter_leaf" ++ suffix, .{}));
+    }
+}
+
 const MlirContextHandle = struct {
     ctx: mlir.MlirContext,
 };

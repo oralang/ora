@@ -35,6 +35,7 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/Passes.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Interfaces/CallInterfaces.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -501,6 +502,18 @@ void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
     MlirRegion oraOperationGetRegion(MlirOperation op, size_t index)
     {
         return wrap(&unwrap(op)->getRegion(index));
+    }
+
+    bool oraOperationContainsCall(MlirOperation op)
+    {
+        mlir::Operation *operation = unwrap(op);
+        if (operation == nullptr)
+            return false;
+        return operation->walk([](mlir::Operation *child) {
+            const bool isCall = llvm::isa<mlir::CallOpInterface>(child) ||
+                                child->getName().getStringRef() == "ora.external_call";
+            return isCall ? mlir::WalkResult::interrupt() : mlir::WalkResult::advance();
+        }).wasInterrupted();
     }
 
     OraOperationMemoryEffectKind oraOperationGetMemoryEffectKind(MlirOperation op)

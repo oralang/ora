@@ -495,6 +495,10 @@ fn runtimeLoopCertificateTargetsComplete(
             try stdout.writeAll("loop_certificate_target_missing");
         }
         try stdout.writeByte('\n');
+        if (std.mem.indexOfScalar(obligation.LoopUnsupportedReason, summary.unsupported_reasons, .loop_has_call) != null) {
+            try stdout.writeAll("    unsupported_call_in_loop: automatic verification is unavailable; no bytecode is authorized.\n");
+            try stdout.writeAll("    Supply --lean-proofs=<manifest>, or explicitly use --no-verify with runtime checks retained.\n");
+        }
     }
     return complete;
 }
@@ -554,7 +558,10 @@ fn coordinateAutomatic(
         return .{ .artifact_emission_authorized = false, .certificate_emitted = false };
     }
     if (targets.items.len == 0) {
-        return .{ .artifact_emission_authorized = true, .certificate_emitted = false };
+        return .{
+            .artifact_emission_authorized = try reportDecision(stdout, "Automatic Lean proof gate", context.merged_result.set),
+            .certificate_emitted = false,
+        };
     }
 
     context.obligations_source = try renderObligationsSource(

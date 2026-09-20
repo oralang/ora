@@ -243,6 +243,10 @@ pub fn writeLoopInductionReport(writer: anytype, set: obligation.ObligationSet) 
         try writeStringField(writer, "loop_kind", @tagName(summary.loop_kind));
         try writeStringField(writer, "projection_completeness", @tagName(summary.projection_completeness));
         try writeStringField(writer, "status", if (certificate_required) "lean_certificate_required" else "excluded");
+        if (!certificate_required and std.mem.indexOfScalar(obligation.LoopUnsupportedReason, summary.unsupported_reasons, .loop_has_call) != null) {
+            try writeStringField(writer, "verification_status", "not_verified");
+            try writeStringField(writer, "verification_reason", "unsupported_call_in_loop");
+        }
         try writeBoolField(writer, "certificate_required", certificate_required);
         try writeOptionalNumberField(writer, "induction_query_id", if (query) |item| item.id else null);
         try writeEnumListField(
