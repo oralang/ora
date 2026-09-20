@@ -2839,6 +2839,67 @@ test "compiler const eval executes comptime while loops" {
     try testing.expectEqual(@as(i128, 3), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
+test "compiler comptime assignment execution reads the current loop state" {
+    const cases = .{
+        .{
+            "pub fn run() -> u256 { var total: u256 = 0; comptime while (total < 5) { total = total + 1; } return total; }",
+            5,
+        },
+        .{
+            "pub fn run() -> u256 { return comptime { var total = 0; while (total < 5) { total = total + 1; } total; }; }",
+            5,
+        },
+        .{
+            "pub fn run() -> u256 { return comptime { var total = 0; for (3) |i| { total = total + 1; } total; }; }",
+            3,
+        },
+        .{
+            "pub fn run() -> u256 { return comptime { var values = [0, 0, 0]; for (3) |i| { values[i + 0] = i + 1; } values[0] * 100 + values[1] * 10 + values[2]; }; }",
+            123,
+        },
+        .{
+            "pub fn run() -> u256 { var total: u256 = 0; comptime while (total < 5) { total += 1; } return total; }",
+            5,
+        },
+        .{
+            "pub fn run() -> u256 { var total: u256 = 0; comptime while (total < 5) { var next = total + 1; total = next; } return total; }",
+            5,
+        },
+        .{
+            "pub fn run() -> u256 { return comptime { var total = 0; while (total < 5) { var next = total + 1; total = next; } total; }; }",
+            5,
+        },
+        .{
+            "pub fn run() -> u256 { return comptime { var total = 0; for (3) |i| { var next = total + 1; total = next; } total; }; }",
+            3,
+        },
+    };
+    inline for (cases) |case| {
+        var compilation = try compileText(case[0]);
+        defer compilation.deinit();
+        const module = compilation.db.sources.module(compilation.root_module_id);
+        const ast_file = try compilation.db.astFile(module.file_id);
+        const function = ast_file.item(ast_file.root_items[0]).Function;
+        const body = ast_file.body(function.body);
+        const ret = ast_file.statement(body.statements[body.statements.len - 1]).Return;
+        var evaluated = try compiler.comptime_eval.constEval(testing.allocator, ast_file, .{
+            .config = .{ .max_loop_iterations = 8 },
+        });
+        defer evaluated.deinit();
+        try testing.expect(evaluated.diagnostics.isEmpty());
+        try testing.expectEqual(@as(i128, case[1]), try evaluated.values[ret.value.?.index()].?.integer.toInt(i128));
+
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir.diagnostics.isEmpty());
+        try testing.expect(mlir.oraCanonicalizeOraMLIR(hir.context, hir.module.raw_module));
+        const text = try hir.renderText(testing.allocator);
+        defer testing.allocator.free(text);
+        errdefer std.debug.print("comptime source: {s}\n{s}\n", .{ case[0], text });
+        try testing.expect(std.mem.indexOf(u8, text, "scf.while") == null);
+        try testing.expect(std.mem.indexOf(u8, text, std.fmt.comptimePrint("ora.return %c{d}_i256 : i256", .{case[1]})) != null);
+    }
+}
+
 test "compiler const eval executes comptime integer for loops" {
     const source_text =
         \\pub fn sum() -> u256 {

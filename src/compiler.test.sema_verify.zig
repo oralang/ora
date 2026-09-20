@@ -66,8 +66,8 @@ test "compiler lowers ensures on implicit void returns" {
     const hir_text = try hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
 
-    const ensures_index = std.mem.indexOf(u8, hir_text, "ora.ensures") orelse return error.TestUnexpectedResult;
-    const return_index = std.mem.indexOf(u8, hir_text, "ora.return") orelse return error.TestUnexpectedResult;
+    const ensures_index = std.mem.indexOf(u8, hir_text, "ora.ensures ") orelse return error.TestUnexpectedResult;
+    const return_index = std.mem.indexOf(u8, hir_text, "ora.return ") orelse return error.TestUnexpectedResult;
     try testing.expect(ensures_index < return_index);
 }
 

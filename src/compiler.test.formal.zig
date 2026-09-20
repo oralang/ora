@@ -4609,10 +4609,12 @@ test "lean proofs verify a two-switch dispatcher network through bytecode" {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
     try source.writer.writeAll(
+        \\comptime const std = @import("std");
+        \\
         \\contract DispatcherNetworkGate {
         \\    storage var counter: u256;
         \\
-        \\    pub fn bump() {
+        \\    pub fn bump() requires counter < std.constants.U256_MAX {
         \\        counter = counter + 1;
         \\    }
         \\
@@ -4668,6 +4670,22 @@ test "lean proofs verify a two-switch dispatcher network through bytecode" {
     try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "current_dispatcher_network_matches"));
     try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "current_dispatcher_unknown_selectors_revert"));
     try testing.expect(std.mem.containsAtLeast(u8, certificate, 1, "\"bytecode_templates_valid\": true"));
+
+    // Retain the unbounded increment as an overflow rejection under default verification.
+    const unbounded = try std.mem.replaceOwned(u8, allocator, source.written(), " requires counter < std.constants.U256_MAX", "");
+    defer allocator.free(unbounded);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "unbounded.ora", .data = unbounded });
+    const unbounded_path = try pathFromTmpAlloc(allocator, tmp, "unbounded.ora");
+    defer allocator.free(unbounded_path);
+    const rejected_path = try pathFromTmpAlloc(allocator, tmp, "rejected");
+    defer allocator.free(rejected_path);
+    const rejected = try runProcessWithLeanPath(allocator, &.{ ORA_BINARY_REL, "emit", "--emit=bytecode", "--out-dir", rejected_path, unbounded_path });
+    defer allocator.free(rejected.stdout);
+    defer allocator.free(rejected.stderr);
+    try expectExited(rejected, 1);
+    try testing.expect(std.mem.indexOf(u8, rejected.stderr, "checked addition overflow") != null);
+    try testing.expect(std.mem.indexOf(u8, rejected.stdout, "counterexample:") != null);
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "rejected/unbounded.hex", .{}));
 }
 
 test "lean proofs discharge multiplicative dispatcher planner trace end to end" {

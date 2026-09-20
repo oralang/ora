@@ -507,7 +507,7 @@ const ConstEvaluator = struct {
             .Comptime => |comptime_expr| blk: {
                 self.required_comptime_depth += 1;
                 defer self.required_comptime_depth -= 1;
-                const ct_value = try self.evalComptimeBodyCtValue(comptime_expr.body, use_cache);
+                const ct_value = try self.evalComptimeBodyCtValue(comptime_expr.body);
                 var value = if (ct_value) |inner|
                     try ctValueToConstValue(self.allocator, &self.env.heap, inner)
                 else
@@ -759,7 +759,7 @@ const ConstEvaluator = struct {
             .Comptime => |comptime_expr| blk: {
                 self.required_comptime_depth += 1;
                 defer self.required_comptime_depth -= 1;
-                break :blk try self.evalComptimeBodyCtValue(comptime_expr.body, use_cache);
+                break :blk try self.evalComptimeBodyCtValue(comptime_expr.body);
             },
             .ArrayLiteral => |array| blk: {
                 const elems = try self.allocator.alloc(CtValue, array.elements.len);
@@ -3270,7 +3270,7 @@ const ConstEvaluator = struct {
         // Do not persist callee-body expression values into the module-global
         // const-eval cache. Those expression ids belong to the generic function
         // body and can otherwise be polluted by one concrete call context.
-        const body_value = try self.evalComptimeBodyCtValue(function.body, false);
+        const body_value = try self.evalComptimeBodyCtValue(function.body);
         if (body_value == null) {
             self.recordMissingComptimeValue(
                 self.sourceSpan(call.range),
@@ -4242,8 +4242,9 @@ const ConstEvaluator = struct {
         };
     }
 
-    fn evalComptimeBodyCtValue(self: *ConstEvaluator, body_id: ast.BodyId, comptime use_cache: bool) anyerror!?CtValue {
-        return switch (try self.evalComptimeBodyControlCtValue(body_id, use_cache)) {
+    fn evalComptimeBodyCtValue(self: *ConstEvaluator, body_id: ast.BodyId) anyerror!?CtValue {
+        // Body expressions read a mutable environment; only the enclosing result may be cached.
+        return switch (try self.evalComptimeBodyControlCtValue(body_id, false)) {
             .value => |value| value,
             .return_value => |value| value,
             .break_loop, .continue_loop => null,
@@ -4289,7 +4290,7 @@ const ConstEvaluator = struct {
                             },
                             else => {},
                         }
-                        if (try self.evalExprCtValue(expr_id)) |ct_value| {
+                        if (try self.evalExprCtValueImpl(expr_id, false, true)) |ct_value| {
                             var persisted = (try ctValueToConstValue(self.allocator, &self.env.heap, ct_value)) orelse try self.evalExprUncached(expr_id);
                             persisted = try self.normalizeWrappingValueForDecl(decl, expr_id, persisted);
                             if (self.shouldBindNormalizedWrappingValue(decl, expr_id, persisted)) {
@@ -4371,7 +4372,8 @@ const ConstEvaluator = struct {
                     }
                 },
                 .Assign => |assign| {
-                    last_value = try self.evalComptimeAssign(assign, true);
+                    // Executed bodies may revisit this expression after mutating its operands.
+                    last_value = try self.evalComptimeAssign(assign, false);
                 },
                 .Assert => |assert_stmt| {
                     if (!(try self.checkFormalPredicate(assert_stmt.condition, assert_stmt.source_fact_id, assert_stmt.range, assert_stmt.message orelse "assertion"))) return .indeterminate;
