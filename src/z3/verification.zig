@@ -6532,6 +6532,17 @@ fn formalLogicalRoleForPreparedAnnotation(ann: EncodedAnnotation) ?[]const u8 {
     if (ann.verification_context) |context| {
         if (std.mem.eql(u8, context, "arithmetic_safety")) return "arithmetic_safety";
     }
+    // Ordinary Ora assertions share the verifier's invariant category, but
+    // retain their source role for exact formal-query identity matching.
+    // Tagged requires/ensures and guards already have distinct kinds.
+    if (ann.kind == .ContractInvariant) {
+        if (ann.source_op) |op| {
+            if (!mlir.oraOperationIsNull(op)) {
+                const name = mlir.oraOperationGetName(op);
+                if (name.data != null and std.mem.eql(u8, name.data[0..name.length], "ora.assert")) return "assert";
+            }
+        }
+    }
     return formalLogicalRoleForAnnotation(ann.kind);
 }
 
@@ -12080,8 +12091,12 @@ test "full verify mode treats untagged ora.assert as obligation" {
     for (queries.items) |q| {
         if (q.kind == .Obligation and q.obligation_kind == .ContractInvariant) {
             saw_contract_obligation = true;
-            try testing.expectEqual(FormalMatchStatus.missing, q.formal_match_status);
-            try testing.expect(q.formal_query_id == null);
+            try testing.expectEqual(FormalMatchStatus.matched, q.formal_match_status);
+            try testing.expectEqual(@as(?u32, 73), q.formal_query_id);
+            try testing.expect(q.smtlib_hash != 0);
+            pass.solver.reset();
+            try assertPreparedQueryConstraints(&pass.solver, q.constraints);
+            try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), try pass.solver.checkChecked());
             try testing.expectEqual(FormalMatchStatus.matched, q.accounting_match_status);
             try testing.expectEqual(@as(?u32, 73), q.accounting_query_id);
             break;

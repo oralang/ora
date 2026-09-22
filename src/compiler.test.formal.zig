@@ -5634,6 +5634,131 @@ test "formal Z3 prepared query results overlay MLIR manifest queries" {
     }
 }
 
+test "C8 source assertions bind real Z3 queries and reject identity corruption" {
+    const h = createContext();
+    defer destroyContext(h);
+    const module = try parseModule(h.ctx,
+        \\module {
+        \\  func.func @checked(%flag: i1) {
+        \\    "ora.requires"(%flag) : (i1) -> ()
+        \\    "ora.assert"(%flag) <{message = "first source assertion"}> : (i1) -> () loc("c8.ora":10:1)
+        \\    "ora.assert"(%flag) <{message = "second source assertion"}> : (i1) -> () loc("c8.ora":10:1)
+        \\    "ora.assert"(%flag) <{message = "checked addition overflow"}> {ora.verification_context = "arithmetic_safety"} : (i1) -> ()
+        \\    cf.assert %flag, "existing invariant category"
+        \\    "ora.assert"(%flag) <{message = "postcondition"}> {ora.ensures = true} : (i1) -> ()
+        \\    func.return
+        \\  }
+        \\  func.func @other(%flag: i1) {
+        \\    "ora.requires"(%flag) : (i1) -> ()
+        \\    "ora.assert"(%flag) <{message = "foreign assertion"}> : (i1) -> () loc("c8.ora":10:1)
+        \\    func.return
+        \\  }
+        \\}
+    );
+    defer mlir.oraModuleDestroy(module);
+    var formal = try obligation_from_mlir.collect(testing.allocator, module, .{});
+    defer formal.deinit();
+    try testing.expect(!formal.set.hasBlockingDiagnostic());
+    const original = try test_helpers.z3FormalQueryBindingsFromFormalForTest(testing.allocator, formal.query_bindings);
+    defer testing.allocator.free(original);
+    var assertion_indices: std.ArrayList(usize) = .empty;
+    defer assertion_indices.deinit(testing.allocator);
+    for (original, 0..) |binding, index| {
+        if (std.mem.eql(u8, binding.logical_role orelse "", "assert")) try assertion_indices.append(testing.allocator, index);
+    }
+    try testing.expectEqual(@as(usize, 3), assertion_indices.items.len);
+    const target_index = assertion_indices.items[0];
+    const target_id = original[target_index].query_id;
+    const foreign_query = obligation.findById(formal.set.queries, original[assertion_indices.items[2]].query_id).?;
+    try testing.expectEqualStrings("other", foreign_query.owner.function.name);
+
+    for (std.meta.tags(enum { intact, wrong_source, wrong_owner, wrong_role, duplicate_binding, missing_binding, duplicate_row, missing_row })) |mutation| {
+        errdefer std.debug.print("C8 mutation={s}\n", .{@tagName(mutation)});
+        var bindings: std.ArrayList(z3_verification.FormalQueryBinding) = .empty;
+        defer bindings.deinit(testing.allocator);
+        try bindings.appendSlice(testing.allocator, original);
+        switch (mutation) {
+            .wrong_source => bindings.items[target_index].source_op_id = original[assertion_indices.items[1]].source_op_id,
+            // Same operation shape and identical source location, but a different
+            // function's actual operation identity cannot supply this proof.
+            .wrong_owner => bindings.items[target_index].source_op_id = original[assertion_indices.items[2]].source_op_id,
+            .wrong_role => bindings.items[target_index].logical_role = "contract_invariant",
+            .duplicate_binding => try bindings.append(testing.allocator, original[target_index]),
+            .missing_binding => _ = bindings.orderedRemove(target_index),
+            else => {},
+        }
+        var pass = try z3_verification.VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        pass.setVerifyMode(.Full);
+        pass.setFormalQueryBindings(bindings.items);
+        var verified = try pass.runVerificationPassPreparedSequential(module);
+        defer verified.deinit();
+        try testing.expect(verified.success);
+        var report = try pass.buildSmtReport(module, "c8_assertions.ora", &verified);
+        defer report.deinit(testing.allocator);
+        const manifest = report.query_manifest orelse return error.TestUnexpectedResult;
+        var rows: std.ArrayList(z3_verification.PreparedQueryManifestRow) = .empty;
+        defer rows.deinit(testing.allocator);
+        for (manifest.rows) |row| {
+            if (row.formal_query_id == target_id and mutation == .missing_row) continue;
+            try rows.append(testing.allocator, row);
+            if (row.formal_query_id == target_id and mutation == .duplicate_row) try rows.append(testing.allocator, row);
+        }
+        var overlay = try obligation_from_z3.overlayPreparedQueryResults(testing.allocator, formal.set, rows.items);
+        defer overlay.deinit();
+        if (mutation == .intact) {
+            try testing.expect(!overlay.set.hasBlockingDiagnostic());
+            try testing.expect(overlay.set.artifactDecision().isAllowed());
+            var assertions: usize = 0;
+            var arithmetic: usize = 0;
+            var invariants: usize = 0;
+            var ensures: usize = 0;
+            for (overlay.set.queries) |query| {
+                try testing.expectEqual(obligation.VerificationBackend.z3, query.backend);
+                const digest = query.smtlib_hash orelse return error.TestUnexpectedResult;
+                try testing.expect(digest != 0);
+                if (query.kind == .base) {
+                    try testing.expectEqual(obligation.VerificationQueryStatus.sat, query.result.?.status);
+                    continue;
+                }
+                try testing.expectEqual(obligation.VerificationQueryStatus.unsat, query.result.?.status);
+                var matches: usize = 0;
+                for (manifest.rows) |row| {
+                    if (row.formal_query_id != query.id) continue;
+                    matches += 1;
+                    try testing.expectEqual(z3_verification.FormalMatchStatus.matched, row.formal_match_status);
+                    try testing.expectEqual(z3_verification.QueryResultStatus.unsat, row.result_status.?);
+                    try testing.expectEqual(digest, row.smtlib_hash);
+                    try testing.expectEqualSlices(obligation.Id, query.assumption_ids, row.formal_assumption_ids);
+                    try testing.expectEqualSlices(obligation.Id, query.obligation_ids, row.formal_obligation_ids);
+                }
+                try testing.expectEqual(@as(usize, 1), matches);
+                switch (query.logical_role orelse return error.TestUnexpectedResult) {
+                    .assert => assertions += 1,
+                    .arithmetic_safety => arithmetic += 1,
+                    .contract_invariant => invariants += 1,
+                    .ensures => ensures += 1,
+                    else => return error.TestUnexpectedResult,
+                }
+            }
+            try testing.expectEqual(@as(usize, 3), assertions);
+            try testing.expectEqual(@as(usize, 1), arithmetic);
+            try testing.expectEqual(@as(usize, 1), invariants);
+            try testing.expectEqual(@as(usize, 1), ensures);
+        } else {
+            try testing.expect(!overlay.set.artifactDecision().isAllowed());
+            var unmatched = false;
+            for (overlay.set.diagnostics) |diagnostic| {
+                if (diagnostic.kind == .unmatched_report_row) unmatched = true;
+            }
+            try testing.expect(unmatched);
+            const target = obligation.findById(overlay.set.queries, target_id).?;
+            try testing.expect(target.result == null);
+            try testing.expect(target.smtlib_hash == null);
+        }
+    }
+}
+
 test "formal Z3 overlay ignores only clean unmatched proved rows" {
     const clean_rows = [_]z3_verification.PreparedQueryManifestRow{
         .{
