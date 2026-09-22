@@ -1,0 +1,46 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "power_compound(uint8,uint8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [0, 2]
+returns = { u8 = 0 }
+
+[[call]]
+fn = "power_compound(uint8,uint8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [3, 2]
+returns = { u8 = 9 }
+
+[[call]]
+fn = "power_compound(uint8,uint8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [0, 0]
+returns = { u8 = 1 }
+
+[[call]]
+fn = "power_ordinary(uint8,uint8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [0, 2]
+returns = { u8 = 0 }
+
+[[call]]
+fn = "power_ordinary(uint8,uint8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [3, 2]
+returns = { u8 = 9 }
+
+[[call]]
+fn = "power_ordinary(uint8,uint8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [0, 0]
+returns = { u8 = 1 }

@@ -1,0 +1,4 @@
+contract CompoundPower {
+    pub fn power_compound(a: u8, b: u8) -> u8 { var x: u8 = a; x **= b; return x; }
+    pub fn power_ordinary(a: u8, b: u8) -> u8 { var x: u8 = a; x = x ** b; return x; }
+}

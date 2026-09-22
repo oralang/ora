@@ -1,0 +1,26 @@
+contract CompoundArithmetic {
+    pub fn div_compound(a: u256, b: u256) -> u256 { var x: u256 = a; x /= b; return x; }
+    pub fn div_ordinary(a: u256, b: u256) -> u256 { var x: u256 = a; x = x / b; return x; }
+    pub fn rem_compound(a: u256, b: u256) -> u256 { var x: u256 = a; x %= b; return x; }
+    pub fn rem_ordinary(a: u256, b: u256) -> u256 { var x: u256 = a; x = x % b; return x; }
+    pub fn signed_div_compound(a: i8, b: i8) -> i8 { var x: i8 = a; x /= b; return x; }
+    pub fn signed_div_ordinary(a: i8, b: i8) -> i8 { var x: i8 = a; x = x / b; return x; }
+    pub fn signed_rem_compound(a: i8, b: i8) -> i8 { var x: i8 = a; x %= b; return x; }
+    pub fn signed_rem_ordinary(a: i8, b: i8) -> i8 { var x: i8 = a; x = x % b; return x; }
+    pub fn add_compound(a: u256, b: u256) -> u256 { var x: u256 = a; x += b; return x; }
+    pub fn add_ordinary(a: u256, b: u256) -> u256 { var x: u256 = a; x = x + b; return x; }
+    pub fn sub_compound(a: u256, b: u256) -> u256 { var x: u256 = a; x -= b; return x; }
+    pub fn sub_ordinary(a: u256, b: u256) -> u256 { var x: u256 = a; x = x - b; return x; }
+    pub fn mul_compound(a: u256, b: u256) -> u256 { var x: u256 = a; x *= b; return x; }
+    pub fn mul_ordinary(a: u256, b: u256) -> u256 { var x: u256 = a; x = x * b; return x; }
+    pub fn wrap_add_compound(a: u8, b: u8) -> u8 { var x: u8 = a; x +%= b; return x; }
+    pub fn wrap_add_ordinary(a: u8, b: u8) -> u8 { var x: u8 = a; x = x +% b; return x; }
+    pub fn wrap_sub_compound(a: u8, b: u8) -> u8 { var x: u8 = a; x -%= b; return x; }
+    pub fn wrap_sub_ordinary(a: u8, b: u8) -> u8 { var x: u8 = a; x = x -% b; return x; }
+    pub fn wrap_mul_compound(a: u8, b: u8) -> u8 { var x: u8 = a; x *%= b; return x; }
+    pub fn wrap_mul_ordinary(a: u8, b: u8) -> u8 { var x: u8 = a; x = x *% b; return x; }
+    pub fn shl_compound(a: u8, b: u8) -> u8 { var x: u8 = a; x <<= b; return x; }
+    pub fn shl_ordinary(a: u8, b: u8) -> u8 { var x: u8 = a; x = x << b; return x; }
+    pub fn shr_compound(a: i8, b: i8) -> i8 { var x: i8 = a; x >>= b; return x; }
+    pub fn shr_ordinary(a: i8, b: i8) -> i8 { var x: i8 = a; x = x >> b; return x; }
+}

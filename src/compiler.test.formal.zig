@@ -6729,6 +6729,30 @@ test "formal obligation MLIR adapter classifies arithmetic safety producers" {
     try testing.expectEqual(@as(usize, 1), countArithmeticSafety(result.set, .shift_amount_bounds));
 }
 
+test "compound arithmetic gate internal quotient exemption requires the exact string marker" {
+    const h = createContext();
+    defer destroyContext(h);
+    for ([_][]const u8{ "", " {ora.guard_internal = \"false\"}", " {ora.guard_internal = true}", " {ora.guard_internal = \"TRUE\"}", " {ora.guard_internal = \"true\"}" }, 0..) |attrs, index| {
+        const text = try std.fmt.allocPrint(testing.allocator,
+            \\module {{
+            \\  func.func @arith(%flag: i1, %x: i256, %y: i256) {{
+            \\    %q = arith.divui %x, %y{s} : i256
+            \\    "ora.assert"(%flag) <{{message = "checked power overflow"}}> : (i1) -> ()
+            \\    func.return
+            \\  }}
+            \\}}
+        , .{attrs});
+        defer testing.allocator.free(text);
+        const module = try parseModule(h.ctx, text);
+        defer mlir.oraModuleDestroy(module);
+        var result = try obligation_from_mlir.collect(testing.allocator, module, .{});
+        defer result.deinit();
+        try testing.expect(!result.set.hasBlockingDiagnostic());
+        try testing.expectEqual(@as(usize, if (index == 4) 0 else 1), countArithmeticSafety(result.set, .division_by_zero));
+        try testing.expectEqual(@as(usize, 1), countArithmeticSafety(result.set, .power_overflow));
+    }
+}
+
 test "formal obligation MLIR adapter collects verification markers and assumptions" {
     const h = createContext();
     defer destroyContext(h);
@@ -16426,4 +16450,166 @@ test "G9c caller boundary permits scalar actuals from a slice caller and rejects
         testing.allocator,
         "tests/formal/call_projection_slice_argument_blocked.ora",
     ));
+}
+
+// Source-operation ordinals include non-obligation ops (such as a repeated
+// index constant). Rename references bijectively, retaining the op name,
+// symbol, all formulas, links and the distinction between different origins.
+fn compoundRenameOrigins(value: *std.json.Value, names: *std.AutoHashMap(i64, i64)) !void {
+    switch (value.*) {
+        .object => |*object| {
+            if (object.get("tag")) |tag| {
+                if (tag == .string and std.mem.eql(u8, tag.string, "mlir_op")) {
+                    const ordinal = object.getPtr("ordinal") orelse return error.TestUnexpectedResult;
+                    const entry = try names.getOrPut(ordinal.integer);
+                    if (!entry.found_existing) entry.value_ptr.* = @intCast(names.count());
+                    ordinal.integer = entry.value_ptr.*;
+                }
+            }
+            for (object.values()) |*child| try compoundRenameOrigins(child, names);
+        },
+        .array => |*array| for (array.items) |*child| try compoundRenameOrigins(child, names),
+        else => {},
+    }
+}
+
+fn compoundComparableDump(set: obligation.ObligationSet) ![]u8 {
+    const a = testing.allocator;
+    const raw = try dumpManifestToOwnedString(a, set);
+    defer a.free(raw);
+    var names = std.AutoHashMap(i64, i64).init(a);
+    defer names.deinit();
+    var output = std.Io.Writer.Allocating.init(a);
+    errdefer output.deinit();
+    var lines = std.mem.tokenizeScalar(u8, raw, '\n');
+    while (lines.next()) |line| {
+        var row = try std.json.parseFromSlice(std.json.Value, a, line, .{});
+        defer row.deinit();
+        try compoundRenameOrigins(&row.value, &names);
+        try std.json.Stringify.value(row.value, .{}, &output.writer);
+        try output.writer.writeByte('\n');
+    }
+    return output.toOwnedSlice();
+}
+
+fn compoundArithmeticProbe(op: []const u8, ty: []const u8, target: usize, compound: bool) ![]u8 {
+    const a = testing.allocator;
+    const declarations = [_][]const u8{ "", "", "", "storage var cell: T;", "storage var cells: [T; 2];", "storage var balances: map<address, T>;" };
+    const initializers = [_][]const u8{ "var x: T = a;", "var values: [T; 2] = [a, a];", "var box: Box = Box { value: a };", "cell = a;", "cells[0] = a;", "balances[key] = a;" };
+    const targets = [_][]const u8{ "x", "values[0]", "box.value", "cell", "cells[0]", "balances[key]" };
+    const declaration = try std.mem.replaceOwned(u8, a, declarations[target], "T", ty);
+    defer a.free(declaration);
+    const initializer = try std.mem.replaceOwned(u8, a, initializers[target], "T", ty);
+    defer a.free(initializer);
+    const expression = if (compound)
+        try std.fmt.allocPrint(a, "{s} {s}= b;", .{ targets[target], op })
+    else
+        try std.fmt.allocPrint(a, "{s} = {s} {s} b;", .{ targets[target], targets[target], op });
+    defer a.free(expression);
+    return std.fmt.allocPrint(a, "struct Box {{ value: {s}; }}\ncontract Probe {{ {s}\npub fn run(a: {s}, b: {s}, key: address) -> {s}\nrequires a >= 2\nrequires a <= 5\nrequires b >= 1\nrequires b <= 2\n{{\n{s}\n{s}\nreturn {s};\n}}\n}}", .{ ty, declaration, ty, ty, ty, initializer, expression, targets[target] });
+}
+
+test "compound arithmetic gate binds every source check to a real prepared query" {
+    const a = testing.allocator;
+    const operators = [_][]const u8{ "+", "-", "*", "/", "%", "**", "+%", "-%", "*%", "&", "|", "^", "<<", ">>" };
+    for (operators) |op| {
+        for ([_][]const u8{ "u8", "i8" }) |ty| {
+            for (0..6) |target| {
+                var ordinary_dump: ?[]u8 = null;
+                defer if (ordinary_dump) |dump| a.free(dump);
+                for ([_]bool{ false, true }) |compound| {
+                    const source = try compoundArithmeticProbe(op, ty, target, compound);
+                    defer a.free(source);
+                    errdefer std.debug.print("compound arithmetic op={s} type={s} target={d} compound={}\n{s}\n", .{ op, ty, target, compound, source });
+                    var compilation = try compileText(source);
+                    defer compilation.deinit();
+                    const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+                    try testing.expect(hir.diagnostics.isEmpty());
+                    var collected = try test_helpers.collectFormalQueryBindingsForVerifier(a, hir.module.raw_module);
+                    defer collected.formal_result.deinit();
+                    defer a.free(collected.z3_bindings);
+                    var pass = try z3_verification.VerificationPass.init(a);
+                    defer pass.deinit();
+                    pass.setFormalQueryBindings(collected.z3_bindings);
+                    var checked = try pass.runVerificationPass(hir.module.raw_module);
+                    defer checked.deinit();
+                    var report = try pass.buildSmtReport(hir.module.raw_module, "test.ora", &checked);
+                    defer report.deinit(a);
+                    const prepared = report.query_manifest orelse return error.TestUnexpectedResult;
+                    var overlay = try obligation_from_z3.overlayPreparedQueryResults(a, collected.formal_result.set, prepared.rows);
+                    defer overlay.deinit();
+                    if (overlay.set.hasBlockingDiagnostic()) {
+                        for (overlay.set.diagnostics) |diagnostic| std.debug.print("compound binding diagnostic: {any}\n", .{diagnostic});
+                    }
+                    try testing.expect(!overlay.set.hasBlockingDiagnostic());
+                    for (overlay.set.queries) |query| {
+                        try testing.expectEqual(obligation.VerificationBackend.z3, query.backend);
+                        try testing.expect(query.smtlib_hash != null);
+                        try testing.expect(query.result != null);
+                    }
+                    // Missing evidence must still reject: a lowering repair cannot
+                    // be implemented by silencing the unmatched-row diagnostic.
+                    if (collected.formal_result.set.obligations.len != 0) {
+                        var missing = try obligation_from_z3.overlayPreparedQueryResults(a, collected.formal_result.set, &.{});
+                        defer missing.deinit();
+                        try testing.expect(missing.set.hasBlockingDiagnostic());
+                    }
+                    // Compare the full pre-solver manifest under a source-location
+                    // correspondence. No identity/digest used by a prover is edited.
+                    const set = collected.formal_result.set;
+                    for (@constCast(set.obligations)) |*row| row.source = .generated();
+                    for (@constCast(set.assumptions)) |*row| row.source = .generated();
+                    for (@constCast(set.queries)) |*row| row.source = .generated();
+                    const dump = try compoundComparableDump(set);
+                    if (ordinary_dump) |expected| {
+                        defer a.free(dump);
+                        try testing.expectEqualStrings(expected, dump);
+                    } else ordinary_dump = dump;
+                }
+            }
+        }
+    }
+}
+
+test "compound arithmetic gate recovers exact signed and unsigned bitfield member types" {
+    for ([_][]const u8{ "u8", "i8" }) |ty| {
+        for ([_]bool{ false, true }) |generic| {
+            const source = try std.fmt.allocPrint(testing.allocator, "bitfield Bits{s}: u256 {{ value: {s}; sibling: u8; }}\n" ++
+                "contract Probe {{ storage var bits: Bits{s}; pub fn run(a: {s}, b: {s}) {{ bits.value = a; bits.value += b; }} }}", .{ if (generic) "(comptime T: type)" else "", if (generic) "T" else ty, if (generic) (if (std.mem.eql(u8, ty, "u8")) "<u8>" else "<i8>") else "", ty, ty });
+            defer testing.allocator.free(source);
+            var compilation = try compileText(source);
+            defer compilation.deinit();
+            const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+            try testing.expect(hir.diagnostics.isEmpty());
+            const add = findFirstOpByName(hir.module.raw_module, "arith.addi") orelse return error.TestUnexpectedResult;
+            const signed = mlir.oraOperationGetAttributeByName(add, strRef("ora.integer_signed"));
+            try testing.expect(!mlir.oraAttributeIsNull(signed));
+            try testing.expectEqual(std.mem.eql(u8, ty, "i8"), mlir.oraBoolAttrGetValue(signed));
+            // Recover the member's i8 carrier, never the bitfield's u256 container.
+            try testing.expectEqual(@as(i64, 8), mlir.oraIntegerTypeGetWidth(mlir.oraValueGetType(mlir.oraOperationGetResult(add, 0))));
+        }
+    }
+}
+
+test "compound arithmetic gate unresolved bitfield members still reject without bytecode" {
+    const a = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][]const u8{ "missing", "flag" }) |member| {
+        const source = try std.fmt.allocPrint(a, "bitfield Bits: u256 {{ flag: bool; }} contract Bad {{ storage var bits: Bits; pub fn run() {{ bits.{s} += 1; }} }}", .{member});
+        defer a.free(source);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "bad.ora", .data = source });
+        const path = try pathFromTmpAlloc(a, tmp, "bad.ora");
+        defer a.free(path);
+        const output = try pathFromTmpAlloc(a, tmp, member);
+        defer a.free(output);
+        const run = try runProcessWithLeanPath(a, &.{ ORA_BINARY_REL, "emit", "--emit=bytecode", "--out-dir", output, path });
+        defer a.free(run.stdout);
+        defer a.free(run.stderr);
+        try expectExited(run, 1);
+        const hex = try std.fmt.allocPrint(a, "{s}/bad.hex", .{member});
+        defer a.free(hex);
+        try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, hex, .{}));
+        try testing.expect(std.mem.indexOf(u8, run.stderr, "error:") != null or std.mem.indexOf(u8, run.stdout, "error:") != null);
+    }
 }

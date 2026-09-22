@@ -1682,6 +1682,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithAddIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            FunctionLowerer.annotateIntegerBinary(self, op, .add, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range));
                             const value = appendValueOp(self.block, op);
                             try FunctionLowerer.maybeEmitCheckedBinaryOverflowAssert(self, .add, lhs, rhs, value, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range), assign.range);
                             break :blk value;
@@ -1691,6 +1692,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraAddWrappingOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs, mlir.oraValueGetType(lhs));
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            FunctionLowerer.annotateIntegerBinary(self, op, .wrapping_add, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range));
                             break :blk appendValueOp(self.block, op);
                         },
                         .bit_and_assign => blk: {
@@ -1705,6 +1707,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithSubIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            FunctionLowerer.annotateIntegerBinary(self, op, .sub, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range));
                             const value = appendValueOp(self.block, op);
                             try FunctionLowerer.maybeEmitCheckedBinaryOverflowAssert(self, .sub, lhs, rhs, value, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range), assign.range);
                             break :blk value;
@@ -1714,6 +1717,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraSubWrappingOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs, mlir.oraValueGetType(lhs));
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            FunctionLowerer.annotateIntegerBinary(self, op, .wrapping_sub, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range));
                             break :blk appendValueOp(self.block, op);
                         },
                         .bit_or_assign => blk: {
@@ -1728,6 +1732,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithMulIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            FunctionLowerer.annotateIntegerBinary(self, op, .mul, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range));
                             const value = appendValueOp(self.block, op);
                             try FunctionLowerer.maybeEmitCheckedBinaryOverflowAssert(self, .mul, lhs, rhs, value, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range), assign.range);
                             break :blk value;
@@ -1737,6 +1742,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraMulWrappingOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs, mlir.oraValueGetType(lhs));
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            FunctionLowerer.annotateIntegerBinary(self, op, .wrapping_mul, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range));
                             break :blk appendValueOp(self.block, op);
                         },
                         .bit_xor_assign => blk: {
@@ -1752,6 +1758,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             try @This().emitCheckedShiftAmountAssert(self, lhs, rhs, assign.range);
                             const op = mlir.oraArithShlIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            FunctionLowerer.annotateIntegerBinary(self, op, .shl, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range));
                             break :blk appendValueOp(self.block, op);
                         },
                         .shr_assign => blk: {
@@ -1763,6 +1770,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             else
                                 mlir.oraArithShrUIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            FunctionLowerer.annotateIntegerBinary(self, op, .shr, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range));
                             break :blk appendValueOp(self.block, op);
                         },
                         .pow_assign => blk: {
@@ -1773,24 +1781,33 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         .div_assign => blk: {
                             const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
-                            const op = if (try @This().patternIntegerSignedness(self, assign.target, locals, assign.range))
+                            const is_signed = try @This().patternIntegerSignedness(self, assign.target, locals, assign.range);
+                            try @This().emitCheckedDivRemSafetyAsserts(self, true, is_signed, lhs, rhs, assign.range);
+                            const op = if (is_signed)
                                 mlir.oraArithDivSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs)
                             else
                                 mlir.oraArithDivUIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            FunctionLowerer.annotateIntegerBinary(self, op, .div, is_signed);
                             break :blk appendValueOp(self.block, op);
                         },
                         .mod_assign => blk: {
                             const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
-                            const op = if (try @This().patternIntegerSignedness(self, assign.target, locals, assign.range))
+                            const is_signed = try @This().patternIntegerSignedness(self, assign.target, locals, assign.range);
+                            try @This().emitCheckedDivRemSafetyAsserts(self, false, is_signed, lhs, rhs, assign.range);
+                            const op = if (is_signed)
                                 mlir.oraArithRemSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs)
                             else
                                 mlir.oraArithRemUIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            FunctionLowerer.annotateIntegerBinary(self, op, .mod, is_signed);
                             break :blk appendValueOp(self.block, op);
                         },
                     };
+                    // Keep captured indexes, but reload containers after RHS effects so
+                    // an aggregate field update cannot overwrite a changed sibling.
+                    if (assignment_cache) |cache| cache.clearValues();
                     try @This().storePatternWithCache(self, assign.target, value, locals, assignment_cache);
                     if (target_local_id) |local_id| {
                         if (known_int) |integer| {
@@ -3015,7 +3032,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 range,
             );
 
-            if (!is_division or !is_signed) return;
+            // Checked signed division and remainder both reject MIN / -1.
+            if (!is_signed) return;
 
             const bit_width = mlir.oraIntegerTypeGetWidth(value_ty);
             if (bit_width == 0) return error.MlirOperationCreationFailed;
@@ -3284,10 +3302,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 .Index => |index| {
                     const semantic_base_type = @This().patternType(self, index.base, locals);
-                    const cached_index = if (semantic_base_type.kind() == .slice)
-                        if (cache) |pattern_cache| pattern_cache.getIndex(pattern_id) else null
-                    else
-                        null;
+                    const cached_index = if (cache) |pattern_cache| pattern_cache.getIndex(pattern_id) else null;
                     const reload_storage_base = cached_index != null and
                         @This().patternIsStorageBacked(self, index.base, locals);
                     if (reload_storage_base) cache.?.clearValues();
@@ -3324,7 +3339,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const map_value_type = mlir.oraMapTypeGetValueType(base_type);
                     if (map_value_type.ptr != null) {
                         const map_key_type = mlir.oraMapTypeGetKeyType(base_type);
-                        const key_value = if (!mlir.oraTypeIsNull(map_key_type))
+                        const key_value = cached_index orelse if (!mlir.oraTypeIsNull(map_key_type))
                             try self.lowerExprForFlowTarget(index.index, map_key_type, locals)
                         else
                             try self.lowerExpr(index.index, locals);
@@ -3707,7 +3722,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Field => |field| blk: {
                     const base_type = @This().patternType(self, field.base, locals);
                     if (@This().isBitfieldLikeType(self, base_type)) {
-                        const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, field.range);
+                        const result_type = self.parent.lowerSemaType(@This().patternType(self, pattern_id, locals), field.range);
                         break :blk try @This().createBitfieldFieldExtract(self, try @This().lowerPatternValueWithCache(self, field.base, locals, cache), base_type, field.name, result_type, field.range);
                     }
                     const base_value = try @This().lowerPatternValueWithCache(self, field.base, locals, cache);
@@ -3743,6 +3758,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 .Field => |field| blk: {
                     const base_type = @This().patternType(self, field.base, locals);
+                    if (@This().isBitfieldLikeType(self, base_type)) {
+                        const type_name = base_type.name() orelse break :blk self.parent.typecheck.pattern_types[pattern_id.index()].type;
+                        const resolved = (self.parent.resolveBitfieldField(type_name, field.name) catch null) orelse
+                            break :blk self.parent.typecheck.pattern_types[pattern_id.index()].type;
+                        break :blk resolved.field_type orelse
+                            (type_descriptors.descriptorFromTypeExpr(self.parent.allocator, self.parent.file, self.parent.item_index, resolved.field.type_expr) catch
+                                self.parent.typecheck.pattern_types[pattern_id.index()].type);
+                    }
                     if (base_type.kind() == .anonymous_struct) {
                         if (base_type.anonymous_struct.fieldByName(field.name)) |struct_field| break :blk struct_field.ty;
                     }

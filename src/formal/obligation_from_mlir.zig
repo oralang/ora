@@ -1428,7 +1428,13 @@ const Collector = struct {
         if (op_kind_map.get(op_name)) |kind| {
             try self.collectOperation(op, kind, op_name, symbol, ordinal);
         } else if (arithmetic_op_map.get(op_name)) |safety| {
+            // Internal overflow probes mask the quotient comparison when rhs is zero.
+            const guard_internal = if (stringAttrView(op, "ora.guard_internal")) |value|
+                std.mem.eql(u8, value.slice(), "true")
+            else
+                false;
             if (!self.operationFeedsOnlyFormalFormula(op) and
+                !guard_internal and
                 !hasAttr(op, "ora.arithmetic_safety_asserted"))
             {
                 try self.addArithmeticSafetyOp(op, op_name, symbol, ordinal, safety, null, try self.sourceForOperation(op));

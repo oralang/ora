@@ -1730,6 +1730,7 @@ const FunctionLowerer = struct {
     pub const lowerNameExpr = ExprLowering.lowerNameExpr;
     pub const lowerUnary = ExprLowering.lowerUnary;
     pub const lowerBinary = ExprLowering.lowerBinary;
+    pub const annotateIntegerBinary = ExprLowering.annotateIntegerBinary;
     pub const maybeEmitCheckedBinaryOverflowAssert = ExprLowering.maybeEmitCheckedBinaryOverflowAssert;
     pub const createCompareOp = ExprLowering.createCompareOp;
     pub const lowerCall = ExprLowering.lowerCall;

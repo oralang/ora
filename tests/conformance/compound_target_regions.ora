@@ -1,0 +1,11 @@
+struct Pair { left:u256; right:u256; }
+contract Extended { storage var calls:u256; tstore var temp:u256; fn next()->u256 { let n=calls; calls = calls +% 1; return n; }
+pub fn memory_slice_compound(input:slice[u256])->u256 { calls = 0; memory var data:slice[u256] = input; memory var alias:slice[u256] = data;alias[next()] += 1;assert(data[0] == 11 && alias[1] == 20, "extended target state"); return calls; }
+pub fn memory_slice_cached(input:slice[u256])->u256 { calls = 0; memory var data:slice[u256] = input; memory var alias:slice[u256] = data;let k = next();alias[k] = alias[k] + 1;assert(data[0] == 11 && alias[1] == 20, "extended target state"); return calls; }
+pub fn nested_field_compound()->u256 { calls = 0; var data:[Pair;2] = [Pair{left:10,right:20},Pair{left:30,right:40}];data[next()].left += 1;assert(data[0].left == 11 && data[0].right == 20 && data[1].left == 30 && data[1].right == 40, "extended target state"); return calls; }
+pub fn nested_field_cached()->u256 { calls = 0; var data:[Pair;2] = [Pair{left:10,right:20},Pair{left:30,right:40}];let k = next();data[k].left = data[k].left + 1;assert(data[0].left == 11 && data[0].right == 20 && data[1].left == 30 && data[1].right == 40, "extended target state"); return calls; }
+pub fn memory_scalar_compound()->u256 { calls = 0; memory var data:u256 = 10;data += 1;assert(data == 11, "extended target state"); return calls; }
+pub fn memory_scalar_cached()->u256 { calls = 0; memory var data:u256 = 10;data = data + 1;assert(data == 11, "extended target state"); return calls; }
+pub fn transient_compound()->u256 { calls = 0; temp = 10;temp += 1;assert(temp == 11, "extended target state"); return calls; }
+pub fn transient_cached()->u256 { calls = 0; temp = 10;temp = temp + 1;assert(temp == 11, "extended target state"); return calls; }
+}

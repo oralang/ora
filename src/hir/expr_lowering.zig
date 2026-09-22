@@ -753,7 +753,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             for (self.parent.file.items, 0..) |_, idx| {
-                const item_id: ast.ItemId = @enumFromInt(idx);
+                const item_id: ast.ItemId = @fromBackingInt(@intCast(idx));
                 switch (self.parent.file.item(item_id).*) {
                     .Field => |field| {
                         if (!std.mem.eql(u8, field.name, name.name)) continue;
@@ -1172,7 +1172,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 "failed to lower binary operator '{s}'",
                 .{@tagName(binary.op)},
             );
-            switch (binary.op) {
+            @This().annotateIntegerBinary(self, op, binary.op, is_signed_int_op);
+            const value = appendValueOp(self.block, op);
+            try @This().maybeEmitCheckedBinaryOverflowAssert(self, binary.op, lhs, rhs, value, is_signed_int_op, binary.range);
+            return value;
+        }
+
+        // Div/rem's safety marker requires their source checks to have been emitted.
+        pub fn annotateIntegerBinary(self: *FunctionLowerer, op: mlir.MlirOperation, binary_op: ast.BinaryOp, is_signed: bool) void {
+            switch (binary_op) {
                 .add,
                 .wrapping_add,
                 .sub,
@@ -1187,27 +1195,24 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 => mlir.oraOperationSetAttributeByName(
                     op,
                     strRef("ora.integer_signed"),
-                    mlir.oraBoolAttrCreate(self.parent.context, is_signed_int_op),
+                    mlir.oraBoolAttrCreate(self.parent.context, is_signed),
                 ),
                 else => {},
             }
-            if (binary.op == .wrapping_pow) {
+            if (binary_op == .wrapping_pow) {
                 mlir.oraOperationSetAttributeByName(
                     op,
                     strRef("ora.integer_checked"),
                     mlir.oraBoolAttrCreate(self.parent.context, false),
                 );
             }
-            if (binary.op == .div or binary.op == .mod) {
+            if (binary_op == .div or binary_op == .mod) {
                 mlir.oraOperationSetAttributeByName(
                     op,
                     strRef("ora.arithmetic_safety_asserted"),
                     mlir.oraBoolAttrCreate(self.parent.context, true),
                 );
             }
-            const value = appendValueOp(self.block, op);
-            try @This().maybeEmitCheckedBinaryOverflowAssert(self, binary.op, lhs, rhs, value, is_signed_int_op, binary.range);
-            return value;
         }
 
         pub fn maybeEmitCheckedBinaryOverflowAssert(

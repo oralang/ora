@@ -1,0 +1,340 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "div_compound(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [7, 0]
+reverts = { data = "0xf667f302" }
+
+[[call]]
+fn = "div_compound(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [7, 2]
+returns = { u256 = 3 }
+
+[[call]]
+fn = "div_ordinary(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [7, 0]
+reverts = { data = "0xf667f302" }
+
+[[call]]
+fn = "div_ordinary(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [7, 2]
+returns = { u256 = 3 }
+
+[[call]]
+fn = "rem_compound(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [7, 0]
+reverts = { data = "0x84caa174" }
+
+[[call]]
+fn = "rem_compound(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [7, 3]
+returns = { u256 = 1 }
+
+[[call]]
+fn = "rem_ordinary(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [7, 0]
+reverts = { data = "0x84caa174" }
+
+[[call]]
+fn = "rem_ordinary(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [7, 3]
+returns = { u256 = 1 }
+
+[[call]]
+fn = "signed_div_compound(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-128, -1]
+reverts = { data = "0x069eece1" }
+
+[[call]]
+fn = "signed_div_compound(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-8, 0]
+reverts = { data = "0xf667f302" }
+
+[[call]]
+fn = "signed_div_compound(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-8, 2]
+returns = { i8 = -4 }
+
+[[call]]
+fn = "signed_div_ordinary(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-128, -1]
+reverts = { data = "0x069eece1" }
+
+[[call]]
+fn = "signed_div_ordinary(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-8, 0]
+reverts = { data = "0xf667f302" }
+
+[[call]]
+fn = "signed_div_ordinary(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-8, 2]
+returns = { i8 = -4 }
+
+[[call]]
+fn = "signed_rem_compound(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-128, -1]
+reverts = { data = "0x069eece1" }
+
+[[call]]
+fn = "signed_rem_compound(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-8, 0]
+reverts = { data = "0x84caa174" }
+
+[[call]]
+fn = "signed_rem_compound(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-8, 3]
+returns = { i8 = -2 }
+
+[[call]]
+fn = "signed_rem_compound(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-127, -1]
+returns = { i8 = 0 }
+
+[[call]]
+fn = "signed_rem_ordinary(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-128, -1]
+reverts = { data = "0x069eece1" }
+
+[[call]]
+fn = "signed_rem_ordinary(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-8, 0]
+reverts = { data = "0x84caa174" }
+
+[[call]]
+fn = "signed_rem_ordinary(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-8, 3]
+returns = { i8 = -2 }
+
+[[call]]
+fn = "signed_rem_ordinary(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-127, -1]
+returns = { i8 = 0 }
+
+[[call]]
+fn = "add_compound(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["115792089237316195423570985008687907853269984665640564039457584007913129639935", 1]
+reverts = { any = true }
+
+[[call]]
+fn = "add_compound(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [2, 3]
+returns = { u256 = 5 }
+
+[[call]]
+fn = "add_ordinary(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["115792089237316195423570985008687907853269984665640564039457584007913129639935", 1]
+reverts = { any = true }
+
+[[call]]
+fn = "add_ordinary(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [2, 3]
+returns = { u256 = 5 }
+
+[[call]]
+fn = "sub_compound(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [0, 1]
+reverts = { any = true }
+
+[[call]]
+fn = "sub_compound(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [5, 3]
+returns = { u256 = 2 }
+
+[[call]]
+fn = "sub_ordinary(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [0, 1]
+reverts = { any = true }
+
+[[call]]
+fn = "sub_ordinary(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [5, 3]
+returns = { u256 = 2 }
+
+[[call]]
+fn = "mul_compound(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["57896044618658097711785492504343953926634992332820282019728792003956564819968", 2]
+reverts = { any = true }
+
+[[call]]
+fn = "mul_compound(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [5, 3]
+returns = { u256 = 15 }
+
+[[call]]
+fn = "mul_ordinary(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["57896044618658097711785492504343953926634992332820282019728792003956564819968", 2]
+reverts = { any = true }
+
+[[call]]
+fn = "mul_ordinary(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [5, 3]
+returns = { u256 = 15 }
+
+[[call]]
+fn = "wrap_add_compound(uint8,uint8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [255, 1]
+returns = { u8 = 0 }
+
+[[call]]
+fn = "wrap_add_ordinary(uint8,uint8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [255, 1]
+returns = { u8 = 0 }
+
+[[call]]
+fn = "wrap_sub_compound(uint8,uint8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [0, 1]
+returns = { u8 = 255 }
+
+[[call]]
+fn = "wrap_sub_ordinary(uint8,uint8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [0, 1]
+returns = { u8 = 255 }
+
+[[call]]
+fn = "wrap_mul_compound(uint8,uint8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [128, 2]
+returns = { u8 = 0 }
+
+[[call]]
+fn = "wrap_mul_ordinary(uint8,uint8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [128, 2]
+returns = { u8 = 0 }
+
+[[call]]
+fn = "shl_compound(uint8,uint8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1, 8]
+reverts = { data = "0xb3215f31" }
+
+[[call]]
+fn = "shl_compound(uint8,uint8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1, 7]
+returns = { u8 = 128 }
+
+[[call]]
+fn = "shl_ordinary(uint8,uint8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1, 8]
+reverts = { data = "0xb3215f31" }
+
+[[call]]
+fn = "shl_ordinary(uint8,uint8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1, 7]
+returns = { u8 = 128 }
+
+[[call]]
+fn = "shr_compound(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-8, 8]
+reverts = { data = "0xb3215f31" }
+
+[[call]]
+fn = "shr_compound(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-8, 1]
+returns = { i8 = -4 }
+
+[[call]]
+fn = "shr_ordinary(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-8, 8]
+reverts = { data = "0xb3215f31" }
+
+[[call]]
+fn = "shr_ordinary(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-8, 1]
+returns = { i8 = -4 }

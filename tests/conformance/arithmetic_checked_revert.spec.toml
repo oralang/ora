@@ -93,13 +93,13 @@ value = 0
 args = [-8, 2]
 returns = { i8 = -4 }
 
-# MIN % -1 is representable and follows EVM SMOD semantics; only zero is unsafe.
+# Checked signed remainder rejects the MIN / -1 pair, like checked division.
 [[call]]
 fn = "checked_signed_rem(int8,int8)"
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
 args = [-128, -1]
-returns = { i8 = 0 }
+reverts = { data = "0x069eece1" }
 
 [[call]]
 fn = "checked_signed_rem(int8,int8)"
