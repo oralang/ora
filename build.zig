@@ -1882,7 +1882,7 @@ pub fn build(b: *std.Build) void {
     check_smt_resource_corpus_step.dependOn(&smt_resource_corpus_cmd.step);
 
     // zig build gate — the full pre-push bar; every commit must pass this on the committed state.
-    const gate_step = b.step("gate", "Run the full pre-push bar (test + OraToSIR gate + Ora MLIR checks + SMT corpus + LSP smoke)");
+    const gate_step = b.step("gate-core", "Run the prerequisites of the full pre-push gate");
     gate_step.dependOn(test_step);
     gate_step.dependOn(check_formal_sync_step);
     gate_step.dependOn(check_canonical_z3_required_step);
@@ -1901,6 +1901,19 @@ pub fn build(b: *std.Build) void {
     gate_step.dependOn(check_smt_modifies_corpus_step);
     gate_step.dependOn(check_smt_resource_corpus_step);
     gate_step.dependOn(lsp_smoke_step);
+
+    const default_fv_tests = b.addSystemCommand(&.{ "python3", "scripts/test-default-fv-corpus.py" });
+    const default_fv_cmd = b.addSystemCommand(&.{ "python3", "scripts/check-default-fv-corpus.py" });
+    default_fv_cmd.step.dependOn(b.getInstallStep());
+    default_fv_cmd.step.dependOn(&default_fv_tests.step);
+    const default_fv_step = b.step("check-default-fv-corpus", "Verify the exact default-FV corpus expectations");
+    default_fv_step.dependOn(&default_fv_cmd.step);
+    // Run the full-gate copy after every other lane: Lean scratch is shared.
+    const gate_default_fv_cmd = b.addSystemCommand(&.{ "python3", "scripts/check-default-fv-corpus.py" });
+    gate_default_fv_cmd.step.dependOn(gate_step);
+    gate_default_fv_cmd.step.dependOn(&default_fv_tests.step);
+    const full_gate_step = b.step("gate", "Run all pre-push checks and the strict default-FV corpus lane");
+    full_gate_step.dependOn(&gate_default_fv_cmd.step);
 }
 
 /// Create a step that runs the installed lexer test suite with --verbose
