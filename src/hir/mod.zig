@@ -387,6 +387,11 @@ const Lowerer = struct {
     active_type_bindings: []const GenericTypeBinding = &.{},
     active_inline_known_args: []const InlineKnownArgBinding = &.{},
     active_impl_contract_scope: ?ast.ItemId = null,
+    // Destination contract while lowering a module-level function cloned into a
+    // contract body. Keeps the clone's transitive calls scoped to the same
+    // contract so their callees are reachable from its symbol table. Distinct
+    // from active_impl_contract_scope, which drives impl-method semantics.
+    effective_clone_contract_scope: ?ast.ItemId = null,
     active_impl_self_type: ?sema.Type = null,
     current_statement_id: ?ast.StmtId = null,
     current_synthetic_index: ?u32 = null,

@@ -296,6 +296,12 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 return symbol_name;
             }
             const scoped_contract_id = if (function.parent_contract == null) caller_contract_id else null;
+            // A module-level function cloned into a contract carries that contract
+            // as its effective scope, so its transitive calls resolve their callees
+            // into the same contract body rather than the unreachable module scope.
+            const previous_clone_scope = self.effective_clone_contract_scope;
+            self.effective_clone_contract_scope = scoped_contract_id;
+            defer self.effective_clone_contract_scope = previous_clone_scope;
             const base_symbol_name = if (scoped_contract_id) |contract_id|
                 try @This().scopedFunctionSymbolName(self, contract_id, function.name)
             else

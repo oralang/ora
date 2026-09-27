@@ -641,6 +641,84 @@ test "compiler skips generic bitfield and enum templates in HIR" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.enum.decl"));
 }
 
+test "generic holds T scopes transitive clones and restores module context" {
+    const variants = [_]struct { leaf: []const u8, call: []const u8, symbol: []const u8, relay_prefix: []const u8 }{
+        .{ .leaf = "fn leaf(comptime T: type, x: T) -> T { return x; }", .call = "leaf(u256, x)", .symbol = "leaf__u256", .relay_prefix = "" },
+        .{ .leaf = "fn leaf(x: u256) -> u256 { return x; }", .call = "leaf(x)", .symbol = "leaf", .relay_prefix = "" },
+        .{ .leaf = "fn leaf(x: u256) -> u256 { return x; }", .call = "leaf(x)", .symbol = "leaf", .relay_prefix = "inline " },
+    };
+    for (variants) |variant| {
+        const source = try std.fmt.allocPrint(testing.allocator,
+            \\{s}
+            \\{s}fn relay(x: u256) -> u256 {{ return {s}; }}
+            \\contract A {{ pub fn run_a(x: u256) -> u256 {{ return relay(x); }} }}
+            \\fn after(x: u256) -> u256 {{ return {s}; }}
+            \\contract B {{ pub fn run_b(x: u256) -> u256 {{ return relay(x); }} }}
+        , .{ variant.leaf, variant.relay_prefix, variant.call, variant.call });
+        defer testing.allocator.free(source);
+        var compilation = try compileText(source);
+        defer compilation.deinit();
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir.diagnostics.isEmpty());
+        try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(hir.module.raw_module)));
+        const text = try hir.renderText(testing.allocator);
+        defer testing.allocator.free(text);
+        for ([_][]const u8{ "A", "B" }) |owner| {
+            const relay_name = try std.fmt.allocPrint(testing.allocator, "func.func @{s}.relay(", .{owner});
+            defer testing.allocator.free(relay_name);
+            const start = std.mem.indexOf(u8, text, relay_name) orelse return error.TestUnexpectedResult;
+            const end = start + (std.mem.indexOf(u8, text[start..], "\n    }") orelse return error.TestUnexpectedResult);
+            const relay = text[start..end];
+            const call = try std.fmt.allocPrint(testing.allocator, "call @{s}.{s}(", .{ owner, variant.symbol });
+            defer testing.allocator.free(call);
+            try testing.expect(std.mem.indexOf(u8, relay, call) != null);
+            // The destination is not the source declaration's owner.
+            try testing.expect(std.mem.indexOf(u8, relay, "ora.source_owner_key = \"module/function:relay\"") != null);
+            try testing.expect(std.mem.indexOf(u8, relay, "ora.source_template_activation = \"runtime_body\"") != null);
+            const leaf_name = try std.fmt.allocPrint(testing.allocator, "func.func @{s}.{s}(", .{ owner, variant.symbol });
+            defer testing.allocator.free(leaf_name);
+            const leaf_start = std.mem.indexOf(u8, text, leaf_name) orelse return error.TestUnexpectedResult;
+            const leaf_end = leaf_start + (std.mem.indexOfScalar(u8, text[leaf_start..], '\n') orelse return error.TestUnexpectedResult);
+            const leaf_header = text[leaf_start..leaf_end];
+            try testing.expect(std.mem.indexOf(u8, leaf_header, "ora.source_owner_key = \"module/function:leaf\"") != null);
+            if (std.mem.eql(u8, variant.symbol, "leaf__u256")) {
+                try testing.expect(std.mem.indexOf(u8, leaf_header, "ora.source_specialization_bindings = [\"generic:T=u256\"]") != null);
+            }
+        }
+        const start = std.mem.indexOf(u8, text, "  func.func @after(") orelse return error.TestUnexpectedResult;
+        const end = start + (std.mem.indexOf(u8, text[start..], "\n  }") orelse return error.TestUnexpectedResult);
+        const call = try std.fmt.allocPrint(testing.allocator, "call @{s}(", .{variant.symbol});
+        defer testing.allocator.free(call);
+        try testing.expect(std.mem.indexOf(u8, text[start..end], call) != null);
+        try testing.expect(std.mem.indexOf(u8, text[start..end], "call @A.") == null);
+        try testing.expect(std.mem.indexOf(u8, text[start..end], "call @B.") == null);
+    }
+}
+
+test "generic holds T retains checks and exact specialization errors" {
+    const safe =
+        \\fn leaf(comptime T: type, x: T, d: T) -> T requires(d > @cast(T, 0)) { return x / d; }
+        \\fn relay(x: u256, d: u256) -> u256 requires(d > 0) { return leaf(u256, x, d); }
+        \\contract Check { pub fn run(x: u256, d: u256) -> u256 requires(d > 0) { return relay(x, d); } }
+    ;
+    var accepted = try verifyTextWithoutDegradation(safe, null);
+    defer accepted.deinit(testing.allocator);
+    try testing.expect(accepted.success and !accepted.degraded);
+    const unsafe = try std.mem.replaceOwned(u8, testing.allocator, safe, " requires(d > 0)", "");
+    defer testing.allocator.free(unsafe);
+    var rejected = try verifyTextWithoutDegradation(unsafe, null);
+    defer rejected.deinit(testing.allocator);
+    try testing.expect(!rejected.success and !rejected.degraded);
+    try testing.expect(rejected.errors_len > 0);
+    try testing.expect(std.mem.indexOf(u8, rejected.error_kinds, "PreconditionViolation") != null);
+    const wrong_type = try std.mem.replaceOwned(u8, testing.allocator, safe, "leaf(u256, x, d)", "leaf(bool, x, d)");
+    defer testing.allocator.free(wrong_type);
+    var compilation = try compileText(wrong_type);
+    defer compilation.deinit();
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "expected argument type 'bool', found 'u256'"));
+}
+
 test "compiler monomorphizes generic contract function calls in HIR" {
     const source_text =
         \\contract Math {
