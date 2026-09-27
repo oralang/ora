@@ -1,5 +1,7 @@
 contract GenericFnControlFlowClone {
-    fn bounded_remainder(comptime T: type, value: T, modulus: T) -> T {
+    fn bounded_remainder(comptime T: type, value: T, modulus: T) -> T
+        requires(modulus > @cast(T, 0))
+    {
         var x = value;
 
         if (x < modulus) {
