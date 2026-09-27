@@ -77,7 +77,10 @@ pub fn run(
     );
     defer runtime.deinit();
 
-    var comptime_result = try from_comptime.collectPackageFoldExpansions(
+    var inactive_arena = std.heap.ArenaAllocator.init(allocator);
+    defer inactive_arena.deinit();
+    const inactive_roots = try collectInactiveFoldRoots(inactive_arena.allocator(), &package, formal.runtime_owner_bindings, prepared);
+    var comptime_result = try from_comptime.collectPackageFoldExpansionsForRoots(
         allocator,
         &package,
         const_eval,
@@ -87,6 +90,7 @@ pub fn run(
             .control_node = try nextId(accounting.ControlNodeId, runtime.control_nodes.len),
             .control_edge = try nextId(accounting.ControlEdgeId, runtime.control_edges.len),
         },
+        inactive_roots,
     );
     defer comptime_result.deinit();
 
@@ -184,6 +188,44 @@ pub fn run(
     }
     const finished = try session.finishAccountingDecision();
     return .{ .session = session, .finished = finished };
+}
+
+fn collectInactiveFoldRoots(
+    allocator: std.mem.Allocator,
+    package: *const from_package.Result,
+    owners: []const obligation_from_mlir.RuntimeOwnerBinding,
+    prepared: ?PreparedIdentity,
+) ![]const []const u8 {
+    const identity = prepared orelse return &.{};
+    const inactive = identity.inactive_runtime_owners orelse return &.{};
+    var roots: std.ArrayList([]const u8) = .empty;
+    for (inactive, 0..) |row, index| {
+        if (row.source_op_id == 0 or (index != 0 and row.source_op_id <= inactive[index - 1].source_op_id))
+            return error.InvalidInactiveRuntimeOwnerInventory;
+        var matched: ?obligation_from_mlir.RuntimeOwnerBinding = null;
+        for (owners) |owner| if (owner.source_op_id == row.source_op_id) {
+            if (matched != null) return error.DuplicateInactiveRuntimeOwnerBinding;
+            matched = owner;
+        };
+        const owner = matched orelse return error.UnknownInactiveRuntimeOwner;
+        if (!std.mem.eql(u8, owner.module_path, row.module_path) or
+            !std.mem.eql(u8, owner.owner_key, row.owner_key) or
+            !std.mem.eql(u8, owner.template_activation, "runtime_body"))
+            return error.InactiveRuntimeOwnerIdentityMismatch;
+        const module = package.moduleForSourcePath(owner.module_path) orelse return error.UnknownRuntimeSourceAccountingModule;
+        // Any live or unrepresented specialization keeps the source root active.
+        const all_inactive = for (owners) |other| {
+            if (!std.mem.eql(u8, other.module_path, owner.module_path) or !std.mem.eql(u8, other.owner_key, owner.owner_key)) continue;
+            const found = for (inactive) |candidate| {
+                if (candidate.source_op_id == other.source_op_id) break true;
+            } else false;
+            if (!found) break false;
+        } else true;
+        if (!all_inactive) continue;
+        const root = try std.fmt.allocPrint(allocator, "{s}::{s}", .{ module.canonical_path, owner.owner_key });
+        if (!containsString(roots.items, root)) try roots.append(allocator, root);
+    }
+    return roots.toOwnedSlice(allocator);
 }
 
 fn adaptBindingsForMode(

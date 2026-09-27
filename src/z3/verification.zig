@@ -3367,6 +3367,26 @@ pub const VerificationPass = struct {
         const arena_allocator = arena.allocator();
 
         const rows = try arena_allocator.alloc(PreparedQueryManifestRow, queries.len);
+        var inactive_owners: std.ArrayList(PreparedQueryManifest.InactiveRuntimeOwner) = .empty;
+        var functions = self.encoder.function_ops.valueIterator();
+        while (functions.next()) |function| {
+            // Use the exact runtime inventory that controls annotation extraction.
+            if (self.shouldVerifyFunctionOp(function.*)) continue;
+            const visibility = self.getStringAttrSlice(function.*, "ora.visibility") orelse continue;
+            if (!std.mem.eql(u8, visibility, "private")) continue;
+            const module_path = self.getStringAttrSlice(function.*, "ora.source_module_path") orelse continue;
+            const owner_key = self.getStringAttrSlice(function.*, "ora.source_owner_key") orelse continue;
+            try inactive_owners.append(arena_allocator, .{
+                .source_op_id = @intFromPtr(function.ptr),
+                .module_path = try arena_allocator.dupe(u8, module_path),
+                .owner_key = try arena_allocator.dupe(u8, owner_key),
+            });
+        }
+        std.mem.sort(PreparedQueryManifest.InactiveRuntimeOwner, inactive_owners.items, {}, struct {
+            fn less(_: void, lhs: PreparedQueryManifest.InactiveRuntimeOwner, rhs: PreparedQueryManifest.InactiveRuntimeOwner) bool {
+                return lhs.source_op_id < rhs.source_op_id;
+            }
+        }.less);
         const source_accounting_rows = try arena_allocator.alloc(prepared_query.Row, queries.len);
         for (queries, rows, source_accounting_rows, 0..) |query, *row, *source_row, index| {
             row.* = .{
@@ -3420,6 +3440,7 @@ pub const VerificationPass = struct {
             .arena = arena,
             .rows = rows,
             .source_accounting_rows = source_accounting_rows,
+            .inactive_runtime_owners = try inactive_owners.toOwnedSlice(arena_allocator),
             .certified_calls = try arena_allocator.dupe(Encoder.CertifiedCallEvidence, self.encoder.certified_evidence.items),
         };
     }
@@ -7512,9 +7533,11 @@ pub const FormalQueryBinding = struct {
 };
 
 pub const PreparedQueryManifest = struct {
+    pub const InactiveRuntimeOwner = struct { source_op_id: usize, module_path: []const u8, owner_key: []const u8 };
     arena: std.heap.ArenaAllocator,
     rows: []const PreparedQueryManifestRow,
     source_accounting_rows: []const prepared_query.Row,
+    inactive_runtime_owners: ?[]const InactiveRuntimeOwner = null,
     certified_calls: []const Encoder.CertifiedCallEvidence = &.{},
 
     pub fn deinit(self: *PreparedQueryManifest) void {

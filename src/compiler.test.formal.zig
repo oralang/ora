@@ -14417,6 +14417,294 @@ test "HIR formal operations retain structural source-fact and runtime-owner iden
     );
 }
 
+fn c1Identity(manifest: z3_verification.PreparedQueryManifest) !source_accounting_from_z3.PreparedIdentity {
+    var identity = try source_accounting_from_z3.collectPreparedIdentity(testing.allocator, manifest.source_accounting_rows);
+    errdefer identity.deinit(testing.allocator);
+    if (manifest.inactive_runtime_owners) |rows| {
+        const owners = try testing.allocator.alloc(source_accounting_from_z3.InactiveRuntimeOwner, rows.len);
+        identity.inactive_runtime_owners = owners;
+        for (rows, owners) |row, *owner| owner.* = .{ .source_op_id = row.source_op_id, .module_path = row.module_path, .owner_key = row.owner_key };
+    }
+    return identity;
+}
+
+fn c1Account(compilation: *compiler.driver.Compilation, formal: *const obligation_from_mlir.CollectResult, identity: source_accounting_from_z3.PreparedIdentityView) !source_accounting_pipeline.Result {
+    return source_accounting_pipeline.run(testing.allocator, &compilation.db, compilation.package_id, compilation.root_module_id, try compilation.db.constEval(compilation.root_module_id), formal, .verified_full, identity);
+}
+
+test "C1 inactive folds require exact reachability evidence and retain missing live queries" {
+    for ([_]bool{ false, true }) |live| {
+        const source = try std.fmt.allocPrint(testing.allocator,
+            \\contract C {{
+            \\ storage var n: u256;
+            \\ pub fn callee() -> u256 requires n > 0 {{ return n; }}
+            \\ {s} fn caller() -> u256 {s} {{ return callee(); }}
+            \\ pub fn run() -> u256 {{ return 1; }}
+            \\}}
+        , .{ if (live) "pub" else "", if (live) "requires n > 0" else "" });
+        defer testing.allocator.free(source);
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "main.ora", .data = source });
+        const root_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/main.ora", .{tmp.sub_path});
+        defer testing.allocator.free(root_path);
+        var compilation = try compilePackage(root_path);
+        defer compilation.deinit();
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir.diagnostics.isEmpty());
+        var formal = try obligation_from_mlir.collect(testing.allocator, hir.module.raw_module, .{});
+        defer formal.deinit();
+        var pass = try z3_verification.VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        const bindings = try test_helpers.z3FormalQueryBindingsFromFormalForTest(testing.allocator, formal.query_bindings);
+        defer testing.allocator.free(bindings);
+        pass.setFormalQueryBindings(bindings);
+        var manifest = try pass.collectPreparedQueryManifest(hir.module.raw_module);
+        defer manifest.deinit();
+        try testing.expectEqual(@as(usize, if (live) 0 else 1), manifest.inactive_runtime_owners.?.len);
+        // The reachable query-free entrypoint must never be classified inactive.
+        try testing.expect(pass.runtime_reachable_function_names.contains("run"));
+        for (manifest.rows) |query| try testing.expect(!std.mem.eql(u8, query.function_name, "run"));
+        var prepared = try c1Identity(manifest);
+        defer prepared.deinit(testing.allocator);
+        const evaluated = try compilation.db.constEval(compilation.root_module_id);
+        try testing.expectEqual(@as(usize, 1), evaluated.formal_folds.len);
+        try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.abandoned, evaluated.formal_folds[0].disposition);
+        const original_fold = evaluated.formal_folds[0];
+        var result = try pass.runVerificationPass(hir.module.raw_module);
+        defer result.deinit();
+        try testing.expect(result.success);
+        var accepted = try c1Account(&compilation, &formal, prepared.view());
+        defer accepted.deinit();
+        try testing.expectEqual(source_accounting_gate.Decision.accepted, accepted.finished.decision);
+        try testing.expectEqualDeep(original_fold, evaluated.formal_folds[0]);
+        for ([_]?[]const source_accounting_from_z3.InactiveRuntimeOwner{ null, &.{} }) |absent| {
+            var view = prepared.view();
+            view.inactive_runtime_owners = absent;
+            var unchanged = try c1Account(&compilation, &formal, view);
+            defer unchanged.deinit();
+            try testing.expectEqual(if (live) source_accounting_gate.Decision.accepted else .rejected, unchanged.finished.decision);
+            if (!live) try testing.expectEqual(@as(?source_accounting_gate.FailureCode, .missing_symbolic_obligation), unchanged.finished.primary_failure);
+        }
+        if (live) {
+            try testing.expect(prepared.boundary_queries.len > 0);
+            var view = prepared.view();
+            view.boundary_queries = &.{};
+            var missing = try c1Account(&compilation, &formal, view);
+            defer missing.deinit();
+            try testing.expectEqual(source_accounting_gate.Decision.rejected, missing.finished.decision);
+            try testing.expectEqual(@as(?source_accounting_gate.FailureCode, .missing_symbolic_obligation), missing.finished.primary_failure);
+            continue;
+        }
+        const original = prepared.inactive_runtime_owners.?[0];
+        for (0..5) |mutation| {
+            var rows = [_]source_accounting_from_z3.InactiveRuntimeOwner{ original, original };
+            var view = prepared.view();
+            view.inactive_runtime_owners = rows[0..1];
+            const failure: anyerror = switch (mutation) {
+                0 => blk: {
+                    rows[0].source_op_id = 0;
+                    break :blk error.InvalidInactiveRuntimeOwnerInventory;
+                },
+                1 => blk: {
+                    rows[0].source_op_id = 1;
+                    break :blk error.UnknownInactiveRuntimeOwner;
+                },
+                2 => blk: {
+                    rows[0].module_path = "foreign.ora";
+                    break :blk error.InactiveRuntimeOwnerIdentityMismatch;
+                },
+                3 => blk: {
+                    rows[0].owner_key = "module/contract:C/function:run";
+                    break :blk error.InactiveRuntimeOwnerIdentityMismatch;
+                },
+                else => blk: {
+                    view.inactive_runtime_owners = &rows;
+                    break :blk error.InvalidInactiveRuntimeOwnerInventory;
+                },
+            };
+            try testing.expectError(failure, c1Account(&compilation, &formal, view));
+        }
+        // An additional runtime instance of this source owner is not covered by
+        // the inactive inventory. It must keep the entire root active.
+        const owners = try testing.allocator.alloc(obligation_from_mlir.RuntimeOwnerBinding, formal.runtime_owner_bindings.len + 1);
+        defer testing.allocator.free(owners);
+        @memcpy(owners[0..formal.runtime_owner_bindings.len], formal.runtime_owner_bindings);
+        for (formal.runtime_owner_bindings) |owner| if (owner.source_op_id == original.source_op_id) {
+            owners[owners.len - 1] = owner;
+        };
+        owners[owners.len - 1].source_op_id = 1;
+        var mixed = formal;
+        mixed.runtime_owner_bindings = owners;
+        var retained = try c1Account(&compilation, &mixed, prepared.view());
+        defer retained.deinit();
+        try testing.expectEqual(source_accounting_gate.Decision.rejected, retained.finished.decision);
+        try testing.expectEqual(@as(?source_accounting_gate.FailureCode, .missing_symbolic_obligation), retained.finished.primary_failure);
+        owners[owners.len - 1].source_op_id = original.source_op_id;
+        try testing.expectError(error.DuplicateInactiveRuntimeOwnerBinding, c1Account(&compilation, &mixed, prepared.view()));
+        mixed.runtime_owner_bindings = &.{};
+        try testing.expectError(error.UnknownInactiveRuntimeOwner, c1Account(&compilation, &mixed, prepared.view()));
+    }
+}
+
+test "C1 inactive folds preserve validation rejected roots and nested ancestry" {
+    var compilation = try compileText(
+        \\contract C {
+        \\ storage var n: u256;
+        \\ pub fn callee() -> u256 requires n > 0 { return n; }
+        \\ fn inactive() -> u256 { return callee(); }
+        \\ pub fn run() -> u256 { return 1; }
+        \\}
+    );
+    defer compilation.deinit();
+    const evaluated = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 1), evaluated.formal_folds.len);
+    var package = try source_accounting_from_package.collect(testing.allocator, &compilation.db, compilation.package_id, compilation.root_module_id);
+    defer package.deinit();
+    const original = evaluated.formal_folds[0];
+    const module = package.module(original.root_runtime_module_id).?;
+    const root = try std.fmt.allocPrint(testing.allocator, "{s}::{s}", .{ module.canonical_path, original.root_runtime_owner_key });
+    defer testing.allocator.free(root);
+    const inactive = [_][]const u8{root};
+    var plain = try source_accounting_from_comptime.collectPackageFoldExpansions(testing.allocator, &package, evaluated, .{});
+    defer plain.deinit();
+    try testing.expectEqual(@as(usize, 2), plain.expansions.len);
+    var scoped = try source_accounting_from_comptime.collectPackageFoldExpansionsForRoots(testing.allocator, &package, evaluated, .{}, &inactive);
+    defer scoped.deinit();
+    try testing.expectEqual(@as(usize, 0), scoped.expansions.len);
+    try testing.expectEqual(@as(usize, 0), scoped.uses.len);
+    for (0..7) |mutation| {
+        var rows = [_]compiler.sema.ComptimeFoldEvidence{ original, original };
+        var ledger = .{ .formal_folds = @as([]const compiler.sema.ComptimeFoldEvidence, rows[0..1]) };
+        const failure: anyerror = switch (mutation) {
+            0 => blk: {
+                rows[0].activation = .required;
+                break :blk error.RequiredComptimeFoldWasAbandoned;
+            },
+            1 => blk: {
+                rows[0].parent_invocation_id = 9999;
+                break :blk error.UnknownComptimeFoldParentInvocation;
+            },
+            2 => blk: {
+                ledger.formal_folds = &rows;
+                break :blk error.DuplicateComptimeFoldInvocationIdentity;
+            },
+            3 => blk: {
+                rows[0].callee_file_id = @fromBackingInt(@intCast(9999));
+                break :blk error.ComptimeFoldCalleeFileMismatch;
+            },
+            4 => blk: {
+                rows[0].root_runtime_module_id = @fromBackingInt(@intCast(9999));
+                break :blk error.UnknownComptimeFoldRootModule;
+            },
+            5 => blk: {
+                rows[0].generic_bindings = &.{ "z", "a" };
+                break :blk error.InvalidComptimeFoldGenericBindings;
+            },
+            else => blk: {
+                rows[0].trait_method = "m";
+                break :blk error.IncompleteComptimeFoldTraitIdentity;
+            },
+        };
+        try testing.expectError(failure, source_accounting_from_comptime.collectPackageFoldExpansionsForRoots(testing.allocator, &package, ledger, .{}, &inactive));
+    }
+    var rejected = original;
+    rejected.disposition = .rejected;
+    var rejection = try source_accounting_from_comptime.collectPackageFoldExpansionsForRoots(testing.allocator, &package, .{ .formal_folds = @as([]const compiler.sema.ComptimeFoldEvidence, &.{rejected}) }, .{}, &inactive);
+    defer rejection.deinit();
+    try testing.expectEqual(@as(usize, 1), rejection.expansions.len);
+    try testing.expectEqual(source_accounting.ExpansionDisposition.rejected, rejection.expansions[0].disposition);
+    var rows = [_]compiler.sema.ComptimeFoldEvidence{ original, original };
+    rows[1].invocation_id = original.invocation_id + 1;
+    rows[1].parent_invocation_id = original.invocation_id;
+    const chain = [_]compiler.sema.ComptimeFoldCallSite{ original.call_site_chain[0], original.call_site_chain[0] };
+    rows[1].call_site_chain = &chain;
+    var nested = try source_accounting_from_comptime.collectPackageFoldExpansionsForRoots(testing.allocator, &package, .{ .formal_folds = @as([]const compiler.sema.ComptimeFoldEvidence, &rows) }, .{}, &inactive);
+    defer nested.deinit();
+    try testing.expectEqual(@as(usize, 4), nested.expansions.len);
+    try testing.expectEqual(@as(?source_accounting.ExpansionId, nested.expansions[0].id), nested.expansions[2].parent_expansion_id);
+    var wrong_root = try source_accounting_from_comptime.collectPackageFoldExpansionsForRoots(testing.allocator, &package, evaluated, .{}, &.{"other.ora::module/contract:C/function:inactive"});
+    defer wrong_root.deinit();
+    try testing.expectEqual(@as(usize, 2), wrong_root.expansions.len);
+}
+
+test "C1 inactive folds distinguish same-name module and contract owners" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][]const u8{ "left.ora", "right.ora" }) |name| try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = name,
+        .data =
+        \\contract A {
+        \\ storage var n: u256;
+        \\ pub fn callee() -> u256 requires n > 0 { return n; }
+        \\ fn inactive() -> u256 { return callee(); }
+        \\}
+        \\contract B {
+        \\ storage var n: u256;
+        \\ pub fn callee() -> u256 requires n > 0 { return n; }
+        \\ fn inactive() -> u256 { return callee(); }
+        \\}
+        \\pub fn touch() -> u256 { return 1; }
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "main.ora",
+        .data =
+        \\comptime const left = @import("./left.ora");
+        \\comptime const right = @import("./right.ora");
+        \\contract Main { pub fn run() -> u256 { return left.touch() + right.touch(); } }
+        ,
+    });
+    const path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/main.ora", .{tmp.sub_path});
+    defer testing.allocator.free(path);
+    var compilation = try compilePackage(path);
+    defer compilation.deinit();
+    var package = try source_accounting_from_package.collect(testing.allocator, &compilation.db, compilation.package_id, compilation.root_module_id);
+    defer package.deinit();
+    try testing.expectEqual(@as(usize, 3), package.modules.len);
+    var checked: usize = 0;
+    for (package.modules) |module| {
+        if (module.module_id == compilation.root_module_id) continue;
+        const evaluated = try compilation.db.constEval(module.module_id);
+        try testing.expectEqual(@as(usize, 2), evaluated.formal_folds.len);
+        const inactive = "left.ora::module/contract:A/function:inactive";
+        var scoped = try source_accounting_from_comptime.collectPackageFoldExpansionsForRoots(testing.allocator, &package, evaluated, .{}, &.{inactive});
+        defer scoped.deinit();
+        const left = std.mem.eql(u8, module.canonical_path, "left.ora");
+        try testing.expectEqual(@as(usize, if (left) 2 else 4), scoped.expansions.len);
+        for (scoped.expansions) |expansion| try testing.expect(!std.mem.eql(u8, expansion.root_runtime_owner, inactive));
+        checked += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), checked);
+}
+
+test "C1 inactive folds retain committed proof events" {
+    var compilation = try compileText(
+        \\contract C {
+        \\ fn callee() -> u256 requires true ensures result == 1 { return 1; }
+        \\ fn inactive() -> u256 { return callee(); }
+        \\ pub fn run() -> u256 { return 1; }
+        \\}
+    );
+    defer compilation.deinit();
+    const evaluated = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 1), evaluated.formal_folds.len);
+    try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.committed, evaluated.formal_folds[0].disposition);
+    var package = try source_accounting_from_package.collect(testing.allocator, &compilation.db, compilation.package_id, compilation.root_module_id);
+    defer package.deinit();
+    const module = package.module(evaluated.formal_folds[0].root_runtime_module_id).?;
+    const root = try std.fmt.allocPrint(testing.allocator, "{s}::{s}", .{ module.canonical_path, evaluated.formal_folds[0].root_runtime_owner_key });
+    defer testing.allocator.free(root);
+    var scoped = try source_accounting_from_comptime.collectPackageFoldExpansionsForRoots(testing.allocator, &package, evaluated, .{}, &.{root});
+    defer scoped.deinit();
+    var unscoped = try source_accounting_from_comptime.collectPackageFoldExpansions(testing.allocator, &package, evaluated, .{});
+    defer unscoped.deinit();
+    try testing.expectEqual(@as(usize, 1), scoped.expansions.len);
+    try testing.expectEqual(@as(usize, 1), scoped.evidence.folds.len);
+    try testing.expectEqual(@as(usize, 5), scoped.evidence.predicate_events.len);
+    try testing.expectEqualDeep(unscoped.evidence, scoped.evidence);
+}
+
 test "result alias C3 preserves actual postcondition queries and missing-query rejection" {
     for ([_]bool{ false, true }) |false_postcondition| {
         const source = try std.fmt.allocPrint(

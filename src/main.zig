@@ -5181,6 +5181,15 @@ fn runMlirEmitAdvanced(
             manifest.source_accounting_rows,
         );
         errdefer identity.deinit(allocator);
+        if (manifest.inactive_runtime_owners) |rows| {
+            const owners = try allocator.alloc(formal_source_accounting_from_z3.InactiveRuntimeOwner, rows.len);
+            identity.inactive_runtime_owners = owners;
+            for (rows, owners) |row, *owner| owner.* = .{
+                .source_op_id = row.source_op_id,
+                .module_path = row.module_path,
+                .owner_key = row.owner_key,
+            };
+        }
         try formal_source_accounting_from_z3.includeCanonicalLoopPostQueries(
             allocator,
             &identity,

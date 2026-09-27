@@ -53,7 +53,11 @@ pub const PreparedIdentityView = struct {
     queries: []const PreparedQueryIdentity,
     boundary_queries: []const PreparedBoundaryQueryIdentity = &.{},
     runtime_function_names: []const []const u8,
+    inactive_runtime_owners: ?[]const InactiveRuntimeOwner = null,
 };
+
+/// Structural producer identities, independent of queries and solver outcomes.
+pub const InactiveRuntimeOwner = struct { source_op_id: usize, module_path: []const u8, owner_key: []const u8 };
 
 pub const PreparedIdentity = struct {
     query_storage: []PreparedQueryIdentity,
@@ -62,11 +66,14 @@ pub const PreparedIdentity = struct {
     queries: []const PreparedQueryIdentity,
     boundary_queries: []const PreparedBoundaryQueryIdentity,
     runtime_function_names: []const []const u8,
+    // Row strings borrow the prepared manifest, which must outlive this identity.
+    inactive_runtime_owners: ?[]const InactiveRuntimeOwner = null,
 
     pub fn deinit(self: *PreparedIdentity, allocator: std.mem.Allocator) void {
         allocator.free(self.query_storage);
         allocator.free(self.boundary_query_storage);
         allocator.free(self.function_storage);
+        if (self.inactive_runtime_owners) |rows| allocator.free(rows);
         self.* = undefined;
     }
 
@@ -75,6 +82,7 @@ pub const PreparedIdentity = struct {
             .queries = self.queries,
             .boundary_queries = self.boundary_queries,
             .runtime_function_names = self.runtime_function_names,
+            .inactive_runtime_owners = self.inactive_runtime_owners,
         };
     }
 };
