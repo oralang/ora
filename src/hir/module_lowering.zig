@@ -319,15 +319,19 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     const known_args = try @This().inlineKnownRuntimeArgBindings(self, function, runtime_args, parameters);
                     const symbol_name = try @This().mangleInlineKnownFunctionName(self, base_symbol_name, known_args);
                     if (!self.monomorphized_function_names.contains(symbol_name)) {
-                        try @This().lowerConcreteFunction(self, item_id, function, symbol_name, parameters, parent_block, &.{}, known_args, null, null);
+                        // Reserve before traversing the body so recursive edges reuse the symbol.
+                        // Undo the reservation if body construction fails.
                         try self.monomorphized_function_names.put(symbol_name, {});
+                        errdefer _ = self.monomorphized_function_names.remove(symbol_name);
+                        try @This().lowerConcreteFunction(self, item_id, function, symbol_name, parameters, parent_block, &.{}, known_args, null, null);
                     }
                     return symbol_name;
                 }
                 if (scoped_contract_id == null) return function.name;
                 if (!self.monomorphized_function_names.contains(base_symbol_name)) {
-                    try @This().lowerConcreteFunction(self, item_id, function, base_symbol_name, parameters, parent_block, &.{}, &.{}, null, null);
                     try self.monomorphized_function_names.put(base_symbol_name, {});
+                    errdefer _ = self.monomorphized_function_names.remove(base_symbol_name);
+                    try @This().lowerConcreteFunction(self, item_id, function, base_symbol_name, parameters, parent_block, &.{}, &.{}, null, null);
                 }
                 return base_symbol_name;
             }
@@ -339,8 +343,9 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             const known_args = try @This().inlineKnownRuntimeArgBindings(self, function, runtime_args, parameters);
             const mangled_name = try @This().mangleInlineKnownFunctionName(self, generic_mangled_name, known_args);
             if (!self.monomorphized_function_names.contains(mangled_name)) {
-                try @This().lowerConcreteFunction(self, item_id, function, mangled_name, parameters, parent_block, bindings, known_args, null, null);
                 try self.monomorphized_function_names.put(mangled_name, {});
+                errdefer _ = self.monomorphized_function_names.remove(mangled_name);
+                try @This().lowerConcreteFunction(self, item_id, function, mangled_name, parameters, parent_block, bindings, known_args, null, null);
             }
             return mangled_name;
         }

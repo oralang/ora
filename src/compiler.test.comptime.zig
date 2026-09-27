@@ -695,6 +695,74 @@ test "generic holds T scopes transitive clones and restores module context" {
     }
 }
 
+test "generic holds T reserves recursive clones once per destination" {
+    const variants = [_]struct { declarations: []const u8, entry: []const u8, symbols: []const []const u8 }{
+        .{
+            .declarations = "fn recur(n: u256) -> u256 { if (n == 0) { return 0; } return recur(n - 1); }",
+            .entry = "recur(n)",
+            .symbols = &.{"recur"},
+        },
+        .{
+            .declarations = "fn recur(comptime T: type, n: u256) -> u256 { if (n == 0) { return 0; } return recur(u256, n - 1); }",
+            .entry = "recur(u256, n)",
+            .symbols = &.{"recur__u256"},
+        },
+        .{
+            .declarations = "fn left(n: u256) -> u256 { if (n == 0) { return 0; } return right(n - 1); }\n" ++
+                "fn right(n: u256) -> u256 { if (n == 0) { return 1; } return left(n - 1); }",
+            .entry = "left(n)",
+            .symbols = &.{ "left", "right" },
+        },
+        .{
+            .declarations = "fn left(comptime T: type, n: u256) -> u256 { if (n == 0) { return 0; } return right(u256, n - 1); }\n" ++
+                "fn right(comptime T: type, n: u256) -> u256 { if (n == 0) { return 1; } return left(u256, n - 1); }",
+            .entry = "left(u256, n)",
+            .symbols = &.{ "left__u256", "right__u256" },
+        },
+    };
+    for (variants) |variant| {
+        const source = try std.fmt.allocPrint(testing.allocator,
+            \\{s}
+            \\contract A {{ pub fn run_a(n: u256) -> u256 {{ return {s}; }} }}
+            \\fn after(n: u256) -> u256 {{ return {s}; }}
+            \\contract B {{ pub fn run_b(n: u256) -> u256 {{ return {s}; }} }}
+        , .{ variant.declarations, variant.entry, variant.entry, variant.entry });
+        defer testing.allocator.free(source);
+        var compilation = try compileText(source);
+        defer compilation.deinit();
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir.diagnostics.isEmpty());
+        try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(hir.module.raw_module)));
+        const text = try hir.renderText(testing.allocator);
+        defer testing.allocator.free(text);
+        for ([_][]const u8{ "A.", "B.", "" }) |scope| {
+            for (variant.symbols, 0..) |symbol, index| {
+                const header = try std.fmt.allocPrint(testing.allocator, "func.func @{s}{s}(", .{ scope, symbol });
+                defer testing.allocator.free(header);
+                try testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, header));
+                const start = std.mem.indexOf(u8, text, header).?;
+                const end = start + (std.mem.indexOf(u8, text[start..], if (scope.len == 0) "\n  }" else "\n    }") orelse return error.TestUnexpectedResult);
+                const target = variant.symbols[(index + 1) % variant.symbols.len];
+                const call = try std.fmt.allocPrint(testing.allocator, "call @{s}{s}(", .{ scope, target });
+                defer testing.allocator.free(call);
+                try testing.expectEqual(@as(usize, 1), std.mem.count(u8, text[start..end], call));
+            }
+        }
+    }
+}
+
+test "generic holds T retains top-level source-inline recursion rejection" {
+    try expectDiagnosticProbeContains(
+        \\inline fn recur(n: u256) -> u256 { return recur(n); }
+        \\contract C { pub fn run(n: u256) -> u256 { return recur(n); } }
+    , .typecheck, "inline functions must not be recursive");
+    try expectDiagnosticProbeContains(
+        \\inline fn left(n: u256) -> u256 { return right(n); }
+        \\inline fn right(n: u256) -> u256 { return left(n); }
+        \\contract C { pub fn run(n: u256) -> u256 { return left(n); } }
+    , .typecheck, "inline functions must not be recursive");
+}
+
 test "generic holds T retains checks and exact specialization errors" {
     const safe =
         \\fn leaf(comptime T: type, x: T, d: T) -> T requires(d > @cast(T, 0)) { return x / d; }

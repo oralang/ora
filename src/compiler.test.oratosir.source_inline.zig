@@ -573,3 +573,108 @@ test "Ora inline without source guarantee does not fail closed" {
     try testing.expect(mlir.oraCanonicalizeOraMLIRWithStatisticsOut(ctx, module, false, &stats));
     try testing.expectEqual(@as(u64, 0), stats.ora_source_inline_failures);
 }
+
+test "source inline cycle preflight rejects direct and mutual cycles before cloning" {
+    for ([_][]const u8{ "recursive", "peer" }) |target| {
+        const ctx = createOraMlirContext();
+        defer mlir.oraContextDestroy(ctx);
+        const text = try std.fmt.allocPrint(testing.allocator,
+            \\module {{
+            \\  func.func @run(%x: i256) -> i256 attributes {{ora.visibility = "pub"}} {{
+            \\    %0 = func.call @identity(%x) : (i256) -> i256
+            \\    %1 = func.call @recursive(%0) : (i256) -> i256
+            \\    return %1 : i256
+            \\  }}
+            \\  func.func @identity(%x: i256) -> i256 attributes {{ora.inline = true}} {{ return %x : i256 }}
+            \\  func.func @recursive(%x: i256) -> i256 attributes {{ora.inline = true}} {{
+            \\    %0 = func.call @{s}(%x) : (i256) -> i256
+            \\    return %0 : i256
+            \\  }}
+            \\  func.func @peer(%x: i256) -> i256 attributes {{ora.inline = true}} {{
+            \\    %0 = func.call @recursive(%x) : (i256) -> i256
+            \\    return %0 : i256
+            \\  }}
+            \\}}
+        , .{target});
+        defer testing.allocator.free(text);
+        const module = try parseOraModule(ctx, text);
+        defer mlir.oraModuleDestroy(module);
+        try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+        var stats: mlir.OraMlirPassStatisticsC = std.mem.zeroes(mlir.OraMlirPassStatisticsC);
+        try testing.expect(!mlir.oraCanonicalizeOraMLIRWithStatisticsOut(ctx, module, false, &stats));
+        try testing.expectEqual(@as(u64, 0), stats.ora_calls_inlined);
+        try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    }
+}
+
+test "source inline cycle preflight preserves recursion through non-inline calls" {
+    for ([_][]const u8{ "false", "true" }) |inline_attr| {
+        const ctx = createOraMlirContext();
+        defer mlir.oraContextDestroy(ctx);
+        const text = try std.fmt.allocPrint(testing.allocator,
+            \\module {{
+            \\  func.func @marked(%x: i256) -> i256 attributes {{ora.inline = {s}, ora.visibility = "pub"}} {{
+            \\    %0 = func.call @ordinary(%x) : (i256) -> i256
+            \\    return %0 : i256
+            \\  }}
+            \\  func.func @ordinary(%x: i256) -> i256 attributes {{ora.visibility = "pub"}} {{
+            \\    %0 = func.call @marked(%x) : (i256) -> i256
+            \\    return %0 : i256
+            \\  }}
+            \\}}
+        , .{inline_attr});
+        defer testing.allocator.free(text);
+        const module = try parseOraModule(ctx, text);
+        defer mlir.oraModuleDestroy(module);
+        try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+        var stats: mlir.OraMlirPassStatisticsC = std.mem.zeroes(mlir.OraMlirPassStatisticsC);
+        try testing.expect(mlir.oraCanonicalizeOraMLIRWithStatisticsOut(ctx, module, false, &stats));
+        try testing.expectEqual(@as(u64, if (std.mem.eql(u8, inline_attr, "true")) 1 else 0), stats.ora_calls_inlined);
+        const rendered = try common.printModuleTextForTest(module);
+        defer testing.allocator.free(rendered);
+        try testing.expect(std.mem.indexOf(u8, rendered, "call @ordinary(") != null);
+        try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    }
+}
+
+test "source inline cycle preflight keeps shared callees and contract-local lookup" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+    const text =
+        \\module {
+        \\  ora.contract @A {
+        \\    func.func @a(%x: i256) -> i256 attributes {ora.inline = true, ora.visibility = "pub"} {
+        \\      %0 = func.call @b(%x) : (i256) -> i256
+        \\      %1 = func.call @c(%0) : (i256) -> i256
+        \\      return %1 : i256
+        \\    }
+        \\    func.func @b(%x: i256) -> i256 attributes {ora.inline = true} {
+        \\      %0 = func.call @leaf(%x) : (i256) -> i256
+        \\      return %0 : i256
+        \\    }
+        \\    func.func @c(%x: i256) -> i256 attributes {ora.inline = true} {
+        \\      %0 = func.call @leaf(%x) : (i256) -> i256
+        \\      return %0 : i256
+        \\    }
+        \\    func.func @leaf(%x: i256) -> i256 attributes {ora.inline = true} { return %x : i256 }
+        \\  }
+        \\  ora.contract @B {
+        \\    func.func @b(%x: i256) -> i256 attributes {ora.inline = true, ora.visibility = "pub"} {
+        \\      %0 = func.call @a(%x) : (i256) -> i256
+        \\      return %0 : i256
+        \\    }
+        \\    func.func @a(%x: i256) -> i256 attributes {ora.inline = true} { return %x : i256 }
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    var stats: mlir.OraMlirPassStatisticsC = std.mem.zeroes(mlir.OraMlirPassStatisticsC);
+    try testing.expect(mlir.oraCanonicalizeOraMLIRWithStatisticsOut(ctx, module, false, &stats));
+    try testing.expect(stats.ora_calls_inlined > 0);
+    const rendered = try common.printModuleTextForTest(module);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "func.call") == null);
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+}
