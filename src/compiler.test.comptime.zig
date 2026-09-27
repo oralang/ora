@@ -5228,6 +5228,147 @@ test "compiler rejects non-boolean loop invariants during semantic analysis" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "loop invariant condition must be 'bool', found 'integer'"));
 }
 
+test "result alias C3 creates no speculative calls or cached results" {
+    for ([_][]const u8{
+        "contract A { storage var n: u256; pub fn get() -> u256 ensures get() == n { return n; } }",
+        "contract B { pub fn get() -> u256 ensures (get()) == 1 { return 1; } }",
+    }) |source_text| {
+        var compilation = try compileText(source_text);
+        defer compilation.deinit();
+        const evaluated = try compilation.db.constEval(compilation.root_module_id);
+        try testing.expect(evaluated.diagnostics.isEmpty());
+        try testing.expectEqual(@as(usize, 0), evaluated.formal_folds.len);
+        const file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+        var aliases: usize = 0;
+        for (file.expressions, 0..) |expr, index| if (expr == .Call) {
+            aliases += 1;
+            try testing.expect(evaluated.values[index] == null);
+        };
+        try testing.expectEqual(@as(usize, 1), aliases);
+    }
+}
+
+test "result alias C3 restores nested results and records real folds" {
+    const source_text =
+        \\fn inner() -> u256 ensures inner() == 1 { return 1; }
+        \\fn outer() -> u256 ensures inner() == 1 && outer() == 2 { return 2; }
+        \\pub fn run() -> u256 { return comptime { outer(); }; }
+    ;
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const evaluated = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(evaluated.diagnostics.isEmpty());
+    var outer_count: usize = 0;
+    var inner_count: usize = 0;
+    for (evaluated.formal_folds) |fold| {
+        try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.committed, fold.disposition);
+        if (std.mem.endsWith(u8, fold.callee_owner_key, "/function:outer")) outer_count += 1 else if (std.mem.endsWith(u8, fold.callee_owner_key, "/function:inner")) inner_count += 1 else return error.TestUnexpectedResult;
+        var predicates: usize = 0;
+        for (fold.events) |event| if (event.kind == .predicate_check) {
+            predicates += 1;
+            try testing.expectEqual(@as(?bool, true), event.predicate_value);
+        };
+        try testing.expectEqual(@as(usize, 1), predicates);
+    }
+    try testing.expectEqual(@as(usize, 1), outer_count);
+    try testing.expect(inner_count > 0);
+    const file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+    const function = file.item(file.root_items[2]).Function;
+    const ret = file.statement(file.body(function.body).statements[0]).Return;
+    try testing.expectEqual(@as(u64, 2), try evaluated.values[ret.value.?.index()].?.integer.toInt(u64));
+}
+
+test "result alias C3 carries concrete results through CtValue dispatch" {
+    for ([_][]const u8{ "accept(get())", "switch (get()) { 1 => true, else => false }" }) |predicate| {
+        for ([_]u8{ 1, 2 }) |returned| {
+            const source_text = try std.fmt.allocPrint(testing.allocator,
+                \\fn accept(value: u256) -> bool requires value > 0 {{ return value == 1; }}
+                \\fn get() -> u256 ensures {s} {{ return {d}; }}
+                \\pub fn run() -> u256 {{ return comptime {{ get(); }}; }}
+            , .{ predicate, returned });
+            defer testing.allocator.free(source_text);
+            var compilation = try compileText(source_text);
+            defer compilation.deinit();
+            const evaluated = try compilation.db.constEval(compilation.root_module_id);
+            if (returned == 1) {
+                try testing.expect(evaluated.diagnostics.isEmpty());
+            } else {
+                try testing.expect(diagnosticMessagesContain(&evaluated.diagnostics, "compile-time formal predicate is false: ensures"));
+            }
+            var getter_folds: usize = 0;
+            for (evaluated.formal_folds) |fold| {
+                if (!std.mem.endsWith(u8, fold.callee_owner_key, "/function:get")) continue;
+                getter_folds += 1;
+                try testing.expectEqual(if (returned == 1) compiler.sema.ComptimeFoldDisposition.committed else .rejected, fold.disposition);
+            }
+            try testing.expect(getter_folds > 0);
+        }
+    }
+}
+
+test "result alias C3 retains real call failures and error restoration" {
+    for ([_][]const u8{
+        "contract C { fn helper() -> u256 requires false { return 1; } pub fn get() -> u256 ensures helper() == 1 && get() == 2 { return 2; } }",
+        "contract C { fn helper() -> u256 { return get(); } pub fn get() -> u256 requires false ensures helper() == 1 { return 1; } }",
+        "contract C { fn get() -> u256 requires false ensures get() == 1 { return 1; } pub fn run() -> u256 { return get(); } }",
+        "contract C { pub fn get(x: u256) -> u256 requires x > 0 ensures get(0) == result { return x; } }",
+    }) |source_text| {
+        var compilation = try compileText(source_text);
+        defer compilation.deinit();
+        const evaluated = try compilation.db.constEval(compilation.root_module_id);
+        try testing.expect(diagnosticMessagesContain(&evaluated.diagnostics, "compile-time formal predicate is false: requires"));
+        var rejected: usize = 0;
+        for (evaluated.formal_folds) |fold| if (fold.disposition == .rejected) {
+            rejected += 1;
+        };
+        try testing.expect(rejected > 0);
+    }
+    for ([_][]const u8{ "result", "wrong()" }) |result_spelling| {
+        const source_text = try std.fmt.allocPrint(testing.allocator,
+            \\fn wrong() -> u256 ensures {s} != 1 {{ return 1; }}
+            \\pub fn run() -> u256 {{ return comptime {{ wrong(); }}; }}
+        , .{result_spelling});
+        defer testing.allocator.free(source_text);
+        var false_alias = try compileText(source_text);
+        defer false_alias.deinit();
+        const evaluated = try false_alias.db.constEval(false_alias.root_module_id);
+        try testing.expect(diagnosticMessagesContain(&evaluated.diagnostics, "compile-time formal predicate is false: ensures"));
+        // Both spellings retain the evaluator's three rejected execution attempts.
+        try testing.expectEqual(@as(usize, 3), evaluated.formal_folds.len);
+        for (evaluated.formal_folds) |fold| {
+            try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.rejected, fold.disposition);
+            try testing.expect(std.mem.endsWith(u8, fold.callee_owner_key, "/function:wrong"));
+        }
+    }
+}
+
+test "result alias C3 does not substitute an imported same-name function" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "dep.ora",
+        .data = "pub fn get() -> u256 requires false { return 1; }",
+    });
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "main.ora",
+        .data =
+        \\comptime const dep = @import("./dep.ora");
+        \\pub fn get() -> u256 ensures dep.get() == 1 { return 1; }
+        ,
+    });
+    const root_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/main.ora", .{tmp.sub_path});
+    defer testing.allocator.free(root_path);
+    var compilation = try compilePackage(root_path);
+    defer compilation.deinit();
+    const evaluated = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&evaluated.diagnostics, "compile-time formal predicate is false: requires"));
+    try testing.expect(evaluated.formal_folds.len > 0);
+    for (evaluated.formal_folds) |fold| {
+        try testing.expect(fold.callee_module_id != compilation.root_module_id);
+        try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.rejected, fold.disposition);
+    }
+}
+
 test "compiler commits a fold only after every loop invariant checkpoint is true" {
     const source_text =
         \\contract CheckedFold {

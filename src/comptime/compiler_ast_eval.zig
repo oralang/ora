@@ -167,9 +167,16 @@ const ConstEvaluator = struct {
     required_comptime_depth: u32 = 0,
     last_error: ?error_mod.CtError = null,
     current_result: ?CtValue = null,
+    result_reference_owner: ?ResultReferenceOwner = null,
     formal_folds: std.ArrayList(model.ComptimeFoldEvidence) = .empty,
     fold_stack: std.ArrayList(FoldBuilder) = .empty,
     next_fold_invocation_id: u32 = 1,
+
+    const ResultReferenceOwner = struct {
+        module_id: source.ModuleId,
+        file_id: source.FileId,
+        item_id: ast.ItemId,
+    };
 
     const FoldBuilder = struct {
         invocation_id: u32,
@@ -243,7 +250,12 @@ const ConstEvaluator = struct {
                 for (contract.members) |member_id| self.visitItem(member_id);
             },
             .Function => |function| {
-                for (function.clauses) |clause| _ = self.evalExpr(clause.expr) catch null;
+                for (function.clauses) |clause| {
+                    const previous_owner = self.result_reference_owner;
+                    self.result_reference_owner = self.resultReferenceOwnerForClause(clause.kind);
+                    defer self.result_reference_owner = previous_owner;
+                    _ = self.evalExpr(clause.expr) catch null;
+                }
                 self.visitBody(function.body);
             },
             .Enum => |enum_item| {
@@ -427,6 +439,14 @@ const ConstEvaluator = struct {
     }
 
     fn evalExprImpl(self: *ConstEvaluator, expr_id: ast.ExprId, comptime use_cache: bool) anyerror!?ConstValue {
+        // A postcondition result is contextual: never read or populate its cache.
+        if (try self.isCurrentResultReference(expr_id)) {
+            if (self.consumeStep(self.exprRange(expr_id))) return null;
+            return if (self.current_result) |value|
+                try ctValueToConstValue(self.allocator, &self.env.heap, value)
+            else
+                null;
+        }
         if (use_cache) {
             if (self.values[expr_id.index()]) |cached| return cached;
         }
@@ -714,6 +734,7 @@ const ConstEvaluator = struct {
         comptime charge_step: bool,
     ) anyerror!?CtValue {
         if (charge_step and self.consumeStep(self.exprRange(expr_id))) return null;
+        if (try self.isCurrentResultReference(expr_id)) return self.current_result;
 
         return switch (self.file.expression(expr_id).*) {
             .IntegerLiteral => |literal| blk: {
@@ -2747,17 +2768,20 @@ const ConstEvaluator = struct {
                 const previous_key = self.current_typecheck_key;
                 const previous_contract = self.current_contract;
                 const previous_result = self.current_result;
+                const previous_result_owner = self.result_reference_owner;
                 self.file = callable.file;
                 self.module_id = callable.module_id;
                 self.current_typecheck_key = .{ .item = callable.item_id };
                 self.current_contract = callable.contract_id;
                 self.current_result = null;
+                self.result_reference_owner = null;
                 defer {
                     self.file = previous_file;
                     self.module_id = previous_module_id;
                     self.current_typecheck_key = previous_key;
                     self.current_contract = previous_contract;
                     self.current_result = previous_result;
+                    self.result_reference_owner = previous_result_owner;
                 }
 
                 try self.ensureTypeChecked(.{ .item = callable.item_id });
@@ -3072,6 +3096,37 @@ const ConstEvaluator = struct {
         return true;
     }
 
+    fn resultReferenceOwnerForClause(self: *ConstEvaluator, kind: ast.SpecClauseKind) ?ResultReferenceOwner {
+        if (kind != .ensures) return null;
+        const key = self.current_typecheck_key orelse return null;
+        return .{
+            .module_id = self.module_id orelse return null,
+            .file_id = self.file.file_id,
+            .item_id = switch (key) {
+                .item => |item| item,
+                .body => return null,
+            },
+        };
+    }
+
+    fn isCurrentResultReference(self: *ConstEvaluator, expr_id: ast.ExprId) !bool {
+        const owner = self.result_reference_owner orelse return false;
+        if (self.module_id != owner.module_id or self.file.file_id != owner.file_id) return false;
+        const call = switch (self.file.expression(expr_id).*) {
+            .Call => |call| call,
+            else => return false,
+        };
+        if (call.args.len != 0) return false;
+        const callee = (try self.lookupCallableFunction(call.callee)) orelse return false;
+        if (callee.module_id != owner.module_id or callee.file.file_id != owner.file_id or
+            callee.item_id != owner.item_id or callee.synthetic_self_arg != null or
+            callee.function.is_generic or callee.function.parameters.len != 0 or callee.function.return_type == null)
+            return false;
+        const typecheck = (try self.currentTypeCheckResult()) orelse return false;
+        const returns = typecheck.item_types[callee.item_id.index()].returnTypes();
+        return returns.len == 1 and returns[0].kind() != .void;
+    }
+
     fn resultSelectsClause(result: ?CtValue, kind: ast.SpecClauseKind) bool {
         return switch (kind) {
             .ensures => true,
@@ -3102,6 +3157,9 @@ const ConstEvaluator = struct {
 
         for (function.clauses) |clause| {
             if (!resultSelectsClause(result, clause.kind) and clause.kind != .invariant) continue;
+            const previous_owner = self.result_reference_owner;
+            self.result_reference_owner = self.resultReferenceOwnerForClause(clause.kind);
+            defer self.result_reference_owner = previous_owner;
             if (!(try self.checkFormalPredicate(
                 clause.expr,
                 clause.source_fact_id,
@@ -3142,17 +3200,20 @@ const ConstEvaluator = struct {
         const previous_key = self.current_typecheck_key;
         const previous_contract = self.current_contract;
         const previous_result = self.current_result;
+        const previous_result_owner = self.result_reference_owner;
         self.file = callable.file;
         self.module_id = callable.module_id;
         self.current_typecheck_key = .{ .item = callable.item_id };
         self.current_contract = callable.contract_id;
         self.current_result = null;
+        self.result_reference_owner = null;
         defer {
             self.file = previous_file;
             self.module_id = previous_module_id;
             self.current_typecheck_key = previous_key;
             self.current_contract = previous_contract;
             self.current_result = previous_result;
+            self.result_reference_owner = previous_result_owner;
         }
         try self.ensureTypeChecked(.{ .item = callable.item_id });
         try self.beginFormalFold(previous_module_id orelse callable.module_id, previous_file.file_id, call, callable, arg_values, retry_previous_representation);
@@ -3221,17 +3282,20 @@ const ConstEvaluator = struct {
         const previous_key = self.current_typecheck_key;
         const previous_contract = self.current_contract;
         const previous_result = self.current_result;
+        const previous_result_owner = self.result_reference_owner;
         self.file = callable.file;
         self.module_id = callable.module_id;
         self.current_typecheck_key = .{ .item = callable.item_id };
         self.current_contract = callable.contract_id;
         self.current_result = null;
+        self.result_reference_owner = null;
         defer {
             self.file = previous_file;
             self.module_id = previous_module_id;
             self.current_typecheck_key = previous_key;
             self.current_contract = previous_contract;
             self.current_result = previous_result;
+            self.result_reference_owner = previous_result_owner;
         }
         try self.ensureTypeChecked(.{ .item = callable.item_id });
         try self.beginFormalFold(previous_module_id orelse callable.module_id, previous_file.file_id, call, callable, arg_values, false);
@@ -3288,6 +3352,7 @@ const ConstEvaluator = struct {
     }
 
     fn evalExprAsCtValue(self: *ConstEvaluator, expr_id: ast.ExprId, comptime use_cache: bool) anyerror!?CtValue {
+        if (try self.isCurrentResultReference(expr_id)) return self.evalExprCtValueImpl(expr_id, use_cache, true);
         switch (self.file.expression(expr_id).*) {
             .Call => |call| {
                 if (try self.evalResultConstructorCallCtValue(call, use_cache)) |ct_value| return ct_value;

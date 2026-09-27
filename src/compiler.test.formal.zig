@@ -14417,6 +14417,78 @@ test "HIR formal operations retain structural source-fact and runtime-owner iden
     );
 }
 
+test "result alias C3 preserves actual postcondition queries and missing-query rejection" {
+    for ([_]bool{ false, true }) |false_postcondition| {
+        const source = try std.fmt.allocPrint(
+            testing.allocator,
+            "contract C {{ storage var n: u256; pub fn get() -> u256 ensures get() {s} n {{ return n; }} }}",
+            .{if (false_postcondition) "!=" else "=="},
+        );
+        defer testing.allocator.free(source);
+        var compilation = try compileText(source);
+        defer compilation.deinit();
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir.diagnostics.isEmpty());
+        const evaluated = try compilation.db.constEval(compilation.root_module_id);
+        try testing.expect(evaluated.diagnostics.isEmpty());
+        try testing.expectEqual(@as(usize, 0), evaluated.formal_folds.len);
+        var formal = try obligation_from_mlir.collect(testing.allocator, hir.module.raw_module, .{});
+        defer formal.deinit();
+        var pass = try z3_verification.VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        const bindings = try test_helpers.z3FormalQueryBindingsFromFormalForTest(testing.allocator, formal.query_bindings);
+        defer testing.allocator.free(bindings);
+        pass.setFormalQueryBindings(bindings);
+        var manifest = try pass.collectPreparedQueryManifest(hir.module.raw_module);
+        defer manifest.deinit();
+        var prepared = try source_accounting_from_z3.collectPreparedIdentity(testing.allocator, manifest.source_accounting_rows);
+        defer prepared.deinit(testing.allocator);
+        try testing.expectEqual(@as(usize, 1), prepared.queries.len);
+        try testing.expectEqual(@as(usize, 0), prepared.boundary_queries.len);
+        var result = try pass.runVerificationPass(hir.module.raw_module);
+        defer result.deinit();
+        try testing.expectEqual(!false_postcondition, result.success);
+        var report = try pass.buildSmtReport(hir.module.raw_module, "test.ora", &result);
+        defer report.deinit(testing.allocator);
+        var overlay = try obligation_from_z3.overlayPreparedQueryResults(testing.allocator, formal.set, report.query_manifest.?.rows);
+        defer overlay.deinit();
+        const query = obligation.findById(overlay.set.queries, prepared.queries[0].formal_query_id).?;
+        try testing.expect(query.smtlib_hash != null and query.smtlib_hash.? != 0);
+        try testing.expectEqual(
+            if (false_postcondition) obligation.VerificationQueryStatus.sat else obligation.VerificationQueryStatus.unsat,
+            query.result.?.status,
+        );
+        var accounted = try source_accounting_pipeline.run(
+            testing.allocator,
+            &compilation.db,
+            compilation.package_id,
+            compilation.root_module_id,
+            evaluated,
+            &formal,
+            .verified_full,
+            prepared.view(),
+        );
+        defer accounted.deinit();
+        try testing.expectEqual(source_accounting_gate.Decision.accepted, accounted.finished.decision);
+        var missing = try source_accounting_pipeline.run(
+            testing.allocator,
+            &compilation.db,
+            compilation.package_id,
+            compilation.root_module_id,
+            evaluated,
+            &formal,
+            .verified_full,
+            .{
+                .queries = &.{},
+                .runtime_function_names = prepared.runtime_function_names,
+            },
+        );
+        defer missing.deinit();
+        try testing.expectEqual(source_accounting_gate.Decision.rejected, missing.finished.decision);
+        try testing.expectEqual(@as(?source_accounting_gate.FailureCode, .missing_symbolic_query), missing.finished.primary_failure);
+    }
+}
+
 test "production source-accounting pipeline keeps loop accounting queries diagnostic-only" {
     const source =
         \\pub fn slice(limit: u256) -> u256 {
