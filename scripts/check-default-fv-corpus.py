@@ -52,12 +52,23 @@ def loop_rows(report):
     return rows
 
 
+def relative_paths(value):
+    """Only checkout-root paths vary; preserve all other report content."""
+    if isinstance(value, str):
+        return value.replace(str(ROOT) + "/", "")
+    if isinstance(value, list):
+        return [relative_paths(item) for item in value]
+    if isinstance(value, dict):
+        return {key: relative_paths(item) for key, item in value.items()}
+    return value
+
+
 def smt_errors(report):
     if report is None:
         return []
-    return [{**{key: row.get(key) for key in ("type", "message", "line", "column", "subtype")},
-             "file": row["file"].replace(str(ROOT) + "/", "") if row.get("file") else None}
-            for row in report["errors"]]
+    return relative_paths([{**{key: row.get(key) for key in ("type", "message", "line", "column", "subtype")},
+                            "file": row.get("file") or None}
+                           for row in report["errors"]])
 
 
 def smt_diagnostics(report):
@@ -67,16 +78,44 @@ def smt_diagnostics(report):
              for key, value in row.items() if key != "counterexample"} for row in report["diagnostics"]]
 
 
+def rejection_evidence(report):
+    return relative_paths({key: report[key] for key in ("verification", "summary", "queries")})
+
+
+def validate_verification_negative(expected, actual, smt, authority):
+    # This records a particular refused verification, never an accepted proof.
+    require(actual["source"] == expected["source"], "negative source changed")
+    require(re.fullmatch(r"[0-9a-f]{64}", expected["source_sha256"] or "") and
+            actual["source_sha256"] == expected["source_sha256"], "negative source hash changed")
+    require(relative_paths(smt["source_file"]) == actual["source"] and
+            relative_paths(authority["source"]) == actual["source"], "foreign rejection report")
+    require(smt["verification"]["success"] is False, "negative verification succeeded")
+    require(smt["verification"]["verification_trust"] in ("full", "degraded"), "unknown negative trust")
+    require(smt["errors"] and all(row["type"] for row in smt["errors"]), "missing named negative error")
+    require(authority["final_artifact_authorization"] == "blocked", "negative authority not blocked")
+    gates = [gate for gate in authority["gates"] if gate["id"] == "z3_userland"]
+    require(len(gates) == 1 and gates[0]["status"] == "rejected", "missing/ambiguous rejected Z3 gate")
+    for query in smt["queries"]:
+        digest = query["smtlib_hash"]
+        require(re.fullmatch(r"0x[0-9a-f]+", digest or "") and int(digest, 16) != 0, "invalid negative solver hash")
+    require(rejection_evidence(smt) == expected["rejection_evidence"], "negative evidence changed")
+
+
 def validate_result(expected, actual, reports):
-    """No expected category can excuse UNKNOWN, degradation, or missing proof evidence."""
+    """Exact refusal pins may describe degradation, never UNKNOWN or artifact authority."""
     smt, loops, authority, proof, accounting = reports
+    category = expected["category"]
+    require(category in ("accepted", "excluded", "invalid", "unsafe", "verification_negative"), "unclassified expectation")
     require(actual["exit"] in (0, 1), "crash, signal, or timeout")
     if smt is not None:
-        require(smt["verification"]["verification_trust"] == "full", "degraded verification trust")
         summary = smt["summary"]
-        for key in ("unknown", "vacuous", "vacuity_unknown", "inconsistent_bases", "encoding_degraded"):
+        for key in ("unknown", "vacuous", "vacuity_unknown"):
             require(not summary[key], "degraded solver state: " + key)
-        require(not summary["soundness_losses"], "solver soundness loss")
+        if category != "verification_negative":
+            require(smt["verification"]["verification_trust"] == "full", "degraded verification trust")
+            for key in ("inconsistent_bases", "encoding_degraded"):
+                require(not summary[key], "degraded solver state: " + key)
+            require(not summary["soundness_losses"], "solver soundness loss")
         for query in smt["queries"]:
             require(query["status"] in ("SAT", "UNSAT"), "unknown query")
             require(query["smtlib_hash"], "missing solver hash")
@@ -86,8 +125,6 @@ def validate_result(expected, actual, reports):
     require(actual["terminal_errors"] == expected["terminal_errors"], "terminal diagnostic changed")
     require(actual["smt_errors"] == expected["smt_errors"], "SMT diagnostic changed")
     require(actual["smt_diagnostics"] == expected["smt_diagnostics"], "SMT auxiliary diagnostic changed")
-    category = expected["category"]
-    require(category in ("accepted", "excluded", "invalid", "unsafe"), "unclassified expectation")
     require(expected["explanation"], "missing expectation justification")
     if category != "accepted":
         require(expected.get("track"), "rejection requires a named track")
@@ -95,6 +132,8 @@ def validate_result(expected, actual, reports):
         if category != "invalid":
             require(smt is not None and authority is not None, "missing rejection report")
             require(authority["final_artifact_authorization"] != "allowed", "rejected source authorized")
+        if category == "verification_negative":
+            validate_verification_negative(expected, actual, smt, authority)
         if category == "excluded":
             require(loops is not None and any(row["reasons"] for row in actual["loops"]), "missing named exclusion")
             require(not smt["errors"], "a loop exclusion cannot hide a failed source check")
