@@ -148,6 +148,37 @@ def wrappingResult
       else
         lhs >>> rhs.toNat
 
+-- Checked unsigned multiplication guard; divisor orientation does not change overflow.
+-- The nonzero factor masks either EVM or SMT division-by-zero totalization.
+theorem unsignedMulOverflow_iff (M a b : Nat) :
+    (b ≠ 0 ∧ M / b < a) ↔ M < a * b := by
+  by_cases hb : b = 0
+  · simp [hb]
+  · simp [hb, Nat.div_lt_iff_lt_mul (Nat.pos_of_ne_zero hb)]
+
+theorem unsignedMulOverflow_comm (M a b : Nat) :
+    (b ≠ 0 ∧ M / b < a) ↔ (a ≠ 0 ∧ M / a < b) := by
+  rw [unsignedMulOverflow_iff, unsignedMulOverflow_iff, Nat.mul_comm a b]
+
+theorem unsignedMulOverflow_bits {w : Nat} (a b : BitVec w) :
+    ((b != 0#w) && (BitVec.allOnes w / b).ult a) =
+      decide (2 ^ w - 1 < a.toNat * b.toNat) := by
+  apply Bool.eq_iff_iff.mpr
+  simp only [Bool.and_eq_true, bne_iff_ne, BitVec.toNat_ne,
+    BitVec.toNat_ofNat, Nat.zero_mod, BitVec.ult, decide_eq_true_eq,
+    BitVec.toNat_udiv, BitVec.toNat_allOnes]
+  exact unsignedMulOverflow_iff _ _ _
+
+theorem unsignedMulOverflow_bits_comm {w : Nat} (a b : BitVec w) :
+    ((b != 0#w) && (BitVec.allOnes w / b).ult a) =
+      ((a != 0#w) && (BitVec.allOnes w / a).ult b) := by
+  rw [unsignedMulOverflow_bits, unsignedMulOverflow_bits, Nat.mul_comm a.toNat b.toNat]
+
+theorem unsignedMulOverflow_zero_quotient_irrelevant {w : Nat} (a b onZero : BitVec w) :
+    ((b != 0#w) && (if b = 0#w then onZero else BitVec.allOnes w / b).ult a) =
+      ((b != 0#w) && (BitVec.allOnes w / b).ult a) := by
+  by_cases hb : b = 0#w <;> simp [hb]
+
 def unsignedLt {shape : IntegerShape} (lhs rhs : Carrier shape) : Prop :=
   lhs.toNat < rhs.toNat
 

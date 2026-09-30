@@ -17098,3 +17098,73 @@ test "compound arithmetic gate unresolved bitfield members still reject without 
         try testing.expect(std.mem.indexOf(u8, run.stderr, "error:") != null or std.mem.indexOf(u8, run.stdout, "error:") != null);
     }
 }
+
+test "C10 multiplication guard prefers literal divisors without rewriting the product" {
+    const Case = struct { body: []const u8, swap: bool, signed: bool = false };
+    for ([_]Case{
+        .{ .body = "return 100 * a;", .swap = true },
+        .{ .body = "return a * 100;", .swap = false },
+        .{ .body = "return a * b;", .swap = false },
+        .{ .body = "return 0 * a;", .swap = true },
+        .{ .body = "return a * 0;", .swap = false },
+        .{ .body = "var x: u256 = 100; x *= a; return x;", .swap = true },
+        .{ .body = "var x: u256 = a; x *= 100; return x;", .swap = false },
+        .{ .body = "return 100 * a;", .swap = false, .signed = true },
+    }) |case| {
+        const source = try std.fmt.allocPrint(testing.allocator, "pub fn run(a: {s}, b: {s}) -> {s} {{ {s} }}", .{
+            if (case.signed) "i256" else "u256", if (case.signed) "i256" else "u256",
+            if (case.signed) "i256" else "u256", case.body,
+        });
+        defer testing.allocator.free(source);
+        errdefer std.debug.print("C10 body: {s}\n", .{case.body});
+        var compilation = try compileText(source);
+        defer compilation.deinit();
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir.diagnostics.isEmpty());
+        const module = hir.module.raw_module;
+        const product = findFirstOpByName(module, "arith.muli") orelse return error.TestUnexpectedResult;
+        const quotient = findFirstOpByName(module, if (case.signed) "arith.divsi" else "arith.divui") orelse return error.TestUnexpectedResult;
+        const divisor = mlir.oraOperationGetOperand(quotient, 1);
+        try testing.expect(mlir.mlirValueEqual(divisor, mlir.oraOperationGetOperand(product, if (case.swap) 0 else 1)));
+        const marker = mlir.oraOperationGetAttributeByName(quotient, strRef("ora.guard_internal"));
+        try testing.expect(!mlir.oraAttributeIsNull(marker));
+        const text = mlir.oraStringAttrGetValue(marker);
+        try testing.expectEqualStrings("true", text.data[0..text.length]);
+        try testing.expect(findFirstOpByName(module, "ora.assert") != null);
+        if (!case.signed) {
+            const nonzero = findFirstOpByName(module, "arith.cmpi") orelse return error.TestUnexpectedResult;
+            try testing.expect(mlir.mlirValueEqual(divisor, mlir.oraOperationGetOperand(nonzero, 0)));
+            const conjunction = findFirstOpByName(module, "arith.andi") orelse return error.TestUnexpectedResult;
+            try testing.expect(mlir.mlirValueEqual(mlir.oraOperationGetResult(nonzero, 0), mlir.oraOperationGetOperand(conjunction, 0)));
+            const comparison = mlir.oraOpResultGetOwner(mlir.oraOperationGetOperand(conjunction, 1));
+            try testing.expect(mlir.mlirValueEqual(mlir.oraOperationGetOperand(comparison, 0), mlir.oraOperationGetOperand(product, if (case.swap) 1 else 0)));
+            try testing.expect(mlir.mlirValueEqual(mlir.oraOperationGetOperand(comparison, 1), mlir.oraOperationGetResult(quotient, 0)));
+        }
+        var collected = try obligation_from_mlir.collect(testing.allocator, module, .{});
+        defer collected.deinit();
+        try testing.expectEqual(@as(usize, 1), countArithmeticSafety(collected.set, .multiplication_overflow));
+        try testing.expectEqual(@as(usize, 0), countArithmeticSafety(collected.set, .division_by_zero));
+    }
+}
+
+test "C10 multiplication canonical loop queries prove with real solver hashes" {
+    for ([_][]const u8{ "tests/formal/mul_guard_loop.ora", "ora-example/verification/fv_test.ora" }) |path| {
+        var result = try collectPackageObligations(testing.allocator, path);
+        defer result.deinit();
+        try testing.expectEqual(@as(usize, 1), result.set.loop_summaries.len);
+        try testing.expect(result.set.loop_summaries[0].projectionSupported());
+        var context = try z3_verification.Z3Context.init(testing.allocator);
+        defer context.deinit();
+        var adapter = obligation_to_z3.Adapter.init(&context, testing.allocator, result.set);
+        var checked_count: usize = 0;
+        for (result.set.queries) |query| {
+            if (query.loop_summary_id == null or query.loop_vc_sha256 == null or query.backend != .z3) continue;
+            const checked = try adapter.checkLoopQueryForRow(query);
+            try testing.expectEqual(obligation_to_z3.CheckStatus.proved, checked.status);
+            try testing.expect(checked.query_hash.constraint_count > 0);
+            try testing.expect(checked.query_hash.smtlib_hash != 0);
+            checked_count += 1;
+        }
+        try testing.expectEqual(@as(usize, 5), checked_count);
+    }
+}

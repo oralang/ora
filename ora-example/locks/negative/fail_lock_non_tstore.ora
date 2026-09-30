@@ -2,10 +2,8 @@
 contract FailLockNonStorage {
     tstore var counter: u256;
     pub fn bad() {
-        @
-        lock(counter);
+        @lock(counter);
         counter = 1;
-        @
-        unlock(counter);
+        @unlock(counter);
     }
 }

@@ -3,9 +3,7 @@
 contract FailLockNestedIndexUnsupported {
     storage nested: map<address, map<address, u256>>;
     pub fn bad(a: address, b: address) {
-        @
-        lock(nested[a][b]);
-        @
-        unlock(nested[a][b]);
+        @lock(nested[a][b]);
+        @unlock(nested[a][b]);
     }
 }

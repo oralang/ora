@@ -2,10 +2,8 @@
 contract FailLockStorageArray {
     storage var history:[u256; 8];
     pub fn bad(index: u256, value: u256) {
-        @
-        lock(history[index]);
+        @lock(history[index]);
         history[index] = value;
-        @
-        unlock(history[index]);
+        @unlock(history[index]);
     }
 }

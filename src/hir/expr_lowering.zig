@@ -4275,6 +4275,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return appendValueOp(self.block, overflow_op);
         }
 
+        fn isIntegerConstantValue(value: mlir.MlirValue) bool {
+            if (!mlir.oraValueIsAOpResult(value)) return false;
+            const owner = mlir.oraOpResultGetOwner(value);
+            if (mlir.oraOperationIsNull(owner)) return false;
+            const name = mlir.oraOperationGetName(owner);
+            return name.data != null and std.mem.eql(u8, name.data[0..name.length], "arith.constant");
+        }
+
         fn computeUnsignedMulOverflow(
             self: *FunctionLowerer,
             _: mlir.MlirValue,
@@ -4283,8 +4291,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             value_ty: mlir.MlirType,
             loc: mlir.MlirLocation,
         ) anyerror!mlir.MlirValue {
+            // Orient only the guard, after both operands have been evaluated.
+            // Ora.Integer.unsignedMulOverflow_bits_comm includes zero operands.
+            const swap = isIntegerConstantValue(a) and !isIntegerConstantValue(b);
+            const factor = if (swap) b else a;
+            const divisor = if (swap) a else b;
             const zero = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, value_ty, 0));
-            const b_non_zero = appendValueOp(self.block, self.createCompareOp(loc, "ne", b, zero));
+            const divisor_non_zero = appendValueOp(self.block, self.createCompareOp(loc, "ne", divisor, zero));
 
             const width = mlir.oraIntegerTypeGetWidth(value_ty);
             const max_value: u256 = if (width >= 256)
@@ -4292,12 +4305,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             else
                 (@as(u256, 1) << @intCast(width)) - 1;
             const max_const = try @This().createWideIntegerConstant(self, value_ty, max_value, false, source.TextRange.empty(0));
-            const quot_op = mlir.oraArithDivUIOpCreate(self.parent.context, loc, max_const, b);
+            const quot_op = mlir.oraArithDivUIOpCreate(self.parent.context, loc, max_const, divisor);
             if (mlir.oraOperationIsNull(quot_op)) return error.MlirOperationCreationFailed;
             mlir.oraOperationSetAttributeByName(quot_op, strRef("ora.guard_internal"), mlir.oraStringAttrCreate(self.parent.context, strRef("true")));
-            const max_div_b = appendValueOp(self.block, quot_op);
-            const above_limit = appendValueOp(self.block, self.createCompareOp(loc, "ugt", a, max_div_b));
-            const overflow_op = mlir.oraArithAndIOpCreate(self.parent.context, loc, b_non_zero, above_limit);
+            const max_divisor = appendValueOp(self.block, quot_op);
+            const above_limit = appendValueOp(self.block, self.createCompareOp(loc, "ugt", factor, max_divisor));
+            const overflow_op = mlir.oraArithAndIOpCreate(self.parent.context, loc, divisor_non_zero, above_limit);
             if (mlir.oraOperationIsNull(overflow_op)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, overflow_op);
         }

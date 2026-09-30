@@ -37,7 +37,9 @@ contract StorageWriteEffect {
 
     // Storage write in loop records write effect per iteration
     pub fn testStorageWriteInLoop() {
-        for (0..10) |i, _| {
+        for (0..10) |i, _|
+            invariant i <= 10
+        {
             counter = i; // Write effect per iteration
         }
     }

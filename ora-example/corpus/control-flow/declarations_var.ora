@@ -52,7 +52,9 @@ contract DeclarationsVar {
     pub fn test_var_in_loop() -> u256 {
         var sum: u256 = 0;
         var i: u256 = 0;
-        while (i < 10) {
+        while (i < 10)
+            invariant i <= 10
+        {
             sum = sum +% i;
             i = i +% 1;
         }

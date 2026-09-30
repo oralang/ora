@@ -1,10 +1,11 @@
-// Expected failure: direct write to a locked storage mapping slot via assignment expression in return.
+// Expected failure: direct write to a locked storage mapping slot before returning its value.
 
 contract FailLockDirectWriteSameSlotExprReturn {
     storage var balances: map<address, u256>;
 
     pub fn bad(user: address, amount: u256) -> u256 {
         @lock(balances[user]);
-        return balances[user] = amount;
+        balances[user] = amount;
+        return balances[user];
     }
 }

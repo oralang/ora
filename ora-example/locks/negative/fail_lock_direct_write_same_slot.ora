@@ -2,8 +2,7 @@
 contract FailLockDirectWriteSameSlot {
     storage var balances: map<address, u256>;
     pub fn bad(user: address, amount: u256) {
-        @
-        lock(balances[user]);
+        @lock(balances[user]);
         balances[user] = amount;
     }
 }
