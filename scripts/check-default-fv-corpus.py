@@ -101,11 +101,114 @@ def validate_verification_negative(expected, actual, smt, authority):
     require(rejection_evidence(smt) == expected["rejection_evidence"], "negative evidence changed")
 
 
+class CollectedRefusal(dict):
+    """An in-process run with owned output paths; serialized observations are not receipts."""
+
+
+_refusal_collections = {}  # Retain run identities/paths for this harness process, never from JSON.
+
+
+def automatic_refusal_evidence(actual, reports):
+    require(type(actual) is CollectedRefusal, "automatic refusal requires fresh collection")
+    collected = _refusal_collections.get(id(actual))
+    require(collected is not None and collected[0] is actual, "missing collection provenance")
+    _, directory, collected_source, exit_code = collected
+    require(not directory.is_symlink(), "symlinked evidence directory")
+    suffixes = ("smt.report.json", "formal.loops.json", "formal.artifacts.json", "lean.proof.json", "formal.accounting.json")
+    for suffix in suffixes:
+        paths = list(directory.glob("*." + suffix))
+        require(all(p.is_file() and not p.is_symlink() for p in paths), "foreign report file")
+    require(tuple(read_report(directory, suffix) for suffix in suffixes) == tuple(reports), "reports changed after collection")
+    smt, loops, authority, _, accounting = reports
+    require(all(r is not None for r in (smt, loops, authority, accounting)), "missing automatic-refusal report")
+    require(actual["source"] == collected_source and actual["source_sha256"] == sha(ROOT / collected_source), "collected source changed")
+    text = "\n".join((directory / name).read_text() for name in ("stdout.txt", "stderr.txt"))
+    require(actual["terminal_errors"] == terminal_errors(text) and actual["loops"] == loop_rows(loops) and
+            actual["smt_errors"] == smt_errors(smt) and actual["smt_diagnostics"] == smt_diagnostics(smt), "observation changed")
+    require(actual["exit"] == exit_code and not list(directory.rglob("*.hex")), "collected outcome changed")
+    stem = Path(collected_source).stem
+    blobs = {}
+    for identity, suffix, kind, owner in (("lean_obligations_source", "lean.obligations.lean", "proof_source", "lean_userland"),
+                                          ("source_accounting_report", "formal.accounting.json", "report", "source_accounting_kernel")):
+        matches = [a for a in authority["artifacts"] if a["id"] == identity]
+        require(len(matches) == 1, "missing/duplicate refusal artifact")
+        artifact = matches[0]
+        require((artifact["kind"], artifact["owner"], artifact["path"]) == (kind, owner, stem + "." + suffix), "foreign refusal artifact")
+        path = directory / artifact["path"]
+        require(list(directory.glob("*." + suffix)) == [path] and path.is_file() and not path.is_symlink() and
+                path.resolve().parent == directory.resolve(), "missing/duplicate/foreign refusal file")
+        blobs[identity] = path.read_bytes()
+        if identity == "source_accounting_report":
+            require(artifact["sha256"] == hashlib.sha256(blobs[identity]).hexdigest(), "accounting artifact hash mismatch")
+    encoded = json.dumps(relative_paths(accounting), sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    return {"smt_schema": smt["schema"], "smt": rejection_evidence(smt), "settings": smt["settings"],
+            "loops": relative_paths(loops), "authority": relative_paths(authority),
+            "accounting_sha256": hashlib.sha256(encoded).hexdigest(),
+            "obligations_sha256": hashlib.sha256(relative_paths(blobs["lean_obligations_source"].decode()).encode()).hexdigest()}
+
+
+def validate_automatic_refusal(expected, actual, reports):
+    smt, loops, authority, proof, accounting = reports
+    require(all(r is not None for r in (smt, loops, authority, accounting)), "missing automatic-refusal report")
+    require(proof is None, "automatic preflight refusal has proof report")
+    require((smt["schema"], loops["schema_version"], authority["schema_version"], accounting["schema_version"]) ==
+            ("ora.smt.report.v1", 1, 2, 3), "unsupported refusal report schema")
+    require(actual["source"] == expected["source"] and
+            re.fullmatch(r"[0-9a-f]{64}", expected["source_sha256"] or "") and
+            actual["source_sha256"] == expected["source_sha256"], "automatic-refusal source changed")
+    require(relative_paths(smt["source_file"]) == actual["source"] == relative_paths(authority["source"]), "foreign refusal report")
+    require(authority["final_artifact_authorization"] == "blocked", "automatic refusal not blocked")
+    gates = authority["gates"]
+    statuses = {"z3_userland": "accepted", "source_accounting_kernel": "accepted",
+                "lean_userland": "rejected", "dispatcher_kernel": "not_requested"}
+    require(len(gates) == len(statuses) and len({g["id"] for g in gates}) == len(gates) and
+            {g["id"]: g["status"] for g in gates} == statuses, "invalid automatic-refusal gates")
+    require(smt["verification"]["success"] is True and not smt["errors"] and not smt["diagnostics"] and
+            not smt["summary"]["failed_obligations"], "automatic refusal requires successful Z3")
+    queries = smt["queries"]
+    kinds = {"base": "SAT", "guard_satisfy": "SAT", "obligation": "UNSAT", "loop_body_safety": "UNSAT",
+             "loop_invariant_step": "UNSAT", "guard_violate": "UNSAT"}
+    require(queries and len({q["id"] for q in queries}) == len(queries), "empty/duplicate refusal queries")
+    require(any(q["kind"] == "base" for q in queries) and
+            any(q["kind"] in ("obligation", "loop_body_safety", "loop_invariant_step") for q in queries), "missing real refusal queries")
+    for query in queries:
+        require(query["kind"] in kinds and query["status"] == kinds[query["kind"]], "failed/unsupported refusal query")
+        require(type(query["id"]) is int and query["id"] > 0 and
+                re.fullmatch(r"0x[0-9a-f]+", query["smtlib_hash"] or "") and int(query["smtlib_hash"], 16) != 0, "invalid refusal query identity/hash")
+    require(accounting["mode"] == "verified_full" and accounting["decision"] == "accepted" and
+            accounting["primary_failure"] is None and not accounting["failures"] and
+            accounting["counts"]["failures"] == 0, "automatic refusal requires full accounting")
+    require(not any(accounting["counts"]["handlings_by_kind"][k] for k in
+                    ("reduced_scope_excluded", "verification_disabled", "rejected")), "reduced refusal accounting")
+    for key in ("inventory_sha256", "evidence_sha256"):
+        require(re.fullmatch(r"[0-9a-f]{64}", accounting[key] or ""), "invalid accounting digest")
+    rows = loops["loops"]
+    require(loops["total"] == loops["certificate_required"] == len(rows) > 0 and loops["excluded"] == 0, "incomplete refusal census")
+    for key in ("id", "induction_query_id"):
+        require(all(type(row[key]) is int and row[key] > 0 for row in rows) and
+                len({row[key] for row in rows}) == len(rows), "invalid/duplicate refusal loop identity")
+    recipes = []
+    for row in rows:
+        source = row["source"]
+        require(row["projection_completeness"] == "complete" and row["status"] == "lean_certificate_required" and
+                row["certificate_required"] is True and not row["excluded_by"] and row["owner"]["function_name"] and
+                relative_paths(source["file"]) == actual["source"], "incomplete/foreign refusal loop")
+        recipes.append(f"- query: emittedQuery_{row['induction_query_id']} ({actual['source']}:{source['line']}:{source['column']})")
+    reason = expected["automatic_refusal_reason"]
+    require(reason in ("automatic_nonlinear_arithmetic", "automatic_term_kind_unsupported"), "unrecognized automatic refusal")
+    terminal = actual["terminal_errors"]
+    require(sorted(line for line in terminal if line.startswith("Automatic Lean ")) ==
+            ["Automatic Lean loop proof unavailable: " + reason] * len(rows), "mixed/incomplete automatic refusals")
+    require(sorted(line for line in terminal if line.startswith("- query:")) == sorted(recipes), "automatic refusal recipe mismatch")
+    require(loop_rows(loops) == actual["loops"], "forged refusal loop observation")
+    require(automatic_refusal_evidence(actual, reports) == expected["automatic_refusal_evidence"], "automatic refusal evidence changed")
+
+
 def validate_result(expected, actual, reports):
     """Exact refusal pins may describe degradation, never UNKNOWN or artifact authority."""
     smt, loops, authority, proof, accounting = reports
     category = expected["category"]
-    require(category in ("accepted", "excluded", "invalid", "unsafe", "verification_negative"), "unclassified expectation")
+    require(category in ("accepted", "excluded", "invalid", "unsafe", "verification_negative", "automatic_refusal"), "unclassified expectation")
     require(actual["exit"] in (0, 1), "crash, signal, or timeout")
     if smt is not None:
         summary = smt["summary"]
@@ -134,6 +237,8 @@ def validate_result(expected, actual, reports):
             require(authority["final_artifact_authorization"] != "allowed", "rejected source authorized")
         if category == "verification_negative":
             validate_verification_negative(expected, actual, smt, authority)
+        if category == "automatic_refusal":
+            validate_automatic_refusal(expected, actual, reports)
         if category == "excluded":
             require(loops is not None and any(row["reasons"] for row in actual["loops"]), "missing named exclusion")
             require(not smt["errors"], "a loop exclusion cannot hide a failed source check")
@@ -174,7 +279,9 @@ def validate_result(expected, actual, reports):
             require(set(p["axioms"]) <= {"propext", "Quot.sound"}, "unapproved axiom")
 
 
-def run_case(compiler, name, directory, timeout):
+def run_case(compiler, name, directory, timeout, capture_automatic_refusal=False):
+    if capture_automatic_refusal:
+        require(directory.is_dir() and not directory.is_symlink() and not any(directory.iterdir()), "refusal collection requires empty owned directory")
     command = [str(compiler), "emit", "--emit=smt-report,bytecode", "--out-dir", str(directory), name]
     started = time.monotonic()
     process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -199,6 +306,9 @@ def run_case(compiler, name, directory, timeout):
               "seconds": round(time.monotonic() - started, 3), "hex": sorted(str(p.relative_to(directory)) for p in directory.rglob("*.hex")),
               "terminal_errors": terminal_errors(stdout + "\n" + stderr), "loops": loop_rows(loops), "smt_errors": smt_errors(smt),
               "smt_diagnostics": smt_diagnostics(smt)}
+    if capture_automatic_refusal:
+        actual = CollectedRefusal(actual)
+        _refusal_collections[id(actual)] = (actual, directory, name, code)
     (directory / "run.json").write_text(json.dumps(actual, indent=2) + "\n")
     return actual, reports
 
@@ -244,7 +354,8 @@ def main():
         directory.mkdir()
         try:
             require(sha(compiler) == binary_hash and sha(ROOT / name) == source_hashes[name], "binary/source changed during run")
-            actual, reports = run_case(compiler, name, directory, args.timeout)
+            actual, reports = run_case(compiler, name, directory, args.timeout,
+                                       capture_automatic_refusal=manifest["files"][name]["category"] == "automatic_refusal")
             validate_result(manifest["files"][name], actual, reports)
             actual["verdict"] = manifest["files"][name]["category"]
         except (ValueError, KeyError, TypeError, OSError) as error:
