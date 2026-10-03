@@ -148,6 +148,54 @@ def wrappingResult
       else
         lhs >>> rhs.toNat
 
+-- Restore a widened addition before observing its source-width overflow.
+theorem maskBit (n i : Nat) : Nat.testBit (2^n - 1) i = decide (i < n) := by
+  induction n generalizing i with
+  | zero => simp only [Nat.pow_zero, Nat.sub_self, Nat.zero_testBit, Nat.not_lt_zero, decide_false]
+  | succ n ih =>
+    have pos : 0 < 2^n := Nat.two_pow_pos n
+    cases i with
+    | zero =>
+      simp only [Nat.testBit_zero, Nat.pow_succ]
+      have hmod : (2^n * 2 - 1) % 2 = 1 := by omega
+      simp only [hmod, decide_true, Nat.zero_lt_succ]
+    | succ i =>
+      rw [Nat.testBit_succ]
+      have hdiv : (2^(n+1)-1) / 2 = 2^n-1 := by rw [Nat.pow_succ]; omega
+      rw [hdiv, ih]
+      simp only [Nat.succ_lt_succ_iff]
+
+theorem lowMaskIsWidth (word : BitVec 256) (n : Nat) :
+    word.toNat &&& (2^n-1) = (word.setWidth n).toNat := by
+  simp only [BitVec.toNat_setWidth]
+  apply Nat.eq_of_testBit_eq
+  intro i
+  simp only [Nat.testBit_and, Nat.testBit_mod_two_pow, maskBit]
+  exact Bool.and_comm _ _
+
+theorem truncateWideAdd (n : Nat) (h : n ≤ 256) (a b : BitVec n) :
+    (a.setWidth 256 + b.setWidth 256).setWidth n = a + b := by
+  rw [BitVec.setWidth_add _ _ h]
+  simp only [BitVec.setWidth_setWidth_of_le _ h, BitVec.setWidth_eq]
+
+theorem maskedWideAdd (n : Nat) (h : n ≤ 256) (a b : BitVec n) :
+    (a.setWidth 256 + b.setWidth 256).toNat &&& (2^n - 1) = (a+b).toNat := by
+  rw [lowMaskIsWidth, truncateWideAdd n h]
+
+theorem wrappedUnsignedAddOverflow {n : Nat} (a b : BitVec n) :
+    (a+b).toNat < a.toNat ↔ 2^n ≤ a.toNat + b.toNat := by
+  have ha := a.isLt
+  have hb := b.isLt
+  simp only [BitVec.toNat_add]
+  cases Nat.lt_or_ge (a.toNat+b.toNat) (2^n) with
+  | inl h =>
+    rw [Nat.mod_eq_of_lt h]
+    constructor <;> intro hbad <;> omega
+  | inr h =>
+    rw [Nat.mod_eq_sub_mod h]
+    rw [Nat.mod_eq_of_lt (by omega)]
+    constructor <;> intro hbound <;> omega
+
 -- Checked unsigned multiplication guard; divisor orientation does not change overflow.
 -- The nonzero factor masks either EVM or SMT division-by-zero totalization.
 theorem unsignedMulOverflow_iff (M a b : Nat) :

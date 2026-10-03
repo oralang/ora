@@ -106,7 +106,8 @@ static LogicalResult lowerBinaryOp(SourceOp op,
                                    Adaptor adaptor,
                                    ConversionPatternRewriter &rewriter,
                                    const TypeConverter *typeConverter,
-                                   StringRef opName)
+                                   StringRef opName,
+                                   bool restoreSourceWidth = false)
 {
     auto loc = op.getLoc();
     auto u256Type = sir::U256Type::get(op.getContext());
@@ -117,9 +118,21 @@ static LogicalResult lowerBinaryOp(SourceOp op,
     if (!resultType)
         return rewriter.notifyMatchFailure(op, ("unable to convert " + opName + " result type").str());
 
+    unsigned sourceWidth = 0;
+    if (restoreSourceWidth)
+    {
+        auto sourceType = llvm::dyn_cast<mlir::IntegerType>(op.getResult().getType());
+        if (!sourceType || sourceType.getWidth() == 0 || sourceType.getWidth() > 256)
+            return rewriter.notifyMatchFailure(op, "addition requires an exact integer width in 1..256");
+        sourceWidth = sourceType.getWidth();
+    }
+
     Value lhs = coerceToU256(rewriter, loc, adaptor.getLhs());
     Value rhs = coerceToU256(rewriter, loc, adaptor.getRhs());
     Value result = rewriter.create<SirOp>(loc, u256Type, lhs, rhs).getResult();
+    // Overflow comparisons must observe the source-width sum, just like its payload.
+    if (restoreSourceWidth)
+        result = lowering::maskLowBits(rewriter, loc, result, sourceWidth);
     if (!isU256IntegerCarrierType(resultType))
         result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
 
@@ -1392,7 +1405,7 @@ LogicalResult ConvertArithAddIOp::matchAndRewrite(
     typename mlir::arith::AddIOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    return lowerBinaryOp<mlir::arith::AddIOp, sir::AddOp>(op, adaptor, rewriter, getTypeConverter(), "addi");
+    return lowerBinaryOp<mlir::arith::AddIOp, sir::AddOp>(op, adaptor, rewriter, getTypeConverter(), "addi", true);
 }
 
 // -----------------------------------------------------------------------------

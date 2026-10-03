@@ -23,4 +23,38 @@ contract CompoundArithmetic {
     pub fn shl_ordinary(a: u8, b: u8) -> u8 { var x: u8 = a; x = x << b; return x; }
     pub fn shr_compound(a: i8, b: i8) -> i8 { var x: i8 = a; x >>= b; return x; }
     pub fn shr_ordinary(a: i8, b: i8) -> i8 { var x: i8 = a; x = x >> b; return x; }
+
+    // Width restoration must feed both the checked guard and the builtin flag.
+    pub fn narrow_add8(a: u8, b: u8) -> u8 { return a + b; }
+    pub fn narrow_compound8(a: u8, b: u8) -> u8 { var x: u8 = a; x += b; return x; }
+    pub fn narrow_flag8(a: u8, b: u8) -> bool { return @addWithOverflow(a, b).overflow; }
+    pub fn narrow_payload8(a: u8, b: u8) -> u8 { return @addWithOverflow(a, b).value; }
+    pub fn narrow_add16(a: u16, b: u16) -> u16 { return a + b; }
+    pub fn narrow_compound16(a: u16, b: u16) -> u16 { var x: u16 = a; x += b; return x; }
+    pub fn narrow_flag16(a: u16, b: u16) -> bool { return @addWithOverflow(a, b).overflow; }
+    pub fn narrow_payload16(a: u16, b: u16) -> u16 { return @addWithOverflow(a, b).value; }
+    pub fn narrow_add32(a: u32, b: u32) -> u32 { return a + b; }
+    pub fn narrow_compound32(a: u32, b: u32) -> u32 { var x: u32 = a; x += b; return x; }
+    pub fn narrow_flag32(a: u32, b: u32) -> bool { return @addWithOverflow(a, b).overflow; }
+    pub fn narrow_payload32(a: u32, b: u32) -> u32 { return @addWithOverflow(a, b).value; }
+    pub fn narrow_add64(a: u64, b: u64) -> u64 { return a + b; }
+    pub fn narrow_compound64(a: u64, b: u64) -> u64 { var x: u64 = a; x += b; return x; }
+    pub fn narrow_flag64(a: u64, b: u64) -> bool { return @addWithOverflow(a, b).overflow; }
+    pub fn narrow_payload64(a: u64, b: u64) -> u64 { return @addWithOverflow(a, b).value; }
+    pub fn narrow_add128(a: u128, b: u128) -> u128 { return a + b; }
+    pub fn narrow_compound128(a: u128, b: u128) -> u128 { var x: u128 = a; x += b; return x; }
+    pub fn narrow_flag128(a: u128, b: u128) -> bool { return @addWithOverflow(a, b).overflow; }
+    pub fn narrow_payload128(a: u128, b: u128) -> u128 { return @addWithOverflow(a, b).value; }
+    pub fn narrow_add160(a: u160, b: u160) -> u160 { return a + b; }
+    pub fn narrow_compound160(a: u160, b: u160) -> u160 { var x: u160 = a; x += b; return x; }
+    pub fn narrow_flag160(a: u160, b: u160) -> bool { return @addWithOverflow(a, b).overflow; }
+    pub fn narrow_payload160(a: u160, b: u160) -> u160 { return @addWithOverflow(a, b).value; }
+    pub fn narrow_add256(a: u256, b: u256) -> u256 { return a + b; }
+    pub fn narrow_compound256(a: u256, b: u256) -> u256 { var x: u256 = a; x += b; return x; }
+    pub fn narrow_flag256(a: u256, b: u256) -> bool { return @addWithOverflow(a, b).overflow; }
+    pub fn narrow_payload256(a: u256, b: u256) -> u256 { return @addWithOverflow(a, b).value; }
+    pub fn narrow_signed_add(a: i8, b: i8) -> i8 { return a + b; }
+    pub fn narrow_signed_compound(a: i8, b: i8) -> i8 { var x: i8 = a; x += b; return x; }
+    pub fn narrow_sub(a: u8, b: u8) -> u8 { return a - b; }
+    pub fn narrow_mul(a: u8, b: u8) -> u8 { return a * b; }
 }

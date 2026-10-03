@@ -2,6 +2,12 @@ import Ora.Integer.Arithmetic
 
 namespace Ora.Integer
 
+#print axioms maskBit
+#print axioms lowMaskIsWidth
+#print axioms truncateWideAdd
+#print axioms maskedWideAdd
+#print axioms wrappedUnsignedAddOverflow
+
 #print axioms unsignedMulOverflow_iff
 #print axioms unsignedMulOverflow_comm
 #print axioms unsignedMulOverflow_bits
