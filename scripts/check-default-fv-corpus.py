@@ -211,6 +211,8 @@ def validate_result(expected, actual, reports):
     require(category in ("accepted", "excluded", "invalid", "unsafe", "verification_negative", "automatic_refusal"), "unclassified expectation")
     require(actual["exit"] in (0, 1), "crash, signal, or timeout")
     if smt is not None:
+        # Inconclusive vacuity can appear only in errors, without a flagged query.
+        require(not any(row["type"] == "Unknown" for row in smt["errors"]), "unknown solver error")
         summary = smt["summary"]
         for key in ("unknown", "vacuous", "vacuity_unknown"):
             require(not summary[key], "degraded solver state: " + key)

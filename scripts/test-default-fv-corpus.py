@@ -43,6 +43,28 @@ class CorpusGateTests(unittest.TestCase):
     def test_accepted_proof(self):
         self.check()
 
+    def test_unknown_errors_cannot_be_pinned_as_source_failures(self):
+        for category in ("invalid", "unsafe"):
+            for position in (0, 1):
+                with self.subTest(category=category, position=position):
+                    actual, reports = copy.deepcopy((self.actual, self.reports))
+                    actual.update(exit=1, hex=[])
+                    smt, _, authority, _, _ = reports
+                    smt["verification"]["success"] = False
+                    authority["final_artifact_authorization"] = "blocked"
+                    smt["errors"] = [{"type": "AssertionViolation", "message": "assertion failed"}]
+                    expected = {**copy.deepcopy(actual), "category": "unsafe", "track": "test-negative",
+                                "explanation": "genuine assertion failure"}
+                    actual["smt_errors"] = expected["smt_errors"] = corpus.smt_errors(smt)
+                    corpus.validate_result(expected, actual, reports)
+                    smt["errors"].insert(position, {"type": "Unknown", "message": "vacuity check was inconclusive"})
+                    actual["smt_errors"] = corpus.smt_errors(smt)
+                    expected.update(category=category, smt_errors=copy.deepcopy(actual["smt_errors"]),
+                                    rejection_evidence=corpus.rejection_evidence(smt))
+                    # All summary/query flags remain clear and every error pin is forged to match.
+                    with self.assertRaisesRegex(ValueError, "unknown solver error"):
+                        corpus.validate_result(expected, actual, reports)
+
     def test_retained_guard_diagnostic_is_bound_to_its_real_query(self):
         diagnostic = {"query_id": 7, "guard_id": "guard:count:input", "subtype": "GuardViolation.NonZero", "counterexample": {"x": "0"}}
         self.reports[0]["diagnostics"] = [diagnostic]
@@ -231,6 +253,7 @@ class VerificationNegativeTests(unittest.TestCase):
             "unknown_summary": lambda a, r: r[0]["summary"].update(unknown=1),
             "vacuous_summary": lambda a, r: r[0]["summary"].update(vacuous=1),
             "vacuity_unknown_summary": lambda a, r: r[0]["summary"].update(vacuity_unknown=1),
+            "unknown_error": lambda a, r: r[0]["errors"][0].update(type="Unknown"),
             "unknown_query": lambda a, r: r[0]["queries"][0].update(status="UNKNOWN"),
             "vacuous_query": lambda a, r: r[0]["queries"][0].update(vacuous=True),
             "vacuity_unknown_query": lambda a, r: r[0]["queries"][0].update(vacuity_unknown=True),
@@ -467,6 +490,7 @@ class AutomaticRefusalTests(unittest.TestCase):
             "soundness_loss": lambda a, r: r[0]["summary"].update(soundness_losses=["lost fact"]),
             "failed_obligation": lambda a, r: r[0]["summary"].update(failed_obligations=1),
             "smt_error": lambda a, r: r[0].update(errors=[{"type": "failure"}]),
+            "unknown_error": lambda a, r: r[0].update(errors=[{"type": "Unknown"}]),
             "smt_diagnostic": lambda a, r: r[0].update(diagnostics=[{"message": "failure"}]),
             "sat_safety": lambda a, r: r[0]["queries"][0].update(status="SAT"),
             "unknown_query": lambda a, r: r[0]["queries"][0].update(status="UNKNOWN"),
