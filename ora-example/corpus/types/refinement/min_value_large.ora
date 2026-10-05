@@ -1,3 +1,5 @@
+// Refined getters require valid stored values; call the checked setters first.
+// These entry checks do not assume or prove a storage lifecycle invariant.
 // MinValue<u256, 100> — larger minimum bound
 
 comptime const std = @import("std");
@@ -14,7 +16,9 @@ contract MinValueLarge {
         minStake = val;
     }
 
-    pub fn getMinStake() -> MinValue<u256, 100> {
+    pub fn getMinStake() -> MinValue<u256, 100>
+        requires(minStake >= 100)
+    {
         return minStake;
     }
 

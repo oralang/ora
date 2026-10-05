@@ -1,3 +1,5 @@
+// Refined getters require valid stored values; call the checked setters first.
+// These entry checks do not assume or prove a storage lifecycle invariant.
 // MinValue<u256, 1> — parameter, storage, arithmetic, comparisons
 
 contract MinValueU256 {
@@ -8,7 +10,9 @@ contract MinValueU256 {
         threshold = val;
     }
 
-    pub fn getThreshold() -> MinValue<u256, 1> {
+    pub fn getThreshold() -> MinValue<u256, 1>
+        requires(threshold >= 1)
+    {
         return threshold;
     }
 

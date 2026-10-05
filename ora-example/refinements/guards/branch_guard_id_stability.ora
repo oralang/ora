@@ -1,8 +1,11 @@
 // Branch guard_id stability test
-// Expect same guard_id for identical refinement guards across branches.
+// Each branch retains its own source-bound conversion guard.
+// The positive input contract establishes the shared bound.
 
 contract GuardIdStability {
-    pub fn branch_guard(flag: bool, x: u256) -> u256 {
+    pub fn branch_guard(flag: bool, x: u256) -> u256
+        requires(x >= 10)
+    {
         var out: u256 = 0;
 
         if (flag) {

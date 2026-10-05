@@ -1,3 +1,7 @@
+comptime const std = @import("std");
+
+// Refined getters require valid stored values; call the checked setters first.
+// These entry checks do not assume or prove a storage lifecycle invariant.
 // Struct with refinement-typed fields
 
 struct BoundedConfig {
@@ -19,15 +23,21 @@ contract RefinementInStruct {
         config = BoundedConfig { minStake: min, maxStake: max, feeRate: fee };
     }
 
-    pub fn getMinStake() -> MinValue<u256, 1> {
+    pub fn getMinStake() -> MinValue<u256, 1>
+        requires(config.minStake >= 1)
+    {
         return config.minStake;
     }
 
-    pub fn getMaxStake() -> MaxValue<u256, 1000000> {
+    pub fn getMaxStake() -> MaxValue<u256, 1000000>
+        requires(config.maxStake <= 1000000)
+    {
         return config.maxStake;
     }
 
-    pub fn getFeeRate() -> InRange<u256, 0, 10000> {
+    pub fn getFeeRate() -> InRange<u256, 0, 10000>
+        requires(config.feeRate <= 10000)
+    {
         return config.feeRate;
     }
 
@@ -35,7 +45,9 @@ contract RefinementInStruct {
         account = AccountRef { owner: owner, balance: balance };
     }
 
-    pub fn getAccountOwner() -> NonZeroAddress {
+    pub fn getAccountOwner() -> NonZeroAddress
+        requires(account.owner != std.constants.ZERO_ADDRESS)
+    {
         return account.owner;
     }
 

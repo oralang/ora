@@ -94,9 +94,13 @@ contract ERC20Token {
         return true;
     }
 
+    // State the caller bound at each public helper consumer until environment
+    // premises are transported through inline summaries. This is an explicit
+    // entry contract, not trust in the helper return annotation.
     // Constructor: creates the initial resource supply and records the account
     // allowed to mint more tokens later.
     pub fn init(initialSupply: TokenUnit)
+    requires std.msg.sender() != std.constants.ZERO_ADDRESS
     modifies total_supply, balances[std.msg.sender()], royal_mint
     requires total_supply == 0
     requires @amount(balances[std.msg.sender()]) == 0
@@ -147,6 +151,7 @@ contract ERC20Token {
     // Transfer is a conservative resource transition: no TokenUnit is created or
     // destroyed, only moved between two balance places.
     pub fn transfer(recipient: NonZeroAddress, amount: TokenUnit) -> !bool | InsufficientBalance | TransferToZeroAddress
+    requires std.msg.sender() != std.constants.ZERO_ADDRESS
     modifies balances[std.msg.sender()], balances[recipient]
     requires recipient != std.constants.ZERO_ADDRESS
     requires @amount(balances[recipient]) <= @cast(TokenUnit, std.constants.U256_MAX) - amount
@@ -166,6 +171,7 @@ contract ERC20Token {
     // approve replaces existing authorization by destroying the current allowance
     // and creating exactly the requested amount.
     pub fn approve(spender: NonZeroAddress, amount: TokenUnit) -> !bool | TransferToZeroAddress
+    requires std.msg.sender() != std.constants.ZERO_ADDRESS
     modifies allowances[std.msg.sender()][spender]
     requires spender != std.constants.ZERO_ADDRESS
     ensures @amount(allowances[std.msg.sender()][spender]) == allowanceAmount(amount)
@@ -182,6 +188,7 @@ contract ERC20Token {
     // resource move as transfer. The same numeric amount is destroyed from the
     // AllowanceUnit domain and moved in the TokenUnit domain.
     pub fn transferFrom(sender: NonZeroAddress, recipient: NonZeroAddress, amount: TokenUnit) -> !bool | InsufficientAllowance | InsufficientBalance | TransferToZeroAddress
+    requires std.msg.sender() != std.constants.ZERO_ADDRESS
     modifies allowances[sender][std.msg.sender()], balances[sender], balances[recipient]
     requires sender != std.constants.ZERO_ADDRESS
     requires recipient != std.constants.ZERO_ADDRESS
@@ -204,6 +211,7 @@ contract ERC20Token {
     // TokenUnit into a balance place, and total_supply is updated in the same
     // function so the public supply view tracks that creation.
     pub fn mint(to: NonZeroAddress, amount: TokenUnit) -> !bool | TransferToZeroAddress
+    requires std.msg.sender() != std.constants.ZERO_ADDRESS
     modifies total_supply, balances[to]
     requires caller() == royal_mint
     requires to != std.constants.ZERO_ADDRESS
@@ -223,6 +231,7 @@ contract ERC20Token {
     // TokenUnit from the caller's balance place, and total_supply is updated in
     // the same function so the public supply view tracks that destruction.
     pub fn burn(amount: TokenUnit) -> !bool | InsufficientBalance
+    requires std.msg.sender() != std.constants.ZERO_ADDRESS
     modifies total_supply, balances[std.msg.sender()]
     requires total_supply >= amount
     ensures total_supply == old(total_supply) - amount
