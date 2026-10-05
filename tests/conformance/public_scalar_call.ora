@@ -1,0 +1,57 @@
+// Internal public scalar calls must consume decoded values, never ABI buffer pointers.
+struct U8Box { value: MinValue<u8, 1>; }
+struct U16Box { value: MinValue<u16, 1>; }
+struct U32Box { value: MinValue<u32, 1>; }
+struct U64Box { value: MinValue<u64, 1>; }
+struct U128Box { value: MinValue<u128, 1>; }
+struct U160Box { value: MinValue<u160, 1>; }
+struct U256Box { value: MinValue<u256, 1>; }
+struct I8Box { value: MinValue<i8, 1>; }
+struct I16Box { value: MinValue<i16, 1>; }
+struct I32Box { value: MinValue<i32, 1>; }
+struct I64Box { value: MinValue<i64, 1>; }
+struct I128Box { value: MinValue<i128, 1>; }
+struct I256Box { value: MinValue<i256, 1>; }
+contract PublicScalarCall {
+    pub fn u8Value(x: u8) -> u8 { return x; }
+    pub fn u8Call(x: u8) -> u8 { return u8Value(x); }
+    pub fn u8Refined(x: u8) -> u8 { let box = U8Box { value: u8Value(x) }; return box.value; }
+    pub fn u16Value(x: u16) -> u16 { return x; }
+    pub fn u16Call(x: u16) -> u16 { return u16Value(x); }
+    pub fn u16Refined(x: u16) -> u16 { let box = U16Box { value: u16Value(x) }; return box.value; }
+    pub fn u32Value(x: u32) -> u32 { return x; }
+    pub fn u32Call(x: u32) -> u32 { return u32Value(x); }
+    pub fn u32Refined(x: u32) -> u32 { let box = U32Box { value: u32Value(x) }; return box.value; }
+    pub fn u64Value(x: u64) -> u64 { return x; }
+    pub fn u64Call(x: u64) -> u64 { return u64Value(x); }
+    pub fn u64Refined(x: u64) -> u64 { let box = U64Box { value: u64Value(x) }; return box.value; }
+    pub fn u128Value(x: u128) -> u128 { return x; }
+    pub fn u128Call(x: u128) -> u128 { return u128Value(x); }
+    pub fn u128Refined(x: u128) -> u128 { let box = U128Box { value: u128Value(x) }; return box.value; }
+    pub fn u160Value(x: u160) -> u160 { return x; }
+    pub fn u160Call(x: u160) -> u160 { return u160Value(x); }
+    pub fn u160Refined(x: u160) -> u160 { let box = U160Box { value: u160Value(x) }; return box.value; }
+    pub fn u256Value(x: u256) -> u256 { return x; }
+    pub fn u256Call(x: u256) -> u256 { return u256Value(x); }
+    pub fn u256Refined(x: u256) -> u256 { let box = U256Box { value: u256Value(x) }; return box.value; }
+    pub fn i8Value(x: i8) -> i8 { return x; }
+    pub fn i8Call(x: i8) -> i8 { return i8Value(x); }
+    pub fn i8Refined(x: i8) -> i8 { let box = I8Box { value: i8Value(x) }; return box.value; }
+    pub fn i16Value(x: i16) -> i16 { return x; }
+    pub fn i16Call(x: i16) -> i16 { return i16Value(x); }
+    pub fn i16Refined(x: i16) -> i16 { let box = I16Box { value: i16Value(x) }; return box.value; }
+    pub fn i32Value(x: i32) -> i32 { return x; }
+    pub fn i32Call(x: i32) -> i32 { return i32Value(x); }
+    pub fn i32Refined(x: i32) -> i32 { let box = I32Box { value: i32Value(x) }; return box.value; }
+    pub fn i64Value(x: i64) -> i64 { return x; }
+    pub fn i64Call(x: i64) -> i64 { return i64Value(x); }
+    pub fn i64Refined(x: i64) -> i64 { let box = I64Box { value: i64Value(x) }; return box.value; }
+    pub fn i128Value(x: i128) -> i128 { return x; }
+    pub fn i128Call(x: i128) -> i128 { return i128Value(x); }
+    pub fn i128Refined(x: i128) -> i128 { let box = I128Box { value: i128Value(x) }; return box.value; }
+    pub fn i256Value(x: i256) -> i256 { return x; }
+    pub fn i256Call(x: i256) -> i256 { return i256Value(x); }
+    pub fn i256Refined(x: i256) -> i256 { let box = I256Box { value: i256Value(x) }; return box.value; }
+    pub fn boolValue(x: bool) -> bool { return x; }
+    pub fn boolCall(x: bool) -> bool { return boolValue(x); }
+}

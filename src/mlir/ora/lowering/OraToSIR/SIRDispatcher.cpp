@@ -1611,6 +1611,28 @@ namespace mlir
                         {
                             Value oldRes = icall.getResult(i);
                             Value newRes = newCall.getResult(i);
+                            auto visibility = calleeFunc->getAttrOfType<StringAttr>("ora.visibility");
+                            auto abiReturn = calleeFunc->getAttrOfType<StringAttr>("ora.abi_return");
+                            auto errorUnion = calleeFunc->getAttrOfType<BoolAttr>("ora.returns_error_union");
+                            AbiLayoutNode layout;
+                            // Internal scalar users need the value, not the public ABI buffer pointer.
+                            if (i == 0 && icall.getNumResults() == 1 && newCall.getNumResults() == 2 &&
+                                visibility && visibility.getValue() == "pub" &&
+                                (!errorUnion || !errorUnion.getValue()) && abiReturn &&
+                                parseAbiLayout(abiReturn.getValue(), layout, AbiLayoutSyntax::CanonicalAbi) &&
+                                layout.kind == AbiLayoutKind::Static && layout.staticKind != AbiStaticKind::FixedBytes)
+                            {
+                                Value ptr = callBuilder.create<sir::BitcastOp>(icall.getLoc(), ptrType, newRes);
+                                Value word = callBuilder.create<sir::LoadOp>(icall.getLoc(), u256Type, ptr);
+                                auto decoded = decodeStaticCalldataWord(callBuilder, icall.getLoc(), ctx, layout, word, 0, true);
+                                if (!decoded)
+                                {
+                                    icall.emitError("unsupported_internal_scalar_abi_result");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                newRes = decoded->payload;
+                            }
                             if (oldRes.getType() == newRes.getType())
                             {
                                 oldRes.replaceAllUsesWith(newRes);

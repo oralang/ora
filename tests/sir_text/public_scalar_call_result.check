@@ -1,0 +1,25 @@
+// INPUT: tests/conformance/public_scalar_call.ora
+// Integer widths and signedness are restored after reading the public ABI buffer.
+// CHECK-LABEL: fn u8Call:
+// CHECK: [[MASK:v[0-9]+]] = const 0xFF
+// CHECK: [[PTR:v[0-9]+]] {{v[0-9]+}} = icall @u8Value
+// CHECK-NEXT: [[WORD:v[0-9]+]] = mload256 [[PTR]]
+// CHECK-NEXT: {{v[0-9]+}} = and [[WORD]] [[MASK]]
+// CHECK-LABEL: fn u256Refined:
+// CHECK: [[ONE:c[0-9]+]] = const 0x1
+// CHECK: [[PTR256:v[0-9]+]] {{v[0-9]+}} = icall @u256Value
+// CHECK-NEXT: [[WORD256:v[0-9]+]] = mload256 [[PTR256]]
+// CHECK-NEXT: [[GT:v[0-9]+]] = gt [[WORD256]] [[ONE]]
+// CHECK-NEXT: [[EQ:v[0-9]+]] = eq [[WORD256]] [[ONE]]
+// CHECK-NEXT: [[VALID:v[0-9]+]] = or [[GT]] [[EQ]]
+// CHECK-NEXT: => [[VALID]] ?
+// CHECK: revert 0x0 0x0
+// CHECK-LABEL: fn i8Call:
+// CHECK: [[SIGNBYTE:v[0-9]+]] = const 0x0
+// CHECK: [[IPTR:v[0-9]+]] {{v[0-9]+}} = icall @i8Value
+// CHECK-NEXT: [[IWORD:v[0-9]+]] = mload256 [[IPTR]]
+// CHECK-NEXT: {{v[0-9]+}} = signextend [[SIGNBYTE]] [[IWORD]]
+// CHECK-LABEL: fn boolCall:
+// CHECK: [[BPTR:v[0-9]+]] {{v[0-9]+}} = icall @boolValue
+// CHECK-NEXT: [[BWORD:v[0-9]+]] = mload256 [[BPTR]]
+// CHECK: {{v[0-9]+}} = and [[BWORD]]

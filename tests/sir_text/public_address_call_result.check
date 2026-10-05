@@ -1,0 +1,19 @@
+// INPUT: tests/conformance/public_address_call.ora
+// A refinement guard must check the returned address loaded from the ABI buffer.
+// CHECK-LABEL: fn aggregate:
+// CHECK: [[MASK:v[0-9]+]] = large_const 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+// CHECK: [[ZERO:c[0-9]+]] = const 0x0
+// CHECK: [[PTR:v[0-9]+]] {{v[0-9]+}} = icall @addressValue
+// CHECK-NEXT: [[WORD:v[0-9]+]] = mload256 [[PTR]]
+// CHECK-NEXT: [[ADDRESS:v[0-9]+]] = and [[WORD]] [[MASK]]
+// CHECK: [[VALUE:v[0-9]+]] = and [[ADDRESS]] [[MASK]]
+// CHECK-NEXT: [[ISZERO:v[0-9]+]] = eq [[VALUE]] [[ZERO]]
+// CHECK-NEXT: [[VALID:v[0-9]+]] = xor [[ISZERO]] {{v[0-9]+}}
+// CHECK-NEXT: => [[VALID]] ?
+// CHECK: revert 0x0 0x0
+// CHECK-LABEL: fn effectful:
+// CHECK: [[EFFECT_PTR:v[0-9]+]] {{v[0-9]+}} = icall @countedAddress
+// CHECK-NEXT: [[EFFECT_WORD:v[0-9]+]] = mload256 [[EFFECT_PTR]]
+// CHECK-NEXT: {{v[0-9]+}} = and [[EFFECT_WORD]]
+// CHECK-NOT: icall
+// CHECK-LABEL: fn callCount:
