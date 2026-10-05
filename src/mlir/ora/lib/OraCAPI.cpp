@@ -2555,6 +2555,54 @@ MlirType oraNonZeroAddressTypeGet(MlirContext ctx)
     }
 }
 
+bool oraRefinementTypeGetIntegerBounds(MlirType type, uint32_t *kind,
+                                      uint32_t *carrierWidth,
+                                      uint64_t *minimum, uint64_t *maximum)
+{
+    if (!type.ptr || !kind || !carrierWidth || !minimum || !maximum)
+        return false;
+    Type base;
+    uint64_t lower[4] = {}, upper[4] = {};
+    uint32_t tag;
+    if (auto t = dyn_cast<ora::MinValueType>(unwrap(type))) {
+        tag = 1;
+        base = t.getBaseType();
+        lower[0] = t.getMinLowLow();
+        lower[1] = t.getMinLowHigh();
+        lower[2] = t.getMinHighLow();
+        lower[3] = t.getMinHighHigh();
+    } else if (auto t = dyn_cast<ora::MaxValueType>(unwrap(type))) {
+        tag = 2;
+        base = t.getBaseType();
+        upper[0] = t.getMaxLowLow();
+        upper[1] = t.getMaxLowHigh();
+        upper[2] = t.getMaxHighLow();
+        upper[3] = t.getMaxHighHigh();
+    } else if (auto t = dyn_cast<ora::InRangeType>(unwrap(type))) {
+        tag = 3;
+        base = t.getBaseType();
+        lower[0] = t.getMinLowLow();
+        lower[1] = t.getMinLowHigh();
+        lower[2] = t.getMinHighLow();
+        lower[3] = t.getMinHighHigh();
+        upper[0] = t.getMaxLowLow();
+        upper[1] = t.getMaxLowHigh();
+        upper[2] = t.getMaxHighLow();
+        upper[3] = t.getMaxHighHigh();
+    } else {
+        return false;
+    }
+    auto integer = dyn_cast<mlir::IntegerType>(base);
+    if (!integer) return false;
+    *kind = tag;
+    *carrierWidth = integer.getWidth();
+    for (unsigned i = 0; i < 4; ++i) {
+        minimum[i] = lower[i];
+        maximum[i] = upper[i];
+    }
+    return true;
+}
+
 MlirType oraRefinementTypeGetBaseType(MlirType refinementType)
 {
     try

@@ -14,6 +14,9 @@ const type_builtin = @import("ora_types").builtin;
 pub const CollectOptions = struct {
     /// Enable with the joint call consumers; projection alone grants no authority.
     project_calls: bool = false,
+    /// Data-only lifecycle collection. The caller must independently establish
+    /// complete runtime/constructor coverage; a supplied subset grants nothing.
+    lifecycle_roots: ?[]const mlir.MlirOperation = null,
     /// Borrowed owner used when the walker has not entered a symbol-bearing op.
     owner: obligation.Owner = .{ .module = "ora_mlir" },
 };
@@ -259,7 +262,11 @@ pub fn collect(
     };
 
     try collector.indexCallDeclarations(mlir.oraModuleGetOperation(module));
+    if (options.lifecycle_roots) |roots| try collector.validateLifecycleRoots(roots);
     try collector.walkOperation(mlir.oraModuleGetOperation(module), null);
+    if (options.lifecycle_roots) |roots| for (roots) |root| {
+        _ = try collector.requireFunctionRow(root);
+    };
     if (options.project_calls) collector.projectCallFunctions() catch |err| {
         try collector.addBlockingDiagnosticFmt(.unsupported, "call_projection_{s}", .{@errorName(err)});
     };
@@ -772,6 +779,7 @@ const Collector = struct {
     loop_value_bindings: std.ArrayList(LoopValueBinding) = .empty,
     operation_ordinals: std.AutoHashMapUnmanaged(usize, u32) = .empty,
     storage_global_types: std.StringHashMapUnmanaged(obligation.TypeRef) = .empty,
+    lifecycle_scope: ?mlir.MlirOperation = null,
     active_loop_formula_overrides: []const LoopFormulaOverride = &.{},
     arithmetic_safety_terms: std.AutoHashMapUnmanaged(obligation.TermId, void) = .empty,
     next_id: obligation.Id = 1,
@@ -974,6 +982,26 @@ const Collector = struct {
         for (0..@intCast(mlir.oraOperationGetNumOperands(op))) |i| if (!mlir.mlirTypeEqual(mlir.oraValueGetType(mlir.oraOperationGetOperand(op, i)), mlir.mlirFunctionTypeGetInput(ty, @intCast(i)))) return error.InvalidCallSignature;
         for (0..@intCast(mlir.oraOperationGetNumResults(op))) |i| if (!mlir.mlirTypeEqual(mlir.oraValueGetType(mlir.oraOperationGetResult(op, i)), mlir.mlirFunctionTypeGetResult(ty, @intCast(i)))) return error.InvalidCallSignature;
         return callee;
+    }
+
+    fn validateLifecycleRoots(self: *Collector, roots: []const mlir.MlirOperation) !void {
+        if (!self.options.project_calls or roots.len == 0) return error.MissingLifecycleRoots;
+        for (roots, 0..) |root, index| {
+            const found = for (self.call_declarations.items) |candidate| {
+                if (candidate.ptr == root.ptr and std.mem.eql(u8, operationName(candidate), "func.func")) break true;
+            } else false;
+            if (!found) return error.ForeignLifecycleRoot;
+            for (roots[0..index]) |previous| if (previous.ptr == root.ptr) return error.DuplicateLifecycleRoot;
+            const scope = mlir.mlirOperationGetParentOperation(root);
+            if (!std.mem.eql(u8, operationName(scope), "ora.contract")) return error.LifecycleOwnerUnsupported;
+            if (self.lifecycle_scope) |previous| {
+                if (previous.ptr != scope.ptr) return error.LifecycleOwnerUnsupported;
+            } else self.lifecycle_scope = scope;
+        }
+        for (self.call_declarations.items) |declaration| {
+            if (mlir.mlirOperationGetParentOperation(declaration).ptr != self.lifecycle_scope.?.ptr)
+                return error.LifecycleOwnerUnsupported;
+        }
     }
 
     fn callConnectedFunction(self: *Collector, function: mlir.MlirOperation) bool {
@@ -1211,6 +1239,13 @@ const Collector = struct {
     }
 
     fn callValueType(self: *Collector, value: mlir.MlirValue, sources: []const LoopValueSource) !obligation.TypeRef {
+        const ty = try self.rawCallValueType(value, sources);
+        if (self.lifecycle_scope != null and ty == .compiler_type_id and ty.compiler_type_id == type_builtin.lookupBuiltinById(.bool).comptime_type_id and
+            integerTypeWidth(mlir.oraValueGetType(value)) == 1) return .{ .spelling = "bool" };
+        return ty;
+    }
+
+    fn rawCallValueType(self: *Collector, value: mlir.MlirValue, sources: []const LoopValueSource) !obligation.TypeRef {
         var index = sources.len;
         while (index > 0) {
             index -= 1;
@@ -1331,6 +1366,10 @@ const Collector = struct {
         if (std.mem.eql(u8, op_name, "ora.global")) {
             const root = (try self.stringAttr(op, "sym_name")) orelse "";
             const type_id = (try self.u32Attr(op, "ora.compiler_type_id")) orelse 0;
+            if (self.lifecycle_scope) |scope| {
+                if (mlir.mlirOperationGetParentOperation(op).ptr != scope.ptr or self.storage_global_types.contains(root))
+                    return error.LifecycleStorageOwnerAmbiguous;
+            }
             if (root.len != 0) try self.storage_global_types.put(
                 self.allocator,
                 root,
@@ -4815,6 +4854,11 @@ const Collector = struct {
         const root = (try self.stringAttr(op, "global")) orelse
             return error.LoopProjectionEffectUnsupported;
         const ty = self.storage_global_types.get(root) orelse obligation.TypeRef{ .compiler_type_id = 0 };
+        if (self.lifecycle_scope != null) {
+            const info = typeRefIntegerInfo(ty) orelse return error.LifecycleStorageTypeMissing;
+            if (!mlirIntegerCarrierHasWidth(mlir.oraValueGetType(value), info.width)) return error.LifecycleStorageWidthMismatch;
+            return .{ .root = root, .value_ty = ty };
+        }
         const width = integerTypeWidth(mlir.oraValueGetType(value)) orelse
             return error.LoopProjectionEffectUnsupported;
         if (typeRefIntegerInfo(ty)) |info| {
@@ -11460,4 +11504,42 @@ test "G7 source entry inventory rejects changed or missing canonical declaration
     try std.testing.expect(!mlir.oraModuleIsNull(module));
     defer mlir.oraModuleDestroy(module);
     try std.testing.expectError(error.CallEntrySourceMissing, collect(std.testing.allocator, module, .{ .project_calls = true }));
+}
+
+test "SL2B lifecycle Boolean identity rejects wrong carriers and source identities" {
+    const context = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(context);
+    const registry = mlir.oraDialectRegistryCreate();
+    mlir.oraRegisterAllDialects(registry);
+    mlir.oraContextAppendDialectRegistry(context, registry);
+    mlir.oraDialectRegistryDestroy(registry);
+    mlir.oraContextLoadAllAvailableDialects(context);
+    try std.testing.expect(mlir.oraDialectRegister(context));
+    const module = mlir.oraModuleCreateParse(context, strRef("module { func.func @probe(%flag: i1, %byte: i8) -> i1 { func.return %flag : i1 } }"));
+    try std.testing.expect(!mlir.oraModuleIsNull(module));
+    defer mlir.oraModuleDestroy(module);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var c = Collector{ .allocator = arena.allocator(), .options = .{} };
+    try c.indexCallDeclarations(mlir.oraModuleGetOperation(module));
+    const function = c.call_declarations.items[0];
+    const block = functionEntryBlock(function);
+    const flag = mlir.oraBlockGetArgument(block, 0);
+    const byte = mlir.oraBlockGetArgument(block, 1);
+    const signature = try Collector.callScalarType(mlir.oraValueGetType(flag), 0);
+    const ordinary = try c.callValueType(flag, &.{});
+    try std.testing.expect(!obligation.typeRefEqual(signature, ordinary));
+    try std.testing.expect(obligation.typeRefEqual(ordinary, .{ .compiler_type_id = 13 }));
+    c.lifecycle_scope = mlir.oraModuleGetOperation(module); // local type test, no projection or authority
+    const lifecycle = try c.callValueType(flag, &.{});
+    const normalized = true;
+    try std.testing.expectEqual(normalized, obligation.typeRefEqual(signature, lifecycle));
+    const wrong = try c.callValueType(flag, &.{.{ .value_id = @intFromPtr(flag.ptr), .key = "wrong", .ty = .{ .compiler_type_id = 6 } }});
+    try std.testing.expect(!obligation.typeRefEqual(signature, wrong));
+    const forged_bool = try c.callValueType(byte, &.{.{ .value_id = @intFromPtr(byte.ptr), .key = "wrong", .ty = .{ .compiler_type_id = 13 } }});
+    try std.testing.expect(!obligation.typeRefEqual(signature, forged_bool));
+    try std.testing.expect(!callCarrierMatches(mlir.oraValueGetType(byte), signature));
+    try std.testing.expectError(error.InvalidCallSignature, Collector.callScalarType(mlir.oraValueGetType(byte), 0));
+    try std.testing.expectError(error.InvalidCallSignature, Collector.callScalarType(mlir.oraValueGetType(flag), 6));
+    std.debug.print("SL2B_CONTROLS ordinary unchanged; exact bool={}; wrong identities and carriers refused\n", .{normalized});
 }

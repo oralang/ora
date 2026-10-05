@@ -549,6 +549,13 @@ extern "C"
     /// Returns null type if the input is not a refinement type
     MLIR_CAPI_EXPORTED MlirType oraRefinementTypeGetBaseType(MlirType refinementType);
 
+    /// Exact integer refinement bounds, as four least-significant-first limbs.
+    /// kind: 1 = MinValue, 2 = MaxValue, 3 = InRange. Unsupported types return
+    /// false; callers must not interpret output buffers on failure.
+    MLIR_CAPI_EXPORTED bool oraRefinementTypeGetIntegerBounds(
+        MlirType type, uint32_t *kind, uint32_t *carrierWidth,
+        uint64_t *minimum, uint64_t *maximum);
+
     /// Create an ora.refinement_to_base operation
     /// Converts a refinement type to its base type
     /// block: The block to insert the operation into (for block arguments, use the block containing the argument)

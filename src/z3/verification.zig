@@ -2328,6 +2328,27 @@ pub const VerificationPass = struct {
         return dup;
     }
 
+    /// Read-only lifecycle census, refreshed from the same inventory used for
+    /// query extraction. It supplies no verification result or entry assumption.
+    pub fn lifecycleRuntimeFunctions(self: *VerificationPass, allocator: std.mem.Allocator, module: mlir.MlirModule) ![]mlir.MlirOperation {
+        if (mlir.oraModuleIsNull(module)) return error.IncompleteRuntimeInventory;
+        if (self.filter_function_name != null) return error.IncompleteRuntimeInventory;
+        const root = mlir.oraModuleGetOperation(module);
+        var previous_names = self.encoder.function_ops.keyIterator();
+        while (previous_names.next()) |name| self.encoder.allocator.free(name.*);
+        self.encoder.function_ops.clearRetainingCapacity();
+        try self.registerFunctionOps(root);
+        self.runtime_reachable_function_names.clearRetainingCapacity();
+        try self.collectRuntimeReachableFunctions(root);
+        var selected: std.ArrayList(mlir.MlirOperation) = .empty;
+        errdefer selected.deinit(allocator);
+        var functions = self.encoder.function_ops.valueIterator();
+        while (functions.next()) |function| {
+            if (self.shouldVerifyFunctionOp(function.*)) try selected.append(allocator, function.*);
+        }
+        return selected.toOwnedSlice(allocator);
+    }
+
     fn shouldVerifyFunctionOp(self: *VerificationPass, op: mlir.MlirOperation) bool {
         // Full-contract verification checks the runtime call graph rooted at
         // public entrypoints. Private helpers still verify modularly when a

@@ -7,6 +7,7 @@ comptime {
     _ = @import("compiler.test.debug_artifacts.zig");
     _ = @import("compiler.test.diagnostics.zig");
     _ = @import("compiler.test.formal.zig");
+    _ = @import("compiler.test.storage_lifecycle.zig");
     _ = @import("compiler.test.hir.zig");
     _ = @import("compiler.test.match.zig");
     _ = @import("compiler.test.misc.zig");
