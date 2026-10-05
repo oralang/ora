@@ -12128,7 +12128,7 @@ fn appendDiagnosticTypeDisplayName(allocator: std.mem.Allocator, buffer: *std.Ar
             try buffer.appendSlice(allocator, refinement.name);
             try buffer.append(allocator, '<');
             try appendDiagnosticTypeDisplayName(allocator, buffer, refinement.base_type.*);
-            for (refinement.args[1..]) |arg| {
+            for (refinement.args[@min(1, refinement.args.len)..]) |arg| {
                 try buffer.appendSlice(allocator, ", ");
                 switch (arg) {
                     .Integer => |integer| try buffer.appendSlice(allocator, integer.text),
