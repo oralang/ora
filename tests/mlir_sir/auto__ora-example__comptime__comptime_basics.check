@@ -10,6 +10,19 @@
 // CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/comptime_basics.ora":6:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/comptime/comptime_basics.ora":2:5)
 // CHECK-NEXT:   func.func @refined_constants() attributes {ora.dispatch_class = "readonly", ora.return_compiler_type_id = 0 : i256, ora.selector = "0xd7e3b1a6", ora.source_module_path = "{{.*}}/ora-example/comptime/comptime_basics.ora", ora.source_owner_key = "module/contract:ComptimeBasics/function:refined_constants", ora.source_owner_start = 186 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.bitcast %1 : !sir.u256 : i1 loc(unknown)
+// CHECK-NEXT:     %3 = sir.bitcast %2 : i1 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/comptime_basics.ora":10:15)))
+// CHECK-NEXT:     sir.cond_br %3 : !sir.u256, ^bb2, ^bb1 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/comptime_basics.ora":10:15)))
+// CHECK-NEXT:   ^bb1:  // 3 preds: ^bb0, ^bb2, ^bb3
+// CHECK-NEXT:     %4 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/comptime_basics.ora":10:15)))
+// CHECK-NEXT:     sir.revert %4 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/comptime_basics.ora":10:15)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     sir.cond_br %3 : !sir.u256, ^bb3, ^bb1 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/comptime/comptime_basics.ora":11:15)))
+// CHECK-NEXT:   ^bb3:  // pred: ^bb2
+// CHECK-NEXT:     sir.cond_br %3 : !sir.u256, ^bb4, ^bb1 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/comptime/comptime_basics.ora":14:15)))
+// CHECK-NEXT:   ^bb4:  // pred: ^bb3
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/comptime/comptime_basics.ora":9:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/comptime/comptime_basics.ora":9:5)
 // CHECK-NEXT:   func.func @comptime_block_example() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.return_compiler_type_id = 6 : i256, ora.selector = "0xecb46a8f", ora.source_module_path = "{{.*}}/ora-example/comptime/comptime_basics.ora", ora.source_owner_key = "module/contract:ComptimeBasics/function:comptime_block_example", ora.source_owner_start = 450 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {

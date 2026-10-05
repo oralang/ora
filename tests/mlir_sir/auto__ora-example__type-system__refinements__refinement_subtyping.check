@@ -3,18 +3,75 @@
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
 // CHECK-NEXT:   func.func @testMinValueSubtyping() attributes {ora.dispatch_class = "readonly", ora.return_compiler_type_id = 0 : i256, ora.selector = "0xc2e35d8f", ora.source_module_path = "{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora", ora.source_owner_key = "module/contract:RefinementSubtyping/function:testMinValueSubtyping", ora.source_owner_start = 451 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.bitcast %1 : !sir.u256 : i1 loc(unknown)
+// CHECK-NEXT:     %3 = sir.bitcast %2 : i1 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":11:13)))
+// CHECK-NEXT:     sir.cond_br %3 : !sir.u256, ^bb2, ^bb1 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":11:13)))
+// CHECK-NEXT:   ^bb1:  // 2 preds: ^bb0, ^bb2
+// CHECK-NEXT:     %4 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":11:13)))
+// CHECK-NEXT:     sir.revert %4 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":11:13)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     sir.cond_br %3 : !sir.u256, ^bb3, ^bb1 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":12:13)))
+// CHECK-NEXT:   ^bb3:  // pred: ^bb2
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":10:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":10:5)
 // CHECK-NEXT:   func.func @testMaxValueSubtyping() attributes {ora.dispatch_class = "readonly", ora.return_compiler_type_id = 0 : i256, ora.selector = "0x7b7b627b", ora.source_module_path = "{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora", ora.source_owner_key = "module/contract:RefinementSubtyping/function:testMaxValueSubtyping", ora.source_owner_start = 667 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.bitcast %1 : !sir.u256 : i1 loc(unknown)
+// CHECK-NEXT:     %3 = sir.bitcast %2 : i1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":17:13)))
+// CHECK-NEXT:     sir.cond_br %3 : !sir.u256, ^bb2, ^bb1 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":17:13)))
+// CHECK-NEXT:   ^bb1:  // 2 preds: ^bb0, ^bb2
+// CHECK-NEXT:     %4 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":17:13)))
+// CHECK-NEXT:     sir.revert %4 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":17:13)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     sir.cond_br %3 : !sir.u256, ^bb3, ^bb1 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":18:13)))
+// CHECK-NEXT:   ^bb3:  // pred: ^bb2
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":16:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":16:5)
 // CHECK-NEXT:   func.func @testInRangeSubtyping() attributes {ora.dispatch_class = "readonly", ora.return_compiler_type_id = 0 : i256, ora.selector = "0x139c253a", ora.source_module_path = "{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora", ora.source_owner_key = "module/contract:RefinementSubtyping/function:testInRangeSubtyping", ora.source_owner_start = 878 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.bitcast %1 : !sir.u256 : i1 loc(unknown)
+// CHECK-NEXT:     %3 = sir.bitcast %2 : i1 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":23:13)))
+// CHECK-NEXT:     sir.cond_br %3 : !sir.u256, ^bb2, ^bb1 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":23:13)))
+// CHECK-NEXT:   ^bb1:  // 2 preds: ^bb0, ^bb2
+// CHECK-NEXT:     %4 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":23:13)))
+// CHECK-NEXT:     sir.revert %4 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":23:13)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     sir.cond_br %3 : !sir.u256, ^bb3, ^bb1 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":24:13)))
+// CHECK-NEXT:   ^bb3:  // pred: ^bb2
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":22:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":22:5)
 // CHECK-NEXT:   func.func @testNonZeroAddressSubtyping() attributes {ora.dispatch_class = "readonly", ora.return_compiler_type_id = 0 : i256, ora.selector = "0xb6248b6b", ora.source_module_path = "{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora", ora.source_owner_key = "module/contract:RefinementSubtyping/function:testNonZeroAddressSubtyping", ora.source_owner_start = 1112 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.const 0 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":29:13)))
+// CHECK-NEXT:     %3 = sir.caller : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":29:39)))
+// CHECK-NEXT:     %4 = sir.and %3 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":29:13)))
+// CHECK-NEXT:     %5 = sir.eq %4 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":29:13)))
+// CHECK-NEXT:     %6 = sir.xor %5 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":29:13)))
+// CHECK-NEXT:     %7 = sir.and %6 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":29:13)))
+// CHECK-NEXT:     %8 = sir.bitcast %7 : !sir.u256 : i1 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":29:13)))
+// CHECK-NEXT:     %9 = sir.bitcast %8 : i1 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":29:13)))
+// CHECK-NEXT:     sir.cond_br %9 : !sir.u256, ^bb2, ^bb1 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":29:13)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     %10 = sir.bitcast %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":29:13)))
+// CHECK-NEXT:     sir.revert %10 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":29:13)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":28:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":28:5)
 // CHECK-NEXT:   func.func @testRefinementToBase() attributes {ora.dispatch_class = "readonly", ora.return_compiler_type_id = 0 : i256, ora.selector = "0x5055c3d1", ora.source_module_path = "{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora", ora.source_owner_key = "module/contract:RefinementSubtyping/function:testRefinementToBase", ora.source_owner_start = 1324 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":1:1)))
+// CHECK-NEXT:     %2 = sir.bitcast %1 : !sir.u256 : i1 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":1:1)))
+// CHECK-NEXT:     %3 = sir.bitcast %2 : i1 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":35:13)))
+// CHECK-NEXT:     sir.cond_br %3 : !sir.u256, ^bb2, ^bb1 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":35:13)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     %4 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":35:13)))
+// CHECK-NEXT:     sir.revert %4 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":35:13)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":34:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":34:5)
 // CHECK-NEXT:   func.func @helperFunction(%arg0: !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":41:23)) -> !sir.u256 attributes {ora.param_binding_ids = ["file:11:pattern:10"], ora.param_compiler_type_ids = [6 : i256], ora.param_names = ["amount"], ora.return_compiler_type_id = 6 : i256, ora.source_module_path = "{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora", ora.source_owner_key = "module/contract:RefinementSubtyping/function:helperFunction", ora.source_owner_start = 1575 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "private"} {
@@ -38,15 +95,44 @@
 // CHECK-NEXT:     sir.return %10 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":42:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":41:5)
 // CHECK-NEXT:   func.func @testFunctionSubtyping() attributes {ora.dispatch_class = "readonly", ora.return_compiler_type_id = 0 : i256, ora.selector = "0x0ab11ad8", ora.source_module_path = "{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora", ora.source_owner_key = "module/contract:RefinementSubtyping/function:testFunctionSubtyping", ora.source_owner_start = 1681 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c300 = sir.const 300 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":47:43)))
-// CHECK-NEXT:     %0 = sir.icall @helperFunction(%c300) : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":48:53)))
+// CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":1:1)))
+// CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.bitcast %c1 : !sir.u256 : i1 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":1:1)))
+// CHECK-NEXT:     %2 = sir.bitcast %1 : i1 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":47:13)))
+// CHECK-NEXT:     sir.cond_br %2 : !sir.u256, ^bb2, ^bb1 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":47:13)))
+// CHECK-NEXT:   ^bb1:  // 2 preds: ^bb0, ^bb2
+// CHECK-NEXT:     %3 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":47:13)))
+// CHECK-NEXT:     sir.revert %3 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":47:13)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     %4 = sir.icall @helperFunction(%c300) : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":48:53)))
+// CHECK-NEXT:     %5 = sir.gt %4 : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":1:1)))
+// CHECK-NEXT:     %6 = sir.eq %4 : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":1:1)))
+// CHECK-NEXT:     %7 = sir.or %5 : !sir.u256, %6 : !sir.u256 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":1:1)))
+// CHECK-NEXT:     %8 = sir.and %7 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":1:1)))
+// CHECK-NEXT:     %9 = sir.bitcast %8 : !sir.u256 : i1 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":1:1)))
+// CHECK-NEXT:     %10 = sir.bitcast %9 : i1 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":48:13)))
+// CHECK-NEXT:     sir.cond_br %10 : !sir.u256, ^bb3, ^bb1 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":48:13)))
+// CHECK-NEXT:   ^bb3:  // pred: ^bb2
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":45:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":45:5)
 // CHECK-NEXT:   func.func @testReturnSubtyping() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.return_compiler_type_id = 6 : i256, ora.selector = "0xac525642", ora.source_module_path = "{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora", ora.source_owner_key = "module/contract:RefinementSubtyping/function:testReturnSubtyping", ora.source_owner_start = 2008 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
-// CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":54:9)))
+// CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c300 = sir.const 300 : !sir.u256 loc("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":53:43)))
-// CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":54:9)))
-// CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %c300 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":54:9)))
-// CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":54:9)))
+// CHECK-NEXT:     %2 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %3 = sir.bitcast %2 : !sir.u256 : i1 loc(unknown)
+// CHECK-NEXT:     %4 = sir.bitcast %3 : i1 : !sir.u256 loc("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":53:13)))
+// CHECK-NEXT:     sir.cond_br %4 : !sir.u256, ^bb2, ^bb1 loc("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":53:13)))
+// CHECK-NEXT:   ^bb1:  // 2 preds: ^bb0, ^bb2
+// CHECK-NEXT:     %5 = sir.bitcast %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":53:13)))
+// CHECK-NEXT:     sir.revert %5 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":53:13)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     sir.cond_br %4 : !sir.u256, ^bb3, ^bb1 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":54:16)))
+// CHECK-NEXT:   ^bb3:  // pred: ^bb2
+// CHECK-NEXT:     %6 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":54:9)))
+// CHECK-NEXT:     sir.store %6 : !sir.ptr<1>, %c300 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":54:9)))
+// CHECK-NEXT:     sir.return %6 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":54:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":52:5)
 // CHECK-NEXT: } loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":8:1)

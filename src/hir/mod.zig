@@ -1632,6 +1632,14 @@ const ContractLowerer = struct {
 };
 
 const FunctionLowerer = struct {
+    pub const CheckedRefinement = struct {
+        value: mlir.MlirValue,
+        refinement: sema.RefinementType,
+        block: mlir.MlirBlock,
+        guard: mlir.MlirOperation,
+        previous: ?*const CheckedRefinement,
+    };
+
     const DeferredReturnKind = enum {
         none,
         ora_yield,
@@ -1659,6 +1667,8 @@ const FunctionLowerer = struct {
     block: mlir.MlirBlock,
     locals: hir_locals.LocalEnv,
     return_type: ?mlir.MlirType,
+    semantic_return_type: ?sema.Type = null,
+    checked_refinements: ?*const CheckedRefinement = null,
     current_return_value: ?mlir.MlirValue = null,
     deferred_return_flag: ?mlir.MlirValue = null,
     deferred_return_value_slot: ?mlir.MlirValue = null,
@@ -1695,6 +1705,7 @@ const FunctionLowerer = struct {
     pub const convertValueForFlow = FunctionCore.convertValueForFlow;
     pub const convertValueForFlowWithSignedness = FunctionCore.convertValueForFlowWithSignedness;
     pub const convertValueForSemaFlow = FunctionCore.convertValueForSemaFlow;
+    pub const convertValueForCheckedFlow = FunctionCore.convertValueForCheckedFlow;
     pub const lowerCheckedPower = FunctionCore.lowerCheckedPower;
     pub const lowerPowerWithOverflow = FunctionCore.lowerPowerWithOverflow;
     pub const createBitfieldFieldExtract = FunctionCore.createBitfieldFieldExtract;

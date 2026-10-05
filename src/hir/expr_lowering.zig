@@ -3789,18 +3789,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 );
             }
 
-            if (!mlir.oraTypeIsNull(target_ref_base) and !mlir.oraTypeEqual(mlir.oraValueGetType(value), target_type)) {
-                const wrap_op = mlir.oraBaseToRefinementOpCreate(
-                    self.parent.context,
-                    self.parent.location(builtin.range),
-                    value,
-                    target_type,
-                    self.block,
-                );
-                if (mlir.oraOperationIsNull(wrap_op)) return error.MlirOperationCreationFailed;
-                return mlir.oraOperationGetResult(wrap_op, 0);
-            }
-            return value;
+            return try self.convertValueForCheckedFlow(value, target_type, self.parent.typecheck.exprType(expr_id), builtin.range);
         }
 
         fn lowerStaticArrayToSliceCast(
@@ -3893,18 +3882,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             const value_type = mlir.oraValueGetType(value);
             if (mlir.oraTypeEqual(value_type, concrete_target)) {
-                if (!mlir.oraTypeIsNull(target_ref_base)) {
-                    const wrap_op = mlir.oraBaseToRefinementOpCreate(
-                        self.parent.context,
-                        self.parent.location(builtin.range),
-                        value,
-                        target_type,
-                        self.block,
-                    );
-                    if (mlir.oraOperationIsNull(wrap_op)) return error.MlirOperationCreationFailed;
-                    return mlir.oraOperationGetResult(wrap_op, 0);
-                }
-                return value;
+                return try self.convertValueForCheckedFlow(value, target_type, self.parent.typecheck.exprType(expr_id), builtin.range);
             }
 
             const bitcast = mlir.oraArithBitcastOpCreate(
@@ -3916,18 +3894,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (mlir.oraOperationIsNull(bitcast)) return error.MlirOperationCreationFailed;
             const casted = appendValueOp(self.block, bitcast);
 
-            if (!mlir.oraTypeIsNull(target_ref_base)) {
-                const wrap_op = mlir.oraBaseToRefinementOpCreate(
-                    self.parent.context,
-                    self.parent.location(builtin.range),
-                    casted,
-                    target_type,
-                    self.block,
-                );
-                if (mlir.oraOperationIsNull(wrap_op)) return error.MlirOperationCreationFailed;
-                return mlir.oraOperationGetResult(wrap_op, 0);
-            }
-            return casted;
+            return try self.convertValueForCheckedFlow(casted, target_type, self.parent.typecheck.exprType(expr_id), builtin.range);
         }
 
         fn unwrapRefinementForCast(
@@ -5118,7 +5085,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const element_type = mlir.oraShapedTypeGetElementType(result_type);
             for (array.elements, 0..) |element, index| {
                 const raw_element_value = try self.lowerExpr(element, locals);
-                const element_value = try self.convertValueForFlow(raw_element_value, element_type, array.range);
+                const semantic_array = self.parent.typecheck.exprType(expr_id);
+                const semantic_element = switch (semantic_array) {
+                    .array => |ty| ty.element_type.*,
+                    .slice => |ty| ty.element_type.*,
+                    else => return error.MlirOperationCreationFailed,
+                };
+                const element_value = try self.convertValueForCheckedFlow(raw_element_value, element_type, semantic_element, exprRange(self.parent.file, element));
                 const raw_index = appendValueOp(
                     self.block,
                     createIntegerConstant(

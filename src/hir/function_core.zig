@@ -766,6 +766,17 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             appendOp(self.block, op);
+            // Only an emitted check creates evidence. Immutable tails are safe
+            // when branch lowerers copy self; no child can update its parent.
+            const checked = try self.parent.allocator.create(FunctionLowerer.CheckedRefinement);
+            checked.* = .{
+                .value = @This().refinementValueIdentity(value),
+                .refinement = refinement,
+                .block = self.block,
+                .guard = op,
+                .previous = self.checked_refinements,
+            };
+            self.checked_refinements = checked;
         }
 
         fn runtimeCheckProvidesForRefinement(self: *FunctionLowerer, name: []const u8, refinement: RefinementType) !?[]const u8 {
@@ -1015,7 +1026,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (self.return_type) |return_type| {
                     const success_type = mlir.oraErrorUnionTypeGetSuccessType(return_type);
                     const target_type = if (mlir.oraTypeIsNull(success_type)) return_type else success_type;
-                    return try self.lowerExprForFlowTarget(expr_id, target_type, locals);
+                    const value = try self.lowerExprForFlowTarget(expr_id, target_type, locals);
+                    const semantic_return = self.semantic_return_type orelse return error.MlirOperationCreationFailed;
+                    const semantic_target = switch (semantic_return) {
+                        .error_union => |error_union| error_union.payload_type.*,
+                        else => semantic_return,
+                    };
+                    return try @This().convertValueForCheckedFlow(self, value, target_type, semantic_target, support.exprRange(self.parent.file, expr_id));
                 }
             }
             return try self.lowerExpr(expr_id, locals);
@@ -2577,7 +2594,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const range = patternRange(self.parent.file, pattern_id);
                     const target_type = try @This().lowerPatternType(self, pattern_id) orelse
                         self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
-                    const converted = try @This().convertValueForFlow(self, value, target_type, range);
+                    const converted = try @This().convertValueForCheckedFlow(self, value, target_type, self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
                     @This().annotatePatternValue(self, pattern_id, converted);
                     try locals.bindPattern(self.parent.file, pattern_id, converted);
                 },
@@ -2722,6 +2739,92 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return appendValueOp(self.block, op);
         }
 
+        // Source conversions need semantic predicates even when an earlier pure
+        // wrapper already gave the value the target MLIR type. Check once here,
+        // before binding/storing or exposing the successful return to ensures.
+        pub fn convertValueForCheckedFlow(
+            self: *FunctionLowerer,
+            value: mlir.MlirValue,
+            target_type: mlir.MlirType,
+            target_sema_type: sema.Type,
+            range: source.TextRange,
+        ) anyerror!mlir.MlirValue {
+            const semantic_target = if (target_sema_type == .named)
+                self.parent.substitutedType(target_sema_type.named.name) orelse target_sema_type
+            else
+                target_sema_type;
+            if (semantic_target != .refinement and
+                mlir.oraTypeIsNull(mlir.oraRefinementTypeGetBaseType(target_type)))
+                return @This().convertValueForFlow(self, value, target_type, range);
+            if (semantic_target != .refinement or
+                !mlir.oraTypeEqual(self.parent.lowerSemaType(semantic_target, range), target_type))
+            {
+                try self.parent.emitLoweringError(range, "refinement conversion requires an exact semantic target", .{});
+                return error.MlirOperationCreationFailed;
+            }
+            return @This().convertValueForSemaFlow(self, value, semantic_target, range);
+        }
+
+        fn refinementValueIdentity(value: mlir.MlirValue) mlir.MlirValue {
+            var current = value;
+            while (mlir.oraValueIsAOpResult(current)) {
+                const op = mlir.oraOpResultGetOwner(current);
+                if (mlir.oraOperationGetNumOperands(op) != 1 or mlir.oraOperationGetNumResults(op) != 1) break;
+                const name = mlir.oraOperationGetName(op);
+                defer @import("mlir_c_api").freeStringRef(name);
+                if (name.data == null) break;
+                const text = name.data[0..name.length];
+                if (!std.mem.eql(u8, text, "ora.base_to_refinement") and
+                    !std.mem.eql(u8, text, "ora.refinement_to_base")) break;
+                const operand = mlir.oraOperationGetOperand(op, 0);
+                const from = mlir.oraValueGetType(operand);
+                const to = mlir.oraValueGetType(current);
+                const from_base = mlir.oraRefinementTypeGetBaseType(from);
+                const to_base = mlir.oraRefinementTypeGetBaseType(to);
+                if (!mlir.oraTypeEqual(
+                    if (mlir.oraTypeIsNull(from_base)) from else from_base,
+                    if (mlir.oraTypeIsNull(to_base)) to else to_base,
+                )) break;
+                current = operand;
+            }
+            return current;
+        }
+
+        fn sameCheckedRefinement(lhs: RefinementType, rhs: RefinementType) bool {
+            if (!std.mem.eql(u8, lhs.name, rhs.name) or lhs.args.len != rhs.args.len) return false;
+            // Unresolved bases never gain trust from their MLIR representation.
+            switch (lhs.base_type.*) {
+                .integer => |integer| {
+                    if (rhs.base_type.* != .integer or integer.bits != rhs.base_type.integer.bits or
+                        integer.signed != rhs.base_type.integer.signed) return false;
+                },
+                .address => if (rhs.base_type.* != .address) return false,
+                else => return false,
+            }
+            for (lhs.args, rhs.args) |a, b| switch (a) {
+                .Type => if (b != .Type) return false, // Concrete type is base_type above.
+                .Integer => |integer| {
+                    if (b != .Integer or !std.mem.eql(u8, integer.text, b.Integer.text)) return false;
+                },
+            };
+            return true;
+        }
+
+        fn hasCheckedRefinement(self: *FunctionLowerer, value: mlir.MlirValue, refinement: RefinementType) bool {
+            const identity = @This().refinementValueIdentity(value);
+            var cursor = self.checked_refinements;
+            while (cursor) |checked| : (cursor = checked.previous) {
+                if (checked.block.ptr != self.block.ptr or !mlir.mlirValueEqual(checked.value, identity) or
+                    !@This().sameCheckedRefinement(checked.refinement, refinement)) continue;
+                // Only an earlier guard still present in this block can be reused.
+                var op = mlir.oraBlockGetFirstOperation(self.block);
+                while (!mlir.oraOperationIsNull(op)) : (op = mlir.oraOperationGetNextInBlock(op)) {
+                    if (op.ptr == checked.guard.ptr) return true;
+                }
+            }
+            return false;
+        }
+
         pub fn convertValueForSemaFlow(
             self: *FunctionLowerer,
             value: mlir.MlirValue,
@@ -2729,9 +2832,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             range: source.TextRange,
         ) anyerror!mlir.MlirValue {
             const target_type = self.parent.lowerSemaType(target_sema_type, range);
-            const value_type = mlir.oraValueGetType(value);
             const converted = try @This().convertValueForFlow(self, value, target_type, range);
-            if (target_sema_type.kind() == .refinement and !mlir.oraTypeEqual(value_type, target_type)) {
+            // Types/wrappers (including refinement-typed storage) prove nothing.
+            // Reuse only the exact predicate checked on this value in this block.
+            if (target_sema_type.kind() == .refinement and
+                !@This().hasCheckedRefinement(self, converted, target_sema_type.refinement))
+            {
                 try @This().insertRefinementGuard(self, converted, target_sema_type.refinement, range, "aggregate", "refinement_conversion");
             }
             return converted;
@@ -3235,7 +3341,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Name => |name| {
                     if (locals.lookupName(name.name)) |local_id| {
                         const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[local_id.index()].type, name.range);
-                        const converted = try @This().convertValueForFlow(self, value, target_type, name.range);
+                        const converted = try @This().convertValueForCheckedFlow(self, value, target_type, self.parent.typecheck.pattern_types[local_id.index()].type, name.range);
                         @This().annotateLocalValue(self, local_id, converted);
                         try locals.setValue(local_id, converted);
                         return;
@@ -3245,7 +3351,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         if (item == .Field) {
                             const field = item.Field;
                             const target_type = self.parent.lowerSemaType(self.parent.typecheck.item_types[item_id.index()], name.range);
-                            const converted = try @This().convertValueForFlow(self, value, target_type, name.range);
+                            const converted = try @This().convertValueForCheckedFlow(self, value, target_type, self.parent.typecheck.item_types[item_id.index()], name.range);
                             const loc = self.parent.location(name.range);
                             const op = switch (field.storage_class) {
                                 .storage => blk: {
@@ -3287,7 +3393,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                     const base_value = try @This().lowerPatternValueWithCache(self, field.base, locals, cache);
                     const target_type = self.parent.lowerSemaType(@This().patternType(self, pattern_id, locals), field.range);
-                    const converted = try @This().convertValueForFlow(self, value, target_type, field.range);
+                    const converted = try @This().convertValueForCheckedFlow(self, value, target_type, @This().patternType(self, pattern_id, locals), field.range);
                     const op = mlir.oraStructFieldUpdateOpCreate(
                         self.parent.context,
                         self.parent.location(field.range),
@@ -3309,7 +3415,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const base_value = try @This().lowerPatternValueWithCache(self, index.base, locals, cache);
                     const base_type = mlir.oraValueGetType(base_value);
                     const target_type = self.parent.lowerSemaType(@This().patternType(self, pattern_id, locals), index.range);
-                    const converted = try @This().convertValueForFlow(self, value, target_type, index.range);
+                    const converted = try @This().convertValueForCheckedFlow(self, value, target_type, @This().patternType(self, pattern_id, locals), index.range);
                     if (mlir.oraTypeIsAMemRef(base_type)) {
                         const key_value = cached_index orelse try self.lowerExprForFlowTarget(index.index, reprIntegerType(self.parent.context), locals);
                         if (@This().guardedStorageRootNameForPattern(self, index.base)) |root_name| {
@@ -4744,6 +4850,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         fn lowerPatternType(self: *FunctionLowerer, pattern_id: ast.PatternId) anyerror!?mlir.MlirType {
             const sema_type = self.parent.typecheck.pattern_types[pattern_id.index()].type;
             if (sema_type.kind() == .unknown) return null;
+            // A resolved refinement descriptor retains bounds that an alias name
+            // alone cannot carry through the declared MLIR type-expression path.
+            if (sema_type.kind() == .refinement)
+                return self.parent.lowerSemaType(sema_type, patternRange(self.parent.file, pattern_id));
             if (sema_type.kind() != .anonymous_struct) {
                 if (@This().declaredTypeExprForPattern(self, pattern_id)) |type_expr| {
                     return self.parent.lowerTypeExpr(type_expr);

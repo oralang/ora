@@ -5634,6 +5634,201 @@ test "formal Z3 prepared query results overlay MLIR manifest queries" {
     }
 }
 
+test "refinement provenance keeps exact predicates and branch checks bound to emitted guards" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "provenance.ora", .data =
+        \\contract Provenance {
+        \\    storage slot: MinValue<u256, 100>;
+        \\    pub fn param(x: MinValue<u256, 100>) -> MinValue<u256, 100> {
+        \\        let y: MinValue<u256, 100> = x; return y;
+        \\    }
+        \\    pub fn castReturn(x: u256) -> MinValue<u256, 100> {
+        \\        return @cast(MinValue<u256, 100>, x);
+        \\    }
+        \\    pub fn roundTrip(x: MinValue<u256, 100>) -> MinValue<u256, 100> {
+        \\        let y: u256 = x; return @cast(MinValue<u256, 100>, y);
+        \\    }
+        \\    pub fn stronger(x: MinValue<u256, 100>) -> MinValue<u256, 200> { return x; }
+        \\    pub fn carrier(x: NonZero<u256>) -> BasisPoints<u256> { return x; }
+        \\    pub fn unchecked(x: u256) -> MinValue<u256, 100> { return x; }
+        \\    pub fn narrow(x: MinValue<u256, 100>) -> u8 { return @truncate(MinValue<u8, 100>, x); }
+        \\    pub fn signed(x: MinValue<u256, 100>) -> i256 { return @bitCast(MinValue<i256, 100>, x); }
+        \\    pub fn wide(x: MinValue<u8, 100>) -> u256 { return @cast(MinValue<u256, 100>, x); }
+        \\    pub fn arms(x: u256, flag: bool) -> u256 {
+        \\        if (flag) { let y: MinValue<u256, 100> = x; return y; }
+        \\        else { let z: MinValue<u256, 100> = x; return z; }
+        \\    }
+        \\    pub fn join(x: u256, flag: bool) -> u256 {
+        \\        if (flag) { let y: MinValue<u256, 100> = x; }
+        \\        let z: MinValue<u256, 100> = x; return z;
+        \\    }
+        \\    pub fn fresh() -> MinValue<u256, 100> {
+        \\        let a: MinValue<u256, 100> = slot;
+        \\        return slot;
+        \\    }
+        \\    pub fn rebind(x: u256, y: u256) -> u256 {
+        \\        var a: MinValue<u256, 100> = x; a = y; return a;
+        \\    }
+        \\}
+    });
+    const path = try pathFromTmpAlloc(testing.allocator, tmp, "provenance.ora");
+    defer testing.allocator.free(path);
+    var compilation = try compilePackage(path);
+    defer compilation.deinit();
+    const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir.diagnostics.isEmpty());
+    var formal = try obligation_from_mlir.collect(testing.allocator, hir.module.raw_module, .{});
+    defer formal.deinit();
+    try testing.expect(!formal.set.hasBlockingDiagnostic());
+    const Case = struct { name: []const u8, parameters: usize, conversions: usize };
+    for ([_]Case{
+        .{ .name = "param", .parameters = 1, .conversions = 0 },
+        .{ .name = "castReturn", .parameters = 0, .conversions = 1 },
+        .{ .name = "roundTrip", .parameters = 1, .conversions = 0 },
+        .{ .name = "stronger", .parameters = 1, .conversions = 1 },
+        .{ .name = "carrier", .parameters = 1, .conversions = 1 },
+        .{ .name = "unchecked", .parameters = 0, .conversions = 1 },
+        .{ .name = "narrow", .parameters = 1, .conversions = 1 },
+        .{ .name = "signed", .parameters = 1, .conversions = 1 },
+        .{ .name = "wide", .parameters = 1, .conversions = 1 },
+        .{ .name = "arms", .parameters = 0, .conversions = 2 },
+        .{ .name = "join", .parameters = 0, .conversions = 2 },
+        .{ .name = "fresh", .parameters = 0, .conversions = 2 },
+        .{ .name = "rebind", .parameters = 0, .conversions = 2 },
+    }) |case| {
+        errdefer std.debug.print("provenance owner={s}\n", .{case.name});
+        var parameters: usize = 0;
+        var conversions: usize = 0;
+        for (formal.set.queries) |query| {
+            if (query.kind != .guard_violate or !std.mem.eql(u8, query.owner.function.name, case.name)) continue;
+            switch (query.artifact_policy) {
+                .runtime_checked_input => parameters += 1,
+                .blocks_verified_artifacts => conversions += 1,
+                else => return error.TestUnexpectedResult,
+            }
+        }
+        try testing.expectEqual(case.parameters, parameters);
+        try testing.expectEqual(case.conversions, conversions);
+    }
+}
+
+test "refinement conversions bind distinct source guards to real queries and reject corruption" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "conversions.ora", .data =
+        \\contract Conversions {
+        \\    pub fn array(x: u256, y: u256) -> u256
+        \\        requires(x >= 100 and y >= 100)
+        \\    {
+        \\        let a: [MinValue<u256, 100>; 2] = [x, y];
+        \\        return a[0];
+        \\    }
+        \\    pub fn other(x: u256) -> MinValue<u256, 100>
+        \\        requires(x >= 100)
+        \\    { return @cast(MinValue<u256, 100>, x); }
+        \\}
+    });
+    const path = try pathFromTmpAlloc(testing.allocator, tmp, "conversions.ora");
+    defer testing.allocator.free(path);
+    var compilation = try compilePackage(path);
+    defer compilation.deinit();
+    const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir.diagnostics.isEmpty());
+    var formal = try obligation_from_mlir.collect(testing.allocator, hir.module.raw_module, .{});
+    defer formal.deinit();
+    try testing.expect(!formal.set.hasBlockingDiagnostic());
+    const original = try test_helpers.z3FormalQueryBindingsFromFormalForTest(testing.allocator, formal.query_bindings);
+    defer testing.allocator.free(original);
+    var guard_indices: std.ArrayList(usize) = .empty;
+    defer guard_indices.deinit(testing.allocator);
+    for (original, 0..) |binding, i| {
+        if (std.mem.eql(u8, binding.kind, "guard_violate")) try guard_indices.append(testing.allocator, i);
+    }
+    try testing.expectEqual(@as(usize, 3), guard_indices.items.len);
+    const first = original[guard_indices.items[0]];
+    const second = original[guard_indices.items[1]];
+    const foreign = original[guard_indices.items[2]];
+    // Two elements in one declaration have separate source identity and guards.
+    try testing.expect(first.source_op_id != second.source_op_id);
+    try testing.expect(!std.mem.eql(u8, first.guard_id.?, second.guard_id.?));
+    try testing.expectEqualStrings("array", obligation.findById(formal.set.queries, first.query_id).?.owner.function.name);
+    try testing.expectEqualStrings("other", obligation.findById(formal.set.queries, foreign.query_id).?.owner.function.name);
+    for (std.meta.tags(enum { intact, wrong_source, wrong_owner, wrong_role, duplicate_binding, missing_binding, duplicate_row, missing_row })) |mutation| {
+        errdefer std.debug.print("refinement conversion mutation={s}\n", .{@tagName(mutation)});
+        var bindings: std.ArrayList(z3_verification.FormalQueryBinding) = .empty;
+        defer bindings.deinit(testing.allocator);
+        try bindings.appendSlice(testing.allocator, original);
+        const target_index = guard_indices.items[0];
+        switch (mutation) {
+            .wrong_source => bindings.items[target_index].source_op_id = second.source_op_id,
+            .wrong_owner => bindings.items[target_index].source_op_id = foreign.source_op_id,
+            .wrong_role => bindings.items[target_index].logical_role = "assert",
+            .duplicate_binding => try bindings.append(testing.allocator, first),
+            .missing_binding => _ = bindings.orderedRemove(target_index),
+            else => {},
+        }
+        var pass = try z3_verification.VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        pass.setVerifyMode(.Full);
+        pass.setFormalQueryBindings(bindings.items);
+        var verified = try pass.runVerificationPassPreparedSequential(hir.module.raw_module);
+        defer verified.deinit();
+        try testing.expect(verified.success);
+        var report = try pass.buildSmtReport(hir.module.raw_module, path, &verified);
+        defer report.deinit(testing.allocator);
+        const manifest = report.query_manifest orelse return error.TestUnexpectedResult;
+        var rows: std.ArrayList(z3_verification.PreparedQueryManifestRow) = .empty;
+        defer rows.deinit(testing.allocator);
+        for (manifest.rows) |row| {
+            if (row.formal_query_id == first.query_id and mutation == .missing_row) continue;
+            try rows.append(testing.allocator, row);
+            if (row.formal_query_id == first.query_id and mutation == .duplicate_row) try rows.append(testing.allocator, row);
+        }
+        var overlay = try obligation_from_z3.overlayPreparedQueryResults(testing.allocator, formal.set, rows.items);
+        defer overlay.deinit();
+        if (mutation == .intact) {
+            try testing.expect(overlay.set.artifactDecision().isAllowed());
+            var guards: usize = 0;
+            for (overlay.set.queries) |query| {
+                try testing.expectEqual(obligation.VerificationBackend.z3, query.backend);
+                const digest = query.smtlib_hash orelse return error.TestUnexpectedResult;
+                try testing.expect(digest != 0);
+                const expected: obligation.VerificationQueryStatus = switch (query.kind) {
+                    .base, .guard_satisfy => .sat,
+                    else => .unsat,
+                };
+                try testing.expectEqual(expected, query.result.?.status);
+                if (query.kind != .guard_violate) continue;
+                guards += 1;
+                try testing.expectEqual(obligation.ArtifactPolicy.blocks_verified_artifacts, query.artifact_policy);
+                var matches: usize = 0;
+                for (manifest.rows) |row| {
+                    if (row.formal_query_id != query.id) continue;
+                    matches += 1;
+                    try testing.expectEqual(z3_verification.FormalMatchStatus.matched, row.formal_match_status);
+                    try testing.expectEqual(z3_verification.QueryResultStatus.unsat, row.result_status.?);
+                    try testing.expectEqual(digest, row.smtlib_hash);
+                    try testing.expectEqualSlices(obligation.Id, query.assumption_ids, row.formal_assumption_ids);
+                    try testing.expectEqualSlices(obligation.Id, query.obligation_ids, row.formal_obligation_ids);
+                }
+                try testing.expectEqual(@as(usize, 1), matches);
+            }
+            try testing.expectEqual(@as(usize, 3), guards);
+        } else {
+            try testing.expect(!overlay.set.artifactDecision().isAllowed());
+            var unmatched = false;
+            for (overlay.set.diagnostics) |diagnostic| {
+                if (diagnostic.kind == .unmatched_report_row) unmatched = true;
+            }
+            try testing.expect(unmatched);
+            const target = obligation.findById(overlay.set.queries, first.query_id).?;
+            try testing.expect(target.result == null);
+            try testing.expect(target.smtlib_hash == null);
+        }
+    }
+}
+
 test "C8 source assertions bind real Z3 queries and reject identity corruption" {
     const h = createContext();
     defer destroyContext(h);

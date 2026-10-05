@@ -57,7 +57,7 @@
 // CHECK-NEXT:   func.func @runtimeMaxValueFromStorage() attributes {ora.dispatch_class = "readonly", ora.effect = "reads", ora.read_slots = ["stored_value"], ora.return_compiler_type_id = 0 : i256, ora.selector = "0x46cae805", ora.source_module_path = "{{.*}}/ora-example/smt/guards/max_value_runtime.ora", ora.source_owner_key = "module/contract:MaxValueRuntime/function:runtimeMaxValueFromStorage", ora.source_owner_start = 1225 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub", ora.write_slots = [], ora.write_slots_complete = true} {
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %slot_stored_value = sir.const 0 : !sir.u256 loc(unknown)
-// CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":33:34)
+// CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %value = sir.sload %slot_stored_value : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":13:5)
 // CHECK-NEXT:     %1 = sir.lt %value : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":33:18)
 // CHECK-NEXT:     %2 = sir.eq %value : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":33:18)
@@ -67,10 +67,19 @@
 // CHECK-NEXT:     %6 = sir.bitcast %5 : i1 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":33:9)
 // CHECK-NEXT:     %7 = sir.iszero %6 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":33:9)
 // CHECK-NEXT:     sir.cond_br %7 : !sir.u256, ^bb1, ^bb2 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":33:9)
-// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:   ^bb1:  // 2 preds: ^bb0, ^bb2
 // CHECK-NEXT:     %8 = sir.bitcast %slot_stored_value : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":33:9)
 // CHECK-NEXT:     sir.revert %8 : !sir.ptr<1>, %slot_stored_value : !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":33:9)
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     %value_0 = sir.sload %slot_stored_value : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":13:5)))
+// CHECK-NEXT:     %9 = sir.lt %value_0 : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":1:1)))
+// CHECK-NEXT:     %10 = sir.eq %value_0 : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":1:1)))
+// CHECK-NEXT:     %11 = sir.or %9 : !sir.u256, %10 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":1:1)))
+// CHECK-NEXT:     %12 = sir.and %11 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":1:1)))
+// CHECK-NEXT:     %13 = sir.bitcast %12 : !sir.u256 : i1 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":1:1)))
+// CHECK-NEXT:     %14 = sir.bitcast %13 : i1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":36:13)))
+// CHECK-NEXT:     sir.cond_br %14 : !sir.u256, ^bb3, ^bb1 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":36:13)))
+// CHECK-NEXT:   ^bb3:  // pred: ^bb2
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":32:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":32:5)
 // CHECK-NEXT:   func.func @runtimeMaxValueFromCall(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":40:36)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["max:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:5"], ora.param_compiler_type_ids = [6 : i256], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.return_compiler_type_id = 6 : i256, ora.selector = "0x83b24fe2", ora.source_module_path = "{{.*}}/ora-example/smt/guards/max_value_runtime.ora", ora.source_owner_key = "module/contract:MaxValueRuntime/function:runtimeMaxValueFromCall", ora.source_owner_start = 1489 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
@@ -104,7 +113,7 @@
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":40:5)
 // CHECK-NEXT:   func.func @testCall(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":46:21)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:6"], ora.param_compiler_type_ids = [6 : i256], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.return_compiler_type_id = 0 : i256, ora.selector = "0xd0a9c043", ora.source_module_path = "{{.*}}/ora-example/smt/guards/max_value_runtime.ora", ora.source_owner_key = "module/contract:MaxValueRuntime/function:testCall", ora.source_owner_start = 1613 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
-// CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":47:23)
+// CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.lt %arg0 : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":47:18)
 // CHECK-NEXT:     %3 = sir.eq %arg0 : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":47:18)
@@ -114,11 +123,19 @@
 // CHECK-NEXT:     %7 = sir.bitcast %6 : i1 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":47:9)
 // CHECK-NEXT:     %8 = sir.iszero %7 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":47:9)
 // CHECK-NEXT:     sir.cond_br %8 : !sir.u256, ^bb1, ^bb2 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":47:9)
-// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:   ^bb1:  // 2 preds: ^bb0, ^bb2
 // CHECK-NEXT:     %9 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":47:9)
 // CHECK-NEXT:     sir.revert %9 : !sir.ptr<1>, %0 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":47:9)
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     %10 = sir.icall @runtimeMaxValueFromCall(%arg0) : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":49:33)))
+// CHECK-NEXT:     %11 = sir.lt %arg0 : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":1:1)))
+// CHECK-NEXT:     %12 = sir.eq %arg0 : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":1:1)))
+// CHECK-NEXT:     %13 = sir.or %11 : !sir.u256, %12 : !sir.u256 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":1:1)))
+// CHECK-NEXT:     %14 = sir.and %13 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":1:1)))
+// CHECK-NEXT:     %15 = sir.bitcast %14 : !sir.u256 : i1 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":1:1)))
+// CHECK-NEXT:     %16 = sir.bitcast %15 : i1 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":51:13)))
+// CHECK-NEXT:     sir.cond_br %16 : !sir.u256, ^bb3, ^bb1 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":51:13)))
+// CHECK-NEXT:   ^bb3:  // pred: ^bb2
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":46:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":46:5)
 // CHECK-NEXT:   func.func @runtimeMaxValueArithmetic(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":55:38), %arg1: !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":55:47)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["uint256", "uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:10", "file:11:pattern:11"], ora.param_compiler_type_ids = [6 : i256, 6 : i256], ora.param_names = ["x", "y"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.return_compiler_type_id = 0 : i256, ora.selector = "0xce11b7e1", ora.source_module_path = "{{.*}}/ora-example/smt/guards/max_value_runtime.ora", ora.source_owner_key = "module/contract:MaxValueRuntime/function:runtimeMaxValueArithmetic", ora.source_owner_start = 1872 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
@@ -128,7 +145,7 @@
 // CHECK-NEXT:     %3 = sir.const 4 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %4 = sir.const 115792089237316195423570985008687907853269984665640564039457584007913129639935 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":56:23)
 // CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc(unknown)
-// CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":57:27)
+// CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %5 = sir.sub %4 : !sir.u256, %arg1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":56:23)
 // CHECK-NEXT:     %6 = sir.gt %arg1 : !sir.u256, %4 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":56:23)
 // CHECK-NEXT:     %7 = sir.xor %6 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":56:23)
@@ -150,7 +167,7 @@
 // CHECK-NEXT:     %18 = sir.bitcast %17 : i1 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":56:9)
 // CHECK-NEXT:     %19 = sir.iszero %18 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":56:9)
 // CHECK-NEXT:     sir.cond_br %19 : !sir.u256, ^bb3, ^bb4 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":56:9)
-// CHECK-NEXT:   ^bb3:  // 2 preds: ^bb2, ^bb6
+// CHECK-NEXT:   ^bb3:  // 3 preds: ^bb2, ^bb6, ^bb9
 // CHECK-NEXT:     %20 = sir.bitcast %1 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":56:9)
 // CHECK-NEXT:     sir.revert %20 : !sir.ptr<1>, %1 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":56:9)
 // CHECK-NEXT:   ^bb4:  // pred: ^bb2
@@ -189,9 +206,41 @@
 // CHECK-NEXT:     sir.store %43 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":59:25)))
 // CHECK-NEXT:     sir.revert %43 : !sir.ptr<1>, %3 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":59:25)))
 // CHECK-NEXT:   ^bb9:  // pred: ^bb7
+// CHECK-NEXT:     %44 = sir.lt %36 : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":1:1)))
+// CHECK-NEXT:     %45 = sir.eq %36 : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":1:1)))
+// CHECK-NEXT:     %46 = sir.or %44 : !sir.u256, %45 : !sir.u256 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":1:1)))
+// CHECK-NEXT:     %47 = sir.and %46 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":1:1)))
+// CHECK-NEXT:     %48 = sir.bitcast %47 : !sir.u256 : i1 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":1:1)))
+// CHECK-NEXT:     %49 = sir.bitcast %48 : i1 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":61:13)))
+// CHECK-NEXT:     sir.cond_br %49 : !sir.u256, ^bb10, ^bb3 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":61:13)))
+// CHECK-NEXT:   ^bb10:  // pred: ^bb9
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":55:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":55:5)
 // CHECK-NEXT:   func.func @runtimeMaxValueConditional(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":65:39)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:14"], ora.param_compiler_type_ids = [6 : i256], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.return_compiler_type_id = 0 : i256, ora.selector = "0x515195f7", ora.source_module_path = "{{.*}}/ora-example/smt/guards/max_value_runtime.ora", ora.source_owner_key = "module/contract:MaxValueRuntime/function:runtimeMaxValueConditional", ora.source_owner_start = 2190 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.lt %arg0 : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":66:13)))
+// CHECK-NEXT:     %3 = sir.eq %arg0 : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":66:13)))
+// CHECK-NEXT:     %4 = sir.or %2 : !sir.u256, %3 : !sir.u256 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":66:13)))
+// CHECK-NEXT:     %5 = sir.and %4 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":66:13)))
+// CHECK-NEXT:     %6 = sir.bitcast %5 : !sir.u256 : i1 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":66:13)))
+// CHECK-NEXT:     %7 = sir.bitcast %6 : i1 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":66:9)))
+// CHECK-NEXT:     sir.cond_br %7 : !sir.u256, ^bb1, ^bb3 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":66:9)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     %8 = sir.lt %arg0 : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":1:1)))
+// CHECK-NEXT:     %9 = sir.eq %arg0 : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":1:1)))
+// CHECK-NEXT:     %10 = sir.or %8 : !sir.u256, %9 : !sir.u256 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":1:1)))
+// CHECK-NEXT:     %11 = sir.and %10 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":1:1)))
+// CHECK-NEXT:     %12 = sir.bitcast %11 : !sir.u256 : i1 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":1:1)))
+// CHECK-NEXT:     %13 = sir.bitcast %12 : i1 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":68:17)))
+// CHECK-NEXT:     sir.cond_br %13 : !sir.u256, ^bb3, ^bb2 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":68:17)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb1
+// CHECK-NEXT:     %14 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":68:17)))
+// CHECK-NEXT:     sir.revert %14 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":68:17)))
+// CHECK-NEXT:   ^bb3:  // 2 preds: ^bb0, ^bb1
+// CHECK-NEXT:     sir.br ^bb4 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":66:9)))
+// CHECK-NEXT:   ^bb4:  // pred: ^bb3
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":65:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":65:5)
 // CHECK-NEXT: } loc("{{.*}}/ora-example/smt/guards/max_value_runtime.ora":12:1)

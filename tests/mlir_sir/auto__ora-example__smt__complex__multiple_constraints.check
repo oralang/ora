@@ -108,7 +108,7 @@
 // CHECK-NEXT:     %1 = sir.const 4 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc(unknown)
-// CHECK-NEXT:     %slot_balance = sir.const 0 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %c0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.gt %arg0 : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":1:1)
 // CHECK-NEXT:     %3 = sir.eq %arg0 : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":1:1)
 // CHECK-NEXT:     %4 = sir.or %2 : !sir.u256, %3 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":1:1)
@@ -116,9 +116,9 @@
 // CHECK-NEXT:     %6 = sir.bitcast %5 : !sir.u256 : i1 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":1:1)
 // CHECK-NEXT:     %7 = sir.bitcast %6 : i1 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":31:36)
 // CHECK-NEXT:     sir.cond_br %7 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":31:36)
-// CHECK-NEXT:   ^bb1:  // 4 preds: ^bb0, ^bb2, ^bb3, ^bb4
-// CHECK-NEXT:     %8 = sir.bitcast %slot_balance : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":31:36)
-// CHECK-NEXT:     sir.revert %8 : !sir.ptr<1>, %slot_balance : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":31:36)
+// CHECK-NEXT:   ^bb1:  // 5 preds: ^bb0, ^bb2, ^bb3, ^bb4, ^bb7
+// CHECK-NEXT:     %8 = sir.bitcast %c0 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":31:36)
+// CHECK-NEXT:     sir.revert %8 : !sir.ptr<1>, %c0 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":31:36)
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     %9 = sir.gt %arg0 : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":32:18)
 // CHECK-NEXT:     %10 = sir.eq %arg0 : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":32:18)
@@ -129,7 +129,7 @@
 // CHECK-NEXT:     %15 = sir.iszero %14 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":32:9)
 // CHECK-NEXT:     sir.cond_br %15 : !sir.u256, ^bb1, ^bb3 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":32:9)
 // CHECK-NEXT:   ^bb3:  // pred: ^bb2
-// CHECK-NEXT:     %value = sir.sload %slot_balance : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":28:5)
+// CHECK-NEXT:     %value = sir.sload %c0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":28:5)
 // CHECK-NEXT:     %16 = sir.lt %arg0 : !sir.u256, %value : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":33:18)
 // CHECK-NEXT:     %17 = sir.eq %arg0 : !sir.u256, %value : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":33:18)
 // CHECK-NEXT:     %18 = sir.or %16 : !sir.u256, %17 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":33:18)
@@ -139,7 +139,7 @@
 // CHECK-NEXT:     %22 = sir.iszero %21 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":33:9)
 // CHECK-NEXT:     sir.cond_br %22 : !sir.u256, ^bb1, ^bb4 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":33:9)
 // CHECK-NEXT:   ^bb4:  // pred: ^bb3
-// CHECK-NEXT:     %value_0 = sir.sload %slot_balance : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":28:5)
+// CHECK-NEXT:     %value_0 = sir.sload %c0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":28:5)
 // CHECK-NEXT:     %value_1 = sir.sload %c1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":29:5)
 // CHECK-NEXT:     %23 = sir.lt %value_0 : !sir.u256, %value_1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":34:18)
 // CHECK-NEXT:     %24 = sir.eq %value_0 : !sir.u256, %value_1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":34:18)
@@ -150,7 +150,7 @@
 // CHECK-NEXT:     %29 = sir.iszero %28 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":34:9)
 // CHECK-NEXT:     sir.cond_br %29 : !sir.u256, ^bb1, ^bb5 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":34:9)
 // CHECK-NEXT:   ^bb5:  // pred: ^bb4
-// CHECK-NEXT:     %value_2 = sir.sload %slot_balance : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":28:5)))
+// CHECK-NEXT:     %value_2 = sir.sload %c0 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":28:5)))
 // CHECK-NEXT:     %30 = sir.sub %value_2 : !sir.u256, %arg0 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":39:19)))
 // CHECK-NEXT:     %31 = sir.lt %value_2 : !sir.u256, %arg0 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":39:19)))
 // CHECK-NEXT:     %32 = sir.xor %31 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":39:19)))
@@ -164,9 +164,17 @@
 // CHECK-NEXT:     sir.store %37 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":39:19)))
 // CHECK-NEXT:     sir.revert %37 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":39:19)))
 // CHECK-NEXT:   ^bb7:  // pred: ^bb5
-// CHECK-NEXT:     sir.sstore %slot_balance : !sir.u256, %30 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":39:9)))
-// CHECK-NEXT:     %value_3 = sir.sload %slot_balance : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":28:5)
-// CHECK-NEXT:     %value_4 = sir.sload %slot_balance : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":28:5)
+// CHECK-NEXT:     %38 = sir.gt %30 : !sir.u256, %c0 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":1:1)))
+// CHECK-NEXT:     %39 = sir.eq %30 : !sir.u256, %c0 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":1:1)))
+// CHECK-NEXT:     %40 = sir.or %38 : !sir.u256, %39 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":1:1)))
+// CHECK-NEXT:     %41 = sir.and %40 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":1:1)))
+// CHECK-NEXT:     %42 = sir.bitcast %41 : !sir.u256 : i1 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":1:1)))
+// CHECK-NEXT:     %43 = sir.bitcast %42 : i1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":39:9)))
+// CHECK-NEXT:     sir.cond_br %43 : !sir.u256, ^bb8, ^bb1 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":39:9)))
+// CHECK-NEXT:   ^bb8:  // pred: ^bb7
+// CHECK-NEXT:     sir.sstore %c0 : !sir.u256, %30 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":39:9)))
+// CHECK-NEXT:     %value_3 = sir.sload %c0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":28:5)
+// CHECK-NEXT:     %value_4 = sir.sload %c0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":28:5)
 // CHECK-NEXT:     %value_5 = sir.sload %c1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":29:5)
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":31:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":31:5)
@@ -187,7 +195,7 @@
 // CHECK-NEXT:     %10 = sir.bitcast %9 : !sir.u256 : i1 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":1:1)
 // CHECK-NEXT:     %11 = sir.bitcast %10 : i1 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":44:9)
 // CHECK-NEXT:     sir.cond_br %11 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":44:9)
-// CHECK-NEXT:   ^bb1:  // 8 preds: ^bb0, ^bb2, ^bb3, ^bb4, ^bb5, ^bb6, ^bb7, ^bb10
+// CHECK-NEXT:   ^bb1:  // 9 preds: ^bb0, ^bb2, ^bb3, ^bb4, ^bb5, ^bb6, ^bb7, ^bb10, ^bb13
 // CHECK-NEXT:     %12 = sir.bitcast %4 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":44:9)
 // CHECK-NEXT:     sir.revert %12 : !sir.ptr<1>, %4 : !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":44:9)
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
@@ -282,9 +290,17 @@
 // CHECK-NEXT:     sir.store %79 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":56:32)))
 // CHECK-NEXT:     sir.revert %79 : !sir.ptr<1>, %3 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":56:32)))
 // CHECK-NEXT:   ^bb13:  // pred: ^bb11
-// CHECK-NEXT:     %80 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":57:9)))
-// CHECK-NEXT:     sir.store %80 : !sir.ptr<1>, %72 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":57:9)))
-// CHECK-NEXT:     sir.return %80 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":57:9)))
+// CHECK-NEXT:     %80 = sir.gt %72 : !sir.u256, %4 : !sir.u256 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":1:1)))
+// CHECK-NEXT:     %81 = sir.eq %72 : !sir.u256, %4 : !sir.u256 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":1:1)))
+// CHECK-NEXT:     %82 = sir.or %80 : !sir.u256, %81 : !sir.u256 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":1:1)))
+// CHECK-NEXT:     %83 = sir.and %82 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":1:1)))
+// CHECK-NEXT:     %84 = sir.bitcast %83 : !sir.u256 : i1 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":1:1)))
+// CHECK-NEXT:     %85 = sir.bitcast %84 : i1 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":57:16)))
+// CHECK-NEXT:     sir.cond_br %85 : !sir.u256, ^bb14, ^bb1 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":57:16)))
+// CHECK-NEXT:   ^bb14:  // pred: ^bb13
+// CHECK-NEXT:     %86 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":57:9)))
+// CHECK-NEXT:     sir.store %86 : !sir.ptr<1>, %72 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":57:9)))
+// CHECK-NEXT:     sir.return %86 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":57:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":43:5)
 // CHECK-NEXT:   func.func @returnWithConstraint(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/complex/multiple_constraints.ora":62:9)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:0;max:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:13"], ora.param_compiler_type_ids = [6 : i256], ora.param_names = ["value"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.return_compiler_type_id = 6 : i256, ora.selector = "0x5cee73e5", ora.source_module_path = "{{.*}}/ora-example/smt/complex/multiple_constraints.ora", ora.source_owner_key = "module/contract:MultipleConstraints/function:returnWithConstraint", ora.source_owner_start = 2058 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)

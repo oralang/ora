@@ -864,6 +864,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             specialized_function.is_generic = false;
             specialized_function.parameters = @constCast(function.parameters);
             var function_lowerer = FunctionLowerer.init(self, item_id, specialized_function, op, return_type);
+            function_lowerer.semantic_return_type = semantic_return;
             function_lowerer.extra_verification_clauses = try @This().traitVerificationClausesForImplMethod(self, item_id);
             try function_lowerer.lower();
         }
