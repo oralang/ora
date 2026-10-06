@@ -548,7 +548,7 @@ test "SL2A private and imported dependencies remain in the fresh binding set" {
     }
 }
 
-test "SL2B unchanged source census pins Boolean recovery and remaining address refusals" {
+test "SL3A unchanged source census pins static addresses and remaining caller refusals" {
     const sources = [_][]const u8{
         "ora-example/corpus/types/refinement/in_range_percentage.ora",
         "ora-example/corpus/types/refinement/in_range_u8.ora",
@@ -609,7 +609,7 @@ test "SL2B unchanged source census pins Boolean recovery and remaining address r
         } else |err| std.debug.print("SL2A_WHOLE {s} REFUSED {s}\n", .{ source, @errorName(err) });
     }
     try testing.expectEqual(@as(usize, 39), total);
-    try testing.expectEqual(@as(usize, 34), projected_count);
+    try testing.expectEqual(@as(usize, 37), projected_count);
     try testing.expectEqual(@as(usize, 6), boolean_count);
     try testing.expectEqual(@as(usize, 5), whole_count);
 }
@@ -665,4 +665,202 @@ test "SL2B Boolean payload relation binds the emitted digest and rejects the wro
     changed_digest[0] ^= 1;
     try testing.expectError(error.FunctionVCDigestMismatch, adapter.encodeFunctionVC(row.id, changed_digest));
     try testing.expect(set.artifactDecision() == .blocked);
+}
+
+test "SL3A address results and map aliasing bind real joint queries to emitted data" {
+    const sources = [_][]const u8{
+        "contract AddressResult { pub fn identity(x: address) -> address { return x; } }",
+        "contract AddressStore { storage var owner: address; pub fn put(x: address) -> address { owner = x; return owner; } }",
+        "contract AddressMap { storage var balances: map<address,u256>; pub fn put(key: address, other: address) -> u256 { balances[other] = 9; balances[key] = 7; return balances[other]; } }",
+    };
+    var pass = try z3.VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    for (sources, 0..) |source, shape| {
+        var compilation = try helpers.compileText(source);
+        defer compilation.deinit();
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir.diagnostics.isEmpty());
+        var snapshot = try collector.collect(testing.allocator, hir.module.raw_module, &pass);
+        defer snapshot.deinit();
+        var projection = try collector.project(testing.allocator, hir.module.raw_module, &pass, snapshot.inventory);
+        defer projection.deinit();
+        const set = projection.canonical.set;
+        try testing.expectEqual(@as(usize, 1), set.function_summaries.len);
+        const row = set.function_summaries[0];
+        const digest = try canonical_lean.functionVcSha256(set, row.id);
+        try testing.expectEqualSlices(u8, &digest, &projection.bindings[0].function_vc_sha256);
+        var output = std.Io.Writer.Allocating.init(testing.allocator);
+        defer output.deinit();
+        try emitter.writeProjection(&output.writer, testing.allocator, projection.snapshot.inventory, set, projection.bindings);
+        try testing.expect(std.mem.indexOf(u8, output.written(), &std.fmt.bytesToHex(digest, .lower)) != null);
+        try lifecycleDataKernelCheck(output.written());
+        var context = try z3.Z3Context.init(testing.allocator);
+        defer context.deinit();
+        var adapter = canonical_z3.Adapter.init(&context, testing.allocator, set);
+        const checked = try adapter.checkFunctionSafety(row.id, digest, 100002);
+        try testing.expectEqual(.proved, checked.query.result.?.status);
+        try testing.expect(!checked.query.result.?.vacuous and !checked.query.result.?.vacuity_unknown);
+        try testing.expect(checked.query.smtlib_hash != null and checked.query.smtlib_hash.? != 0);
+        const vc = try adapter.encodeFunctionVC(row.id, digest);
+        try testing.expectEqualSlices(u8, &digest, &vc.function_vc_sha256);
+        const c = z3.z3_c;
+        const sort = c.Z3_mk_bv_sort(context.ctx, if (shape == 2) 256 else 160);
+        const payload = try adapter.functionOutput(row.id, "arm0.value0", sort);
+        for ([_]bool{ false, true }) |aliases| {
+            const expected: u64 = if (shape == 2) (if (aliases) 7 else 9) else 1;
+            for ([_]bool{ false, true }) |correct| {
+                var solver = try z3.Z3Solver.initForLogic(&context, testing.allocator, "QF_AUFBV");
+                defer solver.deinit();
+                try solver.assertChecked(vc.entry);
+                try solver.assertChecked(vc.joint);
+                for (row.parameters, 0..) |parameter, index| {
+                    try testing.expectEqual(@as(u32, 14), parameter.ty.compiler_type_id);
+                    const id = parameter.id.?;
+                    const name = try std.fmt.allocPrintSentinel(testing.allocator, "$ora.loop.f{d}.p{d}", .{ id.file_id, id.pattern_id }, 0);
+                    defer testing.allocator.free(name);
+                    const address_sort = c.Z3_mk_bv_sort(context.ctx, 160);
+                    const input = c.Z3_mk_const(context.ctx, c.Z3_mk_string_symbol(context.ctx, name), address_sort);
+                    try solver.assertChecked(c.Z3_mk_eq(context.ctx, input, c.Z3_mk_unsigned_int64(context.ctx, if (index == 0 or aliases) 1 else 2, address_sort)));
+                }
+                try solver.assertChecked(c.Z3_mk_eq(context.ctx, payload, c.Z3_mk_unsigned_int64(context.ctx, if (correct) expected else expected + 1, sort)));
+                try testing.expectEqual(if (correct) c.Z3_L_TRUE else c.Z3_L_FALSE, try solver.checkChecked());
+            }
+        }
+        var bad_digest = digest;
+        bad_digest[0] ^= 1;
+        try testing.expectError(error.FunctionVCDigestMismatch, adapter.encodeFunctionVC(row.id, bad_digest));
+        try testing.expect(set.artifactDecision() == .blocked);
+    }
+}
+
+test "SL3A unchanged static address roots retain guards and real canonical queries" {
+    const cases = [_]struct { source: []const u8, symbol: []const u8 }{
+        .{ .source = "ora-example/refinements/dispatcher_refinement_e2e.ora", .symbol = "init" },
+        .{ .source = "ora-example/refinements/dispatcher_refinement_e2e.ora", .symbol = "setOwner" },
+        .{ .source = "ora-example/refinements/patterns/supply_cap.ora", .symbol = "mint" },
+    };
+    var pass = try z3.VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    for (cases) |case| {
+        var compilation = try helpers.compilePackage(case.source);
+        defer compilation.deinit();
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir.diagnostics.isEmpty());
+        var snapshot = try collector.collect(testing.allocator, hir.module.raw_module, &pass);
+        defer snapshot.deinit();
+        const root = for (snapshot.inventory.functions, snapshot.function_ops) |function, op| {
+            if (std.mem.eql(u8, function.symbol, case.symbol)) break op;
+        } else return error.TestUnexpectedResult;
+        var projection = try canonical_collector.collect(testing.allocator, hir.module.raw_module, .{ .project_calls = true, .lifecycle_roots = &.{root} });
+        defer projection.deinit();
+        const set = projection.set;
+        try testing.expect(!set.hasBlockingDiagnostic());
+        const row = set.function_summaries[0];
+        const digest = try canonical_lean.functionVcSha256(set, row.id);
+        var output = std.Io.Writer.Allocating.init(testing.allocator);
+        defer output.deinit();
+        try canonical_lean.writeCallCustodyModule(&output.writer, set, "Ora.Generated.SL3AStatic");
+        try testing.expect(std.mem.indexOf(u8, output.written(), &std.fmt.bytesToHex(digest, .lower)) != null);
+        try lifecycleDataKernelCheck(output.written());
+        var checkpoints: usize = 0;
+        for (row.paths) |path| for (path.timeline) |event| {
+            if (event.payload == .safety_checkpoint) checkpoints += 1;
+        };
+        try testing.expect(checkpoints != 0);
+        var context = try z3.Z3Context.init(testing.allocator);
+        defer context.deinit();
+        var adapter = canonical_z3.Adapter.init(&context, testing.allocator, set);
+        const checked = try adapter.checkFunctionSafety(row.id, digest, 100003);
+        try testing.expect(checked.query.result.?.status == .proved or checked.query.result.?.status == .failed);
+        try testing.expect(!checked.query.result.?.vacuous and !checked.query.result.?.vacuity_unknown);
+        try testing.expect(checked.query.smtlib_hash != null and checked.query.smtlib_hash.? != 0);
+        try testing.expectEqualSlices(u8, &digest, &checked.function_vc_sha256);
+        try testing.expect(set.artifactDecision() == .blocked);
+        std.debug.print("SL3A_QUERY {s} checkpoints={d} status={s} digest={s}\n", .{ case.symbol, checkpoints, @tagName(checked.query.result.?.status), std.fmt.bytesToHex(digest, .lower) });
+    }
+}
+
+test "SL3A address conversion guards remain real failing obligations without a precondition" {
+    for ([_][]const u8{ "address", "NonZeroAddress" }) |parameter_type| {
+        const source = try std.fmt.allocPrint(testing.allocator, "contract Guarded {{ storage var owner: NonZeroAddress; pub fn put(x: {s}) {{ owner = x; }} }}", .{parameter_type});
+        defer testing.allocator.free(source);
+        var compilation = try helpers.compileText(source);
+        defer compilation.deinit();
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir.diagnostics.isEmpty());
+        const root = mlir.oraModuleGetOperation(hir.module.raw_module);
+        try testing.expect(firstOperation(root, "ora.refinement_guard") != null);
+        const function = firstOperation(root, "func.func") orelse return error.TestUnexpectedResult;
+        var projection = try canonical_collector.collect(testing.allocator, hir.module.raw_module, .{ .project_calls = true, .lifecycle_roots = &.{function} });
+        defer projection.deinit();
+        try testing.expect(!projection.set.hasBlockingDiagnostic());
+        const row = projection.set.function_summaries[0];
+        const digest = try canonical_lean.functionVcSha256(projection.set, row.id);
+        var context = try z3.Z3Context.init(testing.allocator);
+        defer context.deinit();
+        var adapter = canonical_z3.Adapter.init(&context, testing.allocator, projection.set);
+        const query = (try adapter.checkFunctionSafety(row.id, digest, 100004)).query;
+        // Recovering a base carrier never assumes that a refinement guard has succeeded.
+        try testing.expectEqual(.failed, query.result.?.status);
+        try testing.expect(!query.result.?.vacuous and !query.result.?.vacuity_unknown);
+        try testing.expect(query.smtlib_hash != null and query.smtlib_hash.? != 0);
+        try testing.expect(projection.set.artifactDecision() == .blocked);
+        const global = firstOperation(root, "ora.global") orelse return error.TestUnexpectedResult;
+        const mlir_context = mlir.mlirOperationGetContext(global);
+        mlir.oraOperationSetAttributeByName(global, mlir.oraStringRefCreate("ora.compiler_type_id", 20), mlir.mlirIntegerAttrGet(mlir.mlirIntegerTypeGet(mlir_context, 256), 14));
+        // Integer-only metadata cannot impersonate the nominal carrier's identity.
+        try testing.expectError(error.LifecycleStorageTypeMissing, canonical_collector.collect(testing.allocator, hir.module.raw_module, .{ .project_calls = true, .lifecycle_roots = &.{function} }));
+    }
+}
+
+test "SL3A address mutations reject foreign inventory missing bindings and wrong storage carriers" {
+    const Mutation = enum { owner, omitted_writer, digest, binding, key, value };
+    for ([_]Mutation{ .owner, .omitted_writer, .digest, .binding, .key, .value }) |mutation| {
+        errdefer std.debug.print("SL3A mutation {s}\n", .{@tagName(mutation)});
+        var compilation = try helpers.compileText("contract Keys { storage var owner: address; storage var balances: map<address,u256>; pub fn put(key: address, wrong: u256) { owner = key; balances[key] = 1; } }");
+        defer compilation.deinit();
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir.diagnostics.isEmpty());
+        var pass = try z3.VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        var snapshot = try collector.collect(testing.allocator, hir.module.raw_module, &pass);
+        defer snapshot.deinit();
+        const root = mlir.oraModuleGetOperation(hir.module.raw_module);
+        const function = firstOperation(root, "func.func") orelse return error.TestUnexpectedResult;
+        const writer = for (snapshot.inventory.functions, 0..) |row, i| {
+            if (std.mem.eql(u8, row.symbol, "put")) break i;
+        } else return error.TestUnexpectedResult;
+        if (mutation == .owner or mutation == .omitted_writer or mutation == .digest) {
+            var changed = snapshot.inventory;
+            const rows = try testing.allocator.dupe(data.Function, changed.functions);
+            defer testing.allocator.free(rows);
+            changed.functions = rows;
+            switch (mutation) {
+                .owner => rows[writer].owner = "foreign/owner",
+                .omitted_writer => rows[writer].events = &.{},
+                .digest => rows[writer].hir_sha256[0] ^= 1,
+                else => unreachable,
+            }
+            try testing.expectError(error.LifecycleInventoryMismatch, collector.project(testing.allocator, hir.module.raw_module, &pass, changed));
+            continue;
+        }
+        if (mutation == .binding) {
+            const context = mlir.mlirOperationGetContext(function);
+            mlir.oraOperationSetAttributeByName(function, mlir.oraStringRefCreate("ora.param_binding_ids", 21), mlir.oraArrayAttrCreate(context, 0, null));
+            try testing.expectError(error.InvalidCallSignature, canonical_collector.collect(testing.allocator, hir.module.raw_module, .{ .project_calls = true, .lifecycle_roots = &.{function} }));
+            continue;
+        }
+        const wrong = mlir.oraBlockGetArgument(mlir.oraRegionGetFirstBlock(mlir.oraOperationGetRegion(function, 0)), 1);
+        const store = firstOperation(function, if (mutation == .key) "ora.map_store" else "ora.sstore") orelse return error.TestUnexpectedResult;
+        var operands: [3]mlir.MlirValue = undefined;
+        const count = mlir.oraOperationGetNumOperands(store);
+        for (0..count) |i| operands[i] = mlir.oraOperationGetOperand(store, i);
+        operands[if (mutation == .key) @as(usize, 1) else 0] = wrong;
+        mlir.mlirOperationSetOperands(store, @intCast(count), &operands);
+        try testing.expectError(error.LifecycleInventoryMismatch, collector.checkFresh(testing.allocator, hir.module.raw_module, &pass, snapshot.inventory));
+        var projection = try canonical_collector.collect(testing.allocator, hir.module.raw_module, .{ .project_calls = true, .lifecycle_roots = &.{function} });
+        defer projection.deinit();
+        try testing.expect(projection.set.hasBlockingDiagnostic());
+        try testing.expect(projection.set.artifactDecision() == .blocked);
+    }
 }

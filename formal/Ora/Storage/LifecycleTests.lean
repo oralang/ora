@@ -1,4 +1,5 @@
 import Ora.Storage.Lifecycle
+import Ora.Storage.Address
 
 namespace Ora.StorageLifecycle
 open Ora.Loop Ora.Obligation
@@ -83,6 +84,83 @@ theorem checked_cap_certificate :
     exact hValue
 
 end Ora.StorageLifecycle
+
+namespace Ora.StorageAddressTests
+open Ora.Obligation Ora.Loop Ora.Storage
+
+def addressContext (value : Value) : StorageFormulaContext := {
+  manifest := { terms := [.variable (.free {
+    id := { file_id := 0, pattern_id := 0 }, name := "key", ty := some (.compilerTypeId 14)
+  })] }
+  entryEnv := { freeBindings := [({ file_id := 0, pattern_id := 0 }, value)] }
+  bindLocals := fun env _ => some env
+  resolvePlace := fun _ _ => none
+}
+
+def addressState (store : StorageState) : StorageActionState := {
+  loop := { locals := [], storage := store }, entryStorage := store
+}
+
+def addressMap : StorageLocationExpr := {
+  root := "balances"
+  projections := [.mappingKey { formula := .term 0, ty := .compilerTypeId 14 }]
+  valueTy := .compilerTypeId 6
+}
+
+theorem addressKeyResolves (word : BitVec 160) (store : StorageState) :
+    (addressContext (addressValue word)).evalLocation? addressMap (addressState store) =
+      some { root := "balances", projections := [.mappingKey (addressValue word)] } := rfl
+
+theorem wrongKeyRefused (value : Bool) (store : StorageState) :
+    (addressContext (.bool value)).evalLocation? addressMap (addressState store) = none := rfl
+
+theorem wideKeyRefused (value : BitVec 256) (store : StorageState) :
+    (addressContext (.u256 value)).evalLocation? addressMap (addressState store) = none := rfl
+
+theorem signedAddressRefused (width : Ora.Types.SIntWidth)
+    (word : Ora.Integer.Carrier (.signed width)) :
+    storageValueMatchesTy (.integer { shape := .signed width, bits := word })
+      (.compilerTypeId 14) = false := by cases width <;> rfl
+
+theorem missingKeyRefused (store : StorageState) :
+    ({ addressContext (addressValue 0) with entryEnv := Env.empty }).evalLocation?
+      addressMap (addressState store) = none := rfl
+
+theorem addressIsNotArithmetic : (TyRef.compilerTypeId 14).integerShape? = none := rfl
+
+theorem zeroIsAnAddress : storageValueMatchesTy (addressValue 0) (.compilerTypeId 14) = true := rfl
+
+theorem addressWrite (word : BitVec 160) (store : StorageState) :
+    execStorageAction? (addressContext (addressValue word)).actionSemantics
+      (.write { root := "owner", valueTy := .compilerTypeId 14 } (.term 0)) (addressState store) =
+      some { state := { loop := { locals := [], storage := store.set { root := "owner" } (addressValue word) }, entryStorage := store },
+             writeTrace := [{ root := "owner" }] } := rfl
+
+theorem wrongAddressWriteRefused (store : StorageState) :
+    execStorageAction? (addressContext (.bool false)).actionSemantics
+      (.write { root := "owner", valueTy := .compilerTypeId 14 } (.term 0)) (addressState store) = none := rfl
+
+#print axioms Ora.Storage.nonAddressTypingUnchanged
+#print axioms Ora.Storage.nonAddressLocationUnchanged
+#print axioms Ora.Storage.addressTypingExact
+#print axioms Ora.Storage.addressValueTyped
+#print axioms Ora.Storage.addressSpellingAgrees
+#print axioms Ora.Storage.addressEquality
+#print axioms Ora.Storage.addressValueInjective
+#print axioms Ora.Storage.addressMappingKeyAlias
+#print axioms Ora.Storage.addressCastRoundTrip
+#print axioms Ora.Storage.addressCastMask
+#print axioms Ora.Storage.directAddressLocation
+#print axioms addressKeyResolves
+#print axioms wrongKeyRefused
+#print axioms wideKeyRefused
+#print axioms signedAddressRefused
+#print axioms missingKeyRefused
+#print axioms addressIsNotArithmetic
+#print axioms zeroIsAnAddress
+#print axioms addressWrite
+#print axioms wrongAddressWriteRefused
+end Ora.StorageAddressTests
 
 #print axioms Ora.StorageLifecycle.checked_write_preserves
 #print axioms Ora.StorageLifecycle.action_preserves

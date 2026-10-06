@@ -879,6 +879,46 @@ const Collector = struct {
         return .{ .compiler_type_id = type_id };
     }
 
+    fn lifecycleCallScalarType(self: *Collector, carrier: mlir.MlirType, type_id: u32) !obligation.TypeRef {
+        if (self.lifecycle_scope != null and addressCarrier(carrier)) {
+            // This metadata field describes integers; the actual nominal carrier owns address identity.
+            if (type_id != 0) return error.InvalidCallSignature;
+            return .{ .compiler_type_id = type_builtin.lookupBuiltinById(.address).comptime_type_id };
+        }
+        return callScalarType(carrier, type_id);
+    }
+
+    fn lifecycleCallCarrierMatches(self: *Collector, carrier: mlir.MlirType, ty: obligation.TypeRef) bool {
+        if (self.lifecycle_scope != null and addressTypeRef(ty)) return addressCarrier(carrier);
+        return callCarrierMatches(carrier, ty);
+    }
+
+    fn lifecycleMapKeyType(self: *Collector, value: mlir.MlirValue) !obligation.TypeRef {
+        if (self.lifecycle_scope != null and addressCarrier(mlir.oraValueGetType(value)))
+            return .{ .compiler_type_id = type_builtin.lookupBuiltinById(.address).comptime_type_id };
+        return self.exactLoopIntegerTypeForValue(value);
+    }
+
+    fn lifecycleAddressCastOperand(self: *Collector, op: mlir.MlirOperation) !?mlir.MlirValue {
+        if (self.lifecycle_scope == null) return null;
+        const name = operationName(op);
+        const to_integer = std.mem.eql(u8, name, "ora.addr.to.i160");
+        if (!to_integer and !std.mem.eql(u8, name, "ora.i160.to.addr")) return null;
+        if (mlir.oraOperationGetNumOperands(op) != 1 or mlir.oraOperationGetNumResults(op) != 1 or
+            mlir.oraOperationGetNumRegions(op) != 0 or mlir.mlirOperationGetNumSuccessors(op) != 0 or
+            mlir.oraOperationGetMemoryEffectKind(op) != mlir.ORA_OPERATION_MEMORY_EFFECT_NONE)
+            return error.InvalidLifecycleAddressCast;
+        const operand = mlir.oraOperationGetOperand(op, 0);
+        const input = mlir.oraValueGetType(operand);
+        const output = mlir.oraValueGetType(mlir.oraOperationGetResult(op, 0));
+        const address = if (to_integer) input else output;
+        const integer = if (to_integer) output else input;
+        if (!mlir.oraTypeIsAddressType(address) or !mlir.oraTypeIsNull(mlir.oraRefinementTypeGetBaseType(address)) or
+            integerTypeWidth(integer) != 160 or mlirIntegerTypeIsSigned(integer))
+            return error.InvalidLifecycleAddressCast;
+        return operand;
+    }
+
     fn callTypeIds(self: *Collector, op: mlir.MlirOperation, name: []const u8) ![]const u32 {
         const attr = mlir.oraOperationGetAttributeByName(op, strRef(name));
         if (mlir.oraAttributeIsNull(attr)) return &.{};
@@ -901,7 +941,7 @@ const Collector = struct {
             for (ids[0..index]) |previous| if (std.meta.eql(previous, ids[index])) return error.InvalidCallSignature;
             const carrier = mlir.oraValueGetType(mlir.oraBlockGetArgument(block, index));
             if (!mlir.mlirTypeEqual(carrier, mlir.mlirFunctionTypeGetInput(fn_type, @intCast(index)))) return error.InvalidCallSignature;
-            parameter.* = .{ .index = @intCast(index), .id = ids[index], .ty = try callScalarType(carrier, types[index]) };
+            parameter.* = .{ .index = @intCast(index), .id = ids[index], .ty = try self.lifecycleCallScalarType(carrier, types[index]) };
         }
         return parameters;
     }
@@ -928,7 +968,7 @@ const Collector = struct {
             if (type_id != 0) return error.InvalidCallSignature;
         } else {
             const types = try self.allocator.alloc(obligation.TypeRef, 1);
-            types[0] = try callScalarType(success_type, type_id);
+            types[0] = try self.lifecycleCallScalarType(success_type, type_id);
             outcomes[0].types = types;
         }
         for (outcomes[1..], 0..) |*outcome, index| {
@@ -949,7 +989,7 @@ const Collector = struct {
             for (payload, 0..) |*ty, field| {
                 const carrier = mlir.oraTypeAttrGetValue(mlir.oraArrayAttrGetElement(carrier_types, field));
                 if (mlir.oraTypeIsNull(carrier)) return error.InvalidCallSignature;
-                ty.* = try callScalarType(carrier, type_ids[field]);
+                ty.* = try self.lifecycleCallScalarType(carrier, type_ids[field]);
             }
             outcome.* = .{ .outcome = .{ .error_return = error_id }, .types = payload };
         }
@@ -1172,7 +1212,7 @@ const Collector = struct {
                 if (!obligation.typeRefEqual(ty, results[index].ty)) return error.InvalidCallReturn;
                 break :blk .{ .term = try self.addTerm(.{ .variable = .{ .free = .{ .id = results[index].id.?, .name = "call_result", .ty = ty } } }) };
             } else blk: {
-                if (!callCarrierMatches(mlir.oraValueGetType(values[index]), ty) or !obligation.typeRefEqual(try self.callValueType(values[index], terminal.path.source_overrides), ty)) return error.InvalidCallReturn;
+                if (!self.lifecycleCallCarrierMatches(mlir.oraValueGetType(values[index]), ty) or !obligation.typeRefEqual(try self.callValueType(values[index], terminal.path.source_overrides), ty)) return error.InvalidCallReturn;
                 source.* = try self.sourceKeyForValue(values[index], terminal.path.source_overrides);
                 break :blk try self.loopFormulaFromValueWithOverrides(values[index], terminal.path.formula_overrides, "ora.return", self.function.runtime_symbol, 0, @intCast(index));
             };
@@ -1220,7 +1260,7 @@ const Collector = struct {
                 if (!obligation.typeRefEqual(ty, bindings[index].ty)) return error.InvalidCallReturn;
                 source.* = try std.fmt.allocPrint(self.allocator, "call-result:{d}:{d}", .{ bindings[index].id.?.file_id, bindings[index].id.?.pattern_id });
             } else {
-                if (!callCarrierMatches(mlir.oraValueGetType(operands[index]), ty) or !obligation.typeRefEqual(try self.callValueType(operands[index], terminal.path.source_overrides), ty)) return error.InvalidCallReturn;
+                if (!self.lifecycleCallCarrierMatches(mlir.oraValueGetType(operands[index]), ty) or !obligation.typeRefEqual(try self.callValueType(operands[index], terminal.path.source_overrides), ty)) return error.InvalidCallReturn;
                 source.* = try self.sourceKeyForValue(operands[index], terminal.path.source_overrides);
             }
         }
@@ -1275,7 +1315,7 @@ const Collector = struct {
         const sources = try self.allocator.alloc([]const u8, operands.len);
         const types = try self.allocator.alloc(obligation.TypeRef, operands.len);
         for (operands, signature.parameters, arguments, sources, types) |operand, parameter, *argument, *source, *ty| {
-            if (!callCarrierMatches(mlir.oraValueGetType(operand), parameter.ty) or !obligation.typeRefEqual(try self.callValueType(operand, initial.source_overrides), parameter.ty)) return error.InvalidCallSignature;
+            if (!self.lifecycleCallCarrierMatches(mlir.oraValueGetType(operand), parameter.ty) or !obligation.typeRefEqual(try self.callValueType(operand, initial.source_overrides), parameter.ty)) return error.InvalidCallSignature;
             const formula = try self.loopFormulaFromValueWithOverrides(operand, initial.formula_overrides, "func.call", self.function.runtime_symbol, 0, 0);
             if (formula == .origin_value) return error.CallArgumentUnsupported;
             argument.* = .{ .ty = parameter.ty, .value = .{ .formula = formula, .read_results = try self.readResultsForFormula(formula, initial.timeline) } };
@@ -1321,7 +1361,7 @@ const Collector = struct {
         for (sources, types, 0..) |*source, *ty, index| {
             const operand = mlir.oraOperationGetOperand(op, index);
             ty.* = signature.parameters[index].ty;
-            if (!callCarrierMatches(mlir.oraValueGetType(operand), ty.*) or !obligation.typeRefEqual(try self.callValueType(operand, initial.source_overrides), ty.*)) return error.InvalidCallSignature;
+            if (!self.lifecycleCallCarrierMatches(mlir.oraValueGetType(operand), ty.*) or !obligation.typeRefEqual(try self.callValueType(operand, initial.source_overrides), ty.*)) return error.InvalidCallSignature;
             source.* = try self.sourceKeyForValue(operand, initial.source_overrides);
         }
         const row_index = try self.requireFunctionRow(declaration);
@@ -1365,10 +1405,17 @@ const Collector = struct {
         const symbol = try self.symbolForOperation(op, op_name, inherited_symbol);
         if (std.mem.eql(u8, op_name, "ora.global")) {
             const root = (try self.stringAttr(op, "sym_name")) orelse "";
-            const type_id = (try self.u32Attr(op, "ora.compiler_type_id")) orelse 0;
+            var type_id = (try self.u32Attr(op, "ora.compiler_type_id")) orelse 0;
             if (self.lifecycle_scope) |scope| {
                 if (mlir.mlirOperationGetParentOperation(op).ptr != scope.ptr or self.storage_global_types.contains(root))
                     return error.LifecycleStorageOwnerAmbiguous;
+                const attr = mlir.oraOperationGetAttributeByName(op, strRef("type"));
+                if (mlir.oraAttributeIsNull(attr) or !mlir.mlirAttributeIsAType(attr)) return error.LifecycleStorageTypeMissing;
+                if (addressCarrier(mlir.oraTypeAttrGetValue(attr))) {
+                    if (type_id != 0) return error.LifecycleStorageTypeMissing;
+                    type_id = type_builtin.lookupBuiltinById(.address).comptime_type_id;
+                } else if (type_id == type_builtin.lookupBuiltinById(.address).comptime_type_id)
+                    return error.LifecycleStorageTypeMissing;
             }
             if (root.len != 0) try self.storage_global_types.put(
                 self.allocator,
@@ -2861,7 +2908,7 @@ const Collector = struct {
                 } else return error.CallResultUnsupported;
                 const result = mlir.oraOperationGetResult(op, 0);
                 const discriminator = std.mem.eql(u8, name, "ora.error.is_error");
-                if (!discriminator and (call.outcome != .success or call.results.len != 1 or !callCarrierMatches(mlir.oraValueGetType(result), call.results[0].ty))) return error.InvalidCallResult;
+                if (!discriminator and (call.outcome != .success or call.results.len != 1 or !self.lifecycleCallCarrierMatches(mlir.oraValueGetType(result), call.results[0].ty))) return error.InvalidCallResult;
                 const term = if (discriminator) try self.addTerm(.{ .bool_lit = call.outcome != .success }) else try self.addTerm(.{ .variable = .{ .free = .{ .id = call.results[0].id.?, .name = "call_result", .ty = call.results[0].ty } } });
                 path.formula_overrides = try appendFormulaOverride(self.allocator, path.formula_overrides, .{ .value_id = @intFromPtr(result.ptr), .formula = .{ .term = term } });
                 path.source_overrides = try appendValueSource(self.allocator, path.source_overrides, .{
@@ -2964,6 +3011,7 @@ const Collector = struct {
                     (std.mem.eql(u8, name, "memref.load") and mlir.oraOperationGetNumOperands(op) == 1) or
                     (std.mem.eql(u8, name, "memref.store") and mlir.oraOperationGetNumOperands(op) == 2))) return error.CallPrivateSlotUnsupported;
             const effect_key = try self.operationStructuralKey(op, name);
+            _ = try self.lifecycleAddressCastOperand(op);
             const effect_kind = mlir.oraOperationGetMemoryEffectKind(op);
             switch (effect_kind) {
                 mlir.ORA_OPERATION_MEMORY_EFFECT_NONE => {},
@@ -3415,7 +3463,7 @@ const Collector = struct {
                 } else return error.CallResultUnsupported;
                 const result = mlir.oraOperationGetResult(op, 0);
                 const discriminator = std.mem.eql(u8, name, "ora.error.is_error");
-                if (!discriminator and (call.outcome != .success or call.results.len != 1 or !callCarrierMatches(mlir.oraValueGetType(result), call.results[0].ty))) return error.InvalidCallResult;
+                if (!discriminator and (call.outcome != .success or call.results.len != 1 or !self.lifecycleCallCarrierMatches(mlir.oraValueGetType(result), call.results[0].ty))) return error.InvalidCallResult;
                 path.source_overrides = try appendValueSource(self.allocator, path.source_overrides, .{
                     .value_id = @intFromPtr(result.ptr),
                     .key = try self.directOperationResultKey(result),
@@ -3523,6 +3571,7 @@ const Collector = struct {
                     access,
                 );
             }
+            _ = try self.lifecycleAddressCastOperand(op);
             const effect_kind = mlir.oraOperationGetMemoryEffectKind(op);
             switch (effect_kind) {
                 mlir.ORA_OPERATION_MEMORY_EFFECT_NONE => {},
@@ -4855,6 +4904,10 @@ const Collector = struct {
             return error.LoopProjectionEffectUnsupported;
         const ty = self.storage_global_types.get(root) orelse obligation.TypeRef{ .compiler_type_id = 0 };
         if (self.lifecycle_scope != null) {
+            if (addressTypeRef(ty)) {
+                if (!addressCarrier(mlir.oraValueGetType(value))) return error.LifecycleStorageWidthMismatch;
+                return .{ .root = root, .value_ty = ty };
+            }
             const info = typeRefIntegerInfo(ty) orelse return error.LifecycleStorageTypeMissing;
             if (!mlirIntegerCarrierHasWidth(mlir.oraValueGetType(value), info.width)) return error.LifecycleStorageWidthMismatch;
             return .{ .root = root, .value_ty = ty };
@@ -4947,7 +5000,7 @@ const Collector = struct {
                 draft.ordinal,
                 @intCast(index + 1),
             );
-            const ty = try self.exactLoopIntegerTypeForValue(key);
+            const ty = try self.lifecycleMapKeyType(key);
             projections[index] = .{ .mapping_key = .{
                 .value = .{
                     .formula = formula,
@@ -5017,7 +5070,7 @@ const Collector = struct {
         for (inputs.keys, 0..) |key, index| projections[index] = .{
             .tag = .mapping_key,
             .source_key = try self.sourceKeyForValue(key, source_overrides),
-            .ty = try self.exactLoopIntegerTypeForValue(key),
+            .ty = try self.lifecycleMapKeyType(key),
         };
         return .{
             .root = inputs.root,
@@ -5043,6 +5096,12 @@ const Collector = struct {
         var current = map_value;
         var depth: u32 = 0;
         while (depth <= 32) : (depth += 1) {
+            if (self.lifecycle_scope != null) {
+                const declared_key = mlir.oraMapTypeGetKeyType(mlir.oraValueGetType(current));
+                const actual_key = mlir.oraValueGetType(reversed.items[reversed.items.len - 1]);
+                // Nominal address keys cannot be replaced with an integer carrier.
+                if (addressCarrier(declared_key) != addressCarrier(actual_key)) return error.LoopProjectionEffectUnsupported;
+            }
             const owner = storageMapSourceOwner(current) orelse
                 return error.LoopProjectionEffectUnsupported;
             const name = operationName(owner);
@@ -6991,6 +7050,8 @@ const Collector = struct {
         if (mlir.oraOperationIsNull(owner)) return null;
 
         const owner_name = operationName(owner);
+        if (try self.lifecycleAddressCastOperand(owner)) |operand|
+            return self.termFromValueWithIntegerSignedness(operand, null);
         if (isTransparentValueOp(owner_name)) {
             if (mlir.oraOperationGetNumOperands(owner) == 0) return null;
             return try self.termFromValueWithIntegerSignedness(mlir.oraOperationGetOperand(owner, 0), signed_override);
@@ -8937,6 +8998,20 @@ fn containingFunction(op: mlir.MlirOperation) mlir.MlirOperation {
     while (!mlir.oraOperationIsNull(parent)) : (parent = mlir.mlirOperationGetParentOperation(parent))
         if (std.mem.eql(u8, operationName(parent), "func.func")) return parent;
     return parent;
+}
+
+fn addressCarrier(ty: mlir.MlirType) bool {
+    if (mlir.oraTypeIsNull(ty)) return false;
+    if (mlir.oraTypeIsAddressType(ty)) return true;
+    const base = mlir.oraRefinementTypeGetBaseType(ty);
+    return !mlir.oraTypeIsNull(base) and mlir.oraTypeIsAddressType(base);
+}
+
+fn addressTypeRef(ty: obligation.TypeRef) bool {
+    return switch (ty) {
+        .compiler_type_id => |id| id == type_builtin.lookupBuiltinById(.address).comptime_type_id,
+        .spelling => |name| std.mem.eql(u8, name, "address") or std.mem.eql(u8, name, "!ora.address"),
+    };
 }
 
 fn callCarrierMatches(carrier: mlir.MlirType, ty: obligation.TypeRef) bool {
@@ -11542,4 +11617,81 @@ test "SL2B lifecycle Boolean identity rejects wrong carriers and source identiti
     try std.testing.expectError(error.InvalidCallSignature, Collector.callScalarType(mlir.oraValueGetType(byte), 0));
     try std.testing.expectError(error.InvalidCallSignature, Collector.callScalarType(mlir.oraValueGetType(flag), 6));
     std.debug.print("SL2B_CONTROLS ordinary unchanged; exact bool={}; wrong identities and carriers refused\n", .{normalized});
+}
+
+test "SL3A exact address carriers and casts stay lifecycle scoped" {
+    const context = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(context);
+    const registry = mlir.oraDialectRegistryCreate();
+    mlir.oraRegisterAllDialects(registry);
+    mlir.oraContextAppendDialectRegistry(context, registry);
+    mlir.oraDialectRegistryDestroy(registry);
+    mlir.oraContextLoadAllAvailableDialects(context);
+    try std.testing.expect(mlir.oraDialectRegister(context));
+    const module = mlir.oraModuleCreateParse(context, strRef(
+        "module { func.func @probe(%a: !ora.address, %n: !ora.non_zero_address, %b: i1, %x: i128, %y: i256, %u: i160, %s: si160) { func.return } }",
+    ));
+    try std.testing.expect(!mlir.oraModuleIsNull(module));
+    defer mlir.oraModuleDestroy(module);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var c = Collector{ .allocator = arena.allocator(), .options = .{} };
+    try c.indexCallDeclarations(mlir.oraModuleGetOperation(module));
+    const block = functionEntryBlock(c.call_declarations.items[0]);
+    const address = mlir.oraBlockGetArgument(block, 0);
+    const address_ty = mlir.oraValueGetType(address);
+    const nominal: obligation.TypeRef = .{ .compiler_type_id = 14 };
+    try std.testing.expectError(error.InvalidCallSignature, c.lifecycleCallScalarType(address_ty, 0));
+    try std.testing.expect(!c.lifecycleCallCarrierMatches(address_ty, nominal));
+    c.lifecycle_scope = mlir.oraModuleGetOperation(module); // isolated helper checks, no projection/authority
+    for (0..2) |index| {
+        const value = mlir.oraBlockGetArgument(block, index);
+        const carrier = mlir.oraValueGetType(value);
+        try std.testing.expect(obligation.typeRefEqual(nominal, try c.lifecycleCallScalarType(carrier, 0)));
+        try std.testing.expect(c.lifecycleCallCarrierMatches(carrier, nominal));
+        try std.testing.expect(obligation.typeRefEqual(nominal, try c.lifecycleMapKeyType(value)));
+        try std.testing.expectError(error.LoopProjectionEffectUnsupported, c.exactLoopIntegerTypeForValue(value));
+        for ([_]u32{ 6, 14, 18 }) |wrong_id|
+            try std.testing.expectError(error.InvalidCallSignature, c.lifecycleCallScalarType(carrier, wrong_id));
+    }
+    for (2..7) |index| {
+        const carrier = mlir.oraValueGetType(mlir.oraBlockGetArgument(block, index));
+        try std.testing.expect(!c.lifecycleCallCarrierMatches(carrier, nominal));
+        try std.testing.expectError(error.InvalidCallSignature, c.lifecycleCallScalarType(carrier, 14));
+        if (index != 2) try std.testing.expectError(error.InvalidCallSignature, c.lifecycleCallScalarType(carrier, 0));
+    }
+    const cases = [_]struct { name: []const u8, input: usize, output: usize, arity: usize = 1, results: usize = 1, valid: bool = false }{
+        .{ .name = "ora.addr.to.i160", .input = 0, .output = 5, .valid = true },
+        .{ .name = "ora.i160.to.addr", .input = 5, .output = 0, .valid = true },
+        .{ .name = "ora.addr.to.i160", .input = 0, .output = 5, .arity = 0 },
+        .{ .name = "ora.addr.to.i160", .input = 0, .output = 5, .arity = 2 },
+        .{ .name = "ora.addr.to.i160", .input = 0, .output = 5, .results = 0 },
+        .{ .name = "ora.addr.to.i160", .input = 0, .output = 5, .results = 2 },
+        .{ .name = "ora.addr.to.i160", .input = 0, .output = 2 },
+        .{ .name = "ora.addr.to.i160", .input = 0, .output = 3 },
+        .{ .name = "ora.addr.to.i160", .input = 0, .output = 4 },
+        .{ .name = "ora.addr.to.i160", .input = 0, .output = 6 },
+        .{ .name = "ora.addr.to.i160", .input = 5, .output = 0 },
+        .{ .name = "ora.addr.to.i160", .input = 1, .output = 5 },
+        .{ .name = "ora.i160.to.addr", .input = 6, .output = 0 },
+        .{ .name = "ora.i160.to.addr", .input = 4, .output = 0 },
+        .{ .name = "ora.i160.to.addr", .input = 5, .output = 1 },
+        .{ .name = "ora.i160.to.addr", .input = 0, .output = 5 },
+    };
+    for (cases) |case| {
+        const input = mlir.oraBlockGetArgument(block, case.input);
+        const operands = [_]mlir.MlirValue{ input, input };
+        const ty = mlir.oraValueGetType(mlir.oraBlockGetArgument(block, case.output));
+        const types = [_]mlir.MlirType{ ty, ty };
+        const op = mlir.oraOperationCreate(context, mlir.mlirLocationUnknownGet(context), strRef(case.name), &operands, case.arity, &types, case.results, null, 0, 0, false);
+        try std.testing.expect(!mlir.oraOperationIsNull(op));
+        defer mlir.mlirOperationDestroy(op);
+        if (case.valid) {
+            try std.testing.expectEqual(input.ptr, (try c.lifecycleAddressCastOperand(op)).?.ptr);
+            try std.testing.expect(!isTransparentValueOp(case.name));
+            c.lifecycle_scope = null;
+            try std.testing.expectEqual(null, try c.lifecycleAddressCastOperand(op));
+            c.lifecycle_scope = mlir.oraModuleGetOperation(module);
+        } else try std.testing.expectError(error.InvalidLifecycleAddressCast, c.lifecycleAddressCastOperand(op));
+    }
 }

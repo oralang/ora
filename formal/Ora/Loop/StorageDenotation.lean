@@ -398,7 +398,7 @@ def StorageFormulaContext.evalLocation?
     (expression : StorageLocationExpr)
     (state : StorageActionState) : Option StorageLocation := do
   if expression.root.isEmpty then none else pure ()
-  if !(expression.valueTy.isBool || expression.valueTy.integerShape?.isSome) then none else pure ()
+  if !storageTypeSupported expression.valueTy then none else pure ()
   pure {
     root := expression.root
     projections := ← context.evalProjections? state expression.projections
@@ -427,16 +427,14 @@ theorem StorageFormulaContext.evalLocation_mapping_free_variable
       projections := [.mappingKey { formula := .term termId, ty := keyTy }]
       valueTy
     } state = some { root, projections := [.mappingKey key] } := by
+  have hSupported : storageTypeSupported valueTy = true := by
+    simp only [storageTypeSupported, hValueType, Bool.true_or]
   unfold StorageFormulaContext.evalLocation?
     StorageFormulaContext.evalProjections?
     StorageFormulaContext.evalTypedValue?
   rw [context.evalValue_free_variable state bound termId reference key
     hBound hTerm hLookup]
-  simp [StorageFormulaContext.evalProjections?, hRoot, hValueType, hKeyType]
-  intro hBool
-  have hSome : valueTy.integerShape?.isSome = true := by
-    simpa [hBool] using hValueType
-  exact Option.isSome_iff_ne_none.mp hSome
+  simp [StorageFormulaContext.evalProjections?, hRoot, hSupported, hKeyType]
 
 /-- Resolve one fixed-array index from the exact context-stable free-variable
 binding used by the timeline. The extent remains part of the canonical
@@ -468,22 +466,19 @@ theorem StorageFormulaContext.evalLocation_fixed_free_variable
       }]
       valueTy
     } state = some { root, projections := [.fixedIndex (.integer key)] } := by
+  have hSupported : storageTypeSupported valueTy = true := by
+    simp only [storageTypeSupported, hValueType, Bool.true_or]
   unfold StorageFormulaContext.evalLocation?
     StorageFormulaContext.evalProjections?
     StorageFormulaContext.evalTypedValue?
   rw [context.evalValue_free_variable state bound termId reference (.integer key)
     hBound hTerm hLookup]
-  simp [StorageFormulaContext.evalProjections?, hRoot, hValueType, hKeyType,
+  simp [StorageFormulaContext.evalProjections?, hRoot, hSupported, hKeyType,
     hKeyShape, hExtentPositive, hExtentFits]
-  constructor
-  · intro hBool
-    have hSome : valueTy.integerShape?.isSome = true := by
-      simpa [hBool] using hValueType
-    exact Option.isSome_iff_ne_none.mp hSome
-  · cases key with
-    | mk shape bits =>
-        cases hKeyShape
-        rfl
+  cases key with
+  | mk shape bits =>
+      cases hKeyShape
+      rfl
 
 def StorageFormulaContext.actionSemantics
     (context : StorageFormulaContext) :

@@ -19,9 +19,21 @@ namespace Ora.Loop
 
 open Ora.Obligation
 
+/-- Nominal address identity uses the existing unsigned 160-bit value carrier.
+This does not register an integer shape or admit address arithmetic. -/
+@[simp] def storageAddressType : TyRef → Bool
+  -- Matches canonical_types.zig's .Address carrier via src/types/builtin.zig's .address ID 14.
+  | .compilerTypeId id => id == 14
+  | .spelling name => name == "address" || name == "!ora.address"
+
+def storageTypeSupported (ty : TyRef) : Bool :=
+  ty.isBool || ty.integerShape?.isSome || storageAddressType ty
+
 def storageValueMatchesTy : Value → TyRef → Bool
   | .bool _, ty => ty.isBool
-  | .integer value, ty => ty.integerShape? == some value.shape
+  | .integer value, ty =>
+      if storageAddressType ty then value.shape == .unsigned .w160
+      else ty.integerShape? == some value.shape
 
 
 /-- One ordered projection in a resolved semantic storage location.  Fixed
