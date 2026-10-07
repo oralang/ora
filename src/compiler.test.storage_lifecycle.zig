@@ -9,6 +9,361 @@ const emitter = @import("formal/storage_lifecycle_to_lean.zig");
 const canonical_collector = @import("formal/obligation_from_mlir.zig");
 const canonical_lean = @import("formal/obligation_to_lean.zig");
 const canonical_z3 = @import("formal/obligation_to_z3.zig");
+const lifecycle_check = @import("formal/storage_lifecycle_check.zig");
+const proof_check = @import("formal/proof_check.zig");
+
+fn lifecycleEnviron(allocator: std.mem.Allocator) !std.process.Environ {
+    var map = std.process.Environ.Map.init(allocator);
+    defer map.deinit();
+    const home = std.mem.span(std.c.getenv("HOME") orelse return error.LeanHomeMissing);
+    try map.put("HOME", home);
+    const inherited = if (std.c.getenv("PATH")) |path| std.mem.span(path) else "/usr/bin:/bin";
+    const path = try std.fmt.allocPrint(allocator, "{s}/.elan/bin:{s}", .{ home, inherited });
+    defer allocator.free(path);
+    try map.put("PATH", path);
+    return .{ .block = try map.createPosixBlock(allocator, .{}) };
+}
+
+test "SL4A producer returns independent queries and fresh kernel custody without authority" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const environ = try lifecycleEnviron(arena.allocator());
+    for ([_][]const u8{ "in_range_percentage", "in_range_u8", "max_value_in_function", "max_value_u256", "max_value_u8" }) |name| {
+        const source = try std.fmt.allocPrint(arena.allocator(), "ora-example/corpus/types/refinement/{s}.ora", .{name});
+        var compilation = try helpers.compilePackage(source);
+        defer compilation.deinit();
+        const module = (try compilation.db.lowerToHir(compilation.root_module_id)).module.raw_module;
+        var pass = try z3.VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        var output = std.Io.Writer.Allocating.init(testing.allocator);
+        defer output.deinit();
+        var receipt = lifecycle_check.produce(testing.allocator, module, &pass, environ, &output.writer) catch |err| {
+            std.debug.print("SL4A producer {s}: {s}\n{s}\n", .{ name, @errorName(err), output.written() });
+            return err;
+        };
+        defer receipt.deinit();
+        try testing.expect(receipt.queries.len != 0);
+        for (receipt.queries) |query| try query.requireSuccess();
+        for (receipt.lean.axioms) |axiom| try testing.expect(std.mem.eql(u8, axiom, "propext") or std.mem.eql(u8, axiom, "Quot.sound"));
+        try testing.expect(!std.mem.allEqual(u8, &receipt.lean.inputs_sha256, 0));
+        try testing.expect(!std.mem.allEqual(u8, &receipt.lean.checker_sha256, 0));
+        var snapshot = try collector.collect(testing.allocator, module, &pass);
+        defer snapshot.deinit();
+        var projection = try collector.project(testing.allocator, module, &pass, snapshot.inventory);
+        defer projection.deinit();
+        try testing.expect(projection.canonical.set.artifactDecision() == .blocked);
+    }
+}
+
+test "SL4A proof inputs bind every direct fragment root and retained guard" {
+    const names = [_][]const u8{ "in_range_percentage", "in_range_u8", "max_value_in_function", "max_value_u256", "max_value_u8" };
+    var pass = try z3.VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    var roots: usize = 0;
+    var claims: usize = 0;
+    for (names) |name| {
+        const source = try std.fmt.allocPrint(testing.allocator, "ora-example/corpus/types/refinement/{s}.ora", .{name});
+        defer testing.allocator.free(source);
+        var compilation = try helpers.compilePackage(source);
+        defer compilation.deinit();
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir.diagnostics.isEmpty());
+        var snapshot = try collector.collect(testing.allocator, hir.module.raw_module, &pass);
+        defer snapshot.deinit();
+        var projection = try collector.project(testing.allocator, hir.module.raw_module, &pass, snapshot.inventory);
+        defer projection.deinit();
+        const inputs = collector.proofInputs(&projection) catch |err| {
+            for (projection.snapshot.inventory.functions) |function| for (function.events) |event|
+                std.debug.print("SL4A effect {s} {s} {d} {s}\n", .{ function.symbol, event.operation, event.ordinal, event.target orelse "?" });
+            for (projection.canonical.set.function_summaries) |row| for (row.paths) |path| for (path.timeline) |event|
+                std.debug.print("SL4A canonical {s} {s}\n", .{ row.owner.function.name, event.structural_key });
+            return err;
+        };
+        try testing.expect(inputs.guards.len != 0);
+        var context = try z3.Z3Context.init(testing.allocator);
+        defer context.deinit();
+        var adapter = canonical_z3.Adapter.init(&context, testing.allocator, projection.canonical.set);
+        const queries = try adapter.checkLifecycle(inputs, pass.timeout_ms);
+        defer testing.allocator.free(queries);
+        try testing.expect(queries.len >= inputs.functions.len * inputs.slots.len * 2 + inputs.slots.len);
+        for (queries) |query| try query.requireSuccess();
+        roots += inputs.functions.len;
+        claims += inputs.slots.len;
+        try collector.checkFresh(testing.allocator, hir.module.raw_module, &pass, inputs.inventory);
+        try testing.expect(!std.mem.allEqual(u8, &(try inputs.sha256(testing.allocator)), 0));
+        var changed = inputs;
+        changed.slots = inputs.slots[1..];
+        try testing.expectError(error.IncompleteLifecycleProofInputs, changed.sha256(testing.allocator));
+        changed = inputs;
+        changed.guards = &.{ inputs.guards[0], inputs.guards[0] };
+        try testing.expectError(error.DuplicateLifecycleGuard, changed.sha256(testing.allocator));
+        var targets = std.Io.Writer.Allocating.init(testing.allocator);
+        defer targets.deinit();
+        try emitter.writeProducerTargets(&targets.writer, testing.allocator, inputs, projection.canonical.set);
+        try emitter.writeProducerProofs(&targets.writer, testing.allocator, inputs, projection.canonical.set);
+        try targets.writer.writeAll("\n#print axioms Ora.Generated.Obligations.Lifecycle.lifecycleProof\n");
+        lifecycleDataKernelCheck(targets.written()) catch |err| {
+            const start = std.mem.indexOf(u8, targets.written(), "def root :") orelse 0;
+            std.debug.print("SL4A target excerpt:\n{s}\n", .{targets.written()[start..@min(start + 900, targets.written().len)]});
+            return err;
+        };
+    }
+    try testing.expectEqual(@as(usize, 30), roots);
+    try testing.expectEqual(@as(usize, 6), claims);
+}
+
+test "SL4A successful-prefix inputs leave unconditional setter safety failed" {
+    var compilation = try helpers.compileText("contract Guarded { storage var cap: MaxValue<u256, 100>; pub fn put(x: MaxValue<u256, 100>) { cap = x; } }");
+    defer compilation.deinit();
+    const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir.diagnostics.isEmpty());
+    var pass = try z3.VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    var snapshot = try collector.collect(testing.allocator, hir.module.raw_module, &pass);
+    defer snapshot.deinit();
+    var projection = try collector.project(testing.allocator, hir.module.raw_module, &pass, snapshot.inventory);
+    defer projection.deinit();
+    const inputs = try collector.proofInputs(&projection);
+    try testing.expectEqual(@as(usize, 1), inputs.guards.len);
+    var context = try z3.Z3Context.init(testing.allocator);
+    defer context.deinit();
+    var adapter = canonical_z3.Adapter.init(&context, testing.allocator, projection.canonical.set);
+    const binding = inputs.functions[0];
+    const checked = try adapter.checkFunctionSafety(binding.function_id, binding.function_vc_sha256, 100005);
+    try testing.expectEqual(.failed, checked.query.result.?.status);
+    try testing.expect(!checked.query.result.?.vacuous and !checked.query.result.?.vacuity_unknown);
+    try testing.expect(checked.query.smtlib_hash != null and checked.query.smtlib_hash.? != 0);
+    try testing.expectEqualSlices(u8, &binding.function_vc_sha256, &checked.function_vc_sha256);
+    try testing.expect(projection.canonical.set.artifactDecision() == .blocked);
+}
+
+test "SL4A native failures stay named without any production fault injection" {
+    const good: data.NativeQuery = .{ .role = .prefix, .claim_index = 0, .status = .unsat, .base_status = .sat, .smtlib_hash = 1, .constraint_count = 1 };
+    try good.requireSuccess();
+    const errors = [_]anyerror{ error.LifecycleQueryMissing, error.LifecycleQueryMissing, error.LifecycleQueryUnknown, error.LifecycleQueryUnknown, error.LifecycleQueryVacuous, error.LifecycleQueryFailed, error.LifecycleQueryFailed };
+    for (errors, 0..) |expected, index| {
+        var query = good;
+        switch (index) {
+            0 => query.smtlib_hash = 0,
+            1 => query.constraint_count = 0,
+            2 => query.status = .unknown,
+            3 => query.base_status = .unknown,
+            4 => query.base_status = .unsat,
+            5 => query.status = .sat,
+            6 => query.role = .nonvacuity,
+            else => unreachable,
+        }
+        try testing.expectError(expected, query.requireSuccess());
+    }
+}
+
+test "SL4A reached bad writes cannot be rescued by a later guard repair or false suffix" {
+    const Mutation = enum { remove_guard, late_guard, changed_guard, repair, false_suffix };
+    for ([_]Mutation{ .remove_guard, .late_guard, .changed_guard, .repair, .false_suffix }) |mutation| {
+        const source = switch (mutation) {
+            .repair => "contract Guarded { storage var cap: MaxValue<u256,100>; pub fn put(x: MaxValue<u256,100>) { cap = x; cap = 0; } }",
+            .false_suffix => "contract Guarded { storage var cap: MaxValue<u256,100>; pub fn put(x: MaxValue<u256,100>) { cap = x; assert(false); } }",
+            else => "contract Guarded { storage var cap: MaxValue<u256,100>; pub fn put(x: MaxValue<u256,100>) { cap = x; } }",
+        };
+        var compilation = try helpers.compileText(source);
+        defer compilation.deinit();
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir.diagnostics.isEmpty());
+        const root = mlir.oraModuleGetOperation(hir.module.raw_module);
+        const guard = firstOperation(root, "ora.refinement_guard") orelse return error.TestUnexpectedResult;
+        const write = firstOperation(root, "ora.sstore") orelse return error.TestUnexpectedResult;
+        if (mutation == .changed_guard) {
+            const comparison = mlir.mlirOpResultGetOwner(mlir.oraOperationGetOperand(guard, 0));
+            try testing.expectEqual(@as(usize, 2), mlir.oraOperationGetNumOperands(comparison));
+            const reversed = [_]mlir.MlirValue{ mlir.oraOperationGetOperand(comparison, 1), mlir.oraOperationGetOperand(comparison, 0) };
+            mlir.mlirOperationSetOperands(comparison, 2, &reversed);
+        } else if (mutation == .late_guard) mlir.mlirOperationMoveAfter(guard, write) else mlir.mlirOperationRemoveFromParent(guard);
+        defer if (mutation != .late_guard and mutation != .changed_guard) mlir.mlirOperationDestroy(guard);
+        var pass = try z3.VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        var snapshot = try collector.collect(testing.allocator, hir.module.raw_module, &pass);
+        defer snapshot.deinit();
+        var projection = try collector.project(testing.allocator, hir.module.raw_module, &pass, snapshot.inventory);
+        defer projection.deinit();
+        const inputs = try collector.proofInputs(&projection);
+        var context = try z3.Z3Context.init(testing.allocator);
+        defer context.deinit();
+        var adapter = canonical_z3.Adapter.init(&context, testing.allocator, projection.canonical.set);
+        const queries = try adapter.checkLifecycle(inputs, pass.timeout_ms);
+        defer testing.allocator.free(queries);
+        var bad_prefixes: usize = 0;
+        for (queries) |query| {
+            if (query.role != .prefix or query.status != .sat) continue;
+            try testing.expectEqual(.sat, query.base_status);
+            try testing.expectError(error.LifecycleQueryFailed, query.requireSuccess());
+            try testing.expect(query.smtlib_hash != 0 and query.constraint_count != 0);
+            bad_prefixes += 1;
+        }
+        try testing.expect(bad_prefixes != 0);
+        var target = std.Io.Writer.Allocating.init(testing.allocator);
+        defer target.deinit();
+        if (mutation == .changed_guard) {
+            // Fresh metadata cannot rescue a proof over the wrong guard body.
+            try emitter.writeProducerTargets(&target.writer, testing.allocator, inputs, projection.canonical.set);
+            var proof = std.Io.Writer.Allocating.init(testing.allocator);
+            defer proof.deinit();
+            try emitter.writeProducerProofs(&proof.writer, testing.allocator, inputs, projection.canonical.set);
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            var output = std.Io.Writer.Allocating.init(testing.allocator);
+            defer output.deinit();
+            try testing.expectError(error.LeanProofCheckFailed, proof_check.checkLifecycleCustody(testing.allocator, hir.module.raw_module, &pass, .{
+                .inputs_sha256 = try inputs.sha256(testing.allocator),
+                .targets_sha256 = data.hash(target.written()),
+                .proof_source = proof.written(),
+                .theorem_name = "Ora.Generated.Obligations.Lifecycle.lifecycleProof",
+            }, try lifecycleEnviron(arena.allocator()), &output.writer));
+        } else try testing.expectError(error.UnsupportedLifecycleWriter, emitter.writeProducerTargets(&target.writer, testing.allocator, inputs, projection.canonical.set));
+        try testing.expect(projection.canonical.set.artifactDecision() == .blocked);
+    }
+}
+
+test "SL4A structural refusal never drops an unsupported root" {
+    const Case = struct { source: []const u8, expected: anyerror };
+    const cases = [_]Case{
+        .{ .source = "contract C { storage var cap: MaxValue<u256,100>; pub fn init() { cap = 0; } pub fn get() -> u256 { return cap; } }", .expected = error.UnsupportedLifecycleRoot },
+        .{ .source = "contract C { storage var cap: MaxValue<u256,100>; fn hidden() -> u256 { return cap; } pub fn get() -> u256 { return hidden(); } }", .expected = error.UnsupportedLifecycleEffect },
+        .{ .source = "contract C { storage var cap: MinValue<u256,1>; pub fn get() -> u256 { return cap; } }", .expected = error.InvalidLifecycleBootstrap },
+        .{ .source = "contract C { storage var cap: MaxValue<u256,100>; storage var values: map[u256,u256]; pub fn put(k:u256,x:u256) { values[k]=x; } }", .expected = error.LifecycleProjectionUnsupported },
+    };
+    for (cases) |case| {
+        var compilation = try helpers.compileText(case.source);
+        defer compilation.deinit();
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir.diagnostics.isEmpty());
+        var pass = try z3.VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        var snapshot = try collector.collect(testing.allocator, hir.module.raw_module, &pass);
+        defer snapshot.deinit();
+        if (case.expected == error.LifecycleProjectionUnsupported) {
+            try testing.expectError(case.expected, collector.project(testing.allocator, hir.module.raw_module, &pass, snapshot.inventory));
+            continue;
+        }
+        var projection = try collector.project(testing.allocator, hir.module.raw_module, &pass, snapshot.inventory);
+        defer projection.deinit();
+        try testing.expectEqual(projection.bindings.len, projection.canonical.set.function_summaries.len);
+        try testing.expectError(case.expected, collector.proofInputs(&projection));
+    }
+}
+
+test "SL4A false complete witness fails actual Z3 nonvacuity" {
+    var compilation = try helpers.compileText("contract C { storage var cap: MaxValue<u256,100>; pub fn get() -> u256 { assert(false); return cap; } }");
+    defer compilation.deinit();
+    const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir.diagnostics.isEmpty());
+    var pass = try z3.VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    var snapshot = try collector.collect(testing.allocator, hir.module.raw_module, &pass);
+    defer snapshot.deinit();
+    var projection = try collector.project(testing.allocator, hir.module.raw_module, &pass, snapshot.inventory);
+    defer projection.deinit();
+    const inputs = try collector.proofInputs(&projection);
+    try testing.expectEqual(@as(usize, 0), inputs.guards.len); // An assertion is not a retained refinement guard.
+    var context = try z3.Z3Context.init(testing.allocator);
+    defer context.deinit();
+    var adapter = canonical_z3.Adapter.init(&context, testing.allocator, projection.canonical.set);
+    const queries = try adapter.checkLifecycle(inputs, pass.timeout_ms);
+    defer testing.allocator.free(queries);
+    var witnesses: usize = 0;
+    for (queries) |query| if (query.role == .nonvacuity) {
+        witnesses += 1;
+        try testing.expectEqual(.unsat, query.status);
+        try testing.expectError(error.LifecycleQueryVacuous, query.requireSuccess());
+    };
+    try testing.expectEqual(@as(usize, 1), witnesses);
+}
+
+test "SL4A absent return and unknown effect cannot enter the producer" {
+    for ([_]bool{ false, true }) |unknown| {
+        var compilation = try helpers.compileText("contract C { storage var cap: MaxValue<u8,100>; pub fn put(x:MaxValue<u8,100>) { cap=x; } }");
+        defer compilation.deinit();
+        const module = (try compilation.db.lowerToHir(compilation.root_module_id)).module.raw_module;
+        const root = mlir.oraModuleGetOperation(module);
+        const terminal = firstOperation(root, "ora.return") orelse return error.TestUnexpectedResult;
+        if (unknown) {
+            var state = mlir.mlirOperationStateGet(mlir.oraStringRefCreate("ora.unknown_effect", 18), mlir.mlirOperationGetLocation(terminal));
+            const operation = mlir.mlirOperationCreate(&state);
+            try testing.expect(!mlir.oraOperationIsNull(operation));
+            mlir.mlirBlockInsertOwnedOperationBefore(mlir.mlirOperationGetBlock(terminal), terminal, operation);
+        } else {
+            mlir.mlirOperationRemoveFromParent(terminal);
+            mlir.mlirOperationDestroy(terminal);
+        }
+        var pass = try z3.VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        var snapshot = try collector.collect(testing.allocator, module, &pass);
+        defer snapshot.deinit();
+        try testing.expectError(error.LifecycleProjectionUnsupported, collector.project(testing.allocator, module, &pass, snapshot.inventory));
+    }
+}
+
+test "SL4A fresh target custody rejects stale identities wrong bodies and forbidden axioms" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const environ = try lifecycleEnviron(allocator);
+    var compilation = try helpers.compileText("contract C { storage var cap: MaxValue<u8,100>; pub fn get() -> u8 { return cap; } }");
+    defer compilation.deinit();
+    const module = (try compilation.db.lowerToHir(compilation.root_module_id)).module.raw_module;
+    var pass = try z3.VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    var snapshot = try collector.collect(testing.allocator, module, &pass);
+    defer snapshot.deinit();
+    var projection = try collector.project(testing.allocator, module, &pass, snapshot.inventory);
+    defer projection.deinit();
+    const inputs = try collector.proofInputs(&projection);
+    var targets = std.Io.Writer.Allocating.init(allocator);
+    try emitter.writeProducerTargets(&targets.writer, allocator, inputs, projection.canonical.set);
+    var proof = std.Io.Writer.Allocating.init(allocator);
+    try emitter.writeProducerProofs(&proof.writer, allocator, inputs, projection.canonical.set);
+    const good: proof_check.LifecycleCustodyInput = .{ .inputs_sha256 = try inputs.sha256(allocator), .targets_sha256 = data.hash(targets.written()), .proof_source = proof.written(), .theorem_name = "Ora.Generated.Obligations.Lifecycle.lifecycleProof" };
+    var output = std.Io.Writer.Allocating.init(allocator);
+    var checked = try proof_check.checkLifecycleCustody(testing.allocator, module, &pass, good, environ, &output.writer);
+    defer checked.deinit();
+    try testing.expectEqualSlices(u8, &good.targets_sha256, &checked.targets_sha256);
+    try testing.expectEqualSlices(u8, &data.hash(good.proof_source), &checked.proof_sha256);
+    const Case = enum { inputs_digest, targets_digest, absent, wrong_body, sorry, axiom, missing_theorem, duplicate, transplant };
+    for ([_]Case{ .inputs_digest, .targets_digest, .absent, .wrong_body, .sorry, .axiom, .missing_theorem, .duplicate, .transplant }) |case| {
+        var input = good;
+        var expected: anyerror = error.LeanProofCheckFailed;
+        switch (case) {
+            .inputs_digest => {
+                input.inputs_sha256[0] ^= 1;
+                expected = error.LifecycleInputsMismatch;
+            },
+            .targets_digest => {
+                input.targets_sha256[0] ^= 1;
+                expected = error.LifecycleTargetsMismatch;
+            },
+            .absent => {
+                input.proof_source = "";
+                expected = error.LifecycleProofMissing;
+            },
+            .wrong_body => input.proof_source = "theorem wrong : True := True.intro\n",
+            .sorry => input.proof_source = "theorem wrong : Ora.Generated.Obligations.Lifecycle.emittedLifecycle := by sorry\n",
+            .axiom => input.proof_source = "axiom untrusted : Ora.Generated.Obligations.Lifecycle.emittedLifecycle\ntheorem wrong : Ora.Generated.Obligations.Lifecycle.emittedLifecycle := untrusted\n",
+            .missing_theorem => input.theorem_name = "absentProof",
+            .duplicate => input.proof_source = try std.fmt.allocPrint(allocator, "{s}\n{s}", .{ good.proof_source, good.proof_source }),
+            .transplant => input.proof_source = "namespace Foreign\ndef emittedLifecycle := True\ntheorem wrong : emittedLifecycle := True.intro\nend Foreign\n",
+        }
+        if (case == .wrong_body or case == .sorry or case == .axiom) input.theorem_name = "wrong";
+        if (case == .transplant) input.theorem_name = "Foreign.wrong";
+        const result = proof_check.checkLifecycleCustody(testing.allocator, module, &pass, input, environ, &output.writer);
+        if (result) |receipt_value| {
+            var receipt = receipt_value;
+            receipt.deinit();
+            return error.TestUnexpectedResult;
+        } else |err| {
+            if (err != expected) std.debug.print("SL4A custody {s}: expected {s}, got {s}\n{s}\n", .{ @tagName(case), @errorName(expected), @errorName(err), output.written() });
+            try testing.expectEqual(expected, err);
+        }
+    }
+}
 
 test "SL1 lifecycle inventory records all eight goal sources without a grant" {
     const sources = [_][]const u8{

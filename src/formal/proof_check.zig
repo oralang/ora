@@ -8,6 +8,9 @@ const std = @import("std");
 const obligation = @import("obligation.zig");
 const obligation_to_lean = @import("obligation_to_lean.zig");
 const proof_manifest = @import("proof_manifest.zig");
+const lifecycle = @import("storage_lifecycle.zig");
+const lifecycle_hir = @import("storage_lifecycle_from_mlir.zig");
+const lifecycle_lean = @import("storage_lifecycle_to_lean.zig");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const proof_check_scratch_root = "formal/Ora/ProofCheckScratch";
@@ -169,6 +172,59 @@ pub fn applyProofRows(
         stdout,
         .{},
     );
+}
+
+pub const LifecycleCustodyInput = struct {
+    inputs_sha256: lifecycle.Digest,
+    targets_sha256: lifecycle.Digest,
+    proof_source: []const u8,
+    theorem_name: []const u8,
+};
+
+/// No VerificationQuery or artifact grant is installed from this receipt.
+pub const LifecycleCustodyReceipt = struct {
+    arena: std.heap.ArenaAllocator,
+    inputs_sha256: lifecycle.Digest,
+    targets_sha256: lifecycle.Digest,
+    proof_sha256: lifecycle.Digest,
+    checker_sha256: lifecycle.Digest,
+    checker_source: []const u8,
+    axioms: []const []const u8,
+
+    pub fn deinit(self: *LifecycleCustodyReceipt) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+pub fn checkLifecycleCustody(allocator: std.mem.Allocator, module: @import("mlir_c_api").c.MlirModule, pass: *@import("ora_z3_verification").VerificationPass, input: LifecycleCustodyInput, process_environ: std.process.Environ, stdout: anytype) !LifecycleCustodyReceipt {
+    var snapshot = try lifecycle_hir.collect(allocator, module, pass);
+    defer snapshot.deinit();
+    var projection = try lifecycle_hir.project(allocator, module, pass, snapshot.inventory);
+    defer projection.deinit();
+    const inputs = try lifecycle_hir.proofInputs(&projection);
+    const digest = try inputs.sha256(allocator);
+    if (!std.mem.eql(u8, &digest, &input.inputs_sha256)) return error.LifecycleInputsMismatch;
+    var targets = std.Io.Writer.Allocating.init(allocator);
+    defer targets.deinit();
+    try lifecycle_lean.writeProducerTargets(&targets.writer, allocator, inputs, projection.canonical.set);
+    const target_digest = lifecycle.hash(targets.written());
+    if (!std.mem.eql(u8, &target_digest, &input.targets_sha256)) return error.LifecycleTargetsMismatch;
+    if (input.proof_source.len == 0) return error.LifecycleProofMissing;
+    if (input.proof_source.len > max_proof_artifact_bytes) return error.LifecycleProofTooLarge;
+    try validateLeanTheoremPath(input.theorem_name);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const checked = try runLeanChecker(allocator, "Ora.Generated.Obligations.Lifecycle", targets.written(), &.{.{
+        .query_id = 0,
+        .module_name = "Ora.LifecycleProof",
+        .theorem_name = input.theorem_name,
+        .lifecycle_target = true,
+        .import_module = false,
+    }}, input.proof_source, process_environ, stdout, true, arena.allocator());
+    if (checked.axiom_audits.len != 1) return error.LeanAxiomAuditMissing;
+    try lifecycle_hir.checkFresh(allocator, module, pass, inputs.inventory);
+    return .{ .arena = arena, .inputs_sha256 = digest, .targets_sha256 = target_digest, .proof_sha256 = lifecycle.hash(input.proof_source), .checker_sha256 = lifecycle.hash(checked.canonical_source), .checker_source = checked.canonical_source, .axioms = checked.axiom_audits[0].axioms };
 }
 
 /// Kernel-checks compiler-constructed proof terms in the generated checker
@@ -515,6 +571,7 @@ const CheckedProofRow = struct {
     loop_summary_id: ?obligation.Id = null,
     call_function_id: ?obligation.Id = null,
     call_loop_id: ?obligation.Id = null,
+    lifecycle_target: bool = false,
     target_smtlib_hash: ?u64 = null,
     target_constraint_count: u32 = 0,
     import_module: bool = true,
@@ -1132,7 +1189,9 @@ fn buildLeanCheckerSourceWithInlineProofs(
         );
     }
     for (rows, 0..) |row, index| {
-        if (row.call_function_id) |function_id| {
+        if (row.lifecycle_target) {
+            try writer.print("theorem check_query_{d}_{d} : {s}.emittedLifecycle := by\n  exact {s}\n\n", .{ row.query_id, index, generated_namespace, row.theorem_name });
+        } else if (row.call_function_id) |function_id| {
             try writer.print(
                 "theorem check_query_{d}_{d} : {s}.emittedCallCustody_{d} := by\n  exact {s}\n\n",
                 .{ row.query_id, index, generated_namespace, function_id, row.theorem_name },

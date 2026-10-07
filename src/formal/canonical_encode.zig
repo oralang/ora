@@ -10,6 +10,7 @@ const canonical_digest = @import("obligation_to_lean.zig");
 const fixture = @import("formal_test_fixture.zig");
 const ct = @import("canonical_types.zig");
 const support = @import("canonical_support.zig");
+const lifecycle = @import("storage_lifecycle.zig");
 
 const CanonicalPlaceSymbolKind = ct.CanonicalPlaceSymbolKind;
 const CanonicalPromotionShape = ct.CanonicalPromotionShape;
@@ -420,6 +421,136 @@ pub const Adapter = struct {
     pub fn checkObligation(self: *Adapter, id: obligation.Id) EncodeError!CheckStatus {
         const query = (try self.findUniqueQueryForObligation(id)) orelse return error.UnknownQuery;
         return self.checkQueryRow(query);
+    }
+
+    /// Lifecycle evidence is separate from unconditional FunctionVC safety.
+    /// Capture each reached write before any subsequent checkpoint is encoded.
+    pub fn checkLifecycle(self: *Adapter, inputs: lifecycle.ProofInputs, timeout_ms: ?u32) ![]lifecycle.NativeQuery {
+        _ = try inputs.sha256(self.allocator);
+        try self.set.validateTermReferences();
+        try self.set.validateIdReferences();
+        if (inputs.functions.len != self.set.function_summaries.len) return error.MissingLifecycleBinding;
+        const output_allocator = self.allocator;
+        var output: std.ArrayList(lifecycle.NativeQuery) = .empty;
+        errdefer output.deinit(output_allocator);
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const previous = self.*;
+        defer self.* = previous;
+        self.allocator = arena.allocator();
+        self.use_free_variable_identity_names = true;
+        self.function_vc_qf = true;
+        for (inputs.inventory.claims, 0..) |claim, ci| {
+            const info = try typeInfo(.{ .compiler_type_id = claim.type_id.? });
+            const zero = try self.integerLiteralForType("0", info);
+            const bootstrap = try self.lifecycleQuery(&.{z3.Z3_mk_true(self.context.ctx)}, try self.lifecyclePredicate(claim, zero), timeout_ms);
+            try output.append(output_allocator, .{ .role = .bootstrap, .claim_index = @intCast(ci), .status = bootstrap.status, .base_status = bootstrap.base_status, .smtlib_hash = bootstrap.smtlib_hash, .constraint_count = bootstrap.constraint_count });
+            for (inputs.functions) |binding| {
+                const row = obligation.findById(self.set.function_summaries, binding.function_id) orelse return error.ForeignLifecycleBinding;
+                const digest = try canonical_digest.functionVcSha256(self.set, row.id);
+                if (!std.mem.eql(u8, &digest, &binding.function_vc_sha256)) return error.LifecycleDigestMismatch;
+                if (row.paths.len != 1 or row.assumption_ids.len != 0 or row.entry_invariant_ids.len != 0 or
+                    row.projection_completeness != .complete or !row.write_footprint_complete) return error.UnsupportedLifecycleRoot;
+                var query_state: CanonicalQueryState = .{};
+                self.query_state = &query_state;
+                var state: LoopEncodeState = .{ .summary = .{ .id = row.id, .owner = row.owner, .source = row.source, .phase = .report, .origin = row.origin, .loop_source_op_id = null, .loop_kind = .other, .context_variables = row.parameters }, .preheader_starts_at_entry = true };
+                self.loop_state = &state;
+                self.function_row = row;
+                try self.storageDomains(row.paths[0].timeline, false);
+                const location: obligation.LoopStorageLocationExpr = .{ .root = claim.root, .value_ty = .{ .compiler_type_id = claim.type_id.? } };
+                const initial = try self.selectLoopLocation(location, info, false);
+                var prefix: std.ArrayList(z3.Z3_ast) = .empty;
+                try prefix.append(self.allocator, try self.lifecyclePredicate(claim, initial));
+                try self.appendSideConstraints(&prefix);
+                var witness: std.ArrayList(z3.Z3_ast) = .empty;
+                try witness.appendSlice(self.allocator, prefix.items);
+                var writes: usize = 0;
+                for (row.paths[0].timeline) |event| {
+                    switch (event.payload) {
+                        .safety_checkpoint => |checkpoint| {
+                            if (checkpoint.formulas.len != 1) return error.UnsupportedLifecycleGuard;
+                            const formula = try self.encodeFormula(checkpoint.formulas[0].formula);
+                            try witness.append(self.allocator, formula);
+                            for (inputs.guards) |guard| if (guard.function_id == row.id and guard.event_id == event.id) {
+                                try prefix.append(self.allocator, formula);
+                                break;
+                            };
+                        },
+                        .storage_read => |read| try self.applyLoopRead(read),
+                        .storage_write => |write| {
+                            const before = try self.selectLoopLocation(location, info, false);
+                            try self.applyLoopWrite(write);
+                            const after = try self.selectLoopLocation(location, info, false);
+                            const changes_claim = std.mem.eql(u8, write.location.root, claim.root);
+                            const goal = if (changes_claim) try self.lifecyclePredicate(claim, after) else z3.Z3_mk_eq(self.context.ctx, before, after);
+                            try prefix.appendSlice(self.allocator, query_state.side_constraints.items);
+                            try self.appendSideConstraints(&witness);
+                            var checked = try self.lifecycleQuery(prefix.items, goal, timeout_ms);
+                            checked.role = if (changes_claim) .prefix else .frame;
+                            checked.claim_index = @intCast(ci);
+                            checked.function_id = row.id;
+                            checked.event_id = event.id;
+                            checked.function_vc_sha256 = digest;
+                            try output.append(output_allocator, checked);
+                            writes += 1;
+                        },
+                        else => return error.UnsupportedLifecycleEvent,
+                    }
+                    try prefix.appendSlice(self.allocator, query_state.side_constraints.items);
+                    try self.appendSideConstraints(&witness);
+                }
+                if (writes == 0) {
+                    const unchanged = z3.Z3_mk_eq(self.context.ctx, initial, try self.selectLoopLocation(location, info, false));
+                    var checked = try self.lifecycleQuery(prefix.items, unchanged, timeout_ms);
+                    checked.role = .frame;
+                    checked.claim_index = @intCast(ci);
+                    checked.function_id = row.id;
+                    checked.function_vc_sha256 = digest;
+                    try output.append(output_allocator, checked);
+                }
+                var reachable = try self.lifecycleQuery(witness.items, null, timeout_ms);
+                reachable.claim_index = @intCast(ci);
+                reachable.function_id = row.id;
+                reachable.function_vc_sha256 = digest;
+                try output.append(output_allocator, reachable);
+            }
+        }
+        return output.toOwnedSlice(output_allocator);
+    }
+
+    fn lifecyclePredicate(self: *Adapter, claim: lifecycle.Claim, value: z3.Z3_ast) !z3.Z3_ast {
+        const info = try typeInfo(.{ .compiler_type_id = claim.type_id.? });
+        if (info.signed or info.kind != .bitvector) return error.UnsupportedLifecycleClaim;
+        const low = try self.integerLiteralForType(try std.fmt.allocPrint(self.allocator, "{d}", .{claim.bounds.?.minimum}), info);
+        const high = try self.integerLiteralForType(try std.fmt.allocPrint(self.allocator, "{d}", .{claim.bounds.?.maximum}), info);
+        return self.conjunction(&.{ z3.Z3_mk_bvuge(self.context.ctx, value, low), z3.Z3_mk_bvule(self.context.ctx, value, high) });
+    }
+
+    fn lifecycleQuery(self: *Adapter, assumptions: []const z3.Z3_ast, goal: ?z3.Z3_ast, timeout_ms: ?u32) !lifecycle.NativeQuery {
+        try self.context.checkNoError();
+        var solver = try Solver.initForLogic(self.context, self.allocator, "QF_AUFBV");
+        defer solver.deinit();
+        if (timeout_ms) |timeout| try solver.setTimeoutMs(timeout);
+        var constraints: std.ArrayList(z3.Z3_ast) = .empty;
+        try constraints.appendSlice(self.allocator, assumptions);
+        for (assumptions) |condition| try solver.assertChecked(condition);
+        const base = try solver.checkChecked();
+        if (goal) |predicate| {
+            const violation = z3.Z3_mk_not(self.context.ctx, predicate);
+            try solver.assertChecked(violation);
+            try constraints.append(self.allocator, violation);
+        }
+        const status = if (goal != null) try solver.checkChecked() else base;
+        const hash = try self.loopQueryHash(constraints.items, .qf_aufbv);
+        return .{ .role = if (goal == null) .nonvacuity else .prefix, .claim_index = 0, .status = switch (status) {
+            z3.Z3_L_TRUE => .sat,
+            z3.Z3_L_FALSE => .unsat,
+            else => .unknown,
+        }, .base_status = switch (base) {
+            z3.Z3_L_TRUE => .sat,
+            z3.Z3_L_FALSE => .unsat,
+            else => .unknown,
+        }, .smtlib_hash = hash.smtlib_hash, .constraint_count = hash.constraint_count };
     }
 
     pub fn checkQuery(self: *Adapter, id: obligation.Id) EncodeError!CheckStatus {

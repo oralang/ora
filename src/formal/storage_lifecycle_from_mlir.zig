@@ -12,6 +12,7 @@ pub const Snapshot = struct {
     arena: std.heap.ArenaAllocator,
     inventory: data.Inventory,
     function_ops: []const mlir.MlirOperation,
+    operations: []const mlir.MlirOperation,
 
     pub fn deinit(self: *Snapshot) void {
         self.arena.deinit();
@@ -47,7 +48,7 @@ pub fn collect(allocator: std.mem.Allocator, module: mlir.MlirModule, pass: *z3.
         .functions = collector.functions.items,
     };
     try inventory.validate();
-    return .{ .arena = arena, .inventory = inventory, .function_ops = collector.function_ops.items };
+    return .{ .arena = arena, .inventory = inventory, .function_ops = collector.function_ops.items, .operations = collector.operations.items };
 }
 
 pub const Projection = struct {
@@ -93,12 +94,103 @@ pub fn checkFresh(allocator: std.mem.Allocator, module: mlir.MlirModule, pass: *
     if (!std.mem.eql(u8, &(try expected.sha256(allocator)), &(try fresh.inventory.sha256(allocator)))) return error.LifecycleInventoryMismatch;
 }
 
+/// A single direct contract scope with all live roots and effects accounted
+/// for. Every selected guard names the actual retained enforcement operation.
+pub fn proofInputs(projection: *Projection) !data.ProofInputs {
+    const snapshot = &projection.snapshot;
+    const arena = snapshot.arena.allocator();
+    const inventory = snapshot.inventory;
+    if (inventory.claims.len == 0) return error.MissingLifecycleClaim;
+    const slots = try arena.alloc(data.SlotBinding, inventory.claims.len);
+    const scope = mlir.mlirOperationGetParentOperation(snapshot.operations[inventory.claims[0].ordinal]);
+    const scope_ordinal = for (snapshot.operations, 0..) |op, i| {
+        if (op.ptr == scope.ptr) break i;
+    } else return error.InvalidLifecycleOwner;
+    for (inventory.claims, slots, 0..) |claim, *slot, i| {
+        const global = snapshot.operations[claim.ordinal];
+        if (mlir.mlirOperationGetParentOperation(global).ptr != scope.ptr) return error.AmbiguousLifecycleOwner;
+        slot.* = .{ .claim_index = @intCast(i), .global_ordinal = claim.ordinal, .owner_ordinal = @intCast(scope_ordinal) };
+    }
+    var guards: std.ArrayList(data.GuardBinding) = .empty;
+    const rows = projection.canonical.set.function_summaries;
+    if (projection.bindings.len != rows.len) return error.MissingLifecycleBinding;
+    for (projection.bindings, rows) |binding, row| {
+        const function = for (inventory.functions) |function| {
+            if (function.ordinal == binding.function_ordinal) break function;
+        } else return error.ForeignLifecycleBinding;
+        const op = snapshot.operations[function.ordinal];
+        if (function.constructor or mlir.mlirOperationGetParentOperation(op).ptr != scope.ptr)
+            return error.UnsupportedLifecycleRoot;
+        if (row.id != binding.function_id or row.projection_completeness != .complete or !row.write_footprint_complete or
+            row.paths.len != 1 or row.assumption_ids.len != 0 or row.entry_invariant_ids.len != 0)
+            return error.UnsupportedLifecycleRoot;
+        if (!std.mem.eql(u8, &(try lean.functionVcSha256(projection.canonical.set, row.id)), &binding.function_vc_sha256))
+            return error.LifecycleDigestMismatch;
+        var writer_events: std.ArrayList(data.Event) = .empty;
+        for (function.events) |effect| {
+            if (std.mem.eql(u8, effect.operation, "ora.sstore") and effect.kind == .write and effect.refusal == null) {
+                try writer_events.append(arena, effect);
+                continue;
+            }
+            // These control operations lack MemoryEffectOpInterface. Account
+            // for their exact canonical control role; never discard an unknown effect.
+            const live = snapshot.operations[effect.ordinal];
+            if (mlir.mlirOperationGetParentOperation(live).ptr != op.ptr or mlir.oraOperationGetNumRegions(live) != 0)
+                return error.UnsupportedLifecycleEffect;
+            if (std.mem.eql(u8, effect.operation, "ora.return") and row.paths[0].returns == .direct and
+                mlir.oraOperationIsNull(mlir.oraOperationGetNextInBlock(live))) continue;
+            if (!std.mem.eql(u8, effect.operation, "ora.refinement_guard") and !std.mem.eql(u8, effect.operation, "ora.assert"))
+                return error.UnsupportedLifecycleEffect;
+            const key = try std.fmt.allocPrint(arena, "op:{d}/{s}", .{ effect.ordinal, effect.operation });
+            for (row.paths[0].timeline) |event| {
+                if (event.payload == .safety_checkpoint and std.mem.eql(u8, event.structural_key, key)) break;
+            } else return error.LifecycleGuardMismatch;
+        }
+        var writes: usize = 0;
+        for (row.paths[0].timeline, 0..) |event, index| switch (event.payload) {
+            .storage_read, .storage_write => {
+                const location = if (event.payload == .storage_read) event.payload.storage_read.location else event.payload.storage_write.location;
+                if (location.projections.len != 0) return error.UnsupportedLifecycleLocation;
+                if (event.payload == .storage_write) {
+                    if (writes >= writer_events.items.len) return error.MissingLifecycleWriter;
+                    const effect = writer_events.items[writes];
+                    const key = try std.fmt.allocPrint(arena, "op:{d}/{s}", .{ effect.ordinal, effect.operation });
+                    if (effect.kind != .write or effect.refusal != null or !std.mem.eql(u8, effect.operation, "ora.sstore") or
+                        !std.mem.eql(u8, effect.target orelse "", location.root) or !std.mem.eql(u8, key, event.structural_key))
+                        return error.LifecycleWriterMismatch;
+                    writes += 1;
+                }
+            },
+            .safety_checkpoint => |checkpoint| {
+                if (event.id != index) return error.LifecycleGuardMismatch;
+                if (checkpoint.formulas.len != 1) return error.UnsupportedLifecycleGuard;
+                for (function.events) |effect| {
+                    if (!std.mem.eql(u8, effect.operation, "ora.refinement_guard")) continue;
+                    const key = try std.fmt.allocPrint(arena, "op:{d}/{s}", .{ effect.ordinal, effect.operation });
+                    if (!std.mem.eql(u8, key, event.structural_key)) continue;
+                    const live = snapshot.operations[effect.ordinal];
+                    if (mlir.mlirOperationGetParentOperation(live).ptr != op.ptr)
+                        return error.LifecycleGuardMismatch;
+                    try guards.append(arena, .{ .function_id = row.id, .event_id = event.id, .operation_ordinal = effect.ordinal, .hir_sha256 = try operationHash(live) });
+                    break;
+                }
+            },
+            else => return error.UnsupportedLifecycleEvent,
+        };
+        if (writes != writer_events.items.len) return error.MissingLifecycleWriter;
+    }
+    const inputs: data.ProofInputs = .{ .inventory = inventory, .functions = projection.bindings, .slots = slots, .guards = guards.items };
+    _ = try inputs.sha256(arena);
+    return inputs;
+}
+
 const Collector = struct {
     allocator: std.mem.Allocator,
     selected: []const mlir.MlirOperation,
     claims: std.ArrayList(data.Claim) = .empty,
     functions: std.ArrayList(data.Function) = .empty,
     function_ops: std.ArrayList(mlir.MlirOperation) = .empty,
+    operations: std.ArrayList(mlir.MlirOperation) = .empty,
     ordinal: u32 = 0,
 
     fn string(self: *Collector, op: mlir.MlirOperation, name: []const u8) !?[]const u8 {
@@ -148,6 +240,7 @@ const Collector = struct {
     fn walk(self: *Collector, op: mlir.MlirOperation, inherited_owner: []const u8, inherited_function: ?usize) !void {
         const ordinal = self.ordinal;
         self.ordinal = try std.math.add(u32, self.ordinal, 1);
+        try self.operations.append(self.allocator, op);
         const name_ref = mlir.oraOperationGetName(op);
         defer if (name_ref.data != null) mlir.oraStringRefFree(name_ref);
         if (name_ref.data == null) return error.MissingLifecycleOperation;
