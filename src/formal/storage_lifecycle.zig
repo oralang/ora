@@ -54,6 +54,10 @@ pub const NativeQuery = struct {
     smtlib_hash: u64,
     constraint_count: u32,
 
+    pub fn key(self: NativeQuery) NativeQueryKey {
+        return .{ .role = self.role, .claim_index = self.claim_index, .function_id = self.function_id, .event_id = self.event_id, .function_vc_sha256 = self.function_vc_sha256 };
+    }
+
     pub fn requireSuccess(self: NativeQuery) !void {
         if (self.smtlib_hash == 0 or self.constraint_count == 0) return error.LifecycleQueryMissing;
         if (self.status == .unknown or self.base_status == .unknown) return error.LifecycleQueryUnknown;
@@ -62,6 +66,93 @@ pub const NativeQuery = struct {
             (self.role != .nonvacuity and self.status != .unsat)) return error.LifecycleQueryFailed;
     }
 };
+
+pub const NativeQueryKey = struct {
+    role: @FieldType(NativeQuery, "role"),
+    claim_index: u32,
+    function_id: ?u32 = null,
+    event_id: ?u32 = null,
+    function_vc_sha256: ?Digest = null,
+};
+
+/// Evidence owned by one live consumer session, never decoded from a report.
+/// Final authority additionally checks the ordinary query and source joins.
+pub const Evidence = struct {
+    inputs_sha256: Digest,
+    native_inputs_sha256: Digest,
+    lean_inputs_sha256: Digest,
+    module_sha256: Digest,
+    targets_sha256: Digest,
+    proof_sha256: Digest,
+    checker_sha256: Digest,
+    axioms: []const []const u8,
+    native_keys: []const NativeQueryKey,
+    native_queries: []const NativeQuery,
+    functions: []const FunctionBinding,
+    slots: []const SlotBinding,
+    expected_uses: []const @import("ora_prepared_query_row").LifecycleQueryUse,
+    checked_uses: []const CheckedUse,
+    retained_checks: bool,
+
+    pub const CheckedUse = struct {
+        use: @import("ora_prepared_query_row").LifecycleQueryUse,
+        status: @FieldType(NativeQuery, "status"),
+        vacuous: bool,
+        vacuity_unknown: bool,
+        degraded: bool,
+        runtime_input: bool,
+    };
+
+    pub fn validate(self: Evidence) !void {
+        if (!self.retained_checks) return error.LifecycleChecksNotRetained;
+        if (emptyDigest(self.inputs_sha256) or emptyDigest(self.module_sha256) or
+            !std.mem.eql(u8, &self.inputs_sha256, &self.native_inputs_sha256) or
+            !std.mem.eql(u8, &self.inputs_sha256, &self.lean_inputs_sha256)) return error.LifecycleInputsMismatch;
+        if (emptyDigest(self.targets_sha256) or emptyDigest(self.proof_sha256) or emptyDigest(self.checker_sha256)) return error.MissingLifecycleCustody;
+        for (self.axioms, 0..) |axiom, i| {
+            if (!std.mem.eql(u8, axiom, "propext") and !std.mem.eql(u8, axiom, "Quot.sound")) return error.LifecycleAxiomMismatch;
+            for (self.axioms[0..i]) |prior| if (std.mem.eql(u8, prior, axiom)) return error.LifecycleAxiomMismatch;
+        }
+        try validateNativeQueries(self.native_keys, self.native_queries);
+        if (self.functions.len == 0 or self.slots.len == 0) return error.IncompleteLifecycleProofInputs;
+        if (self.expected_uses.len == 0 or self.expected_uses.len != self.checked_uses.len) return error.MissingLifecycleUse;
+        for (self.expected_uses, self.checked_uses, 0..) |expected, checked, i| {
+            if (!std.meta.eql(expected, checked.use)) return error.LifecycleUseMismatch;
+            for (self.expected_uses[0..i]) |prior| if (prior.query_index == expected.query_index) return error.DuplicateLifecycleUse;
+            const dependency = expected.dependency;
+            if (!std.mem.eql(u8, &dependency.inputs_sha256, &self.inputs_sha256) or
+                !std.mem.eql(u8, &dependency.module_sha256, &self.module_sha256) or
+                emptyDigest(dependency.function_vc_sha256) or dependency.claim_count != self.slots.len or
+                dependency.owner_ordinal != self.slots[0].owner_ordinal) return error.LifecycleEntryIdentityMismatch;
+            for (self.functions) |function| {
+                if (function.function_id == dependency.function_id and function.function_ordinal == dependency.function_ordinal and
+                    std.mem.eql(u8, &function.function_vc_sha256, &dependency.function_vc_sha256)) break;
+            } else return error.LifecycleEntryIdentityMismatch;
+            if (expected.smtlib_hash == 0 or expected.constraint_count < dependency.claim_count) return error.LifecycleQueryMissing;
+            if (checked.degraded) return error.LifecycleQueryDegraded;
+            if (checked.vacuous) return error.LifecycleQueryVacuous;
+            if (checked.vacuity_unknown or checked.status == .unknown) return error.LifecycleQueryUnknown;
+            switch (expected.kind) {
+                .base, .guard_satisfy => if (checked.status != .sat) return error.LifecycleQueryVacuous,
+                .obligation => if (checked.status != .unsat) return error.LifecycleQueryFailed,
+                .guard_violate => if (checked.status != .unsat and !(checked.status == .sat and checked.runtime_input)) return error.LifecycleQueryFailed,
+            }
+        }
+    }
+};
+
+pub fn validateNativeQueries(expected: []const NativeQueryKey, queries: []const NativeQuery) !void {
+    if (expected.len == 0 or queries.len != expected.len) return error.MissingLifecycleQuery;
+    for (expected, 0..) |key, i| {
+        for (expected[0..i]) |prior| if (std.meta.eql(prior, key)) return error.DuplicateLifecycleQuery;
+        var found: ?NativeQuery = null;
+        for (queries) |query| if (std.meta.eql(query.key(), key)) {
+            if (found != null) return error.DuplicateLifecycleQuery;
+            found = query;
+        };
+        try (found orelse return error.ForeignLifecycleQuery).requireSuccess();
+    }
+}
 
 /// Process-independent selectors, rebuilt from actual HIR operations before
 /// checking proofs. These rows grant no authority to ordinary FunctionVCs.

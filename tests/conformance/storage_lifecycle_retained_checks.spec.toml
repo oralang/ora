@@ -1,0 +1,91 @@
+[deploy]
+source = "ora-example/corpus/types/refinement/in_range_percentage.ora"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "setFeeRate(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [100]
+returns = {}
+
+[[call]]
+fn = "setRewardRate(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [50]
+returns = {}
+
+[[call]]
+fn = "getFeeRate()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 100 }
+
+[[call]]
+fn = "getRewardRate()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 50 }
+
+[[call]]
+fn = "setFeeRate(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [10001]
+gas_max = 100000
+reverts = { data = "0x000000000000000000000000000000000000000000000000000000000000000a" }
+
+[[call]]
+fn = "getFeeRate()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 100 }
+
+[[call]]
+fn = "getRewardRate()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 50 }
+
+[[call]]
+fn = "setRewardRate(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [65535]
+gas_max = 100000
+reverts = { data = "0x000000000000000000000000000000000000000000000000000000000000000a" }
+
+[[call]]
+fn = "totalRate()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 150 }
+
+[[call]]
+fn = "setFeeRate(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [10000]
+returns = {}
+
+[[call]]
+fn = "getFeeRate()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 10000 }
+
+[[call]]
+fn = "getRewardRate()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 50 }

@@ -27,6 +27,13 @@ const Solver = Z3Solver;
 const Encoder = @import("encoder.zig").Encoder;
 pub const CertifiedCallEncoder = Encoder;
 pub const CertifiedCallProvider = Encoder.CertifiedCallProvider;
+pub const LifecycleEntry = struct { dependency: prepared_query.LifecycleDependency, values: []const z3.Z3_ast, facts: []const z3.Z3_ast };
+pub const LifecycleProvider = struct {
+    data: *anyopaque,
+    begin: *const fn (*anyopaque) anyerror!void,
+    entry: *const fn (*anyopaque, *Encoder, mlir.MlirOperation) anyerror!LifecycleEntry,
+    record: *const fn (*anyopaque, []const prepared_query.LifecycleQueryUse) anyerror!void,
+};
 const errors = @import("errors.zig");
 const mlir_helpers = @import("mlir_helpers.zig");
 const refinements = @import("ora_types").refinement_semantics;
@@ -206,6 +213,8 @@ pub const VerificationPass = struct {
     minimize_cores: bool = false,
     force_unknown_query: ?ForcedUnknownQuery = null,
     formal_query_bindings: []const FormalQueryBinding = &.{},
+    lifecycle: ?LifecycleProvider = null,
+    lifecycle_entries: std.StringHashMapUnmanaged(LifecycleEntry) = .empty,
 
     /// Current function being processed (for MLIR extraction)
     current_function_name: ?[]const u8 = null,
@@ -376,6 +385,7 @@ pub const VerificationPass = struct {
     }
 
     pub fn deinit(self: *VerificationPass) void {
+        self.lifecycle_entries.deinit(self.allocator);
         for (self.function_name_storage.items) |name| {
             self.allocator.free(name);
         }
@@ -471,6 +481,8 @@ pub const VerificationPass = struct {
     /// Extract verification annotations from MLIR module
     /// This walks MLIR operations looking for ora.requires, ora.ensures, ora.invariant
     pub fn extractAnnotationsFromMLIR(self: *VerificationPass, mlir_module: mlir.MlirModule) !void {
+        self.lifecycle_entries.clearRetainingCapacity();
+        if (self.lifecycle) |provider| try provider.begin(provider.data);
         // Manifest preflight and proving may run on the same pass. Each
         // extraction is a fresh snapshot: retaining either annotations or the
         // encoder's post-function storage state can promote a post-state
@@ -721,6 +733,10 @@ pub const VerificationPass = struct {
                             }
                         }
                         self.encoder.resetFunctionState();
+                        if (self.current_function_verify_enabled) if (self.lifecycle) |provider| {
+                            const entry = try provider.entry(provider.data, &self.encoder, current_op);
+                            try self.lifecycle_entries.put(self.allocator, fn_name, entry);
+                        };
                     }
                 }
 
@@ -3412,6 +3428,8 @@ pub const VerificationPass = struct {
         for (queries, rows, source_accounting_rows, 0..) |query, *row, *source_row, index| {
             row.* = .{
                 .kind = query.kind,
+                .lifecycle_dependency = query.lifecycle_dependency,
+                .lifecycle_use = query.lifecycle_use,
                 .fragment = query.fragment,
                 .solver_logic = query.solver_logic,
                 .function_name = try arena_allocator.dupe(u8, query.function_name),
@@ -3772,7 +3790,7 @@ pub const VerificationPass = struct {
                             query.line,
                             query.column,
                         );
-                    } else if (entry.status == z3.Z3_L_FALSE) {
+                    } else if (entry.status == z3.Z3_L_FALSE and self.lifecycle == null) {
                         // Any obligation the verifier proves unsat
                         // (the bad case is impossible / the property
                         // holds). Record its position for reports and
@@ -3991,6 +4009,7 @@ pub const VerificationPass = struct {
         status: GuardErasureProofStatus,
         duplicate_guard_id: bool,
     ) bool {
+        if (self.lifecycle != null) return false;
         if (self.encoder.certified_evidence.items.len != 0) return false;
         if (!self.guardErasureEnclosingResultHealthy()) return false;
         if (!guardErasureCleanProof(status)) return false;
@@ -4764,7 +4783,7 @@ pub const VerificationPass = struct {
         const writer = &buffer.writer;
 
         try writer.writeByte('{');
-        try writer.writeAll("\"schema\":\"ora.smt.report.v1\",");
+        try writer.writeAll("\"schema\":\"ora.smt.report.v2\",");
         try writer.writeAll("\"source_file\":");
         try writeJsonStringEscaped(writer, source_file);
         try writer.writeByte(',');
@@ -5057,6 +5076,8 @@ pub const VerificationPass = struct {
             try writer.print(",\"smtlib_bytes\":{d}", .{query.smtlib_bytes});
             try writer.writeAll(",\"smtlib_hash\":");
             try writer.print("\"0x{x}\"", .{query.smtlib_hash});
+            try writer.writeAll(",\"lifecycle_use\":");
+            try std.json.Stringify.value(query.lifecycle_use, .{}, writer);
             try writer.writeAll(",\"annotation_pure\":");
             try writer.writeAll(if (query.annotation_pure) "true" else "false");
             try writer.writeAll(",\"guard_id\":");
@@ -5145,6 +5166,10 @@ pub const VerificationPass = struct {
 
     fn buildPreparedQueries(self: *VerificationPass) !ManagedArrayList(PreparedQuery) {
         var queries = ManagedArrayList(PreparedQuery).init(self.allocator);
+        errdefer {
+            for (queries.items) |*query| query.deinit(self.allocator);
+            queries.deinit();
+        }
         self.phaseLog("buildPreparedQueries start annotations={d}", .{self.encoded_annotations.items.len});
 
         var by_function = std.StringHashMap(ManagedArrayList(EncodedAnnotation)).init(self.allocator);
@@ -5248,26 +5273,32 @@ pub const VerificationPass = struct {
             }
             try materializeTrackedAssumptionProxies(self, &tracked_base_assumptions);
 
-            const base_fragment = inferQueryFragment(self.context.ctx, assumption_constraints.items);
+            const lifecycle_entry = self.lifecycle_entries.get(fn_name);
+            var base_constraints = ManagedArrayList(z3.Z3_ast).init(self.allocator);
+            defer base_constraints.deinit();
+            try addConstraintSlice(&base_constraints, assumption_constraints.items);
+            if (lifecycle_entry) |entry| try addConstraintSlice(&base_constraints, entry.facts);
+            const base_fragment = inferQueryFragment(self.context.ctx, base_constraints.items);
             const base_solver_logic = solverLogicForFragment(base_fragment);
-            const base_query = try buildSmtlibForConstraints(self.allocator, &self.solver, assumption_constraints.items, base_solver_logic);
+            const base_query = try buildSmtlibForConstraints(self.allocator, &self.solver, base_constraints.items, base_solver_logic);
             const base_smtlib = base_query.smtlib_z;
             const base_hash = std.hash.Wyhash.hash(0, base_smtlib);
-            const base_tag = try formatQueryTag(self.allocator, assumption_constraints.items.len, base_hash);
+            const base_tag = try formatQueryTag(self.allocator, base_constraints.items.len, base_hash);
             defer self.allocator.free(base_tag);
             const base_log_prefix = try std.fmt.allocPrint(self.allocator, "{s} [base]{s}", .{ fn_name, base_tag });
             try appendPreparedQueryUnique(&queries, self.allocator, .{
                 .kind = .Base,
+                .lifecycle_dependency = if (lifecycle_entry) |entry| entry.dependency else null,
                 .fragment = base_fragment,
                 .solver_logic = base_solver_logic,
                 .function_name = fn_name,
                 .file = self.firstLocationFile(annotations),
                 .line = self.firstLocationLine(annotations),
                 .column = self.firstLocationColumn(annotations),
-                .constraints = try cloneConstraintAstSlice(self.allocator, assumption_constraints.items),
+                .constraints = try cloneConstraintAstSlice(self.allocator, base_constraints.items),
                 .tracked_assumptions = try cloneTrackedAssumptionSlice(self.allocator, tracked_base_assumptions.items),
                 .smtlib_z = base_smtlib,
-                .constraint_count = assumption_constraints.items.len,
+                .constraint_count = base_constraints.items.len,
                 .smtlib_bytes = base_smtlib.len,
                 .smtlib_hash = base_hash,
                 .log_prefix = base_log_prefix,
@@ -5355,6 +5386,10 @@ pub const VerificationPass = struct {
                 try appendGoalTrackedAssumption(&tracked_obligation_assumptions, fn_name, ann, negated);
                 try materializeTrackedAssumptionProxies(self, &tracked_obligation_assumptions);
 
+                const formal_identity = try formalIdentityForAnnotation(self, ann, .Obligation);
+                const annotation_pure = preparedObligationAnnotationPure(ann, assumption_annotations.items, obligation_constraints.items.len, global_contract_invariants.items.len, formal_identity);
+                const lifecycle_dependency = try addLifecycleFacts(self, lifecycle_entry, &relevant_symbols, &obligation_constraints);
+                if (lifecycle_dependency != null and annotation_pure) return error.LifecycleCanonicalQueryUnsupported;
                 const obligation_fragment = inferQueryFragment(self.context.ctx, obligation_constraints.items);
                 const obligation_solver_logic = solverLogicForFragment(obligation_fragment);
                 const obligation_query = try buildSmtlibForConstraints(self.allocator, &self.solver, obligation_constraints.items, obligation_solver_logic);
@@ -5369,18 +5404,11 @@ pub const VerificationPass = struct {
                     "{s} [{s}]{s}{s}",
                     .{ fn_name, obligationKindLabel(ann.kind), obligation_log_suffix, obligation_tag },
                 );
-                const formal_identity = try formalIdentityForAnnotation(self, ann, .Obligation);
                 const accounting_identity = try accountingIdentityForAnnotation(self, ann, .Obligation);
                 const accounting_boundary = accountingBoundaryIdentityForAnnotation(ann);
-                const annotation_pure = preparedObligationAnnotationPure(
-                    ann,
-                    assumption_annotations.items,
-                    obligation_constraints.items.len,
-                    global_contract_invariants.items.len,
-                    formal_identity,
-                );
                 try appendPreparedQueryUnique(&queries, self.allocator, .{
                     .kind = .Obligation,
+                    .lifecycle_dependency = lifecycle_dependency,
                     .fragment = obligation_fragment,
                     .solver_logic = obligation_solver_logic,
                     .function_name = fn_name,
@@ -5763,6 +5791,8 @@ pub const VerificationPass = struct {
                     try guard_base.append(prev.condition);
                 }
 
+                const lifecycle_dependency = try addLifecycleFacts(self, lifecycle_entry, &relevant_symbols, &guard_base);
+
                 // Satisfy query
                 var satisfy_constraints = ManagedArrayList(z3.Z3_ast).init(self.allocator);
                 defer satisfy_constraints.deinit();
@@ -5784,6 +5814,7 @@ pub const VerificationPass = struct {
                 );
                 try appendPreparedQueryUnique(&queries, self.allocator, .{
                     .kind = .GuardSatisfy,
+                    .lifecycle_dependency = lifecycle_dependency,
                     .fragment = satisfy_fragment,
                     .solver_logic = satisfy_solver_logic,
                     .function_name = fn_name,
@@ -5823,6 +5854,7 @@ pub const VerificationPass = struct {
                 const violate_accounting_identity = try accountingIdentityForAnnotation(self, ann, .GuardViolate);
                 try appendPreparedQueryUnique(&queries, self.allocator, .{
                     .kind = .GuardViolate,
+                    .lifecycle_dependency = lifecycle_dependency,
                     .fragment = violate_fragment,
                     .solver_logic = violate_solver_logic,
                     .function_name = fn_name,
@@ -5851,6 +5883,22 @@ pub const VerificationPass = struct {
             self.phaseLog("buildPreparedQueries function {s} done queries_so_far={d}", .{ fn_name, queries.items.len });
         }
 
+        if (self.lifecycle) |provider| {
+            var uses: std.ArrayList(prepared_query.LifecycleQueryUse) = .empty;
+            defer uses.deinit(self.allocator);
+            for (queries.items, 0..) |*query, index| if (query.lifecycle_dependency) |dependency| {
+                const use: prepared_query.LifecycleQueryUse = .{ .dependency = dependency, .query_index = @intCast(index), .kind = switch (query.kind) {
+                    .Base => .base,
+                    .Obligation => .obligation,
+                    .GuardSatisfy => .guard_satisfy,
+                    .GuardViolate => .guard_violate,
+                    else => return error.UnsupportedLifecycleQuery,
+                }, .formal_query_id = query.formal_query_id, .accounting_query_id = query.accounting_query_id, .smtlib_hash = query.smtlib_hash, .constraint_count = @intCast(query.constraint_count) };
+                query.lifecycle_use = use;
+                try uses.append(self.allocator, use);
+            };
+            try provider.record(provider.data, uses.items);
+        }
         self.phaseLog("buildPreparedQueries done total_queries={d}", .{queries.items.len});
         return queries;
     }
@@ -7228,6 +7276,15 @@ fn annotationReferencesFreshLoopPostState(self: *VerificationPass, ann: EncodedA
     return false;
 }
 
+fn addLifecycleFacts(self: *VerificationPass, entry: ?LifecycleEntry, symbols: *const ManagedArrayList([]const u8), constraints: *ManagedArrayList(z3.Z3_ast)) !?prepared_query.LifecycleDependency {
+    const bound = entry orelse return null;
+    for (bound.values) |value| if (astUsesOnlyRelevantSymbols(self, value, symbols)) {
+        try addConstraintSlice(constraints, bound.facts);
+        return bound.dependency;
+    };
+    return null;
+}
+
 fn astUsesOnlyRelevantSymbols(
     self: *VerificationPass,
     ast: z3.Z3_ast,
@@ -7497,6 +7554,8 @@ pub const PreparedQuerySummary = struct {
 };
 
 pub const PreparedQueryManifestRow = struct {
+    lifecycle_dependency: ?prepared_query.LifecycleDependency = null,
+    lifecycle_use: ?prepared_query.LifecycleQueryUse = null,
     kind: QueryKind,
     fragment: QueryFragment = .unknown,
     solver_logic: QuerySolverLogic = .all,
@@ -8335,6 +8394,8 @@ fn writeCounterexampleJson(writer: anytype, allocator: std.mem.Allocator, ce: er
 }
 
 const PreparedQuery = struct {
+    lifecycle_dependency: ?prepared_query.LifecycleDependency = null,
+    lifecycle_use: ?prepared_query.LifecycleQueryUse = null,
     kind: QueryKind,
     loop_owner: ?u64 = null,
     fragment: QueryFragment = .unknown,
@@ -8379,6 +8440,7 @@ const PreparedQuery = struct {
 };
 
 fn preparedQueryEquivalent(lhs: PreparedQuery, rhs: PreparedQuery) bool {
+    if (!std.meta.eql(lhs.lifecycle_dependency, rhs.lifecycle_dependency)) return false;
     if (lhs.kind != rhs.kind) return false;
     if (lhs.fragment != rhs.fragment) return false;
     if (lhs.solver_logic != rhs.solver_logic) return false;

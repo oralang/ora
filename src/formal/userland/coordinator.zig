@@ -30,6 +30,8 @@ pub const Options = struct {
     process_environ: std.process.Environ,
     suppress_artifact_logs: bool = false,
     module: ?@import("mlir_c_api").c.MlirModule = null,
+    lifecycle: ?*@import("../storage_lifecycle_consume.zig").Consumer = null,
+    lifecycle_checks_retained: bool = false,
 };
 
 /// Userland proofs may authorize artifact emission only. This type
@@ -307,6 +309,9 @@ fn coordinateManifest(
         stdout,
         "Lean proof gate",
         decided_set,
+        file_path,
+        smt_report,
+        options,
     );
     if (artifact_emission_authorized and applied != null) {
         try printAcceptedLoopCertificates(stdout, decided_set, parsed_manifest.rows);
@@ -320,8 +325,18 @@ fn coordinateManifest(
 fn reportDecision(
     stdout: anytype,
     label: []const u8,
-    set: obligation.ObligationSet,
+    input_set: obligation.ObligationSet,
+    file_path: []const u8,
+    smt_report: z3_verification.SmtReportArtifacts,
+    options: Options,
 ) !bool {
+    var set = input_set;
+    if (options.lifecycle) |consumer| {
+        if (smt_report.blocksTrustedArtifacts()) return error.LifecycleNativeReportRejected;
+        const manifest = smt_report.query_manifest orelse return error.MissingLifecycleQuery;
+        set.lifecycle_evidence = try consumer.evidence(manifest.rows, set, options.lifecycle_checks_retained);
+        try consumer.writeReport(file_path, options.output_dir, set.lifecycle_evidence.?);
+    }
     return switch (set.artifactDecision()) {
         .allowed => true,
         .blocked => |reason| blk: {
@@ -559,7 +574,7 @@ fn coordinateAutomatic(
     }
     if (targets.items.len == 0) {
         return .{
-            .artifact_emission_authorized = try reportDecision(stdout, "Automatic Lean proof gate", context.merged_result.set),
+            .artifact_emission_authorized = try reportDecision(stdout, "Automatic Lean proof gate", context.merged_result.set, file_path, smt_report, options),
             .certificate_emitted = false,
         };
     }
@@ -629,6 +644,9 @@ fn coordinateAutomatic(
         stdout,
         "Automatic Lean proof gate",
         applied.?.set,
+        file_path,
+        smt_report,
+        options,
     );
     if (artifact_emission_authorized) {
         try printAcceptedLoopCertificates(stdout, applied.?.set, rows);

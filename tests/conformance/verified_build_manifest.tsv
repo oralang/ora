@@ -77,6 +77,7 @@ same-bytecode	storage_bitfield.spec.toml	-
 same-bytecode	storage_custom_bitfield.spec.toml	-
 unverifiable	storage_dynamic_array.spec.toml	contract_invariant_unproved
 same-bytecode	storage_fixed_bytes_mapping.spec.toml	-
+same-bytecode	storage_lifecycle_retained_checks.spec.toml	-
 same-bytecode	storage_map_bitfield.spec.toml	-
 same-bytecode	storage_map_struct.spec.toml	-
 unverifiable	storage_map_struct_array.spec.toml	contract_invariant_unproved

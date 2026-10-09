@@ -3614,6 +3614,24 @@ pub const Encoder = struct {
         return ast;
     }
 
+    /// Called only at a fresh function entry by the authenticated lifecycle
+    /// provider. Never constrain a post-write value or infer a carrier width.
+    pub fn lifecycleEntry(self: *Encoder, name: []const u8, ty: mlir.MlirType, width: u16, minimum: u256, maximum: u256) !struct { value: z3.Z3_ast, fact: z3.Z3_ast } {
+        if (self.global_map.contains(name) or self.global_entry_map.contains(name)) return error.LifecycleEntryAlreadyBound;
+        const sort = try self.encodeMLIRType(ty);
+        if (width == 0 or width > 256 or z3.Z3_get_sort_kind(self.context.ctx, sort) != z3.Z3_BV_SORT or
+            z3.Z3_get_bv_sort_size(self.context.ctx, sort) != width) return error.LifecycleEntrySortMismatch;
+        if (minimum > maximum or (width < 256 and maximum >> @intCast(width) != 0)) return error.LifecycleEntryBoundsMismatch;
+        const value = try self.getOrCreateGlobal(name, sort);
+        if (self.global_entry_map.get(name) != value) return error.LifecycleEntryIdentityMismatch;
+        const low = try self.encodeU256NumeralToSort(minimum, sort);
+        const high = try self.encodeU256NumeralToSort(maximum, sort);
+        var bounds = [_]z3.Z3_ast{ z3.Z3_mk_bvuge(self.context.ctx, value, low), z3.Z3_mk_bvule(self.context.ctx, value, high) };
+        const fact = z3.Z3_mk_and(self.context.ctx, bounds.len, &bounds);
+        try self.context.checkNoError();
+        return .{ .value = value, .fact = fact };
+    }
+
     fn getOrCreateEnv(self: *Encoder, name: []const u8, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
         if (self.env_map.get(name)) |existing| {
             return existing;

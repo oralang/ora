@@ -776,7 +776,8 @@
       "area": "refinements",
       "behavior": "MinValue/InRange refinement params: in-range args execute, violating args REVERT at the boundary guard",
       "specs": [
-        "tests/conformance/refinement_guard_revert.spec.toml"
+        "tests/conformance/refinement_guard_revert.spec.toml",
+        "tests/conformance/storage_lifecycle_retained_checks.spec.toml"
       ]
     },
     {

@@ -71,7 +71,7 @@ test "verified conformance manifest pins all three build classes" {
         }
     }
 
-    try testing.expectEqual(@as(usize, 60), counts[@backingInt(runner.VerifiedBuildClass.same_bytecode)]);
+    try testing.expectEqual(@as(usize, 61), counts[@backingInt(runner.VerifiedBuildClass.same_bytecode)]);
     try testing.expectEqual(@as(usize, 11), counts[@backingInt(runner.VerifiedBuildClass.rewritten)]);
     try testing.expectEqual(@as(usize, 29), counts[@backingInt(runner.VerifiedBuildClass.unverifiable)]);
 }

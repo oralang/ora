@@ -160,7 +160,7 @@ pub fn overlayPreparedQueryResults(
         // A clean proved row cannot be opened by a Lean proof and has already
         // been discharged by the SMT gate. Vacuity/caveat flags are still
         // artifact blockers, so those rows must remain visible.
-        if (unmatchedCleanUnsatRow(row)) continue;
+        if (row.lifecycle_dependency == null and row.lifecycle_use == null and unmatchedCleanUnsatRow(row)) continue;
         try appendUnmatchedRowDiagnostic(arena_allocator, &diagnostics, row);
     }
 
@@ -173,6 +173,11 @@ pub fn overlayPreparedQueryResults(
     );
 
     var merged = base;
+    var lifecycle_uses: std.ArrayList(@import("ora_prepared_query_row").LifecycleQueryUse) = .empty;
+    for (rows) |row| if (row.lifecycle_use) |use| {
+        try lifecycle_uses.append(arena_allocator, use);
+    } else if (row.lifecycle_dependency != null) return error.MissingLifecycleUse;
+    merged.lifecycle_uses = lifecycle_uses.items;
     if (base.function_summaries.len != 0) {
         const functions = try arena_allocator.dupe(obligation.FunctionSummaryRow, base.function_summaries);
         var next: obligation.Id = 1;
@@ -407,6 +412,7 @@ fn optionalFile(allocator: std.mem.Allocator, file: []const u8) !?[]const u8 {
 }
 
 fn applyRowMetadata(query: *obligation.VerificationQuery, row: z3_verification.PreparedQueryManifestRow) void {
+    query.lifecycle_use = row.lifecycle_use;
     query.backend = .z3;
     query.fragment = queryFragment(row.fragment);
     query.solver_logic = querySolverLogic(row.solver_logic);

@@ -3914,7 +3914,7 @@ test "certified call rows bind signatures ordered results returns and dependency
     var dumped = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer dumped.deinit();
     try @import("obligation_dump.zig").writeJsonLines(&dumped.writer, set);
-    for ([_][]const u8{ "\"entry_scope\":null", "\"entry_invariant_ids\":[]", "\"schema_version\":11", "\"record\":\"function_summary\"", "\"function_vc_sha256\":", "\"callee_summary_id\":1", "\"callee_vc_sha256\":", "\"returns\":{\"tag\":\"direct\"", "\"results\":[", "\"write_footprint_complete\":true" }) |text| {
+    for ([_][]const u8{ "\"entry_scope\":null", "\"entry_invariant_ids\":[]", "\"schema_version\":12", "\"record\":\"function_summary\"", "\"function_vc_sha256\":", "\"callee_summary_id\":1", "\"callee_vc_sha256\":", "\"returns\":{\"tag\":\"direct\"", "\"results\":[", "\"write_footprint_complete\":true" }) |text| {
         try std.testing.expect(std.mem.containsAtLeast(u8, dumped.written(), 1, text));
     }
     var records = std.mem.splitScalar(u8, dumped.written(), '\n');

@@ -160,4 +160,50 @@ theorem covered_step_preserves
   rcases hCoverage before after hStep with ⟨step, hMember, hNext⟩
   exact certificate.preserve step hMember before after hBefore hNext
 
+/-- Coverage is required before lifecycle preservation supplies a function-entry fact. -/
+theorem covered_certificate
+    (certificate : Certificate claims initial steps)
+    (coverage : Covers actual steps) : Certificate claims initial [actual] := by
+  refine ⟨certificate.witness, certificate.bootstrap, ?_⟩
+  intro step member before after invariant executed
+  have same : step = actual := by simpa using member
+  subst step
+  exact covered_step_preserves certificate coverage invariant executed
+
+theorem reached_entry_fact
+    (certificate : Certificate claims initial steps)
+    (coverage : Covers actual steps)
+    (started : initial start)
+    (reached : Reaches (lifecycleVC claims initial [actual]) start entry)
+    (member : claim ∈ claims) : claim.holds (entry claim.location) := by
+  exact reached_getter_fact (covered_certificate certificate coverage) started reached member
+
+theorem query_from_entry
+    (goal : StorageState → Prop)
+    (certificate : Certificate claims initial steps)
+    (coverage : Covers actual steps)
+    (started : initial start)
+    (reached : Reaches (lifecycleVC claims initial [actual]) start entry)
+    (member : claim ∈ claims)
+    (query : claim.holds (entry claim.location) → goal entry) : goal entry := by
+  exact query (reached_entry_fact certificate coverage started reached member)
+
+theorem bad_entry_cannot_be_reached
+    (certificate : Certificate claims initial steps)
+    (coverage : Covers actual steps)
+    (started : initial start)
+    (member : claim ∈ claims)
+    (bad : ¬ claim.holds (entry claim.location)) :
+    ¬ Reaches (lifecycleVC claims initial [actual]) start entry := by
+  intro reached
+  exact bad (reached_entry_fact certificate coverage started reached member)
+
+theorem bad_later_value_is_not_the_entry_value
+    (claim : Claim) (entry : StorageState) (laterValue : Value)
+    (entryFact : claim.holds (entry claim.location))
+    (bad : ¬ claim.holds laterValue) : laterValue ≠ entry claim.location := by
+  intro equal
+  subst laterValue
+  exact bad entryFact
+
 end Ora.StorageLifecycle

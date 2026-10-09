@@ -11,6 +11,366 @@ const canonical_lean = @import("formal/obligation_to_lean.zig");
 const canonical_z3 = @import("formal/obligation_to_z3.zig");
 const lifecycle_check = @import("formal/storage_lifecycle_check.zig");
 const proof_check = @import("formal/proof_check.zig");
+const lifecycle_consume = @import("formal/storage_lifecycle_consume.zig");
+
+test "SL4B structural preflight refuses whole fragments before installing facts" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const environ = try lifecycleEnviron(arena.allocator());
+    for ([_][]const u8{
+        "contract Plain { pub fn get(x: u256) -> u256 { return x; } }",
+        "contract Empty { storage var cap: MaxValue<u256, 100>; }",
+        "contract Positive { storage var cap: MinValue<u256, 1>; pub fn get() -> MinValue<u256, 1> { return cap; } }",
+        "contract A { storage var cap: MaxValue<u256, 100>; pub fn get() -> MaxValue<u256, 100> { return cap; } } contract B { storage var cap: MaxValue<u256, 100>; pub fn get() -> MaxValue<u256, 100> { return cap; } }",
+        "contract Requires { storage var cap: MaxValue<u256, 100>; pub fn get() -> MaxValue<u256, 100> requires(cap <= 100) { return cap; } }",
+    }) |source| {
+        var compilation = try helpers.compileText(source);
+        defer compilation.deinit();
+        const module = (try compilation.db.lowerToHir(compilation.root_module_id)).module.raw_module;
+        var pass = try z3.VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        var output = std.Io.Writer.Allocating.init(testing.allocator);
+        defer output.deinit();
+        var session = try lifecycle_consume.prepare(testing.allocator, module, &pass, environ, &output.writer);
+        defer if (session) |*value| value.deinit();
+        try testing.expect(session == null);
+        try testing.expect(pass.lifecycle == null and pass.lifecycle_entries.count() == 0);
+    }
+}
+
+test "SL4B owned session binds actual native entries and the complete grant" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const environ = try lifecycleEnviron(arena.allocator());
+    for ([_][]const u8{ "in_range_percentage", "in_range_u8", "max_value_in_function", "max_value_u256", "max_value_u8" }) |name| {
+        errdefer std.debug.print("SL4B native entry case {s}\n", .{name});
+        const source = try std.fmt.allocPrint(arena.allocator(), "ora-example/corpus/types/refinement/{s}.ora", .{name});
+        var compilation = try helpers.compilePackage(source);
+        defer compilation.deinit();
+        const module = (try compilation.db.lowerToHir(compilation.root_module_id)).module.raw_module;
+        var formal = try helpers.collectFormalQueryBindingsForVerifier(testing.allocator, module);
+        defer formal.formal_result.deinit();
+        defer testing.allocator.free(formal.z3_bindings);
+        var pass = try z3.VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        pass.setFormalQueryBindings(formal.z3_bindings);
+        pass.setVerifyMode(.Full);
+        var output = std.Io.Writer.Allocating.init(testing.allocator);
+        defer output.deinit();
+        var session = try lifecycle_check.Session.init(testing.allocator, module, &pass, environ, &output.writer);
+        defer session.deinit();
+        var consumer: lifecycle_consume.Consumer = .{ .session = &session };
+        pass.lifecycle = consumer.provider();
+        var before = try pass.collectPreparedQueryManifest(module);
+        defer before.deinit();
+        try testing.expect(session.uses.?.len != 0);
+        var verified = try pass.runVerificationPassPreparedSequential(module);
+        defer verified.deinit();
+        if (!verified.success) for (verified.errors.items) |err| std.debug.print("SL4B native error {any}\n", .{err});
+        try testing.expect(verified.success);
+        try testing.expectEqual(@as(usize, 0), verified.proven_guard_ids.count());
+        try testing.expectEqual(@as(usize, 0), verified.proven_guard_positions.items.len);
+        var report = try pass.buildSmtReport(module, source, &verified);
+        defer report.deinit(testing.allocator);
+        try testing.expect(!report.blocksTrustedArtifacts());
+        const rows = report.query_manifest.?.rows;
+        try testing.expectEqual(before.rows.len, rows.len);
+        for (before.rows, rows) |original, row| {
+            try testing.expectEqual(original.smtlib_hash, row.smtlib_hash);
+            try testing.expect(std.meta.eql(original.lifecycle_use, row.lifecycle_use));
+            if (row.lifecycle_use) |_| try testing.expect(row.result_status != null and row.result_status != .unknown);
+        }
+        var overlaid = try @import("formal/obligation_from_z3.zig").overlayPreparedQueryResults(testing.allocator, formal.formal_result.set, rows);
+        defer overlaid.deinit();
+        for (overlaid.set.diagnostics) |diagnostic| if (diagnostic.blocks_artifacts) {
+            std.debug.print("SL4B binding diagnostic {s}: {s}\n", .{ @tagName(diagnostic.kind), diagnostic.message });
+        };
+        try testing.expect(!overlaid.set.hasBlockingDiagnostic());
+        try consumer.validateRows(rows, overlaid.set, true);
+        try testing.expectError(error.LifecycleChecksNotRetained, consumer.validateRows(rows, overlaid.set, false));
+        const target = for (rows, 0..) |row, i| {
+            if (row.kind == .GuardViolate and row.lifecycle_use != null and row.result_status == .unsat) break i;
+        } else return error.MissingAssistedSafetyTest;
+        const changed_rows = try arena.allocator().dupe(z3.PreparedQueryManifestRow, rows);
+        const original_row = rows[target];
+        for (std.meta.tags(enum { no_use, no_dependency, wrong_hash, wrong_count, wrong_owner, wrong_file, wrong_line, wrong_kind, wrong_formal_id, wrong_accounting_id, no_result, unknown, vacuous, unknown_vacuity, degraded, no_binding, foreign_use, failed_safety })) |mutation| {
+            changed_rows[target] = original_row;
+            const changed = &changed_rows[target];
+            const expected: anyerror = switch (mutation) {
+                .no_use => blk: {
+                    changed.lifecycle_use = null;
+                    break :blk error.MissingLifecycleUse;
+                },
+                .no_dependency => blk: {
+                    changed.lifecycle_dependency = null;
+                    break :blk error.LifecycleQueryIdentityMismatch;
+                },
+                .wrong_hash => blk: {
+                    changed.smtlib_hash ^= 1;
+                    break :blk error.LifecycleQueryIdentityMismatch;
+                },
+                .wrong_count => blk: {
+                    changed.constraint_count += 1;
+                    break :blk error.LifecycleQueryIdentityMismatch;
+                },
+                .wrong_owner => blk: {
+                    changed.function_name = "foreign";
+                    break :blk error.ForeignLifecycleFunction;
+                },
+                .wrong_file => blk: {
+                    changed.file = "foreign.ora";
+                    break :blk error.LifecycleQueryIdentityMismatch;
+                },
+                .wrong_line => blk: {
+                    changed.line += 1;
+                    break :blk error.LifecycleQueryIdentityMismatch;
+                },
+                .wrong_kind => blk: {
+                    changed.kind = .Obligation;
+                    break :blk error.LifecycleQueryIdentityMismatch;
+                },
+                .wrong_formal_id => blk: {
+                    changed.formal_query_id = 999999;
+                    break :blk error.LifecycleQueryIdentityMismatch;
+                },
+                .wrong_accounting_id => blk: {
+                    changed.accounting_query_id = 999999;
+                    break :blk error.LifecycleQueryIdentityMismatch;
+                },
+                .no_result => blk: {
+                    changed.result_status = null;
+                    break :blk error.LifecycleQueryMissing;
+                },
+                .unknown => blk: {
+                    changed.result_status = .unknown;
+                    break :blk error.LifecycleQueryUnknown;
+                },
+                .vacuous => blk: {
+                    changed.vacuous = true;
+                    break :blk error.LifecycleQueryVacuous;
+                },
+                .unknown_vacuity => blk: {
+                    changed.vacuity_unknown = true;
+                    break :blk error.LifecycleQueryUnknown;
+                },
+                .degraded => blk: {
+                    changed.verified_with_caveats = true;
+                    break :blk error.LifecycleQueryDegraded;
+                },
+                .no_binding => blk: {
+                    changed.formal_match_status = .missing;
+                    break :blk error.LifecycleSourceBindingMissing;
+                },
+                .foreign_use => blk: {
+                    changed.lifecycle_use.?.dependency.owner_ordinal += 1;
+                    break :blk error.LifecycleUseMismatch;
+                },
+                .failed_safety => blk: {
+                    changed.result_status = .sat;
+                    break :blk error.LifecycleQueryIdentityMismatch;
+                },
+            };
+            errdefer std.debug.print("SL4B row {s} {s}\n", .{ name, @tagName(mutation) });
+            try testing.expectError(expected, consumer.validateRows(changed_rows, overlaid.set, true));
+        }
+        const stored = session.uses.?;
+        session.uses = stored[1..];
+        try testing.expectError(error.LifecycleUseMismatch, session.validate());
+        session.uses = stored;
+        var no_uses = overlaid.set;
+        no_uses.lifecycle_uses = &.{};
+        try testing.expectError(error.MissingLifecycleUse, consumer.validateRows(rows, no_uses, true));
+        var no_queries = overlaid.set;
+        no_queries.queries = &.{};
+        try testing.expectError(error.LifecycleSourceBindingMissing, consumer.validateRows(rows, no_queries, true));
+        var candidate = overlaid.set;
+        candidate.lifecycle_evidence = try consumer.evidence(rows, candidate, true);
+        try candidate.validateLifecycleEvidence();
+        try testing.expect(candidate.artifactDecision() == .allowed);
+        const evidence = candidate.lifecycle_evidence.?;
+        for (std.meta.tags(enum { no_custody, no_native, no_uses, no_results, no_checks, wrong_native_digest, wrong_lean_digest, no_proof_hash, sorry, no_functions, no_slots })) |mutation| {
+            candidate.lifecycle_evidence = evidence;
+            const item = &candidate.lifecycle_evidence.?;
+            const expected: anyerror = switch (mutation) {
+                .no_custody => blk: {
+                    candidate.lifecycle_evidence = null;
+                    break :blk error.MissingLifecycleCustody;
+                },
+                .no_native => blk: {
+                    item.native_queries = &.{};
+                    break :blk error.MissingLifecycleQuery;
+                },
+                .no_uses => blk: {
+                    item.expected_uses = &.{};
+                    break :blk error.MissingLifecycleUse;
+                },
+                .no_results => blk: {
+                    item.checked_uses = &.{};
+                    break :blk error.MissingLifecycleUse;
+                },
+                .no_checks => blk: {
+                    item.retained_checks = false;
+                    break :blk error.LifecycleChecksNotRetained;
+                },
+                .wrong_native_digest => blk: {
+                    item.native_inputs_sha256[0] ^= 1;
+                    break :blk error.LifecycleInputsMismatch;
+                },
+                .wrong_lean_digest => blk: {
+                    item.lean_inputs_sha256[0] ^= 1;
+                    break :blk error.LifecycleInputsMismatch;
+                },
+                .no_proof_hash => blk: {
+                    item.proof_sha256 = @splat(0);
+                    break :blk error.MissingLifecycleCustody;
+                },
+                .sorry => blk: {
+                    item.axioms = &.{"sorryAx"};
+                    break :blk error.LifecycleAxiomMismatch;
+                },
+                .no_functions => blk: {
+                    item.functions = &.{};
+                    break :blk error.IncompleteLifecycleProofInputs;
+                },
+                .no_slots => blk: {
+                    item.slots = &.{};
+                    break :blk error.IncompleteLifecycleProofInputs;
+                },
+            };
+            errdefer std.debug.print("SL4B evidence {s} {s}\n", .{ name, @tagName(mutation) });
+            try testing.expectError(expected, candidate.validateLifecycleEvidence());
+            try testing.expectEqual(@import("formal/obligation.zig").lifecycleBlockReason(expected), candidate.artifactDecision().blocked);
+        }
+        try testing.expectEqual(.lifecycle_custody_missing, overlaid.set.artifactDecision().blocked);
+        // Corrupt the captured native facts after the real preflight. Rebuilding
+        // a report may not silently bind a different set of solver inputs.
+        const entry = pass.lifecycle_entries.get(original_row.function_name) orelse return error.MissingEntryTest;
+        try testing.expect(std.meta.eql(entry.dependency, original_row.lifecycle_dependency.?));
+        const facts = entry.facts;
+        const first_fact = facts[0];
+        @constCast(facts)[0] = z3.z3_c.Z3_mk_true(pass.context.ctx);
+        if (pass.buildSmtReport(module, source, &verified)) |accepted| {
+            var unexpected = accepted;
+            unexpected.deinit(testing.allocator);
+            @constCast(facts)[0] = first_fact;
+            return error.CorruptedLifecycleInputsAccepted;
+        } else |err| try testing.expectEqual(error.LifecycleUseMismatch, err);
+        @constCast(facts)[0] = first_fact;
+        try session.validate();
+        const slot = session.inputs.slots[0];
+        const claim = session.inputs.inventory.claims[0];
+        const global = session.projection.snapshot.operations[slot.global_ordinal];
+        const attribute = mlir.oraOperationGetAttributeByName(global, mlir.oraStringRefCreate("type", 4));
+        const ty = mlir.oraTypeAttrGetValue(attribute);
+        const width = @import("ora_types").builtin.integerInfoByComptimeTypeId(claim.type_id.?).?.width;
+        pass.encoder.resetFunctionState();
+        try testing.expectError(error.LifecycleEntrySortMismatch, pass.encoder.lifecycleEntry(claim.root, ty, if (width == 256) 255 else 256, 0, 100));
+        try testing.expectError(error.LifecycleEntryBoundsMismatch, pass.encoder.lifecycleEntry(claim.root, ty, width, 101, 100));
+        _ = try pass.encoder.lifecycleEntry(claim.root, ty, width, 0, 100);
+        try testing.expectError(error.LifecycleEntryAlreadyBound, pass.encoder.lifecycleEntry(claim.root, ty, width, 0, 100));
+    }
+}
+
+test "SL4B every native obligation and kernel custody corruption blocks by name" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var compilation = try helpers.compileText("contract Guarded { storage var cap: MaxValue<u256, 100>; pub fn put(x: MaxValue<u256, 100>) { cap = x; } pub fn get() -> MaxValue<u256, 100> { return cap; } }");
+    defer compilation.deinit();
+    const module = (try compilation.db.lowerToHir(compilation.root_module_id)).module.raw_module;
+    var pass = try z3.VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    var output = std.Io.Writer.Allocating.init(testing.allocator);
+    defer output.deinit();
+    var session = try lifecycle_check.Session.init(testing.allocator, module, &pass, try lifecycleEnviron(arena.allocator()), &output.writer);
+    defer session.deinit();
+    const originals = try arena.allocator().dupe(data.NativeQuery, session.receipt.queries);
+    const writable = @constCast(session.receipt.queries);
+    for (originals, 0..) |original, index| {
+        for (std.meta.tags(enum { failed, unknown, unknown_base, vacuous, no_hash, no_constraints, foreign_claim, foreign_function, foreign_event, foreign_digest, changed_hash })) |mutation| {
+            writable[index] = original;
+            defer writable[index] = original;
+            const expected: anyerror = switch (mutation) {
+                .failed => blk: {
+                    writable[index].status = if (original.role == .nonvacuity) .unsat else .sat;
+                    break :blk error.LifecycleQueryFailed;
+                },
+                .unknown => blk: {
+                    writable[index].status = .unknown;
+                    break :blk error.LifecycleQueryUnknown;
+                },
+                .unknown_base => blk: {
+                    writable[index].base_status = .unknown;
+                    break :blk error.LifecycleQueryUnknown;
+                },
+                .vacuous => blk: {
+                    writable[index].base_status = .unsat;
+                    break :blk error.LifecycleQueryVacuous;
+                },
+                .no_hash => blk: {
+                    writable[index].smtlib_hash = 0;
+                    break :blk error.LifecycleQueryMissing;
+                },
+                .no_constraints => blk: {
+                    writable[index].constraint_count = 0;
+                    break :blk error.LifecycleQueryMissing;
+                },
+                .foreign_claim => blk: {
+                    writable[index].claim_index += 100;
+                    break :blk error.ForeignLifecycleQuery;
+                },
+                .foreign_function => blk: {
+                    writable[index].function_id = 10000;
+                    break :blk error.ForeignLifecycleQuery;
+                },
+                .foreign_event => blk: {
+                    writable[index].event_id = 10000;
+                    break :blk error.ForeignLifecycleQuery;
+                },
+                .foreign_digest => blk: {
+                    writable[index].function_vc_sha256 = @splat(99);
+                    break :blk error.ForeignLifecycleQuery;
+                },
+                .changed_hash => blk: {
+                    writable[index].smtlib_hash ^= 1;
+                    break :blk error.LifecycleNativeCustodyMismatch;
+                },
+            };
+            errdefer std.debug.print("SL4B native {d} {s} {s}\n", .{ index, @tagName(original.role), @tagName(mutation) });
+            try testing.expectError(expected, session.validate());
+        }
+    }
+    const query_slice = session.receipt.queries;
+    session.receipt.queries = query_slice[1..];
+    try testing.expectError(error.MissingLifecycleQuery, session.validate());
+    session.receipt.queries = query_slice;
+    writable[1] = writable[0];
+    try testing.expectError(error.DuplicateLifecycleQuery, session.validate());
+    writable[1] = originals[1];
+    inline for (.{ "inputs_sha256", "targets_sha256", "proof_sha256", "checker_sha256" }, .{ error.LifecycleInputsMismatch, error.LifecycleTargetsMismatch, error.LifecycleProofMismatch, error.LifecycleCheckerMismatch }) |field, expected| {
+        const original = @field(session.receipt.lean, field);
+        @field(session.receipt.lean, field)[0] ^= 1;
+        try testing.expectError(expected, session.validate());
+        @field(session.receipt.lean, field) = original;
+    }
+    const native_digest = session.receipt.native_inputs_sha256;
+    session.receipt.native_inputs_sha256[0] ^= 1;
+    try testing.expectError(error.LifecycleNativeInputsMismatch, session.validate());
+    session.receipt.native_inputs_sha256 = native_digest;
+    var other = try helpers.compileText("contract Foreign { storage var cap: MaxValue<u256, 100>; pub fn get() -> MaxValue<u256, 100> { return cap; } }");
+    defer other.deinit();
+    session.module = (try other.db.lowerToHir(other.root_module_id)).module.raw_module;
+    try testing.expectError(error.ForeignLifecycleCompilation, session.validate());
+    session.module = module;
+    const axioms = session.receipt.lean.axioms;
+    session.receipt.lean.axioms = &.{"sorryAx"};
+    try testing.expectError(error.LifecycleAxiomMismatch, session.validate());
+    session.receipt.lean.axioms = axioms;
+    const checker = session.receipt.lean.checker_source;
+    session.receipt.lean.checker_source = "foreign checker";
+    try testing.expectError(error.ForeignLifecycleCustody, session.validate());
+    session.receipt.lean.checker_source = checker;
+    try session.validate();
+}
 
 fn lifecycleEnviron(allocator: std.mem.Allocator) !std.process.Environ {
     var map = std.process.Environ.Map.init(allocator);

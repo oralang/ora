@@ -34,6 +34,8 @@ const formal_source_accounting = @import("formal/shared/source_accounting.zig");
 const formal_source_accounting_from_z3 = @import("formal/source_accounting_from_z3.zig");
 const formal_source_accounting_pipeline = @import("formal/source_accounting_pipeline.zig");
 const formal_userland_coordinator = @import("formal/userland/coordinator.zig");
+const formal_lifecycle_check = @import("formal/storage_lifecycle_check.zig");
+const formal_lifecycle_consume = @import("formal/storage_lifecycle_consume.zig");
 const Metrics = lib.metrics.Metrics;
 const allocation_stats = lib.lsp.allocation_stats;
 const ManagedArrayList = std.array_list.Managed;
@@ -5050,6 +5052,11 @@ fn runMlirEmitAdvanced(
     var formal_result_for_smt_report: ?formal_obligation_from_mlir.CollectResult = null;
     var source_prepared_query_manifest: ?z3_verification.PreparedQueryManifest = null;
     var z3_formal_query_bindings: []const z3_verification.FormalQueryBinding = &.{};
+    var lifecycle_verifier: ?z3_verification.VerificationPass = null;
+    var lifecycle_session: ?formal_lifecycle_check.Session = null;
+    var lifecycle_consumer: ?formal_lifecycle_consume.Consumer = null;
+    defer if (lifecycle_verifier) |*verifier| verifier.deinit();
+    defer if (lifecycle_session) |*session| session.deinit();
     defer {
         if (verification_result_opt) |*vr| vr.deinit();
         if (pending_smt_report) |*report| report.deinit(mlir_allocator);
@@ -5095,8 +5102,8 @@ fn runMlirEmitAdvanced(
     std.debug.assert(needs_lean_proof_gate == (needs_external_lean_proof_gate or needs_automatic_lean_proof_gate));
 
     if (mlir_options.verify_z3) {
-        var verifier = try z3_verification.VerificationPass.initWithProofs(mlir_allocator, mlir_options.z3_proofs);
-        defer verifier.deinit();
+        lifecycle_verifier = try z3_verification.VerificationPass.initWithProofs(mlir_allocator, mlir_options.z3_proofs);
+        const verifier = &lifecycle_verifier.?;
 
         if (mlir_options.verify_mode) |mode| {
             if (std.ascii.eqlIgnoreCase(mode, "full")) {
@@ -5117,6 +5124,26 @@ fn runMlirEmitAdvanced(
         z3_formal_query_bindings = try z3FormalQueryBindingsFromFormal(allocator, formal_result_for_smt_report.?.query_bindings);
         verifier.setFormalQueryBindings(z3_formal_query_bindings);
         if (native_calls.function_ops.len != 0) verifier.setCertifiedCalls(native_calls.provider());
+
+        // No query consumer means no request for lifecycle assistance. The
+        // ordinary verification path still decides such files independently.
+        if (z3_formal_query_bindings.len != 0) {
+            lifecycle_session = formal_lifecycle_consume.prepare(mlir_allocator, final_module, verifier, mlir_options.process_environ, stdout) catch |err| {
+                try stdout.print("error: storage lifecycle proof gate failed: {s}\n", .{@errorName(err)});
+                formal_gate_statuses.lifecycle_kernel = .rejected;
+                markUnrunFormalGatesSkipped(&formal_gate_statuses);
+                try writeFormalArtifactIndex(allocator, file_path, mlir_options, formal_gate_statuses, .blocked);
+                return error.VerificationFailed;
+            };
+            if (lifecycle_session) |*session| {
+                lifecycle_consumer = .{ .session = session };
+                verifier.lifecycle = lifecycle_consumer.?.provider();
+                needs_lean_proof_gate = true;
+                needs_automatic_lean_proof_gate = !needs_external_lean_proof_gate;
+                formal_gate_statuses.lean_userland = .not_run;
+                formal_gate_statuses.lifecycle_kernel = .not_run;
+            }
+        }
 
         // Capture the verifier's actual matched prepared-query identities for
         // the source-accounting gate. Formal pre-verifier rows alone carry no
@@ -5294,6 +5321,8 @@ fn runMlirEmitAdvanced(
                 .process_environ = mlir_options.process_environ,
                 .suppress_artifact_logs = mlir_options.suppress_artifact_logs,
                 .module = final_module,
+                .lifecycle = if (lifecycle_consumer) |*consumer| consumer else null,
+                .lifecycle_checks_retained = lifecycle_session != null,
             },
             stdout,
         ) catch |err| blk: {
@@ -5306,6 +5335,7 @@ fn runMlirEmitAdvanced(
             lean_artifact_gate_allowed = result.artifact_emission_authorized;
             formal_gate_statuses.lean_userland = if (result.artifact_emission_authorized) .accepted else .rejected;
         }
+        if (lifecycle_session != null) formal_gate_statuses.lifecycle_kernel = if (lean_artifact_gate_allowed) .accepted else .rejected;
     }
 
     if (lean_artifact_gate_failed) verification_failed = true;
@@ -5333,6 +5363,12 @@ fn runMlirEmitAdvanced(
         }
     }
     if (verification_result_opt) |*verification_result| {
+        // A Lean result cannot substitute for independent native success on
+        // an assisted compilation, including report-level failures.
+        if (lifecycle_session != null and (!verification_result.success or verification_report_blocked_artifacts)) {
+            formal_gate_statuses.lifecycle_kernel = .rejected;
+            verification_failed = true;
+        }
         const needs_unknown_recipe = !verification_result.success and hasUnknownVerificationError(verification_result);
         if (!verification_result.success and !lean_artifact_gate_allowed) {
             try printVerificationErrors(stdout, verification_result.errors.items);
@@ -5480,7 +5516,7 @@ fn runMlirEmitAdvanced(
         const refinement_guards = compiler.refinement_guards;
         if (verification_result_opt) |*vr| {
             refinement_guards.cleanupRefinementGuardsWithOptions(mlir_allocator, ctx, final_module, &vr.proven_guard_ids, .{
-                .keep_proved_checks = mlir_options.keep_proved_checks,
+                .keep_proved_checks = mlir_options.keep_proved_checks or lifecycle_session != null,
             });
         } else {
             var empty_guards = std.StringHashMap(void).init(mlir_allocator);
@@ -5491,7 +5527,7 @@ fn runMlirEmitAdvanced(
         }
     }
 
-    if (!mlir_options.keep_proved_checks) {
+    if (!mlir_options.keep_proved_checks and lifecycle_session == null) {
         if (verification_result_opt) |*vr| {
             if (vr.success) {
                 // Resource runtime-check erasure is intentionally tied only to
@@ -6308,6 +6344,7 @@ fn writeLeanDispatcherProofCertificate(
 }
 
 fn markUnrunFormalGatesSkipped(statuses: *formal_artifact_catalog.GateStatuses) void {
+    if (statuses.lifecycle_kernel == .not_run) statuses.lifecycle_kernel = .skipped;
     if (statuses.z3_userland == .not_run) statuses.z3_userland = .skipped;
     if (statuses.lean_userland == .not_run) statuses.lean_userland = .skipped;
     if (statuses.dispatcher_kernel == .not_run) statuses.dispatcher_kernel = .skipped;

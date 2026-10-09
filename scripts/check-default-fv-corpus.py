@@ -152,7 +152,7 @@ def validate_automatic_refusal(expected, actual, reports):
     require(all(r is not None for r in (smt, loops, authority, accounting)), "missing automatic-refusal report")
     require(proof is None, "automatic preflight refusal has proof report")
     require((smt["schema"], loops["schema_version"], authority["schema_version"], accounting["schema_version"]) ==
-            ("ora.smt.report.v1", 1, 2, 3), "unsupported refusal report schema")
+            ("ora.smt.report.v2", 1, 3, 3), "unsupported refusal report schema")
     require(actual["source"] == expected["source"] and
             re.fullmatch(r"[0-9a-f]{64}", expected["source_sha256"] or "") and
             actual["source_sha256"] == expected["source_sha256"], "automatic-refusal source changed")
@@ -160,11 +160,13 @@ def validate_automatic_refusal(expected, actual, reports):
     require(authority["final_artifact_authorization"] == "blocked", "automatic refusal not blocked")
     gates = authority["gates"]
     statuses = {"z3_userland": "accepted", "source_accounting_kernel": "accepted",
-                "lean_userland": "rejected", "dispatcher_kernel": "not_requested"}
+                "lean_userland": "rejected", "dispatcher_kernel": "not_requested", "lifecycle_kernel": "not_requested"}
     require(len(gates) == len(statuses) and len({g["id"] for g in gates}) == len(gates) and
             {g["id"]: g["status"] for g in gates} == statuses, "invalid automatic-refusal gates")
     require(smt["verification"]["success"] is True and not smt["errors"] and not smt["diagnostics"] and
             not smt["summary"]["failed_obligations"], "automatic refusal requires successful Z3")
+    require(not any(q.get("lifecycle_use") is not None for q in smt["queries"]) and
+            not any(a["id"] == "storage_lifecycle_report" for a in authority["artifacts"]), "assisted automatic-refusal path changed")
     queries = smt["queries"]
     kinds = {"base": "SAT", "guard_satisfy": "SAT", "obligation": "UNSAT", "loop_body_safety": "UNSAT",
              "loop_invariant_step": "UNSAT", "guard_violate": "UNSAT"}
@@ -202,6 +204,68 @@ def validate_automatic_refusal(expected, actual, reports):
     require(sorted(line for line in terminal if line.startswith("- query:")) == sorted(recipes), "automatic refusal recipe mismatch")
     require(loop_rows(loops) == actual["loops"], "forged refusal loop observation")
     require(automatic_refusal_evidence(actual, reports) == expected["automatic_refusal_evidence"], "automatic refusal evidence changed")
+
+
+_lifecycle_collections = {}
+
+
+def validate_lifecycle(actual, reports):
+    smt, _, authority, _, _ = reports
+    require(smt["schema"] == "ora.smt.report.v2" and authority["schema_version"] == 3, "unsupported lifecycle report schema")
+    gates = [g for g in authority["gates"] if g["id"] == "lifecycle_kernel"]
+    require(len(gates) == 1, "missing/duplicate lifecycle gate")
+    uses = [q["lifecycle_use"] for q in smt["queries"] if q.get("lifecycle_use") is not None]
+    artifacts = [a for a in authority["artifacts"] if a["id"] == "storage_lifecycle_report"]
+    if gates[0]["status"] == "not_requested":
+        require(not uses and not artifacts, "unrequested lifecycle assistance")
+        return
+    require(gates[0]["status"] == "accepted" and uses and len(artifacts) == 1, "unchecked lifecycle assistance")
+    collected = _lifecycle_collections.get(id(actual))
+    require(collected is not None and collected[0] is actual, "missing lifecycle collection provenance")
+    _, directory, source, exit_code, sealed = collected
+    require(actual["source"] == source and actual["exit"] == exit_code and actual["source_sha256"] == sha(ROOT / source), "lifecycle source/outcome changed")
+    require(not directory.is_symlink(), "foreign lifecycle directory")
+    suffixes = ("smt.report.json", "formal.loops.json", "formal.artifacts.json", "lean.proof.json", "formal.accounting.json")
+    require(tuple(read_report(directory, suffix) for suffix in suffixes) == tuple(reports), "lifecycle reports changed")
+    current = {p.name: sha(p) for p in directory.glob("*.json") if p.name != "run.json" and p.is_file() and not p.is_symlink()}
+    require(current == sealed, "lifecycle evidence changed after collection")
+    artifact = artifacts[0]
+    filename = Path(source).stem + ".formal.lifecycle.json"
+    require((artifact["kind"], artifact["owner"], artifact["path"]) ==
+            ("report", "lifecycle_kernel", filename), "foreign lifecycle artifact")
+    path = directory / filename
+    require(list(directory.glob("*.formal.lifecycle.json")) == [path] and path.is_file() and not path.is_symlink() and
+            path.resolve().parent == directory.resolve() and artifact["sha256"] == sha(path), "lifecycle artifact custody mismatch")
+    report = json.loads(path.read_text())
+    require(report["schema_version"] == 1 and relative_paths(report["source"]) == source, "foreign lifecycle report")
+    evidence = report["evidence"]
+    def digest(value):
+        return isinstance(value, list) and len(value) == 32 and all(type(b) is int and 0 <= b <= 255 for b in value) and any(value)
+    for key in ("inputs_sha256", "native_inputs_sha256", "lean_inputs_sha256", "module_sha256", "targets_sha256", "proof_sha256", "checker_sha256"):
+        require(digest(evidence[key]), "invalid lifecycle digest: " + key)
+    require(evidence["inputs_sha256"] == evidence["native_inputs_sha256"] == evidence["lean_inputs_sha256"], "cross-prover lifecycle mismatch")
+    require(evidence["retained_checks"] is True and set(evidence["axioms"]) <= {"propext", "Quot.sound"}, "unretained checks or unchecked lifecycle axioms")
+    native = evidence["native_queries"]
+    keys = evidence["native_keys"]
+    selectors = ("role", "claim_index", "function_id", "event_id", "function_vc_sha256")
+    require(native and collections.Counter(json.dumps({k: q[k] for k in selectors}, sort_keys=True) for q in native) == collections.Counter(json.dumps(k, sort_keys=True) for k in keys) and
+            len({json.dumps(k, sort_keys=True) for k in keys}) == len(keys), "incomplete lifecycle native coverage")
+    for query in native:
+        require(query["role"] in ("bootstrap", "prefix", "frame", "nonvacuity") and query["smtlib_hash"] > 0 and query["constraint_count"] > 0 and query["base_status"] == "sat" and
+                query["status"] == ("sat" if query["role"] == "nonvacuity" else "unsat"), "failed lifecycle native proof")
+    require(evidence["functions"] and evidence["slots"] and evidence["expected_uses"] == uses and
+            [r["use"] for r in evidence["checked_uses"]] == uses, "incomplete lifecycle use ledger")
+    for use, checked in zip(uses, evidence["checked_uses"]):
+        dependency = use["dependency"]
+        query = smt["queries"][use["query_index"]]
+        require(query["id"] == use["query_index"] + 1 and query["lifecycle_use"] == use and
+                int(query["smtlib_hash"], 16) == use["smtlib_hash"] and query["constraint_count"] == use["constraint_count"], "foreign lifecycle query use")
+        require(dependency["inputs_sha256"] == evidence["inputs_sha256"] and dependency["module_sha256"] == evidence["module_sha256"] and
+                dependency["claim_count"] == len(evidence["slots"]) and dependency["owner_ordinal"] == evidence["slots"][0]["owner_ordinal"] and
+                any(all(f[k] == dependency[k] for k in ("function_id", "function_ordinal", "function_vc_sha256")) for f in evidence["functions"]), "foreign lifecycle entry")
+        require(not any(checked[k] for k in ("vacuous", "vacuity_unknown", "degraded")) and checked["status"].upper() == query["status"], "degraded lifecycle use")
+        require(checked["status"] == ("sat" if use["kind"] in ("base", "guard_satisfy") else "unsat") or
+                (use["kind"] == "guard_violate" and checked["status"] == "sat" and checked["runtime_input"] is True), "failed lifecycle use")
 
 
 def validate_result(expected, actual, reports):
@@ -265,6 +329,7 @@ def validate_result(expected, actual, reports):
     require(gates.get("z3_userland") == "accepted", "Z3 gate not accepted")
     require(gates.get("source_accounting_kernel") == "accepted", "source accounting not accepted")
     require(accounting["decision"] == "accepted" and not accounting["failures"], "source accounting evidence rejected")
+    validate_lifecycle(actual, reports)
     if actual["loops"]:
         require(gates.get("lean_userland") == "accepted", "Lean gate not accepted")
         require(proof is not None and proof["status"] == "checked", "missing checked Lean certificate")
@@ -311,6 +376,8 @@ def run_case(compiler, name, directory, timeout, capture_automatic_refusal=False
     if capture_automatic_refusal:
         actual = CollectedRefusal(actual)
         _refusal_collections[id(actual)] = (actual, directory, name, code)
+    _lifecycle_collections[id(actual)] = (actual, directory, name, code,
+        {p.name: sha(p) for p in directory.glob("*.json") if p.name != "run.json" and p.is_file() and not p.is_symlink()})
     (directory / "run.json").write_text(json.dumps(actual, indent=2) + "\n")
     return actual, reports
 

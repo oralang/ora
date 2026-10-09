@@ -906,6 +906,7 @@ pub fn build(b: *std.Build) void {
     });
     proof_check_test_mod.addImport("ora_types", ora_types_mod);
     proof_check_test_mod.addImport("ora_z3_verification", z3_verification_mod);
+    proof_check_test_mod.addImport("ora_prepared_query_row", prepared_query_row_mod);
     const proof_check_tests = b.addTest(.{
         .name = "formal-proof-check-tests",
         .root_module = proof_check_test_mod,

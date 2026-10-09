@@ -13,10 +13,12 @@ const timeline_validation = @import("loop_timeline_validation.zig").Validator(@T
 pub const Id = u32;
 pub const TermId = u32;
 
-pub const obligation_dump_schema_version: u32 = 11;
+pub const obligation_dump_schema_version: u32 = 12;
 pub const proof_certificate_schema_version: u32 = 3;
 
 pub const ObligationSet = struct {
+    lifecycle_evidence: ?@import("storage_lifecycle.zig").Evidence = null,
+    lifecycle_uses: []const @import("ora_prepared_query_row").LifecycleQueryUse = &.{},
     obligations: []const Obligation = &.{},
     assumptions: []const Assumption = &.{},
     queries: []const VerificationQuery = &.{},
@@ -38,6 +40,9 @@ pub const ObligationSet = struct {
     }
 
     pub fn artifactDecision(self: ObligationSet) ArtifactDecision {
+        // Additive conjunction: lifecycle evidence never discharges any of the
+        // ordinary query, loop, call, binding or obligation checks below.
+        self.validateLifecycleEvidence() catch |err| return .{ .blocked = lifecycleBlockReason(err) };
         for (self.diagnostics) |diagnostic| {
             if (diagnostic.blocks_artifacts) return .{ .blocked = .blocking_diagnostic };
         }
@@ -91,6 +96,54 @@ pub const ObligationSet = struct {
         }
 
         return .allowed;
+    }
+
+    /// Validate both independently produced evidence and every exact use.
+    pub fn validateLifecycleEvidence(self: ObligationSet) !void {
+        const evidence = self.lifecycle_evidence orelse {
+            if (self.lifecycle_uses.len != 0) return error.MissingLifecycleCustody;
+            for (self.queries) |query| if (query.lifecycle_use != null) return error.MissingLifecycleCustody;
+            return;
+        };
+        try evidence.validate();
+        if (self.lifecycle_uses.len != evidence.expected_uses.len) return error.MissingLifecycleUse;
+        for (self.lifecycle_uses, evidence.checked_uses) |use, checked| {
+            if (!std.meta.eql(use, checked.use)) return error.LifecycleUseMismatch;
+            if (use.kind == .base) continue;
+            var matched: ?VerificationQuery = null;
+            for (self.queries) |query| if (query.lifecycle_use) |actual| {
+                if (!std.meta.eql(use, actual)) continue;
+                if (matched != null) return error.DuplicateLifecycleQuery;
+                matched = query;
+            };
+            const query = matched orelse return error.LifecycleSourceBindingMissing;
+            if (query.backend != .z3 or query.loop_summary_id != null or query.function_summary_id != null or
+                query.proof_requirement != .backend_result or query.artifact_policy == .diagnostic_only or
+                query.smtlib_hash != use.smtlib_hash or query.constraint_count != use.constraint_count or
+                (query.artifact_policy == .runtime_checked_input) != checked.runtime_input) return error.LifecycleQueryIdentityMismatch;
+            const kind: VerificationQueryKind = switch (use.kind) {
+                .base => .base,
+                .obligation => .obligation,
+                .guard_satisfy => .guard_satisfy,
+                .guard_violate => .guard_violate,
+            };
+            if (query.kind != kind) return error.LifecycleQueryIdentityMismatch;
+            const result = query.result orelse return error.LifecycleQueryMissing;
+            if (result.degraded) return error.LifecycleQueryDegraded;
+            if (result.vacuous) return error.LifecycleQueryVacuous;
+            if (result.vacuity_unknown or result.status == .unknown) return error.LifecycleQueryUnknown;
+            const status: VerificationQueryStatus = switch (checked.status) {
+                .sat => .sat,
+                .unsat => .unsat,
+                .unknown => .unknown,
+            };
+            if (result.status != status) return error.LifecycleQueryIdentityMismatch;
+        }
+        for (self.queries) |query| if (query.lifecycle_use) |use| {
+            for (self.lifecycle_uses) |actual| {
+                if (std.meta.eql(use, actual)) break;
+            } else return error.ForeignLifecycleUse;
+        };
     }
 
     fn callArtifactAuthorityBlockReason(self: ObligationSet) ?ArtifactBlockReason {
@@ -1059,6 +1112,7 @@ pub const Obligation = struct {
 };
 
 pub const VerificationQuery = struct {
+    lifecycle_use: ?@import("ora_prepared_query_row").LifecycleQueryUse = null,
     id: Id,
     owner: Owner,
     source: SourceRef,
@@ -1267,7 +1321,48 @@ pub const ArtifactDecision = union(enum) {
     }
 };
 
+pub fn lifecycleBlockReason(err: anyerror) ArtifactBlockReason {
+    return switch (err) {
+        error.MissingLifecycleCustody => .lifecycle_custody_missing,
+        error.LifecycleChecksNotRetained => .lifecycle_checks_not_retained,
+        error.LifecycleInputsMismatch => .lifecycle_digest_mismatch,
+        error.LifecycleAxiomMismatch => .lifecycle_axiom_mismatch,
+        error.MissingLifecycleQuery, error.LifecycleQueryMissing => .lifecycle_query_missing,
+        error.DuplicateLifecycleQuery => .lifecycle_query_duplicate,
+        error.ForeignLifecycleQuery => .lifecycle_query_foreign,
+        error.LifecycleQueryFailed => .lifecycle_query_failed,
+        error.LifecycleQueryUnknown => .lifecycle_query_unknown,
+        error.LifecycleQueryVacuous => .lifecycle_query_vacuous,
+        error.LifecycleQueryDegraded => .lifecycle_query_degraded,
+        error.IncompleteLifecycleProofInputs => .lifecycle_inputs_incomplete,
+        error.MissingLifecycleUse => .lifecycle_use_missing,
+        error.LifecycleUseMismatch => .lifecycle_use_mismatch,
+        error.DuplicateLifecycleUse => .lifecycle_use_duplicate,
+        error.ForeignLifecycleUse => .lifecycle_use_foreign,
+        error.LifecycleSourceBindingMissing => .lifecycle_source_binding_missing,
+        else => .lifecycle_identity_mismatch,
+    };
+}
+
 pub const ArtifactBlockReason = enum(u8) {
+    lifecycle_custody_missing,
+    lifecycle_checks_not_retained,
+    lifecycle_digest_mismatch,
+    lifecycle_axiom_mismatch,
+    lifecycle_query_missing,
+    lifecycle_query_duplicate,
+    lifecycle_query_foreign,
+    lifecycle_query_failed,
+    lifecycle_query_unknown,
+    lifecycle_query_vacuous,
+    lifecycle_query_degraded,
+    lifecycle_inputs_incomplete,
+    lifecycle_use_missing,
+    lifecycle_use_mismatch,
+    lifecycle_use_duplicate,
+    lifecycle_use_foreign,
+    lifecycle_identity_mismatch,
+    lifecycle_source_binding_missing,
     call_relation_unsupported,
     call_z3_relation_missing,
     call_lean_custody_missing,

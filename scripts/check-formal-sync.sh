@@ -54,10 +54,12 @@ run_emitter() {
     -Mroot="$emitter" \
     --dep ora_types \
     --dep ora_refinements \
+    --dep ora_prepared_query_row \
     -Mora_formal=src/formal.zig \
     --dep ora_refinements \
     -Mora_types=src/types/root.zig \
     -Mora_refinements=src/refinements/root.zig \
+    -Mora_prepared_query_row=src/formal/shared/prepared_query_row.zig \
     > "$snapshot"
 }
 

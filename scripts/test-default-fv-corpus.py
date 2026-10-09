@@ -24,13 +24,14 @@ class CorpusGateTests(unittest.TestCase):
         self.actual = {"exit": 0, "hex": ["count.hex"], "terminal_errors": [], "smt_errors": [],
                        "smt_diagnostics": [], "loops": corpus.loop_rows(loops)}
         self.expected = {"category": "accepted", "artifacts": 1, "explanation": "bounded counter", **self.actual}
-        smt = {"summary": {"unknown": 0, "vacuous": 0, "vacuity_unknown": 0, "inconsistent_bases": 0,
+        smt = {"schema": "ora.smt.report.v2", "summary": {"unknown": 0, "vacuous": 0, "vacuity_unknown": 0, "inconsistent_bases": 0,
                            "encoding_degraded": False, "soundness_losses": []}, "errors": [], "diagnostics": [],
                "verification": {"success": True, "verification_trust": "full"},
                "queries": [{"status": "UNSAT", "smtlib_hash": "0x1234", "vacuous": False,
                             "vacuity_unknown": False, "verified_with_caveats": False}]}
-        authority = {"final_artifact_authorization": "allowed", "gates": [
+        authority = {"schema_version": 3, "artifacts": [], "final_artifact_authorization": "allowed", "gates": [
             {"id": name, "status": "accepted"} for name in ("z3_userland", "lean_userland", "source_accounting_kernel")]}
+        authority["gates"].append({"id": "lifecycle_kernel", "status": "not_requested"})
         proof = {"status": "checked", "proof_count": 1, "proofs": [
             {"loop_summary_id": 1, "target_query_id": 5, "lean_status": "checked", "anti_vacuity_status": "proved",
              "authorization_claim": "loop_induction_and_nonvacuity", "loop_vc_sha256": "a" * 64,
@@ -329,7 +330,7 @@ class AutomaticRefusalTests(unittest.TestCase):
         self.reason = "automatic_nonlinear_arithmetic"
         self.actual.update(source=self.source, source_sha256=corpus.sha(source), exit=1, hex=[])
         smt, loops, authority, _, _ = self.reports
-        smt.update(schema="ora.smt.report.v1", source_file=self.source, settings={"timeout_ms": 60000})
+        smt.update(schema="ora.smt.report.v2", source_file=self.source, settings={"timeout_ms": 60000})
         smt["summary"].update(failed_obligations=0)
         smt["queries"][0].update(id=1, kind="loop_body_safety", function_name="count", smtlib="(assert false)")
         smt["queries"].append({**smt["queries"][0], "id": 2, "kind": "base", "status": "SAT"})
@@ -337,7 +338,7 @@ class AutomaticRefusalTests(unittest.TestCase):
         loops["loops"][0].update(certificate_required=True, loop_source_op_id=7, loop_kind="scf_while")
         loops["loops"][0]["source"]["file"] = self.source
         loops["loops"][0]["owner"].update(tag="statement", ordinal=7)
-        authority.update(schema_version=2, source=self.source, final_artifact_authorization="blocked", artifacts=[
+        authority.update(schema_version=3, source=self.source, final_artifact_authorization="blocked", artifacts=[
             {"id": "lean_obligations_source", "kind": "proof_source", "owner": "lean_userland", "path": "refusal.lean.obligations.lean"},
             {"id": "source_accounting_report", "kind": "report", "owner": "source_accounting_kernel", "path": "refusal.formal.accounting.json"}])
         authority["gates"][1]["status"] = "rejected"
@@ -686,6 +687,132 @@ class AutomaticRefusalTests(unittest.TestCase):
         self.assertFalse(run.call_args_list[1].kwargs["capture_automatic_refusal"])
         self.assertIn('"accepted": 1, "automatic_refusal": 1', captured.getvalue())
         self.assertIn("checked loops in accepted artifacts: 1", captured.getvalue())
+
+
+class LifecycleEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        base = CorpusGateTests()
+        base.setUp()
+        self.reports = base.reports
+        self.source = "ora-example/smoke.ora"
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.directory = Path(self.temp.name)
+        smt, loops, authority, _, accounting = self.reports
+        loops.update(total=0, loops=[])
+        self.reports[3] = None
+        smt.update(source_file=self.source)
+        dependency = {"inputs_sha256": [1]*32, "module_sha256": [2]*32, "function_vc_sha256": [3]*32,
+                      "function_id": 1, "function_ordinal": 3, "owner_ordinal": 0, "claim_count": 1}
+        uses = [{"dependency": dependency, "query_index": i, "kind": kind, "formal_query_id": None if i == 0 else 7,
+                 "accounting_query_id": None if i == 0 else 8, "smtlib_hash": 256+i, "constraint_count": i+1}
+                for i, kind in enumerate(("base", "guard_violate"))]
+        smt["queries"] = [{"id": i+1, "kind": use["kind"], "lifecycle_use": use, "status": "SAT" if i == 0 else "UNSAT",
+                           "smtlib_hash": hex(use["smtlib_hash"]), "constraint_count": i+1, "vacuous": False,
+                           "vacuity_unknown": False, "verified_with_caveats": False} for i, use in enumerate(uses)]
+        native = [{"role": role, "claim_index": 0, "function_id": None if role == "bootstrap" else 1,
+                   "event_id": None, "function_vc_sha256": None if role == "bootstrap" else [3]*32,
+                   "smtlib_hash": 512+i, "constraint_count": 1, "base_status": "sat",
+                   "status": "sat" if role == "nonvacuity" else "unsat"}
+                  for i, role in enumerate(("bootstrap", "frame", "nonvacuity"))]
+        evidence = {"inputs_sha256": [1]*32, "native_inputs_sha256": [1]*32, "lean_inputs_sha256": [1]*32,
+                    "module_sha256": [2]*32, "targets_sha256": [4]*32, "proof_sha256": [5]*32, "checker_sha256": [6]*32,
+                    "axioms": ["propext"], "retained_checks": True, "native_queries": native,
+                    "native_keys": [{k: q[k] for k in ("role", "claim_index", "function_id", "event_id", "function_vc_sha256")} for q in native],
+                    "functions": [{"function_id": 1, "function_ordinal": 3, "function_vc_sha256": [3]*32}],
+                    "slots": [{"claim_index": 0, "global_ordinal": 2, "owner_ordinal": 0}], "expected_uses": uses,
+                    "checked_uses": [{"use": use, "status": "sat" if i == 0 else "unsat", "vacuous": False,
+                                      "vacuity_unknown": False, "degraded": False, "runtime_input": False} for i, use in enumerate(uses)]}
+        self.lifecycle = {"schema_version": 1, "source": self.source, "evidence": evidence}
+        authority.update(source=self.source)
+        authority["gates"][-1]["status"] = "accepted"
+        self.artifact = {"id": "storage_lifecycle_report", "owner": "lifecycle_kernel", "kind": "report",
+                         "path": "smoke.formal.lifecycle.json"}
+        authority["artifacts"] = [self.artifact]
+        self.capture()
+
+    def capture(self):
+        def run(*args, **kwargs):
+            blob = json.dumps(self.lifecycle).encode()
+            (self.directory / self.artifact["path"]).write_bytes(blob)
+            self.artifact["sha256"] = hashlib.sha256(blob).hexdigest()
+            self.reports[2]["artifacts"] = [self.artifact]
+            suffixes = ("smt.report.json", "formal.loops.json", "formal.artifacts.json", "lean.proof.json", "formal.accounting.json")
+            for suffix, report in zip(suffixes, self.reports):
+                if report is not None:
+                    (self.directory / ("smoke." + suffix)).write_text(json.dumps(report))
+            (self.directory / "smoke.hex").write_text("00")
+            process = mock.Mock(returncode=0)
+            process.communicate.return_value = ("", "")
+            return process
+        with mock.patch.object(corpus.subprocess, "Popen", side_effect=run):
+            self.actual, self.reports = corpus.run_case(Path("fake-compiler"), self.source, self.directory, 120)
+        self.expected = {"category": "accepted", "artifacts": 1, "explanation": "test-only lifecycle fixture", **self.actual}
+
+    def check(self):
+        corpus.validate_result(self.expected, self.actual, self.reports)
+
+    def test_fresh_evidence_is_not_counted_as_a_loop_proof(self):
+        self.check()
+        self.assertEqual([], self.actual["loops"])
+        self.assertIsNone(self.reports[3])
+
+    def test_report_schema_is_checked_in_the_hashed_report(self):
+        self.lifecycle["schema_version"] = 2
+        self.capture()
+        with self.assertRaisesRegex(ValueError, "foreign lifecycle report"):
+            self.check()
+
+    def test_fatal_evidence_cannot_pass_even_from_fresh_collector(self):
+        original = copy.deepcopy(self.lifecycle)
+        mutations = {
+            "checks_erased": lambda e: e.update(retained_checks=False),
+            "wrong_native_digest": lambda e: e.update(native_inputs_sha256=[9]*32),
+            "no_proof": lambda e: e.update(proof_sha256=[0]*32),
+            "sorry": lambda e: e.update(axioms=["sorryAx"]),
+            "native_missing": lambda e: e.update(native_queries=[]),
+            "native_unknown": lambda e: e["native_queries"][0].update(status="unknown"),
+            "native_timeout": lambda e: e["native_queries"][0].update(base_status="unknown"),
+            "native_failed": lambda e: e["native_queries"][0].update(status="sat"),
+            "no_uses": lambda e: e.update(expected_uses=[]),
+            "foreign_entry": lambda e: e.update(functions=[]),
+            "vacuous": lambda e: e["checked_uses"][0].update(vacuous=True),
+            "degraded": lambda e: e["checked_uses"][0].update(degraded=True),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                self.lifecycle = copy.deepcopy(original)
+                mutate(self.lifecycle["evidence"])
+                self.capture()
+                with self.assertRaises((ValueError, KeyError, IndexError)):
+                    self.check()
+
+    def test_reports_hashes_and_actual_objects_are_not_custody(self):
+        self.check()
+        for change in ("actual", "owner", "kind", "body", "symlink", "duplicate"):
+            with self.subTest(change=change):
+                actual, reports = self.actual, self.reports
+                if change == "actual":
+                    actual = copy.deepcopy(actual)
+                elif change in ("owner", "kind"):
+                    reports = copy.deepcopy(reports)
+                    reports[2]["artifacts"][0][change] = "foreign"
+                else:
+                    path = self.directory / "smoke.formal.lifecycle.json"
+                    if change == "body":
+                        path.write_text("{}")
+                    elif change == "symlink":
+                        path.unlink()
+                        path.symlink_to(self.directory / "smoke.smt.report.json")
+                    else:
+                        (self.directory / "foreign.formal.lifecycle.json").write_text("{}")
+                with self.assertRaises((ValueError, KeyError)):
+                    corpus.validate_result(self.expected, actual, reports)
+                if change == "symlink":
+                    (self.directory / "smoke.formal.lifecycle.json").unlink()
+                if change == "duplicate":
+                    (self.directory / "foreign.formal.lifecycle.json").unlink()
+                self.capture()
 
 
 if __name__ == "__main__":
