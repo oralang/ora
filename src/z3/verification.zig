@@ -9438,6 +9438,91 @@ fn runExplainCheck(
     };
 }
 
+// Inspect original non-goal assumptions only. Bounded discovery is optional;
+// ambiguity, quantifiers, or a different index shape retain the original solve.
+fn sequenceWitnessIndex(allocator: std.mem.Allocator, ctx: z3.Z3_context, query: PreparedQuery) !?z3.Z3_ast {
+    var pending = ManagedArrayList(z3.Z3_ast).init(allocator);
+    defer pending.deinit();
+    for (query.constraints) |ast| {
+        if (!trackedAssumptionContainsAst(query.tracked_assumptions, ast)) try pending.append(ast);
+    }
+    for (query.tracked_assumptions) |tracked| {
+        if (tracked.tag.kind != .goal) try pending.append(tracked.ast);
+    }
+    if (pending.items.len > 256) return null;
+    var visited = std.AutoHashMap(z3.Z3_ast, void).init(allocator);
+    defer visited.deinit();
+    var candidate: ?z3.Z3_ast = null;
+    while (pending.pop()) |ast| {
+        if (visited.contains(ast)) continue;
+        if (visited.count() == 256) return null;
+        try visited.put(ast, {});
+        const kind = z3.Z3_get_ast_kind(ctx, ast);
+        if (kind == z3.Z3_QUANTIFIER_AST) return null;
+        if (kind != z3.Z3_APP_AST) continue;
+        const app = z3.Z3_to_app(ctx, ast);
+        const count = z3.Z3_get_app_num_args(ctx, app);
+        if (z3.Z3_get_decl_kind(ctx, z3.Z3_get_app_decl(ctx, app)) == z3.c.Z3_OP_SEQ_NTH) {
+            if (count != 2) return null;
+            const seq_sort = z3.Z3_get_sort(ctx, z3.Z3_get_app_arg(ctx, app, 0));
+            if (z3.Z3_get_sort_kind(ctx, seq_sort) != z3.Z3_SEQ_SORT) return null;
+            const element = z3.Z3_get_seq_sort_basis(ctx, seq_sort);
+            if (z3.Z3_get_sort_kind(ctx, element) != z3.Z3_BV_SORT or z3.Z3_get_bv_sort_size(ctx, element) != 8) return null;
+            const index = z3.Z3_get_app_arg(ctx, app, 1);
+            if (z3.Z3_get_ast_kind(ctx, index) != z3.Z3_APP_AST) return null;
+            const conversion = z3.Z3_to_app(ctx, index);
+            if (z3.Z3_get_decl_kind(ctx, z3.Z3_get_app_decl(ctx, conversion)) != z3.c.Z3_OP_BV2INT or z3.Z3_get_app_num_args(ctx, conversion) != 1) return null;
+            const symbol = z3.Z3_get_app_arg(ctx, conversion, 0);
+            const sort = z3.Z3_get_sort(ctx, symbol);
+            if (z3.Z3_get_sort_kind(ctx, sort) != z3.Z3_BV_SORT or z3.Z3_get_bv_sort_size(ctx, sort) != 256) return null;
+            if (z3.Z3_get_ast_kind(ctx, symbol) != z3.Z3_APP_AST) return null;
+            const symbol_app = z3.Z3_to_app(ctx, symbol);
+            if (z3.Z3_get_app_num_args(ctx, symbol_app) != 0 or z3.Z3_get_decl_kind(ctx, z3.Z3_get_app_decl(ctx, symbol_app)) != z3.c.Z3_OP_UNINTERPRETED) return null;
+            if (candidate) |prior| {
+                if (prior != symbol) return null;
+            }
+            candidate = symbol;
+        }
+        if (pending.items.len + count > 256) return null;
+        for (0..count) |i| try pending.append(z3.Z3_get_app_arg(ctx, app, @intCast(i)));
+    }
+    return candidate;
+}
+
+fn remainingWitnessTimeout(timeout_ms: u32, elapsed_ns: u64) ?u32 {
+    // Round elapsed time up: zero means exhausted, never Z3's unlimited timeout.
+    const spent = elapsed_ns / std.time.ns_per_ms + @intFromBool(elapsed_ns % std.time.ns_per_ms != 0);
+    if (spent >= timeout_ms) return null;
+    return timeout_ms - @as(u32, @intCast(spent));
+}
+
+fn checkPinnedSequenceWitness(solver: anytype, proxies: []const z3.Z3_ast, pin: z3.Z3_ast) !z3.Z3_lbool {
+    try solver.pushChecked();
+    const outcome: anyerror!z3.Z3_lbool = blk: {
+        solver.assertChecked(pin) catch |err| break :blk err;
+        break :blk solver.checkAssumptionsChecked(proxies);
+    };
+    // Even solver errors must pop; a failed pop itself prevents any verdict.
+    try solver.popChecked();
+    return outcome;
+}
+
+fn checkSequenceNonvacuity(self: *VerificationPass, solver: *Solver, query: PreparedQuery, proxies: []const z3.Z3_ast, timeout_ms: u32) !ExplainCheckResult {
+    const start = nowTimestamp();
+    if (try sequenceWitnessIndex(self.allocator, self.context.ctx, query)) |index| {
+        const remaining = remainingWitnessTimeout(timeout_ms, elapsedNs(start)) orelse return .{ .status = z3.Z3_L_UNDEF };
+        try solver.setTimeoutMs(remaining);
+        const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, z3.Z3_get_sort(self.context.ctx, index));
+        const pin = z3.Z3_mk_eq(self.context.ctx, index, zero);
+        // Only genuine SAT transfers to the original assumptions. This scope is
+        // already popped before fallback, core extraction, or a safety check.
+        if (try checkPinnedSequenceWitness(solver, proxies, pin) == z3.Z3_L_TRUE) return .{ .status = z3.Z3_L_TRUE };
+        const fallback = remainingWitnessTimeout(timeout_ms, elapsedNs(start)) orelse return .{ .status = z3.Z3_L_UNDEF };
+        try solver.setTimeoutMs(fallback);
+    }
+    return checkPreparedProxySet(self, solver, query, proxies);
+}
+
 fn checkPreparedQueryTrackedAssumptions(
     self: *VerificationPass,
     solver: *Solver,
@@ -9454,13 +9539,27 @@ fn checkPreparedQueryTrackedAssumptions(
         try proxies.append(proxy);
     }
 
-    if (proxies.items.len == 0) {
+    if (!include_goal) {
+        if (self.timeout_ms) |ms| {
+            if (ms != 0) {
+                const outcome = checkSequenceNonvacuity(self, solver, query, proxies.items, ms);
+                // Checked restoration also runs on every error/early return.
+                try solver.setTimeoutMs(ms);
+                return outcome;
+            }
+        }
+    }
+    return checkPreparedProxySet(self, solver, query, proxies.items);
+}
+
+fn checkPreparedProxySet(self: *VerificationPass, solver: *Solver, query: PreparedQuery, proxies: []const z3.Z3_ast) !ExplainCheckResult {
+    if (proxies.len == 0) {
         return .{
             .status = try solver.checkChecked(),
         };
     }
 
-    const status = try solver.checkAssumptionsChecked(proxies.items);
+    const status = try solver.checkAssumptionsChecked(proxies);
     if (status != z3.Z3_L_FALSE) {
         return .{ .status = status };
     }
@@ -16296,4 +16395,156 @@ test "parseLocationString prefers innermost file location from nested ora tags" 
     try testing.expectEqualStrings("test.ora", parsed.file);
     try testing.expectEqual(@as(u32, 3), parsed.line);
     try testing.expectEqual(@as(u32, 5), parsed.column);
+}
+
+// Group 3: native witness isolation and deadline regression tests.
+fn sequenceWitnessTestQuery(constraints: []const z3.Z3_ast, tracked: []const TrackedAssumption) PreparedQuery {
+    return .{ .kind = .Obligation, .function_name = "witness_owner", .file = "witness.ora", .line = 1, .column = 1, .constraints = constraints, .tracked_assumptions = tracked, .smtlib_z = "", .log_prefix = "witness" };
+}
+
+fn sequenceWitnessTestTerm(ctx: z3.Z3_context, index: z3.Z3_ast, element_width: u32, signed: bool) z3.Z3_ast {
+    const sequence = z3.Z3_mk_const(ctx, z3.Z3_mk_string_symbol(ctx, "bytes"), z3.Z3_mk_seq_sort(ctx, z3.Z3_mk_bv_sort(ctx, element_width)));
+    return z3.Z3_mk_seq_nth(ctx, sequence, z3.Z3_mk_bv2int(ctx, index, signed));
+}
+
+test "sequence witness discovery binds exact native symbol and shape" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    const ctx = pass.context.ctx;
+    const wide = z3.Z3_mk_bv_sort(ctx, 256);
+    const index = z3.Z3_mk_const(ctx, z3.Z3_mk_string_symbol(ctx, "owner_a.index"), wide);
+    const other = z3.Z3_mk_const(ctx, z3.Z3_mk_string_symbol(ctx, "owner_b.index"), wide);
+    const term = sequenceWitnessTestTerm(ctx, index, 8, false);
+    const condition = z3.Z3_mk_eq(ctx, term, z3.Z3_mk_unsigned_int64(ctx, 0, z3.Z3_mk_bv_sort(ctx, 8)));
+    var roots = [_]z3.Z3_ast{condition};
+    var query = sequenceWitnessTestQuery(&roots, &.{});
+    try testing.expectEqual(index, (try sequenceWitnessIndex(testing.allocator, ctx, query)).?);
+    // A goal alone is never used to discover a nonvacuity witness.
+    const goal = [_]TrackedAssumption{.{ .ast = condition, .tag = .{ .kind = .goal, .function_name = "other", .file = "", .line = 0, .column = 0, .label = "goal" } }};
+    query.tracked_assumptions = &goal;
+    try testing.expectEqual(@as(?z3.Z3_ast, null), try sequenceWitnessIndex(testing.allocator, ctx, query));
+    query.tracked_assumptions = &.{};
+    const narrow = z3.Z3_mk_const(ctx, z3.Z3_mk_string_symbol(ctx, "owner_a.index"), z3.Z3_mk_bv_sort(ctx, 8));
+    const expressions = [_]z3.Z3_ast{
+        sequenceWitnessTestTerm(ctx, index, 8, true),
+        sequenceWitnessTestTerm(ctx, index, 16, false),
+        sequenceWitnessTestTerm(ctx, narrow, 8, false),
+        sequenceWitnessTestTerm(ctx, z3.c.Z3_mk_bvadd(ctx, index, other), 8, false),
+        z3.Z3_mk_eq(ctx, term, sequenceWitnessTestTerm(ctx, other, 8, false)),
+        z3.Z3_mk_true(ctx),
+    };
+    for (expressions) |expression| {
+        roots[0] = expression;
+        try testing.expectEqual(@as(?z3.Z3_ast, null), try sequenceWitnessIndex(testing.allocator, ctx, query));
+    }
+    const bound = [_]z3.Z3_app{z3.Z3_to_app(ctx, index)};
+    roots[0] = z3.c.Z3_mk_forall_const(ctx, 0, 1, &bound, 0, null, condition);
+    try testing.expectEqual(@as(?z3.Z3_ast, null), try sequenceWitnessIndex(testing.allocator, ctx, query));
+    var too_many: [257]z3.Z3_ast = undefined;
+    @memset(&too_many, condition);
+    query.constraints = &too_many;
+    try testing.expectEqual(@as(?z3.Z3_ast, null), try sequenceWitnessIndex(testing.allocator, ctx, query));
+}
+
+test "sequence nonvacuity uses all original assumptions and never pins safety" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    const ctx = pass.context.ctx;
+    const wide = z3.Z3_mk_bv_sort(ctx, 256);
+    const index = z3.Z3_mk_const(ctx, z3.Z3_mk_string_symbol(ctx, "index"), wide);
+    const zero = z3.Z3_mk_unsigned_int64(ctx, 0, wide);
+    const one = z3.Z3_mk_unsigned_int64(ctx, 1, wide);
+    const term = sequenceWitnessTestTerm(ctx, index, 8, false);
+    const byte_zero = z3.Z3_mk_unsigned_int64(ctx, 0, z3.Z3_mk_bv_sort(ctx, 8));
+    const sequence_fact = z3.Z3_mk_eq(ctx, term, byte_zero);
+    const pin = z3.Z3_mk_eq(ctx, index, zero);
+    const not_pin = z3.Z3_mk_not(ctx, pin);
+    const proxy = try pass.solver.mkFreshBoolProxy("source_assumption");
+    const goal_proxy = try pass.solver.mkFreshBoolProxy("counterexample");
+    var tracked = [_]TrackedAssumption{
+        .{ .proxy = proxy, .ast = sequence_fact, .tag = .{ .kind = .requires, .function_name = "witness_owner", .file = "witness.ora", .line = 1, .column = 1, .label = "sequence fact" } },
+        .{ .proxy = goal_proxy, .ast = not_pin, .tag = .{ .kind = .goal, .function_name = "witness_owner", .file = "witness.ora", .line = 2, .column = 1, .label = "counterexample" } },
+    };
+    var roots = [_]z3.Z3_ast{ sequence_fact, not_pin, z3.Z3_mk_true(ctx) };
+    var query = sequenceWitnessTestQuery(&roots, &tracked);
+    query.smtlib_hash = 0x1234;
+    const original_roots = roots;
+    const original_tracked = tracked;
+    try assertPreparedQueryUntrackedConstraints(&pass.solver, query);
+    try assertPreparedQueryTrackedImplications(&pass, &pass.solver, query);
+    const nonvacuity = try checkPreparedQueryTrackedAssumptions(&pass, &pass.solver, query, false);
+    try testing.expectEqual(z3.Z3_L_TRUE, nonvacuity.status);
+    try testing.expectEqual(@as(c_uint, 0), z3.c.Z3_solver_get_num_scopes(ctx, pass.solver.solver));
+    // Safety is UNSAT only under the pin; the real unpinned counterexample is SAT.
+    try testing.expectEqual(z3.Z3_L_FALSE, try checkPinnedSequenceWitness(&pass.solver, &.{ proxy, goal_proxy }, pin));
+    const proof = try checkPreparedQueryTrackedAssumptions(&pass, &pass.solver, query, true);
+    try testing.expectEqual(z3.Z3_L_TRUE, proof.status);
+    try testing.expectEqual(@as(u64, 0x1234), query.smtlib_hash);
+    try testing.expectEqualSlices(z3.Z3_ast, &original_roots, &roots);
+    for (tracked, original_tracked) |actual, original| {
+        try testing.expectEqual(original.ast, actual.ast);
+        try testing.expectEqual(original.proxy, actual.proxy);
+    }
+    // An untracked constraint forbids the pin, but the original has a witness at 1.
+    roots[2] = z3.Z3_mk_eq(ctx, index, one);
+    try pass.solver.resetChecked();
+    try assertPreparedQueryUntrackedConstraints(&pass.solver, query);
+    try assertPreparedQueryTrackedImplications(&pass, &pass.solver, query);
+    try testing.expectEqual(z3.Z3_L_FALSE, try checkPinnedSequenceWitness(&pass.solver, &.{proxy}, pin));
+    const fallback = try checkPreparedQueryTrackedAssumptions(&pass, &pass.solver, query, false);
+    try testing.expectEqual(z3.Z3_L_TRUE, fallback.status);
+    // Contradict the tracked sequence fact: dropping either premise would be SAT.
+    roots[2] = z3.Z3_mk_not(ctx, sequence_fact);
+    try pass.solver.resetChecked();
+    try assertPreparedQueryUntrackedConstraints(&pass.solver, query);
+    try assertPreparedQueryTrackedImplications(&pass, &pass.solver, query);
+    const inconsistent = try checkPreparedQueryTrackedAssumptions(&pass, &pass.solver, query, false);
+    defer if (inconsistent.explain_str) |s| testing.allocator.free(s);
+    defer if (inconsistent.explain_tags.len > 0) testing.allocator.free(inconsistent.explain_tags);
+    try testing.expectEqual(z3.Z3_L_FALSE, inconsistent.status);
+    try testing.expectEqual(@as(c_uint, 0), z3.c.Z3_solver_get_num_scopes(ctx, pass.solver.solver));
+}
+
+test "sequence witness scope failures and UNKNOWN never fabricate SAT" {
+    const Mock = struct {
+        fail: enum { none, push, assertion, check, pop } = .none,
+        status: z3.Z3_lbool = z3.Z3_L_UNDEF,
+        scopes: u32 = 0,
+        fn pushChecked(self: *@This()) !void {
+            if (self.fail == .push) return error.InjectedPush;
+            self.scopes += 1;
+        }
+        fn assertChecked(self: *@This(), _: z3.Z3_ast) !void {
+            if (self.fail == .assertion) return error.InjectedAssert;
+        }
+        fn checkAssumptionsChecked(self: *@This(), _: []const z3.Z3_ast) !z3.Z3_lbool {
+            if (self.fail == .check) return error.InjectedCheck;
+            return self.status;
+        }
+        fn popChecked(self: *@This()) !void {
+            self.scopes -= 1;
+            if (self.fail == .pop) return error.InjectedPop;
+        }
+    };
+    var mock = Mock{};
+    for ([_]z3.Z3_lbool{ z3.Z3_L_UNDEF, z3.Z3_L_FALSE, z3.Z3_L_TRUE }) |status| {
+        mock.status = status;
+        try testing.expectEqual(status, try checkPinnedSequenceWitness(&mock, &.{}, null));
+        try testing.expectEqual(@as(u32, 0), mock.scopes);
+    }
+    inline for (.{ .push, .assertion, .check, .pop }, .{ error.InjectedPush, error.InjectedAssert, error.InjectedCheck, error.InjectedPop }) |failure, expected| {
+        mock.fail = failure;
+        try testing.expectError(expected, checkPinnedSequenceWitness(&mock, &.{}, null));
+        try testing.expectEqual(@as(u32, 0), mock.scopes);
+    }
+}
+
+test "sequence witness and fallback share one deadline without timeout zero" {
+    try testing.expectEqual(@as(?u32, 60000), remainingWitnessTimeout(60000, 0));
+    try testing.expectEqual(@as(?u32, 59999), remainingWitnessTimeout(60000, 1));
+    try testing.expectEqual(@as(?u32, 20000), remainingWitnessTimeout(60000, 40000 * std.time.ns_per_ms));
+    try testing.expectEqual(@as(?u32, 1), remainingWitnessTimeout(60000, 59999 * std.time.ns_per_ms));
+    try testing.expectEqual(@as(?u32, null), remainingWitnessTimeout(60000, 60000 * std.time.ns_per_ms));
+    try testing.expectEqual(@as(?u32, null), remainingWitnessTimeout(60000, std.math.maxInt(u64)));
+    try testing.expectEqual(@as(?u32, null), remainingWitnessTimeout(0, 0));
 }

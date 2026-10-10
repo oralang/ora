@@ -17363,3 +17363,52 @@ test "C10 multiplication canonical loop queries prove with real solver hashes" {
         try testing.expectEqual(@as(usize, 5), checked_count);
     }
 }
+
+test "Group 3 total unsigned bound retains independent producer safety" {
+    const cases = [_]struct { body: []const u8, diagnostic: ?[]const u8 }{
+        .{ .body = "pub fn f(x:u256) -> MinValue<u256,0> { return x; }", .diagnostic = null },
+        .{ .body = "pub fn f(x:u256) -> MinValue<u256,0> { return x + 1; }", .diagnostic = "checked addition overflow" },
+        .{ .body = "pub fn f(x:u256) -> MinValue<u256,0> { let a:[u256;2] = [1,2]; return a[x]; }", .diagnostic = "fixed-array index out of bounds" },
+        .{ .body = "fn leaf(x:u256) -> u256 requires x > 0 { return x; } pub fn f(x:u256) -> MinValue<u256,0> { return leaf(x); }", .diagnostic = "callee" },
+        .{ .body = "pub fn f(x:i256) -> MinValue<i256,0> { return x; }", .diagnostic = "refinement guard" },
+        .{ .body = "pub fn f(x:u256) -> MinValue<u256,1> { return x; }", .diagnostic = "refinement guard" },
+    };
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for (cases, 0..) |case, i| {
+        const source = try std.fmt.allocPrint(testing.allocator, "contract BoundProducer {{ {s} }}", .{case.body});
+        defer testing.allocator.free(source);
+        const filename = try std.fmt.allocPrint(testing.allocator, "producer-{d}.ora", .{i});
+        defer testing.allocator.free(filename);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = filename, .data = source });
+        const path = try pathFromTmpAlloc(testing.allocator, tmp, filename);
+        defer testing.allocator.free(path);
+        const output_name = try std.fmt.allocPrint(testing.allocator, "output-{d}", .{i});
+        defer testing.allocator.free(output_name);
+        const output = try pathFromTmpAlloc(testing.allocator, tmp, output_name);
+        defer testing.allocator.free(output);
+        const run = try runProcessWithLeanPath(testing.allocator, &.{ ORA_BINARY_REL, "emit", "--emit=smt-report,bytecode", "--out-dir", output, path });
+        defer testing.allocator.free(run.stdout);
+        defer testing.allocator.free(run.stderr);
+        errdefer std.debug.print("producer case {d}\n{s}\n{s}", .{ i, run.stdout, run.stderr });
+        try expectExited(run, if (case.diagnostic == null) 0 else 1);
+        const hex = try std.fmt.allocPrint(testing.allocator, "{s}/producer-{d}.hex", .{ output_name, i });
+        defer testing.allocator.free(hex);
+        if (case.diagnostic) |diagnostic| {
+            try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, hex, .{}));
+            try testing.expect(std.mem.indexOf(u8, run.stdout, diagnostic) != null or std.mem.indexOf(u8, run.stderr, diagnostic) != null);
+            const report_path = try std.fmt.allocPrint(testing.allocator, "{s}/producer-{d}.smt.report.json", .{ output_name, i });
+            defer testing.allocator.free(report_path);
+            const report = try tmp.dir.readFileAlloc(std.testing.io, report_path, testing.allocator, .limited(16 * 1024 * 1024));
+            defer testing.allocator.free(report);
+            const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, report, .{ .allocate = .alloc_always });
+            defer parsed.deinit();
+            var saw_sat = false;
+            for (parsed.value.object.get("queries").?.array.items) |row| {
+                if (std.mem.eql(u8, row.object.get("status").?.string, "SAT")) saw_sat = true;
+            }
+            try testing.expect(saw_sat);
+            try testing.expect(std.mem.indexOf(u8, report, "unmatched_report_row") == null);
+        } else try tmp.dir.access(std.testing.io, hex, .{});
+    }
+}

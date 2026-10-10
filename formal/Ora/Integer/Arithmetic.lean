@@ -878,4 +878,15 @@ theorem checked_i8_add_accepts_representable :
       some (BitVec.ofInt 8 (-2)) := by
   decide
 
+/-- Unsigned zero is an exact total lower bound, independently of a value's producer. -/
+theorem unsigned_zero_lower_bound (width : Nat) (value : BitVec width) :
+    (0 : BitVec width) ≤ value := by
+  change (0 : BitVec width).toNat ≤ value.toNat
+  simp
+
+/-- The rewrite supplies a genuine value-level proposition, not a loop result. -/
+theorem unsigned_zero_predicate (width : Nat) (value : BitVec width) :
+    decide ((0 : BitVec width) ≤ value) = true := by
+  exact decide_eq_true (unsigned_zero_lower_bound width value)
+
 end Ora.Integer

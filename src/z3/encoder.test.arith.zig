@@ -570,3 +570,57 @@ test "unsigned mul overflow check uses narrow width for constant multiplier boun
     overflow_lhs_const_solver.assert(z3.Z3_mk_not(z3_ctx.ctx, lhs_const_overflow));
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), overflow_lhs_const_solver.check());
 }
+
+test "unsigned zero lower bound folds exactly without inventing producer values" {
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    for ([_]u32{ 1, 8, 16, 32, 64, 128, 160, 256 }) |width| {
+        var ctx = try Context.init(testing.allocator);
+        defer ctx.deinit();
+        var encoder = Encoder.init(&ctx, testing.allocator);
+        defer encoder.deinit();
+        const ty = mlir.oraIntegerTypeCreate(mlir_ctx, width);
+        // An unsupported producer distinguishes early identity from broad reduction.
+        const result_types = [_]mlir.MlirType{ty};
+        const producer = mlir.oraOperationCreate(mlir_ctx, loc, stringRef("group3.unsupported"), null, 0, &result_types, 1, null, 0, 0, false);
+        const lhs = mlir.oraOperationGetResult(producer, 0);
+        const literal = mlir.oraArithConstantOpCreate(mlir_ctx, loc, ty, mlir.oraIntegerAttrCreateI64FromType(ty, 0));
+        const cmp = mlir.oraArithCmpIOpCreate(mlir_ctx, loc, 9, lhs, mlir.oraOperationGetResult(literal, 0));
+        const encoded = try encoder.encodeOperation(cmp);
+        try testing.expectEqual(z3.Z3_L_TRUE, z3.c.Z3_get_bool_value(ctx.ctx, encoded));
+        try testing.expect(!encoder.isDegraded());
+        // Folding the consumer did not install a fake value for its producer.
+        try testing.expectError(error.UnsupportedOperation, encoder.encodeValue(lhs));
+    }
+}
+
+test "unsigned zero fold refuses signed positive nonliteral and mismatched forms" {
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    for (0..5) |case| {
+        var ctx = try Context.init(testing.allocator);
+        defer ctx.deinit();
+        var encoder = Encoder.init(&ctx, testing.allocator);
+        defer encoder.deinit();
+        const result_types = [_]mlir.MlirType{ty};
+        const producer = mlir.oraOperationCreate(mlir_ctx, loc, stringRef("group3.unsupported"), null, 0, &result_types, 1, null, 0, 0, false);
+        const lhs = mlir.oraOperationGetResult(producer, 0);
+        const bound_ty = if (case == 3) mlir.oraIntegerTypeCreate(mlir_ctx, 8) else ty;
+        const zero_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, bound_ty, mlir.oraIntegerAttrCreateI64FromType(bound_ty, if (case == 1) 1 else 0));
+        const zero = mlir.oraOperationGetResult(zero_op, 0);
+        const rhs = if (case == 2) mlir.oraOperationGetResult(mlir.oraArithAddIOpCreate(mlir_ctx, loc, zero, zero), 0) else zero;
+        if (case == 4) mlir.oraOperationSetAttributeByName(zero_op, stringRef("value"), mlir.oraStringAttrCreate(mlir_ctx, stringRef("0")));
+        const operands = [_]mlir.MlirValue{ lhs, rhs };
+        const cmp_results = [_]mlir.MlirType{mlir.oraIntegerTypeCreate(mlir_ctx, 1)};
+        const attrs = [_]mlir.MlirNamedAttribute{namedAttr(mlir_ctx, "predicate", mlir.oraIntegerAttrCreateI64FromType(mlir.oraIntegerTypeCreate(mlir_ctx, 64), if (case == 0) 5 else 9))};
+        const cmp = mlir.oraOperationCreate(mlir_ctx, loc, stringRef("arith.cmpi"), &operands, 2, &cmp_results, 1, &attrs, 1, 0, false);
+        try testing.expectError(error.UnsupportedOperation, encoder.encodeOperation(cmp));
+    }
+}

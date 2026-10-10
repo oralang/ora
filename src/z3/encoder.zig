@@ -5085,6 +5085,11 @@ pub const Encoder = struct {
             return try self.encodeComputedStorageRangeEraseOp(mlir_op, mode);
         }
 
+        // This total identity needs no value summary; producer safety remains independent.
+        if (std.mem.eql(u8, op_name, "arith.cmpi") and self.isUnsignedZeroLowerBound(mlir_op)) {
+            return z3.Z3_mk_true(self.context.ctx);
+        }
+
         // get number of operands
         const num_operands = mlir.oraOperationGetNumOperands(mlir_op);
 
@@ -5105,6 +5110,28 @@ pub const Encoder = struct {
             }
             return err;
         };
+    }
+
+    fn isUnsignedZeroLowerBound(self: *Encoder, op: mlir.MlirOperation) bool {
+        if (mlir.oraOperationGetNumOperands(op) != 2 or mlir.oraOperationGetNumResults(op) != 1) return false;
+        const predicate = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate("predicate", 9));
+        if (mlir.oraAttributeIsNull(predicate) or mlir.oraIntegerAttrGetValueSInt(predicate) != 9) return false;
+        const lhs = mlir.oraOperationGetOperand(op, 0);
+        const rhs = mlir.oraOperationGetOperand(op, 1);
+        const ty = mlir.oraValueGetType(lhs);
+        if (!mlir.oraTypeIsAInteger(ty) or !mlir.oraTypeEqual(ty, mlir.oraValueGetType(rhs))) return false;
+        const width = mlir.oraIntegerTypeGetWidth(ty);
+        if (width < 1 or width > 256) return false;
+        const result_ty = mlir.oraValueGetType(mlir.oraOperationGetResult(op, 0));
+        if (!mlir.oraTypeIsAInteger(result_ty) or mlir.oraIntegerTypeGetWidth(result_ty) != 1) return false;
+        if (!mlir.oraValueIsAOpResult(rhs)) return false;
+        const literal = mlir.oraOpResultGetOwner(rhs);
+        if (!self.operationNameEq(literal, "arith.constant") or mlir.oraOperationGetNumOperands(literal) != 0) return false;
+        const value = mlir.oraOperationGetAttributeByName(literal, mlir.oraStringRefCreate("value", 5));
+        if (mlir.oraAttributeIsNull(value)) return false;
+        const text = mlir.oraIntegerAttrGetValueString(value);
+        defer if (text.data != null) @import("mlir_c_api").freeStringRef(text);
+        return text.data != null and std.mem.eql(u8, text.data[0..text.length], "0");
     }
 
     /// Encode an MLIR value to Z3 AST (with caching)
