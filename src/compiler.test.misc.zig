@@ -3030,7 +3030,7 @@ test "stale flagship probes remain non-degraded" {
     const probes = [_]struct { path: []const u8, function_name: []const u8, timeout_ms: u32, expect_success: bool }{
         .{ .path = "ora-example/apps/erc20_verified.ora", .function_name = "transferFrom", .timeout_ms = 5_000, .expect_success = true },
         .{ .path = "ora-example/apps/defi_lending_pool.ora", .function_name = "borrow", .timeout_ms = 15_000, .expect_success = true },
-        .{ .path = "ora-example/apps/defi_lending_pool_fv.ora", .function_name = "borrow", .timeout_ms = 15_000, .expect_success = true },
+        .{ .path = "ora-example/apps/defi_lending_pool_fv.ora", .function_name = "borrow", .timeout_ms = 15_000, .expect_success = false },
     };
 
     for (probes) |probe| {
@@ -3043,7 +3043,7 @@ test "stale flagship probes remain non-degraded" {
             try testing.expectEqual(@as(usize, 0), result.errors_len);
         } else {
             try testing.expect(result.errors_len > 0);
-            try testing.expect(std.mem.indexOf(u8, result.error_kinds, "PreconditionViolation") != null);
+            try testing.expect(std.mem.indexOf(u8, result.error_kinds, "UnbootstrappedContractInvariant") != null);
         }
     }
 }

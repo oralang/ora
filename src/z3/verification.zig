@@ -215,6 +215,7 @@ pub const VerificationPass = struct {
     formal_query_bindings: []const FormalQueryBinding = &.{},
     lifecycle: ?LifecycleProvider = null,
     lifecycle_entries: std.StringHashMapUnmanaged(LifecycleEntry) = .empty,
+    unbootstrapped_invariant: ?mlir.MlirOperation = null,
 
     /// Current function being processed (for MLIR extraction)
     current_function_name: ?[]const u8 = null,
@@ -482,7 +483,6 @@ pub const VerificationPass = struct {
     /// This walks MLIR operations looking for ora.requires, ora.ensures, ora.invariant
     pub fn extractAnnotationsFromMLIR(self: *VerificationPass, mlir_module: mlir.MlirModule) !void {
         self.lifecycle_entries.clearRetainingCapacity();
-        if (self.lifecycle) |provider| try provider.begin(provider.data);
         // Manifest preflight and proving may run on the same pass. Each
         // extraction is a fresh snapshot: retaining either annotations or the
         // encoder's post-function storage state can promote a post-state
@@ -492,6 +492,8 @@ pub const VerificationPass = struct {
         self.releaseActivePathAssumptionsFrom(0);
         self.encoder.resetFunctionState();
         self.semantic_constraint_tags.clearRetainingCapacity();
+        try self.refuseUnbootstrappedInvariants(mlir_module);
+        if (self.lifecycle) |provider| try provider.begin(provider.data);
         // Unfiltered full-contract verification checks every function body in
         // the artifact once. Targeted verification intentionally narrows that
         // set, so call summaries must replay callee-local obligations into the
@@ -512,6 +514,36 @@ pub const VerificationPass = struct {
             const region = mlir.oraOperationGetRegion(module_op, @intCast(region_idx));
             try self.walkMLIRRegion(region);
         }
+    }
+
+    // Global invariants have no authenticated initialization/preservation proof.
+    // Inspect live operations, including unused contracts, before any encoding.
+    fn findGlobalInvariant(self: *VerificationPass, op: mlir.MlirOperation) anyerror!?mlir.MlirOperation {
+        const name_ref = self.getMLIROperationName(op);
+        defer mlir_c_api.freeStringRef(name_ref);
+        const name = if (name_ref.data == null) "" else name_ref.data[0..name_ref.length];
+        if (std.mem.eql(u8, name, "ora.invariant") and !try annotationHasLocalScope(op)) return op;
+        for (0..@intCast(mlir.oraOperationGetNumRegions(op))) |i| {
+            const region = mlir.oraOperationGetRegion(op, @intCast(i));
+            var block = mlir.oraRegionGetFirstBlock(region);
+            while (!mlir.oraBlockIsNull(block)) : (block = mlir.oraBlockGetNextInRegion(block)) {
+                var child = mlir.oraBlockGetFirstOperation(block);
+                while (!mlir.oraOperationIsNull(child)) : (child = mlir.oraOperationGetNextInBlock(child)) {
+                    if (try self.findGlobalInvariant(child)) |found| return found;
+                }
+            }
+        }
+        return null;
+    }
+
+    fn refuseUnbootstrappedInvariants(self: *VerificationPass, module: mlir.MlirModule) !void {
+        self.unbootstrapped_invariant = null;
+        self.unbootstrapped_invariant = try self.findGlobalInvariant(mlir.oraModuleGetOperation(module));
+        if (self.unbootstrapped_invariant == null) return;
+        // A report may reuse a pass containing another module's annotations.
+        self.clearEncodedAnnotations();
+        self.lifecycle_entries.clearRetainingCapacity();
+        return error.UnbootstrappedContractInvariant;
     }
 
     fn getStringAttrSlice(_: *VerificationPass, op: mlir.MlirOperation, name: []const u8) ?[]const u8 {
@@ -2226,6 +2258,7 @@ pub const VerificationPass = struct {
                     .function_name = function_name,
                     .kind = annotation_kind,
                     .condition = guarded_obligation,
+                    .scope_op = op,
                     .extra_constraints = try self.cloneConstraintSlice(leaked_constraints),
                     .path_constraints = try self.cloneConstraintSlice(path_constraints),
                     .old_condition = null,
@@ -2263,7 +2296,7 @@ pub const VerificationPass = struct {
 
         for (0..original_len) |annotation_index| {
             const ann = self.encoded_annotations.items[annotation_index];
-            if (!isGlobalContractInvariantAnnotation(ann)) continue;
+            if (!try isGlobalContractInvariantAnnotation(ann)) continue;
             const condition_value = ann.condition_value orelse continue;
 
             // Re-encode the top-level invariant expression after the function
@@ -2286,6 +2319,7 @@ pub const VerificationPass = struct {
                 .condition = encoded,
                 .condition_value = condition_value,
                 .source_op = ann.source_op,
+                .scope_op = ann.scope_op,
                 .extra_constraints = extra_constraints,
                 .path_constraints = &[_]z3.Z3_ast{},
                 .old_condition = null,
@@ -2561,6 +2595,7 @@ pub const VerificationPass = struct {
                 .condition = guarded_obligation,
                 .condition_value = null,
                 .source_op = null,
+                .scope_op = op,
                 .extra_constraints = obligation_extra_constraints,
                 .path_constraints = try self.cloneConstraintSlice(path_constraints),
                 .old_condition = null,
@@ -3285,7 +3320,10 @@ pub const VerificationPass = struct {
             return result;
         }
         self.phaseLog("prepared-sequential build-queries begin", .{});
-        var queries = try self.buildPreparedQueries();
+        var queries = self.buildPreparedQueries() catch |err| {
+            if (err == error.UnbootstrappedContractInvariant) return self.annotationExtractionFailureResult(err);
+            return err;
+        };
         defer {
             for (queries.items) |*query| {
                 query.deinit(self.allocator);
@@ -4097,6 +4135,11 @@ pub const VerificationPass = struct {
         source_file: []const u8,
         verification_result: ?*const errors.VerificationResult,
     ) !SmtReportArtifacts {
+        self.refuseUnbootstrappedInvariants(mlir_module) catch |err| {
+            var result = try self.annotationExtractionFailureResult(err);
+            defer result.deinit();
+            return self.buildVerificationFailureSmtReport(source_file, &result);
+        };
         self.report_resource_events.clearRetainingCapacity();
         try self.collectResourceEffectEvents(mlir_module);
 
@@ -4123,7 +4166,12 @@ pub const VerificationPass = struct {
         }
 
         self.phaseLog("report build-queries begin", .{});
-        var queries = try self.buildPreparedQueries();
+        var queries = self.buildPreparedQueries() catch |err| {
+            if (err != error.UnbootstrappedContractInvariant) return err;
+            var result = try self.annotationExtractionFailureResult(err);
+            defer result.deinit();
+            return self.buildVerificationFailureSmtReport(source_file, &result);
+        };
         defer {
             for (queries.items) |*query| {
                 query.deinit(self.allocator);
@@ -5185,9 +5233,10 @@ pub const VerificationPass = struct {
         defer global_contract_invariants.deinit();
 
         for (self.encoded_annotations.items) |ann| {
-            if (isGlobalContractInvariantAnnotation(ann)) {
-                try global_contract_invariants.append(ann);
-                continue;
+            if (try isGlobalContractInvariantAnnotation(ann)) {
+                // No cached/global annotation may reach the assumption fanout.
+                self.unbootstrapped_invariant = ann.source_op;
+                return error.UnbootstrappedContractInvariant;
             }
             const entry = try by_function.getOrPut(ann.function_name);
             if (!entry.found_existing) {
@@ -6169,6 +6218,19 @@ pub const VerificationPass = struct {
 
     fn annotationExtractionFailureResult(self: *VerificationPass, err: anyerror) !errors.VerificationResult {
         var result = errors.VerificationResult.init(self.allocator);
+        if (err == error.UnbootstrappedContractInvariant) {
+            const loc = if (self.unbootstrapped_invariant) |op| try self.getLocationInfo(op) else null;
+            try result.addError(.{
+                .error_type = .UnbootstrappedContractInvariant,
+                .message = try self.allocator.dupe(u8, "UnbootstrappedContractInvariant: global contract invariant requires authenticated initialization and preservation; no bytecode is authorized"),
+                .file = try self.allocator.dupe(u8, if (loc) |value| value.file else ""),
+                .line = if (loc) |value| value.line else 0,
+                .column = if (loc) |value| value.column else 0,
+                .counterexample = null,
+                .allocator = self.allocator,
+            });
+            return result;
+        }
         const encoder_reason = self.encoder.degradationReason();
         const z3_message = duplicateZ3ApiMessageOrNull(self.context, self.allocator, err);
         defer if (z3_message) |msg| self.allocator.free(msg);
@@ -6483,6 +6545,8 @@ const EncodedAnnotation = struct {
     condition: z3.Z3_ast,
     condition_value: ?mlir.MlirValue = null,
     source_op: ?mlir.MlirOperation = null,
+    // Native generator context for scope only; never a canonical query source.
+    scope_op: ?mlir.MlirOperation = null,
     extra_constraints: []const z3.Z3_ast,
     path_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{},
     old_condition: ?z3.Z3_ast = null,
@@ -6530,10 +6594,26 @@ fn isObligationKind(kind: AnnotationKind) bool {
     };
 }
 
-fn isGlobalContractInvariantAnnotation(ann: EncodedAnnotation) bool {
-    return ann.kind == .ContractInvariant and
-        ann.loop_owner == null and
-        std.mem.eql(u8, ann.function_name, "unknown");
+// The closest structural boundary owns the annotation, never a name sentinel.
+fn annotationHasLocalScope(op: mlir.MlirOperation) !bool {
+    var block = mlir.mlirOperationGetBlock(op);
+    while (!mlir.oraBlockIsNull(block)) {
+        const parent = mlir.mlirBlockGetParentOperation(block);
+        if (mlir.oraOperationIsNull(parent)) break;
+        const name_ref = mlir.oraOperationGetName(parent);
+        defer mlir_c_api.freeStringRef(name_ref);
+        const name = if (name_ref.data == null) "" else name_ref.data[0..name_ref.length];
+        if (std.mem.eql(u8, name, "ora.contract") or std.mem.eql(u8, name, "builtin.module")) return false;
+        if (std.mem.eql(u8, name, "func.func") or std.mem.eql(u8, name, "scf.for") or std.mem.eql(u8, name, "scf.while")) return true;
+        block = mlir.mlirOperationGetBlock(parent);
+    }
+    return error.UnbootstrappedContractInvariant;
+}
+
+fn isGlobalContractInvariantAnnotation(ann: EncodedAnnotation) !bool {
+    if (ann.kind != .ContractInvariant) return false;
+    const op = ann.source_op orelse ann.scope_op orelse return error.UnbootstrappedContractInvariant;
+    return !try annotationHasLocalScope(op);
 }
 
 fn isImportedCalleeEnsuresAnnotation(ann: EncodedAnnotation) bool {
@@ -12130,38 +12210,219 @@ test "sequential verification continues past failing ensures to check loop-post"
     try testing.expectEqual(@as(usize, 0), loop_post_errors);
 }
 
-test "global contract invariants attach to real functions instead of unknown" {
+fn expectTier1Refusal(result: *const VerificationResult) !void {
+    try testing.expect(!result.success);
+    try testing.expectEqual(@as(usize, 1), result.errors.items.len);
+    try testing.expectEqual(errors.VerificationErrorType.UnbootstrappedContractInvariant, result.errors.items[0].error_type);
+    try testing.expectEqual(@as(usize, 0), result.proven_guard_ids.count());
+}
+
+fn expectTier1Report(report: SmtReportArtifacts) !void {
+    try testing.expect(report.blocksTrustedArtifacts());
+    try testing.expect(report.query_manifest == null);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, report.json, .{});
+    defer parsed.deinit();
+    const object = parsed.value.object;
+    try testing.expectEqual(@as(usize, 0), object.get("queries").?.array.items.len);
+    try testing.expect(!object.get("verification").?.object.get("success").?.bool);
+    try testing.expect(!object.get("summary").?.object.get("encoding_degraded").?.bool);
+    try testing.expect(std.mem.indexOf(u8, report.json, "UnbootstrappedContractInvariant") != null);
+}
+
+test "S1 Tier1 recursive scope and repeated pass no bypass matrix" {
+    const ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(ctx);
+    testLoadAllDialects(ctx);
+    _ = mlir.oraDialectRegister(ctx);
+    mlir.oraContextSetAllowUnregisteredDialects(ctx, true);
+    const scopes = [_]struct { prefix: []const u8, suffix: []const u8 }{
+        .{ .prefix = "module {", .suffix = "}" },
+        .{ .prefix = "module { ora.contract @Unused {", .suffix = "} }" },
+        .{ .prefix = "module { module @Unused {", .suffix = "} }" },
+        .{ .prefix = "module { \"test.dead_region\"() ({", .suffix = "}) : () -> () }" },
+        .{ .prefix = "module { func.func @unused() { ora.contract @Nested {", .suffix = "} return } }" },
+    };
+    const attributes = [_][]const u8{ "", "{ora.label = \"fake\", ora.source_fact_kind = \"loop_invariant\"}" };
+    for (scopes) |scope| for (attributes) |attrs| for ([_]bool{ true, false }) |predicate| {
+        const text = try std.fmt.allocPrint(testing.allocator, "{s} %c = arith.constant {s} ora.invariant %c {s} : i1 loc(\"tier1.ora\":7:3) {s}", .{ scope.prefix, if (predicate) "true" else "false", attrs, scope.suffix });
+        defer testing.allocator.free(text);
+        const module = mlir.oraModuleCreateParse(ctx, mlir.oraStringRefCreate(text.ptr, text.len));
+        try testing.expect(!mlir.oraModuleIsNull(module));
+        defer mlir.oraModuleDestroy(module);
+        for ([_]VerificationPass.VerifyMode{ .Full, .Basic }) |mode| {
+            var pass = try VerificationPass.init(testing.allocator);
+            defer pass.deinit();
+            pass.setVerifyMode(mode);
+            pass.filter_function_name = "absent"; // Must not hide unused/no-function roots.
+            try testing.expectError(error.UnbootstrappedContractInvariant, pass.collectPreparedQuerySummary(module));
+            try testing.expectError(error.UnbootstrappedContractInvariant, pass.collectPreparedQueryManifest(module));
+            try testing.expectError(error.UnbootstrappedContractInvariant, pass.collectLoopQueryCensus(module));
+            for (0..2) |_| {
+                var result = try pass.runVerificationPass(module);
+                defer result.deinit();
+                try expectTier1Refusal(&result);
+                try testing.expectEqualStrings("tier1.ora", result.errors.items[0].file);
+                try testing.expectEqual(@as(u32, 7), result.errors.items[0].line);
+                try testing.expectEqual(@as(u32, 3), result.errors.items[0].column);
+                var report = try pass.buildSmtReport(module, "tier1.ora", &result);
+                defer report.deinit(testing.allocator);
+                try expectTier1Report(report);
+            }
+        }
+    };
+    // A previously accepted module must not authorize a report for a different one.
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
+    const safe = buildUntaggedCfAssertModule(ctx);
+    defer mlir.oraModuleDestroy(safe);
+    const unsafe = buildGlobalContractInvariantModule(ctx, 1);
+    defer mlir.oraModuleDestroy(unsafe);
+    var accepted = try pass.runVerificationPass(safe);
+    defer accepted.deinit();
+    try testing.expect(accepted.success);
+    try testing.expect(pass.encoded_annotations.items.len > 0);
+    var blocked_report = try pass.buildSmtReport(unsafe, "cached.ora", &accepted);
+    defer blocked_report.deinit(testing.allocator);
+    try expectTier1Report(blocked_report);
+    try testing.expectEqual(@as(usize, 0), pass.encoded_annotations.items.len);
+    var blocked = try pass.runVerificationPass(unsafe);
+    defer blocked.deinit();
+    try expectTier1Refusal(&blocked);
+    var recovered = try pass.runVerificationPass(safe);
+    defer recovered.deinit();
+    try testing.expect(recovered.success);
+    var safe_report = try pass.buildSmtReport(safe, "safe.ora", &recovered);
+    defer safe_report.deinit(testing.allocator);
+    try testing.expect(!safe_report.blocksTrustedArtifacts());
+}
 
-    const mlir_ctx = mlir.oraContextCreate();
-    defer mlir.oraContextDestroy(mlir_ctx);
-    testLoadAllDialects(mlir_ctx);
-    _ = mlir.oraDialectRegister(mlir_ctx);
-
-    const module = buildGlobalContractInvariantModule(mlir_ctx, 1);
+test "S1 Tier1 global contract invariant refuses before assumption fanout" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    const ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(ctx);
+    testLoadAllDialects(ctx);
+    _ = mlir.oraDialectRegister(ctx);
+    const module = buildGlobalContractInvariantModule(ctx, 1);
     defer mlir.oraModuleDestroy(module);
+    try testing.expectError(error.UnbootstrappedContractInvariant, pass.extractAnnotationsFromMLIR(module));
+    try testing.expectEqual(@as(usize, 0), pass.encoded_annotations.items.len);
+    var result = try pass.runVerificationPass(module);
+    defer result.deinit();
+    try expectTier1Refusal(&result);
+    // Simulate an alternate/cached extraction route: no global row can fan out.
+    try pass.encoded_annotations.append(.{
+        .kind = .ContractInvariant,
+        .function_name = "unknown",
+        .condition = z3.Z3_mk_true(pass.context.ctx),
+        .extra_constraints = &.{},
+        .file = "cached.ora",
+        .line = 1,
+        .column = 1,
+    });
+    try testing.expectError(error.UnbootstrappedContractInvariant, pass.buildPreparedQueries());
+    pass.current_function_name = "some_function";
+    try testing.expectError(error.UnbootstrappedContractInvariant, pass.recordGlobalContractInvariantPostObligations());
+    const global_op = (try pass.findGlobalInvariant(mlir.oraModuleGetOperation(module))).?;
+    pass.encoded_annotations.items[0].source_op = global_op;
+    pass.encoded_annotations.items[0].function_name = "not_a_sentinel";
+    try testing.expect(try isGlobalContractInvariantAnnotation(pass.encoded_annotations.items[0]));
+    try testing.expectError(error.UnbootstrappedContractInvariant, pass.buildPreparedQueries());
+}
 
-    try pass.extractAnnotationsFromMLIR(module);
-    var queries = try pass.buildPreparedQueries();
-    defer {
-        for (queries.items) |*q| {
-            q.deinit(testing.allocator);
+test "S1 Tier1 structural owners preserve real local assertions named unknown" {
+    const ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(ctx);
+    testLoadAllDialects(ctx);
+    _ = mlir.oraDialectRegister(ctx);
+    for ([_]bool{ true, false }) |valid| {
+        const text = try std.fmt.allocPrint(testing.allocator, "module {{ func.func @unknown() {{ %c = arith.constant {s} ora.assert %c, \"local\" : i1 return }} }}", .{if (valid) "true" else "false"});
+        defer testing.allocator.free(text);
+        const module = mlir.oraModuleCreateParse(ctx, mlir.oraStringRefCreate(text.ptr, text.len));
+        try testing.expect(!mlir.oraModuleIsNull(module));
+        defer mlir.oraModuleDestroy(module);
+        var pass = try VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        try pass.extractAnnotationsFromMLIR(module);
+        try testing.expectEqual(@as(usize, 1), pass.encoded_annotations.items.len);
+        const ann = pass.encoded_annotations.items[0];
+        try testing.expectEqualStrings("unknown", ann.function_name);
+        try testing.expect(!try isGlobalContractInvariantAnnotation(ann));
+        pass.current_function_name = "unknown";
+        try pass.recordGlobalContractInvariantPostObligations();
+        try testing.expectEqual(@as(usize, 1), pass.encoded_annotations.items.len);
+        var result = try pass.runVerificationPass(module);
+        defer result.deinit();
+        try testing.expectEqual(valid, result.success);
+        var report = try pass.buildSmtReport(module, "unknown.ora", &result);
+        defer report.deinit(testing.allocator);
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, report.json, .{});
+        defer parsed.deinit();
+        var obligations: usize = 0;
+        for (parsed.value.object.get("queries").?.array.items) |query| {
+            const row = query.object;
+            if (!std.mem.eql(u8, row.get("kind").?.string, "obligation")) continue;
+            obligations += 1;
+            try testing.expectEqualStrings(if (valid) "UNSAT" else "SAT", row.get("status").?.string);
+            try testing.expect(row.get("smtlib_hash") != null);
         }
-        queries.deinit();
+        try testing.expectEqual(@as(usize, 1), obligations);
     }
+}
 
-    var found_target_contract_invariant = false;
-    for (queries.items) |q| {
-        try testing.expect(!std.mem.eql(u8, q.function_name, "unknown"));
-        if (std.mem.eql(u8, q.function_name, "global_invariant_target") and
-            q.kind == .Obligation and
-            q.obligation_kind == .ContractInvariant)
-        {
-            found_target_contract_invariant = true;
+test "S1 Tier1 synthetic scope captures live generators without changing query eligibility" {
+    const ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(ctx);
+    testLoadAllDialects(ctx);
+    _ = mlir.oraDialectRegister(ctx);
+    const call_module = buildPublicCallsPrivateEnsuresModule(ctx);
+    defer mlir.oraModuleDestroy(call_module);
+    const text = "module { func.func @unknown(%x: i256) { %one = arith.constant 1 : i256 %q = arith.divui %one, %x : i256 %ok = arith.cmpi uge, %q, %one : i256 ora.assert %ok, \"division\" : i1 return } }";
+    const assert_module = mlir.oraModuleCreateParse(ctx, testStringRef(text));
+    try testing.expect(!mlir.oraModuleIsNull(assert_module));
+    defer mlir.oraModuleDestroy(assert_module);
+    const global_module = buildGlobalContractInvariantModule(ctx, 1);
+    defer mlir.oraModuleDestroy(global_module);
+    for ([_]mlir.MlirModule{ call_module, assert_module }, [_][]const u8{ "func.call", "ora.assert" }) |module, generator_name| {
+        var pass = try VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        try pass.extractAnnotationsFromMLIR(module);
+        const func = findFirstOpByNameInBlock(mlir.oraModuleGetBody(module), "func.func").?;
+        const generator = findFirstOpByNameInBlock(mlir.oraFuncOpGetBodyBlock(func), generator_name).?;
+        var found: usize = 0;
+        for (pass.encoded_annotations.items) |ann| {
+            if (ann.kind != .ContractInvariant or ann.source_op != null) continue;
+            found += 1;
+            try testing.expectEqual(generator.ptr, ann.scope_op.?.ptr);
+            try testing.expect(try annotationHasLocalScope(ann.scope_op.?));
+            try testing.expect(!try isGlobalContractInvariantAnnotation(ann));
+            try testing.expect(!preparedObligationAnnotationPure(ann, &.{}, 1, 0, .{}));
+            var forged = ann;
+            forged.scope_op = null;
+            try testing.expectError(error.UnbootstrappedContractInvariant, isGlobalContractInvariantAnnotation(forged));
+            const detached = mlir.oraArithConstantOpCreate(ctx, mlir.oraLocationUnknownGet(ctx), mlir.oraIntegerTypeCreate(ctx, 1), mlir.oraIntegerAttrCreateI64FromType(mlir.oraIntegerTypeCreate(ctx, 1), 1));
+            defer mlir.oraBlockAppendOwnedOperation(mlir.oraFuncOpGetBodyBlock(func), detached);
+            forged.scope_op = detached;
+            try testing.expectError(error.UnbootstrappedContractInvariant, isGlobalContractInvariantAnnotation(forged));
+            const global = (try pass.findGlobalInvariant(mlir.oraModuleGetOperation(global_module))).?;
+            forged.scope_op = global;
+            try testing.expect(try isGlobalContractInvariantAnnotation(forged));
+            // A local fallback must never override a real global source.
+            forged.source_op = global;
+            forged.scope_op = generator;
+            try testing.expect(try isGlobalContractInvariantAnnotation(forged));
+        }
+        try testing.expect(found > 0);
+        var queries = try pass.buildPreparedQueries();
+        defer {
+            for (queries.items) |*q| q.deinit(testing.allocator);
+            queries.deinit();
+        }
+        for (queries.items) |query| {
+            if (query.kind == .Obligation and query.obligation_kind == .ContractInvariant)
+                try testing.expect(!query.annotation_pure);
         }
     }
-    try testing.expect(found_target_contract_invariant);
 }
 
 test "prepared manifest preflight cannot make a post-state contract invariant self-proving" {
@@ -12176,20 +12437,14 @@ test "prepared manifest preflight cannot make a post-state contract invariant se
     const module = buildGlobalContractInvariantStoreModule(mlir_ctx);
     defer mlir.oraModuleDestroy(module);
 
-    var manifest = try pass.collectPreparedQueryManifest(module);
-    defer manifest.deinit();
-
+    try testing.expectError(error.UnbootstrappedContractInvariant, pass.collectPreparedQueryManifest(module));
     var result = try pass.runVerificationPass(module);
     defer result.deinit();
-
-    try testing.expect(!result.success);
-    var found_contract_invariant_failure = false;
-    for (result.errors.items) |verification_error| {
-        if (std.mem.indexOf(u8, verification_error.message, "contract invariant") != null) {
-            found_contract_invariant_failure = true;
-        }
-    }
-    try testing.expect(found_contract_invariant_failure);
+    try expectTier1Refusal(&result);
+    // Direct proving and report construction must agree with manifest-first.
+    var report = try pass.buildSmtReport(module, "bad_writer.ora", &result);
+    defer report.deinit(testing.allocator);
+    try expectTier1Report(report);
 }
 
 test "full verify mode treats untagged cf.assert as obligation" {

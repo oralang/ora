@@ -5154,6 +5154,9 @@ fn runMlirEmitAdvanced(
             // degraded, so leave it unavailable and let verification report
             // the named failure instead of leaking an internal error trace.
             error.VerificationEncodingDegraded => null,
+            // The native verifier owns this named refusal and its failed report.
+            // An absent manifest never grants source-accounting authority.
+            error.UnbootstrappedContractInvariant => null,
             else => return err,
         };
 

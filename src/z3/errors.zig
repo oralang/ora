@@ -26,6 +26,7 @@ pub const VerificationErrorType = enum {
     RefinementViolation,
     UnreachableCode,
     EncodingDegraded,
+    UnbootstrappedContractInvariant,
     Unknown,
 };
 

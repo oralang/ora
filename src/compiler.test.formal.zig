@@ -81,32 +81,85 @@ test "v1 closure default loop free verification retains source assertions and in
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    for ([_]bool{ true, false }) |valid| {
-        const source = try std.fmt.allocPrint(
-            allocator,
-            "contract LoopFree {{ storage var x: u256 = 0; invariant bounded(x <= 100); pub fn set(v: u256) requires({s}) {{ assert(v <= 100, \"bound\"); x = v; }} }}",
-            .{if (valid) "v <= 100" else "true"},
-        );
-        defer allocator.free(source);
-        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "loop_free.ora", .data = source });
-        const path = try pathFromTmpAlloc(allocator, tmp, "loop_free.ora");
+    for ([_]bool{ true, false }) |invariant| {
+        for ([_]bool{ true, false }) |valid| {
+            const source = try std.fmt.allocPrint(
+                allocator,
+                "contract LoopFree {{ storage var x: u256 = 0; {s} pub fn set(v: u256) requires({s}) {{ assert(v <= 100, \"bound\"); x = v; }} }}",
+                .{ if (invariant) "invariant bounded(x <= 100);" else "", if (valid) "v <= 100" else "true" },
+            );
+            defer allocator.free(source);
+            try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "loop_free.ora", .data = source });
+            const path = try pathFromTmpAlloc(allocator, tmp, "loop_free.ora");
+            defer allocator.free(path);
+            const relative = try std.fmt.allocPrint(allocator, "{s}-{s}", .{ if (invariant) "invariant" else "assert", if (valid) "valid" else "invalid" });
+            defer allocator.free(relative);
+            const output = try pathFromTmpAlloc(allocator, tmp, relative);
+            defer allocator.free(output);
+            const run = try runProcessWithLeanPath(allocator, &.{ ORA_BINARY_REL, "emit", "--emit=smt-report,bytecode", "--out-dir", output, path });
+            defer allocator.free(run.stdout);
+            defer allocator.free(run.stderr);
+            errdefer std.debug.print("loop-free valid={}\n{s}\n{s}", .{ valid, run.stdout, run.stderr });
+            try expectExited(run, if (valid and !invariant) 0 else 1);
+            const hex = try std.fmt.allocPrint(allocator, "{s}/loop_free.hex", .{relative});
+            defer allocator.free(hex);
+            if (valid and !invariant) {
+                try tmp.dir.access(std.testing.io, hex, .{});
+            } else {
+                try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, hex, .{}));
+                try testing.expect(std.mem.indexOf(u8, run.stdout, if (invariant) "UnbootstrappedContractInvariant" else "failed to prove contract invariant") != null);
+                try testing.expect(std.mem.indexOf(u8, run.stdout, "Z3: rejected") != null);
+            }
+        }
+    }
+}
+
+test "S1 Tier1 CLI global refusal cannot be bypassed by proof mode or empty targets" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "empty.json", .data = "{\"schema_version\":1,\"proofs\":[]}" });
+    const manifest = try pathFromTmpAlloc(allocator, tmp, "empty.json");
+    defer allocator.free(manifest);
+    const supplied = try std.fmt.allocPrint(allocator, "--lean-proofs={s}", .{manifest});
+    defer allocator.free(supplied);
+    const sources = [_][]const u8{
+        "contract S1 { storage var value:u256; invariant positive(value>=1); pub fn get()->u256 ensures(result>=1) { return value; } }",
+        "contract S1 { storage var value:u256=1; invariant positive(value>=1); pub fn get()->u256 ensures(result>=1) { return value; } }",
+        "contract S1 { invariant true; pub fn get()->u256 { return 1; } }",
+        "contract Unused { invariant false; } contract Live { pub fn get()->u256 { return 1; } }",
+        "contract S1 { invariant true; }",
+    };
+    for (sources, 0..) |source, index| {
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "s1.ora", .data = source });
+        const path = try pathFromTmpAlloc(allocator, tmp, "s1.ora");
         defer allocator.free(path);
-        const relative = if (valid) "valid" else "invalid";
-        const output = try pathFromTmpAlloc(allocator, tmp, relative);
-        defer allocator.free(output);
-        const run = try runProcessWithLeanPath(allocator, &.{ ORA_BINARY_REL, "emit", "--emit=smt-report,bytecode", "--out-dir", output, path });
-        defer allocator.free(run.stdout);
-        defer allocator.free(run.stderr);
-        errdefer std.debug.print("loop-free valid={}\n{s}\n{s}", .{ valid, run.stdout, run.stderr });
-        try expectExited(run, if (valid) 0 else 1);
-        const hex = try std.fmt.allocPrint(allocator, "{s}/loop_free.hex", .{relative});
-        defer allocator.free(hex);
-        if (valid) {
-            try tmp.dir.access(std.testing.io, hex, .{});
-        } else {
+        for ([_][]const u8{ "", "--verify=basic", "--verify=full", "--lean-proofs", supplied }, 0..) |mode, mode_index| {
+            const relative = try std.fmt.allocPrint(allocator, "refused-{d}-{d}", .{ index, mode_index });
+            defer allocator.free(relative);
+            const out = try pathFromTmpAlloc(allocator, tmp, relative);
+            defer allocator.free(out);
+            var argv: std.ArrayList([]const u8) = .empty;
+            defer argv.deinit(allocator);
+            try argv.appendSlice(allocator, &.{ ORA_BINARY_REL, "emit", "--emit=smt-report,bytecode", "--out-dir", out });
+            if (mode.len != 0) try argv.append(allocator, mode);
+            try argv.append(allocator, path);
+            const run = try runProcessWithLeanPath(allocator, argv.items);
+            defer allocator.free(run.stdout);
+            defer allocator.free(run.stderr);
+            errdefer std.debug.print("S1 source={d} mode={s}\n{s}\n{s}", .{ index, mode, run.stdout, run.stderr });
+            try expectExited(run, 1);
+            try testing.expect(std.mem.indexOf(u8, run.stdout, "UnbootstrappedContractInvariant") != null);
+            const hex = try std.fmt.allocPrint(allocator, "{s}/s1.hex", .{relative});
+            defer allocator.free(hex);
             try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, hex, .{}));
-            try testing.expect(std.mem.indexOf(u8, run.stdout, "failed to prove contract invariant") != null);
-            try testing.expect(std.mem.indexOf(u8, run.stdout, "Z3: rejected") != null);
+            const authority_path = try std.fmt.allocPrint(allocator, "{s}/s1.formal.artifacts.json", .{relative});
+            defer allocator.free(authority_path);
+            const authority_text = try tmp.dir.readFileAlloc(std.testing.io, authority_path, allocator, .limited(1024 * 1024));
+            defer allocator.free(authority_text);
+            const authority = try std.json.parseFromSlice(std.json.Value, allocator, authority_text, .{});
+            defer authority.deinit();
+            try testing.expectEqualStrings("blocked", authority.value.object.get("final_artifact_authorization").?.string);
         }
     }
 }

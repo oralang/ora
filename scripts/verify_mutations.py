@@ -257,6 +257,12 @@ contract MutationStateInvariant {
 }
 """
 
+# Keep the original invariant program below as refusal coverage. This pair
+# checks the same setter bound through a local, independently solved obligation.
+BASE_STATE_POSTCONDITION = BASE_STATE_INVARIANT.replace(
+    "    invariant bounded(x <= 100);\n", ""
+).replace("        requires(v <= 100)\n", "        requires(v <= 100)\n        ensures(x <= 100)\n")
+
 
 BASE_ASSERTION = """\
 contract MutationAssert {
@@ -332,6 +338,7 @@ class MutationCase:
     reason: str
     covers: tuple[str, ...] = ()
     default_loop_exclusion: str | None = None
+    require_postcondition_evidence: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -341,6 +348,7 @@ class NegativeBuildCase:
     reason: str
     expected_fragment: str
     covers: tuple[str, ...] = ()
+    exact_error: str | None = None
 
 
 REQUIRED_S1_COVERAGE = {
@@ -533,12 +541,13 @@ CASES = (
         default_loop_exclusion="loop_header_fact_type_unsupported",
     ),
     MutationCase(
-        name="state_invariant_precondition_removed",
-        source=BASE_STATE_INVARIANT,
+        name="storage_postcondition_precondition_removed",
+        source=BASE_STATE_POSTCONDITION,
         function="set",
         find="requires(v <= 100)",
         replace="requires(true)",
-        reason="weakened precondition permits a storage write that violates the state invariant",
+        reason="weakened precondition permits a storage write that violates the local postcondition",
+        require_postcondition_evidence=True,
     ),
     MutationCase(
         name="assert_requires_weakened",
@@ -568,6 +577,20 @@ CASES = (
 
 
 NEGATIVE_BUILD_CASES = (
+    NegativeBuildCase(
+        name="global_invariant_original_requires_bootstrap",
+        source=BASE_STATE_INVARIANT,
+        reason="a valid precondition is not authenticated global-invariant bootstrap",
+        expected_fragment="UnbootstrappedContractInvariant",
+        exact_error="UnbootstrappedContractInvariant",
+    ),
+    NegativeBuildCase(
+        name="global_invariant_weakened_requires_bootstrap",
+        source=BASE_STATE_INVARIANT.replace("requires(v <= 100)", "requires(true)"),
+        reason="a weakened precondition cannot bypass the global-invariant refusal",
+        expected_fragment="UnbootstrappedContractInvariant",
+        exact_error="UnbootstrappedContractInvariant",
+    ),
     NegativeBuildCase(
         name="degraded_query_does_not_emit_artifact",
         source="""\
@@ -692,6 +715,46 @@ def loop_boundary_matches(
     )
 
 
+def read_evidence(directory: pathlib.Path) -> tuple[dict, dict]:
+    reports = list(directory.rglob("*.smt.report.json"))
+    registries = list(directory.rglob("*.formal.artifacts.json"))
+    if len(reports) != 1 or len(registries) != 1:
+        raise ValueError("expected one fresh SMT report and authority registry")
+    return json.loads(reports[0].read_text()), json.loads(registries[0].read_text())
+
+
+def postcondition_evidence_matches(result, directory, source, function, accepted):
+    try:
+        report, registry = read_evidence(directory)
+        summary = report["summary"]
+        errors = report["errors"]
+        queries = [q for q in report["queries"] if q["kind"] == "obligation"]
+        bases = [q for q in report["queries"] if q["kind"] == "base"]
+        return (
+            result.returncode == (0 if accepted else 1)
+            and len(emitted_hex_artifacts(directory)) == (1 if accepted else 0)
+            and registry["source"] == str(source)
+            and registry["final_artifact_authorization"] == ("allowed" if accepted else "blocked")
+            and report["verification"]["success"] is accepted
+            and not summary["encoding_degraded"] and summary["soundness_losses"] == []
+            and all(summary[k] == 0 for k in ("unknown", "vacuous", "vacuity_unknown", "inconsistent_bases"))
+            and summary["failed_obligations"] == (0 if accepted else 1)
+            and len(bases) == 1 and bases[0]["status"] == "SAT"
+            and len(queries) == 1
+            and queries[0]["function_name"] == function
+            and pathlib.Path(queries[0]["file"]).resolve() == source.resolve()
+            and queries[0]["obligation_kind"] == "ensures"
+            and queries[0]["status"] == ("UNSAT" if accepted else "SAT")
+            and queries[0]["constraint_count"] > 0 and int(queries[0]["smtlib_hash"], 16) != 0
+            and not queries[0]["vacuous"] and not queries[0]["vacuity_unknown"]
+            and (errors == [] if accepted else len(errors) == 1
+                 and errors[0]["type"] == "PostconditionViolation"
+                 and errors[0]["query_id"] == queries[0]["id"] and bool(queries[0]["model"]))
+        )
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
 def run_case(case: MutationCase, compiler: pathlib.Path, tmpdir: pathlib.Path, timeout: int) -> bool:
     original_path = tmpdir / f"{case.name}.original.ora"
     mutant_path = tmpdir / f"{case.name}.mutant.ora"
@@ -705,6 +768,10 @@ def run_case(case: MutationCase, compiler: pathlib.Path, tmpdir: pathlib.Path, t
         loop_boundary_matches(original, original_artifacts, case.default_loop_exclusion, True)
         if case.default_loop_exclusion else original.returncode == 0
     )
+    if case.require_postcondition_evidence:
+        original_valid = original_valid and postcondition_evidence_matches(
+            original, original_artifacts, original_path, case.function, True
+        )
     if not original_valid:
         print(f"[fail] {case.name}: original contract did not verify", file=sys.stderr)
         print_failure_output(original)
@@ -714,6 +781,13 @@ def run_case(case: MutationCase, compiler: pathlib.Path, tmpdir: pathlib.Path, t
     if mutant.returncode == 0:
         print(f"[fail] {case.name}: mutant still verified ({case.reason})", file=sys.stderr)
         print(f"       file: {mutant_path}", file=sys.stderr)
+        return False
+
+    if case.require_postcondition_evidence and not postcondition_evidence_matches(
+        mutant, mutant_artifacts, mutant_path, case.function, False
+    ):
+        print(f"[fail] {case.name}: missing real SAT postcondition rejection", file=sys.stderr)
+        print_failure_output(mutant)
         return False
 
     if case.default_loop_exclusion:
@@ -753,6 +827,27 @@ def run_negative_build_case(
         print(f"[fail] {case.name}: failure did not mention {case.expected_fragment!r}", file=sys.stderr)
         print_failure_output(result)
         return False
+
+    if case.exact_error is not None:
+        try:
+            report, registry = read_evidence(artifact_dir)
+            exact_refusal = (
+                result.returncode == 1 and report["verification"]["success"] is False
+                and [error["type"] for error in report["errors"]] == [case.exact_error]
+                and registry["source"] == str(source_path)
+                and registry["final_artifact_authorization"] == "blocked"
+                and report["queries"] == [] and report["summary"]["total_queries"] == 0
+                and not report["summary"]["encoding_degraded"]
+                and report["summary"]["soundness_losses"] == []
+                and all(report["summary"][key] == 0 for key in
+                        ("unknown", "vacuous", "vacuity_unknown", "inconsistent_bases"))
+            )
+        except (OSError, ValueError, KeyError, TypeError):
+            exact_refusal = False
+        if not exact_refusal:
+            print(f"[fail] {case.name}: missing exact blocked refusal evidence", file=sys.stderr)
+            print_failure_output(result)
+            return False
 
     hex_artifacts = emitted_hex_artifacts(artifact_dir)
     if hex_artifacts:

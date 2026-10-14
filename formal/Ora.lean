@@ -79,6 +79,7 @@ import Ora.Loop.StorageCertificate
 import Ora.Loop.StorageTests
 import Ora.Storage.Address
 import Ora.Storage.Lifecycle
+import Ora.ContractInvariantBootstrap
 import Ora.Storage.LifecycleAdapter
 import Ora.Storage.LifecycleTests
 import Ora.Loop.Denotation
