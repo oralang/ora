@@ -30,6 +30,9 @@ pub fn prepare(allocator: std.mem.Allocator, module: mlir.MlirModule, pass: *z3.
         error.UnsupportedLifecycleFormula,
         error.MissingLifecycleRetainedGuard,
         error.InvalidCallSignature,
+        error.UnauthenticatedLifecycleContractInvariant,
+        error.UnauthenticatedLifecycleRequires,
+        error.LifecycleEntryStoreChanged,
         => return null,
         else => return err,
     };

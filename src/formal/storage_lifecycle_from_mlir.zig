@@ -5,6 +5,7 @@ const mlir = @import("mlir_c_api").c;
 const z3 = @import("ora_z3_verification");
 const builtin = @import("ora_types").builtin;
 const data = @import("storage_lifecycle.zig");
+const obligation = @import("obligation.zig");
 const canonical = @import("obligation_from_mlir.zig");
 const lean = @import("obligation_to_lean.zig");
 
@@ -100,12 +101,17 @@ pub fn proofInputs(projection: *Projection) !data.ProofInputs {
     const snapshot = &projection.snapshot;
     const arena = snapshot.arena.allocator();
     const inventory = snapshot.inventory;
+    try projection.canonical.set.validateIdReferences();
     if (inventory.claims.len == 0) return error.MissingLifecycleClaim;
     const slots = try arena.alloc(data.SlotBinding, inventory.claims.len);
     const scope = mlir.mlirOperationGetParentOperation(snapshot.operations[inventory.claims[0].ordinal]);
     const scope_ordinal = for (snapshot.operations, 0..) |op, i| {
         if (op.ptr == scope.ptr) break i;
     } else return error.InvalidLifecycleOwner;
+    for (snapshot.operations) |op| {
+        if (mlir.mlirOperationGetParentOperation(op).ptr == scope.ptr and operationIs(op, "ora.invariant"))
+            return error.UnauthenticatedLifecycleContractInvariant;
+    }
     for (inventory.claims, slots, 0..) |claim, *slot, i| {
         const global = snapshot.operations[claim.ordinal];
         if (mlir.mlirOperationGetParentOperation(global).ptr != scope.ptr) return error.AmbiguousLifecycleOwner;
@@ -121,9 +127,9 @@ pub fn proofInputs(projection: *Projection) !data.ProofInputs {
         const op = snapshot.operations[function.ordinal];
         if (function.constructor or mlir.mlirOperationGetParentOperation(op).ptr != scope.ptr)
             return error.UnsupportedLifecycleRoot;
-        if (row.id != binding.function_id or row.projection_completeness != .complete or !row.write_footprint_complete or
-            row.paths.len != 1 or row.assumption_ids.len != 0 or row.entry_invariant_ids.len != 0)
+        if (row.id != binding.function_id or row.projection_completeness != .complete or !row.write_footprint_complete or row.paths.len != 1)
             return error.UnsupportedLifecycleRoot;
+        _ = try authenticateEntry(projection, row, function);
         if (!std.mem.eql(u8, &(try lean.functionVcSha256(projection.canonical.set, row.id)), &binding.function_vc_sha256))
             return error.LifecycleDigestMismatch;
         var writer_events: std.ArrayList(data.Event) = .empty;
@@ -139,6 +145,9 @@ pub fn proofInputs(projection: *Projection) !data.ProofInputs {
                 return error.UnsupportedLifecycleEffect;
             if (std.mem.eql(u8, effect.operation, "ora.return") and row.paths[0].returns == .direct and
                 mlir.oraOperationIsNull(mlir.oraOperationGetNextInBlock(live))) continue;
+            // authenticateEntry already matched every semantic requires to
+            // its adjacent retained runtime assertion by live identity.
+            if (std.mem.eql(u8, effect.operation, "ora.requires") and operationIs(live, "ora.requires")) continue;
             if (!std.mem.eql(u8, effect.operation, "ora.refinement_guard") and !std.mem.eql(u8, effect.operation, "ora.assert"))
                 return error.UnsupportedLifecycleEffect;
             const key = try std.fmt.allocPrint(arena, "op:{d}/{s}", .{ effect.ordinal, effect.operation });
@@ -182,6 +191,100 @@ pub fn proofInputs(projection: *Projection) !data.ProofInputs {
     const inputs: data.ProofInputs = .{ .inventory = inventory, .functions = projection.bindings, .slots = slots, .guards = guards.items };
     _ = try inputs.sha256(arena);
     return inputs;
+}
+
+/// Exact live enforcement, not a source tag or an accepted accounting row.
+/// Returns the end of the unchanged-store prefix containing every mirror.
+pub fn authenticateEntry(projection: *Projection, row: obligation.FunctionSummaryRow, function: data.Function) !usize {
+    if (row.entry_invariant_ids.len != 0) return error.UnauthenticatedLifecycleContractInvariant;
+    try projection.canonical.set.validateIdReferences();
+    const operations = projection.snapshot.operations;
+    if (row.paths.len != 1 or function.ordinal >= operations.len) return error.UnsupportedLifecycleRoot;
+    const owner = operations[function.ordinal];
+    const parent = mlir.mlirOperationGetParentOperation(owner);
+    const scope = for (operations, 0..) |op, index| {
+        if (op.ptr == parent.ptr and operationIs(op, "ora.contract")) break index;
+    } else return error.InvalidLifecycleOwner;
+    const arena = projection.snapshot.arena.allocator();
+    if (!std.mem.eql(u8, row.entry_scope orelse "", try std.fmt.allocPrint(arena, "op:{d}/ora.contract", .{scope})) or
+        !std.mem.eql(u8, row.structural_key, try std.fmt.allocPrint(arena, "op:{d}/func.func", .{function.ordinal})) or
+        row.owner != .function or !std.mem.eql(u8, row.owner.function.name, function.symbol)) return error.InvalidLifecycleOwner;
+    const bindings = projection.canonical.source_fact_bindings;
+    var end: usize = 0;
+    var previous: u32 = 0;
+    for (row.assumption_ids) |id| {
+        var selected: ?canonical.SourceFactOpBinding = null;
+        for (bindings) |binding| {
+            if (std.mem.indexOfScalar(obligation.Id, binding.assumption_ids, id) == null) continue;
+            if (selected != null) return error.UnauthenticatedLifecycleRequires;
+            selected = binding;
+        }
+        const source = selected orelse return error.UnauthenticatedLifecycleRequires;
+        const fact = obligation.findById(projection.canonical.set.assumptions, id) orelse return error.UnauthenticatedLifecycleRequires;
+        if (fact.origin != .mlir_op or fact.origin.mlir_op.ordinal != source.op_ordinal or
+            !std.mem.eql(u8, fact.origin.mlir_op.op_name, "ora.requires")) return error.UnauthenticatedLifecycleRequires;
+        if (source.assumption_ids.len != 1 or source.op_ordinal >= operations.len or source.op_ordinal <= previous or
+            !entryBindingOwned(source, function, "assumption_context")) return error.UnauthenticatedLifecycleRequires;
+        const semantic = operations[source.op_ordinal];
+        const mirror = mlir.oraOperationGetNextInBlock(semantic);
+        if (@intFromPtr(semantic.ptr) != source.source_op_id or !operationIs(semantic, "ora.requires") or
+            mlir.mlirOperationGetParentOperation(semantic).ptr != owner.ptr or mlir.oraOperationIsNull(mirror) or
+            !operationIs(mirror, "ora.assert") or mlir.mlirOperationGetParentOperation(mirror).ptr != owner.ptr or
+            mlir.oraOperationGetNumOperands(semantic) != 1 or mlir.oraOperationGetNumOperands(mirror) != 1 or
+            mlir.oraOperationGetOperand(semantic, 0).ptr != mlir.oraOperationGetOperand(mirror, 0).ptr)
+            return error.UnauthenticatedLifecycleRequires;
+        var runtime: ?canonical.SourceFactOpBinding = null;
+        for (bindings) |binding| {
+            if (binding.source_fact_id != source.source_fact_id or !entryBindingOwned(binding, function, "runtime_condition")) continue;
+            if (runtime != null) return error.UnauthenticatedLifecycleRequires;
+            runtime = binding;
+        }
+        const checked = runtime orelse return error.UnauthenticatedLifecycleRequires;
+        if (checked.op_ordinal != source.op_ordinal + 1 or checked.op_ordinal >= operations.len or operations[checked.op_ordinal].ptr != mirror.ptr or
+            checked.source_op_id != @intFromPtr(mirror.ptr) or !checked.runtime_check_present or
+            checked.runtime_check_ids.len != 1) return error.UnauthenticatedLifecycleRequires;
+        var producers: usize = 0;
+        for (projection.canonical.runtime_check_producers) |producer| {
+            if (producer.id != checked.runtime_check_ids[0]) continue;
+            if (producer.source_op_id != checked.source_op_id or producer.op_ordinal != checked.op_ordinal)
+                return error.UnauthenticatedLifecycleRequires;
+            producers += 1;
+        }
+        if (producers != 1) return error.UnauthenticatedLifecycleRequires;
+        const key = try std.fmt.allocPrint(projection.snapshot.arena.allocator(), "op:{d}/ora.assert", .{checked.op_ordinal});
+        var matches: usize = 0;
+        for (row.paths[0].timeline, 0..) |event, index| {
+            if (!std.mem.eql(u8, event.structural_key, key)) continue;
+            if (index < end or event.id != index or event.payload != .safety_checkpoint or
+                event.payload.safety_checkpoint.formulas.len != 1) return error.UnauthenticatedLifecycleRequires;
+            end = index + 1;
+            matches += 1;
+        }
+        if (matches != 1) return error.UnauthenticatedLifecycleRequires;
+        previous = checked.op_ordinal;
+    }
+    var actual: usize = 0;
+    for (operations) |op| {
+        if (mlir.mlirOperationGetParentOperation(op).ptr == owner.ptr and operationIs(op, "ora.requires")) actual += 1;
+    }
+    if (actual != row.assumption_ids.len) return error.UnauthenticatedLifecycleRequires;
+    for (row.paths[0].timeline[0..end]) |event| switch (event.payload) {
+        .storage_read, .safety_checkpoint => {},
+        else => return error.LifecycleEntryStoreChanged,
+    };
+    return end;
+}
+
+fn entryBindingOwned(binding: canonical.SourceFactOpBinding, function: data.Function, role: []const u8) bool {
+    return std.mem.eql(u8, binding.kind, "requires") and binding.roles.len == 1 and std.mem.eql(u8, binding.roles[0], role) and
+        std.mem.eql(u8, binding.module_path orelse "", function.module_path) and
+        std.mem.eql(u8, binding.owner_key orelse "", function.owner) and std.mem.eql(u8, binding.runtime_symbol orelse "", function.symbol);
+}
+
+fn operationIs(op: mlir.MlirOperation, expected: []const u8) bool {
+    const name = mlir.oraOperationGetName(op);
+    defer if (name.data != null) mlir.oraStringRefFree(name);
+    return name.data != null and std.mem.eql(u8, name.data[0..name.length], expected);
 }
 
 const Collector = struct {

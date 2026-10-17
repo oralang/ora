@@ -13,6 +13,266 @@ const lifecycle_check = @import("formal/storage_lifecycle_check.zig");
 const proof_check = @import("formal/proof_check.zig");
 const lifecycle_consume = @import("formal/storage_lifecycle_consume.zig");
 
+test "E1 fresh requires authenticate exact live runtime mirrors without granting authority" {
+    const sources = [_][]const u8{
+        "contract C { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) requires(x <= 100) { cap = x; } }",
+        "contract C { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) requires(x >= 1) { cap = x; } }",
+        "contract C { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) requires(x >= 1) requires(x <= 100) { cap = x; } }",
+        "contract C { storage var cap: MaxValue<u256,100>; pub fn get() -> MaxValue<u256,100> requires(cap <= 100) { return cap; } }",
+    };
+    for (sources) |source| {
+        var compilation = try helpers.compileText(source);
+        defer compilation.deinit();
+        const module = (try compilation.db.lowerToHir(compilation.root_module_id)).module.raw_module;
+        var pass = try z3.VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        var snapshot = try collector.collect(testing.allocator, module, &pass);
+        defer snapshot.deinit();
+        var projection = try collector.project(testing.allocator, module, &pass, snapshot.inventory);
+        defer projection.deinit();
+        const row = projection.canonical.set.function_summaries[0];
+        const prefix = try collector.authenticateEntry(&projection, row, projection.snapshot.inventory.functions[0]);
+        try testing.expect(prefix > 0);
+        try testing.expect(projection.canonical.set.function_summaries[0].paths[0].timeline[prefix - 1].payload == .safety_checkpoint);
+        _ = try collector.proofInputs(&projection);
+        try testing.expect(pass.lifecycle == null and pass.lifecycle_entries.count() == 0);
+    }
+}
+
+test "E1 entry provenance mutations refuse before any assistance" {
+    const Mutation = enum { owner, module, role, source_identity, runtime_identity, fact_id, missing_binding, duplicate_binding, missing_producer, duplicate_producer, producer_identity, producer_ordinal, wrong_scope, missing_reference, duplicate_reference, reordered_references, condition, late_check, missing_mirror, pre_entry_write, source_origin };
+    for (std.meta.tags(Mutation)) |mutation| {
+        errdefer std.debug.print("E1 entry mutation {s}\n", .{@tagName(mutation)});
+        var compilation = try helpers.compileText("contract C { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) requires(x >= 1) requires(x <= 100) { cap = x; } }");
+        defer compilation.deinit();
+        const module = (try compilation.db.lowerToHir(compilation.root_module_id)).module.raw_module;
+        const root = mlir.oraModuleGetOperation(module);
+        const semantic = firstOperation(root, "ora.requires") orelse return error.MissingRequiresTest;
+        const mirror = mlir.oraOperationGetNextInBlock(semantic);
+        defer if (mutation == .missing_mirror) mlir.mlirOperationDestroy(mirror);
+        if (mutation == .condition) {
+            const guard = firstOperation(root, "ora.refinement_guard") orelse return error.MissingGuardTest;
+            const operands = [_]mlir.MlirValue{mlir.oraOperationGetOperand(guard, 0)};
+            mlir.mlirOperationSetOperands(mirror, 1, &operands);
+        } else if (mutation == .late_check) {
+            const write = firstOperation(root, "ora.sstore") orelse return error.MissingWriteTest;
+            mlir.mlirOperationMoveAfter(mirror, write);
+        } else if (mutation == .missing_mirror) {
+            mlir.mlirOperationRemoveFromParent(mirror);
+        } else if (mutation == .pre_entry_write) {
+            const write = firstOperation(root, "ora.sstore") orelse return error.MissingWriteTest;
+            mlir.mlirOperationMoveBefore(write, semantic);
+        }
+        var pass = try z3.VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        var snapshot = try collector.collect(testing.allocator, module, &pass);
+        defer snapshot.deinit();
+        var projection = try collector.project(testing.allocator, module, &pass, snapshot.inventory);
+        defer projection.deinit();
+        if (mutation == .missing_mirror) {
+            try testing.expectError(error.UnauthenticatedLifecycleRequires, collector.proofInputs(&projection));
+            continue;
+        }
+        const arena = projection.snapshot.arena.allocator();
+        const bindings = try arena.dupe(canonical_collector.SourceFactOpBinding, projection.canonical.source_fact_bindings);
+        projection.canonical.source_fact_bindings = bindings;
+        const semantic_index = for (bindings, 0..) |binding, index| {
+            if (binding.source_op_id == @intFromPtr(semantic.ptr)) break index;
+        } else return error.MissingRequiresTest;
+        const runtime_index = for (bindings, 0..) |binding, index| {
+            if (binding.source_op_id == @intFromPtr(mirror.ptr)) break index;
+        } else return error.MissingMirrorTest;
+        const producers = try arena.dupe(canonical_collector.RuntimeCheckProducer, projection.canonical.runtime_check_producers);
+        projection.canonical.runtime_check_producers = producers;
+        const producer_index = for (producers, 0..) |producer, index| {
+            if (producer.source_op_id == @intFromPtr(mirror.ptr)) break index;
+        } else return error.MissingProducerTest;
+        const rows = @constCast(projection.canonical.set.function_summaries);
+        const expected: anyerror = switch (mutation) {
+            .pre_entry_write => error.LifecycleEntryStoreChanged,
+            .source_origin => blk: {
+                @constCast(projection.canonical.set.assumptions)[0].origin.mlir_op.ordinal += 1;
+                break :blk error.UnauthenticatedLifecycleRequires;
+            },
+            .wrong_scope => blk: {
+                rows[0].entry_scope = "op:999/ora.contract";
+                break :blk error.InvalidLifecycleOwner;
+            },
+            .missing_reference, .duplicate_reference, .reordered_references => blk: {
+                const ids = rows[0].assumption_ids;
+                rows[0].assumption_ids = switch (mutation) {
+                    .missing_reference => ids[0..1],
+                    .duplicate_reference => try arena.dupe(u32, &.{ ids[0], ids[0] }),
+                    else => try arena.dupe(u32, &.{ ids[1], ids[0] }),
+                };
+                break :blk error.InvalidDependency;
+            },
+            else => blk: {
+                switch (mutation) {
+                    .owner => bindings[semantic_index].owner_key = "module/contract:C/function:foreign",
+                    .module => bindings[semantic_index].module_path = "foreign.ora",
+                    .role => bindings[runtime_index].roles = &.{"assumption_context"},
+                    .source_identity => bindings[semantic_index].source_op_id = @intFromPtr(mirror.ptr),
+                    .runtime_identity => bindings[runtime_index].source_op_id = @intFromPtr(semantic.ptr),
+                    .fact_id => bindings[runtime_index].source_fact_id += 1,
+                    .missing_binding => bindings[runtime_index].roles = &.{},
+                    .duplicate_binding => projection.canonical.source_fact_bindings = try std.mem.concat(arena, canonical_collector.SourceFactOpBinding, &.{ bindings, &.{bindings[runtime_index]} }),
+                    .missing_producer => projection.canonical.runtime_check_producers = &.{},
+                    .duplicate_producer => projection.canonical.runtime_check_producers = try std.mem.concat(arena, canonical_collector.RuntimeCheckProducer, &.{ producers, &.{producers[producer_index]} }),
+                    .producer_identity => producers[producer_index].source_op_id = @intFromPtr(semantic.ptr),
+                    .producer_ordinal => producers[producer_index].op_ordinal += 1,
+                    .condition, .late_check => {},
+                    else => unreachable,
+                }
+                break :blk error.UnauthenticatedLifecycleRequires;
+            },
+        };
+        try testing.expectError(expected, collector.authenticateEntry(&projection, rows[0], projection.snapshot.inventory.functions[0]));
+        try testing.expect(pass.lifecycle == null and pass.lifecycle_entries.count() == 0);
+    }
+}
+
+test "E1 producer proves complete entry and failed-entry prefixes independently" {
+    for ([_][]const u8{
+        "contract C { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) requires(x <= 100) { cap = x; } }",
+        "contract C { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) requires(x >= 1) { cap = x; } }",
+        "contract C { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) requires(x >= 1) requires(x <= 100) { cap = x; } }",
+        "contract C { storage var cap: MaxValue<u256,100>; pub fn get() -> MaxValue<u256,100> requires(cap <= 100) { return cap; } }",
+    }, 0..) |source, index| {
+        errdefer std.debug.print("E1 producer case {d}\n", .{index});
+        var compilation = try helpers.compileText(source);
+        defer compilation.deinit();
+        const module = (try compilation.db.lowerToHir(compilation.root_module_id)).module.raw_module;
+        var pass = try z3.VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        var snapshot = try collector.collect(testing.allocator, module, &pass);
+        defer snapshot.deinit();
+        var projection = try collector.project(testing.allocator, module, &pass, snapshot.inventory);
+        defer projection.deinit();
+        const inputs = try collector.proofInputs(&projection);
+        var context = try z3.Z3Context.init(testing.allocator);
+        defer context.deinit();
+        var adapter = canonical_z3.Adapter.init(&context, testing.allocator, projection.canonical.set);
+        const queries = try adapter.checkLifecycle(inputs, pass.timeout_ms);
+        defer testing.allocator.free(queries);
+        for (queries) |query| try query.requireSuccess();
+        var lean = std.Io.Writer.Allocating.init(testing.allocator);
+        defer lean.deinit();
+        try emitter.writeProducerTargets(&lean.writer, testing.allocator, inputs, projection.canonical.set);
+        try emitter.writeProducerProofs(&lean.writer, testing.allocator, inputs, projection.canonical.set);
+        try lean.writer.writeAll("\n#print axioms Ora.Generated.Obligations.Lifecycle.lifecycleProof\n");
+        errdefer std.debug.print("E1 generated source begin\n{s}\nE1 generated source end\n", .{lean.written()});
+        try lifecycleDataKernelCheck(lean.written());
+        try testing.expect(pass.lifecycle == null and pass.lifecycle_entries.count() == 0);
+    }
+}
+
+test "E1 contradictory entry false checkpoint and out-of-candidate witness cannot prove" {
+    for ([_][]const u8{
+        "contract C { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) requires(x == 0) requires(x == 1) { cap = x; } }",
+        "contract C { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) requires(x <= 100) { assert(false); cap = x; } }",
+        "contract C { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) requires(x == 2) { cap = x; } }",
+    }, 0..) |source, index| {
+        errdefer std.debug.print("E1 witness negative {d}\n", .{index});
+        var compilation = try helpers.compileText(source);
+        defer compilation.deinit();
+        const module = (try compilation.db.lowerToHir(compilation.root_module_id)).module.raw_module;
+        var pass = try z3.VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        var snapshot = try collector.collect(testing.allocator, module, &pass);
+        defer snapshot.deinit();
+        var projection = try collector.project(testing.allocator, module, &pass, snapshot.inventory);
+        defer projection.deinit();
+        const inputs = try collector.proofInputs(&projection);
+        var context = try z3.Z3Context.init(testing.allocator);
+        defer context.deinit();
+        var adapter = canonical_z3.Adapter.init(&context, testing.allocator, projection.canonical.set);
+        const queries = try adapter.checkLifecycle(inputs, pass.timeout_ms);
+        defer testing.allocator.free(queries);
+        const witness = for (queries) |query| {
+            if (query.role == .nonvacuity) break query;
+        } else return error.MissingNonvacuityTest;
+        if (index == 2) {
+            try witness.requireSuccess(); // Native existence does not select a Lean candidate.
+        } else {
+            try testing.expect(witness.status == .unsat);
+            try testing.expectError(error.LifecycleQueryVacuous, witness.requireSuccess());
+        }
+        var lean = std.Io.Writer.Allocating.init(testing.allocator);
+        defer lean.deinit();
+        try emitter.writeProducerTargets(&lean.writer, testing.allocator, inputs, projection.canonical.set);
+        try emitter.writeProducerProofs(&lean.writer, testing.allocator, inputs, projection.canonical.set);
+        try testing.expectError(error.TestExpectedEqual, lifecycleDataKernelCheck(lean.written()));
+        try testing.expect(pass.lifecycle == null and pass.lifecycle_entries.count() == 0);
+    }
+}
+
+test "E1 refuses every contract invariant rather than filtering selected facts" {
+    for ([_][]const u8{ "true", "cap <= 100", "cap >= 1" }) |predicate| {
+        const source = try std.fmt.allocPrint(testing.allocator, "contract C {{ storage var cap: MaxValue<u256,100>; invariant {s}; pub fn get() -> MaxValue<u256,100> requires(cap <= 100) {{ return cap; }} }}", .{predicate});
+        defer testing.allocator.free(source);
+        var compilation = try helpers.compileText(source);
+        defer compilation.deinit();
+        const module = (try compilation.db.lowerToHir(compilation.root_module_id)).module.raw_module;
+        var pass = try z3.VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        var snapshot = try collector.collect(testing.allocator, module, &pass);
+        defer snapshot.deinit();
+        var projection = try collector.project(testing.allocator, module, &pass, snapshot.inventory);
+        defer projection.deinit();
+        try testing.expect(projection.canonical.set.function_summaries[0].entry_invariant_ids.len != 0);
+        try testing.expectError(error.UnauthenticatedLifecycleContractInvariant, collector.proofInputs(&projection));
+        const rows = @constCast(projection.canonical.set.function_summaries);
+        rows[0].entry_invariant_ids = &.{};
+        try testing.expectError(error.InvalidDependency, collector.proofInputs(&projection));
+        try testing.expect(pass.lifecycle == null and pass.lifecycle_entries.count() == 0);
+    }
+}
+
+test "E1 authenticated entry reaches the complete native and kernel consumer" {
+    for ([_][]const u8{
+        "contract Requires { storage var cap: MaxValue<u256,100>; pub fn get() -> MaxValue<u256,100> requires(cap <= 100) { return cap; } }",
+        "contract Requires { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) requires(x >= 1) { cap = x; } pub fn get() -> MaxValue<u256,100> { return cap; } }",
+    }) |source| {
+        var compilation = try helpers.compileText(source);
+        defer compilation.deinit();
+        const module = (try compilation.db.lowerToHir(compilation.root_module_id)).module.raw_module;
+        var formal = try helpers.collectFormalQueryBindingsForVerifier(testing.allocator, module);
+        defer formal.formal_result.deinit();
+        defer testing.allocator.free(formal.z3_bindings);
+        var pass = try z3.VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        pass.setFormalQueryBindings(formal.z3_bindings);
+        pass.setVerifyMode(.Full);
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var output = std.Io.Writer.Allocating.init(testing.allocator);
+        defer output.deinit();
+        errdefer std.debug.print("E1 consumer output: {s}\n", .{output.written()});
+        var session = (try lifecycle_consume.prepare(testing.allocator, module, &pass, try lifecycleEnviron(arena.allocator()), &output.writer)) orelse return error.MissingE1Session;
+        defer session.deinit();
+        var consumer: lifecycle_consume.Consumer = .{ .session = &session };
+        pass.lifecycle = consumer.provider();
+        var before = try pass.collectPreparedQueryManifest(module);
+        defer before.deinit();
+        try testing.expect(session.uses.?.len != 0);
+        var verified = try pass.runVerificationPassPreparedSequential(module);
+        defer verified.deinit();
+        try testing.expect(verified.success);
+        try testing.expectEqual(@as(usize, 0), verified.proven_guard_ids.count());
+        try testing.expectEqual(@as(usize, 0), verified.proven_guard_positions.items.len);
+        var report = try pass.buildSmtReport(module, "test.ora", &verified);
+        defer report.deinit(testing.allocator);
+        try testing.expect(!report.blocksTrustedArtifacts());
+        const rows = report.query_manifest.?.rows;
+        var overlaid = try @import("formal/obligation_from_z3.zig").overlayPreparedQueryResults(testing.allocator, formal.formal_result.set, rows);
+        defer overlaid.deinit();
+        try consumer.validateRows(rows, overlaid.set, true);
+        try testing.expectError(error.LifecycleChecksNotRetained, consumer.validateRows(rows, overlaid.set, false));
+        for (before.rows, rows) |original, row| try testing.expectEqual(original.smtlib_hash, row.smtlib_hash);
+    }
+}
+
 test "SL4B structural preflight refuses whole fragments before installing facts" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -22,7 +282,6 @@ test "SL4B structural preflight refuses whole fragments before installing facts"
         "contract Empty { storage var cap: MaxValue<u256, 100>; }",
         "contract Positive { storage var cap: MinValue<u256, 1>; pub fn get() -> MinValue<u256, 1> { return cap; } }",
         "contract A { storage var cap: MaxValue<u256, 100>; pub fn get() -> MaxValue<u256, 100> { return cap; } } contract B { storage var cap: MaxValue<u256, 100>; pub fn get() -> MaxValue<u256, 100> { return cap; } }",
-        "contract Requires { storage var cap: MaxValue<u256, 100>; pub fn get() -> MaxValue<u256, 100> requires(cap <= 100) { return cap; } }",
     }) |source| {
         var compilation = try helpers.compileText(source);
         defer compilation.deinit();

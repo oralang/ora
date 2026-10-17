@@ -449,7 +449,8 @@ pub const Adapter = struct {
                 const row = obligation.findById(self.set.function_summaries, binding.function_id) orelse return error.ForeignLifecycleBinding;
                 const digest = try canonical_digest.functionVcSha256(self.set, row.id);
                 if (!std.mem.eql(u8, &digest, &binding.function_vc_sha256)) return error.LifecycleDigestMismatch;
-                if (row.paths.len != 1 or row.assumption_ids.len != 0 or row.entry_invariant_ids.len != 0 or
+                if (row.entry_invariant_ids.len != 0) return error.UnauthenticatedLifecycleContractInvariant;
+                if (row.paths.len != 1 or
                     row.projection_completeness != .complete or !row.write_footprint_complete) return error.UnsupportedLifecycleRoot;
                 var query_state: CanonicalQueryState = .{};
                 self.query_state = &query_state;
@@ -461,6 +462,9 @@ pub const Adapter = struct {
                 const initial = try self.selectLoopLocation(location, info, false);
                 var prefix: std.ArrayList(z3.Z3_ast) = .empty;
                 try prefix.append(self.allocator, try self.lifecyclePredicate(claim, initial));
+                // Exact validated source references, evaluated at the entry
+                // store before any timeline write. Witnesses share this predicate.
+                try self.appendLoopAssumptions(&prefix, row.assumption_ids);
                 try self.appendSideConstraints(&prefix);
                 var witness: std.ArrayList(z3.Z3_ast) = .empty;
                 try witness.appendSlice(self.allocator, prefix.items);

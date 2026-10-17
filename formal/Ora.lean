@@ -81,6 +81,8 @@ import Ora.Storage.Address
 import Ora.Storage.Lifecycle
 import Ora.ContractInvariantBootstrap
 import Ora.Storage.LifecycleAdapter
+import Ora.Storage.LifecycleEntry
+import Ora.Storage.LifecycleEntryTests
 import Ora.Storage.LifecycleTests
 import Ora.Loop.Denotation
 import Ora.Loop.Auto
