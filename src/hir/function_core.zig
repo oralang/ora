@@ -896,6 +896,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn createTypedIntegerConstant(self: *FunctionLowerer, ty: mlir.MlirType, value: u256, loc: mlir.MlirLocation) anyerror!mlir.MlirValue {
+            if (mlir.oraTypeIsNull(ty)) return error.InvalidIntegerConstantType;
             const attr = if (value <= std.math.maxInt(i64))
                 mlir.oraIntegerAttrCreateI64FromType(ty, @intCast(value))
             else blk: {
@@ -903,6 +904,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const decimal_text = std.fmt.bufPrint(&decimal_buf, "{}", .{value}) catch return error.MlirOperationCreationFailed;
                 break :blk mlir.oraIntegerAttrGetFromString(ty, strRef(decimal_text));
             };
+            if (mlir.oraAttributeIsNull(attr)) return error.InvalidIntegerConstantAttribute;
             const op = mlir.oraArithConstantOpCreate(self.parent.context, loc, ty, attr);
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, op);
