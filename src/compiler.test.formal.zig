@@ -17465,3 +17465,28 @@ test "Group 3 total unsigned bound retains independent producer safety" {
         } else try tmp.dir.access(std.testing.io, hex, .{});
     }
 }
+
+test "lifecycle refusal reaches stdout before CLI failure" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "fenced.ora",
+        .data = "contract C { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) requires(x == 0) requires(x == 1) { cap = x; } }",
+    });
+    const path = try pathFromTmpAlloc(allocator, tmp, "fenced.ora");
+    defer allocator.free(path);
+    const output = try pathFromTmpAlloc(allocator, tmp, "out");
+    defer allocator.free(output);
+    const run = try runProcessWithLeanPath(allocator, &.{ ORA_BINARY_REL, "emit", "--emit=smt-report,bytecode", "--out-dir", output, path });
+    defer allocator.free(run.stdout);
+    defer allocator.free(run.stderr);
+    try expectExited(run, 1);
+    try testing.expect(std.mem.indexOf(u8, run.stdout, "error: storage lifecycle proof gate failed: LifecycleQueryVacuous\n") != null);
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/fenced.hex", .{}));
+    const authority_text = try tmp.dir.readFileAlloc(std.testing.io, "out/fenced.formal.artifacts.json", allocator, .limited(1024 * 1024));
+    defer allocator.free(authority_text);
+    const authority = try std.json.parseFromSlice(std.json.Value, allocator, authority_text, .{});
+    defer authority.deinit();
+    try testing.expectEqualStrings("blocked", authority.value.object.get("final_artifact_authorization").?.string);
+}

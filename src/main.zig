@@ -5130,6 +5130,7 @@ fn runMlirEmitAdvanced(
         if (z3_formal_query_bindings.len != 0) {
             lifecycle_session = formal_lifecycle_consume.prepare(mlir_allocator, final_module, verifier, mlir_options.process_environ, stdout) catch |err| {
                 try stdout.print("error: storage lifecycle proof gate failed: {s}\n", .{@errorName(err)});
+                try stdout.flush();
                 formal_gate_statuses.lifecycle_kernel = .rejected;
                 markUnrunFormalGatesSkipped(&formal_gate_statuses);
                 try writeFormalArtifactIndex(allocator, file_path, mlir_options, formal_gate_statuses, .blocked);
