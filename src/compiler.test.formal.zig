@@ -17490,3 +17490,52 @@ test "lifecycle refusal reaches stdout before CLI failure" {
     defer authority.deinit();
     try testing.expectEqualStrings("blocked", authority.value.object.get("final_artifact_authorization").?.string);
 }
+
+test "error union return refinements inspect the discriminant before reading the payload" {
+    for ([_][]const u8{
+        "MinValue<u256,5>",  "MaxValue<u8,100>", "InRange<i8,-5,10>",
+        "BasisPoints<u256>", "NonZero<u256>",    "NonZeroAddress<address>",
+    }) |refinement| {
+        const text = try std.fmt.allocPrint(testing.allocator, "type Payload = {s}; error Failed; contract C {{ storage var amount: Payload; pub fn forward() -> Result<Payload,Failed> {{ return Ok(amount); }} }}", .{refinement});
+        defer testing.allocator.free(text);
+        var compilation = try compileText(text);
+        defer compilation.deinit();
+        const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+        try testing.expect(typecheck.diagnostics.isEmpty());
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        const function = findFunctionByName(hir.module.raw_module, "forward") orelse return error.TestUnexpectedResult;
+        const wrapper = findFirstOpByNameInOp(function, "ora.error.ok") orelse return error.TestUnexpectedResult;
+        const input = mlir.oraOperationGetResult(wrapper, 0);
+        const branch = findFirstOpByNameInOp(function, "scf.if") orelse return error.TestUnexpectedResult;
+        const tag = findFirstOpByNameInOp(function, "ora.error.is_error") orelse return error.TestUnexpectedResult;
+        try testing.expect(mlir.mlirValueEqual(mlir.oraOperationGetOperand(tag, 0), input));
+        try testing.expect(mlir.mlirValueEqual(mlir.oraOperationGetOperand(branch, 0), mlir.oraOperationGetResult(tag, 0)));
+
+        // Err has only its empty yield: no unwrap, guard, or error-carrier read.
+        const err = mlir.oraBlockGetFirstOperation(mlir.oraScfIfOpGetThenBlock(branch));
+        const err_name = mlir.oraOperationGetName(err);
+        defer @import("mlir_c_api").freeStringRef(err_name);
+        try testing.expectEqualStrings("scf.yield", err_name.data[0..err_name.length]);
+        try testing.expectEqual(@as(usize, 0), mlir.oraOperationGetNumOperands(err));
+        try testing.expect(mlir.oraOperationIsNull(mlir.oraOperationGetNextInBlock(err)));
+
+        const ok_block = mlir.oraScfIfOpGetElseBlock(branch);
+        const unwrap = findFirstOpByNameInOp(function, "ora.error.unwrap") orelse return error.TestUnexpectedResult;
+        try testing.expectEqual(ok_block.ptr, mlir.mlirOperationGetBlock(unwrap).ptr);
+        try testing.expect(mlir.mlirValueEqual(mlir.oraOperationGetOperand(unwrap, 0), input));
+        const guard = findFirstOpByNameInOp(function, "ora.refinement_guard") orelse return error.TestUnexpectedResult;
+        try testing.expectEqual(ok_block.ptr, mlir.mlirOperationGetBlock(guard).ptr);
+        const payload = mlir.oraOperationGetResult(unwrap, 0);
+        const base_value = if (!mlir.oraTypeIsNull(mlir.oraRefinementTypeGetBaseType(mlir.oraValueGetType(payload)))) blk: {
+            const base = findFirstOpByNameInOp(function, "ora.refinement_to_base") orelse return error.TestUnexpectedResult;
+            try testing.expectEqual(ok_block.ptr, mlir.mlirOperationGetBlock(base).ptr);
+            try testing.expect(mlir.mlirValueEqual(mlir.oraOperationGetOperand(base, 0), payload));
+            break :blk mlir.oraOperationGetResult(base, 0);
+        } else payload;
+        const base_type = mlir.oraValueGetType(base_value);
+        try testing.expect(mlir.oraTypeIsAInteger(base_type) or mlir.oraTypeIsAddressType(base_type));
+        const ret = findFirstOpByNameInOp(function, "ora.return") orelse return error.TestUnexpectedResult;
+        try testing.expect(mlir.mlirValueEqual(mlir.oraOperationGetOperand(ret, 0), input));
+        try testing.expect(mlir.oraConvertToSIR(hir.context, hir.module.raw_module, false));
+    }
+}

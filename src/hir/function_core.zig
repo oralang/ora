@@ -1030,14 +1030,65 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const target_type = if (mlir.oraTypeIsNull(success_type)) return_type else success_type;
                     const value = try self.lowerExprForFlowTarget(expr_id, target_type, locals);
                     const semantic_return = self.semantic_return_type orelse return error.MlirOperationCreationFailed;
-                    const semantic_target = switch (semantic_return) {
+                    const semantic_payload = switch (semantic_return) {
                         .error_union => |error_union| error_union.payload_type.*,
                         else => semantic_return,
                     };
+                    const semantic_target = if (semantic_payload == .named)
+                        self.parent.substitutedType(semantic_payload.named.name) orelse semantic_payload
+                    else
+                        semantic_payload;
+                    if (!mlir.oraTypeIsNull(mlir.oraErrorUnionTypeGetSuccessType(mlir.oraValueGetType(value))) and
+                        (semantic_target == .refinement or !mlir.oraTypeIsNull(mlir.oraRefinementTypeGetBaseType(target_type))))
+                    {
+                        try @This().checkErrorUnionReturnRefinement(self, value, return_type, target_type, semantic_target, support.exprRange(self.parent.file, expr_id));
+                        return value;
+                    }
                     return try @This().convertValueForCheckedFlow(self, value, target_type, semantic_target, support.exprRange(self.parent.file, expr_id));
                 }
             }
             return try self.lowerExpr(expr_id, locals);
+        }
+
+        fn checkErrorUnionReturnRefinement(
+            self: *FunctionLowerer,
+            value: mlir.MlirValue,
+            return_type: mlir.MlirType,
+            payload_type: mlir.MlirType,
+            semantic_payload: sema.Type,
+            range: source.TextRange,
+        ) anyerror!void {
+            const value_type = mlir.oraValueGetType(value);
+            const actual_payload = mlir.oraErrorUnionTypeGetSuccessType(value_type);
+            if (mlir.oraTypeIsNull(actual_payload)) return error.InvalidRefinedErrorUnionPayload;
+            const refinement_base = mlir.oraRefinementTypeGetBaseType(actual_payload);
+            const base_type = if (mlir.oraTypeIsNull(refinement_base)) actual_payload else refinement_base;
+            // Type equality binds the representation, never discharges R.
+            if (!mlir.oraTypeEqual(value_type, return_type) or !mlir.oraTypeEqual(actual_payload, payload_type) or
+                !(mlir.oraTypeIsAInteger(base_type) or mlir.oraTypeIsAddressType(base_type)))
+                return error.InvalidRefinedErrorUnionPayload;
+
+            const loc = self.parent.location(range);
+            const is_error = mlir.oraErrorIsErrorOpCreate(self.parent.context, loc, value);
+            if (mlir.oraOperationIsNull(is_error)) return error.MlirOperationCreationFailed;
+            const tag = appendValueOp(self.block, is_error);
+            const branch = mlir.oraScfIfOpCreate(self.parent.context, loc, tag, null, 0, true);
+            if (mlir.oraOperationIsNull(branch)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, branch);
+            const err_block = mlir.oraScfIfOpGetThenBlock(branch);
+            const ok_block = mlir.oraScfIfOpGetElseBlock(branch);
+            if (mlir.oraBlockIsNull(err_block) or mlir.oraBlockIsNull(ok_block)) return error.MlirOperationCreationFailed;
+
+            // RefinementErrorUnion.checkedReturn?: only Ok may read/check T.
+            // The Err arm never reads a payload; both arms retain the original value.
+            const unwrap = mlir.oraErrorUnwrapOpCreate(self.parent.context, loc, value, actual_payload);
+            if (mlir.oraOperationIsNull(unwrap)) return error.MlirOperationCreationFailed;
+            const payload = appendValueOp(ok_block, unwrap);
+            var ok_lowerer = self.*;
+            ok_lowerer.block = ok_block;
+            _ = try @This().convertValueForCheckedFlow(&ok_lowerer, payload, payload_type, semantic_payload, range);
+            if (!support.blockEndsWithTerminator(err_block)) try appendScfYieldValues(self.parent.context, err_block, loc, &.{});
+            if (!support.blockEndsWithTerminator(ok_block)) try appendScfYieldValues(self.parent.context, ok_block, loc, &.{});
         }
 
         fn voidValue(self: *FunctionLowerer, range: source.TextRange) anyerror!mlir.MlirValue {
