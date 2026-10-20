@@ -1543,6 +1543,7 @@ fn termReferencesUnavailableCheckpointDependency(
         .int_lit,
         .result,
         .place_read,
+        .invocation_caller,
         => false,
     };
 }
@@ -1610,6 +1611,7 @@ fn termReferencesSummaryDependencyVariable(
         .int_lit,
         .result,
         .place_read,
+        .invocation_caller,
         => false,
     };
 }
@@ -1906,6 +1908,7 @@ fn formulaTermSemanticSupport(
         .old,
         .result,
         .place_read,
+        .invocation_caller,
         => .{ .unsupported = .unsupported_term_kind },
     };
 }
@@ -1923,6 +1926,7 @@ fn valueTermSemanticSupport(
         .variable => |variable| varRefSupportsBoolOrIntegerValue(variable),
         .result => .supported,
         .place_read => .supported,
+        .invocation_caller => .{ .unsupported = .unsupported_term_kind },
         .binary => |binary| switch (binary.op) {
             .add, .sub, .mul, .pow, .shl, .shr, .div, .mod, .bit_and, .bit_xor => binaryCarrierArithmeticValueSemanticSupport(set, binary, fuel - 1),
             else => .{ .unsupported = .unsupported_term_kind },
@@ -1947,6 +1951,7 @@ fn integerValueTermSemanticSupport(
         .variable => |variable| varRefSupportsIntegerValue(variable),
         .result => .supported,
         .place_read => .supported,
+        .invocation_caller => .{ .unsupported = .unsupported_term_kind },
         .binary => |binary| switch (binary.op) {
             .add, .sub, .mul, .pow, .shl, .shr, .div, .mod, .bit_and, .bit_xor => binaryCarrierArithmeticValueSemanticSupport(set, binary, fuel - 1),
             else => .{ .unsupported = .unsupported_term_kind },
@@ -2001,6 +2006,7 @@ fn unsignedIntegerValueTermSemanticSupport(
         .variable => |variable| varRefSupportsUnsignedIntegerValue(variable),
         .result => .supported,
         .place_read => .supported,
+        .invocation_caller => .{ .unsupported = .unsupported_term_kind },
         .binary => |binary| switch (binary.op) {
             .add, .sub, .mul, .pow, .shl, .shr, .div, .mod, .bit_and, .bit_xor => binaryUnsignedArithmeticValueSemanticSupport(set, binary, fuel - 1),
             else => .{ .unsupported = .unsupported_term_kind },
@@ -2086,6 +2092,7 @@ fn signedIntegerValueTermSemanticSupport(
         .variable => |variable| varRefSupportsSignedIntegerValue(variable),
         .result => .supported,
         .place_read => .supported,
+        .invocation_caller => .{ .unsupported = .unsupported_term_kind },
         .binary => |binary| switch (binary.op) {
             .add, .sub, .mul, .pow, .shl, .shr, .div, .mod, .bit_and, .bit_xor => binarySignedArithmeticValueSemanticSupport(set, binary, fuel - 1),
             else => .{ .unsupported = .unsupported_term_kind },
@@ -2509,6 +2516,12 @@ fn writeTerm(writer: anytype, term: obligation.Term) !void {
             try writer.print("{d}", .{id});
         },
         .result => try writer.writeAll(".result"),
+        .invocation_caller => |caller| {
+            if (!caller.validType() or caller.function_id == 0) return error.InvalidLifecycleCallerType;
+            try writer.print(".invocationCaller {d} (", .{caller.function_id});
+            try writeTypeRef(writer, caller.ty);
+            try writer.writeByte(')');
+        },
         .place_read => |place| {
             try writer.writeAll(".placeRead ");
             try writePlaceRef(writer, place);

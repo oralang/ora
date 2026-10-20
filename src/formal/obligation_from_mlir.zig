@@ -30,12 +30,24 @@ pub const CollectResult = struct {
     runtime_check_producers: []const RuntimeCheckProducer = &.{},
     state_effect_producers: []const StateEffectProducer = &.{},
     function_ops: []const usize = &.{},
+    caller_bindings: []const CallerBinding = &.{},
     call_bindings: []const CallSiteBinding = &.{},
 
     pub fn deinit(self: *CollectResult) void {
         self.arena.deinit();
         self.* = undefined;
     }
+};
+
+/// Live identities are compilation-owned, never reconstructed from names.
+pub const CallerBinding = struct {
+    source_op_id: usize,
+    value_id: usize,
+    module_op_id: usize,
+    function_op_id: usize,
+    function_id: obligation.Id,
+    operation_ordinal: u32,
+    term_id: obligation.TermId,
 };
 
 pub const CallSiteBinding = struct { source_op_id: usize, function_id: obligation.Id };
@@ -310,6 +322,7 @@ pub fn collect(
         .arena = arena,
         .set = set,
         .function_ops = function_ops,
+        .caller_bindings = try collector.caller_bindings.toOwnedSlice(collector.allocator),
         .call_bindings = try call_bindings.toOwnedSlice(collector.allocator),
         .query_bindings = try collector.query_bindings.toOwnedSlice(collector.allocator),
         .source_fact_bindings = try collector.source_fact_bindings.toOwnedSlice(collector.allocator),
@@ -765,6 +778,7 @@ const Collector = struct {
     call_sites: std.ArrayList(mlir.MlirOperation) = .empty,
     function_summaries: std.ArrayList(obligation.FunctionSummaryRow) = .empty,
     function_ops: std.ArrayList(mlir.MlirOperation) = .empty,
+    caller_bindings: std.ArrayList(CallerBinding) = .empty,
     function_contexts: std.AutoHashMapUnmanaged(usize, FunctionContext) = .empty,
     active_loop_summary_indices: std.ArrayList(usize) = .empty,
     query_bindings: std.ArrayList(obligation.FormalQueryBinding) = .empty,
@@ -897,6 +911,51 @@ const Collector = struct {
         if (self.lifecycle_scope != null and addressCarrier(mlir.oraValueGetType(value)))
             return .{ .compiler_type_id = type_builtin.lookupBuiltinById(.address).comptime_type_id };
         return self.exactLoopIntegerTypeForValue(value);
+    }
+
+    fn lifecycleCaller(self: *Collector, op: mlir.MlirOperation) !?obligation.TermId {
+        const roots = self.options.lifecycle_roots orelse return null;
+        const function = containingFunction(op);
+        for (roots) |root| {
+            if (root.ptr == function.ptr) break;
+        } else return null;
+        if (!std.mem.eql(u8, operationName(op), "ora.evm.caller") or
+            mlir.oraOperationGetNumOperands(op) != 0 or mlir.oraOperationGetNumResults(op) != 1 or
+            mlir.oraOperationGetNumRegions(op) != 0 or mlir.mlirOperationGetNumSuccessors(op) != 0)
+            return error.InvalidLifecycleCallerOperation;
+        const value = mlir.oraOperationGetResult(op, 0);
+        const ty = mlir.oraValueGetType(value);
+        if (!mlir.oraTypeIsAddressType(ty) or !mlir.oraTypeIsNull(mlir.oraRefinementTypeGetBaseType(ty)))
+            return error.InvalidLifecycleCallerType;
+        const ordinal = self.operationOrdinal(op) orelse return error.DetachedLifecycleCaller;
+        var module = function;
+        while (!std.mem.eql(u8, operationName(module), "builtin.module")) {
+            module = mlir.mlirOperationGetParentOperation(module);
+            if (mlir.oraOperationIsNull(module)) return error.DetachedLifecycleCaller;
+        }
+        const function_index = try self.requireFunctionRow(function);
+        const owner = self.function_summaries.items[function_index].id;
+        for (self.caller_bindings.items) |binding| if (binding.source_op_id == @intFromPtr(op.ptr)) {
+            if (binding.value_id != @intFromPtr(value.ptr) or binding.function_id != owner)
+                return error.LifecycleCallerIdentityMismatch;
+            return binding.term_id;
+        };
+        const term = for (self.terms.items, 0..) |term, index| {
+            if (term == .invocation_caller and term.invocation_caller.function_id == owner) break @as(obligation.TermId, @intCast(index));
+        } else try self.addTerm(.{ .invocation_caller = .{
+            .function_id = owner,
+            .ty = .{ .compiler_type_id = type_builtin.lookupBuiltinById(.address).comptime_type_id },
+        } });
+        try self.caller_bindings.append(self.allocator, .{
+            .source_op_id = @intFromPtr(op.ptr),
+            .value_id = @intFromPtr(value.ptr),
+            .module_op_id = @intFromPtr(module.ptr),
+            .function_op_id = @intFromPtr(function.ptr),
+            .function_id = owner,
+            .operation_ordinal = ordinal,
+            .term_id = term,
+        });
+        return term;
     }
 
     fn lifecycleAddressCastOperand(self: *Collector, op: mlir.MlirOperation) !?mlir.MlirValue {
@@ -1402,6 +1461,7 @@ const Collector = struct {
         const ordinal = self.nextOrdinal();
         try self.operation_ordinals.put(self.allocator, @intFromPtr(op.ptr), ordinal);
         const op_name = operationName(op);
+        if (std.mem.eql(u8, op_name, "ora.evm.caller")) _ = try self.lifecycleCaller(op);
         const symbol = try self.symbolForOperation(op, op_name, inherited_symbol);
         if (std.mem.eql(u8, op_name, "ora.global")) {
             const root = (try self.stringAttr(op, "sym_name")) orelse "";
@@ -2423,7 +2483,7 @@ const Collector = struct {
                 }
                 break :blk self.termReferencesStoragePlace(quantified.body, fuel - 1);
             },
-            .bool_lit, .int_lit, .variable, .result => false,
+            .bool_lit, .int_lit, .variable, .result, .invocation_caller => false,
         };
     }
 
@@ -7050,6 +7110,7 @@ const Collector = struct {
         if (mlir.oraOperationIsNull(owner)) return null;
 
         const owner_name = operationName(owner);
+        if (std.mem.eql(u8, owner_name, "ora.evm.caller")) return self.lifecycleCaller(owner);
         if (try self.lifecycleAddressCastOperand(owner)) |operand|
             return self.termFromValueWithIntegerSignedness(operand, null);
         if (isTransparentValueOp(owner_name)) {
@@ -7845,6 +7906,7 @@ const Collector = struct {
             .int_lit,
             .result,
             .place_read,
+            .invocation_caller,
             => term_id,
             .variable => |variable| switch (variable) {
                 .free => |free| {

@@ -111,6 +111,10 @@ def decodeTerm : RawTerm → Option Term
           | none => none
       | "old" => some (.old lhs)
       | "result" => some .result
+      | "invocation_caller" =>
+          match decodeTy? tyName with
+          | some ty => some (.invocationCaller lhs ty)
+          | none => none
       | "place_read" =>
           match decodePlace rawPlace with
           | some place => some (.placeRead place)
@@ -465,6 +469,7 @@ def formulaFullyDenotable? (manifest : Manifest) (env : Env) : Nat → TermId �
       | some (.intLit _)
       | some (.old _)
       | some .result
+      | some (.invocationCaller _ _)
       | some (.placeRead _) => false
       | none => false
 

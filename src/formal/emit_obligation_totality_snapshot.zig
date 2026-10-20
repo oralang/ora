@@ -285,6 +285,7 @@ fn writeTerm(out: anytype, term: obligation.Term) !void {
         },
         .old => |operand| try writeRawTerm(out, .{ .tag = "old", .lhs = operand }),
         .result => try writeRawTerm(out, .{ .tag = "result" }),
+        .invocation_caller => |caller| try writeRawTerm(out, .{ .tag = "invocation_caller", .lhs = caller.function_id, .ty = caller.ty }),
         .place_read => |place| try writeRawTerm(out, .{ .tag = "place_read", .place = place }),
         .unary => |unary| try writeRawTerm(out, .{ .tag = "unary", .text = unaryName(unary.op), .lhs = unary.operand }),
         .binary => |binary| try writeRawTerm(out, .{ .tag = "binary", .text = binaryName(binary.op), .ty = binary.ty, .lhs = binary.lhs, .rhs = binary.rhs }),
@@ -618,6 +619,11 @@ pub fn main(init: std.process.Init) !void {
     try out.writeAll(header);
     try out.writeAll(row_type);
     var first = true;
+
+    {
+        const terms = [_]obligation.Term{.{ .invocation_caller = .{ .function_id = 1, .ty = .{ .compiler_type_id = type_builtin.lookupBuiltinById(.address).comptime_type_id } } }};
+        try writeFixtureWithExpectation(out, &first, "invocation_caller_without_context_refuses", &terms, &.{}, false, .{ .formula = 0 });
+    }
 
     {
         const terms = [_]obligation.Term{.{ .bool_lit = true }};

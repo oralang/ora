@@ -110,6 +110,7 @@ pub const Consumer = struct {
     /// ordinary exact-join output. An unmatched UNSAT row is never sufficient.
     pub fn validateRows(self: *Consumer, rows: []const z3.PreparedQueryManifestRow, set: obligation.ObligationSet, retained_checks: bool) !void {
         try self.session.validate();
+        _ = try hir.authenticateCallers(&self.session.projection);
         if (!retained_checks) return error.LifecycleChecksNotRetained;
         const expected = self.session.uses orelse return error.MissingLifecycleUse;
         if (set.lifecycle_uses.len != expected.len) return error.MissingLifecycleUse;
@@ -215,6 +216,7 @@ pub const Consumer = struct {
 
     fn begin(raw: *anyopaque) !void {
         try get(raw).session.validate();
+        _ = try hir.authenticateCallers(&get(raw).session.projection);
     }
 
     fn entry(raw: *anyopaque, encoder: *z3.CertifiedCallEncoder, function: mlir.MlirOperation) !z3.LifecycleEntry {

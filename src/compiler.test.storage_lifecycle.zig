@@ -13,6 +13,269 @@ const lifecycle_check = @import("formal/storage_lifecycle_check.zig");
 const proof_check = @import("formal/proof_check.zig");
 const lifecycle_consume = @import("formal/storage_lifecycle_consume.zig");
 
+test "E2a live caller terms and independent native and kernel lifecycle construction" {
+    var compilation = try helpers.compileText(
+        "comptime const std = @import(\"std\"); contract C { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) requires(std.msg.sender() != std.constants.ZERO_ADDRESS) { cap = x; } pub fn get() -> MaxValue<u256,100> { return cap; } }",
+    );
+    defer compilation.deinit();
+    const module = (try compilation.db.lowerToHir(compilation.root_module_id)).module.raw_module;
+    var pass = try z3.VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    var snapshot = try collector.collect(testing.allocator, module, &pass);
+    defer snapshot.deinit();
+    var projection = try collector.project(testing.allocator, module, &pass, snapshot.inventory);
+    defer projection.deinit();
+    const inputs = try collector.proofInputs(&projection);
+    try testing.expect(inputs.callers.len > 0);
+    for (inputs.callers) |capture| {
+        try testing.expect(projection.canonical.set.terms[capture.term_id].invocation_caller.validType());
+    }
+    var context = try z3.Z3Context.init(testing.allocator);
+    defer context.deinit();
+    var adapter = canonical_z3.Adapter.init(&context, testing.allocator, projection.canonical.set);
+    const queries = adapter.checkLifecycle(inputs, pass.timeout_ms) catch |err| {
+        var diagnostic = std.Io.Writer.Allocating.init(testing.allocator);
+        defer diagnostic.deinit();
+        try canonical_lean.writeCallCustodyModule(&diagnostic.writer, projection.canonical.set, "Ora.Generated.E2aDiagnostic");
+        std.debug.print("E2a manifest:\n{s}\n", .{diagnostic.written()});
+        std.debug.print("E2a native error: {s}\nterms: {any}\n", .{ context.lastErrorMessage(), projection.canonical.set.terms });
+        return err;
+    };
+    defer testing.allocator.free(queries);
+    for (queries) |query| try query.requireSuccess();
+    var lean = std.Io.Writer.Allocating.init(testing.allocator);
+    defer lean.deinit();
+    try emitter.writeProducerTargets(&lean.writer, testing.allocator, inputs, projection.canonical.set);
+    try emitter.writeProducerProofs(&lean.writer, testing.allocator, inputs, projection.canonical.set);
+    errdefer std.debug.print("E2a generated source\n{s}\n", .{lean.written()});
+    try lifecycleDataKernelCheck(lean.written());
+    try testing.expect(pass.lifecycle == null and pass.lifecycle_entries.count() == 0);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var session = (try lifecycle_consume.prepare(testing.allocator, module, &pass, try lifecycleEnviron(arena.allocator()), &lean.writer)) orelse return error.MissingE2aSession;
+    defer session.deinit();
+    try testing.expect(pass.lifecycle == null and pass.lifecycle_entries.count() == 0);
+}
+
+test "E2a complete caller occurrence custody rejects named corruptions" {
+    const Mutation = enum { absent, omitted, duplicate, operation, result, function, module, owner, term, type, live_u160, live_u256, opcode, detached, stale_module, stale_function, copied_metadata, swapped_requires_body };
+    for (std.meta.tags(Mutation)) |mutation| {
+        std.debug.print("E2a capture case {s}\n", .{@tagName(mutation)});
+        errdefer std.debug.print("E2a capture corruption {s}\n", .{@tagName(mutation)});
+        var compilation = try helpers.compileText("comptime const std = @import(\"std\"); contract C { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) requires(std.msg.sender() != std.constants.ZERO_ADDRESS) { cap = x; } pub fn same() -> bool { return std.msg.sender() == std.msg.sender(); } }");
+        defer compilation.deinit();
+        const module = (try compilation.db.lowerToHir(compilation.root_module_id)).module.raw_module;
+        var pass = try z3.VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        var snapshot = try collector.collect(testing.allocator, module, &pass);
+        defer snapshot.deinit();
+        var projection = try collector.project(testing.allocator, module, &pass, snapshot.inventory);
+        defer projection.deinit();
+        const arena = projection.snapshot.arena.allocator();
+        const captures = try arena.dupe(canonical_collector.CallerBinding, projection.canonical.caller_bindings);
+        try testing.expect(captures.len >= 3);
+        projection.canonical.caller_bindings = captures;
+        const operation = projection.snapshot.operations[captures[0].operation_ordinal];
+        const original_block = mlir.mlirOperationGetBlock(operation);
+        const next_operation = mlir.oraOperationGetNextInBlock(operation);
+        const live_value = mlir.oraOperationGetResult(operation, 0);
+        const live_type = mlir.oraValueGetType(live_value);
+        defer if (mutation == .live_u160 or mutation == .live_u256) mlir.mlirValueSetType(live_value, live_type);
+        // Reattach after the refusal: destroying a detached result while its
+        // users remain live would corrupt the test module during teardown.
+        defer if (mutation == .detached) mlir.mlirBlockInsertOwnedOperationBefore(original_block, next_operation, operation);
+        if (mutation == .stale_module or mutation == .stale_function) {
+            var inventory = projection.snapshot.inventory;
+            if (mutation == .stale_module) inventory.module_sha256[0] ^= 1 else {
+                const functions = try arena.dupe(data.Function, inventory.functions);
+                functions[0].hir_sha256[0] ^= 1;
+                inventory.functions = functions;
+            }
+            try testing.expectError(error.LifecycleInventoryMismatch, collector.checkFresh(testing.allocator, module, &pass, inventory));
+            continue;
+        }
+        const expected: anyerror = switch (mutation) {
+            .absent => blk: {
+                projection.canonical.caller_bindings = &.{};
+                break :blk error.MissingLifecycleCaller;
+            },
+            .omitted => blk: {
+                projection.canonical.caller_bindings = captures[1..];
+                break :blk error.MissingLifecycleCaller;
+            },
+            .duplicate => blk: {
+                const duplicate = try arena.alloc(canonical_collector.CallerBinding, captures.len + 1);
+                @memcpy(duplicate[0..captures.len], captures);
+                duplicate[captures.len] = captures[0];
+                projection.canonical.caller_bindings = duplicate;
+                break :blk error.DuplicateLifecycleCaller;
+            },
+            .operation => blk: {
+                captures[0].source_op_id = captures[1].source_op_id;
+                break :blk error.LifecycleCallerOperationMismatch;
+            },
+            .result => blk: {
+                captures[0].value_id = captures[1].value_id;
+                break :blk error.LifecycleCallerResultMismatch;
+            },
+            .function => blk: {
+                captures[0].function_op_id = 0;
+                break :blk error.ForeignLifecycleCallerFunction;
+            },
+            .module => blk: {
+                captures[0].module_op_id = 0;
+                break :blk error.ForeignLifecycleCallerModule;
+            },
+            .owner => blk: {
+                captures[0].function_id = 999;
+                break :blk error.ForeignLifecycleCaller;
+            },
+            .term => blk: {
+                @constCast(projection.canonical.set.terms)[captures[0].term_id].invocation_caller.function_id = 999;
+                break :blk error.LifecycleCallerIdentityMismatch;
+            },
+            .type => blk: {
+                @constCast(projection.canonical.set.terms)[captures[0].term_id].invocation_caller.ty = .{ .compiler_type_id = 6 };
+                break :blk error.InvalidLifecycleCallerType;
+            },
+            .live_u160, .live_u256 => blk: {
+                mlir.mlirValueSetType(live_value, mlir.mlirIntegerTypeGet(mlir.mlirOperationGetContext(operation), if (mutation == .live_u160) 160 else 256));
+                break :blk error.InvalidLifecycleCallerType;
+            },
+            .swapped_requires_body => blk: {
+                const foreign = for (captures) |capture| {
+                    if (capture.function_id != captures[0].function_id) break capture;
+                } else return error.MissingForeignCallerTest;
+                captures[0].term_id = foreign.term_id;
+                break :blk error.LifecycleCallerIdentityMismatch;
+            },
+            .opcode, .copied_metadata => blk: {
+                const fake = firstOperation(mlir.oraModuleGetOperation(module), "arith.constant").?;
+                if (mutation == .copied_metadata) {
+                    const attributes = mlir.mlirOperationGetNumAttributes(operation);
+                    for (0..@intCast(attributes)) |i| {
+                        const attr = mlir.mlirOperationGetAttribute(operation, @intCast(i));
+                        mlir.mlirOperationSetAttributeByName(fake, mlir.mlirIdentifierStr(attr.name), attr.attribute);
+                    }
+                }
+                for (projection.snapshot.operations, 0..) |op, i| if (op.ptr == fake.ptr) {
+                    captures[0].operation_ordinal = @intCast(i);
+                    break;
+                };
+                captures[0].source_op_id = @intFromPtr(fake.ptr);
+                break :blk error.InvalidLifecycleCallerOperation;
+            },
+            .detached => blk: {
+                mlir.mlirOperationRemoveFromParent(operation);
+                break :blk error.ForeignLifecycleCallerFunction;
+            },
+            else => unreachable,
+        };
+        try testing.expectError(expected, collector.authenticateCallers(&projection));
+        try testing.expect(pass.lifecycle == null and pass.lifecycle_entries.count() == 0);
+    }
+}
+
+test "E2a native caller is fixed exact-width and unconstrained including zero" {
+    const c = z3.z3_c;
+    var compilation = try helpers.compileText("comptime const std = @import(\"std\"); contract C { storage var cap: MaxValue<u256,100>; pub fn same() -> bool { return std.msg.sender() == std.msg.sender(); } }");
+    defer compilation.deinit();
+    const module = (try compilation.db.lowerToHir(compilation.root_module_id)).module.raw_module;
+    var pass = try z3.VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    var snapshot = try collector.collect(testing.allocator, module, &pass);
+    defer snapshot.deinit();
+    var projection = try collector.project(testing.allocator, module, &pass, snapshot.inventory);
+    defer projection.deinit();
+    const capture = projection.canonical.caller_bindings[0];
+    try testing.expectEqual(@as(usize, 2), projection.canonical.caller_bindings.len);
+    try testing.expectEqual(capture.term_id, projection.canonical.caller_bindings[1].term_id);
+    var context = try z3.Z3Context.init(testing.allocator);
+    defer context.deinit();
+    const obligation = @import("formal/obligation.zig");
+    const n = projection.canonical.set.terms.len;
+    const terms = try testing.allocator.alloc(obligation.Term, n + 3);
+    defer testing.allocator.free(terms);
+    @memcpy(terms[0..n], projection.canonical.set.terms);
+    terms[n] = .{ .int_lit = .{ .value = "0", .ty = terms[capture.term_id].invocation_caller.ty } };
+    terms[n + 1] = .{ .binary = .{ .op = .eq, .lhs = capture.term_id, .rhs = @intCast(n) } };
+    terms[n + 2] = .{ .binary = .{ .op = .eq, .lhs = capture.term_id, .rhs = capture.term_id } };
+    var set = projection.canonical.set;
+    set.terms = terms;
+    var adapter = canonical_z3.Adapter.init(&context, testing.allocator, set);
+    adapter.function_row = projection.canonical.set.function_summaries[0];
+    var query_state: @import("formal/canonical_types.zig").CanonicalQueryState = .{};
+    adapter.query_state = &query_state;
+    const term: @import("formal/obligation.zig").FormulaRef = .{ .term = @intCast(n + 2) };
+    try testing.expectError(error.FunctionVCVariableOutOfScope, adapter.encodeFormula(term));
+    const sort = c.Z3_mk_bv_sort(context.ctx, 160);
+    const caller = c.Z3_mk_const(context.ctx, c.Z3_mk_string_symbol(context.ctx, "invocation_A"), sort);
+    const other = c.Z3_mk_const(context.ctx, c.Z3_mk_string_symbol(context.ctx, "invocation_B"), sort);
+    adapter.call_scope = 1;
+    adapter.caller_context = .{ .owner = capture.function_id, .scope = 1, .value = caller };
+    const first = try adapter.encodeFormula(term);
+    const second = try adapter.encodeFormula(term);
+    try testing.expect(first == second);
+    const is_zero = try adapter.encodeFormula(.{ .term = @intCast(n + 1) });
+    const relations = [_]c.Z3_ast{
+        is_zero,
+        c.Z3_mk_not(context.ctx, is_zero),
+        c.Z3_mk_eq(context.ctx, caller, other),
+        c.Z3_mk_not(context.ctx, c.Z3_mk_eq(context.ctx, caller, other)),
+        c.Z3_mk_not(context.ctx, first),
+    };
+    for (relations, 0..) |relation, i| {
+        var solver = try z3.Z3Solver.init(&context, testing.allocator);
+        defer solver.deinit();
+        try solver.assertChecked(relation);
+        try testing.expectEqual(if (i == 4) c.Z3_L_FALSE else c.Z3_L_TRUE, try solver.checkChecked());
+    }
+    adapter.call_scope = 2;
+    try testing.expectError(error.FunctionVCVariableOutOfScope, adapter.encodeFormula(term));
+    adapter.call_scope = 1;
+    adapter.caller_context.?.owner += 1;
+    try testing.expectError(error.FunctionVCVariableOutOfScope, adapter.encodeFormula(term));
+    adapter.caller_context.?.owner = capture.function_id;
+    adapter.caller_context.?.value = c.Z3_mk_unsigned_int64(context.ctx, 0, c.Z3_mk_bv_sort(context.ctx, 256));
+    try testing.expectError(error.TypeMismatch, adapter.encodeFormula(term));
+    adapter.caller_context.?.value = c.Z3_mk_true(context.ctx);
+    try testing.expectError(error.TypeMismatch, adapter.encodeFormula(term));
+}
+
+test "E2a fresh caller and mapping keys serialize only in explicit lifecycle roots" {
+    const cases = [_][]const u8{
+        "comptime const std = @import(\"std\"); contract C { pub fn caller() -> address { return std.msg.sender(); } }",
+        "comptime const std = @import(\"std\"); contract C { pub fn same() -> bool { return std.msg.sender() == std.msg.sender(); } }",
+        "contract C { storage balances: map<address,u256>; pub fn get(key: address) -> u256 { return balances[key]; } }",
+        "comptime const std = @import(\"std\"); contract C { storage balances: map<address,u256>; pub fn get() -> u256 { return balances[std.msg.sender()]; } }",
+    };
+    for (cases, 0..) |source, index| {
+        errdefer std.debug.print("E2a projection source {d}: {s}\n", .{ index, source });
+        var compilation = try helpers.compileText(source);
+        defer compilation.deinit();
+        const module = (try compilation.db.lowerToHir(compilation.root_module_id)).module.raw_module;
+        var pass = try z3.VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        var snapshot = try collector.collect(testing.allocator, module, &pass);
+        defer snapshot.deinit();
+        var rows = try canonical_collector.collect(testing.allocator, module, .{ .project_calls = true, .lifecycle_roots = snapshot.function_ops });
+        defer rows.deinit();
+        for (rows.set.diagnostics) |diagnostic| if (diagnostic.blocks_artifacts)
+            std.debug.print("E2a projection diagnostic: {s}\n", .{diagnostic.message});
+        try testing.expect(!rows.set.hasBlockingDiagnostic());
+        try testing.expectEqual(index != 2, rows.caller_bindings.len != 0);
+        var lean = std.Io.Writer.Allocating.init(testing.allocator);
+        defer lean.deinit();
+        try canonical_lean.writeCallCustodyModule(&lean.writer, rows.set, "Ora.Generated.E2aProjection");
+        try lifecycleDataKernelCheck(lean.written());
+        var ordinary = try canonical_collector.collect(testing.allocator, module, .{});
+        defer ordinary.deinit();
+        try testing.expectEqual(@as(usize, 0), ordinary.caller_bindings.len);
+        for (ordinary.set.terms) |term| try testing.expect(term != .invocation_caller);
+        try testing.expect(pass.lifecycle == null and pass.lifecycle_entries.count() == 0);
+    }
+}
+
 test "E1 fresh requires authenticate exact live runtime mirrors without granting authority" {
     const sources = [_][]const u8{
         "contract C { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) requires(x <= 100) { cap = x; } }",
@@ -168,11 +431,23 @@ test "E1 producer proves complete entry and failed-entry prefixes independently"
 }
 
 test "E1 contradictory entry false checkpoint and out-of-candidate witness cannot prove" {
-    for ([_][]const u8{
+    try lifecycleWitnessNegatives(&.{
         "contract C { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) requires(x == 0) requires(x == 1) { cap = x; } }",
         "contract C { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) requires(x <= 100) { assert(false); cap = x; } }",
         "contract C { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) requires(x == 2) { cap = x; } }",
-    }, 0..) |source, index| {
+    });
+}
+
+test "E2a independent caller nonvacuity and kernel witness failures cannot rescue each other" {
+    try lifecycleWitnessNegatives(&.{
+        "comptime const std = @import(\"std\"); contract C { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) requires(std.msg.sender() == std.constants.ZERO_ADDRESS) requires(std.msg.sender() != std.constants.ZERO_ADDRESS) { cap = x; } }",
+        "comptime const std = @import(\"std\"); contract C { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) requires(std.msg.sender() != std.constants.ZERO_ADDRESS) { assert(false); cap = x; } }",
+        "comptime const std = @import(\"std\"); contract C { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) requires(std.msg.sender() != std.constants.ZERO_ADDRESS) requires(x == 2) { cap = x; } }",
+    });
+}
+
+fn lifecycleWitnessNegatives(sources: []const []const u8) !void {
+    for (sources, 0..) |source, index| {
         errdefer std.debug.print("E1 witness negative {d}\n", .{index});
         var compilation = try helpers.compileText(source);
         defer compilation.deinit();
@@ -250,6 +525,49 @@ test "E1 authenticated entry reaches the complete native and kernel consumer" {
         defer output.deinit();
         errdefer std.debug.print("E1 consumer output: {s}\n", .{output.written()});
         var session = (try lifecycle_consume.prepare(testing.allocator, module, &pass, try lifecycleEnviron(arena.allocator()), &output.writer)) orelse return error.MissingE1Session;
+        defer session.deinit();
+        var consumer: lifecycle_consume.Consumer = .{ .session = &session };
+        pass.lifecycle = consumer.provider();
+        var before = try pass.collectPreparedQueryManifest(module);
+        defer before.deinit();
+        try testing.expect(session.uses.?.len != 0);
+        var verified = try pass.runVerificationPassPreparedSequential(module);
+        defer verified.deinit();
+        try testing.expect(verified.success);
+        try testing.expectEqual(@as(usize, 0), verified.proven_guard_ids.count());
+        try testing.expectEqual(@as(usize, 0), verified.proven_guard_positions.items.len);
+        var report = try pass.buildSmtReport(module, "test.ora", &verified);
+        defer report.deinit(testing.allocator);
+        try testing.expect(!report.blocksTrustedArtifacts());
+        const rows = report.query_manifest.?.rows;
+        var overlaid = try @import("formal/obligation_from_z3.zig").overlayPreparedQueryResults(testing.allocator, formal.formal_result.set, rows);
+        defer overlaid.deinit();
+        try consumer.validateRows(rows, overlaid.set, true);
+        try testing.expectError(error.LifecycleChecksNotRetained, consumer.validateRows(rows, overlaid.set, false));
+        for (before.rows, rows) |original, row| try testing.expectEqual(original.smtlib_hash, row.smtlib_hash);
+    }
+}
+
+test "E2a authenticated caller reaches the complete production consumer" {
+    for ([_][]const u8{
+        "comptime const std = @import(\"std\"); contract C { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) requires(std.msg.sender() != std.constants.ZERO_ADDRESS) { cap = x; } pub fn get() -> MaxValue<u256,100> { return cap; } }",
+    }) |source| {
+        var compilation = try helpers.compileText(source);
+        defer compilation.deinit();
+        const module = (try compilation.db.lowerToHir(compilation.root_module_id)).module.raw_module;
+        var formal = try helpers.collectFormalQueryBindingsForVerifier(testing.allocator, module);
+        defer formal.formal_result.deinit();
+        defer testing.allocator.free(formal.z3_bindings);
+        var pass = try z3.VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        pass.setFormalQueryBindings(formal.z3_bindings);
+        pass.setVerifyMode(.Full);
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var output = std.Io.Writer.Allocating.init(testing.allocator);
+        defer output.deinit();
+        errdefer std.debug.print("E1 consumer output: {s}\n", .{output.written()});
+        var session = (try lifecycle_consume.prepare(testing.allocator, module, &pass, try lifecycleEnviron(arena.allocator()), &output.writer)) orelse return error.MissingE2aSession;
         defer session.deinit();
         var consumer: lifecycle_consume.Consumer = .{ .session = &session };
         pass.lifecycle = consumer.provider();
@@ -531,9 +849,17 @@ test "SL4B owned session binds actual native entries and the complete grant" {
 }
 
 test "SL4B every native obligation and kernel custody corruption blocks by name" {
+    try lifecycleCustodyCorruptions("contract Guarded { storage var cap: MaxValue<u256, 100>; pub fn put(x: MaxValue<u256, 100>) { cap = x; } pub fn get() -> MaxValue<u256, 100> { return cap; } }");
+}
+
+test "E2a every native obligation and kernel custody corruption blocks by name" {
+    try lifecycleCustodyCorruptions("comptime const std = @import(\"std\"); contract Guarded { storage var cap: MaxValue<u256, 100>; pub fn put(x: MaxValue<u256, 100>) requires(std.msg.sender() != std.constants.ZERO_ADDRESS) { cap = x; } pub fn get() -> MaxValue<u256, 100> { return cap; } }");
+}
+
+fn lifecycleCustodyCorruptions(source: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var compilation = try helpers.compileText("contract Guarded { storage var cap: MaxValue<u256, 100>; pub fn put(x: MaxValue<u256, 100>) { cap = x; } pub fn get() -> MaxValue<u256, 100> { return cap; } }");
+    var compilation = try helpers.compileText(source);
     defer compilation.deinit();
     const module = (try compilation.db.lowerToHir(compilation.root_module_id)).module.raw_module;
     var pass = try z3.VerificationPass.init(testing.allocator);
@@ -543,6 +869,24 @@ test "SL4B every native obligation and kernel custody corruption blocks by name"
     var session = try lifecycle_check.Session.init(testing.allocator, module, &pass, try lifecycleEnviron(arena.allocator()), &output.writer);
     defer session.deinit();
     const originals = try arena.allocator().dupe(data.NativeQuery, session.receipt.queries);
+    if (session.inputs.callers.len != 0) {
+        const captures = session.inputs.callers;
+        const changed = try arena.allocator().dupe(data.CallerBinding, captures);
+        session.inputs.callers = changed;
+        for (0..4) |mutation| {
+            @memcpy(changed, captures);
+            switch (mutation) {
+                0 => changed[0].hir_sha256[0] ^= 1,
+                1 => changed[0].term_id += 1,
+                2 => changed[0].operation_ordinal += 1,
+                3 => session.inputs.callers = &.{},
+                else => unreachable,
+            }
+            try testing.expectError(error.LifecycleNativeInputsMismatch, session.validate());
+            session.inputs.callers = changed;
+        }
+        session.inputs.callers = captures;
+    }
     const writable = @constCast(session.receipt.queries);
     for (originals, 0..) |original, index| {
         for (std.meta.tags(enum { failed, unknown, unknown_base, vacuous, no_hash, no_constraints, foreign_claim, foreign_function, foreign_event, foreign_digest, changed_hash })) |mutation| {
@@ -1522,7 +1866,7 @@ test "SL2A private and imported dependencies remain in the fresh binding set" {
     }
 }
 
-test "SL3A unchanged source census pins static addresses and remaining caller refusals" {
+test "SL3A and E2a unchanged source census pins exact caller projection without authority" {
     const sources = [_][]const u8{
         "ora-example/corpus/types/refinement/in_range_percentage.ora",
         "ora-example/corpus/types/refinement/in_range_u8.ora",
@@ -1583,9 +1927,11 @@ test "SL3A unchanged source census pins static addresses and remaining caller re
         } else |err| std.debug.print("SL2A_WHOLE {s} REFUSED {s}\n", .{ source, @errorName(err) });
     }
     try testing.expectEqual(@as(usize, 39), total);
-    try testing.expectEqual(@as(usize, 37), projected_count);
+    // E2a adds dispatcher.deposit and supply.burn; all other 37 rows retain
+    // their projection. This is representation only, not lifecycle authority.
+    try testing.expectEqual(@as(usize, 39), projected_count);
     try testing.expectEqual(@as(usize, 6), boolean_count);
-    try testing.expectEqual(@as(usize, 5), whole_count);
+    try testing.expectEqual(@as(usize, 7), whole_count);
 }
 
 test "SL2B Boolean payload relation binds the emitted digest and rejects the wrong result" {

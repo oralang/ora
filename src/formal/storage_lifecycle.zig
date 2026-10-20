@@ -167,11 +167,18 @@ pub const GuardBinding = struct {
     operation_ordinal: u32,
     hir_sha256: Digest,
 };
+pub const CallerBinding = struct {
+    function_id: u32,
+    term_id: u32,
+    operation_ordinal: u32,
+    hir_sha256: Digest,
+};
 pub const ProofInputs = struct {
     inventory: Inventory,
     functions: []const FunctionBinding,
     slots: []const SlotBinding,
     guards: []const GuardBinding,
+    callers: []const CallerBinding = &.{},
 
     pub fn canonical(self: ProofInputs, allocator: std.mem.Allocator) ![]u8 {
         try validateBindings(self.inventory, self.functions);
@@ -193,6 +200,17 @@ pub const ProofInputs = struct {
             for (self.functions) |function| {
                 if (function.function_id == guard.function_id) break;
             } else return error.ForeignLifecycleGuard;
+        }
+        for (self.callers, 0..) |capture, i| {
+            if (emptyDigest(capture.hir_sha256)) return error.InvalidLifecycleCallerDigest;
+            for (self.callers[0..i]) |prior| {
+                if (prior.operation_ordinal == capture.operation_ordinal) return error.DuplicateLifecycleCaller;
+                if (prior.function_id == capture.function_id and prior.term_id != capture.term_id)
+                    return error.LifecycleCallerIdentityMismatch;
+            }
+            for (self.functions) |function| {
+                if (function.function_id == capture.function_id) break;
+            } else return error.ForeignLifecycleCaller;
         }
         var output = std.Io.Writer.Allocating.init(allocator);
         errdefer output.deinit();

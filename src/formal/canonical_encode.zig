@@ -155,6 +155,7 @@ pub const Adapter = struct {
     function_vc_qf: bool = false,
     function_row: ?obligation.FunctionSummaryRow = null,
     call_scope: u32 = 0,
+    caller_context: ?struct { owner: obligation.Id, scope: u32, value: z3.Z3_ast } = null,
     fresh_index: u32 = 0,
     native_slots: ?[]const z3_verification.CertifiedCallEncoder.CallSlotState = null,
 
@@ -425,6 +426,39 @@ pub const Adapter = struct {
 
     /// Lifecycle evidence is separate from unconditional FunctionVC safety.
     /// Capture each reached write before any subsequent checkpoint is encoded.
+    fn bindLifecycleCaller(self: *Adapter, inputs: lifecycle.ProofInputs, owner: obligation.Id) !void {
+        self.caller_context = null;
+        var needed = false;
+        for (self.set.terms, 0..) |term, ti| if (term == .invocation_caller and term.invocation_caller.function_id == owner) {
+            if (!term.invocation_caller.validType()) return error.TypeMismatch;
+            for (inputs.callers) |capture| {
+                if (capture.function_id == owner and capture.term_id == ti) break;
+            } else return error.MissingLifecycleCaller;
+            needed = true;
+        };
+        if (!needed) return;
+        self.fresh_index = try std.math.add(u32, self.fresh_index, 1);
+        self.call_scope = self.fresh_index;
+        const name = try std.fmt.allocPrint(self.allocator, "$ora.lifecycle.{s}.{d}.{d}.caller", .{
+            std.fmt.bytesToHex(inputs.inventory.module_sha256, .lower), owner, self.call_scope,
+        });
+        defer self.allocator.free(name);
+        // No env_assume and no nonzero constraint: zero remains in the domain.
+        self.caller_context = .{ .owner = owner, .scope = self.call_scope, .value = try self.namedConst(name, z3.Z3_mk_bv_sort(self.context.ctx, 160)) };
+    }
+
+    fn invocationCaller(self: *Adapter, caller: obligation.InvocationCaller) EncodeError!z3.Z3_ast {
+        if (!caller.validType()) return error.TypeMismatch;
+        const capture = self.caller_context orelse return error.FunctionVCVariableOutOfScope;
+        const row = self.function_row orelse return error.FunctionVCVariableOutOfScope;
+        if (capture.owner != caller.function_id or row.id != caller.function_id or capture.scope != self.call_scope)
+            return error.FunctionVCVariableOutOfScope;
+        const sort = z3.Z3_get_sort(self.context.ctx, capture.value);
+        if (z3.Z3_get_sort_kind(self.context.ctx, sort) != z3.Z3_BV_SORT or
+            z3.Z3_get_bv_sort_size(self.context.ctx, sort) != 160) return error.TypeMismatch;
+        return capture.value;
+    }
+
     pub fn checkLifecycle(self: *Adapter, inputs: lifecycle.ProofInputs, timeout_ms: ?u32) ![]lifecycle.NativeQuery {
         _ = try inputs.sha256(self.allocator);
         try self.set.validateTermReferences();
@@ -457,6 +491,7 @@ pub const Adapter = struct {
                 var state: LoopEncodeState = .{ .summary = .{ .id = row.id, .owner = row.owner, .source = row.source, .phase = .report, .origin = row.origin, .loop_source_op_id = null, .loop_kind = .other, .context_variables = row.parameters }, .preheader_starts_at_entry = true };
                 self.loop_state = &state;
                 self.function_row = row;
+                try self.bindLifecycleCaller(inputs, row.id);
                 try self.storageDomains(row.paths[0].timeline, false);
                 const location: obligation.LoopStorageLocationExpr = .{ .root = claim.root, .value_ty = .{ .compiler_type_id = claim.type_id.? } };
                 const initial = try self.selectLoopLocation(location, info, false);
@@ -1330,6 +1365,7 @@ pub const Adapter = struct {
             .int_lit => |literal| self.encodeIntegerLiteral(literal),
             .variable => |variable| self.encodeVariable(variable),
             .old => |operand| self.encodeOld(operand),
+            .invocation_caller => |caller| self.invocationCaller(caller),
             .result => blk: {
                 const info = state.expected orelse return error.UnsupportedResultTerm;
                 if (info.kind != .bitvector) return error.UnsupportedResultTerm;

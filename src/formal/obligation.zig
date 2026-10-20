@@ -645,7 +645,7 @@ pub const ObligationSet = struct {
                 if (quantified.condition) |condition| try self.collectTermFreeVars(allocator, condition, ids, fuel - 1);
                 try self.collectTermFreeVars(allocator, quantified.body, ids, fuel - 1);
             },
-            .bool_lit, .int_lit, .result, .place_read => {},
+            .bool_lit, .int_lit, .result, .place_read, .invocation_caller => {},
         }
     }
 
@@ -710,12 +710,17 @@ pub const ObligationSet = struct {
                 }
                 break :blk self.termReferencesFreeVar(quantified.body, target, fuel - 1);
             },
-            .bool_lit, .int_lit, .result, .place_read => false,
+            .bool_lit, .int_lit, .result, .place_read, .invocation_caller => false,
         };
     }
 
     fn validateTerm(self: ObligationSet, term: Term) !void {
         switch (term) {
+            .invocation_caller => |caller| {
+                if (!caller.validType()) return error.InvalidTermReference;
+                if (caller.function_id == 0 or findById(self.function_summaries, caller.function_id) == null)
+                    return error.InvalidDependency;
+            },
             .bool_lit,
             .int_lit,
             .variable,
@@ -3060,6 +3065,7 @@ pub const TermTag = enum(u8) {
     binary,
     refinement_predicate,
     quantified,
+    invocation_caller,
 };
 
 pub const Term = union(TermTag) {
@@ -3073,6 +3079,18 @@ pub const Term = union(TermTag) {
     binary: BinaryTerm,
     refinement_predicate: RefinementPredicateTerm,
     quantified: QuantifiedTerm,
+    invocation_caller: InvocationCaller,
+};
+
+/// Intrinsic invocation value; never a source binding or storage read.
+pub const InvocationCaller = struct {
+    function_id: Id,
+    ty: TypeRef,
+
+    pub fn validType(self: InvocationCaller) bool {
+        return self.ty == .compiler_type_id and self.ty.compiler_type_id ==
+            @import("ora_types").builtin.lookupBuiltinById(.address).comptime_type_id;
+    }
 };
 
 pub const IntegerLiteralTerm = struct {

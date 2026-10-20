@@ -206,6 +206,8 @@ inductive Term where
   | binary : BinaryTerm → Term
   | refinementPredicate : RefinementPredicateTerm → Term
   | quantified : QuantifiedTerm → Term
+  /-- Address id is pinned to canonical_types.zig / builtin.address. -/
+  | invocationCaller : Nat → TyRef → Term
   deriving Repr, BEq, DecidableEq
 
 inductive FormulaRef where
@@ -391,6 +393,7 @@ def Term.wf (terms : List Term) : Term → Bool
   | .variable _ => true
   | .old id => termRefInBounds terms id
   | .result => true
+  | .invocationCaller owner ty => owner > 0 && ty == .compilerTypeId 14
   | .placeRead _ => true
   | .unary u => termRefInBounds terms u.operand
   | .binary b =>
@@ -416,6 +419,7 @@ def Term.refsBefore (id : TermId) : Term → Bool
   | .variable _ => true
   | .old ref => termRefBefore id ref
   | .result => true
+  | .invocationCaller owner ty => owner > 0 && ty == .compilerTypeId 14
   | .placeRead _ => true
   | .unary u => termRefBefore id u.operand
   | .binary b =>

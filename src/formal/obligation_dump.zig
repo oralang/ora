@@ -1307,6 +1307,10 @@ fn writeTermField(writer: anytype, term: obligation.Term) !void {
         .variable => |value| try writeVarRefField(writer, "value", value),
         .old => |id| try writeIdField(writer, "operand", id),
         .result => {},
+        .invocation_caller => |caller| {
+            try writer.print(",\"function_id\":{d}", .{caller.function_id});
+            try writeTypeRefField(writer, "ty", caller.ty);
+        },
         .place_read => |place| try writePlaceFieldNamed(writer, "place", place),
         .unary => |unary| {
             try writeStringField(writer, "op", @tagName(unary.op));

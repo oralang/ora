@@ -1720,6 +1720,7 @@ fn markAutomaticTermClosure(
         .variable,
         .result,
         .place_read,
+        .invocation_caller,
         => {},
     }
 }

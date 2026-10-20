@@ -81,9 +81,9 @@ fn string(writer: anytype, text: []const u8) !void {
 /// Targets are regenerated separately from proof terms. The equations bind
 /// the successful view to the unmodified canonical timeline at the kernel.
 pub fn writeProducerTargets(writer: anytype, allocator: std.mem.Allocator, inputs: data.ProofInputs, set: obligation.ObligationSet) !void {
-    try writer.writeAll("import Ora.Storage.LifecycleEntry\n");
+    try writer.writeAll("import Ora.Storage.CallerIdentity\n");
     try writeProjectionNamed(writer, allocator, inputs.inventory, set, inputs.functions, "Ora.Generated.Obligations.Lifecycle");
-    try writer.print("\nnamespace Ora.Generated.Obligations.Lifecycle\nopen Ora.Obligation Ora.Loop Ora.StorageLifecycle\ndef lifecycleInputsSha256 : String := \"{s}\"\n", .{std.fmt.bytesToHex(try inputs.sha256(allocator), .lower)});
+    try writer.print("\nnamespace Ora.Generated.Obligations.Lifecycle\nopen Ora.Obligation Ora.Loop Ora.StorageLifecycle Ora.CallerIdentityModel\ndef lifecycleInputsSha256 : String := \"{s}\"\n", .{std.fmt.bytesToHex(try inputs.sha256(allocator), .lower)});
     for (inputs.inventory.claims, 0..) |claim, ci| {
         const info = builtin.integerInfoByComptimeTypeId(claim.type_id.?) orelse return error.InvalidLifecycleType;
         try writer.print("namespace LC{d}\ndef word (bits : BitVec {d}) : Value := .integer {{shape := .unsigned .w{d}, bits}}\ndef claim : Claim := {{location := {{root := ", .{ ci, info.width, info.width });
@@ -92,7 +92,7 @@ pub fn writeProducerTargets(writer: anytype, allocator: std.mem.Allocator, input
         if (claim.bounds.?.kind != .MaxValue) try value(writer, info, claim.bounds.?.minimum);
         if (claim.bounds.?.kind == .InRange) try writer.writeAll(", ");
         if (claim.bounds.?.kind != .MinValue) try value(writer, info, claim.bounds.?.maximum);
-        try writer.writeAll("]}\ndef semantics := (adapterSemantics {} (directStorageContext emittedManifest Env.empty [])).withCallChecks\n");
+        try writer.writeAll("]}\n");
         for (set.function_summaries) |row| {
             _ = try writerRecipe(claim, row, inputs);
             try writer.print("namespace F{d}\nabbrev row := emittedFunctionSummary_{d}\ndef original : List AdapterEvent := [", .{ row.id, row.id });
@@ -108,15 +108,23 @@ pub fn writeProducerTargets(writer: anytype, allocator: std.mem.Allocator, input
             try producerEvents(writer, row, inputs, true);
             try writer.writeAll("]\ndef strictEvents : List AdapterEvent := original.map fun event => match event with | .check f => .assume f | other => other\n");
             try writer.print("def entryPrefix : List AdapterEvent := original.take {d}\n", .{try entryPrefixEnd(allocator, set, row)});
+            try writer.print("def invocationKey (serial : Nat) : InvocationKey := {{moduleDigest := \"{s}\", functionId := {d}, serial}}\n", .{ std.fmt.bytesToHex(inputs.inventory.module_sha256, .lower), row.id });
             try writer.writeAll(
-                \\def prefixRoot : Root (CallFormula AdapterFormula FormulaRef AdapterChild) StorageLocationExpr FormulaRef AdapterChild := {semantics, events := entryPrefix, entry := fun state =>
-                \\  ∃ input, (row.callSignature.entry? input = some state)}
-                \\def root := sourceRoot emittedManifest row semantics events
+                \\def callerEnv (capture : Capture) : Env := (capturedEnv capture).toEnv (invocationKey capture.key.serial)
+                \\def semantics (capture : Capture) := (adapterSemantics {} (directStorageContext emittedManifest (callerEnv capture) [])).withCallChecks
+                \\def prefixRoot : Family (CallFormula AdapterFormula FormulaRef AdapterChild) StorageLocationExpr FormulaRef AdapterChild := {semantics, events := entryPrefix, entry := fun capture state =>
+                \\  (capture.key = invocationKey capture.key.serial ∧ ∃ input, row.callSignature.entry? input = some state)}
+                \\def root : Family (CallFormula AdapterFormula FormulaRef AdapterChild) StorageLocationExpr FormulaRef AdapterChild := {semantics, events, entry := fun capture state =>
+                \\  (capture.key = invocationKey capture.key.serial ∧ ∃ input, row.callSignature.entry? input = some state ∧
+                \\    row.entryFactsHold emittedManifest input (callerEnv capture).invocationCaller)}
+                \\def strictWitness : Prop := ∃ capture input state result,
+                \\  capture.key = invocationKey capture.key.serial ∧ row.callSignature.entry? input = some state ∧
+                \\  row.entryFactsHold emittedManifest input (callerEnv capture).invocationCaller ∧ Invariant [claim] state.loop.storage ∧
+                \\  TimelineExec (semantics capture) strictEvents state result
                 \\def target : Prop := row.paths.length = 1 ∧
                 \\  emittedCallManifest.timeline {} (row.paths[0]'(by decide)).timeline = .ok original ∧
                 \\  successfulView original selected = some events ∧ prefixRoot.Checked [claim] ∧
-                \\  root.Checked [claim] ∧ claim.holds (word 0) ∧
-                \\  SourceWitness emittedManifest row [claim] semantics strictEvents
+                \\  root.Checked [claim] ∧ claim.holds (word 0) ∧ strictWitness
                 \\
             );
             try writer.print("end F{d}\n", .{row.id});
@@ -126,7 +134,7 @@ pub fn writeProducerTargets(writer: anytype, allocator: std.mem.Allocator, input
             if (index != 0) try writer.writeAll(", ");
             try writer.print("F{d}.prefixRoot, F{d}.root", .{ row.id, row.id });
         }
-        try writer.writeAll("]\ndef initial (store : StorageState) : Prop := store claim.location = word 0\ndef certificateTarget : Prop := Certificate [claim] initial (roots.map Root.step)\n");
+        try writer.writeAll("]\ndef initial (store : StorageState) : Prop := store claim.location = word 0\ndef certificateTarget : Prop := Certificate [claim] initial (roots.map Family.step)\n");
         try writer.print("end LC{d}\n", .{ci});
     }
     try writer.writeAll("def emittedLifecycle : Prop := ");
@@ -220,7 +228,7 @@ fn producerEvents(writer: anytype, row: obligation.FunctionSummaryRow, inputs: d
 /// The separate target module is the type checked by custody.
 pub fn writeProducerProofs(writer: anytype, allocator: std.mem.Allocator, inputs: data.ProofInputs, set: obligation.ObligationSet) !void {
     _ = try inputs.sha256(allocator);
-    try writer.writeAll("\nnamespace Ora.Generated.Obligations.Lifecycle\nopen Ora.Obligation Ora.Loop Ora.StorageLifecycle\n");
+    try writer.writeAll("\nnamespace Ora.Generated.Obligations.Lifecycle\nopen Ora.Obligation Ora.Loop Ora.StorageLifecycle Ora.CallerIdentityModel\n");
     for (inputs.inventory.claims, 0..) |claim, ci| {
         const info = builtin.integerInfoByComptimeTypeId(claim.type_id.?) orelse return error.InvalidLifecycleType;
         try writer.print("namespace LC{d}\ntheorem zero_valid : claim.holds (word 0) := by\n  change ", .{ci});
@@ -270,26 +278,26 @@ pub fn writeProducerProofs(writer: anytype, allocator: std.mem.Allocator, inputs
                     \\
                 );
                 try writer.print("      have same : shape = .unsigned .w{d} := by symm; simpa [storageValueMatchesTy] using typed\n      subst shape\n      exact ⟨bits, (Option.some.inj entry).symm⟩\n", .{info.width});
-                try writer.writeAll("theorem preserved : root.Checked [claim] := by\n  intro state ⟨input, entry, _⟩ valid\n  obtain ⟨bits, rfl⟩ := entry_shape input state entry\n");
-                try writer.print("  apply guarded_write_after_checks semantics (.ordinary (.inl (.term {d}))) [", .{checkpoint});
+                try writer.writeAll("theorem preserved : root.Checked [claim] := by\n  intro capture state ⟨_, input, entry, _⟩ valid\n  obtain ⟨bits, rfl⟩ := entry_shape input state entry\n");
+                try writer.print("  apply guarded_write_after_checks (semantics capture) (.ordinary (.inl (.term {d}))) [", .{checkpoint});
                 for (row.paths[0].timeline[1..write_index], 0..) |event, index| {
                     if (index != 0) try writer.writeAll(", ");
                     try writer.print(".ordinary (.inl (.term {d}))", .{event.payload.safety_checkpoint.formulas[0].formula.term});
                 }
                 try writer.writeAll("] valid (value := word bits)\n    (after := {state := {entryState bits input.storage with loop := {locals := [], storage := input.storage.set claim.location (word bits)}}, writeTrace := [claim.location]})\n");
                 try writer.writeAll("  ·\n");
-                try producerFormulaBridge(writer, set, checkpoint, "    ");
+                try producerFormulaBridge(writer, set, checkpoint, "    ", "capture");
                 try writer.writeAll("  · ");
-                try writer.print("change execStorageAction? semantics.storage (.write {{root := ", .{});
+                try writer.print("change execStorageAction? (semantics capture).storage (.write {{root := ", .{});
                 try string(writer, claim.root);
                 try writer.print(", projections := [], valueTy := .compilerTypeId {d}}} (.term {d})) _ = _\n", .{ claim.type_id.?, written });
-                try producerWriteBridge(writer, set, written, "    ");
+                try producerWriteBridge(writer, set, written, "    ", "capture");
                 try writer.writeAll("  · rfl\n  ·\n");
                 try producerFrames(writer, row.paths[0].timeline[write_index + 1 ..], "    ");
             } else {
                 try writer.writeAll(
                     \\theorem preserved : root.Checked [claim] := by
-                    \\  intro state _ valid
+                    \\  intro capture state _ valid
                     \\  apply framed_prefixes _ valid
                     \\  intro observed member
                     \\  have equal : observed = claim := by simpa using member
@@ -298,7 +306,7 @@ pub fn writeProducerProofs(writer: anytype, allocator: std.mem.Allocator, inputs
                 );
                 try producerFrames(writer, row.paths[0].timeline, "  ");
             }
-            try writer.writeAll("theorem prefix_preserved : prefixRoot.Checked [claim] := by\n  intro state _ valid\n  apply framed_prefixes _ valid\n  intro observed member\n  have equal : observed = claim := by simpa using member\n  subst observed\n  change ∀ event ∈ entryPrefix, _\n");
+            try writer.writeAll("theorem prefix_preserved : prefixRoot.Checked [claim] := by\n  intro capture state _ valid\n  apply framed_prefixes _ valid\n  intro observed member\n  have equal : observed = claim := by simpa using member\n  subst observed\n  change ∀ event ∈ entryPrefix, _\n");
             try producerFrames(writer, row.paths[0].timeline[0..try entryPrefixEnd(allocator, set, row)], "  ");
             try writer.print("def witnessState (candidate : Nat) : StorageActionState := {{loop := {{locals := [], storage := fun _ => word (BitVec.ofNat {d} candidate)}}, entryStorage := fun _ => word (BitVec.ofNat {d} candidate), reads := [", .{ info.width, info.width });
             for (row.parameters, 0..) |parameter, index| {
@@ -313,19 +321,21 @@ pub fn writeProducerProofs(writer: anytype, allocator: std.mem.Allocator, inputs
                 if (index != 0) try writer.writeAll(", ");
                 try parameterCandidate(writer, parameter.ty);
             }
-            try writer.writeAll("]}\ntheorem witnessed : SourceWitness emittedManifest row [claim] semantics strictEvents := by\n  first\n");
+            try writer.writeAll("]}\ndef witnessCapture (candidate : Nat) : Capture := {key := invocationKey 0, caller := BitVec.ofNat 160 candidate}\ntheorem witnessed : strictWitness := by\n  first\n");
             for ([_]u8{ 0, 1 }) |candidate| {
-                try writer.print("  | have executed : ∃ result, TimelineExec semantics strictEvents (witnessState {d}) result := by\n      refine ⟨_, ", .{candidate});
+                const capture = try std.fmt.allocPrint(allocator, "(witnessCapture {d})", .{candidate});
+                defer allocator.free(capture);
+                try writer.print("  | have executed : ∃ result, TimelineExec (semantics (witnessCapture {d})) strictEvents (witnessState {d}) result := by\n      refine ⟨_, ", .{ candidate, candidate });
                 for (row.paths[0].timeline) |event| {
                     switch (event.payload) {
                         .safety_checkpoint => |checkpoint| {
                             try writer.writeAll(".cons (.assume (by\n");
-                            try producerFormulaBridge(writer, set, checkpoint.formulas[0].formula.term, "          ");
+                            try producerFormulaBridge(writer, set, checkpoint.formulas[0].formula.term, "          ", capture);
                             try writer.writeAll("        ) (by try simp only [Ora.Integer.unsignedLe, Ora.Integer.unsignedLt]\n              decide)) (");
                         },
                         .storage_write => |write| {
                             try writer.writeAll(".cons (.storage (by\n");
-                            try producerWriteBridge(writer, set, write.value.formula.term, "          ");
+                            try producerWriteBridge(writer, set, write.value.formula.term, "          ", capture);
                             try writer.writeAll("        )) (");
                         },
                         .storage_read => try writer.writeAll(".cons (.storage (by rfl)) ("),
@@ -335,14 +345,14 @@ pub fn writeProducerProofs(writer: anytype, allocator: std.mem.Allocator, inputs
                 try writer.writeAll(".nil _");
                 for (row.paths[0].timeline) |_| try writer.writeByte(')');
                 try writer.writeAll("⟩\n");
-                try writer.print("    obtain ⟨result, trace⟩ := executed\n    refine ⟨witnessInput {d}, witnessState {d}, result, rfl, ?_, ?_, trace⟩\n    · unfold FunctionSummaryRow.entryFactsHold\n      rw [entry_selected, show row.callSignature.entry? (witnessInput {d}) = some (witnessState {d}) from rfl]\n      intro formula member\n      simp only [List.mem_cons, List.not_mem_nil, or_false] at member\n", .{ candidate, candidate, candidate, candidate });
+                try writer.print("    obtain ⟨result, trace⟩ := executed\n    refine ⟨witnessCapture {d}, witnessInput {d}, witnessState {d}, result, rfl, rfl, ?_, ?_, trace⟩\n    · unfold FunctionSummaryRow.entryFactsHold\n      rw [entry_selected, show row.callSignature.entry? (witnessInput {d}) = some (witnessState {d}) from rfl]\n      intro formula member\n      simp only [List.mem_cons, List.not_mem_nil, or_false] at member\n", .{ candidate, candidate, candidate, candidate, candidate });
                 if (row.assumption_ids.len != 0) {
                     try writer.writeAll("      rcases member with ");
                     for (row.assumption_ids, 0..) |_, index| try writer.writeAll(if (index == 0) "rfl" else " | rfl");
                     try writer.writeByte('\n');
                     for (row.assumption_ids) |id| {
                         const term = obligation.findById(set.assumptions, id).?.formula.?.term;
-                        try writer.print("      · have proven : ∃ p, (directStorageContext emittedManifest (bindStorageReads Env.empty (witnessState {d}).reads) []).evalFormula? (.term {d}) (witnessState {d}) = some p ∧ p := by\n          unfold emittedManifest\n          exact ⟨_, rfl, by try simp only [Ora.Integer.unsignedLe, Ora.Integer.unsignedLt]; decide⟩\n        obtain ⟨p, evaluated, holds⟩ := proven\n        rw [evaluated]\n        exact holds\n", .{ candidate, term, candidate });
+                        try writer.print("      · have proven : ∃ p, (directStorageContext emittedManifest (bindStorageReads (callerEnv (witnessCapture {d})) (witnessState {d}).reads) []).evalFormula? (.term {d}) (witnessState {d}) = some p ∧ p := by\n          unfold emittedManifest\n          exact ⟨_, rfl, by try simp only [Ora.Integer.unsignedLe, Ora.Integer.unsignedLt]; decide⟩\n        obtain ⟨p, evaluated, holds⟩ := proven\n        change ((directStorageContext emittedManifest (bindStorageReads (callerEnv (witnessCapture {d})) (witnessState {d}).reads) []).evalFormula? (.term {d}) (witnessState {d})).getD False\n        rw [evaluated]\n        exact holds\n", .{ candidate, candidate, term, candidate, candidate, candidate, term, candidate });
                     }
                 }
                 try writer.writeAll("    · intro observed member\n      have equal : observed = claim := by simpa using member\n      subst observed\n      change ");
@@ -356,7 +366,7 @@ pub fn writeProducerProofs(writer: anytype, allocator: std.mem.Allocator, inputs
         }
         try writer.writeAll(
             \\theorem certificateProof : certificateTarget := by
-            \\  apply prefix_certificate (claims := [claim]) (initial := initial) roots ⟨fun _ => word 0, rfl⟩
+            \\  apply caller_family_certificate (claims := [claim]) (initial := initial) roots ⟨fun _ => word 0, rfl⟩
             \\  · intro store starts observed member
             \\    have equal : observed = claim := by simpa using member
             \\    subst observed
@@ -399,14 +409,14 @@ fn producerFrames(writer: anytype, events: []const obligation.LoopTimelineEvent,
             continue;
         }
         const location = event.payload.storage_write.location;
-        try writer.print("{s}· intro state location evaluates\n{s}  have same := direct_location (directStorageContext emittedManifest Env.empty []) ", .{ indent, indent });
+        try writer.print("{s}· intro state location evaluates\n{s}  have same := direct_location (directStorageContext emittedManifest (callerEnv capture) []) ", .{ indent, indent });
         try string(writer, location.root);
         try writer.print(" (.compilerTypeId {d}) state location evaluates\n{s}  rw [same]\n{s}  decide\n", .{ location.value_ty.compiler_type_id, indent, indent });
     }
 }
 
-fn producerFormulaBridge(writer: anytype, set: obligation.ObligationSet, term: obligation.TermId, indent: []const u8) !void {
-    try writer.print("{s}change (directStorageContext emittedManifest Env.empty []).evalFormula? (.term {d}) _ = _\n{s}unfold StorageFormulaContext.evalFormula?\n{s}rw [direct_empty_env _ _ (by rfl)]\n", .{ indent, term, indent, indent });
+fn producerFormulaBridge(writer: anytype, set: obligation.ObligationSet, term: obligation.TermId, indent: []const u8, capture: []const u8) !void {
+    try writer.print("{s}change (directStorageContext emittedManifest (callerEnv {s}) []).evalFormula? (.term {d}) _ = _\n{s}unfold StorageFormulaContext.evalFormula?\n{s}rw [direct_context_env _ _ _ (by rfl)]\n", .{ indent, capture, term, indent, indent });
     try writer.print("{s}simp only [Option.bind_eq_bind, Option.some_bind, StorageFormulaContext.formulaStorageReady, formulaDenotes?, emitted_terms_length]\n{s}simp only [directStorageContext, emitted_terms_length, StorageFormulaContext.termStorageReady, ", .{ indent, indent });
     try producerLookups(writer, set, term, set.terms.len + 1);
     try writer.print("Bool.and_true, Bool.not_true, Bool.false_eq_true, if_false, Option.pure_def, Option.some_bind]\n{s}simp only [emitted_terms_length, denoteFormula?, denoteValue?, ", .{indent});
@@ -414,7 +424,8 @@ fn producerFormulaBridge(writer: anytype, set: obligation.ObligationSet, term: o
     try writer.print("Option.some_bind]\n{s}rfl\n", .{indent});
 }
 
-fn producerWriteBridge(writer: anytype, set: obligation.ObligationSet, term: obligation.TermId, indent: []const u8) !void {
+fn producerWriteBridge(writer: anytype, set: obligation.ObligationSet, term: obligation.TermId, indent: []const u8, capture: []const u8) !void {
+    _ = capture;
     try writer.print("{s}simp only [execStorageAction?, semantics, TimelineSemantics.withCallChecks, adapterSemantics, StorageFormulaContext.actionSemantics, StorageFormulaContext.evalValue?, StorageFormulaContext.stateEnv?, directStorageContext, StorageFormulaContext.formulaStorageReady, formulaValue?, emitted_terms_length, StorageFormulaContext.termStorageReady, denoteValue?, ", .{indent});
     try producerLookups(writer, set, term, set.terms.len + 1);
     try writer.print("Option.pure_def, Option.some_bind, Bool.not_true, Bool.false_eq_true, if_false]\n{s}rfl\n", .{indent});
@@ -433,7 +444,7 @@ fn producerLookups(writer: anytype, set: obligation.ObligationSet, id: obligatio
             try producerLookups(writer, set, term.value, fuel - 1);
             for (term.args) |arg| try producerLookups(writer, set, arg, fuel - 1);
         },
-        .bool_lit, .int_lit, .variable, .place_read => {},
+        .bool_lit, .int_lit, .variable, .place_read, .invocation_caller => {},
         else => return error.UnsupportedLifecycleFormula,
     }
 }

@@ -102,6 +102,7 @@ pub fn proofInputs(projection: *Projection) !data.ProofInputs {
     const arena = snapshot.arena.allocator();
     const inventory = snapshot.inventory;
     try projection.canonical.set.validateIdReferences();
+    const callers = try authenticateCallers(projection);
     if (inventory.claims.len == 0) return error.MissingLifecycleClaim;
     const slots = try arena.alloc(data.SlotBinding, inventory.claims.len);
     const scope = mlir.mlirOperationGetParentOperation(snapshot.operations[inventory.claims[0].ordinal]);
@@ -188,9 +189,68 @@ pub fn proofInputs(projection: *Projection) !data.ProofInputs {
         };
         if (writes != writer_events.items.len) return error.MissingLifecycleWriter;
     }
-    const inputs: data.ProofInputs = .{ .inventory = inventory, .functions = projection.bindings, .slots = slots, .guards = guards.items };
+    const inputs: data.ProofInputs = .{ .inventory = inventory, .functions = projection.bindings, .slots = slots, .guards = guards.items, .callers = callers };
     _ = try inputs.sha256(arena);
     return inputs;
+}
+
+/// Complete live occurrence join, independent of source names and metadata.
+/// The module digest is bound separately by the fresh inventory and receipt.
+pub fn authenticateCallers(projection: *Projection) ![]const data.CallerBinding {
+    const snapshot = &projection.snapshot;
+    const rows = &projection.canonical;
+    const captures = rows.caller_bindings;
+    const output = try snapshot.arena.allocator().alloc(data.CallerBinding, captures.len);
+    for (captures, output, 0..) |capture, *bound, i| {
+        if (capture.operation_ordinal >= snapshot.operations.len) return error.DetachedLifecycleCaller;
+        const op = snapshot.operations[capture.operation_ordinal];
+        if (@intFromPtr(op.ptr) != capture.source_op_id) return error.LifecycleCallerOperationMismatch;
+        if (!operationIs(op, "ora.evm.caller") or mlir.oraOperationGetNumOperands(op) != 0 or
+            mlir.oraOperationGetNumResults(op) != 1 or mlir.oraOperationGetNumRegions(op) != 0 or
+            mlir.mlirOperationGetNumSuccessors(op) != 0) return error.InvalidLifecycleCallerOperation;
+        const value = mlir.oraOperationGetResult(op, 0);
+        if (@intFromPtr(value.ptr) != capture.value_id) return error.LifecycleCallerResultMismatch;
+        const ty = mlir.oraValueGetType(value);
+        if (!mlir.oraTypeIsAddressType(ty) or !mlir.oraTypeIsNull(mlir.oraRefinementTypeGetBaseType(ty)))
+            return error.InvalidLifecycleCallerType;
+        var owner = mlir.mlirOperationGetParentOperation(op);
+        while (!mlir.oraOperationIsNull(owner) and !operationIs(owner, "func.func"))
+            owner = mlir.mlirOperationGetParentOperation(owner);
+        if (mlir.oraOperationIsNull(owner) or @intFromPtr(owner.ptr) != capture.function_op_id)
+            return error.ForeignLifecycleCallerFunction;
+        const binding = for (projection.bindings) |binding| {
+            if (binding.function_id == capture.function_id) break binding;
+        } else return error.ForeignLifecycleCaller;
+        if (snapshot.operations[binding.function_ordinal].ptr != owner.ptr) return error.ForeignLifecycleCallerFunction;
+        while (!mlir.oraOperationIsNull(owner) and !operationIs(owner, "builtin.module"))
+            owner = mlir.mlirOperationGetParentOperation(owner);
+        if (owner.ptr != snapshot.operations[0].ptr or @intFromPtr(owner.ptr) != capture.module_op_id)
+            return error.ForeignLifecycleCallerModule;
+        if (capture.term_id >= rows.set.terms.len) return error.MissingLifecycleCallerTerm;
+        const term = rows.set.terms[capture.term_id];
+        if (term != .invocation_caller or !term.invocation_caller.validType()) return error.InvalidLifecycleCallerType;
+        if (term.invocation_caller.function_id != capture.function_id) return error.LifecycleCallerIdentityMismatch;
+        for (captures[0..i]) |prior| if (prior.source_op_id == capture.source_op_id) return error.DuplicateLifecycleCaller;
+        bound.* = .{ .function_id = capture.function_id, .term_id = capture.term_id, .operation_ordinal = capture.operation_ordinal, .hir_sha256 = try operationHash(op) };
+    }
+    for (snapshot.operations) |op| {
+        if (!operationIs(op, "ora.evm.caller")) continue;
+        var function = mlir.mlirOperationGetParentOperation(op);
+        while (!mlir.oraOperationIsNull(function) and !operationIs(function, "func.func"))
+            function = mlir.mlirOperationGetParentOperation(function);
+        for (projection.bindings) |binding| {
+            if (snapshot.operations[binding.function_ordinal].ptr == function.ptr) break;
+        } else continue;
+        for (captures) |capture| {
+            if (capture.source_op_id == @intFromPtr(op.ptr)) break;
+        } else return error.MissingLifecycleCaller;
+    }
+    for (rows.set.terms, 0..) |term, i| if (term == .invocation_caller) {
+        for (captures) |capture| {
+            if (capture.term_id == i and capture.function_id == term.invocation_caller.function_id) break;
+        } else return error.MissingLifecycleCaller;
+    };
+    return output;
 }
 
 /// Exact live enforcement, not a source tag or an accepted accounting row.

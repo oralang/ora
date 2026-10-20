@@ -162,6 +162,7 @@ pub fn walkTerm(
             visitor.visitOld(set, operand, fuel, state)
         else
             visitor.visitDefault(set, set.terms[id], fuel, state),
+        .invocation_caller => visitor.visitDefault(set, set.terms[id], fuel, state),
         .result => if (@hasDecl(Visitor, "visitResult"))
             visitor.visitResult(set, fuel, state)
         else
@@ -418,6 +419,7 @@ const SupportVisitor = struct {
                 break :blk .supported;
             },
             .place_read => |place| placeReadCanonicalSupport(place),
+            .invocation_caller => .{ .unsupported = .unsupported_obligation_kind },
             else => .{ .unsupported = .unsupported_obligation_kind },
         };
     }
@@ -684,6 +686,7 @@ const StaticTypeVisitor = struct {
             .int_lit => |literal| typeInfo(literal.ty orelse return error.MissingType),
             .variable => |variable| typeInfo(variableTypeRef(variable) orelse return error.MissingType),
             .result => error.MissingType,
+            .invocation_caller => |caller| if (caller.validType()) typeInfo(caller.ty) else error.TypeMismatch,
             .place_read => |place| blk: {
                 try requireSupportedScalarPlace(place);
                 break :blk u256TypeInfo();

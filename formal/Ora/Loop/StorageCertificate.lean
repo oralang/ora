@@ -161,18 +161,29 @@ def directStorageContext
   resolvePlace := directStorageResolvePlace
 }
 
+/-- The explicit invocation namespace survives direct-slot state binding. -/
+theorem direct_context_env (manifest : Manifest) (base : Env)
+    (state : StorageActionState) (empty : state.loop.locals = []) :
+    (directStorageContext manifest base []).stateEnv? state =
+      some ((directStorageContext manifest base []).withStoreViews
+        (bindStorageReads base state.reads) state) := by
+  simp only [StorageFormulaContext.stateEnv?, directStorageContext, empty, bindState?,
+    Option.pure_def, Option.bind_eq_bind, Option.some_bind]
+
 def FunctionSummaryRow.callSignature (row : FunctionSummaryRow) : CallSignature := {
   parameters := row.parameters.map fun parameter => (parameter.id, parameter.ty)
   results := row.outcomeTypes?
 }
 
 /-- Only callee arguments and the invocation store enter this predicate.
-Both current and old storage start at that store; no caller environment enters. -/
+Both current and old storage start at that store. Only the optional authenticated
+invocation caller is added; arbitrary ambient bindings are not imported. -/
 def FunctionSummaryRow.entryFactsHold (row : FunctionSummaryRow)
-    (manifest : Manifest) (input : CallInput) : Prop :=
+    (manifest : Manifest) (input : CallInput)
+    (caller : Option (Nat × BitVec 160) := none) : Prop :=
   match row.entryFormulas? manifest, row.callSignature.entry? input with
   | some formulas, some initial =>
-      let base := bindStorageReads Env.empty initial.reads
+      let base := bindStorageReads {Env.empty with invocationCaller := caller} initial.reads
       ∀ formula ∈ formulas,
         ((directStorageContext manifest base []).evalFormula? formula initial).getD False
   | _, _ => False

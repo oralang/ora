@@ -104,6 +104,7 @@ def StorageFormulaContext.termStorageReady
       | some (.intLit _) => true
       | some (.variable _) => true
       | some .result => true
+      | some (.invocationCaller owner ty) => (bindings.callerValue? owner ty).isSome
 
 def StorageFormulaContext.formulaStorageReady
     (context : StorageFormulaContext)
