@@ -819,6 +819,118 @@ test "compiler rejects fixed size data helper writes outside declared bounded ra
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "[0..3]' is not covered by this function's `modifies` clause"));
 }
 
+test "compiler substitutes named storage helper effects and rejects the wrong forwarded frame" {
+    var wrong = try compilePackage("tests/negative/modifies_helper_wrong_forwarded_key.ora");
+    defer wrong.deinit();
+    const wrong_typecheck = try wrong.db.moduleTypeCheck(wrong.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&wrong_typecheck.diagnostics, "storage write to 'm[b]' is not covered by this function's `modifies` clause"));
+
+    const source_text =
+        \\contract CorrectForwardedKey {
+        \\    storage m: map<u256, u256>;
+        \\    fn leaf(k: u256) -> u256 modifies m[k] { m[k] = 1; return 0; }
+        \\    pub fn relay(a: u256, b: u256) -> u256
+        \\        requires a != b
+        \\        modifies m[b]
+        \\    { return leaf(b); }
+        \\}
+    ;
+    var correct = try compileText(source_text);
+    defer correct.deinit();
+    const correct_typecheck = try correct.db.moduleTypeCheck(correct.root_module_id);
+    try testing.expect(correct_typecheck.diagnostics.isEmpty());
+    _ = try correct.db.lowerToHir(correct.root_module_id);
+}
+
+test "compiler substitutes named storage helper effects for literals forwarding and nested keys" {
+    const source_text =
+        \\contract Effects {
+        \\    storage m: map<u256, u256>;
+        \\    storage nested: map<u256, map<u256, u256>>;
+        \\    fn lookup(k: u256) -> u256 { return m[k]; }
+        \\    fn write(k: u256) modifies m[k] { m[k] = 1; }
+        \\    fn pair(x: u256, y: u256) modifies nested[x][y] { nested[x][y] = 1; }
+        \\    fn middle(x: u256, y: u256) modifies m[y] { write(y); }
+        \\    pub fn literal() -> u256 { return lookup(7); }
+        \\    pub fn forward(a: u256, b: u256) -> u256 { return lookup(b); }
+        \\    pub fn aligned(k: u256) -> u256 { return lookup(k); }
+        \\    pub fn writeLiteral() modifies m[7] { write(7); }
+        \\    pub fn writeForward(a: u256, b: u256) modifies m[b] { write(b); }
+        \\    pub fn writeAligned(k: u256) modifies m[k] { write(k); }
+        \\    pub fn writeTwice(a: u256, b: u256) modifies m[a] { middle(b, a); }
+        \\    pub fn writePair(a: u256, b: u256) modifies nested[b][a] { pair(b, a); }
+        \\}
+    ;
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+    const ast_file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+    const contract = try firstContract(ast_file);
+    const expectations = .{
+        .{ "literal", "m[7]", false },
+        .{ "forward", "m[param#1]", false },
+        .{ "aligned", "m[param#0]", false },
+        .{ "writeLiteral", "m[7]", true },
+        .{ "writeForward", "m[param#1]", true },
+        .{ "writeAligned", "m[param#0]", true },
+        .{ "writeTwice", "m[param#0]", true },
+        .{ "writePair", "nested[param#1][param#0]", true },
+    };
+    inline for (expectations) |expected| {
+        var found = false;
+        for (contract.members) |member| {
+            const item = ast_file.item(member);
+            if (item.* != .Function or !std.mem.eql(u8, item.Function.name, expected[0])) continue;
+            const effect = typecheck.itemEffect(member);
+            const slots = if (expected[2]) effect.writeSlots() else effect.readSlots();
+            try testing.expectEqual(@as(usize, 1), slots.len);
+            try expectEffectSlotPath(slots[0], expected[1]);
+            found = true;
+        }
+        try testing.expect(found);
+    }
+}
+
+test "compiler substitutes named storage helper effects with unknown arguments conservatively" {
+    const source_text =
+        \\contract Effects {
+        \\    storage m: map<u256, u256>;
+        \\    fn write(k: u256) modifies m[k] { m[k] = 1; }
+        \\    pub fn wrong(a: u256) modifies m[a] { write(a +% 1); }
+        \\    pub fn broad(a: u256) modifies m { write(a +% 1); }
+        \\}
+    ;
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(&typecheck.diagnostics, "storage write to 'm[?]' is not covered by this function's `modifies` clause"));
+    const ast_file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+    const contract = try firstContract(ast_file);
+    for (contract.members) |member| {
+        const item = ast_file.item(member);
+        if (item.* != .Function or std.mem.eql(u8, item.Function.name, "write")) continue;
+        const slots = typecheck.itemEffect(member).writeSlots();
+        try testing.expectEqual(@as(usize, 1), slots.len);
+        try expectEffectSlotPath(slots[0], "m[?]");
+    }
+}
+
+test "compiler substitutes named storage helper effects with environment keys" {
+    const source_text =
+        \\contract Effects {
+        \\    storage balances: map<address, u256>;
+        \\    fn write(owner: address) modifies balances[owner] { balances[owner] = 1; }
+        \\    pub fn caller() modifies balances[std.msg.sender()] { write(std.msg.sender()); }
+        \\    pub fn origin() modifies balances[std.tx.origin()] { write(std.tx.origin()); }
+        \\}
+    ;
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
 test "compiler substitutes computed storage slot arguments through helper effects" {
     const source_text =
         \\contract Vault {
