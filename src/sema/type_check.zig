@@ -4387,7 +4387,7 @@ const TypeChecker = struct {
                 const base_slot = (try self.modifiesStorageSlotForExpr(field.base)) orelse break :blk null;
                 const result_type = self.expr_types[expr_id.index()];
                 if (result_type.kind() == .unknown) break :blk null;
-                break :blk self.slotWithField(base_slot, field.name);
+                break :blk try self.slotWithField(base_slot, field.name);
             },
             .Index => |index| blk: {
                 const base_slot = (try self.modifiesStorageSlotForExpr(index.base)) orelse break :blk null;
@@ -4397,7 +4397,7 @@ const TypeChecker = struct {
                     break :blk null;
                 }
                 try self.validateModifiesKeyExpr(index.index);
-                break :blk self.slotWithIndexKey(base_slot, index.index);
+                break :blk try self.slotWithIndexKey(base_slot, index.index);
             },
             .Builtin => |builtin| blk: {
                 if (builtinKind(builtin.name) != .storage_range) break :blk null;
@@ -4488,7 +4488,7 @@ const TypeChecker = struct {
             if (!keySegmentEql(declared_segment, write_segment)) return false;
         }
         const declared_tail = declared_path[declared_path.len - 1];
-        if (declared_tail == .unknown) return true;
+        if (declared_tail == .unknown) return false;
         const declared_len = self.rangeLengthForSegment(declared_tail) orelse return false;
         const write_tail = write_path[write_path.len - 1];
         switch (write_tail) {
@@ -4950,7 +4950,7 @@ const TypeChecker = struct {
     fn resourcePlaceForExpr(self: *TypeChecker, expr_id: ast.ExprId) !?ResourcePlaceInfo {
         return switch (self.file.expression(expr_id).*) {
             .Group => |group| try self.resourcePlaceForExpr(group.expr),
-            .Name => self.resourcePlaceFromLocated(expr_id, self.locatedTypeForBinding(self.resolution.expr_bindings[expr_id.index()])),
+            .Name => try self.resourcePlaceFromLocated(expr_id, self.locatedTypeForBinding(self.resolution.expr_bindings[expr_id.index()])),
             .Field => |field| blk: {
                 if (!try self.validateResourcePlacePathKeys(expr_id)) break :blk null;
                 const base = self.exprLocatedType(field.base);
@@ -4965,7 +4965,7 @@ const TypeChecker = struct {
                         return error.UnsupportedResourcePlaceShape;
                     }
                 }
-                break :blk self.resourcePlaceFromLocated(expr_id, .{
+                break :blk try self.resourcePlaceFromLocated(expr_id, .{
                     .type = place_type,
                     .region = base.region,
                     .provenance = if (base.region == .storage) .storage else base.provenance,
@@ -4976,7 +4976,7 @@ const TypeChecker = struct {
                 const base = self.exprLocatedType(index.base);
                 const base_type = self.expr_types[index.base.index()];
                 const place_type = self.indexAccessType(base_type, index.index);
-                break :blk self.resourcePlaceFromLocated(expr_id, .{
+                break :blk try self.resourcePlaceFromLocated(expr_id, .{
                     .type = place_type,
                     .region = base.region,
                     .provenance = if (base.region == .storage) .storage else base.provenance,
@@ -5008,7 +5008,7 @@ const TypeChecker = struct {
         };
     }
 
-    fn resourcePlaceFromLocated(self: *TypeChecker, expr_id: ast.ExprId, located: LocatedType) ?ResourcePlaceInfo {
+    fn resourcePlaceFromLocated(self: *TypeChecker, expr_id: ast.ExprId, located: LocatedType) std.mem.Allocator.Error!?ResourcePlaceInfo {
         if (located.type.kind() != .resource_place) return null;
         if (located.region != .storage and located.region != .transient) return null;
         const domain_type = located.type.resource_place.domain_type.*;
@@ -5020,7 +5020,7 @@ const TypeChecker = struct {
             .domain_type = domain_type,
             .carrier_type = carrier_type,
             .region = located.region,
-            .slot = self.lockSlotForExpr(expr_id),
+            .slot = try self.lockSlotForExpr(expr_id),
         };
     }
 
@@ -7994,30 +7994,30 @@ const TypeChecker = struct {
         };
     }
 
-    fn lockSlotForExpr(self: *TypeChecker, expr_id: ast.ExprId) ?EffectSlot {
+    fn lockSlotForExpr(self: *TypeChecker, expr_id: ast.ExprId) std.mem.Allocator.Error!?EffectSlot {
         return switch (self.file.expression(expr_id).*) {
             .Name => |name| self.lookupNamedFieldSlot(name.name),
-            .Group => |group| self.lockSlotForExpr(group.expr),
-            .Field => |field| self.lockSlotForExpr(field.base),
+            .Group => |group| try self.lockSlotForExpr(group.expr),
+            .Field => |field| try self.lockSlotForExpr(field.base),
             .Index => |index| blk: {
-                const base = self.lockSlotForExpr(index.base) orelse break :blk null;
-                break :blk self.slotWithIndexKey(base, index.index);
+                const base = (try self.lockSlotForExpr(index.base)) orelse break :blk null;
+                break :blk try self.slotWithIndexKey(base, index.index);
             },
             else => null,
         };
     }
 
-    fn placeSlotForExpr(self: *TypeChecker, expr_id: ast.ExprId) ?EffectSlot {
+    fn placeSlotForExpr(self: *TypeChecker, expr_id: ast.ExprId) std.mem.Allocator.Error!?EffectSlot {
         return switch (self.file.expression(expr_id).*) {
             .Name => |name| self.lookupNamedFieldSlot(name.name),
-            .Group => |group| self.placeSlotForExpr(group.expr),
+            .Group => |group| try self.placeSlotForExpr(group.expr),
             .Field => |field| blk: {
-                const base = self.placeSlotForExpr(field.base) orelse break :blk null;
-                break :blk self.slotWithField(base, field.name);
+                const base = (try self.placeSlotForExpr(field.base)) orelse break :blk null;
+                break :blk try self.slotWithField(base, field.name);
             },
             .Index => |index| blk: {
-                const base = self.placeSlotForExpr(index.base) orelse break :blk null;
-                break :blk self.slotWithIndexKey(base, index.index);
+                const base = (try self.placeSlotForExpr(index.base)) orelse break :blk null;
+                break :blk try self.slotWithIndexKey(base, index.index);
             },
             else => null,
         };
@@ -8039,7 +8039,7 @@ const TypeChecker = struct {
     }
 
     fn collectResourcePlaceReadWrite(self: *TypeChecker, expr_id: ast.ExprId, state: *EffectCollectorState) !void {
-        const slot = self.placeSlotForExpr(expr_id) orelse {
+        const slot = (try self.placeSlotForExpr(expr_id)) orelse {
             try self.emitExprError(expr_id, "resource operation place does not resolve to a storage or transient effect slot", .{});
             return;
         };
@@ -8074,7 +8074,7 @@ const TypeChecker = struct {
                     try self.emitExprError(expr_id, "{s} v1 only supports current-contract storage paths", .{op_name});
                     break :blk null;
                 }
-                break :blk self.slotWithIndexKey(base, index.index);
+                break :blk try self.slotWithIndexKey(base, index.index);
             },
             .Field => {
                 try self.emitExprError(expr_id, "{s} v1 only supports storage roots or single-key indexed storage paths; struct-field locks are not runtime-lowered yet", .{op_name});
@@ -8398,7 +8398,7 @@ const TypeChecker = struct {
             switch (file.expression(expr_id).*) {
                 .Index => |index| {
                     try ast.walk.walkExpr(EffectCollector, self, file, index.index, effect_collector_walk_options);
-                    if (self.checker.lockSlotForExpr(expr_id)) |slot| {
+                    if (try self.checker.lockSlotForExpr(expr_id)) |slot| {
                         try self.checker.appendUniqueEffectSlot(&self.current().reads, slot);
                     } else {
                         try ast.walk.walkExpr(EffectCollector, self, file, index.base, effect_collector_walk_options);
@@ -8465,13 +8465,13 @@ const TypeChecker = struct {
     fn collectPatternTargetEffects(self: *TypeChecker, pattern_id: ast.PatternId, op: ast.AssignmentOp, state: *EffectCollectorState) anyerror!void {
         switch (self.file.pattern(pattern_id).*) {
             .Name => {
-                if (self.patternFieldSlot(pattern_id)) |slot| {
+                if (try self.patternFieldSlot(pattern_id)) |slot| {
                     if (op != .assign) try self.appendUniqueEffectSlot(&state.reads, slot);
                     try self.appendUniqueEffectSlot(&state.writes, slot);
                 }
             },
             .Field => |field| {
-                if (self.patternFieldSlot(pattern_id)) |slot| {
+                if (try self.patternFieldSlot(pattern_id)) |slot| {
                     if (op != .assign) try self.appendUniqueEffectSlot(&state.reads, slot);
                     try self.appendUniqueEffectSlot(&state.writes, slot);
                 } else {
@@ -8480,7 +8480,7 @@ const TypeChecker = struct {
             },
             .Index => |index| {
                 try self.collectExprEffects(index.index, state);
-                if (self.patternFieldSlot(pattern_id)) |slot| {
+                if (try self.patternFieldSlot(pattern_id)) |slot| {
                     try self.appendUniqueEffectSlot(&state.reads, slot);
                     try self.appendUniqueEffectSlot(&state.writes, slot);
                 } else {
@@ -8495,12 +8495,12 @@ const TypeChecker = struct {
     fn collectPatternExprReads(self: *TypeChecker, pattern_id: ast.PatternId, state: *EffectCollectorState) anyerror!void {
         switch (self.file.pattern(pattern_id).*) {
             .Name => {
-                if (self.patternFieldSlot(pattern_id)) |slot| {
+                if (try self.patternFieldSlot(pattern_id)) |slot| {
                     try self.appendUniqueEffectSlot(&state.reads, slot);
                 }
             },
             .Field => |field| {
-                if (self.patternFieldSlot(pattern_id)) |slot| {
+                if (try self.patternFieldSlot(pattern_id)) |slot| {
                     try self.appendUniqueEffectSlot(&state.reads, slot);
                 } else {
                     try self.collectPatternExprReads(field.base, state);
@@ -8508,7 +8508,7 @@ const TypeChecker = struct {
             },
             .Index => |index| {
                 try self.collectExprEffects(index.index, state);
-                if (self.patternFieldSlot(pattern_id)) |slot| {
+                if (try self.patternFieldSlot(pattern_id)) |slot| {
                     try self.appendUniqueEffectSlot(&state.reads, slot);
                 } else {
                     try self.collectPatternExprReads(index.base, state);
@@ -8519,16 +8519,16 @@ const TypeChecker = struct {
         }
     }
 
-    fn patternFieldSlot(self: *TypeChecker, pattern_id: ast.PatternId) ?EffectSlot {
+    fn patternFieldSlot(self: *TypeChecker, pattern_id: ast.PatternId) std.mem.Allocator.Error!?EffectSlot {
         return switch (self.file.pattern(pattern_id).*) {
             .Name => |name| self.lookupNamedFieldSlot(name.name),
             .Field => |field| blk: {
-                const base = self.patternFieldSlot(field.base) orelse break :blk null;
-                break :blk self.slotWithField(base, field.name);
+                const base = (try self.patternFieldSlot(field.base)) orelse break :blk null;
+                break :blk try self.slotWithField(base, field.name);
             },
             .Index => |index| blk: {
-                const base = self.patternFieldSlot(index.base) orelse break :blk null;
-                break :blk self.slotWithIndexKey(base, index.index);
+                const base = (try self.patternFieldSlot(index.base)) orelse break :blk null;
+                break :blk try self.slotWithIndexKey(base, index.index);
             },
             .StructDestructure => null,
             .Error => null,
@@ -8572,14 +8572,14 @@ const TypeChecker = struct {
         try slots.appendUnique(self.arena, slot);
     }
 
-    fn slotWithIndexKey(self: *TypeChecker, base: EffectSlot, index_expr: ast.ExprId) ?EffectSlot {
+    fn slotWithIndexKey(self: *TypeChecker, base: EffectSlot, index_expr: ast.ExprId) std.mem.Allocator.Error!EffectSlot {
         const segment = self.keySegmentForExpr(index_expr);
         return self.slotWithKeySegment(base, segment);
     }
 
-    fn slotWithKeySegment(self: *TypeChecker, base: EffectSlot, segment: KeySegment) ?EffectSlot {
+    fn slotWithKeySegment(self: *TypeChecker, base: EffectSlot, segment: KeySegment) std.mem.Allocator.Error!EffectSlot {
         const base_len: usize = if (base.key_path) |path| path.len else 0;
-        const path = self.arena.alloc(KeySegment, base_len + 1) catch return null;
+        const path = try self.arena.alloc(KeySegment, base_len + 1);
         if (base.key_path) |existing| @memcpy(path[0..existing.len], existing);
         path[base_len] = segment;
         var slot = base;
@@ -8595,16 +8595,16 @@ const TypeChecker = struct {
         };
     }
 
-    fn computedStorageDerivedSlot(self: *TypeChecker, builtin: ast.BuiltinExpr) ?EffectSlot {
+    fn computedStorageDerivedSlot(self: *TypeChecker, builtin: ast.BuiltinExpr) std.mem.Allocator.Error!?EffectSlot {
         return self.computedStorageDerivedSlotFromArgs(builtin.args);
     }
 
-    fn computedStorageDerivedSlotFromArgs(self: *TypeChecker, args: []const ast.ExprId) ?EffectSlot {
+    fn computedStorageDerivedSlotFromArgs(self: *TypeChecker, args: []const ast.ExprId) std.mem.Allocator.Error!?EffectSlot {
         if (args.len == 0) return null;
         var slot = self.computedStorageUnknownSlot();
         slot.key_path = &.{};
         for (args) |arg| {
-            slot = self.slotWithKeySegment(slot, self.keySegmentForExpr(arg)) orelse return null;
+            slot = try self.slotWithKeySegment(slot, self.keySegmentForExpr(arg));
         }
         return slot;
     }
@@ -8617,12 +8617,12 @@ const TypeChecker = struct {
         return switch (self.file.expression(expr_id).*) {
             .Group => |group| try self.computedStorageSlotExprMode(group.expr, summarize_calls),
             .Builtin => |builtin| if (builtinKind(builtin.name) == .storage_derive)
-                self.computedStorageDerivedSlot(builtin)
+                try self.computedStorageDerivedSlot(builtin)
             else
                 null,
             .Call => |call| blk: {
                 if (self.stdStorageDeriveCall(call) catch false) {
-                    break :blk self.computedStorageDerivedSlotFromArgs(call.args);
+                    break :blk try self.computedStorageDerivedSlotFromArgs(call.args);
                 }
                 if (summarize_calls) {
                     if (try self.computedStorageSlotReturnedByCall(expr_id, call)) |slot| break :blk slot;
@@ -8640,7 +8640,7 @@ const TypeChecker = struct {
                         } else if (self.runtimeParameterIndexForPattern(pattern_id)) |index| {
                             var slot = self.computedStorageUnknownSlot();
                             slot.key_path = &.{};
-                            break :blk self.slotWithKeySegment(slot, .{ .parameter = index });
+                            break :blk try self.slotWithKeySegment(slot, .{ .parameter = index });
                         },
                         .item => {},
                     }
@@ -8693,7 +8693,7 @@ const TypeChecker = struct {
     fn computedStorageWordSlot(self: *TypeChecker, slot_expr: ast.ExprId, offset_expr: ast.ExprId) std.mem.Allocator.Error!?EffectSlot {
         const base = (try self.computedStorageSlotExpr(slot_expr)) orelse return null;
         if (base.key_path == null) return base;
-        return self.slotWithKeySegment(base, self.keySegmentForExpr(offset_expr));
+        return try self.slotWithKeySegment(base, self.keySegmentForExpr(offset_expr));
     }
 
     fn computedStorageRangeSlot(self: *TypeChecker, expr_id: ast.ExprId) std.mem.Allocator.Error!?EffectSlot {
@@ -8702,7 +8702,7 @@ const TypeChecker = struct {
             .Builtin => |builtin| if (builtinKind(builtin.name) == .storage_range and builtin.args.len == 2) blk: {
                 var base = (try self.computedStorageSlotExpr(builtin.args[0])) orelse break :blk null;
                 if (base.key_path == null) break :blk base;
-                base = self.slotWithKeySegment(base, self.computedStorageRangeSegmentForExpr(builtin.args[1])) orelse break :blk null;
+                base = try self.slotWithKeySegment(base, try self.computedStorageRangeSegmentForExpr(builtin.args[1]));
                 break :blk base;
             } else null,
             .Call => |call| blk: {
@@ -8710,7 +8710,7 @@ const TypeChecker = struct {
                     if (call.args.len != 2) break :blk null;
                     var base = (try self.computedStorageSlotExpr(call.args[0])) orelse break :blk null;
                     if (base.key_path == null) break :blk base;
-                    base = self.slotWithKeySegment(base, self.computedStorageRangeSegmentForExpr(call.args[1])) orelse break :blk null;
+                    base = try self.slotWithKeySegment(base, try self.computedStorageRangeSegmentForExpr(call.args[1]));
                     break :blk base;
                 }
                 if (try self.computedStorageRangeReturnedByCall(expr_id, call)) |slot| break :blk slot;
@@ -8727,7 +8727,7 @@ const TypeChecker = struct {
                         } else if (self.runtimeParameterIndexForPattern(pattern_id)) |index| {
                             var slot = self.computedStorageUnknownSlot();
                             slot.key_path = &.{};
-                            break :blk self.slotWithKeySegment(slot, .{ .parameter = index });
+                            break :blk try self.slotWithKeySegment(slot, .{ .parameter = index });
                         },
                         .item => {},
                     }
@@ -8828,10 +8828,10 @@ const TypeChecker = struct {
         };
     }
 
-    fn computedStorageRangeSegmentForExpr(self: *TypeChecker, expr_id: ast.ExprId) KeySegment {
+    fn computedStorageRangeSegmentForExpr(self: *TypeChecker, expr_id: ast.ExprId) std.mem.Allocator.Error!KeySegment {
         return switch (self.file.expression(expr_id).*) {
-            .Group => |group| self.computedStorageRangeSegmentForExpr(group.expr),
-            .IntegerLiteral => |literal| self.rangeSegmentForIntegerLiteral(literal.text),
+            .Group => |group| try self.computedStorageRangeSegmentForExpr(group.expr),
+            .IntegerLiteral => |literal| try self.rangeSegmentForIntegerLiteral(literal.text),
             .Name => blk: {
                 if (self.resolution.expr_bindings[expr_id.index()]) |binding| {
                     switch (binding) {
@@ -8841,26 +8841,26 @@ const TypeChecker = struct {
                         .item => {},
                     }
                 }
-                if (self.integerLiteralValueForExpr(expr_id)) |value| break :blk self.rangeSegmentForLength(value);
+                if (self.integerLiteralValueForExpr(expr_id)) |value| break :blk try self.rangeSegmentForLength(value);
                 break :blk .unknown;
             },
             else => .unknown,
         };
     }
 
-    fn rangeSegmentForIntegerLiteral(self: *TypeChecker, text: []const u8) KeySegment {
+    fn rangeSegmentForIntegerLiteral(self: *TypeChecker, text: []const u8) std.mem.Allocator.Error!KeySegment {
         const value = parseUnsignedIntegerLiteralU256(integerLiteralValueText(text)) orelse return .unknown;
         return self.rangeSegmentForLength(value);
     }
 
-    fn rangeSegmentForLength(self: *TypeChecker, value: u256) KeySegment {
-        const label = std.fmt.allocPrint(self.arena, "0..{d}", .{value}) catch return .unknown;
+    fn rangeSegmentForLength(self: *TypeChecker, value: u256) std.mem.Allocator.Error!KeySegment {
+        const label = try std.fmt.allocPrint(self.arena, "0..{d}", .{value});
         return .{ .constant = label };
     }
 
-    fn slotWithField(self: *TypeChecker, base: EffectSlot, field_name: []const u8) ?EffectSlot {
+    fn slotWithField(self: *TypeChecker, base: EffectSlot, field_name: []const u8) std.mem.Allocator.Error!EffectSlot {
         const base_len: usize = if (base.field_path) |path| path.len else 0;
-        const path = self.arena.alloc([]const u8, base_len + 1) catch return null;
+        const path = try self.arena.alloc([]const u8, base_len + 1);
         if (base.field_path) |existing| @memcpy(path[0..existing.len], existing);
         path[base_len] = field_name;
         var slot = base;
@@ -9230,12 +9230,12 @@ const TypeChecker = struct {
         substituted.key_path = &.{};
         for (key_path) |segment| {
             if (segment == .parameter) {
-                if (self.callArgForParameter(function_file, function, call, segment.parameter)) |arg_expr| {
+                if (try self.callArgForParameter(function_file, function, call, segment.parameter)) |arg_expr| {
                     if (computed and self.expr_types[arg_expr.index()].kind() == .storage_slot) {
                         if (try self.computedStorageSlotExpr(arg_expr)) |arg_slot| {
                             if (arg_slot.key_path) |arg_path| {
                                 for (arg_path) |arg_segment| {
-                                    substituted = self.slotWithKeySegment(substituted, arg_segment) orelse return error.OutOfMemory;
+                                    substituted = try self.slotWithKeySegment(substituted, arg_segment);
                                 }
                                 continue;
                             }
@@ -9244,23 +9244,23 @@ const TypeChecker = struct {
                         if (try self.computedStorageRangeSlot(arg_expr)) |arg_slot| {
                             if (arg_slot.key_path) |arg_path| {
                                 for (arg_path) |arg_segment| {
-                                    substituted = self.slotWithKeySegment(substituted, arg_segment) orelse return error.OutOfMemory;
+                                    substituted = try self.slotWithKeySegment(substituted, arg_segment);
                                 }
                                 continue;
                             }
                         }
                     }
-                    substituted = self.slotWithKeySegment(substituted, self.keySegmentForExpr(arg_expr)) orelse return error.OutOfMemory;
+                    substituted = try self.slotWithKeySegment(substituted, self.keySegmentForExpr(arg_expr));
                     continue;
                 }
             } else if (segment == .comptime_parameter) {
                 if (self.callArgForFunctionParameter(function_file, function, call, segment.comptime_parameter)) |arg_expr| {
-                    substituted = self.slotWithKeySegment(substituted, self.keySegmentForExpr(arg_expr)) orelse return error.OutOfMemory;
+                    substituted = try self.slotWithKeySegment(substituted, self.keySegmentForExpr(arg_expr));
                     continue;
                 }
             } else if (segment == .comptime_range_parameter) {
                 if (self.callArgForFunctionParameter(function_file, function, call, segment.comptime_range_parameter)) |arg_expr| {
-                    substituted = self.slotWithKeySegment(substituted, self.computedStorageRangeSegmentForExpr(arg_expr)) orelse return error.OutOfMemory;
+                    substituted = try self.slotWithKeySegment(substituted, try self.computedStorageRangeSegmentForExpr(arg_expr));
                     continue;
                 }
             }
@@ -9269,17 +9269,17 @@ const TypeChecker = struct {
                 .parameter, .comptime_parameter, .comptime_range_parameter => .unknown,
                 else => segment,
             };
-            substituted = self.slotWithKeySegment(substituted, resolved_segment) orelse return error.OutOfMemory;
+            substituted = try self.slotWithKeySegment(substituted, resolved_segment);
         }
         if (computed) {
             if (expr_id) |call_expr_id| {
-                return self.specializedStdFixedDataEffectSlot(call_expr_id, call, function, substituted) orelse substituted;
+                return (try self.specializedStdFixedDataEffectSlot(call_expr_id, call, function, substituted)) orelse substituted;
             }
         }
         return substituted;
     }
 
-    fn specializedStdFixedDataEffectSlot(self: *TypeChecker, expr_id: ast.ExprId, call: ast.CallExpr, function: ast.FunctionItem, slot: EffectSlot) ?EffectSlot {
+    fn specializedStdFixedDataEffectSlot(self: *TypeChecker, expr_id: ast.ExprId, call: ast.CallExpr, function: ast.FunctionItem, slot: EffectSlot) std.mem.Allocator.Error!?EffectSlot {
         const module_path = self.resolvedCallModulePath(expr_id) orelse return null;
         if (!std.mem.eql(u8, module_path, std_fixed_size_data_module_path)) return null;
         const key_path = slot.key_path orelse return null;
@@ -9294,7 +9294,7 @@ const TypeChecker = struct {
         else
             null;
         const word_count = len orelse return null;
-        return self.slotWithReplacedTail(slot, self.rangeSegmentForLength(word_count));
+        return self.slotWithReplacedTail(slot, try self.rangeSegmentForLength(word_count));
     }
 
     fn resolvedCallModulePath(self: *TypeChecker, expr_id: ast.ExprId) ?[]const u8 {
@@ -9324,10 +9324,10 @@ const TypeChecker = struct {
         };
     }
 
-    fn slotWithReplacedTail(self: *TypeChecker, slot: EffectSlot, segment: KeySegment) ?EffectSlot {
+    fn slotWithReplacedTail(self: *TypeChecker, slot: EffectSlot, segment: KeySegment) std.mem.Allocator.Error!?EffectSlot {
         const key_path = slot.key_path orelse return null;
         if (key_path.len == 0) return null;
-        const path = self.arena.alloc(KeySegment, key_path.len) catch return null;
+        const path = try self.arena.alloc(KeySegment, key_path.len);
         @memcpy(path, key_path);
         path[path.len - 1] = segment;
         var result = slot;
@@ -9335,7 +9335,7 @@ const TypeChecker = struct {
         return result;
     }
 
-    fn callArgForParameter(self: *TypeChecker, function_file: *const ast.AstFile, function: ast.FunctionItem, call: ast.CallExpr, parameter_index: u32) ?ast.ExprId {
+    fn callArgForParameter(self: *TypeChecker, function_file: *const ast.AstFile, function: ast.FunctionItem, call: ast.CallExpr, parameter_index: u32) std.mem.Allocator.Error!?ast.ExprId {
         const runtime_param_index: usize = @intCast(parameter_index);
         const method_receiver_supplied = self.callSuppliesMethodReceiver(call.callee) and model.functionHasRuntimeSelf(function_file, function);
         if (method_receiver_supplied) {
@@ -9348,12 +9348,13 @@ const TypeChecker = struct {
             return null;
         }
 
-        const runtime_parameters = self.runtimeFunctionParameters(function) catch return null;
+        const runtime_parameters = try self.runtimeFunctionParameters(function);
         const effective_runtime_count = runtime_parameters.len - @as(usize, if (method_receiver_supplied) 1 else 0);
         const comptime_count = self.comptimeParameterCount(function);
         const explicit_generics = call.args.len == comptime_count + effective_runtime_count;
         if (explicit_generics) {
             var iter = generic_call_args.iterator(function, call, .{ .skip_first_runtime_parameter = method_receiver_supplied });
+            // The iterator can only report InvalidGenericArgumentCount; it does not allocate.
             while ((iter.next() catch return null)) |entry| {
                 if (entry.runtime_index) |current_runtime_index| {
                     if (current_runtime_index == runtime_param_index) return entry.arg;

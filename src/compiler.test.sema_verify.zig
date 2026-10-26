@@ -48,6 +48,113 @@ fn firstContract(ast_file: *const compiler.ast.AstFile) !compiler.ast.ContractIt
     return error.TestUnexpectedResult;
 }
 
+fn checkEffectAllocationFailures(source_text: []const u8) !void {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const file = try compilation.db.astFile(module.file_id);
+    const index = try compilation.db.itemIndex(compilation.root_module_id);
+    const resolution = try compilation.db.resolveNames(compilation.root_module_id);
+    const const_eval = try compilation.db.constEval(compilation.root_module_id);
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator, module_id: compiler.source.ModuleId, ast_file: *const compiler.ast.AstFile, items: *const compiler.sema.ItemIndexResult, names: *const compiler.sema.NameResolutionResult, constants: *const compiler.sema.ConstEvalResult) !void {
+            for (ast_file.root_items) |item| {
+                if (ast_file.item(item).* != .Contract) continue;
+                var checked = try compiler.sema.typeCheck(allocator, module_id, ast_file.file_id, ast_file, items, names, constants, .{ .item = item }, null, false);
+                defer checked.deinit();
+                try testing.expect(checked.diagnostics.isEmpty());
+            }
+        }
+    };
+    var observed_failure = false;
+    for (0..256) |fail_index| {
+        var backing_arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer backing_arena.deinit();
+        var failing = testing.FailingAllocator.init(backing_arena.allocator(), .{ .fail_index = fail_index });
+        if (Probe.run(failing.allocator(), compilation.root_module_id, file, index, resolution, const_eval)) |_| {
+            if (failing.has_induced_failure) {
+                const trace = failing.getStackTrace();
+                std.debug.dumpStackTrace(&trace);
+                return error.SwallowedOutOfMemoryError;
+            }
+            try testing.expect(observed_failure);
+            return;
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expect(failing.has_induced_failure);
+            observed_failure = true;
+        }
+    }
+    return error.AllocationFailureSweepIncomplete;
+}
+
+test "compiler propagates slot-builder OOM through named map and field effects" {
+    try checkEffectAllocationFailures(
+        \\contract Slots {
+        \\    struct Config { value: u256 }
+        \\    storage config: Config;
+        \\    storage m: map<u256, map<u256, u256>>;
+        \\    pub fn write(a: u256, b: u256, value: u256)
+        \\        modifies m[a][b], config.value
+        \\    {
+        \\        m[a][b] = value;
+        \\        config.value = m[a][b];
+        \\    }
+        \\}
+    );
+}
+
+test "compiler propagates slot-builder OOM without dropping deep map writes" {
+    for (1..33) |depth| {
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(testing.allocator);
+        try text.appendSlice(testing.allocator, "contract Slots { storage m: ");
+        for (0..depth) |_| try text.appendSlice(testing.allocator, "map<u256, ");
+        try text.appendSlice(testing.allocator, "u256");
+        for (0..depth) |_| try text.append(testing.allocator, '>');
+        try text.appendSlice(testing.allocator, "; pub fn write(value: u256) modifies m { m");
+        for (0..depth) |_| try text.appendSlice(testing.allocator, "[0]");
+        try text.appendSlice(testing.allocator, " = value; } }");
+        try checkEffectAllocationFailures(text.items);
+    }
+}
+
+test "compiler propagates slot-builder OOM through computed storage effects" {
+    try checkEffectAllocationFailures(
+        \\contract Slots {
+        \\    fn write(slot: StorageSlot, value: u256) {
+        \\        @storageWordStore(slot, 0, value);
+        \\    }
+        \\    pub fn run(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("oom.slots", owner), 2)
+        \\    {
+        \\        let slot: StorageSlot = @storageDerive("oom.slots", owner);
+        \\        write(slot, value);
+        \\        @storageWordStore(slot, 1, @storageWordLoad(slot, 0));
+        \\        @storageRangeErase(@storageRange(slot, 2));
+        \\    }
+        \\}
+    );
+}
+
+test "compiler propagates slot-builder OOM through lock and resource effects" {
+    try checkEffectAllocationFailures(
+        \\resource Token = u256;
+        \\contract Slots {
+        \\    storage balances: map<address, u256>;
+        \\    storage pending: map<address, Resource<Token>>;
+        \\    storage settled: map<address, Resource<Token>>;
+        \\    pub fn run(from: address, to: address, amount: Token) {
+        \\        @lock(balances[from]);
+        \\        let value = balances[from];
+        \\        @unlock(balances[from]);
+        \\        balances[from] = value;
+        \\        @move(pending[from], settled[to], amount);
+        \\    }
+        \\}
+    );
+}
+
 test "compiler lowers ensures on implicit void returns" {
     const source_text =
         \\contract Counter {
@@ -793,6 +900,40 @@ test "compiler rejects computed storage writes with unknown offsets under bounde
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to '$computed_storage"));
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "[?]' is not covered by this function's `modifies` clause"));
+}
+
+test "compiler rejects unknown declared range tails instead of covering arbitrary offsets" {
+    const source_text =
+        \\comptime const std_storage = @import("std/storage");
+        \\contract Vault {
+        \\    pub fn builtin(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("range.unknown", owner), 2)
+        \\    {
+        \\        @storageWordStore(@storageDerive("range.unknown", owner), 7, value);
+        \\    }
+        \\    pub fn library(owner: address, value: u256)
+        \\        modifies std_storage.range(std_storage.derive("range.unknown", owner), 2)
+        \\    {
+        \\        std_storage.words.store(std_storage.derive("range.unknown", owner), 7, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const ast_file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+    // Inject an unparseable range literal after parsing, so this exercises
+    // coverage's unknown-tail refusal rather than stopping at a lexer error.
+    var corrupted: usize = 0;
+    for (ast_file.expressions) |*expr| {
+        if (expr.* == .IntegerLiteral and std.mem.eql(u8, expr.IntegerLiteral.text, "2")) {
+            expr.IntegerLiteral.text = "0x";
+            corrupted += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), corrupted);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 2), countDiagnosticMessages(&typecheck.diagnostics, "storage write to '$computed_storage[range.unknown][owner][7]' is not covered by this function's `modifies` clause"));
 }
 
 test "compiler rejects fixed size data helper writes outside declared bounded range" {
