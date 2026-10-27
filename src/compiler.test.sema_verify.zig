@@ -48,6 +48,185 @@ fn firstContract(ast_file: *const compiler.ast.AstFile) !compiler.ast.ContractIt
     return error.TestUnexpectedResult;
 }
 
+const EffectQueryProbe = struct {
+    db: *compiler.CompilerDb,
+    calls: usize = 0,
+    fail_at: ?usize = null,
+    failure: anyerror = error.EffectQueryFailed,
+
+    fn next(context: *anyopaque) !*EffectQueryProbe {
+        const self: *EffectQueryProbe = @ptrCast(@alignCast(context));
+        const index = self.calls;
+        self.calls += 1;
+        if (self.fail_at == index) return self.failure;
+        return self;
+    }
+
+    fn astFile(context: *anyopaque, module_id: compiler.ModuleId) anyerror!*const compiler.ast.AstFile {
+        const self = try next(context);
+        return self.db.astFile(self.db.sources.module(module_id).file_id);
+    }
+
+    fn modulePath(context: *anyopaque, module_id: compiler.ModuleId) anyerror![]const u8 {
+        const self = try next(context);
+        return self.db.sources.file(self.db.sources.module(module_id).file_id).path;
+    }
+
+    fn itemIndex(context: *anyopaque, module_id: compiler.ModuleId) anyerror!*const compiler.sema.ItemIndexResult {
+        const self = try next(context);
+        return self.db.itemIndex(module_id);
+    }
+
+    fn resolution(context: *anyopaque, module_id: compiler.ModuleId) anyerror!*const compiler.sema.NameResolutionResult {
+        const self = try next(context);
+        return self.db.resolveNames(module_id);
+    }
+
+    fn moduleTypeCheck(context: *anyopaque, module_id: compiler.ModuleId) anyerror!*const compiler.sema.TypeCheckResult {
+        const self = try next(context);
+        return self.db.moduleTypeCheck(module_id);
+    }
+
+    fn lookupItem(context: *anyopaque, module_id: compiler.ModuleId, name: []const u8) anyerror!?compiler.ast.ItemId {
+        const self = try next(context);
+        return (try self.db.itemIndex(module_id)).lookup(name);
+    }
+
+    fn resolveImportAlias(context: *anyopaque, module_id: compiler.ModuleId, alias: []const u8) anyerror!?compiler.ModuleId {
+        const self = try next(context);
+        const graph = try self.db.moduleGraph(self.db.sources.module(module_id).package_id);
+        for (graph.modules) |module| {
+            if (module.module_id != module_id) continue;
+            for (module.imports) |import| {
+                const name = import.alias orelse std.fs.path.stem(std.fs.path.basename(import.path));
+                if (std.mem.eql(u8, name, alias)) return import.target_module_id;
+            }
+        }
+        return null;
+    }
+
+    fn check(self: *EffectQueryProbe, module_id: compiler.ModuleId, expected_write: []const u8) !void {
+        const file = try self.db.astFile(self.db.sources.module(module_id).file_id);
+        const index = try self.db.itemIndex(module_id);
+        const names = try self.db.resolveNames(module_id);
+        const constants = try self.db.constEval(module_id);
+        const contract_id = index.lookup("Vault") orelse return error.TestUnexpectedResult;
+        var checked = try compiler.sema.typeCheck(testing.allocator, module_id, file.file_id, file, index, names, constants, .{ .item = contract_id }, .{
+            .context = self,
+            .ast_file = astFile,
+            .module_path = modulePath,
+            .item_index = itemIndex,
+            .resolution = resolution,
+            .module_typecheck = moduleTypeCheck,
+            .lookup_item = lookupItem,
+            .resolve_import_alias = resolveImportAlias,
+        }, false);
+        defer checked.deinit();
+        try testing.expect(checked.diagnostics.isEmpty());
+        var found = false;
+        for (file.item(contract_id).Contract.members) |item| {
+            if (file.item(item).* != .Function or !std.mem.eql(u8, file.item(item).Function.name, "run")) continue;
+            const writes = checked.itemEffect(item).writeSlots();
+            try testing.expectEqual(@as(usize, 1), writes.len);
+            try expectEffectSlotPath(writes[0], expected_write);
+            found = true;
+        }
+        try testing.expect(found);
+    }
+};
+
+fn checkEffectQueryFailures(source_text: []const u8, expected_write: []const u8) !void {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const helper_file = try compilation.db.addSourceFile("effect_helper.ora",
+        \\pub fn slot(owner: address) -> StorageSlot {
+        \\    return @storageDerive("query", owner);
+        \\}
+        \\pub fn range(owner: address) -> StorageRange {
+        \\    return @storageRange(@storageDerive("query", owner), 2);
+        \\}
+    );
+    _ = try compilation.db.addModule(compilation.package_id, helper_file, "effect_helper");
+    var probe = EffectQueryProbe{ .db = &compilation.db };
+    try probe.check(compilation.root_module_id, expected_write);
+    const count = probe.calls;
+    try testing.expect(count > 0);
+    // Fail each query exactly once, including queries made after successful
+    // callee resolution. A later fallback/retry must not hide the original error.
+    for ([_]anyerror{ error.EffectQueryFailed, error.OutOfMemory }) |failure| {
+        for (0..count) |fail_at| {
+            probe = .{ .db = &compilation.db, .fail_at = fail_at, .failure = failure };
+            try testing.expectError(failure, probe.check(compilation.root_module_id, expected_write));
+            try testing.expectEqual(fail_at + 1, probe.calls);
+        }
+    }
+}
+
+test "compiler propagates computed storage derive query failures" {
+    try checkEffectQueryFailures(
+        \\comptime const std_storage = @import("std/storage");
+        \\contract Vault {
+        \\    pub fn run(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("query", owner), 2)
+        \\    {
+        \\        @storageWordStore(std_storage.derive("query", owner), 1, value);
+        \\    }
+        \\}
+    , "$computed_storage[query][param#0][1]");
+}
+
+test "compiler propagates computed storage range query failures" {
+    try checkEffectQueryFailures(
+        \\comptime const std_storage = @import("std/storage");
+        \\contract Vault {
+        \\    pub fn run(owner: address)
+        \\        modifies @storageRange(@storageDerive("query", owner), 2)
+        \\    {
+        \\        @storageRangeErase(std_storage.range(@storageDerive("query", owner), 2));
+        \\    }
+        \\}
+    , "$computed_storage[query][param#0][0..2]");
+}
+
+test "compiler propagates imported computed slot return query failures" {
+    try checkEffectQueryFailures(
+        \\comptime const helper = @import("./effect_helper.ora");
+        \\contract Vault {
+        \\    pub fn run(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("query", owner), 2)
+        \\    {
+        \\        @storageWordStore(helper.slot(owner), 1, value);
+        \\    }
+        \\}
+    , "$computed_storage[query][param#0][1]");
+}
+
+test "compiler propagates imported computed range return query failures" {
+    try checkEffectQueryFailures(
+        \\comptime const helper = @import("./effect_helper.ora");
+        \\contract Vault {
+        \\    pub fn run(owner: address)
+        \\        modifies @storageRange(@storageDerive("query", owner), 2)
+        \\    {
+        \\        @storageRangeErase(helper.range(owner));
+        \\    }
+        \\}
+    , "$computed_storage[query][param#0][0..2]");
+}
+
+test "compiler propagates fixed data effect specialization query failures" {
+    try checkEffectQueryFailures(
+        \\comptime const fixed = @import("std/storage/fixed_size_data");
+        \\contract Vault {
+        \\    pub fn run(owner: address)
+        \\        modifies @storageRange(@storageDerive("query", owner), 2)
+        \\    {
+        \\        fixed.erase(@storageDerive("query", owner), 2);
+        \\    }
+        \\}
+    , "$computed_storage[query][param#0][0..2]");
+}
+
 fn checkEffectAllocationFailures(source_text: []const u8) !void {
     var compilation = try compileText(source_text);
     defer compilation.deinit();

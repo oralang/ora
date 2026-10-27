@@ -8609,11 +8609,12 @@ const TypeChecker = struct {
         return slot;
     }
 
-    fn computedStorageSlotExpr(self: *TypeChecker, expr_id: ast.ExprId) std.mem.Allocator.Error!?EffectSlot {
+    fn computedStorageSlotExpr(self: *TypeChecker, expr_id: ast.ExprId) !?EffectSlot {
         return self.computedStorageSlotExprMode(expr_id, true);
     }
 
-    fn computedStorageSlotExprMode(self: *TypeChecker, expr_id: ast.ExprId, summarize_calls: bool) std.mem.Allocator.Error!?EffectSlot {
+    // Recursive call summaries share the query view's anyerror boundary.
+    fn computedStorageSlotExprMode(self: *TypeChecker, expr_id: ast.ExprId, summarize_calls: bool) anyerror!?EffectSlot {
         return switch (self.file.expression(expr_id).*) {
             .Group => |group| try self.computedStorageSlotExprMode(group.expr, summarize_calls),
             .Builtin => |builtin| if (builtinKind(builtin.name) == .storage_derive)
@@ -8621,7 +8622,7 @@ const TypeChecker = struct {
             else
                 null,
             .Call => |call| blk: {
-                if (self.stdStorageDeriveCall(call) catch false) {
+                if (try self.stdStorageDeriveCall(call)) {
                     break :blk try self.computedStorageDerivedSlotFromArgs(call.args);
                 }
                 if (summarize_calls) {
@@ -8657,12 +8658,12 @@ const TypeChecker = struct {
         };
     }
 
-    fn computedStorageSlotReturnedByCall(self: *TypeChecker, expr_id: ast.ExprId, call: ast.CallExpr) std.mem.Allocator.Error!?EffectSlot {
+    fn computedStorageSlotReturnedByCall(self: *TypeChecker, expr_id: ast.ExprId, call: ast.CallExpr) !?EffectSlot {
         if (try self.computedStorageSlotReturnedByLocalCall(call)) |slot| return slot;
         return self.computedStorageSlotReturnedByImportedCall(expr_id, call);
     }
 
-    fn computedStorageSlotReturnedByLocalCall(self: *TypeChecker, call: ast.CallExpr) std.mem.Allocator.Error!?EffectSlot {
+    fn computedStorageSlotReturnedByLocalCall(self: *TypeChecker, call: ast.CallExpr) !?EffectSlot {
         const callee_id = self.calleeFunctionItem(call.callee) orelse return null;
         const function = switch (self.file.item(callee_id).*) {
             .Function => |function| function,
@@ -8679,24 +8680,24 @@ const TypeChecker = struct {
         return try self.substituteCallEffectSlot(null, call, self.file, function, returned_slot);
     }
 
-    fn computedStorageSlotReturnedByImportedCall(self: *TypeChecker, expr_id: ast.ExprId, call: ast.CallExpr) std.mem.Allocator.Error!?EffectSlot {
-        const target = (self.importedCallTarget(expr_id) catch return null) orelse return null;
+    fn computedStorageSlotReturnedByImportedCall(self: *TypeChecker, expr_id: ast.ExprId, call: ast.CallExpr) !?EffectSlot {
+        const target = (try self.importedCallTarget(expr_id)) orelse return null;
         const returned_slot = (try self.computedStorageSlotReturnExprInImportedFunction(target)) orelse return null;
         return try self.substituteCallEffectSlot(null, call, target.file, target.function, returned_slot);
     }
 
-    fn computedStorageSlotReturnExprInFunction(self: *TypeChecker, function: ast.FunctionItem) std.mem.Allocator.Error!?EffectSlot {
+    fn computedStorageSlotReturnExprInFunction(self: *TypeChecker, function: ast.FunctionItem) !?EffectSlot {
         const value_expr = self.simpleReturnValueExprInFile(self.file, function) orelse return null;
         return self.computedStorageSlotExprMode(value_expr, false);
     }
 
-    fn computedStorageWordSlot(self: *TypeChecker, slot_expr: ast.ExprId, offset_expr: ast.ExprId) std.mem.Allocator.Error!?EffectSlot {
+    fn computedStorageWordSlot(self: *TypeChecker, slot_expr: ast.ExprId, offset_expr: ast.ExprId) !?EffectSlot {
         const base = (try self.computedStorageSlotExpr(slot_expr)) orelse return null;
         if (base.key_path == null) return base;
         return try self.slotWithKeySegment(base, self.keySegmentForExpr(offset_expr));
     }
 
-    fn computedStorageRangeSlot(self: *TypeChecker, expr_id: ast.ExprId) std.mem.Allocator.Error!?EffectSlot {
+    fn computedStorageRangeSlot(self: *TypeChecker, expr_id: ast.ExprId) anyerror!?EffectSlot {
         return switch (self.file.expression(expr_id).*) {
             .Group => |group| try self.computedStorageRangeSlot(group.expr),
             .Builtin => |builtin| if (builtinKind(builtin.name) == .storage_range and builtin.args.len == 2) blk: {
@@ -8706,7 +8707,7 @@ const TypeChecker = struct {
                 break :blk base;
             } else null,
             .Call => |call| blk: {
-                if (self.stdStorageRangeCall(call) catch false) {
+                if (try self.stdStorageRangeCall(call)) {
                     if (call.args.len != 2) break :blk null;
                     var base = (try self.computedStorageSlotExpr(call.args[0])) orelse break :blk null;
                     if (base.key_path == null) break :blk base;
@@ -8744,12 +8745,12 @@ const TypeChecker = struct {
         };
     }
 
-    fn computedStorageRangeReturnedByCall(self: *TypeChecker, expr_id: ast.ExprId, call: ast.CallExpr) std.mem.Allocator.Error!?EffectSlot {
+    fn computedStorageRangeReturnedByCall(self: *TypeChecker, expr_id: ast.ExprId, call: ast.CallExpr) !?EffectSlot {
         if (try self.computedStorageRangeReturnedByLocalCall(call)) |slot| return slot;
         return self.computedStorageRangeReturnedByImportedCall(expr_id, call);
     }
 
-    fn computedStorageRangeReturnedByLocalCall(self: *TypeChecker, call: ast.CallExpr) std.mem.Allocator.Error!?EffectSlot {
+    fn computedStorageRangeReturnedByLocalCall(self: *TypeChecker, call: ast.CallExpr) !?EffectSlot {
         const callee_id = self.calleeFunctionItem(call.callee) orelse return null;
         const function = switch (self.file.item(callee_id).*) {
             .Function => |function| function,
@@ -8766,13 +8767,13 @@ const TypeChecker = struct {
         return try self.substituteCallEffectSlot(null, call, self.file, function, returned_slot);
     }
 
-    fn computedStorageRangeReturnedByImportedCall(self: *TypeChecker, expr_id: ast.ExprId, call: ast.CallExpr) std.mem.Allocator.Error!?EffectSlot {
-        const target = (self.importedCallTarget(expr_id) catch return null) orelse return null;
+    fn computedStorageRangeReturnedByImportedCall(self: *TypeChecker, expr_id: ast.ExprId, call: ast.CallExpr) !?EffectSlot {
+        const target = (try self.importedCallTarget(expr_id)) orelse return null;
         const returned_slot = (try self.computedStorageRangeReturnExprInImportedFunction(target)) orelse return null;
         return try self.substituteCallEffectSlot(null, call, target.file, target.function, returned_slot);
     }
 
-    fn computedStorageRangeReturnExprInFunction(self: *TypeChecker, function: ast.FunctionItem) std.mem.Allocator.Error!?EffectSlot {
+    fn computedStorageRangeReturnExprInFunction(self: *TypeChecker, function: ast.FunctionItem) !?EffectSlot {
         const value_expr = self.simpleReturnValueExprInFile(self.file, function) orelse return null;
         return self.computedStorageRangeSlot(value_expr);
     }
@@ -8802,12 +8803,12 @@ const TypeChecker = struct {
         }
     };
 
-    fn computedStorageSlotReturnExprInImportedFunction(self: *TypeChecker, target: ImportedCallTarget) std.mem.Allocator.Error!?EffectSlot {
+    fn computedStorageSlotReturnExprInImportedFunction(self: *TypeChecker, target: ImportedCallTarget) !?EffectSlot {
         var view = SemaFileView.imported(self, target);
         return view.checker.computedStorageSlotReturnExprInFunction(target.function);
     }
 
-    fn computedStorageRangeReturnExprInImportedFunction(self: *TypeChecker, target: ImportedCallTarget) std.mem.Allocator.Error!?EffectSlot {
+    fn computedStorageRangeReturnExprInImportedFunction(self: *TypeChecker, target: ImportedCallTarget) !?EffectSlot {
         var view = SemaFileView.imported(self, target);
         return view.checker.computedStorageRangeReturnExprInFunction(target.function);
     }
@@ -9223,7 +9224,7 @@ const TypeChecker = struct {
         }
     }
 
-    fn substituteCallEffectSlot(self: *TypeChecker, expr_id: ?ast.ExprId, call: ast.CallExpr, function_file: *const ast.AstFile, function: ast.FunctionItem, slot: EffectSlot) std.mem.Allocator.Error!EffectSlot {
+    fn substituteCallEffectSlot(self: *TypeChecker, expr_id: ?ast.ExprId, call: ast.CallExpr, function_file: *const ast.AstFile, function: ast.FunctionItem, slot: EffectSlot) !EffectSlot {
         const computed = std.mem.eql(u8, slot.name, computed_storage_effect_root);
         const key_path = slot.key_path orelse return slot;
         var substituted = slot;
@@ -9279,8 +9280,8 @@ const TypeChecker = struct {
         return substituted;
     }
 
-    fn specializedStdFixedDataEffectSlot(self: *TypeChecker, expr_id: ast.ExprId, call: ast.CallExpr, function: ast.FunctionItem, slot: EffectSlot) std.mem.Allocator.Error!?EffectSlot {
-        const module_path = self.resolvedCallModulePath(expr_id) orelse return null;
+    fn specializedStdFixedDataEffectSlot(self: *TypeChecker, expr_id: ast.ExprId, call: ast.CallExpr, function: ast.FunctionItem, slot: EffectSlot) !?EffectSlot {
+        const module_path = (try self.resolvedCallModulePath(expr_id)) orelse return null;
         if (!std.mem.eql(u8, module_path, std_fixed_size_data_module_path)) return null;
         const key_path = slot.key_path orelse return null;
         if (key_path.len == 0 or key_path[key_path.len - 1] != .unknown) return null;
@@ -9297,11 +9298,11 @@ const TypeChecker = struct {
         return self.slotWithReplacedTail(slot, try self.rangeSegmentForLength(word_count));
     }
 
-    fn resolvedCallModulePath(self: *TypeChecker, expr_id: ast.ExprId) ?[]const u8 {
+    fn resolvedCallModulePath(self: *TypeChecker, expr_id: ast.ExprId) !?[]const u8 {
         if (self.call_resolutions.len == 0 or expr_id.index() >= self.call_resolutions.len) return null;
         const resolved = self.call_resolutions[expr_id.index()] orelse return null;
         const query = self.import_query orelse return null;
-        return query.modulePath(resolved.module_id) catch null;
+        return try query.modulePath(resolved.module_id);
     }
 
     fn fixedDataStoreCallLength(self: *TypeChecker, call: ast.CallExpr) ?u256 {
