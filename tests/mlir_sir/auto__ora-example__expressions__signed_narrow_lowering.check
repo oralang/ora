@@ -90,7 +90,7 @@
 // CHECK-NEXT:     %0 = sir.const 240 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 1 : !sir.u256 loc(unknown)
-// CHECK-NEXT:     %3 = sir.const 2994673805860425736261894368720395923235437751382225797913827509018820608000 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %3 = sir.const 7238577234383170427670656471354507137219124392573791677679457416557658898432 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %4 = sir.const 60063313428592043570098608417322348722414490360843063309327670181160137261056 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %5 = sir.const 4 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %6 = sir.const 0 : !sir.u256 loc(unknown)

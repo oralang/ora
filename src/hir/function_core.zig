@@ -3222,7 +3222,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             );
             if (mlir.oraOperationIsNull(special_case_op)) return error.MlirOperationCreationFailed;
             const special_case = appendValueOp(self.block, special_case_op);
-            try @This().emitOverflowAssert(self, special_case, "checked division overflow", range);
+            try @This().emitOverflowAssert(self, special_case, if (is_division) "checked division overflow" else "checked remainder overflow", range);
         }
 
         fn emitSafetyAssert(self: *FunctionLowerer, condition: mlir.MlirValue, message: []const u8, range: source.TextRange) anyerror!void {

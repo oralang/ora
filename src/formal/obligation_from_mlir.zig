@@ -156,6 +156,7 @@ const assert_safety_map = std.StaticStringMap(obligation.ArithmeticSafetyKind).i
     .{ "checked division by zero", .division_by_zero },
     .{ "checked remainder by zero", .division_by_zero },
     .{ "checked division overflow", .signed_division_overflow },
+    .{ "checked remainder overflow", .signed_division_overflow },
     .{ "checked shift amount out of range", .shift_amount_bounds },
     // A for-range may imply this condition, but only the emitted assertion
     // owns the checkpoint; loop bounds are premises, never a synthesized check.

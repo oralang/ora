@@ -106,7 +106,7 @@ fn = "signed_rem_compound(int8,int8)"
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
 args = [-128, -1]
-reverts = { data = "0x069eece1" }
+reverts = { data = "0x1000e3b8" }
 
 [[call]]
 fn = "signed_rem_compound(int8,int8)"
@@ -134,7 +134,7 @@ fn = "signed_rem_ordinary(int8,int8)"
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
 args = [-128, -1]
-reverts = { data = "0x069eece1" }
+reverts = { data = "0x1000e3b8" }
 
 [[call]]
 fn = "signed_rem_ordinary(int8,int8)"
