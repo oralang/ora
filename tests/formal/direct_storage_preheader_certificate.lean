@@ -80,7 +80,7 @@ theorem preheaderReadWriteSamePreserves
             (.read readId locationExpr) initial = some readResult at hReadAction
           have hLocation : context.evalLocation? locationExpr initial =
               some location := by
-            unfold StorageFormulaContext.evalLocation?
+            unfold StorageFormulaContext.evalLocation? storageTypeSupported
             simp only [locationExpr, hRoot, Bool.false_eq_true, if_false,
               StorageFormulaContext.evalProjections?, Option.pure_def,
               Option.some_bind]
@@ -110,7 +110,7 @@ theorem preheaderReadWriteSamePreserves
                   some writeResult at hWriteAction
               have hWriteLocation : context.evalLocation? locationExpr afterRead =
                   some location := by
-                unfold StorageFormulaContext.evalLocation?
+                unfold StorageFormulaContext.evalLocation? storageTypeSupported
                 simp only [locationExpr, hRoot, Bool.false_eq_true, if_false,
                   StorageFormulaContext.evalProjections?, Option.pure_def]
                 rw [hValueTy]
@@ -264,7 +264,7 @@ theorem discharge_q10 : emittedQuery_10 := by
           Ora.Loop.directStoragePreheaderContext,
           Ora.Loop.directStoragePreheaderInitialState,
           Ora.Loop.StorageFormulaContext.actionSemantics,
-          Ora.Loop.StorageFormulaContext.evalLocation?,
+          Ora.Loop.StorageFormulaContext.evalLocation?, Ora.Loop.storageTypeSupported,
           Ora.Loop.StorageFormulaContext.evalProjections?,
           Ora.Loop.directStorageResolvePlace, Ora.Loop.execStorageAction?,
           Ora.Loop.StorageActionState.bindRead?, Ora.Loop.storageReadIdBound,
@@ -283,7 +283,7 @@ theorem discharge_q10 : emittedQuery_10 := by
           some location := by
         simp [context, locationExpr, location, readResult,
           Ora.Loop.directStoragePreheaderContext,
-          Ora.Loop.StorageFormulaContext.evalLocation?,
+          Ora.Loop.StorageFormulaContext.evalLocation?, Ora.Loop.storageTypeSupported,
           Ora.Loop.StorageFormulaContext.evalProjections?,
           Ora.Loop.directStorageResolvePlace, hCounterRootNotEmpty]
       have hWriteValue : context.evalValue? (.term 0) readResult.state = some zero := by

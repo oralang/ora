@@ -985,6 +985,70 @@
       "specs": [
         "tests/conformance/app_staking.spec.toml"
       ]
+    },
+    {
+      "id": "arithmetic.compound_checked_and_wrapping",
+      "area": "arithmetic",
+      "behavior": "Ordinary and compound arithmetic retain matching checked-revert, wrapping, shift, and narrow-overflow behavior",
+      "specs": [
+        "tests/conformance/compound_arithmetic.spec.toml"
+      ]
+    },
+    {
+      "id": "arithmetic.compound_power",
+      "area": "arithmetic",
+      "behavior": "Compound exponentiation agrees with ordinary exponentiation and its checked overflow boundary",
+      "specs": [
+        "tests/conformance/compound_power.spec.toml"
+      ]
+    },
+    {
+      "id": "assignment.compound_target_evaluation",
+      "area": "assignment",
+      "behavior": "Compound targets evaluate keys once and preserve RHS sibling updates",
+      "specs": [
+        "tests/conformance/compound_target_evaluation.spec.toml"
+      ]
+    },
+    {
+      "id": "assignment.compound_target_regions",
+      "area": "assignment",
+      "behavior": "Compound targets preserve single evaluation across memory, nested fields, and transient storage",
+      "specs": [
+        "tests/conformance/compound_target_regions.spec.toml"
+      ]
+    },
+    {
+      "id": "arithmetic.multiply_guard_orientation",
+      "area": "arithmetic",
+      "behavior": "Literal multiplication guards retain overflow reverts and left-to-right single evaluation",
+      "specs": [
+        "tests/conformance/mul_guard_orientation.spec.toml"
+      ]
+    },
+    {
+      "id": "dispatcher.public_address_result",
+      "area": "dispatcher_abi",
+      "behavior": "Internal public address results are decoded before nonzero refinement checks",
+      "specs": [
+        "tests/conformance/public_address_call.spec.toml"
+      ]
+    },
+    {
+      "id": "dispatcher.public_scalar_result",
+      "area": "dispatcher_abi",
+      "behavior": "Internal public integer and Boolean results are decoded and refined payloads checked",
+      "specs": [
+        "tests/conformance/public_scalar_call.spec.toml"
+      ]
+    },
+    {
+      "id": "refinement.conversion_boundaries",
+      "area": "refinements",
+      "behavior": "Refinement conversions enforce bounds across locals, aggregates, storage, calls, and returns",
+      "specs": [
+        "tests/conformance/refinement_conversions.spec.toml"
+      ]
     }
   ]
 }

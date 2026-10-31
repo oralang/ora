@@ -2425,7 +2425,8 @@ test "div rem loop safety comes from canonical source assertions" {
     defer result.deinit();
     try testing.expectEqual(@as(usize, 3), result.set.loop_summaries.len);
     try testing.expectEqual(@as(usize, 3), countArithmeticSafety(result.set, .division_by_zero));
-    try testing.expectEqual(@as(usize, 1), countArithmeticSafety(result.set, .signed_division_overflow));
+    // Checked signed division and remainder both reject MIN / -1.
+    try testing.expectEqual(@as(usize, 2), countArithmeticSafety(result.set, .signed_division_overflow));
 
     var z3_context = try z3_verification.Z3Context.init(testing.allocator);
     defer z3_context.deinit();
@@ -2439,7 +2440,7 @@ test "div rem loop safety comes from canonical source assertions" {
             u8,
             summary.owner.statement.function_name,
             "signed_div_loop",
-        )) 2 else 1;
+        ) or std.mem.eql(u8, summary.owner.statement.function_name, "signed_rem_loop")) 2 else 1;
         try testing.expectEqual(expected_safety_count, summary.edges[0].safetyFormulaCount());
         try testing.expectEqual(@as(usize, 0), summary.edges[1].safetyFormulaCount());
         for (summary.query_ids.body_safety) |query_id| {
@@ -5432,7 +5433,7 @@ test "B4 unknown diagnostic rejects Lean recipe for unsupported semantic type" {
     try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "b4-out/b4_unsupported_lean_type.lean.obligations.lean", .{}));
 }
 
-test "B5 unknown diagnostic reports Lean projection coverage when no recipe is available" {
+test "B5 unknown diagnostic supplies a recipe for an identity-matched source assertion" {
     std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
@@ -5445,13 +5446,12 @@ test "B5 unknown diagnostic reports Lean projection coverage when no recipe is a
     const out_dir = try pathFromTmpAlloc(allocator, tmp, "b5-out");
     defer allocator.free(out_dir);
 
-    // The first obligation is the source-level assert. It intentionally has
-    // no Lean-dischargeable query; later arithmetic-safety rows are now
-    // identity-bound and therefore are not valid coverage-gap probes.
+    // The source assert acquired an exact prepared-query role in 8f88323d.
+    // UNKNOWN must now offer that query's recipe, without granting authority.
     const result = try runOraWithForcedUnknown(allocator, "obligation:2", &.{
         ORA_BINARY_REL,
         "emit",
-        "--emit=smt-report",
+        "--emit=smt-report,bytecode",
         "--out-dir",
         out_dir,
         "ora-example/formal/obligation_report_logical.ora",
@@ -5460,13 +5460,16 @@ test "B5 unknown diagnostic reports Lean projection coverage when no recipe is a
     defer allocator.free(result.stderr);
 
     try expectExited(result, 1);
-    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean proof recipe unavailable for some required userland obligations"));
-    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "unmatched UNKNOWN prepared rows: 1"));
-    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "formula projection: term="));
-    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "origin_value="));
-    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "term_ratio_basis_points="));
-    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "no matching Lean-dischargeable obligation query"));
-    try testing.expect(!std.mem.containsAtLeast(u8, result.stdout, 1, "Lean proof recipe for required userland obligations"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Lean proof recipe for required userland obligations"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "proof row: query_id=3, obligation_ids=[2], assumption_ids=[1]"));
+    try testing.expect(!std.mem.containsAtLeast(u8, result.stdout, 1, "unmatched UNKNOWN prepared rows"));
+    try testing.expect(!std.mem.containsAtLeast(u8, result.stdout, 1, "Lean proof recipe unavailable"));
+    try tmp.dir.access(std.testing.io, "b5-out/obligation_report_logical.lean.obligations.lean", .{});
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "b5-out/obligation_report_logical.hex", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "b5-out/obligation_report_logical.lean.proof.json", .{}));
+    const authority = try tmp.dir.readFileAlloc(std.testing.io, "b5-out/obligation_report_logical.formal.artifacts.json", allocator, .limited(1024 * 1024));
+    defer allocator.free(authority);
+    try testing.expect(std.mem.containsAtLeast(u8, authority, 1, "\"final_artifact_authorization\": \"blocked\""));
 }
 
 test "formal query vocabulary matches Z3 prepared query vocabulary" {

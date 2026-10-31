@@ -265,7 +265,7 @@ test "compiler lowers generic requires clauses with substituted integer signedne
     try testing.expect(std.mem.containsAtLeast(u8, signed_fn, 1, "sdiv"));
 }
 
-test "frontend reuses storage roots for compound map assignments without parent handle rewrites" {
+test "frontend reloads compound map containers without parent handle rewrites" {
     const source_text =
         \\contract MapCounter {
         \\    storage var balances: map<address, u256>;
@@ -284,9 +284,13 @@ test "frontend reuses storage roots for compound map assignments without parent 
     const rendered = try renderOraMlirForSource(source_text);
     defer testing.allocator.free(rendered);
 
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "ora.sload \"balances\""));
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "ora.sload \"allowances\""));
+    // Capture the target before the RHS, then reload its container before the
+    // write so RHS changes to siblings cannot be overwritten by an old handle.
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, rendered, "ora.sload \"balances\""));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, rendered, "ora.sload \"allowances\""));
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, rendered, "ora.map_store"));
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, rendered, "ora.sstore \"balances\""));
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, rendered, "ora.sstore \"allowances\""));
 }
 
 test "compiler lowers dynamic byte concat and slice through OraToSIR" {

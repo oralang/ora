@@ -39,6 +39,7 @@ test "verified conformance manifest pins all three build classes" {
     try testing.expectEqual(specs.len, manifest.entries.len);
 
     var counts = [_]usize{ 0, 0, 0 };
+    var drift = false;
     for (manifest.entries, specs) |entry, spec_name| {
         try testing.expectEqualStrings(spec_name, entry.spec_name);
         counts[@backingInt(entry.class)] += 1;
@@ -51,7 +52,14 @@ test "verified conformance manifest pins all three build classes" {
         const spec_path = try std.fs.path.join(allocator, &.{ types.CONFORMANCE_DIR_REL, spec_name });
         defer allocator.free(spec_path);
 
-        const observed = try runner.classifyVerifiedBuild(allocator, source_path, spec_path);
+        const observed = runner.classifyVerifiedBuild(allocator, source_path, spec_path) catch |err| switch (err) {
+            error.UnclassifiedVerifiedCompilerRejection => {
+                std.debug.print("verified conformance classification failed: {s}: {s}\n", .{ spec_name, @errorName(err) });
+                drift = true;
+                continue;
+            },
+            else => return err,
+        };
         if (observed.class != entry.class or observed.rejection_reason != entry.rejection_reason) {
             std.debug.print("verified conformance drift: {s}: manifest={s}/{s}, observed={s}/{s}\n", .{
                 spec_name,
@@ -60,7 +68,8 @@ test "verified conformance manifest pins all three build classes" {
                 @tagName(observed.class),
                 rejectionReasonName(observed.rejection_reason),
             });
-            return error.VerifiedConformanceClassDrift;
+            drift = true;
+            continue;
         }
 
         if (entry.class == .rewritten) {
@@ -71,9 +80,10 @@ test "verified conformance manifest pins all three build classes" {
         }
     }
 
-    try testing.expectEqual(@as(usize, 61), counts[@backingInt(runner.VerifiedBuildClass.same_bytecode)]);
-    try testing.expectEqual(@as(usize, 11), counts[@backingInt(runner.VerifiedBuildClass.rewritten)]);
-    try testing.expectEqual(@as(usize, 29), counts[@backingInt(runner.VerifiedBuildClass.unverifiable)]);
+    try testing.expectEqual(@as(usize, 56), counts[@backingInt(runner.VerifiedBuildClass.same_bytecode)]);
+    try testing.expectEqual(@as(usize, 14), counts[@backingInt(runner.VerifiedBuildClass.rewritten)]);
+    try testing.expectEqual(@as(usize, 39), counts[@backingInt(runner.VerifiedBuildClass.unverifiable)]);
+    if (drift) return error.VerifiedConformanceClassDrift;
 }
 
 test "resource rewrite executes with proved runtime checks kept" {

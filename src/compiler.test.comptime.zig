@@ -5266,7 +5266,7 @@ test "result alias C3 restores nested results and records real folds" {
         var predicates: usize = 0;
         for (fold.events) |event| if (event.kind == .predicate_check) {
             predicates += 1;
-            try testing.expectEqual(@as(?bool, true), event.predicate_value);
+            try testing.expect(event.predicate_value orelse return error.TestUnexpectedResult);
         };
         try testing.expectEqual(@as(usize, 1), predicates);
     }

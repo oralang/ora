@@ -1,14 +1,18 @@
 verified-conformance-manifest-v2
 same-bytecode	adt_payload_match.spec.toml	-
 unverifiable	adversarial_calldata.spec.toml	verification_encoding_degraded
-same-bytecode	app_amm_pool.spec.toml	-
+rewritten	app_amm_pool.spec.toml	-
 rewritten	app_erc20_resource.spec.toml	-
-same-bytecode	app_full_token.spec.toml	-
+rewritten	app_full_token.spec.toml	-
 rewritten	app_resource_points.spec.toml	-
-same-bytecode	app_staking.spec.toml	-
+rewritten	app_staking.spec.toml	-
 same-bytecode	app_vault_errors.spec.toml	-
 unverifiable	arithmetic_checked_revert.spec.toml	callee_precondition_unproved
 same-bytecode	checked_shift_verified.spec.toml	-
+unverifiable	compound_arithmetic.spec.toml	contract_invariant_unproved
+unverifiable	compound_power.spec.toml	contract_invariant_unproved
+unverifiable	compound_target_evaluation.spec.toml	contract_invariant_unproved
+unverifiable	compound_target_regions.spec.toml	contract_invariant_unproved
 same-bytecode	comptime_observable.spec.toml	-
 unverifiable	computed_storage_cost_array.spec.toml	contract_invariant_unproved
 unverifiable	computed_storage_cost_compare.spec.toml	contract_invariant_unproved
@@ -41,7 +45,7 @@ same-bytecode	events_multifield.spec.toml	-
 same-bytecode	external_return_decode.spec.toml	-
 same-bytecode	falsification_arith.spec.toml	-
 same-bytecode	falsification_error_union_ok.spec.toml	-
-same-bytecode	falsification_loop_invariant.spec.toml	-
+unverifiable	falsification_loop_invariant.spec.toml	storage_counter_loop_projection_unavailable
 same-bytecode	falsification_map_effect.spec.toml	-
 same-bytecode	falsification_map_frame.spec.toml	-
 same-bytecode	falsification_storage_branch.spec.toml	-
@@ -49,8 +53,12 @@ same-bytecode	fixed_array_bounds_varied.spec.toml	-
 same-bytecode	fixed_array_bounds_verified.spec.toml	-
 same-bytecode	generic_instantiation.spec.toml	-
 same-bytecode	lock_guard_revert.spec.toml	-
-same-bytecode	loop_control_suffix.spec.toml	-
+unverifiable	loop_control_suffix.spec.toml	loop_invariant_missing
+unverifiable	mul_guard_orientation.spec.toml	contract_invariant_unproved
+unverifiable	public_address_call.spec.toml	refinement_guard_reachable
+unverifiable	public_scalar_call.spec.toml	refinement_guard_reachable
 unverifiable	reentrancy_lock_guard.spec.toml	contract_invariant_unproved
+unverifiable	refinement_conversions.spec.toml	refinement_guard_reachable_and_loop_invariant_missing
 same-bytecode	refinement_guard_revert.spec.toml	-
 unverifiable	resource_app_token.spec.toml	contract_invariant_unproved
 unverifiable	resource_app_vault_shares.spec.toml	contract_invariant_unproved

@@ -285,7 +285,7 @@ theorem preheaderPreservesObserved
             have hValueTy : ((TyRef.compilerTypeId 6).isBool ||
                 (TyRef.compilerTypeId 6).integerShape?.isSome) = true := by decide
             have hEmpty : context.evalProjections? initial [] = some [] := by rfl
-            unfold StorageFormulaContext.evalLocation?
+            unfold StorageFormulaContext.evalLocation? storageTypeSupported
               StorageFormulaContext.evalProjections?
               StorageFormulaContext.evalTypedValue?
             simp [hRoot, hValueTy, hKeyValue, storageValueMatchesTy,
@@ -460,7 +460,7 @@ theorem discharge_q11 : emittedQuery_11 := by
         have hEmpty : context.evalProjections? initial [] = some [] := by rfl
         have hZeroShape : (Ora.Integer.Value.ofNat
             (.unsigned .w256) 0).shape = .unsigned .w256 := rfl
-        unfold StorageFormulaContext.evalLocation?
+        unfold StorageFormulaContext.evalLocation? storageTypeSupported
           StorageFormulaContext.evalProjections?
           StorageFormulaContext.evalTypedValue?
         simp [locationExpr, location, hRoot, hValueTy, hKeyValue,

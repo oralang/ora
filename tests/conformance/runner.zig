@@ -147,6 +147,8 @@ fn classifyOraEmitTermination(
     return switch (term) {
         .exited => |code| if (code == 0)
             .success
+        else if (code != 1 and !report_failure)
+            error.UnclassifiedVerifiedCompilerRejection
         else
             .{ .rejected = if (report_failure) null else try classifyVerifiedRejection(stdout, stderr) },
         else => error.OraEmitTerminatedAbnormally,
@@ -154,6 +156,11 @@ fn classifyOraEmitTermination(
 }
 
 fn classifyVerifiedRejection(stdout: []const u8, stderr: []const u8) !VerifiedRejectionReason {
+    // An expected rejection never excuses an inconclusive solver run.
+    for ([_][]const u8{ "UNKNOWN", "inconclusive", "vacuous", "timeout", "timed out" }) |fatal| {
+        if (std.mem.indexOf(u8, stdout, fatal) != null or std.mem.indexOf(u8, stderr, fatal) != null)
+            return error.UnclassifiedVerifiedCompilerRejection;
+    }
     if (std.mem.indexOf(u8, stdout, "SMT encoding degraded") != null or
         std.mem.indexOf(u8, stderr, "SMT encoding degraded") != null)
     {
@@ -169,7 +176,37 @@ fn classifyVerifiedRejection(stdout: []const u8, stderr: []const u8) !VerifiedRe
     {
         return .contract_invariant_unproved;
     }
+    if (std.mem.indexOf(u8, stdout, "refinement guard is reachable in ") != null and
+        std.mem.indexOf(u8, stdout, "counterexample:") != null and
+        std.mem.indexOf(u8, stderr, "[violate]") != null and std.mem.indexOf(u8, stderr, "-> SAT (") != null)
+    {
+        if (std.mem.indexOf(u8, stdout, "error: userland verification failed (Z3: rejected, Lean obligation gate: not-requested)") != null)
+            return .refinement_guard_reachable;
+        if (hasOnlyLoopExclusions(stdout, "loop_invariant_missing") and
+            std.mem.indexOf(u8, stdout, "error: userland verification failed (Z3: rejected, Lean obligation gate: rejected)") != null)
+            return .refinement_guard_reachable_and_loop_invariant_missing;
+    }
+    if (std.mem.indexOf(u8, stdout, "error: userland verification failed (Z3: accepted, Lean obligation gate: rejected)") != null) {
+        if (hasOnlyLoopExclusions(stdout, "loop_invariant_missing")) return .loop_invariant_missing;
+        if (hasOnlyLoopExclusions(stdout, storage_counter_exclusions)) return .storage_counter_loop_projection_unavailable;
+    }
     return error.UnclassifiedVerifiedCompilerRejection;
+}
+
+const storage_counter_exclusions = "loop_header_fact_type_unsupported,loop_has_storage_write,loop_has_storage_read,loop_projection_inventory_missing";
+
+fn hasOnlyLoopExclusions(stdout: []const u8, expected: []const u8) bool {
+    if (std.mem.indexOf(u8, stdout, "Lean proof gate cannot cover every runtime loop:\n") == null) return false;
+    // Each pin names the complete exclusion list; never admit a subset or
+    // fold a different projection or automatic-proof failure into it.
+    var exclusions: usize = 0;
+    var lines = std.mem.splitScalar(u8, stdout, '\n');
+    while (lines.next()) |line| {
+        const index = std.mem.indexOf(u8, line, "excluded_by=") orelse continue;
+        if (!std.mem.eql(u8, line[index + "excluded_by=".len ..], expected)) return false;
+        exclusions += 1;
+    }
+    return exclusions != 0;
 }
 
 test "verified emit classification rejects abnormal termination" {
@@ -208,6 +245,40 @@ test "verified emit classification names normal verifier rejections" {
         error.UnclassifiedVerifiedCompilerRejection,
         classifyOraEmitTermination(.{ .exited = 1 }, "error: VerificationEncodingDegraded", "", false),
     );
+
+    const refinement = "refinement guard is reachable in run\ncounterexample:\nerror: userland verification failed (Z3: rejected, Lean obligation gate: not-requested)";
+    const sat = "run guard [violate] -> SAT (1ms)";
+    try std.testing.expectEqual(VerifiedRejectionReason.refinement_guard_reachable, (try classifyOraEmitTermination(.{ .exited = 1 }, refinement, sat, false)).rejected.?);
+    try std.testing.expectError(error.UnclassifiedVerifiedCompilerRejection, classifyOraEmitTermination(.{ .exited = 1 }, refinement, "", false));
+
+    const loop_prefix = "Lean proof gate cannot cover every runtime loop:\n  - test.ora:4 (run) excluded_by=";
+    const loop_suffix = "\nerror: userland verification failed (Z3: accepted, Lean obligation gate: rejected)";
+    const loop = loop_prefix ++ "loop_invariant_missing" ++ loop_suffix;
+    const counter_loop = loop_prefix ++ storage_counter_exclusions ++ loop_suffix;
+    try std.testing.expectEqual(VerifiedRejectionReason.storage_counter_loop_projection_unavailable, (try classifyOraEmitTermination(.{ .exited = 1 }, counter_loop, "", false)).rejected.?);
+    for ([_][]const u8{
+        "loop_has_storage_write,loop_has_storage_read,loop_projection_inventory_missing",
+        storage_counter_exclusions ++ ",loop_formula_unsupported",
+        "loop_header_fact_type_unsupported,loop_has_storage_read,loop_projection_inventory_missing",
+    }) |changed| {
+        const diagnostic = try std.fmt.allocPrint(std.testing.allocator, "{s}{s}{s}", .{ loop_prefix, changed, loop_suffix });
+        defer std.testing.allocator.free(diagnostic);
+        try std.testing.expectError(error.UnclassifiedVerifiedCompilerRejection, classifyOraEmitTermination(.{ .exited = 1 }, diagnostic, "", false));
+    }
+    try std.testing.expectEqual(VerifiedRejectionReason.loop_invariant_missing, (try classifyOraEmitTermination(.{ .exited = 1 }, loop, "", false)).rejected.?);
+    try std.testing.expectError(error.UnclassifiedVerifiedCompilerRejection, classifyOraEmitTermination(.{ .exited = 1 }, loop_prefix ++ "loop_invariant_missing,loop_formula_unsupported" ++ loop_suffix, "", false));
+    try std.testing.expectError(error.UnclassifiedVerifiedCompilerRejection, classifyOraEmitTermination(.{ .exited = 1 }, loop_prefix ++ "" ++ loop_suffix, "", false));
+    const mixed_prefix = "refinement guard is reachable in run\ncounterexample:\n" ++ loop_prefix;
+    const mixed_suffix = "\nerror: userland verification failed (Z3: rejected, Lean obligation gate: rejected)";
+    const mixed = mixed_prefix ++ "loop_invariant_missing" ++ mixed_suffix;
+    try std.testing.expectEqual(VerifiedRejectionReason.refinement_guard_reachable_and_loop_invariant_missing, (try classifyOraEmitTermination(.{ .exited = 1 }, mixed, sat, false)).rejected.?);
+    try std.testing.expectError(error.UnclassifiedVerifiedCompilerRejection, classifyOraEmitTermination(.{ .exited = 1 }, mixed_prefix ++ "loop_formula_unsupported" ++ mixed_suffix, sat, false));
+    for ([_][]const u8{ "UNKNOWN", "inconclusive", "vacuous", "timeout", "timed out" }) |fatal| {
+        for ([_][]const u8{ loop, counter_loop, refinement, mixed, "failed to prove contract invariant" }) |diagnostic|
+            try std.testing.expectError(error.UnclassifiedVerifiedCompilerRejection, classifyOraEmitTermination(.{ .exited = 1 }, diagnostic, fatal, false));
+    }
+    for ([_]u8{ 2, 124, 134, 139 }) |code|
+        try std.testing.expectError(error.UnclassifiedVerifiedCompilerRejection, classifyOraEmitTermination(.{ .exited = code }, loop, "", false));
 }
 
 pub fn pathFromTmpAlloc(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, rel_path: []const u8) ![]u8 {
@@ -464,7 +535,37 @@ pub const VerifiedRejectionReason = enum {
     verification_encoding_degraded,
     callee_precondition_unproved,
     contract_invariant_unproved,
+    refinement_guard_reachable,
+    refinement_guard_reachable_and_loop_invariant_missing,
+    loop_invariant_missing,
+    storage_counter_loop_projection_unavailable,
 };
+
+/// A capability pin is an acceptance tripwire, not a skipped runtime test.
+/// Compile afresh in both falsification modes and require the named refusal,
+/// blocked artifact authority, and no bytecode in either output directory.
+pub fn expectVerifiedRefusal(allocator: std.mem.Allocator, source_path: []const u8, expected: VerifiedRejectionReason) !void {
+    const stem = sourceStem(source_path) orelse return error.InvalidSourcePath;
+    const modes = [_][]const []const u8{ &.{}, &.{"--keep-proved-checks"} };
+    for (modes) |args| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const output = try pathFromTmpAlloc(allocator, tmp, "out");
+        defer allocator.free(output);
+        switch (try tryRunOraEmitWithExtraArgs(allocator, source_path, output, args, false)) {
+            .success => return error.ExpectedVerifiedRefusal,
+            .rejected => |reason| try testing.expectEqual(expected, reason orelse return error.MissingVerifiedRejectionReason),
+        }
+        const hex_path = try std.fmt.allocPrint(allocator, "out/{s}.hex", .{stem});
+        defer allocator.free(hex_path);
+        try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, hex_path, .{}));
+        const authority_path = try std.fmt.allocPrint(allocator, "out/{s}.formal.artifacts.json", .{stem});
+        defer allocator.free(authority_path);
+        const authority = try tmp.dir.readFileAlloc(std.testing.io, authority_path, allocator, .limited(1024 * 1024));
+        defer allocator.free(authority);
+        try testing.expect(std.mem.containsAtLeast(u8, authority, 1, "\"final_artifact_authorization\": \"blocked\""));
+    }
+}
 
 pub const VerifiedBuildObservation = struct {
     class: VerifiedBuildClass,
@@ -519,9 +620,17 @@ fn classifyVerifiedContract(
     try runOraEmitWithExtraArgs(allocator, source_path, baseline_path, &.{"--no-verify"});
     switch (try tryRunOraEmitWithExtraArgs(allocator, source_path, verified_path, &.{}, false)) {
         .success => {},
-        .rejected => |reason| return .{
-            .class = .unverifiable,
-            .rejection_reason = reason orelse return error.MissingVerifiedRejectionReason,
+        .rejected => |reason| {
+            const stem = sourceStem(source_path) orelse return error.InvalidSourcePath;
+            const hex_path = try std.fmt.allocPrint(allocator, "{s}/{s}.hex", .{ verified_path, stem });
+            std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), hex_path, .{}) catch |err| switch (err) {
+                error.FileNotFound => return .{
+                    .class = .unverifiable,
+                    .rejection_reason = reason orelse return error.MissingVerifiedRejectionReason,
+                },
+                else => return err,
+            };
+            return error.RejectedVerifiedBuildEmittedBytecode;
         },
     }
 
