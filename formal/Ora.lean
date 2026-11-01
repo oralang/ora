@@ -86,6 +86,7 @@ import Ora.Storage.LifecycleEntry
 import Ora.Storage.LifecycleEntryTests
 import Ora.Storage.CallerIdentity
 import Ora.Storage.CallerIdentityTests
+import Ora.Storage.ScalarBoundAuthentication
 import Ora.Storage.LifecycleTests
 import Ora.Loop.Denotation
 import Ora.Loop.Auto
