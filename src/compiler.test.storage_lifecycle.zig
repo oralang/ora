@@ -591,6 +591,68 @@ test "E2a authenticated caller reaches the complete production consumer" {
     }
 }
 
+test "H15 multiple owners refuse assistance before installing any facts" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var compilation = try helpers.compileText("contract A { storage var cap: MaxValue<u256,100>; pub fn get() -> MaxValue<u256,100> { return cap; } } contract B { pub fn echo(x: u256) -> u256 { return x; } }");
+    defer compilation.deinit();
+    const module = (try compilation.db.lowerToHir(compilation.root_module_id)).module.raw_module;
+    var pass = try z3.VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    var output = std.Io.Writer.Allocating.init(testing.allocator);
+    defer output.deinit();
+    var session = try lifecycle_consume.prepare(testing.allocator, module, &pass, try lifecycleEnviron(arena.allocator()), &output.writer);
+    defer if (session) |*value| value.deinit();
+    try testing.expect(session == null);
+    try testing.expect(pass.lifecycle == null and pass.lifecycle_entries.count() == 0);
+    try testing.expectEqualStrings("Storage lifecycle assistance unavailable: LifecycleOwnerUnsupported\n", output.written());
+}
+
+test "H15 installed lifecycle native and kernel failures never fall back" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var compilation = try helpers.compileText("contract C { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) { cap = x; } pub fn get() -> MaxValue<u256,100> { return cap; } }");
+    defer compilation.deinit();
+    const module = (try compilation.db.lowerToHir(compilation.root_module_id)).module.raw_module;
+    var formal = try helpers.collectFormalQueryBindingsForVerifier(testing.allocator, module);
+    defer formal.formal_result.deinit();
+    defer testing.allocator.free(formal.z3_bindings);
+    var pass = try z3.VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+    pass.setFormalQueryBindings(formal.z3_bindings);
+    var output = std.Io.Writer.Allocating.init(testing.allocator);
+    defer output.deinit();
+    var session = (try lifecycle_consume.prepare(testing.allocator, module, &pass, try lifecycleEnviron(arena.allocator()), &output.writer)) orelse return error.MissingLifecycleSession;
+    defer session.deinit();
+    var consumer: lifecycle_consume.Consumer = .{ .session = &session };
+    pass.lifecycle = consumer.provider();
+    var manifest = try pass.collectPreparedQueryManifest(module);
+    defer manifest.deinit();
+    try testing.expect(pass.lifecycle_entries.count() > 0 and session.uses.?.len > 0);
+    const original = session.receipt.queries[0];
+    const proof_hash = session.receipt.lean.proof_sha256;
+    const axioms = session.receipt.lean.axioms;
+    for ([_]anyerror{ error.LifecycleQueryFailed, error.LifecycleQueryUnknown, error.LifecycleProofMismatch, error.LifecycleAxiomMismatch }) |expected| {
+        @constCast(session.receipt.queries)[0] = original;
+        session.receipt.lean.proof_sha256 = proof_hash;
+        session.receipt.lean.axioms = axioms;
+        switch (expected) {
+            error.LifecycleQueryFailed => @constCast(session.receipt.queries)[0].status = if (original.role == .nonvacuity) .unsat else .sat,
+            error.LifecycleQueryUnknown => @constCast(session.receipt.queries)[0].status = .unknown,
+            error.LifecycleProofMismatch => session.receipt.lean.proof_sha256[0] ^= 1,
+            error.LifecycleAxiomMismatch => session.receipt.lean.axioms = &.{"sorryAx"},
+            else => unreachable,
+        }
+        try testing.expectError(expected, pass.collectPreparedQueryManifest(module));
+        try testing.expect(pass.lifecycle != null);
+        try testing.expect(std.mem.indexOf(u8, output.written(), "assistance unavailable") == null);
+    }
+    @constCast(session.receipt.queries)[0] = original;
+    session.receipt.lean.proof_sha256 = proof_hash;
+    session.receipt.lean.axioms = axioms;
+    try session.validate();
+}
+
 test "SL4B structural preflight refuses whole fragments before installing facts" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

@@ -17469,6 +17469,85 @@ test "Group 3 total unsigned bound retains independent producer safety" {
     }
 }
 
+test "H15 CLI ordinary verification decides multi-owner sources without lifecycle credit" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const Case = struct { stem: []const u8, source: ?[]const u8, accepted: bool, diagnostic: bool = false, assisted: bool = false, report_only: bool = false };
+    const cases = [_]Case{
+        .{ .stem = "ghost_variables", .source = null, .accepted = true, .diagnostic = true },
+        .{ .stem = "unproved", .source = "contract A { storage var cap: MaxValue<u256,100>; pub fn get() -> MaxValue<u256,100> { return cap; } } contract B { pub fn echo(x: u256) -> u256 { return x; } }", .accepted = false, .diagnostic = true },
+        // Duplicate symbols have a separate OraToSIR lowering refusal. Check
+        // owner isolation before that backend boundary, without claiming code.
+        .{ .stem = "same_names_safe", .source = "contract A { storage var cap: MaxValue<u256,100>; pub fn get() -> MaxValue<u256,100> { return 1; } } contract B { storage var cap: MaxValue<u256,100>; pub fn get() -> MaxValue<u256,100> { return 1; } }", .accepted = true, .report_only = true },
+        .{ .stem = "same_names_unproved", .source = "contract A { storage var cap: MaxValue<u256,100>; pub fn get() -> MaxValue<u256,100> { return 1; } } contract B { storage var cap: MaxValue<u256,100>; pub fn get() -> MaxValue<u256,100> { return cap; } }", .accepted = false, .report_only = true },
+        .{ .stem = "single_owner", .source = "contract C { storage var cap: MaxValue<u256,100>; pub fn set(x: MaxValue<u256,100>) { cap = x; } pub fn get() -> MaxValue<u256,100> { return cap; } }", .accepted = true, .assisted = true },
+    };
+    for (cases) |case| {
+        const filename = try std.fmt.allocPrint(allocator, "{s}.ora", .{case.stem});
+        defer allocator.free(filename);
+        if (case.source) |source| try tmp.dir.writeFile(std.testing.io, .{ .sub_path = filename, .data = source });
+        const path = if (case.source != null) try pathFromTmpAlloc(allocator, tmp, filename) else try allocator.dupe(u8, "ora-example/smt/verification/ghost_variables.ora");
+        defer allocator.free(path);
+        const output = try pathFromTmpAlloc(allocator, tmp, case.stem);
+        defer allocator.free(output);
+        const run = try runProcessWithLeanPath(allocator, &.{ ORA_BINARY_REL, "emit", if (case.report_only) "--emit=smt-report" else "--emit=smt-report,bytecode", "--out-dir", output, path });
+        defer allocator.free(run.stdout);
+        defer allocator.free(run.stderr);
+        errdefer std.debug.print("H15 {s}\n{s}\n{s}\n", .{ case.stem, run.stdout, run.stderr });
+        try expectExited(run, if (case.accepted) 0 else 1);
+        if (case.diagnostic) try testing.expectEqual(@as(usize, 1), std.mem.count(u8, run.stdout, "Storage lifecycle assistance unavailable: LifecycleOwnerUnsupported\n"));
+        const hex = try std.fmt.allocPrint(allocator, "{s}/{s}.hex", .{ case.stem, case.stem });
+        defer allocator.free(hex);
+        if (case.accepted and !case.report_only) try tmp.dir.access(std.testing.io, hex, .{}) else try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, hex, .{}));
+        const authority_path = try std.fmt.allocPrint(allocator, "{s}/{s}.formal.artifacts.json", .{ case.stem, case.stem });
+        defer allocator.free(authority_path);
+        const authority_text = try tmp.dir.readFileAlloc(std.testing.io, authority_path, allocator, .limited(1024 * 1024));
+        defer allocator.free(authority_text);
+        const authority = try std.json.parseFromSlice(std.json.Value, allocator, authority_text, .{});
+        defer authority.deinit();
+        try testing.expectEqualStrings(if (case.accepted) "allowed" else "blocked", authority.value.object.get("final_artifact_authorization").?.string);
+        var lifecycle_gates: usize = 0;
+        for (authority.value.object.get("gates").?.array.items) |gate| {
+            if (!std.mem.eql(u8, gate.object.get("id").?.string, "lifecycle_kernel")) continue;
+            lifecycle_gates += 1;
+            try testing.expectEqualStrings(if (case.assisted) "accepted" else "not_requested", gate.object.get("status").?.string);
+            try testing.expectEqual(@as(usize, if (case.assisted) 1 else 0), gate.object.get("produced_artifacts").?.array.items.len);
+        }
+        try testing.expectEqual(@as(usize, 1), lifecycle_gates);
+        const report_path = try std.fmt.allocPrint(allocator, "{s}/{s}.smt.report.json", .{ case.stem, case.stem });
+        defer allocator.free(report_path);
+        const report_text = try tmp.dir.readFileAlloc(std.testing.io, report_path, allocator, .limited(8 * 1024 * 1024));
+        defer allocator.free(report_text);
+        const report = try std.json.parseFromSlice(std.json.Value, allocator, report_text, .{});
+        defer report.deinit();
+        try testing.expectEqualStrings("full", report.value.object.get("verification").?.object.get("verification_trust").?.string);
+        var uses: usize = 0;
+        var sat_safety = false;
+        for (report.value.object.get("queries").?.array.items) |query| {
+            if (query.object.get("lifecycle_use")) |use| if (use != .null) {
+                uses += 1;
+            };
+            const status = query.object.get("status").?.string;
+            try testing.expect(!std.mem.eql(u8, status, "UNKNOWN"));
+            const kind = query.object.get("kind").?.string;
+            if (std.mem.eql(u8, status, "SAT") and (std.mem.eql(u8, kind, "guard_violate") or std.mem.eql(u8, kind, "obligation"))) sat_safety = true;
+        }
+        if (case.assisted) try testing.expect(uses > 0) else try testing.expectEqual(@as(usize, 0), uses);
+        if (!case.accepted) {
+            try testing.expect(sat_safety);
+            try testing.expect(report.value.object.get("errors").?.array.items.len > 0);
+        }
+        if (!case.assisted) {
+            inline for (.{ "formal.lifecycle.json", "lean.proof.json" }) |suffix| {
+                const absent = try std.fmt.allocPrint(allocator, "{s}/{s}.{s}", .{ case.stem, case.stem, suffix });
+                defer allocator.free(absent);
+                try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, absent, .{}));
+            }
+        }
+    }
+}
+
 test "lifecycle refusal reaches stdout before CLI failure" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});

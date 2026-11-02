@@ -20,6 +20,7 @@ pub fn prepare(allocator: std.mem.Allocator, module: mlir.MlirModule, pass: *z3.
         error.LifecycleProjectionUnsupported,
         error.UnsupportedLifecycleRoot,
         error.AmbiguousLifecycleOwner,
+        error.LifecycleOwnerUnsupported,
         error.AmbiguousLifecycleFunction,
         error.UnsupportedLifecycleEffect,
         error.UnsupportedLifecycleLocation,
@@ -33,7 +34,13 @@ pub fn prepare(allocator: std.mem.Allocator, module: mlir.MlirModule, pass: *z3.
         error.UnauthenticatedLifecycleContractInvariant,
         error.UnauthenticatedLifecycleRequires,
         error.LifecycleEntryStoreChanged,
-        => return null,
+        => {
+            if (err == error.LifecycleOwnerUnsupported) {
+                try stdout.print("Storage lifecycle assistance unavailable: {s}\n", .{@errorName(err)});
+                try stdout.flush();
+            }
+            return null;
+        },
         else => return err,
     };
     return try checked.Session.init(allocator, module, pass, environ, stdout);
