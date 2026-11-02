@@ -268,11 +268,39 @@ def validate_lifecycle(actual, reports):
                 (use["kind"] == "guard_violate" and checked["status"] == "sat" and checked["runtime_input"] is True), "failed lifecycle use")
 
 
-def validate_result(expected, actual, reports):
+def validate_capability_refusal(expected, actual, reports, open_findings):
+    # A pinned missing capability is an open finding, never a checked proof.
+    smt, _, authority, _, _ = reports
+    source, digest = expected["source"], expected["source_sha256"]
+    require(actual["source"] == source and actual["source_sha256"] == digest and
+            re.fullmatch(r"[0-9a-f]{64}", digest or "") and int(digest, 16) != 0, "capability source changed")
+    findings = [f for f in open_findings if f["id"] == expected["open_finding"]]
+    require(len(findings) == 1 and findings[0]["id"].partition("/")[2] == expected["track"] and
+            findings[0]["sources"].get(source) == digest and findings[0]["explanation"], "missing/mismatched capability finding")
+    require(relative_paths(smt["source_file"]) == source and relative_paths(authority["source"]) == source,
+            "foreign capability report")
+    require(authority["final_artifact_authorization"] == "blocked", "capability authority not blocked")
+    require(actual["terminal_errors"] and actual["smt_errors"] == smt_errors(smt) and
+            actual["smt_diagnostics"] == smt_diagnostics(smt), "missing/inconsistent capability diagnostics")
+    require(not any(e["type"] == "EncodingDegraded" for e in smt["errors"]) and
+            not smt["summary"].get("degradation_reason") and not smt["summary"].get("degradation_reasons"),
+            "degraded capability report")
+    gates = [g for g in authority["gates"] if g["id"] == "lifecycle_kernel"]
+    require(len(gates) == 1 and gates[0]["status"] == "not_requested" and
+            not gates[0].get("produced_artifacts") and
+            not any(a["id"] == "storage_lifecycle_report" or a["owner"] == "lifecycle_kernel" for a in authority["artifacts"]),
+            "capability refusal cannot use lifecycle assistance")
+    for query in smt["queries"]:
+        require(query.get("lifecycle_use") is None, "capability refusal has a lifecycle use")
+        require(re.fullmatch(r"0x[0-9a-f]+", query["smtlib_hash"] or "") and int(query["smtlib_hash"], 16) != 0,
+                "invalid capability solver hash")
+
+
+def validate_result(expected, actual, reports, open_findings=()):
     """Exact refusal pins may describe degradation, never UNKNOWN or artifact authority."""
     smt, loops, authority, proof, accounting = reports
     category = expected["category"]
-    require(category in ("accepted", "excluded", "invalid", "unsafe", "verification_negative", "automatic_refusal"), "unclassified expectation")
+    require(category in ("accepted", "excluded", "invalid", "unsafe", "verification_negative", "automatic_refusal", "capability_refusal"), "unclassified expectation")
     require(actual["exit"] in (0, 1), "crash, signal, or timeout")
     if smt is not None:
         # Inconclusive vacuity can appear only in errors, without a flagged query.
@@ -305,6 +333,8 @@ def validate_result(expected, actual, reports):
             validate_verification_negative(expected, actual, smt, authority)
         if category == "automatic_refusal":
             validate_automatic_refusal(expected, actual, reports)
+        if category == "capability_refusal":
+            validate_capability_refusal(expected, actual, reports, open_findings)
         if category == "excluded":
             require(loops is not None and any(row["reasons"] for row in actual["loops"]), "missing named exclusion")
             require(not smt["errors"], "a loop exclusion cannot hide a failed source check")
@@ -425,7 +455,7 @@ def main():
             require(sha(compiler) == binary_hash and sha(ROOT / name) == source_hashes[name], "binary/source changed during run")
             actual, reports = run_case(compiler, name, directory, args.timeout,
                                        capture_automatic_refusal=manifest["files"][name]["category"] == "automatic_refusal")
-            validate_result(manifest["files"][name], actual, reports)
+            validate_result(manifest["files"][name], actual, reports, manifest["open_findings"])
             actual["verdict"] = manifest["files"][name]["category"]
         except (ValueError, KeyError, TypeError, OSError) as error:
             actual = locals().get("actual", {"source": name})

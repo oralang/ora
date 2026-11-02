@@ -158,6 +158,142 @@ class CorpusGateTests(unittest.TestCase):
         self.assertNotEqual(corpus.terminal_errors("error: division by zero"), corpus.terminal_errors("error: division by zero; extra"))
 
 
+class CapabilityRefusalTests(unittest.TestCase):
+    def setUp(self):
+        CorpusGateTests.setUp(self)
+        self.actual.update(source="ora-example/capability.ora", source_sha256="a" * 64, exit=1, hex=[],
+                           terminal_errors=["error: unsupported capability"])
+        self.reports[0]["source_file"] = self.actual["source"]
+        self.reports[2].update(source=self.actual["source"], final_artifact_authorization="blocked")
+        self.reports[2]["gates"][1]["status"] = "rejected"
+        self.reports[3] = None
+        self.expected = {**copy.deepcopy(self.actual), "category": "capability_refusal",
+                         "track": "test-capability", "open_finding": "H03/test-capability",
+                         "explanation": "unsupported capability; no proof claimed"}
+        self.findings = [{"id": self.expected["open_finding"], "explanation": "capability remains open",
+                          "sources": {self.actual["source"]: self.actual["source_sha256"]}}]
+
+    def check(self):
+        corpus.validate_result(self.expected, self.actual, self.reports, self.findings)
+
+    def test_native_success_and_pre_solver_refusal_are_not_proofs(self):
+        self.check()  # Native success may still be refused by Lean.
+        smt = self.reports[0]
+        smt["verification"]["success"] = False
+        smt["queries"] = []  # Tier-1 refuses before solving.
+        smt["errors"] = [{"type": "UnbootstrappedContractInvariant", "message": "bootstrap required"}]
+        self.reports[2]["gates"][0]["status"] = "rejected"
+        self.actual["smt_errors"] = self.expected["smt_errors"] = corpus.smt_errors(smt)
+        self.check()
+
+    def test_matching_pins_cannot_excuse_fatal_states(self):
+        mutations = {
+            "timeout": lambda a, r: a.update(exit="timeout"),
+            "crash": lambda a, r: a.update(exit=-11),
+            "exit_zero": lambda a, r: a.update(exit=0),
+            "bytecode": lambda a, r: a.update(hex=["unexpected.hex"]),
+            "missing_smt": lambda a, r: r.__setitem__(0, None),
+            "missing_authority": lambda a, r: r.__setitem__(2, None),
+            "allowed": lambda a, r: r[2].update(final_artifact_authorization="allowed"),
+            "unknown_authority": lambda a, r: r[2].update(final_artifact_authorization="unknown"),
+            "unknown_error": lambda a, r: r[0]["errors"].append({"type": "Unknown", "message": "inconclusive"}),
+            "degraded_error": lambda a, r: r[0]["errors"].append({"type": "EncodingDegraded", "message": "unsupported encoding"}),
+            "unknown_summary": lambda a, r: r[0]["summary"].update(unknown=1),
+            "vacuous": lambda a, r: r[0]["summary"].update(vacuous=1),
+            "vacuity_unknown": lambda a, r: r[0]["summary"].update(vacuity_unknown=1),
+            "inconsistent": lambda a, r: r[0]["summary"].update(inconsistent_bases=1),
+            "degraded": lambda a, r: r[0]["summary"].update(encoding_degraded=True),
+            "soundness_loss": lambda a, r: r[0]["summary"].update(soundness_losses=["lost"]),
+            "degradation_reason": lambda a, r: r[0]["summary"].update(degradation_reason="lost"),
+            "degradation_reasons": lambda a, r: r[0]["summary"].update(degradation_reasons=["lost"]),
+            "degraded_trust": lambda a, r: r[0]["verification"].update(verification_trust="degraded"),
+            "unknown_query": lambda a, r: r[0]["queries"][0].update(status="UNKNOWN"),
+            "vacuous_query": lambda a, r: r[0]["queries"][0].update(vacuous=True),
+            "inconclusive_query": lambda a, r: r[0]["queries"][0].update(vacuity_unknown=True),
+            "degraded_query": lambda a, r: r[0]["queries"][0].update(verified_with_caveats=True),
+            "zero_hash": lambda a, r: r[0]["queries"][0].update(smtlib_hash="0x0"),
+            "malformed_hash": lambda a, r: r[0]["queries"][0].update(smtlib_hash="broken"),
+            "lifecycle_use": lambda a, r: r[0]["queries"][0].update(lifecycle_use={}),
+            "lifecycle_accepted": lambda a, r: r[2]["gates"][-1].update(status="accepted"),
+            "lifecycle_rejected": lambda a, r: r[2]["gates"][-1].update(status="rejected"),
+            "lifecycle_missing": lambda a, r: r[2]["gates"].pop(),
+            "lifecycle_duplicate": lambda a, r: r[2]["gates"].append(copy.deepcopy(r[2]["gates"][-1])),
+            "lifecycle_produced": lambda a, r: r[2]["gates"][-1].update(produced_artifacts=["report"]),
+            "lifecycle_artifact": lambda a, r: r[2]["artifacts"].append({"id": "storage_lifecycle_report", "owner": "other"}),
+            "lifecycle_owner": lambda a, r: r[2]["artifacts"].append({"id": "other", "owner": "lifecycle_kernel"}),
+            "foreign_smt": lambda a, r: r[0].update(source_file="ora-example/foreign.ora"),
+            "foreign_authority": lambda a, r: r[2].update(source="ora-example/foreign.ora"),
+            "no_terminal_reason": lambda a, r: a.update(terminal_errors=[]),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                expected, actual, reports = copy.deepcopy((self.expected, self.actual, self.reports))
+                mutate(actual, reports)
+                actual["smt_errors"] = corpus.smt_errors(reports[0])
+                actual["smt_diagnostics"] = corpus.smt_diagnostics(reports[0])
+                expected.update(copy.deepcopy(actual))  # Forged pins never override fatal guards.
+                with self.assertRaises((ValueError, KeyError, TypeError)):
+                    corpus.validate_result(expected, actual, reports, self.findings)
+
+    def test_exact_diagnostics_and_source_cannot_drift(self):
+        for key, value in (("terminal_errors", ["error: changed"]), ("smt_errors", [{"type": "changed"}]),
+                           ("smt_diagnostics", [{"subtype": "changed"}]), ("loops", []),
+                           ("source", "ora-example/foreign.ora"), ("source_sha256", "b" * 64)):
+            with self.subTest(key=key):
+                actual = {**self.actual, key: value}
+                with self.assertRaises(ValueError):
+                    corpus.validate_result(self.expected, actual, self.reports, self.findings)
+
+    def test_open_finding_must_match_track_source_and_hash(self):
+        for key in ("track", "open_finding"):
+            for value in (None, "", "other"):
+                with self.subTest(key=key, value=value), self.assertRaises((ValueError, KeyError)):
+                    corpus.validate_result({**self.expected, key: value}, self.actual, self.reports, self.findings)
+            expected = copy.deepcopy(self.expected)
+            del expected[key]
+            with self.assertRaises((ValueError, KeyError)):
+                corpus.validate_result(expected, self.actual, self.reports, self.findings)
+        mutations = {
+            "absent": lambda f: f.clear(),
+            "duplicate": lambda f: f.append(copy.deepcopy(f[0])),
+            "wrong_id": lambda f: f[0].update(id="H99/test-capability"),
+            "no_source": lambda f: f[0]["sources"].clear(),
+            "wrong_hash": lambda f: f[0]["sources"].update({self.actual["source"]: "b" * 64}),
+            "no_explanation": lambda f: f[0].update(explanation=""),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                findings = copy.deepcopy(self.findings)
+                mutate(findings)
+                with self.assertRaises(ValueError):
+                    corpus.validate_result(self.expected, self.actual, self.reports, findings)
+
+    def test_cli_routes_findings_and_counts_no_checked_proofs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / self.actual["source"]
+            source.parent.mkdir()
+            source.write_text("// capability control\n")
+            digest = corpus.sha(source)
+            self.actual["source_sha256"] = self.expected["source_sha256"] = digest
+            self.findings[0]["sources"][self.actual["source"]] = digest
+            manifest = root / "manifest.json"
+            manifest.write_text(json.dumps({"schema": 1, "open_findings": self.findings,
+                                            "files": {self.actual["source"]: self.expected}}))
+            compiler = root / "compiler"
+            compiler.write_text("test binary")
+            captured = io.StringIO()
+            with mock.patch.object(corpus, "ROOT", root), \
+                 mock.patch("sys.argv", ["checker", "--manifest", str(manifest), "--compiler", str(compiler),
+                                         "--output", str(root / "output")]), \
+                 mock.patch.object(corpus.subprocess, "check_output", side_effect=[self.actual["source"], ""]), \
+                 mock.patch.object(corpus, "run_case", return_value=(self.actual, self.reports)), \
+                 mock.patch("sys.stdout", captured):
+                corpus.main()
+            self.assertIn('"capability_refusal": 1', captured.getvalue())
+            self.assertIn("checked loops in accepted artifacts: 0", captured.getvalue())
+
+
 class VerificationNegativeTests(unittest.TestCase):
     def setUp(self):
         CorpusGateTests.setUp(self)
