@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "review_status": "Reviewed census at 95336bcf9a4de35cb5f87969eed50ebda1a598e9; candidate H15 routing has fresh accepted evidence. Release-queue item 2 classifies H03, H11, H12, H14 and H16 as pinned capability refusals with their open findings retained. Three blocking holds remain: H01, H02, H04 (timeouts). No timeout, UNKNOWN, inconclusive, vacuous, or degraded outcome is accepted as success.",
+  "review_status": "Reviewed census at 95336bcf9a4de35cb5f87969eed50ebda1a598e9 with H15 routing and pinned capability refusals committed. Release item 3 uses the approved performance-hold route for H01, H02 and H04: these rows are NOT RUN and claim no proof. Zero blocking release holds remain; all eight open findings and their source digests remain pinned. No timeout, UNKNOWN, inconclusive, vacuous, or degraded run is classified as verification success.",
   "base_commit": "95336bcf9a4de35cb5f87969eed50ebda1a598e9",
   "compiler_sha256": "f4b82d54d0b0a7fbf46f64502e27fef1c7895dbf1da346b8491fe5b5389bef1e",
   "native_sha256": "73baac3e4d8d6115fee92980092e255f18a1c7e783378e91386ec0f1aaba47da",
@@ -2095,9 +2095,10 @@
       "terminal_errors": [],
       "smt_errors": [],
       "smt_diagnostics": [],
-      "category": "hold",
-      "explanation": "BLOCKING REVIEW HOLD: 120-second watchdog failure; never an expected outcome",
-      "track": "ordinary-query-performance"
+      "category": "performance_hold",
+      "explanation": "NOT RUN: unresolved ordinary-query multiplication-overflow cost. Explain-mode solving reaches independent loop-projection refusals; no accepted verification or proof is claimed.",
+      "track": "ordinary-query-performance",
+      "open_finding": "H01/ordinary-query-performance"
     },
     "ora-example/corpus/control-flow/switch/fail_switch_labeled_fallthrough.ora": {
       "source": "ora-example/corpus/control-flow/switch/fail_switch_labeled_fallthrough.ora",
@@ -2299,9 +2300,10 @@
       "terminal_errors": [],
       "smt_errors": [],
       "smt_diagnostics": [],
-      "category": "hold",
-      "explanation": "BLOCKING REVIEW HOLD: 120-second watchdog failure; never an expected outcome",
-      "track": "ordinary-query-performance"
+      "category": "performance_hold",
+      "explanation": "NOT RUN: unresolved ordinary-query multiplication-overflow cost and an independent automatic nonlinear Lean-certificate boundary. No accepted verification or proof is claimed.",
+      "track": "ordinary-query-performance",
+      "open_finding": "H02/ordinary-query-performance"
     },
     "ora-example/corpus/control-flow/while/while_counter.ora": {
       "source": "ora-example/corpus/control-flow/while/while_counter.ora",
@@ -4624,9 +4626,10 @@
       "terminal_errors": [],
       "smt_errors": [],
       "smt_diagnostics": [],
-      "category": "hold",
-      "explanation": "BLOCKING REVIEW HOLD: 120-second watchdog failure; never an expected outcome",
-      "track": "ordinary-query-performance"
+      "category": "performance_hold",
+      "explanation": "NOT RUN: repeated expensive arithmetic queries after accrued-interest expansion; the profiled build still reaches the unchanged watchdog. No accepted verification or proof is claimed.",
+      "track": "ordinary-query-performance",
+      "open_finding": "H04/ordinary-query-performance"
     },
     "ora-example/corpus/patterns/mintable_token.ora": {
       "source": "ora-example/corpus/patterns/mintable_token.ora",

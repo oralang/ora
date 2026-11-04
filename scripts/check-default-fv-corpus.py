@@ -421,6 +421,23 @@ def membership(manifest, tracked):
         require((ROOT / name).is_file(), "missing source: " + name)
 
 
+def performance_hold(name, expected, open_findings):
+    """A reviewed, unrun row. This provides no solver result or proof evidence."""
+    require(expected["category"] == "performance_hold" and expected["source"] == name,
+            "foreign performance hold")
+    digest = expected["source_sha256"]
+    require(re.fullmatch(r"[0-9a-f]{64}", digest or "") and int(digest, 16) != 0 and
+            sha(ROOT / name) == digest, "performance hold source changed")
+    require(expected.get("track") and expected["explanation"], "performance hold requires a named track and explanation")
+    findings = [f for f in open_findings if f["id"] == expected["open_finding"]]
+    require(len(findings) == 1 and findings[0]["id"].partition("/")[2] == expected["track"] and
+            findings[0]["sources"].get(name) == digest and findings[0]["explanation"],
+            "missing/mismatched performance finding")
+    return {"source": name, "source_sha256": digest, "verdict": "performance_hold", "executed": False,
+            "open_finding": expected["open_finding"], "track": expected["track"],
+            "explanation": expected["explanation"]}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compiler", type=Path, default=ROOT / "zig-out/bin/ora")
@@ -453,10 +470,16 @@ def main():
         directory.mkdir()
         try:
             require(sha(compiler) == binary_hash and sha(ROOT / name) == source_hashes[name], "binary/source changed during run")
-            actual, reports = run_case(compiler, name, directory, args.timeout,
-                                       capture_automatic_refusal=manifest["files"][name]["category"] == "automatic_refusal")
-            validate_result(manifest["files"][name], actual, reports, manifest["open_findings"])
-            actual["verdict"] = manifest["files"][name]["category"]
+            expected = manifest["files"][name]
+            if expected["category"] == "performance_hold":
+                actual = performance_hold(name, expected, manifest["open_findings"])
+                print(f"PERFORMANCE HOLD (NOT RUN; no proof): {name} [{actual['open_finding']}]: {actual['explanation']}", flush=True)
+                (directory / "hold.json").write_text(json.dumps(actual, indent=2) + "\n")
+            else:
+                actual, reports = run_case(compiler, name, directory, args.timeout,
+                                           capture_automatic_refusal=expected["category"] == "automatic_refusal")
+                validate_result(expected, actual, reports, manifest["open_findings"])
+                actual["verdict"] = expected["category"]
         except (ValueError, KeyError, TypeError, OSError) as error:
             actual = locals().get("actual", {"source": name})
             actual["verdict"] = "unexpected_failure"
@@ -468,6 +491,7 @@ def main():
     require(sha(compiler) == binary_hash and all(sha(ROOT / n) == h for n, h in source_hashes.items()), "tree/binary changed during run")
     counts = collections.Counter(r["verdict"] for r in result["runs"])
     print("default-FV results: " + json.dumps(counts, sort_keys=True))
+    print("performance holds (not run; no proof): " + str(counts["performance_hold"]))
     print("checked loops in accepted artifacts: " + str(sum(len(r["loops"]) for r in result["runs"] if r["verdict"] == "accepted")))
     require(not counts["unexpected_failure"], "unexpected corpus results; see " + str(output / "results.json"))
 

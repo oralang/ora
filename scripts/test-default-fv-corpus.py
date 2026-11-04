@@ -158,6 +158,113 @@ class CorpusGateTests(unittest.TestCase):
         self.assertNotEqual(corpus.terminal_errors("error: division by zero"), corpus.terminal_errors("error: division by zero; extra"))
 
 
+class PerformanceHoldTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        patch = mock.patch.object(corpus, "ROOT", self.root)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.source = "ora-example/state_machine.ora"
+        path = self.root / self.source
+        path.parent.mkdir()
+        path.write_text("// reviewed performance reproducer\n")
+        self.expected = {"source": self.source, "source_sha256": corpus.sha(path), "category": "performance_hold",
+                         "track": "ordinary-query-performance", "open_finding": "H01/ordinary-query-performance",
+                         "explanation": "Not run: performance remains unresolved; no proof claimed."}
+        self.findings = [{"id": self.expected["open_finding"], "explanation": "profile under fixed limits",
+                          "sources": {self.source: self.expected["source_sha256"]}}]
+
+    def test_source_and_finding_pins_are_required(self):
+        self.assertFalse(corpus.performance_hold(self.source, self.expected, self.findings)["executed"])
+        for key in ("source", "source_sha256", "category", "track", "open_finding", "explanation"):
+            for value in (None, "", "foreign"):
+                if key == "explanation" and value == "foreign":
+                    continue
+                with self.subTest(key=key, value=value), self.assertRaises((ValueError, KeyError, TypeError)):
+                    corpus.performance_hold(self.source, {**self.expected, key: value}, self.findings)
+            changed = copy.deepcopy(self.expected)
+            del changed[key]
+            with self.assertRaises((ValueError, KeyError, TypeError)):
+                corpus.performance_hold(self.source, changed, self.findings)
+        mutations = {
+            "missing": lambda f: f.clear(),
+            "duplicate": lambda f: f.append(copy.deepcopy(f[0])),
+            "id": lambda f: f[0].update(id="H02/ordinary-query-performance"),
+            "source": lambda f: f[0].update(sources={"ora-example/foreign.ora": self.expected["source_sha256"]}),
+            "digest": lambda f: f[0]["sources"].update({self.source: "b" * 64}),
+            "explanation": lambda f: f[0].update(explanation=""),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                findings = copy.deepcopy(self.findings)
+                mutate(findings)
+                with self.assertRaises(ValueError):
+                    corpus.performance_hold(self.source, self.expected, findings)
+        (self.root / self.source).write_text("// changed source\n")
+        with self.assertRaisesRegex(ValueError, "source changed"):
+            corpus.performance_hold(self.source, self.expected, self.findings)
+
+    def test_a_run_result_cannot_be_validated_as_a_performance_hold(self):
+        for code in (0, 1, -11, "timeout"):
+            with self.subTest(code=code), self.assertRaisesRegex(ValueError, "unclassified expectation"):
+                corpus.validate_result(self.expected, {"exit": code}, [None] * 5, self.findings)
+
+    def run_main(self, files, findings, output, run_results):
+        manifest = self.root / "manifest.json"
+        manifest.write_text(json.dumps({"schema": 1, "open_findings": findings, "files": files}))
+        compiler = self.root / "compiler"
+        compiler.write_text("test compiler")
+        with mock.patch("sys.argv", ["checker", "--manifest", str(manifest), "--compiler", str(compiler),
+                                     "--output", str(output)]), \
+             mock.patch.object(corpus.subprocess, "check_output", side_effect=["\n".join(files), ""]), \
+             mock.patch.object(corpus, "run_case", side_effect=run_results) as run:
+            self.run_mock = run
+            corpus.main()
+
+    def test_all_three_are_printed_and_never_run_or_counted_as_proofs(self):
+        files, findings = {}, []
+        for hid, stem in (("H01", "state_machine"), ("H02", "while_continue"), ("H04", "lending_pool")):
+            source = f"ora-example/{stem}.ora"
+            (self.root / source).write_text("// reviewed performance reproducer\n")
+            expected = {**self.expected, "source": source, "open_finding": hid + "/ordinary-query-performance"}
+            files[source] = expected
+            findings.append({**self.findings[0], "id": expected["open_finding"],
+                             "sources": {source: expected["source_sha256"]}})
+        accepted = CorpusGateTests()
+        accepted.setUp()
+        accepted.actual["source"] = "ora-example/accepted.ora"
+        (self.root / accepted.actual["source"]).write_text("// accepted control\n")
+        files[accepted.actual["source"]] = accepted.expected
+        captured = io.StringIO()
+        output = self.root / "output"
+        with mock.patch("sys.stdout", captured):
+            self.run_main(files, findings, output, [(accepted.actual, accepted.reports)])
+        self.run_mock.assert_called_once()
+        self.assertEqual(self.run_mock.call_args.args[1], accepted.actual["source"])
+        results = json.loads((output / "results.json").read_text())["runs"]
+        for index, (source, row) in enumerate(zip(list(files)[:3], results[:3])):
+            self.assertIn(f"PERFORMANCE HOLD (NOT RUN; no proof): {source}", captured.getvalue())
+            self.assertEqual(row["verdict"], "performance_hold")
+            self.assertIs(row["executed"], False)
+            self.assertNotIn("exit", row)
+            self.assertNotIn("hex", row)
+            self.assertNotIn("queries", row)
+            self.assertEqual([p.name for p in (output / str(index)).iterdir()], ["hold.json"])
+        self.assertIn('"accepted": 1, "performance_hold": 3', captured.getvalue())
+        self.assertIn("checked loops in accepted artifacts: 1", captured.getvalue())
+        self.assertIn("performance holds (not run; no proof): 3", captured.getvalue())
+
+    def test_bad_hold_fails_the_gate_without_falling_back_to_a_run(self):
+        captured = io.StringIO()
+        with mock.patch("sys.stdout", captured), self.assertRaisesRegex(ValueError, "unexpected corpus results"):
+            self.run_main({self.source: {**self.expected, "track": "foreign"}}, self.findings,
+                          self.root / "output", [])
+        self.run_mock.assert_not_called()
+        self.assertIn('"unexpected_failure": 1', captured.getvalue())
+
+
 class CapabilityRefusalTests(unittest.TestCase):
     def setUp(self):
         CorpusGateTests.setUp(self)
