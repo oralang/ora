@@ -11,14 +11,6 @@ args = [[5, 8, 13]]
 returns = {}
 
 [[call.storage]]
-slot = 0
-value = 3
-
-[[call.storage]]
-slot = "keccak(0)"
-value = 5
-
-[[call.storage]]
 slot = "add(keccak(0),1)"
 value = 8
 
@@ -32,3 +24,104 @@ caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
 args = [1]
 returns = { u256 = 8 }
+
+[[call]]
+fn = "write(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [2, 21]
+returns = {}
+
+[[call]]
+fn = "get(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [2]
+returns = { u256 = 21 }
+
+[[call]]
+fn = "compoundAfterReplace(uint256,uint256[],uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1, [5], 1]
+reverts = { data = "0xdd8bfc7c" }
+
+[[call.storage]]
+slot = "add(keccak(0),1)"
+value = 8
+
+[[call.storage]]
+slot = "add(keccak(0),2)"
+value = 21
+
+[[call]]
+fn = "get(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [3]
+reverts = { data = "0xdd8bfc7c" }
+
+[[call]]
+fn = "get(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [115792089237316195423570985008687907853269984665640564039457584007913129639935]
+reverts = { data = "0xdd8bfc7c" }
+
+# Shrinking the slice leaves the old second element as an adjacent sentinel.
+[[call]]
+fn = "set(uint256[])"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [[5, 99]]
+returns = {}
+
+[[call]]
+fn = "set(uint256[])"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [[5]]
+returns = {}
+
+[[call.storage]]
+slot = "add(keccak(0),1)"
+value = 99
+
+[[call]]
+fn = "write(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1, 777]
+reverts = { data = "0xdd8bfc7c" }
+
+[[call.storage]]
+slot = "add(keccak(0),1)"
+value = 99
+
+[[call]]
+fn = "get(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [0]
+returns = { u256 = 5 }
+
+[[call]]
+fn = "set(uint256[])"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [[]]
+returns = {}
+
+[[call]]
+fn = "get(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [0]
+reverts = { data = "0xdd8bfc7c" }
+
+[[call]]
+fn = "write(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [0, 777]
+reverts = { data = "0xdd8bfc7c" }

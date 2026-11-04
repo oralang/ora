@@ -34,6 +34,8 @@
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/Passes.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Interfaces/CallInterfaces.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -44,6 +46,7 @@
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Support/Casting.h"
@@ -501,6 +504,62 @@ void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
         return wrap(&unwrap(op)->getRegion(index));
     }
 
+    bool oraOperationContainsCall(MlirOperation op)
+    {
+        mlir::Operation *operation = unwrap(op);
+        if (operation == nullptr)
+            return false;
+        return operation->walk([](mlir::Operation *child) {
+            const bool isCall = llvm::isa<mlir::CallOpInterface>(child) ||
+                                child->getName().getStringRef() == "ora.external_call";
+            return isCall ? mlir::WalkResult::interrupt() : mlir::WalkResult::advance();
+        }).wasInterrupted();
+    }
+
+    OraOperationMemoryEffectKind oraOperationGetMemoryEffectKind(MlirOperation op)
+    {
+        mlir::Operation *operation = unwrap(op);
+        if (operation == nullptr)
+        {
+            return ORA_OPERATION_MEMORY_EFFECT_UNKNOWN;
+        }
+        if (operation->hasTrait<mlir::OpTrait::HasRecursiveMemoryEffects>())
+        {
+            return ORA_OPERATION_MEMORY_EFFECT_RECURSIVE;
+        }
+
+        auto interface = llvm::dyn_cast<mlir::MemoryEffectOpInterface>(operation);
+        if (!interface)
+        {
+            return ORA_OPERATION_MEMORY_EFFECT_UNKNOWN;
+        }
+
+        llvm::SmallVector<mlir::SideEffects::EffectInstance<mlir::MemoryEffects::Effect>, 4> effects;
+        interface.getEffects(effects);
+        if (effects.empty())
+        {
+            return ORA_OPERATION_MEMORY_EFFECT_NONE;
+        }
+
+        bool sawRead = false;
+        for (const auto &effect : effects)
+        {
+            if (llvm::isa<mlir::MemoryEffects::Read>(effect.getEffect()))
+            {
+                sawRead = true;
+                continue;
+            }
+            if (llvm::isa<mlir::MemoryEffects::Write,
+                          mlir::MemoryEffects::Allocate,
+                          mlir::MemoryEffects::Free>(effect.getEffect()))
+            {
+                return ORA_OPERATION_MEMORY_EFFECT_WRITE;
+            }
+            return ORA_OPERATION_MEMORY_EFFECT_UNKNOWN;
+        }
+        return sawRead ? ORA_OPERATION_MEMORY_EFFECT_READ : ORA_OPERATION_MEMORY_EFFECT_NONE;
+    }
+
     MlirType oraValueGetType(MlirValue value)
     {
         return wrap(unwrap(value).getType());
@@ -620,6 +679,26 @@ void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
     int32_t oraDenseI32ArrayAttrGetElement(MlirAttribute attr, size_t index)
     {
         auto array_attr = llvm::dyn_cast<mlir::DenseI32ArrayAttr>(unwrap(attr));
+        if (!array_attr || index >= static_cast<size_t>(array_attr.size()))
+        {
+            return 0;
+        }
+        return array_attr.asArrayRef()[index];
+    }
+
+    size_t oraDenseI64ArrayAttrGetNumElements(MlirAttribute attr)
+    {
+        auto array_attr = llvm::dyn_cast<mlir::DenseI64ArrayAttr>(unwrap(attr));
+        if (!array_attr)
+        {
+            return 0;
+        }
+        return array_attr.size();
+    }
+
+    int64_t oraDenseI64ArrayAttrGetElement(MlirAttribute attr, size_t index)
+    {
+        auto array_attr = llvm::dyn_cast<mlir::DenseI64ArrayAttr>(unwrap(attr));
         if (!array_attr || index >= static_cast<size_t>(array_attr.size()))
         {
             return 0;
@@ -2476,6 +2555,54 @@ MlirType oraNonZeroAddressTypeGet(MlirContext ctx)
     }
 }
 
+bool oraRefinementTypeGetIntegerBounds(MlirType type, uint32_t *kind,
+                                      uint32_t *carrierWidth,
+                                      uint64_t *minimum, uint64_t *maximum)
+{
+    if (!type.ptr || !kind || !carrierWidth || !minimum || !maximum)
+        return false;
+    Type base;
+    uint64_t lower[4] = {}, upper[4] = {};
+    uint32_t tag;
+    if (auto t = dyn_cast<ora::MinValueType>(unwrap(type))) {
+        tag = 1;
+        base = t.getBaseType();
+        lower[0] = t.getMinLowLow();
+        lower[1] = t.getMinLowHigh();
+        lower[2] = t.getMinHighLow();
+        lower[3] = t.getMinHighHigh();
+    } else if (auto t = dyn_cast<ora::MaxValueType>(unwrap(type))) {
+        tag = 2;
+        base = t.getBaseType();
+        upper[0] = t.getMaxLowLow();
+        upper[1] = t.getMaxLowHigh();
+        upper[2] = t.getMaxHighLow();
+        upper[3] = t.getMaxHighHigh();
+    } else if (auto t = dyn_cast<ora::InRangeType>(unwrap(type))) {
+        tag = 3;
+        base = t.getBaseType();
+        lower[0] = t.getMinLowLow();
+        lower[1] = t.getMinLowHigh();
+        lower[2] = t.getMinHighLow();
+        lower[3] = t.getMinHighHigh();
+        upper[0] = t.getMaxLowLow();
+        upper[1] = t.getMaxLowHigh();
+        upper[2] = t.getMaxHighLow();
+        upper[3] = t.getMaxHighHigh();
+    } else {
+        return false;
+    }
+    auto integer = dyn_cast<mlir::IntegerType>(base);
+    if (!integer) return false;
+    *kind = tag;
+    *carrierWidth = integer.getWidth();
+    for (unsigned i = 0; i < 4; ++i) {
+        minimum[i] = lower[i];
+        maximum[i] = upper[i];
+    }
+    return true;
+}
+
 MlirType oraRefinementTypeGetBaseType(MlirType refinementType)
 {
     try
@@ -3093,6 +3220,49 @@ MlirOperation oraIncreasesOpCreate(MlirContext ctx, MlirLocation loc, MlirValue 
 
 
         return wrap(increasesOp.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraLoopControlOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    MlirStringRef kind,
+    uint32_t targetLoopSourceId,
+    uint32_t sourceControlId,
+    const MlirValue *stateValues,
+    size_t stateCount)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        SmallVector<Value> state;
+        state.reserve(stateCount);
+        for (size_t index = 0; index < stateCount; ++index)
+        {
+            state.push_back(unwrap(stateValues[index]));
+        }
+
+        OperationState opState(unwrap(loc), ora::LoopControlOp::getOperationName());
+        opState.addOperands(state);
+        opState.addAttribute("kind", StringAttr::get(context, unwrap(kind)));
+        opState.addAttribute(
+            "target_loop_source_id",
+            IntegerAttr::get(mlir::IntegerType::get(context, 64), targetLoopSourceId));
+        opState.addAttribute(
+            "source_control_id",
+            IntegerAttr::get(mlir::IntegerType::get(context, 64), sourceControlId));
+
+        OpBuilder builder(context);
+        return wrap(builder.create(opState));
     }
     catch (...)
     {
@@ -4350,6 +4520,31 @@ MlirBlock oraScfForOpGetBodyBlock(MlirOperation forOp)
     catch (...)
     {
         return {nullptr};
+    }
+}
+
+bool oraScfForOpGetUnsignedCmp(MlirOperation forOp, bool *unsignedCmp)
+{
+    try
+    {
+        Operation *operation = unwrap(forOp);
+        if (!operation || !unsignedCmp)
+        {
+            return false;
+        }
+
+        auto op = dyn_cast<scf::ForOp>(operation);
+        if (!op)
+        {
+            return false;
+        }
+
+        *unsignedCmp = op.getUnsignedCmp();
+        return true;
+    }
+    catch (...)
+    {
+        return false;
     }
 }
 

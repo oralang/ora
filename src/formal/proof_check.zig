@@ -8,9 +8,36 @@ const std = @import("std");
 const obligation = @import("obligation.zig");
 const obligation_to_lean = @import("obligation_to_lean.zig");
 const proof_manifest = @import("proof_manifest.zig");
+const lifecycle = @import("storage_lifecycle.zig");
+const lifecycle_hir = @import("storage_lifecycle_from_mlir.zig");
+const lifecycle_lean = @import("storage_lifecycle_to_lean.zig");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const proof_check_scratch_root = "formal/Ora/ProofCheckScratch";
 const max_proof_artifact_bytes = 4 * 1024 * 1024;
+const canonical_obligations_module = "Ora.ProofCheckCanonical.Obligations";
+const canonical_agreement_module = "Ora.ProofCheckCanonical.Agreement";
+
+pub const LeanProofFailure = error{
+    LeanProofParseError,
+    LeanProofUnsolvedGoals,
+    LeanProofTimeout,
+    LeanToolUnavailable,
+    LeanProofAbnormalTermination,
+    LeanProofCheckFailed,
+};
+
+pub fn leanProofFailureReason(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.LeanProofParseError => "lean_tactic_parse_error",
+        error.LeanProofUnsolvedGoals => "lean_unsolved_goals",
+        error.LeanProofTimeout => "lean_tactic_timeout",
+        error.LeanToolUnavailable => "lean_tool_unavailable",
+        error.LeanProofAbnormalTermination => "lean_abnormal_termination",
+        error.LeanProofCheckFailed => "lean_proof_rejected",
+        else => null,
+    };
+}
 
 pub const ApplyResult = struct {
     arena: std.heap.ArenaAllocator,
@@ -27,6 +54,104 @@ pub const ApplyResult = struct {
 
 pub const ProofRow = proof_manifest.ProofRow;
 
+pub const CallCustodyInput = struct {
+    function_id: obligation.Id,
+    function_vc_sha256: [32]u8,
+    manifest_sha256: [32]u8,
+    theorem_name: []const u8,
+    proof_source: []const u8,
+};
+
+pub const CallCustodyManifest = struct {
+    collected: @import("obligation_from_mlir.zig").CollectResult,
+    source: []const u8,
+    sha256: [32]u8,
+
+    pub fn deinit(self: *CallCustodyManifest) void {
+        self.collected.deinit();
+        self.* = undefined;
+    }
+};
+
+/// Preparation and checking both start from canonical HIR. Neither accepts a
+/// caller-built ObligationSet or treats projection-completeness bits as evidence.
+pub fn prepareCallCustody(allocator: std.mem.Allocator, module: @import("mlir_c_api").c.MlirModule, namespace: []const u8) !CallCustodyManifest {
+    _ = try namespaceSuffix(namespace);
+    var collected = try @import("obligation_from_mlir.zig").collect(allocator, module, .{ .project_calls = true });
+    errdefer collected.deinit();
+    var source = std.Io.Writer.Allocating.init(collected.arena.allocator());
+    try obligation_to_lean.writeCallCustodyModule(&source.writer, collected.set, namespace);
+    var digest: [32]u8 = undefined;
+    Sha256.hash(source.written(), &digest, .{});
+    return .{ .collected = collected, .source = source.written(), .sha256 = digest };
+}
+
+/// A custody receipt is deliberately not a successful VerificationQuery. It
+/// records a kernel-checked installation, without claiming Z3, nonvacuity, or
+/// caller consumption. No artifactDecision path consumes this receipt in G9a.
+pub const CallCustodyReceipt = struct {
+    arena: std.heap.ArenaAllocator,
+    function_id: obligation.Id,
+    function_vc_sha256: [32]u8,
+    manifest_sha256: [32]u8,
+    proof_sha256: [32]u8,
+    checker_sha256: [32]u8,
+    checker_source: []const u8,
+    canonical_checker_source: []const u8,
+    agreement_source: []const u8,
+    axioms: []const []const u8,
+
+    pub fn deinit(self: *CallCustodyReceipt) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+pub fn checkCallCustody(
+    allocator: std.mem.Allocator,
+    module: @import("mlir_c_api").c.MlirModule,
+    namespace: []const u8,
+    input: CallCustodyInput,
+    process_environ: std.process.Environ,
+    stdout: anytype,
+) !CallCustodyReceipt {
+    var manifest = try prepareCallCustody(allocator, module, namespace);
+    defer manifest.deinit();
+    const set = manifest.collected.set;
+    _ = obligation.findById(set.function_summaries, input.function_id) orelse return error.CallCustodyFunctionMissing;
+    const digest = try obligation_to_lean.functionVcSha256(set, input.function_id);
+    if (!std.mem.eql(u8, &digest, &input.function_vc_sha256)) return error.CallCustodyFunctionDigestMismatch;
+    if (!std.mem.eql(u8, &manifest.sha256, &input.manifest_sha256)) return error.CallCustodyManifestMismatch;
+    if (input.proof_source.len == 0) return error.CallCustodyProofMissing;
+    try validateLeanTheoremPath(input.theorem_name);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const checked = try runLeanChecker(allocator, namespace, manifest.source, &.{.{
+        .query_id = input.function_id,
+        .module_name = "Ora.CallCustodyProof",
+        .theorem_name = input.theorem_name,
+        .call_function_id = input.function_id,
+        .import_module = false,
+    }}, input.proof_source, process_environ, stdout, false, arena.allocator());
+    if (checked.axiom_audits.len != 1) return error.LeanAxiomAuditMissing;
+    var proof_digest: [32]u8 = undefined;
+    var checker_digest: [32]u8 = undefined;
+    Sha256.hash(input.proof_source, &proof_digest, .{});
+    Sha256.hash(checked.canonical_source, &checker_digest, .{});
+    return .{
+        .arena = arena,
+        .function_id = input.function_id,
+        .function_vc_sha256 = digest,
+        .manifest_sha256 = manifest.sha256,
+        .proof_sha256 = proof_digest,
+        .checker_sha256 = checker_digest,
+        .checker_source = checked.checked_source,
+        .canonical_checker_source = checked.canonical_source,
+        .agreement_source = checked.canonical_agreement_source,
+        .axioms = checked.axiom_audits[0].axioms,
+    };
+}
+
 pub fn applyProofRows(
     allocator: std.mem.Allocator,
     set: obligation.ObligationSet,
@@ -37,7 +162,129 @@ pub fn applyProofRows(
     stdout: anytype,
 ) !?ApplyResult {
     if (rows.len == 0) return null;
-    return try applyRows(allocator, set, rows, generated_namespace, obligations_source, process_environ, stdout, false);
+    return try applyRows(
+        allocator,
+        set,
+        rows,
+        generated_namespace,
+        obligations_source,
+        process_environ,
+        stdout,
+        .{},
+    );
+}
+
+pub const LifecycleCustodyInput = struct {
+    inputs_sha256: lifecycle.Digest,
+    targets_sha256: lifecycle.Digest,
+    proof_source: []const u8,
+    theorem_name: []const u8,
+};
+
+/// No VerificationQuery or artifact grant is installed from this receipt.
+pub const LifecycleCustodyReceipt = struct {
+    arena: std.heap.ArenaAllocator,
+    inputs_sha256: lifecycle.Digest,
+    targets_sha256: lifecycle.Digest,
+    proof_sha256: lifecycle.Digest,
+    checker_sha256: lifecycle.Digest,
+    checker_source: []const u8,
+    axioms: []const []const u8,
+
+    pub fn deinit(self: *LifecycleCustodyReceipt) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+pub fn checkLifecycleCustody(allocator: std.mem.Allocator, module: @import("mlir_c_api").c.MlirModule, pass: *@import("ora_z3_verification").VerificationPass, input: LifecycleCustodyInput, process_environ: std.process.Environ, stdout: anytype) !LifecycleCustodyReceipt {
+    var snapshot = try lifecycle_hir.collect(allocator, module, pass);
+    defer snapshot.deinit();
+    var projection = try lifecycle_hir.project(allocator, module, pass, snapshot.inventory);
+    defer projection.deinit();
+    const inputs = try lifecycle_hir.proofInputs(&projection);
+    const digest = try inputs.sha256(allocator);
+    if (!std.mem.eql(u8, &digest, &input.inputs_sha256)) return error.LifecycleInputsMismatch;
+    var targets = std.Io.Writer.Allocating.init(allocator);
+    defer targets.deinit();
+    try lifecycle_lean.writeProducerTargets(&targets.writer, allocator, inputs, projection.canonical.set);
+    const target_digest = lifecycle.hash(targets.written());
+    if (!std.mem.eql(u8, &target_digest, &input.targets_sha256)) return error.LifecycleTargetsMismatch;
+    if (input.proof_source.len == 0) return error.LifecycleProofMissing;
+    if (input.proof_source.len > max_proof_artifact_bytes) return error.LifecycleProofTooLarge;
+    try validateLeanTheoremPath(input.theorem_name);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const checked = try runLeanChecker(allocator, "Ora.Generated.Obligations.Lifecycle", targets.written(), &.{.{
+        .query_id = 0,
+        .module_name = "Ora.LifecycleProof",
+        .theorem_name = input.theorem_name,
+        .lifecycle_target = true,
+        .import_module = false,
+    }}, input.proof_source, process_environ, stdout, true, arena.allocator());
+    if (checked.axiom_audits.len != 1) return error.LeanAxiomAuditMissing;
+    try lifecycle_hir.checkFresh(allocator, module, pass, inputs.inventory);
+    return .{ .arena = arena, .inputs_sha256 = digest, .targets_sha256 = target_digest, .proof_sha256 = lifecycle.hash(input.proof_source), .checker_sha256 = lifecycle.hash(checked.canonical_source), .checker_source = checked.canonical_source, .axioms = checked.axiom_audits[0].axioms };
+}
+
+/// Kernel-checks compiler-constructed proof terms in the generated checker
+/// itself. Unlike manifest proof rows, these rows never name or import a proof
+/// module and never point at a separately materialized proof artifact.
+pub fn applyInlineProofRows(
+    allocator: std.mem.Allocator,
+    set: obligation.ObligationSet,
+    rows: []const ProofRow,
+    generated_namespace: []const u8,
+    obligations_source: []const u8,
+    inline_proof_source: []const u8,
+    process_environ: std.process.Environ,
+    stdout: anytype,
+) !?ApplyResult {
+    if (rows.len == 0) return null;
+    if (inline_proof_source.len == 0) return error.EmptyInlineProofSource;
+    return try applyRows(
+        allocator,
+        set,
+        rows,
+        generated_namespace,
+        obligations_source,
+        process_environ,
+        stdout,
+        .{ .inline_proof_source = inline_proof_source },
+    );
+}
+
+const ApplyRowsOptions = struct {
+    quiet: bool = false,
+    inline_proof_source: ?[]const u8 = null,
+    call_custody: bool = false,
+};
+
+/// External rows only select targets. Expected bodies and digests come from a
+/// fresh pair of HIR inventories, exactly as in checkCallCustody.
+pub fn applyCallProofRows(allocator: std.mem.Allocator, module: @import("mlir_c_api").c.MlirModule, set: obligation.ObligationSet, rows: []const ProofRow, namespace: []const u8, process_environ: std.process.Environ, stdout: anytype) !ApplyResult {
+    try set.validateTermReferences();
+    try set.validateIdReferences();
+    var fresh = try prepareCallCustody(allocator, module, namespace);
+    defer fresh.deinit();
+    if (fresh.collected.set.function_summaries.len != set.function_summaries.len or fresh.collected.set.loop_summaries.len != set.loop_summaries.len) return error.CallCustodyManifestMismatch;
+    for (set.function_summaries) |row| {
+        const expected = try obligation_to_lean.functionVcSha256(fresh.collected.set, row.id);
+        if (!std.mem.eql(u8, &expected, &try obligation_to_lean.functionVcSha256(set, row.id))) return error.CallCustodyFunctionDigestMismatch;
+        for (set.queries) |query| if (query.function_summary_id == row.id) {
+            if (!std.meta.eql(query.function_vc_sha256, @as(?[32]u8, expected))) return error.CallCustodyFunctionDigestMismatch;
+        };
+    }
+    for (set.loop_summaries) |row| {
+        const expected = try obligation_to_lean.loopVcSha256(fresh.collected.set, row.id);
+        if (!std.mem.eql(u8, &expected, &try obligation_to_lean.loopVcSha256(set, row.id))) return error.CallCustodyManifestMismatch;
+        for (set.queries) |query| if (query.loop_summary_id == row.id) {
+            if (!std.meta.eql(query.loop_vc_sha256, @as(?[32]u8, expected))) return error.CallCustodyLoopDigestMismatch;
+            const target = obligation.findById(fresh.collected.set.queries, query.discharges_query_id orelse query.id) orelse return error.CallCustodyLoopTargetMismatch;
+            if (!obligation.proofTargetIdentityEqual(query, target)) return error.CallCustodyLoopTargetMismatch;
+        };
+    }
+    return applyRows(allocator, set, rows, namespace, fresh.source, process_environ, stdout, .{ .call_custody = true });
 }
 
 fn applyRows(
@@ -48,8 +295,9 @@ fn applyRows(
     obligations_source: []const u8,
     process_environ: std.process.Environ,
     stdout: anytype,
-    quiet: bool,
+    options: ApplyRowsOptions,
 ) !ApplyResult {
+    if (set.function_summaries.len != 0 and !options.call_custody) return error.CallCustodyManifestMismatch;
     const io = std.Io.Threaded.global_single_threaded.io();
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
@@ -59,24 +307,50 @@ fn applyRows(
     var lean_queries: std.ArrayList(obligation.VerificationQuery) = .empty;
     var checker_rows: std.ArrayList(CheckedProofRow) = .empty;
     var certificate_rows: std.ArrayList(CertificateRow) = .empty;
+    var external_sources: std.ArrayList(ExternalProofSource) = .empty;
 
     const next_artifact_start = nextProofArtifactId(set);
     const next_query_start = nextQueryId(set);
 
     for (rows, 0..) |row, index| {
         try validateProofRowSyntax(row);
+        if (options.inline_proof_source == null) try validateExternalProofNamespace(row);
+        if (options.inline_proof_source != null and
+            (row.path != null or row.content_sha256 != null))
+        {
+            return error.InlineProofRowHasExternalArtifact;
+        }
         const target_query = obligation.findById(set.queries, row.query_id) orelse return error.UnknownProofQuery;
         try validateProofTarget(target_query);
         if (!obligation.equalIdSlices(target_query.obligation_ids, row.obligation_ids)) return error.ProofRowObligationMismatch;
         if (!obligation.equalIdSlices(target_query.assumption_ids, row.assumption_ids)) return error.ProofRowAssumptionMismatch;
 
-        const content_sha256 = try readAndCheckProofContentSha256(
-            arena_allocator,
-            allocator,
-            io,
-            row.path,
-            row.content_sha256,
-        );
+        const proof_content: ProofContent = if (options.inline_proof_source) |source|
+            .{ .sha256 = try sha256HexAlloc(arena_allocator, source) }
+        else
+            try readAndCheckProofContent(
+                arena_allocator,
+                allocator,
+                io,
+                row.path,
+                row.content_sha256,
+            );
+        if (row.inline_source) {
+            if (proof_content.source) |source| {
+                const path = row.path orelse return error.ProofRowSourceWithoutPath;
+                var already_present = false;
+                for (external_sources.items) |existing| {
+                    if (std.mem.eql(u8, existing.path, path)) {
+                        already_present = true;
+                        break;
+                    }
+                }
+                if (!already_present) try external_sources.append(arena_allocator, .{
+                    .path = try arena_allocator.dupe(u8, path),
+                    .source = source,
+                });
+            }
+        }
 
         const index_id = std.math.cast(obligation.Id, index) orelse return error.TooManyProofRows;
         const artifact_id = next_artifact_start + index_id;
@@ -112,6 +386,10 @@ fn applyRows(
             .proof_artifact_id = artifact_id,
             .discharges_query_id = row.query_id,
             .loop_summary_id = target_query.loop_summary_id,
+            .loop_edge_id = target_query.loop_edge_id,
+            .loop_vc_sha256 = target_query.loop_vc_sha256,
+            .function_summary_id = target_query.function_summary_id,
+            .function_vc_sha256 = target_query.function_vc_sha256,
             .result = .{ .status = .proved },
         });
         try checker_rows.append(arena_allocator, .{
@@ -128,8 +406,14 @@ fn applyRows(
                 .unsupported => false,
             },
             .loop_summary_id = target_query.loop_summary_id,
+            .call_function_id = target_query.function_summary_id,
+            .call_loop_id = if (target_query.loop_summary_id) |id| if (obligation_to_lean.loopUsesCallAdapter(set, obligation.findById(set.loop_summaries, id).?)) id else null else null,
             .target_smtlib_hash = target_query.smtlib_hash,
             .target_constraint_count = target_query.constraint_count,
+            // A path names user-authored source that is checked in the same
+            // transient module as the freshly emitted obligations. Installed
+            // user modules remain importable when no path is supplied.
+            .import_module = options.inline_proof_source == null and !row.inline_source,
         });
         try certificate_rows.append(arena_allocator, .{
             .target_query_id = row.query_id,
@@ -139,20 +423,48 @@ fn applyRows(
             .module_name = module_name,
             .theorem_name = theorem_name,
             .path = proof_path,
-            .content_sha256 = content_sha256,
+            .content_sha256 = proof_content.sha256,
+            .inline_source = row.inline_source,
             .target_smtlib_hash = target_query.smtlib_hash,
             .target_constraint_count = target_query.constraint_count,
             .loop_summary_id = target_query.loop_summary_id,
+            .loop_vc_sha256 = target_query.loop_vc_sha256,
+            .function_summary_id = target_query.function_summary_id,
+            .function_vc_sha256 = target_query.function_vc_sha256,
         });
     }
 
     if (checker_rows.items.len == 0) return error.EmptyProofRows;
-    const proof_check = try runLeanChecker(allocator, generated_namespace, obligations_source, checker_rows.items, process_environ, stdout, quiet, arena_allocator);
+    const checker_proof_source = if (options.inline_proof_source) |source|
+        source
+    else if (external_sources.items.len != 0)
+        try joinExternalProofSources(arena_allocator, external_sources.items)
+    else
+        null;
+    const proof_check = try runLeanChecker(
+        allocator,
+        generated_namespace,
+        obligations_source,
+        checker_rows.items,
+        checker_proof_source,
+        process_environ,
+        stdout,
+        options.quiet,
+        arena_allocator,
+    );
     if (proof_check.axiom_audits.len != certificate_rows.items.len) return error.LeanAxiomAuditMissing;
     for (certificate_rows.items, proof_check.axiom_audits) |*row, audit| {
         row.axioms = audit.axioms;
     }
-    const certificate_json = try buildCertificateJson(arena_allocator, generated_namespace, obligations_source, proof_check.source, proof_check.agreement_source, certificate_rows.items, process_environ);
+    const certificate_json = try buildCertificateJson(
+        arena_allocator,
+        generated_namespace,
+        obligations_source,
+        proof_check.canonical_source,
+        proof_check.canonical_agreement_source,
+        certificate_rows.items,
+        process_environ,
+    );
 
     var merged = set;
     merged.proof_artifacts = try concat(obligation.ProofArtifact, arena_allocator, set.proof_artifacts, artifacts.items);
@@ -162,15 +474,15 @@ fn applyRows(
         .arena = arena,
         .set = merged,
         .applied_count = checker_rows.items.len,
-        .proof_check_source = proof_check.source,
+        .proof_check_source = proof_check.checked_source,
         .certificate_json = certificate_json,
     };
 }
 
 fn validateProofTarget(target_query: obligation.VerificationQuery) !void {
     if (target_query.artifact_policy == .diagnostic_only) return error.ProofRowTargetNotEligible;
-    if (target_query.kind == .loop_induction) {
-        if (target_query.loop_summary_id == null) return error.ProofRowLoopSummaryMissing;
+    if (target_query.kind == .loop_induction or target_query.function_summary_id != null) {
+        if (target_query.loop_summary_id == null and target_query.function_summary_id == null) return error.ProofRowLoopSummaryMissing;
         if (target_query.obligation_ids.len != 0 or
             target_query.backend != .unspecified or
             target_query.result != null or
@@ -220,6 +532,30 @@ fn validateProofRowSyntax(row: ProofRow) !void {
     try validateLeanTheoremPath(row.theorem_name);
     if (row.content_sha256) |digest| try validateSha256Hex(digest);
     if (row.path == null and row.content_sha256 != null) return error.ProofRowDigestWithoutPath;
+    if (row.inline_source and row.path == null) return error.InlineProofSourceWithoutPath;
+}
+
+fn validateExternalProofNamespace(row: ProofRow) !void {
+    const compiler_owned_namespaces = [_][]const u8{
+        "Ora.AutoProofScratch",
+        "Ora.ProofCheckScratch",
+        "Ora.CompilerAutomaticProof",
+        "Ora.Generated",
+    };
+    for (compiler_owned_namespaces) |namespace| {
+        if (isNamespaceOrMember(row.module_name, namespace) or
+            isNamespaceOrMember(row.theorem_name, namespace))
+        {
+            return error.CompilerGeneratedProofNamespaceForbidden;
+        }
+    }
+}
+
+fn isNamespaceOrMember(path: []const u8, namespace: []const u8) bool {
+    if (std.mem.eql(u8, path, namespace)) return true;
+    return path.len > namespace.len and
+        std.mem.startsWith(u8, path, namespace) and
+        path[namespace.len] == '.';
 }
 
 const CheckedProofRow = struct {
@@ -233,13 +569,18 @@ const CheckedProofRow = struct {
     z3_proof_compatible: bool = false,
     zig_semantic_supported: bool = false,
     loop_summary_id: ?obligation.Id = null,
+    call_function_id: ?obligation.Id = null,
+    call_loop_id: ?obligation.Id = null,
+    lifecycle_target: bool = false,
     target_smtlib_hash: ?u64 = null,
     target_constraint_count: u32 = 0,
+    import_module: bool = true,
 };
 
 const LeanCheckResult = struct {
-    source: []const u8,
-    agreement_source: []const u8,
+    checked_source: []const u8,
+    canonical_source: []const u8,
+    canonical_agreement_source: []const u8,
     axiom_audits: []const AxiomAuditRow,
 };
 
@@ -257,10 +598,14 @@ const CertificateRow = struct {
     theorem_name: []const u8,
     path: ?[]const u8,
     content_sha256: ?[]const u8,
+    inline_source: bool = false,
     axioms: []const []const u8 = &.{},
     target_smtlib_hash: ?u64,
     target_constraint_count: u32,
     loop_summary_id: ?obligation.Id = null,
+    loop_vc_sha256: ?[32]u8 = null,
+    function_summary_id: ?obligation.Id = null,
+    function_vc_sha256: ?[32]u8 = null,
 };
 
 fn buildCertificateJson(
@@ -308,7 +653,7 @@ fn buildCertificateJsonWithLeanVersion(
 
     try writer.writeAll("{\n  \"schema_version\": ");
     try writer.print("{d}", .{obligation.proof_certificate_schema_version});
-    try writer.writeAll(",\n  \"status\": \"checked\",\n  \"checker\": \"lean\",\n  \"hash_algorithm\": \"sha256\",\n  \"lean_version\": ");
+    try writer.writeAll(",\n  \"status\": \"checked\",\n  \"checker\": \"lean\",\n  \"hash_algorithm\": \"sha256\",\n  \"checker_source_identity\": \"canonical_scratch_modules\",\n  \"lean_version\": ");
     try writeJsonString(writer, lean_version);
     try writer.writeAll(",\n  \"generated_namespace\": ");
     try writeJsonString(writer, generated_namespace);
@@ -345,6 +690,33 @@ fn buildCertificateJsonWithLeanVersion(
         } else {
             try writer.writeAll("null");
         }
+        try writer.writeAll(",\n      \"loop_vc_sha256\": ");
+        if (row.loop_vc_sha256) |digest| {
+            const digest_hex = std.fmt.bytesToHex(digest, .lower);
+            try writeJsonString(writer, &digest_hex);
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeAll(",\n      \"function_summary_id\": ");
+        if (row.function_summary_id) |id| try writer.print("{d}", .{id}) else try writer.writeAll("null");
+        try writer.writeAll(",\n      \"function_vc_sha256\": ");
+        if (row.function_vc_sha256) |digest| try writeJsonString(writer, &std.fmt.bytesToHex(digest, .lower)) else try writer.writeAll("null");
+        try writer.writeAll(",\n      \"authorization_claim\": ");
+        try writeJsonString(
+            writer,
+            if (row.function_summary_id != null)
+                "certified_call_installation"
+            else if (row.loop_summary_id != null)
+                "loop_induction_and_nonvacuity"
+            else
+                "query_proof",
+        );
+        try writer.writeAll(",\n      \"lean_status\": \"checked\"");
+        try writer.writeAll(",\n      \"anti_vacuity_status\": ");
+        try writeJsonString(
+            writer,
+            if (row.loop_summary_id != null) "proved" else "not_applicable",
+        );
         try writer.writeAll(",\n      \"module_name\": ");
         try writeJsonString(writer, row.module_name);
         try writer.writeAll(",\n      \"theorem_name\": ");
@@ -361,6 +733,8 @@ fn buildCertificateJsonWithLeanVersion(
         } else {
             try writer.writeAll("null");
         }
+        try writer.writeAll(",\n      \"inline_source\": ");
+        try writer.writeAll(if (row.inline_source) "true" else "false");
         try writer.writeAll(",\n      \"axioms\": ");
         try writeJsonStringArray(writer, row.axioms);
         try writer.writeAll("\n    }");
@@ -430,11 +804,46 @@ fn writeJsonString(writer: anytype, value: []const u8) !void {
     try writer.writeByte('"');
 }
 
+const CertificateBindingSources = struct {
+    proof_check: []const u8,
+    agreement: []const u8,
+};
+
+/// Scratch module names are randomized only to isolate concurrent Lean runs.
+/// Certificate identity rebuilds the same generated sources with fixed module
+/// aliases; the imported obligation, agreement, and proof contents are hashed
+/// independently in the certificate.
+fn buildCertificateBindingSources(
+    allocator: std.mem.Allocator,
+    generated_namespace: []const u8,
+    rows: []const CheckedProofRow,
+    inline_proof_source: ?[]const u8,
+) !CertificateBindingSources {
+    const agreement = try buildLeanAgreementSource(
+        allocator,
+        generated_namespace,
+        canonical_obligations_module,
+        rows,
+        .{},
+    );
+    errdefer allocator.free(agreement);
+    const proof_check = try buildLeanCheckerSourceWithInlineProofs(
+        allocator,
+        generated_namespace,
+        canonical_obligations_module,
+        canonical_agreement_module,
+        rows,
+        inline_proof_source,
+    );
+    return .{ .proof_check = proof_check, .agreement = agreement };
+}
+
 fn runLeanChecker(
     allocator: std.mem.Allocator,
     generated_namespace: []const u8,
     obligations_source: []const u8,
     rows: []const CheckedProofRow,
+    inline_proof_source: ?[]const u8,
     process_environ: std.process.Environ,
     stdout: anytype,
     quiet: bool,
@@ -449,10 +858,20 @@ fn runLeanChecker(
     defer allocator.free(scratch_segment);
 
     const io = std.Io.Threaded.global_single_threaded.io();
-    const scratch_rel = try std.fmt.allocPrint(allocator, "formal/Ora/ProofCheckScratch/{s}", .{scratch_segment});
+    try sweepProofCheckScratchRoot(allocator, std.Io.Dir.cwd(), io, proof_check_scratch_root);
+    defer std.Io.Dir.cwd().deleteDir(io, proof_check_scratch_root) catch {};
+
+    const scratch_rel = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ proof_check_scratch_root, scratch_segment });
     defer allocator.free(scratch_rel);
     try std.Io.Dir.cwd().createDirPath(io, scratch_rel);
     defer std.Io.Dir.cwd().deleteTree(io, scratch_rel) catch {};
+
+    const lease_rel = try std.fmt.allocPrint(allocator, "{s}/.lease", .{scratch_rel});
+    defer allocator.free(lease_rel);
+    var lease = try std.Io.Dir.cwd().createFile(io, lease_rel, .{ .truncate = false });
+    defer lease.close(io);
+    try lease.lock(io, .exclusive);
+    defer lease.unlock(io);
 
     const obligations_rel = try std.fmt.allocPrint(allocator, "{s}/Obligations.lean", .{scratch_rel});
     defer allocator.free(obligations_rel);
@@ -485,12 +904,26 @@ fn runLeanChecker(
     const agreement_source = try buildLeanAgreementSource(result_allocator, generated_namespace, obligations_module, rows, .{});
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = agreement_rel, .data = agreement_source });
 
-    const checker_source = try buildLeanCheckerSource(result_allocator, generated_namespace, obligations_module, agreement_module, rows);
+    const checker_source = try buildLeanCheckerSourceWithInlineProofs(
+        result_allocator,
+        generated_namespace,
+        obligations_module,
+        agreement_module,
+        rows,
+        inline_proof_source,
+    );
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = checker_rel, .data = checker_source });
+    const certificate_sources = try buildCertificateBindingSources(
+        result_allocator,
+        generated_namespace,
+        rows,
+        inline_proof_source,
+    );
 
     try runLeanCommand(allocator, &.{ "lake", "build", obligations_module }, process_environ, stdout, quiet);
     try runLeanCommand(allocator, &.{ "lake", "build", agreement_module }, process_environ, stdout, quiet);
     for (rows) |row| {
+        if (!row.import_module) continue;
         try runLeanCommand(allocator, &.{ "lake", "build", row.module_name }, process_environ, stdout, quiet);
     }
     const checker_output = try runLeanCommandCapture(allocator, &.{ "lake", "env", "lean", checker_path }, process_environ, stdout, quiet);
@@ -498,10 +931,44 @@ fn runLeanChecker(
     defer allocator.free(checker_output.stderr);
 
     return .{
-        .source = checker_source,
-        .agreement_source = agreement_source,
+        .checked_source = checker_source,
+        .canonical_source = certificate_sources.proof_check,
+        .canonical_agreement_source = certificate_sources.agreement,
         .axiom_audits = try parseLeanAxiomAuditOutput(result_allocator, checker_output.stdout, rows),
     };
+}
+
+fn sweepProofCheckScratchRoot(
+    allocator: std.mem.Allocator,
+    dir: std.Io.Dir,
+    io: std.Io,
+    root: []const u8,
+) !void {
+    try dir.createDirPath(io, root);
+    var scratch = try dir.openDir(io, root, .{ .iterate = true });
+    defer scratch.close(io);
+
+    var entries = scratch.iterate();
+    while (try entries.next(io)) |entry| {
+        if (entry.kind != .directory or !std.mem.startsWith(u8, entry.name, "Run_")) continue;
+
+        const lease_path = try std.fmt.allocPrint(allocator, "{s}/.lease", .{entry.name});
+        defer allocator.free(lease_path);
+        var lease = scratch.openFile(io, lease_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                try scratch.deleteTree(io, entry.name);
+                continue;
+            },
+            else => return err,
+        };
+        if (!try lease.tryLock(io, .exclusive)) {
+            lease.close(io);
+            continue;
+        }
+        lease.unlock(io);
+        lease.close(io);
+        try scratch.deleteTree(io, entry.name);
+    }
 }
 
 const AgreementSourceOptions = struct {
@@ -660,6 +1127,24 @@ fn buildLeanCheckerSource(
     agreement_module: []const u8,
     rows: []const CheckedProofRow,
 ) ![]const u8 {
+    return buildLeanCheckerSourceWithInlineProofs(
+        allocator,
+        generated_namespace,
+        obligations_module,
+        agreement_module,
+        rows,
+        null,
+    );
+}
+
+fn buildLeanCheckerSourceWithInlineProofs(
+    allocator: std.mem.Allocator,
+    generated_namespace: []const u8,
+    obligations_module: []const u8,
+    agreement_module: []const u8,
+    rows: []const CheckedProofRow,
+    inline_proof_source: ?[]const u8,
+) ![]const u8 {
     var checker = std.Io.Writer.Allocating.init(allocator);
     defer checker.deinit();
     const writer = &checker.writer;
@@ -671,18 +1156,49 @@ fn buildLeanCheckerSource(
         \\
         \\import Lean
         \\import Lean.Util.CollectAxioms
+        \\import Std.Tactic.BVDecide
+        \\import Ora.Loop.Auto
         \\
     );
     try writer.print("import {s}\n", .{obligations_module});
     try writer.print("import {s}\n", .{agreement_module});
     for (rows) |row| {
+        if (!row.import_module) continue;
         try writer.print("import {s}\n", .{row.module_name});
     }
     try writer.writeByte('\n');
+    if (inline_proof_source) |source| {
+        try writer.writeAll(source);
+        if (source[source.len - 1] != '\n') try writer.writeByte('\n');
+        try writer.writeByte('\n');
+    }
     try writeLeanAxiomAuditPrelude(writer);
     try writer.writeByte('\n');
-    for (rows, 0..) |row, index| {
+    try writer.writeAll("section\n");
+    var has_loop_row = false;
+    for (rows) |row| {
         if (row.loop_summary_id != null) {
+            has_loop_row = true;
+            break;
+        }
+    }
+    if (has_loop_row) {
+        try writer.print(
+            "attribute [local irreducible] {s}.emittedManifest\n\n",
+            .{generated_namespace},
+        );
+    }
+    for (rows, 0..) |row, index| {
+        if (row.lifecycle_target) {
+            try writer.print("theorem check_query_{d}_{d} : {s}.emittedLifecycle := by\n  exact {s}\n\n", .{ row.query_id, index, generated_namespace, row.theorem_name });
+        } else if (row.call_function_id) |function_id| {
+            try writer.print(
+                "theorem check_query_{d}_{d} : {s}.emittedCallCustody_{d} := by\n  exact {s}\n\n",
+                .{ row.query_id, index, generated_namespace, function_id, row.theorem_name },
+            );
+        } else if (row.call_loop_id) |loop_id| {
+            try writer.print("theorem check_query_{d}_{d} : {s}.emittedCallLoop_{d} := by\n  exact {s}\n\n", .{ row.query_id, index, generated_namespace, loop_id, row.theorem_name });
+        } else if (row.loop_summary_id != null) {
             try writer.print(
                 \\theorem check_query_{d}_{d} :
                 \\    {s}.emittedVerifiedQuery_{d} := by
@@ -704,7 +1220,7 @@ fn buildLeanCheckerSource(
     for (rows, 0..) |row, index| {
         try writer.print("  check_query_{d}_{d}\n", .{ row.query_id, index });
     }
-    try writer.writeAll("]\n");
+    try writer.writeAll("]\n\nend\n");
     return try allocator.dupe(u8, checker.written());
 }
 
@@ -787,15 +1303,150 @@ fn runLeanCommandCapture(allocator: std.mem.Allocator, argv: []const []const u8,
         },
         else => {},
     }
+    const failure = classifyLeanCommandFailure(result.term, result.stdout, result.stderr);
     if (!quiet) {
-        try stdout.writeAll("Lean proof row rejected.\n");
+        try stdout.print("Lean proof row rejected: {s}.\n", .{leanProofFailureReason(failure).?});
         if (result.stdout.len != 0) try stdout.print("{s}\n", .{result.stdout});
         if (result.stderr.len != 0) try stdout.print("{s}\n", .{result.stderr});
         try stdout.flush();
     }
     allocator.free(result.stdout);
     allocator.free(result.stderr);
+    return failure;
+}
+
+fn classifyLeanCommandFailure(
+    term: std.process.Child.Term,
+    command_stdout: []const u8,
+    command_stderr: []const u8,
+) LeanProofFailure {
+    const exit_code = switch (term) {
+        .exited => |code| code,
+        .signal, .stopped, .unknown => return error.LeanProofAbnormalTermination,
+    };
+    if (exit_code == 126 or exit_code == 127) return error.LeanToolUnavailable;
+
+    if (containsLeanFailureText(command_stdout, command_stderr, "maximum heartbeats exceeded") or
+        containsLeanFailureText(command_stdout, command_stderr, "deterministic timeout"))
+    {
+        return error.LeanProofTimeout;
+    }
+    if (containsLeanFailureText(command_stdout, command_stderr, "unsolved goals")) {
+        return error.LeanProofUnsolvedGoals;
+    }
+    if (containsLeanFailureText(command_stdout, command_stderr, "unexpected token") or
+        containsLeanFailureText(command_stdout, command_stderr, "unexpected end of input") or
+        containsLeanFailureText(command_stdout, command_stderr, "invalid 'end'") or
+        containsLeanFailureText(command_stdout, command_stderr, "parser error"))
+    {
+        return error.LeanProofParseError;
+    }
     return error.LeanProofCheckFailed;
+}
+
+fn containsLeanFailureText(
+    command_stdout: []const u8,
+    command_stderr: []const u8,
+    needle: []const u8,
+) bool {
+    return std.mem.indexOf(u8, command_stdout, needle) != null or
+        std.mem.indexOf(u8, command_stderr, needle) != null;
+}
+
+test "Lean command failures have stable named classifications" {
+    const testing = std.testing;
+
+    try testing.expectEqual(
+        error.LeanProofParseError,
+        classifyLeanCommandFailure(.{ .exited = 1 }, "", "error: unexpected token '('"),
+    );
+    try testing.expectEqual(
+        error.LeanProofUnsolvedGoals,
+        classifyLeanCommandFailure(.{ .exited = 1 }, "error: unsolved goals", ""),
+    );
+    try testing.expectEqual(
+        error.LeanProofTimeout,
+        classifyLeanCommandFailure(.{ .exited = 1 }, "", "maximum heartbeats exceeded"),
+    );
+    try testing.expectEqual(
+        error.LeanToolUnavailable,
+        classifyLeanCommandFailure(.{ .exited = 127 }, "", "env: lake: No such file or directory"),
+    );
+    try testing.expectEqual(
+        error.LeanProofAbnormalTermination,
+        classifyLeanCommandFailure(.{ .unknown = 9 }, "", ""),
+    );
+    try testing.expectEqual(
+        error.LeanProofCheckFailed,
+        classifyLeanCommandFailure(.{ .exited = 1 }, "", "proof rejected for another reason"),
+    );
+
+    try testing.expectEqualStrings(
+        "lean_tactic_parse_error",
+        leanProofFailureReason(error.LeanProofParseError).?,
+    );
+    try testing.expect(leanProofFailureReason(error.OutOfMemory) == null);
+}
+
+test "Lean checker reports parse unsolved and unavailable failures by name" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const process_environ = try leanTestProcessEnviron(allocator);
+    defer process_environ.block.deinit(allocator);
+
+    const scratch_dir = "formal/Ora/ProofCheckScratch/NamedFailureFixture";
+    try std.Io.Dir.cwd().createDirPath(io, scratch_dir);
+    defer std.Io.Dir.cwd().deleteTree(io, scratch_dir) catch {};
+
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = scratch_dir ++ "/Parse.lean",
+        .data =
+        \\namespace Ora.ProofCheckScratch.NamedFailureFixture
+        \\
+        \\theorem malformed : True := by
+        \\  exact (
+        \\
+        \\end Ora.ProofCheckScratch.NamedFailureFixture
+        \\
+        ,
+    });
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = scratch_dir ++ "/Unsolved.lean",
+        .data =
+        \\namespace Ora.ProofCheckScratch.NamedFailureFixture
+        \\
+        \\theorem unfinished : True ∧ True := by
+        \\  constructor
+        \\  · trivial
+        \\
+        \\end Ora.ProofCheckScratch.NamedFailureFixture
+        \\
+        ,
+    });
+
+    var output = std.Io.Writer.Allocating.init(allocator);
+    defer output.deinit();
+    try std.testing.expectError(error.LeanProofParseError, runLeanCommand(
+        allocator,
+        &.{ "lake", "env", "lean", "Ora/ProofCheckScratch/NamedFailureFixture/Parse.lean" },
+        process_environ,
+        &output.writer,
+        true,
+    ));
+    try std.testing.expectError(error.LeanProofUnsolvedGoals, runLeanCommand(
+        allocator,
+        &.{ "lake", "env", "lean", "Ora/ProofCheckScratch/NamedFailureFixture/Unsolved.lean" },
+        process_environ,
+        &output.writer,
+        true,
+    ));
+    try std.testing.expectError(error.LeanToolUnavailable, runLeanCommand(
+        allocator,
+        &.{"ora-intentionally-missing-lean-tool"},
+        process_environ,
+        &output.writer,
+        true,
+    ));
 }
 
 fn parseLeanAxiomAuditOutput(
@@ -871,17 +1522,27 @@ fn namespaceSuffix(namespace: []const u8) ![]const u8 {
     return suffix;
 }
 
-fn readAndCheckProofContentSha256(
+const ProofContent = struct {
+    sha256: ?[]const u8 = null,
+    source: ?[]const u8 = null,
+};
+
+const ExternalProofSource = struct {
+    path: []const u8,
+    source: []const u8,
+};
+
+fn readAndCheckProofContent(
     result_allocator: std.mem.Allocator,
     scratch_allocator: std.mem.Allocator,
     io: std.Io,
     path: ?[]const u8,
     expected_sha256: ?[]const u8,
-) !?[]const u8 {
+) !ProofContent {
     if (expected_sha256) |digest| try validateSha256Hex(digest);
     const proof_path = path orelse {
         if (expected_sha256 != null) return error.ProofRowDigestWithoutPath;
-        return null;
+        return .{};
     };
     const content = try std.Io.Dir.cwd().readFileAlloc(
         io,
@@ -897,7 +1558,26 @@ fn readAndCheckProofContentSha256(
             return error.ProofRowDigestMismatch;
         }
     }
-    return actual;
+    return .{
+        .sha256 = actual,
+        .source = try result_allocator.dupe(u8, content),
+    };
+}
+
+fn joinExternalProofSources(
+    allocator: std.mem.Allocator,
+    sources: []const ExternalProofSource,
+) ![]const u8 {
+    var out = std.Io.Writer.Allocating.init(allocator);
+    errdefer out.deinit();
+    for (sources, 0..) |source, index| {
+        if (index != 0) try out.writer.writeByte('\n');
+        try out.writer.writeAll(source.source);
+        if (source.source.len == 0 or source.source[source.source.len - 1] != '\n') {
+            try out.writer.writeByte('\n');
+        }
+    }
+    return try out.toOwnedSlice();
 }
 
 fn proofCheckScratchSegment(
@@ -917,6 +1597,42 @@ fn proofCheckScratchSegment(
     const nonce = random_source.interface().int(u64);
 
     return try std.fmt.allocPrint(allocator, "Run_{s}_{x}", .{ digest_hex[0..16], nonce });
+}
+
+test "proof checker startup removes abandoned runs and preserves active leases" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const root = "ProofCheckScratch";
+    try tmp.dir.createDirPath(std.testing.io, root ++ "/Run_abandoned");
+    try tmp.dir.createDirPath(std.testing.io, root ++ "/Run_active");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = root ++ "/Run_abandoned/Checker.lean",
+        .data = "stale",
+    });
+    var active_lease = try tmp.dir.createFile(
+        std.testing.io,
+        root ++ "/Run_active/.lease",
+        .{ .truncate = false },
+    );
+    try active_lease.lock(std.testing.io, .exclusive);
+
+    try sweepProofCheckScratchRoot(std.testing.allocator, tmp.dir, std.testing.io, root);
+
+    try tmp.dir.access(std.testing.io, root, .{});
+    try tmp.dir.access(std.testing.io, root ++ "/Run_active/.lease", .{});
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.access(std.testing.io, root ++ "/Run_abandoned/Checker.lean", .{}),
+    );
+
+    active_lease.unlock(std.testing.io);
+    active_lease.close(std.testing.io);
+    try sweepProofCheckScratchRoot(std.testing.allocator, tmp.dir, std.testing.io, root);
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.access(std.testing.io, root ++ "/Run_active/.lease", .{}),
+    );
 }
 
 fn sha256HexAlloc(allocator: std.mem.Allocator, data: []const u8) ![]const u8 {
@@ -1021,6 +1737,13 @@ test "Lean proof row syntax accepts only strict dotted identifiers" {
         .module_name = "Ora.Proofs.Transfer\nimport Bad",
         .theorem_name = "preserves_supply",
     }));
+    try std.testing.expectError(error.InlineProofSourceWithoutPath, validateProofRowSyntax(.{
+        .query_id = 1,
+        .obligation_ids = &.{1},
+        .module_name = "Ora.Proofs.Transfer",
+        .theorem_name = "Ora.Proofs.Transfer.preserves_supply",
+        .inline_source = true,
+    }));
     try std.testing.expectError(error.InvalidLeanTheoremName, validateProofRowSyntax(.{
         .query_id = 1,
         .obligation_ids = &.{1},
@@ -1033,6 +1756,42 @@ test "Lean proof row syntax accepts only strict dotted identifiers" {
         .module_name = "Ora.import.Transfer",
         .theorem_name = "preserves_supply",
     }));
+}
+
+test "external proof rows cannot name compiler-generated proof namespaces" {
+    const forbidden = [_][]const u8{
+        "Ora.AutoProofScratch.Generated",
+        "Ora.ProofCheckScratch.Run_1",
+        "Ora.CompilerAutomaticProof.Query_7",
+        "Ora.Generated.Obligations.Source_fixture",
+    };
+    for (forbidden) |namespace| {
+        try std.testing.expectError(
+            error.CompilerGeneratedProofNamespaceForbidden,
+            validateExternalProofNamespace(.{
+                .query_id = 7,
+                .obligation_ids = &.{},
+                .module_name = namespace,
+                .theorem_name = "Ora.UserProofs.Fixture.discharge",
+            }),
+        );
+        try std.testing.expectError(
+            error.CompilerGeneratedProofNamespaceForbidden,
+            validateExternalProofNamespace(.{
+                .query_id = 7,
+                .obligation_ids = &.{},
+                .module_name = "Ora.UserProofs.Fixture",
+                .theorem_name = namespace,
+            }),
+        );
+    }
+
+    try validateExternalProofNamespace(.{
+        .query_id = 7,
+        .obligation_ids = &.{},
+        .module_name = "Ora.UserProofs.GeneratedFixture",
+        .theorem_name = "Ora.UserProofs.GeneratedFixture.discharge",
+    });
 }
 
 test "mandatory loop induction target is independent of Z3 agreement rows" {
@@ -1090,24 +1849,26 @@ test "proof content digest check reads path and rejects mismatch" {
 
     const expected = try sha256HexAlloc(allocator, source);
     defer allocator.free(expected);
-    const actual = try readAndCheckProofContentSha256(
+    const content = try readAndCheckProofContent(
         allocator,
         allocator,
         std.testing.io,
         path,
         expected,
-    ) orelse return error.ExpectedDigest;
-    defer allocator.free(actual);
-    try std.testing.expectEqualStrings(expected, actual);
+    );
+    defer allocator.free(content.sha256.?);
+    defer allocator.free(content.source.?);
+    try std.testing.expectEqualStrings(expected, content.sha256.?);
+    try std.testing.expectEqualStrings(source, content.source.?);
 
-    try std.testing.expectError(error.ProofRowDigestMismatch, readAndCheckProofContentSha256(
+    try std.testing.expectError(error.ProofRowDigestMismatch, readAndCheckProofContent(
         allocator,
         allocator,
         std.testing.io,
         path,
         "0000000000000000000000000000000000000000000000000000000000000000",
     ));
-    try std.testing.expectError(error.ProofRowDigestWithoutPath, readAndCheckProofContentSha256(
+    try std.testing.expectError(error.ProofRowDigestWithoutPath, readAndCheckProofContent(
         allocator,
         allocator,
         std.testing.io,
@@ -1146,16 +1907,21 @@ test "proof certificate JSON exposes stable schema fields" {
     );
     defer allocator.free(certificate);
 
-    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"schema_version\": 2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"schema_version\": 3") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"version\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"hash_algorithm\": \"sha256\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"checker_source_identity\": \"canonical_scratch_modules\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"lean_version\": \"Lean test version\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"agreement_check_sha256\": ") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"proof_count\": 1") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"target_query_id\": 11") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"lean_query_id\": 12") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"loop_summary_id\": 4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"authorization_claim\": \"loop_induction_and_nonvacuity\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"lean_status\": \"checked\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"anti_vacuity_status\": \"proved\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"content_sha256\": \"0000000000000000000000000000000000000000000000000000000000000000\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, certificate, "\"inline_source\": false") != null);
     try std.testing.expect(std.mem.indexOf(u8, certificate, "\"axioms\": [\"propext\", \"Quot.sound\"]") != null);
 }
 
@@ -1181,6 +1947,140 @@ test "Lean checker source audits proof-row theorem axiom dependencies" {
     try std.testing.expect(std.mem.indexOf(u8, checker, "ORA_AXIOM_AUDIT\\t{decl}\\t{formatAxioms normalized}") != null);
     try std.testing.expect(std.mem.indexOf(u8, checker, "theorem check_query_17_0") != null);
     try std.testing.expect(std.mem.indexOf(u8, checker, "#ora_audit_axioms [\n  check_query_17_0\n]") != null);
+}
+
+test "automatic proof terms are checked inline without importing a generated proof artifact" {
+    const allocator = std.testing.allocator;
+    const rows = [_]CheckedProofRow{.{
+        .query_id = 17,
+        .module_name = "Ora.CompilerAutomaticProof",
+        .theorem_name = "Ora.CompilerAutomaticProof.Query_17.discharge_q17",
+        .import_module = false,
+    }};
+    const inline_source =
+        \\namespace Ora.CompilerAutomaticProof.Query_17
+        \\
+        \\theorem discharge_q17 : True := by trivial
+        \\
+        \\end Ora.CompilerAutomaticProof.Query_17
+        \\
+    ;
+
+    const checker = try buildLeanCheckerSourceWithInlineProofs(
+        allocator,
+        "Ora.Generated.Obligations.Transfer",
+        "Ora.ProofCheckScratch.Run_test.Obligations",
+        "Ora.ProofCheckScratch.Run_test.Agreement",
+        &rows,
+        inline_source,
+    );
+    defer allocator.free(checker);
+
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        checker,
+        "import Ora.CompilerAutomaticProof",
+    ) == null);
+    try std.testing.expect(std.mem.indexOf(u8, checker, inline_source) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        checker,
+        "exact Ora.CompilerAutomaticProof.Query_17.discharge_q17",
+    ) != null);
+}
+
+test "manifest path source is checked beside transient obligations without a module import" {
+    const allocator = std.testing.allocator;
+    const process_environ = try leanTestProcessEnviron(allocator);
+    defer process_environ.block.deinit(allocator);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const proof_source =
+        \\namespace Ora.UserProofs.PathFixture
+        \\
+        \\theorem discharge :
+        \\    Ora.Generated.Obligations.PathFixture.emittedQuery_2 := by
+        \\  trivial
+        \\
+        \\end Ora.UserProofs.PathFixture
+        \\
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "PathFixture.lean", .data = proof_source });
+    const proof_path = try std.fmt.allocPrint(
+        allocator,
+        ".zig-cache/tmp/{s}/PathFixture.lean",
+        .{tmp.sub_path},
+    );
+    defer allocator.free(proof_path);
+    const proof_sha256 = try sha256HexAlloc(allocator, proof_source);
+    defer allocator.free(proof_sha256);
+
+    const terms = [_]obligation.Term{.{ .bool_lit = true }};
+    const obligation_ids = [_]obligation.Id{1};
+    const obligations = [_]obligation.Obligation{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "pathFixture" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .kind = .{ .logical = .{ .role = .ensures, .formula = .{ .term = 0 } } },
+        .required_backend = .lean,
+    }};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "pathFixture" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .backend = .lean,
+        .kind = .obligation,
+        .logical_role = .ensures,
+        .obligation_ids = &obligation_ids,
+    }};
+    const set: obligation.ObligationSet = .{
+        .terms = &terms,
+        .obligations = &obligations,
+        .queries = &queries,
+    };
+    const rows = [_]ProofRow{.{
+        .query_id = 2,
+        .obligation_ids = &obligation_ids,
+        .module_name = "Ora.UserProofs.PathFixture",
+        .theorem_name = "Ora.UserProofs.PathFixture.discharge",
+        .path = proof_path,
+        .content_sha256 = proof_sha256,
+        .inline_source = true,
+    }};
+    const obligations_source =
+        \\namespace Ora.Generated.Obligations.PathFixture
+        \\
+        \\def emittedQuery_2 : Prop := True
+        \\
+        \\end Ora.Generated.Obligations.PathFixture
+        \\
+    ;
+    var stdout = std.Io.Writer.Allocating.init(allocator);
+    defer stdout.deinit();
+    var applied = (try applyProofRows(
+        allocator,
+        set,
+        &rows,
+        "Ora.Generated.Obligations.PathFixture",
+        obligations_source,
+        process_environ,
+        &stdout.writer,
+    )) orelse return error.ExpectedProofResult;
+    defer applied.deinit();
+
+    try std.testing.expect(std.mem.indexOf(u8, applied.proof_check_source, proof_source) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        applied.proof_check_source,
+        "import Ora.UserProofs.PathFixture",
+    ) == null);
+    try std.testing.expect(std.mem.indexOf(u8, applied.certificate_json, proof_sha256) != null);
+    try std.testing.expect(std.mem.indexOf(u8, applied.certificate_json, "\"axioms\": []") != null);
 }
 
 test "loop checker audits the kernel-derived verified theorem" {
@@ -1212,6 +2112,70 @@ test "loop checker audits the kernel-derived verified theorem" {
         1,
         "Ora.Generated.Obligations.Count.emittedQuery_17_sound Ora.Proofs.Count.induction",
     ));
+}
+
+test "certificate checker identity excludes randomized scratch module names" {
+    const allocator = std.testing.allocator;
+    const rows = [_]CheckedProofRow{.{
+        .query_id = 17,
+        .module_name = "Ora.Proofs.Count",
+        .theorem_name = "Ora.Proofs.Count.induction",
+        .loop_summary_id = 4,
+    }};
+    const first_checked = try buildLeanCheckerSource(
+        allocator,
+        "Ora.Generated.Obligations.Count",
+        "Ora.ProofCheckScratch.Run_first.Obligations",
+        "Ora.ProofCheckScratch.Run_first.Agreement",
+        &rows,
+    );
+    defer allocator.free(first_checked);
+    const second_checked = try buildLeanCheckerSource(
+        allocator,
+        "Ora.Generated.Obligations.Count",
+        "Ora.ProofCheckScratch.Run_second.Obligations",
+        "Ora.ProofCheckScratch.Run_second.Agreement",
+        &rows,
+    );
+    defer allocator.free(second_checked);
+    try std.testing.expect(!std.mem.eql(u8, first_checked, second_checked));
+
+    const first = try buildCertificateBindingSources(
+        allocator,
+        "Ora.Generated.Obligations.Count",
+        &rows,
+        null,
+    );
+    defer allocator.free(first.proof_check);
+    defer allocator.free(first.agreement);
+    const second = try buildCertificateBindingSources(
+        allocator,
+        "Ora.Generated.Obligations.Count",
+        &rows,
+        null,
+    );
+    defer allocator.free(second.proof_check);
+    defer allocator.free(second.agreement);
+    try std.testing.expectEqualStrings(first.proof_check, second.proof_check);
+    try std.testing.expectEqualStrings(first.agreement, second.agreement);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        first.proof_check,
+        canonical_obligations_module,
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, first.proof_check, "Run_first") == null);
+
+    var changed_rows = rows;
+    changed_rows[0].theorem_name = "Ora.Proofs.Count.changed_induction";
+    const changed = try buildCertificateBindingSources(
+        allocator,
+        "Ora.Generated.Obligations.Count",
+        &changed_rows,
+        null,
+    );
+    defer allocator.free(changed.proof_check);
+    defer allocator.free(changed.agreement);
+    try std.testing.expect(!std.mem.eql(u8, first.proof_check, changed.proof_check));
 }
 
 test "agreement checker rejects empty rows for accepted proof targets" {
@@ -1686,7 +2650,7 @@ fn expectLeanFixtureProof(
             obligations_source,
             process_environ,
             &stdout.writer,
-            false,
+            .{},
         ) catch |err| {
             std.debug.print("proof-check fixture stdout:\n{s}\n", .{stdout.written()});
             return err;
@@ -1704,7 +2668,7 @@ fn expectLeanFixtureProof(
         obligations_source,
         process_environ,
         &stdout.writer,
-        false,
+        .{},
     ));
     if (expected_diagnostic) |needle| {
         try std.testing.expect(std.mem.indexOf(u8, stdout.written(), needle) != null);

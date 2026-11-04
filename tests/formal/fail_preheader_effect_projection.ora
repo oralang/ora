@@ -1,0 +1,14 @@
+contract FailPreheaderEffectProjection {
+    storage var observed: map<u256, u256>;
+    tstore var scratch: u256;
+
+    pub fn run(observed_key: u256, value: u256) {
+        scratch = value;
+        var current: u256 = 0;
+        while (current < 1)
+            invariant observed[observed_key] == old(observed[observed_key])
+        {
+            current = current +% 1;
+        }
+    }
+}

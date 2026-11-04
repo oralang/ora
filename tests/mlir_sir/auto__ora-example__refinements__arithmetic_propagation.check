@@ -2,7 +2,7 @@
 // INPUT: ora-example/refinements/arithmetic_propagation.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module {
-// CHECK-NEXT:   func.func @test_min_value_addition(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":7:36)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:0"], ora.param_compiler_type_ids = [6 : i256], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xb63bdfb8", ora.source_module_path = "{{.*}}/ora-example/refinements/arithmetic_propagation.ora", ora.source_owner_key = "module/contract:RefinementArithmetic/function:test_min_value_addition", ora.source_owner_start = 241 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @test_min_value_addition(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":7:36)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:0"], ora.param_compiler_type_ids = [6 : i256], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.return_compiler_type_id = 6 : i256, ora.selector = "0xb63bdfb8", ora.source_module_path = "{{.*}}/ora-example/refinements/arithmetic_propagation.ora", ora.source_owner_key = "module/contract:RefinementArithmetic/function:test_min_value_addition", ora.source_owner_start = 241 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
@@ -18,7 +18,7 @@
 // CHECK-NEXT:     %9 = sir.bitcast %8 : !sir.u256 : i1 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)
 // CHECK-NEXT:     %10 = sir.bitcast %9 : i1 : !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":7:36)
 // CHECK-NEXT:     sir.cond_br %10 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":7:36)
-// CHECK-NEXT:   ^bb1:  // 3 preds: ^bb0, ^bb2, ^bb3
+// CHECK-NEXT:   ^bb1:  // 4 preds: ^bb0, ^bb2, ^bb3, ^bb6
 // CHECK-NEXT:     %11 = sir.bitcast %3 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":7:36)
 // CHECK-NEXT:     sir.revert %11 : !sir.ptr<1>, %3 : !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":7:36)
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
@@ -53,11 +53,19 @@
 // CHECK-NEXT:     sir.store %33 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":14:19)))
 // CHECK-NEXT:     sir.revert %33 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":14:19)))
 // CHECK-NEXT:   ^bb6:  // pred: ^bb4
-// CHECK-NEXT:     %34 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":15:9)))
-// CHECK-NEXT:     sir.store %34 : !sir.ptr<1>, %26 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":15:9)))
-// CHECK-NEXT:     sir.return %34 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":15:9)))
+// CHECK-NEXT:     %34 = sir.gt %26 : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %35 = sir.eq %26 : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %36 = sir.or %34 : !sir.u256, %35 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %37 = sir.and %36 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %38 = sir.bitcast %37 : !sir.u256 : i1 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %39 = sir.bitcast %38 : i1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":15:16)))
+// CHECK-NEXT:     sir.cond_br %39 : !sir.u256, ^bb7, ^bb1 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":15:16)))
+// CHECK-NEXT:   ^bb7:  // pred: ^bb6
+// CHECK-NEXT:     %40 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":15:9)))
+// CHECK-NEXT:     sir.store %40 : !sir.ptr<1>, %26 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":15:9)))
+// CHECK-NEXT:     sir.return %40 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":15:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":7:5)
-// CHECK-NEXT:   func.func @test_min_value_same_type(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":18:37), %arg1: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":18:61)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:100", "min:u:0:0:0:50"], ora.abi_params = ["uint256", "uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:3", "file:11:pattern:4"], ora.param_compiler_type_ids = [6 : i256, 6 : i256], ora.param_names = ["x", "y"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x8551bba2", ora.source_module_path = "{{.*}}/ora-example/refinements/arithmetic_propagation.ora", ora.source_owner_key = "module/contract:RefinementArithmetic/function:test_min_value_same_type", ora.source_owner_start = 678 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @test_min_value_same_type(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":18:37), %arg1: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":18:61)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:100", "min:u:0:0:0:50"], ora.abi_params = ["uint256", "uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:3", "file:11:pattern:4"], ora.param_compiler_type_ids = [6 : i256, 6 : i256], ora.param_names = ["x", "y"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.return_compiler_type_id = 6 : i256, ora.selector = "0x8551bba2", ora.source_module_path = "{{.*}}/ora-example/refinements/arithmetic_propagation.ora", ora.source_owner_key = "module/contract:RefinementArithmetic/function:test_min_value_same_type", ora.source_owner_start = 678 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 6988570666312495752839002421695666563898142680323167511053911032881624383488 : !sir.u256 loc(unknown)
@@ -67,6 +75,7 @@
 // CHECK-NEXT:     %c50 = sir.const 50 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %5 = sir.const 115792089237316195423570985008687907853269984665640564039457584007913129639935 : !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":21:23)
 // CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %c150 = sir.const 150 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
 // CHECK-NEXT:     %6 = sir.gt %arg0 : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)
 // CHECK-NEXT:     %7 = sir.eq %arg0 : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)
 // CHECK-NEXT:     %8 = sir.or %6 : !sir.u256, %7 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)
@@ -74,7 +83,7 @@
 // CHECK-NEXT:     %10 = sir.bitcast %9 : !sir.u256 : i1 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)
 // CHECK-NEXT:     %11 = sir.bitcast %10 : i1 : !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":18:37)
 // CHECK-NEXT:     sir.cond_br %11 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":18:37)
-// CHECK-NEXT:   ^bb1:  // 5 preds: ^bb0, ^bb2, ^bb3, ^bb4, ^bb7
+// CHECK-NEXT:   ^bb1:  // 6 preds: ^bb0, ^bb2, ^bb3, ^bb4, ^bb7, ^bb10
 // CHECK-NEXT:     %12 = sir.bitcast %4 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":18:37)
 // CHECK-NEXT:     sir.revert %12 : !sir.ptr<1>, %4 : !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":18:37)
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
@@ -139,11 +148,19 @@
 // CHECK-NEXT:     sir.store %55 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":24:16)))
 // CHECK-NEXT:     sir.revert %55 : !sir.ptr<1>, %3 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":24:16)))
 // CHECK-NEXT:   ^bb10:  // pred: ^bb8
-// CHECK-NEXT:     %56 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":24:9)))
-// CHECK-NEXT:     sir.store %56 : !sir.ptr<1>, %48 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":24:9)))
-// CHECK-NEXT:     sir.return %56 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":24:9)))
+// CHECK-NEXT:     %56 = sir.gt %48 : !sir.u256, %c150 : !sir.u256 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %57 = sir.eq %48 : !sir.u256, %c150 : !sir.u256 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %58 = sir.or %56 : !sir.u256, %57 : !sir.u256 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %59 = sir.and %58 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %60 = sir.bitcast %59 : !sir.u256 : i1 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %61 = sir.bitcast %60 : i1 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":24:16)))
+// CHECK-NEXT:     sir.cond_br %61 : !sir.u256, ^bb11, ^bb1 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":24:16)))
+// CHECK-NEXT:   ^bb11:  // pred: ^bb10
+// CHECK-NEXT:     %62 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":24:9)))
+// CHECK-NEXT:     sir.store %62 : !sir.ptr<1>, %48 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":24:9)))
+// CHECK-NEXT:     sir.return %62 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":24:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":18:5)
-// CHECK-NEXT:   func.func @test_max_value_subtraction(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":28:39)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["max:u:0:0:0:1000"], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:5"], ora.param_compiler_type_ids = [6 : i256], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x2840c945", ora.source_module_path = "{{.*}}/ora-example/refinements/arithmetic_propagation.ora", ora.source_owner_key = "module/contract:RefinementArithmetic/function:test_max_value_subtraction", ora.source_owner_start = 1029 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @test_max_value_subtraction(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":28:39)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["max:u:0:0:0:1000"], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:5"], ora.param_compiler_type_ids = [6 : i256], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.return_compiler_type_id = 6 : i256, ora.selector = "0x2840c945", ora.source_module_path = "{{.*}}/ora-example/refinements/arithmetic_propagation.ora", ora.source_owner_key = "module/contract:RefinementArithmetic/function:test_max_value_subtraction", ora.source_owner_start = 1029 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 6988570666312495752839002421695666563898142680323167511053911032881624383488 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
@@ -158,7 +175,7 @@
 // CHECK-NEXT:     %8 = sir.bitcast %7 : !sir.u256 : i1 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)
 // CHECK-NEXT:     %9 = sir.bitcast %8 : i1 : !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":28:39)
 // CHECK-NEXT:     sir.cond_br %9 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":28:39)
-// CHECK-NEXT:   ^bb1:  // 3 preds: ^bb0, ^bb2, ^bb3
+// CHECK-NEXT:   ^bb1:  // 4 preds: ^bb0, ^bb2, ^bb3, ^bb6
 // CHECK-NEXT:     %10 = sir.bitcast %3 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":28:39)
 // CHECK-NEXT:     sir.revert %10 : !sir.ptr<1>, %3 : !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":28:39)
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
@@ -193,11 +210,19 @@
 // CHECK-NEXT:     sir.store %32 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":35:19)))
 // CHECK-NEXT:     sir.revert %32 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":35:19)))
 // CHECK-NEXT:   ^bb6:  // pred: ^bb4
-// CHECK-NEXT:     %33 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":36:9)))
-// CHECK-NEXT:     sir.store %33 : !sir.ptr<1>, %25 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":36:9)))
-// CHECK-NEXT:     sir.return %33 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":36:9)))
+// CHECK-NEXT:     %33 = sir.lt %25 : !sir.u256, %c1000 : !sir.u256 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %34 = sir.eq %25 : !sir.u256, %c1000 : !sir.u256 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %35 = sir.or %33 : !sir.u256, %34 : !sir.u256 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %36 = sir.and %35 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %37 = sir.bitcast %36 : !sir.u256 : i1 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %38 = sir.bitcast %37 : i1 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":36:16)))
+// CHECK-NEXT:     sir.cond_br %38 : !sir.u256, ^bb7, ^bb1 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":36:16)))
+// CHECK-NEXT:   ^bb7:  // pred: ^bb6
+// CHECK-NEXT:     %39 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":36:9)))
+// CHECK-NEXT:     sir.store %39 : !sir.ptr<1>, %25 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":36:9)))
+// CHECK-NEXT:     sir.return %39 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":36:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":28:5)
-// CHECK-NEXT:   func.func @test_max_value_same_type(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":39:37), %arg1: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":39:62)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["max:u:0:0:0:1000", "max:u:0:0:0:500"], ora.abi_params = ["uint256", "uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:8", "file:11:pattern:9"], ora.param_compiler_type_ids = [6 : i256, 6 : i256], ora.param_names = ["x", "y"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0xedc4bd4d", ora.source_module_path = "{{.*}}/ora-example/refinements/arithmetic_propagation.ora", ora.source_owner_key = "module/contract:RefinementArithmetic/function:test_max_value_same_type", ora.source_owner_start = 1448 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @test_max_value_same_type(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":39:37), %arg1: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":39:62)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["max:u:0:0:0:1000", "max:u:0:0:0:500"], ora.abi_params = ["uint256", "uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:8", "file:11:pattern:9"], ora.param_compiler_type_ids = [6 : i256, 6 : i256], ora.param_names = ["x", "y"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.return_compiler_type_id = 6 : i256, ora.selector = "0xedc4bd4d", ora.source_module_path = "{{.*}}/ora-example/refinements/arithmetic_propagation.ora", ora.source_owner_key = "module/contract:RefinementArithmetic/function:test_max_value_same_type", ora.source_owner_start = 1448 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
@@ -205,6 +230,7 @@
 // CHECK-NEXT:     %c1000 = sir.const 1000 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c500 = sir.const 500 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %c1500 = sir.const 1500 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
 // CHECK-NEXT:     %4 = sir.lt %arg0 : !sir.u256, %c1000 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)
 // CHECK-NEXT:     %5 = sir.eq %arg0 : !sir.u256, %c1000 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)
 // CHECK-NEXT:     %6 = sir.or %4 : !sir.u256, %5 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)
@@ -212,7 +238,7 @@
 // CHECK-NEXT:     %8 = sir.bitcast %7 : !sir.u256 : i1 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)
 // CHECK-NEXT:     %9 = sir.bitcast %8 : i1 : !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":39:37)
 // CHECK-NEXT:     sir.cond_br %9 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":39:37)
-// CHECK-NEXT:   ^bb1:  // 4 preds: ^bb0, ^bb2, ^bb3, ^bb4
+// CHECK-NEXT:   ^bb1:  // 5 preds: ^bb0, ^bb2, ^bb3, ^bb4, ^bb7
 // CHECK-NEXT:     %10 = sir.bitcast %3 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":39:37)
 // CHECK-NEXT:     sir.revert %10 : !sir.ptr<1>, %3 : !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":39:37)
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
@@ -255,11 +281,19 @@
 // CHECK-NEXT:     sir.store %38 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":44:16)))
 // CHECK-NEXT:     sir.revert %38 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":44:16)))
 // CHECK-NEXT:   ^bb7:  // pred: ^bb5
-// CHECK-NEXT:     %39 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":44:9)))
-// CHECK-NEXT:     sir.store %39 : !sir.ptr<1>, %31 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":44:9)))
-// CHECK-NEXT:     sir.return %39 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":44:9)))
+// CHECK-NEXT:     %39 = sir.lt %31 : !sir.u256, %c1500 : !sir.u256 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %40 = sir.eq %31 : !sir.u256, %c1500 : !sir.u256 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %41 = sir.or %39 : !sir.u256, %40 : !sir.u256 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %42 = sir.and %41 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %43 = sir.bitcast %42 : !sir.u256 : i1 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %44 = sir.bitcast %43 : i1 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":44:16)))
+// CHECK-NEXT:     sir.cond_br %44 : !sir.u256, ^bb8, ^bb1 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":44:16)))
+// CHECK-NEXT:   ^bb8:  // pred: ^bb7
+// CHECK-NEXT:     %45 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":44:9)))
+// CHECK-NEXT:     sir.store %45 : !sir.ptr<1>, %31 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":44:9)))
+// CHECK-NEXT:     sir.return %45 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":44:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":39:5)
-// CHECK-NEXT:   func.func @test_in_range_same_type(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":48:36), %arg1: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":48:63)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:10;max:u:0:0:0:100", "min:u:0:0:0:20;max:u:0:0:0:200"], ora.abi_params = ["uint256", "uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:10", "file:11:pattern:11"], ora.param_compiler_type_ids = [6 : i256, 6 : i256], ora.param_names = ["x", "y"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x5d1eca9e", ora.source_module_path = "{{.*}}/ora-example/refinements/arithmetic_propagation.ora", ora.source_owner_key = "module/contract:RefinementArithmetic/function:test_in_range_same_type", ora.source_owner_start = 1756 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @test_in_range_same_type(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":48:36), %arg1: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":48:63)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:10;max:u:0:0:0:100", "min:u:0:0:0:20;max:u:0:0:0:200"], ora.abi_params = ["uint256", "uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:10", "file:11:pattern:11"], ora.param_compiler_type_ids = [6 : i256, 6 : i256], ora.param_names = ["x", "y"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.return_compiler_type_id = 6 : i256, ora.selector = "0x5d1eca9e", ora.source_module_path = "{{.*}}/ora-example/refinements/arithmetic_propagation.ora", ora.source_owner_key = "module/contract:RefinementArithmetic/function:test_in_range_same_type", ora.source_owner_start = 1756 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
@@ -269,6 +303,8 @@
 // CHECK-NEXT:     %c20 = sir.const 20 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c200 = sir.const 200 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %c30 = sir.const 30 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %c300 = sir.const 300 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
 // CHECK-NEXT:     %4 = sir.gt %arg0 : !sir.u256, %c10 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)
 // CHECK-NEXT:     %5 = sir.eq %arg0 : !sir.u256, %c10 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)
 // CHECK-NEXT:     %6 = sir.or %4 : !sir.u256, %5 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)
@@ -280,7 +316,7 @@
 // CHECK-NEXT:     %12 = sir.bitcast %11 : !sir.u256 : i1 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)
 // CHECK-NEXT:     %13 = sir.bitcast %12 : i1 : !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":48:36)
 // CHECK-NEXT:     sir.cond_br %13 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":48:36)
-// CHECK-NEXT:   ^bb1:  // 6 preds: ^bb0, ^bb2, ^bb3, ^bb4, ^bb5, ^bb6
+// CHECK-NEXT:   ^bb1:  // 7 preds: ^bb0, ^bb2, ^bb3, ^bb4, ^bb5, ^bb6, ^bb9
 // CHECK-NEXT:     %14 = sir.bitcast %3 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":48:36)
 // CHECK-NEXT:     sir.revert %14 : !sir.ptr<1>, %3 : !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":48:36)
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
@@ -345,11 +381,23 @@
 // CHECK-NEXT:     sir.store %60 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":55:16)))
 // CHECK-NEXT:     sir.revert %60 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":55:16)))
 // CHECK-NEXT:   ^bb9:  // pred: ^bb7
-// CHECK-NEXT:     %61 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":55:9)))
-// CHECK-NEXT:     sir.store %61 : !sir.ptr<1>, %53 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":55:9)))
-// CHECK-NEXT:     sir.return %61 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":55:9)))
+// CHECK-NEXT:     %61 = sir.gt %53 : !sir.u256, %c30 : !sir.u256 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %62 = sir.eq %53 : !sir.u256, %c30 : !sir.u256 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %63 = sir.or %61 : !sir.u256, %62 : !sir.u256 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %64 = sir.lt %53 : !sir.u256, %c300 : !sir.u256 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %65 = sir.eq %53 : !sir.u256, %c300 : !sir.u256 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %66 = sir.or %64 : !sir.u256, %65 : !sir.u256 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %67 = sir.and %63 : !sir.u256, %66 : !sir.u256 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %68 = sir.and %67 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %69 = sir.bitcast %68 : !sir.u256 : i1 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":1:1)))
+// CHECK-NEXT:     %70 = sir.bitcast %69 : i1 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":55:16)))
+// CHECK-NEXT:     sir.cond_br %70 : !sir.u256, ^bb10, ^bb1 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":55:16)))
+// CHECK-NEXT:   ^bb10:  // pred: ^bb9
+// CHECK-NEXT:     %71 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":55:9)))
+// CHECK-NEXT:     sir.store %71 : !sir.ptr<1>, %53 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":55:9)))
+// CHECK-NEXT:     sir.return %71 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":55:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":48:5)
-// CHECK-NEXT:   func.func @test_scaled_addition(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":59:33), %arg1: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":59:54)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["uint256", "uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:12", "file:11:pattern:13"], ora.param_compiler_type_ids = [6 : i256, 6 : i256], ora.param_names = ["x", "y"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x146e861d", ora.source_module_path = "{{.*}}/ora-example/refinements/arithmetic_propagation.ora", ora.source_owner_key = "module/contract:RefinementArithmetic/function:test_scaled_addition", ora.source_owner_start = 2172 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @test_scaled_addition(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":59:33), %arg1: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":59:54)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["uint256", "uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:12", "file:11:pattern:13"], ora.param_compiler_type_ids = [6 : i256, 6 : i256], ora.param_names = ["x", "y"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.return_compiler_type_id = 6 : i256, ora.selector = "0x146e861d", ora.source_module_path = "{{.*}}/ora-example/refinements/arithmetic_propagation.ora", ora.source_owner_key = "module/contract:RefinementArithmetic/function:test_scaled_addition", ora.source_owner_start = 2172 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 0 : !sir.u256 loc(unknown)
@@ -399,7 +447,7 @@
 // CHECK-NEXT:     sir.store %30 : !sir.ptr<1>, %22 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":63:9)))
 // CHECK-NEXT:     sir.return %30 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":63:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":59:5)
-// CHECK-NEXT:   func.func @test_scaled_mixed(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":66:30)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:14"], ora.param_compiler_type_ids = [6 : i256], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xd3a58d83", ora.source_module_path = "{{.*}}/ora-example/refinements/arithmetic_propagation.ora", ora.source_owner_key = "module/contract:RefinementArithmetic/function:test_scaled_mixed", ora.source_owner_start = 2417 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @test_scaled_mixed(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":66:30)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:14"], ora.param_compiler_type_ids = [6 : i256], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.return_compiler_type_id = 6 : i256, ora.selector = "0xd3a58d83", ora.source_module_path = "{{.*}}/ora-example/refinements/arithmetic_propagation.ora", ora.source_owner_key = "module/contract:RefinementArithmetic/function:test_scaled_mixed", ora.source_owner_start = 2417 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 5168383158333527212367477668933974099645452977747541072494433970985659006976 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)
@@ -436,7 +484,7 @@
 // CHECK-NEXT:     sir.store %22 : !sir.ptr<1>, %14 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":71:9)))
 // CHECK-NEXT:     sir.return %22 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":71:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":66:5)
-// CHECK-NEXT:   func.func @test_scaled_multiplication(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":75:39), %arg1: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":75:60)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["uint256", "uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:16", "file:11:pattern:17"], ora.param_compiler_type_ids = [6 : i256, 6 : i256], ora.param_names = ["x", "y"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x90e82a63", ora.source_module_path = "{{.*}}/ora-example/refinements/arithmetic_propagation.ora", ora.source_owner_key = "module/contract:RefinementArithmetic/function:test_scaled_multiplication", ora.source_owner_start = 2740 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @test_scaled_multiplication(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":75:39), %arg1: !sir.u256 loc("{{.*}}/ora-example/refinements/arithmetic_propagation.ora":75:60)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["uint256", "uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.dispatch_class = "readonly", ora.param_binding_ids = ["file:11:pattern:16", "file:11:pattern:17"], ora.param_compiler_type_ids = [6 : i256, 6 : i256], ora.param_names = ["x", "y"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.return_compiler_type_id = 6 : i256, ora.selector = "0x90e82a63", ora.source_module_path = "{{.*}}/ora-example/refinements/arithmetic_propagation.ora", ora.source_owner_key = "module/contract:RefinementArithmetic/function:test_scaled_multiplication", ora.source_owner_start = 2740 : i256, ora.source_template_activation = "runtime_body", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %1 = sir.const 56016217287220138543383237988819299768112786790290310538187226855197252780032 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 4 : !sir.u256 loc(unknown)

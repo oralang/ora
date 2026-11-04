@@ -361,8 +361,7 @@ pub fn expectDynamicAbiDecodeWordGuardChain(fn_text: []const u8) !void {
 pub fn expectMixedDynamicTupleCarrierShape(fn_text: []const u8) !void {
     // The dedicated mixed dynamic tuple branch allocates a 2-slot tuple carrier,
     // stores the static u256, then stores the string/bytes tail pointer.
-    try expectOrderedNeedles(fn_text, &.{ "const 0x40", "mload256", "malloc", "mstore256", "add", "mstore256" });
-    try testing.expect(std.mem.containsAtLeast(u8, fn_text, 1, "const 0x20"));
+    try expectOrderedNeedles(fn_text, &.{ "mload256", "malloc 0x40", "mstore256", "add", "mstore256" });
     try testing.expect(std.mem.containsAtLeast(u8, fn_text, 2, "malloc"));
 }
 

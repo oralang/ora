@@ -1,0 +1,37 @@
+struct AddressBox { owner: NonZeroAddress; }
+contract PublicAddressCall {
+    storage var calls: u256;
+    pub fn addressValue(x: address) -> address { return x; }
+    pub fn countedAddress(x: address) -> address {
+        calls +%= 1;
+        return x;
+    }
+    fn privateAddress(x: address) -> address { return x; }
+    inline fn inlineAddress(x: address) -> address { return x; }
+    pub fn aggregate(x: address) -> address {
+        let box = AddressBox { owner: addressValue(x) };
+        return box.owner;
+    }
+    pub fn local(x: address) -> address {
+        let owner: NonZeroAddress = addressValue(x);
+        return owner;
+    }
+    pub fn returning(x: address) -> NonZeroAddress { return addressValue(x); }
+    pub fn direct(x: address) -> address {
+        let box = AddressBox { owner: x };
+        return box.owner;
+    }
+    pub fn privateControl(x: address) -> address {
+        let box = AddressBox { owner: privateAddress(x) };
+        return box.owner;
+    }
+    pub fn inlineControl(x: address) -> address {
+        let box = AddressBox { owner: inlineAddress(x) };
+        return box.owner;
+    }
+    pub fn effectful(x: address) -> address {
+        let box = AddressBox { owner: countedAddress(x) };
+        return box.owner;
+    }
+    pub fn callCount() -> u256 { return calls; }
+}

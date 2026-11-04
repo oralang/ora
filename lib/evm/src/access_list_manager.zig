@@ -192,7 +192,7 @@ test "AccessListManager: access_address returns cold then warm" {
     var manager = AccessListManager.init(allocator);
     defer manager.deinit();
 
-    const addr = Address{ .bytes = [_]u8{1} ** 20 };
+    const addr = Address{ .bytes = @as([20]u8, @splat(1)) };
     const cold = try manager.access_address(addr);
     try std.testing.expectEqual(gas_constants.ColdAccountAccessCost, cold);
 
@@ -205,7 +205,7 @@ test "AccessListManager: access_storage_slot returns cold then warm" {
     var manager = AccessListManager.init(allocator);
     defer manager.deinit();
 
-    const addr = Address{ .bytes = [_]u8{2} ** 20 };
+    const addr = Address{ .bytes = @as([20]u8, @splat(2)) };
     const slot: u256 = 42;
     const cold = try manager.access_storage_slot(addr, slot);
     try std.testing.expectEqual(gas_constants.ColdSloadCost, cold);
@@ -219,8 +219,8 @@ test "AccessListManager: pre_warm_addresses marks warm" {
     var manager = AccessListManager.init(allocator);
     defer manager.deinit();
 
-    const addr1 = Address{ .bytes = [_]u8{1} ** 20 };
-    const addr2 = Address{ .bytes = [_]u8{2} ** 20 };
+    const addr1 = Address{ .bytes = @as([20]u8, @splat(1)) };
+    const addr2 = Address{ .bytes = @as([20]u8, @splat(2)) };
     const addresses = [_]Address{ addr1, addr2 };
 
     try manager.pre_warm_addresses(&addresses);
@@ -234,7 +234,7 @@ test "AccessListManager: pre_warm_storage_slots marks warm" {
     var manager = AccessListManager.init(allocator);
     defer manager.deinit();
 
-    const addr = Address{ .bytes = [_]u8{3} ** 20 };
+    const addr = Address{ .bytes = @as([20]u8, @splat(3)) };
     const slot1: u256 = 1;
     const slot2: u256 = 2;
     const slots = [_]StorageKey{
@@ -253,8 +253,8 @@ test "AccessListManager: pre_warm_from_access_list marks addresses and slots" {
     var manager = AccessListManager.init(allocator);
     defer manager.deinit();
 
-    const addr = Address{ .bytes = [_]u8{4} ** 20 };
-    const slot_hash: primitives.Hash.Hash = [_]u8{0xaa} ** 32;
+    const addr = Address{ .bytes = @as([20]u8, @splat(4)) };
+    const slot_hash: primitives.Hash.Hash = @as([32]u8, @splat(0xaa));
     const access_list = [_]primitives.AccessList.AccessListEntry{
         .{
             .address = addr,
@@ -274,7 +274,7 @@ test "AccessListManager: clear resets warm state" {
     var manager = AccessListManager.init(allocator);
     defer manager.deinit();
 
-    const addr = Address{ .bytes = [_]u8{5} ** 20 };
+    const addr = Address{ .bytes = @as([20]u8, @splat(5)) };
     const slot: u256 = 7;
     _ = try manager.access_address(addr);
     _ = try manager.access_storage_slot(addr, slot);
@@ -290,8 +290,8 @@ test "AccessListManager: snapshot and restore" {
     var manager = AccessListManager.init(allocator);
     defer manager.deinit();
 
-    const addr1 = Address{ .bytes = [_]u8{6} ** 20 };
-    const addr2 = Address{ .bytes = [_]u8{7} ** 20 };
+    const addr1 = Address{ .bytes = @as([20]u8, @splat(6)) };
+    const addr2 = Address{ .bytes = @as([20]u8, @splat(7)) };
 
     _ = try manager.access_address(addr1);
 

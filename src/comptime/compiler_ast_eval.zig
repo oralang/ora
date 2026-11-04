@@ -167,9 +167,16 @@ const ConstEvaluator = struct {
     required_comptime_depth: u32 = 0,
     last_error: ?error_mod.CtError = null,
     current_result: ?CtValue = null,
+    result_reference_owner: ?ResultReferenceOwner = null,
     formal_folds: std.ArrayList(model.ComptimeFoldEvidence) = .empty,
     fold_stack: std.ArrayList(FoldBuilder) = .empty,
     next_fold_invocation_id: u32 = 1,
+
+    const ResultReferenceOwner = struct {
+        module_id: source.ModuleId,
+        file_id: source.FileId,
+        item_id: ast.ItemId,
+    };
 
     const FoldBuilder = struct {
         invocation_id: u32,
@@ -243,7 +250,12 @@ const ConstEvaluator = struct {
                 for (contract.members) |member_id| self.visitItem(member_id);
             },
             .Function => |function| {
-                for (function.clauses) |clause| _ = self.evalExpr(clause.expr) catch null;
+                for (function.clauses) |clause| {
+                    const previous_owner = self.result_reference_owner;
+                    self.result_reference_owner = self.resultReferenceOwnerForClause(clause.kind);
+                    defer self.result_reference_owner = previous_owner;
+                    _ = self.evalExpr(clause.expr) catch null;
+                }
                 self.visitBody(function.body);
             },
             .Enum => |enum_item| {
@@ -361,7 +373,10 @@ const ConstEvaluator = struct {
                     },
                     else => _ = self.evalExpr(expr_stmt.expr) catch null,
                 },
-                .Assign => |assign| _ = self.evalComptimeAssign(assign, true) catch null,
+                .Assign => |assign| {
+                    self.visitAssignmentTargetExpressions(assign.target);
+                    _ = self.evalComptimeAssign(assign, true) catch null;
+                },
                 .Log => |log_stmt| {
                     for (log_stmt.args) |arg| _ = self.evalExpr(arg) catch null;
                 },
@@ -396,6 +411,20 @@ const ConstEvaluator = struct {
         }
     }
 
+    fn visitAssignmentTargetExpressions(self: *ConstEvaluator, pattern_id: ast.PatternId) void {
+        switch (self.file.pattern(pattern_id).*) {
+            .Field => |field| self.visitAssignmentTargetExpressions(field.base),
+            .Index => |index| {
+                self.visitAssignmentTargetExpressions(index.base);
+                _ = self.evalExpr(index.index) catch null;
+            },
+            .StructDestructure => |destructure| for (destructure.fields) |field| {
+                self.visitAssignmentTargetExpressions(field.binding);
+            },
+            .Name, .Error => {},
+        }
+    }
+
     fn evalSwitchPatternExprs(self: *ConstEvaluator, pattern: ast.SwitchPattern, comptime use_cache: bool) anyerror!void {
         switch (pattern) {
             .Expr => |expr_id| _ = try self.evalExprImpl(expr_id, use_cache),
@@ -410,6 +439,14 @@ const ConstEvaluator = struct {
     }
 
     fn evalExprImpl(self: *ConstEvaluator, expr_id: ast.ExprId, comptime use_cache: bool) anyerror!?ConstValue {
+        // A postcondition result is contextual: never read or populate its cache.
+        if (try self.isCurrentResultReference(expr_id)) {
+            if (self.consumeStep(self.exprRange(expr_id))) return null;
+            return if (self.current_result) |value|
+                try ctValueToConstValue(self.allocator, &self.env.heap, value)
+            else
+                null;
+        }
         if (use_cache) {
             if (self.values[expr_id.index()]) |cached| return cached;
         }
@@ -490,7 +527,7 @@ const ConstEvaluator = struct {
             .Comptime => |comptime_expr| blk: {
                 self.required_comptime_depth += 1;
                 defer self.required_comptime_depth -= 1;
-                const ct_value = try self.evalComptimeBodyCtValue(comptime_expr.body, use_cache);
+                const ct_value = try self.evalComptimeBodyCtValue(comptime_expr.body);
                 var value = if (ct_value) |inner|
                     try ctValueToConstValue(self.allocator, &self.env.heap, inner)
                 else
@@ -697,6 +734,7 @@ const ConstEvaluator = struct {
         comptime charge_step: bool,
     ) anyerror!?CtValue {
         if (charge_step and self.consumeStep(self.exprRange(expr_id))) return null;
+        if (try self.isCurrentResultReference(expr_id)) return self.current_result;
 
         return switch (self.file.expression(expr_id).*) {
             .IntegerLiteral => |literal| blk: {
@@ -742,7 +780,7 @@ const ConstEvaluator = struct {
             .Comptime => |comptime_expr| blk: {
                 self.required_comptime_depth += 1;
                 defer self.required_comptime_depth -= 1;
-                break :blk try self.evalComptimeBodyCtValue(comptime_expr.body, use_cache);
+                break :blk try self.evalComptimeBodyCtValue(comptime_expr.body);
             },
             .ArrayLiteral => |array| blk: {
                 const elems = try self.allocator.alloc(CtValue, array.elements.len);
@@ -893,6 +931,12 @@ const ConstEvaluator = struct {
                 };
             },
             .Binary => |binary| blk: {
+                // Scalar operators use one scalar walk, including its cache
+                // population for constant subexpressions of runtime values.
+                if (binary.op != .eq and binary.op != .ne) {
+                    const value = (try self.evalBinaryExpr(binary, use_cache)) orelse break :blk null;
+                    break :blk try self.constValueToCtValue(value);
+                }
                 if (try self.evalExprCtValueImpl(binary.lhs, use_cache, true)) |lhs| {
                     if (try self.evalExprCtValueImpl(binary.rhs, use_cache, true)) |rhs| {
                         break :blk switch (binary.op) {
@@ -926,7 +970,8 @@ const ConstEvaluator = struct {
 
     fn exprUsesConstFallbackForCtValue(self: *ConstEvaluator, expr_id: ast.ExprId) bool {
         return switch (self.file.expression(expr_id).*) {
-            .Call, .Unary, .Comptime => true,
+            .Call, .Unary, .Comptime, .Group => true,
+            .Binary => |binary| binary.op != .eq and binary.op != .ne,
             else => false,
         };
     }
@@ -2648,7 +2693,7 @@ const ConstEvaluator = struct {
     fn abiDecodeErr(self: *ConstEvaluator, err: abi_comptime_decoder.DecodeError) !CtValue {
         const err_value = CtValue{ .adt_val = .{
             .type_id = type_builtin.abi_decode_error_type_id,
-            .variant_id = @intFromEnum(err),
+            .variant_id = @backingInt(err),
             .payload = null,
         } };
         const payload_id = try self.env.heap.allocTupleOwned(try self.allocator.dupe(CtValue, &.{err_value}));
@@ -2723,17 +2768,20 @@ const ConstEvaluator = struct {
                 const previous_key = self.current_typecheck_key;
                 const previous_contract = self.current_contract;
                 const previous_result = self.current_result;
+                const previous_result_owner = self.result_reference_owner;
                 self.file = callable.file;
                 self.module_id = callable.module_id;
                 self.current_typecheck_key = .{ .item = callable.item_id };
                 self.current_contract = callable.contract_id;
                 self.current_result = null;
+                self.result_reference_owner = null;
                 defer {
                     self.file = previous_file;
                     self.module_id = previous_module_id;
                     self.current_typecheck_key = previous_key;
                     self.current_contract = previous_contract;
                     self.current_result = previous_result;
+                    self.result_reference_owner = previous_result_owner;
                 }
 
                 try self.ensureTypeChecked(.{ .item = callable.item_id });
@@ -3048,6 +3096,37 @@ const ConstEvaluator = struct {
         return true;
     }
 
+    fn resultReferenceOwnerForClause(self: *ConstEvaluator, kind: ast.SpecClauseKind) ?ResultReferenceOwner {
+        if (kind != .ensures) return null;
+        const key = self.current_typecheck_key orelse return null;
+        return .{
+            .module_id = self.module_id orelse return null,
+            .file_id = self.file.file_id,
+            .item_id = switch (key) {
+                .item => |item| item,
+                .body => return null,
+            },
+        };
+    }
+
+    fn isCurrentResultReference(self: *ConstEvaluator, expr_id: ast.ExprId) !bool {
+        const owner = self.result_reference_owner orelse return false;
+        if (self.module_id != owner.module_id or self.file.file_id != owner.file_id) return false;
+        const call = switch (self.file.expression(expr_id).*) {
+            .Call => |call| call,
+            else => return false,
+        };
+        if (call.args.len != 0) return false;
+        const callee = (try self.lookupCallableFunction(call.callee)) orelse return false;
+        if (callee.module_id != owner.module_id or callee.file.file_id != owner.file_id or
+            callee.item_id != owner.item_id or callee.synthetic_self_arg != null or
+            callee.function.is_generic or callee.function.parameters.len != 0 or callee.function.return_type == null)
+            return false;
+        const typecheck = (try self.currentTypeCheckResult()) orelse return false;
+        const returns = typecheck.item_types[callee.item_id.index()].returnTypes();
+        return returns.len == 1 and returns[0].kind() != .void;
+    }
+
     fn resultSelectsClause(result: ?CtValue, kind: ast.SpecClauseKind) bool {
         return switch (kind) {
             .ensures => true,
@@ -3078,6 +3157,9 @@ const ConstEvaluator = struct {
 
         for (function.clauses) |clause| {
             if (!resultSelectsClause(result, clause.kind) and clause.kind != .invariant) continue;
+            const previous_owner = self.result_reference_owner;
+            self.result_reference_owner = self.resultReferenceOwnerForClause(clause.kind);
+            defer self.result_reference_owner = previous_owner;
             if (!(try self.checkFormalPredicate(
                 clause.expr,
                 clause.source_fact_id,
@@ -3118,17 +3200,20 @@ const ConstEvaluator = struct {
         const previous_key = self.current_typecheck_key;
         const previous_contract = self.current_contract;
         const previous_result = self.current_result;
+        const previous_result_owner = self.result_reference_owner;
         self.file = callable.file;
         self.module_id = callable.module_id;
         self.current_typecheck_key = .{ .item = callable.item_id };
         self.current_contract = callable.contract_id;
         self.current_result = null;
+        self.result_reference_owner = null;
         defer {
             self.file = previous_file;
             self.module_id = previous_module_id;
             self.current_typecheck_key = previous_key;
             self.current_contract = previous_contract;
             self.current_result = previous_result;
+            self.result_reference_owner = previous_result_owner;
         }
         try self.ensureTypeChecked(.{ .item = callable.item_id });
         try self.beginFormalFold(previous_module_id orelse callable.module_id, previous_file.file_id, call, callable, arg_values, retry_previous_representation);
@@ -3197,17 +3282,20 @@ const ConstEvaluator = struct {
         const previous_key = self.current_typecheck_key;
         const previous_contract = self.current_contract;
         const previous_result = self.current_result;
+        const previous_result_owner = self.result_reference_owner;
         self.file = callable.file;
         self.module_id = callable.module_id;
         self.current_typecheck_key = .{ .item = callable.item_id };
         self.current_contract = callable.contract_id;
         self.current_result = null;
+        self.result_reference_owner = null;
         defer {
             self.file = previous_file;
             self.module_id = previous_module_id;
             self.current_typecheck_key = previous_key;
             self.current_contract = previous_contract;
             self.current_result = previous_result;
+            self.result_reference_owner = previous_result_owner;
         }
         try self.ensureTypeChecked(.{ .item = callable.item_id });
         try self.beginFormalFold(previous_module_id orelse callable.module_id, previous_file.file_id, call, callable, arg_values, false);
@@ -3246,7 +3334,7 @@ const ConstEvaluator = struct {
         // Do not persist callee-body expression values into the module-global
         // const-eval cache. Those expression ids belong to the generic function
         // body and can otherwise be polluted by one concrete call context.
-        const body_value = try self.evalComptimeBodyCtValue(function.body, false);
+        const body_value = try self.evalComptimeBodyCtValue(function.body);
         if (body_value == null) {
             self.recordMissingComptimeValue(
                 self.sourceSpan(call.range),
@@ -3264,6 +3352,7 @@ const ConstEvaluator = struct {
     }
 
     fn evalExprAsCtValue(self: *ConstEvaluator, expr_id: ast.ExprId, comptime use_cache: bool) anyerror!?CtValue {
+        if (try self.isCurrentResultReference(expr_id)) return self.evalExprCtValueImpl(expr_id, use_cache, true);
         switch (self.file.expression(expr_id).*) {
             .Call => |call| {
                 if (try self.evalResultConstructorCallCtValue(call, use_cache)) |ct_value| return ct_value;
@@ -4218,8 +4307,9 @@ const ConstEvaluator = struct {
         };
     }
 
-    fn evalComptimeBodyCtValue(self: *ConstEvaluator, body_id: ast.BodyId, comptime use_cache: bool) anyerror!?CtValue {
-        return switch (try self.evalComptimeBodyControlCtValue(body_id, use_cache)) {
+    fn evalComptimeBodyCtValue(self: *ConstEvaluator, body_id: ast.BodyId) anyerror!?CtValue {
+        // Body expressions read a mutable environment; only the enclosing result may be cached.
+        return switch (try self.evalComptimeBodyControlCtValue(body_id, false)) {
             .value => |value| value,
             .return_value => |value| value,
             .break_loop, .continue_loop => null,
@@ -4265,7 +4355,7 @@ const ConstEvaluator = struct {
                             },
                             else => {},
                         }
-                        if (try self.evalExprCtValue(expr_id)) |ct_value| {
+                        if (try self.evalExprCtValueImpl(expr_id, false, true)) |ct_value| {
                             var persisted = (try ctValueToConstValue(self.allocator, &self.env.heap, ct_value)) orelse try self.evalExprUncached(expr_id);
                             persisted = try self.normalizeWrappingValueForDecl(decl, expr_id, persisted);
                             if (self.shouldBindNormalizedWrappingValue(decl, expr_id, persisted)) {
@@ -4347,7 +4437,8 @@ const ConstEvaluator = struct {
                     }
                 },
                 .Assign => |assign| {
-                    last_value = try self.evalComptimeAssign(assign, true);
+                    // Executed bodies may revisit this expression after mutating its operands.
+                    last_value = try self.evalComptimeAssign(assign, false);
                 },
                 .Assert => |assert_stmt| {
                     if (!(try self.checkFormalPredicate(assert_stmt.condition, assert_stmt.source_fact_id, assert_stmt.range, assert_stmt.message orelse "assertion"))) return .indeterminate;

@@ -49,6 +49,65 @@ value = 0
 args = [7, 2]
 returns = { u256 = 3 }
 
+# The operators themselves own the checked safety assertions. These remain
+# executable when formal verification is disabled.
+[[call]]
+fn = "checked_div(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [7, 0]
+reverts = { data = "0xf667f302" }
+
+[[call]]
+fn = "checked_div(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [7, 2]
+returns = { u256 = 3 }
+
+[[call]]
+fn = "checked_rem(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [7, 0]
+reverts = { data = "0x84caa174" }
+
+[[call]]
+fn = "checked_rem(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [7, 3]
+returns = { u256 = 1 }
+
+[[call]]
+fn = "checked_signed_div(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-128, -1]
+reverts = { data = "0x069eece1" }
+
+[[call]]
+fn = "checked_signed_div(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-8, 2]
+returns = { i8 = -4 }
+
+# Checked signed remainder rejects the MIN / -1 pair, like checked division.
+[[call]]
+fn = "checked_signed_rem(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-128, -1]
+reverts = { data = "0x1000e3b8" }
+
+[[call]]
+fn = "checked_signed_rem(int8,int8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-8, 0]
+reverts = { data = "0x84caa174" }
+
 [[call]]
 fn = "call_private_div(uint256,uint256)"
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"

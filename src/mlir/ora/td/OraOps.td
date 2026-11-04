@@ -1456,6 +1456,24 @@ def Ora_IncreasesOp : Ora_MeasureMarkerOp<"increases",
   }];
 }
 
+def Ora_LoopControlOp : Ora_Op<"loop_control",
+    [MemoryEffects<[MemWrite]>]> {
+  let summary = "Source-owned formal loop-control marker";
+  let description = [{
+    Records a source break, continue, successful return, or error return
+    together with the complete state of its target loop. This operation exists
+    only at the formal-verification boundary; Ora-to-SIR erases it after
+    verification has consumed its provenance.
+  }];
+
+  let arguments = (ins
+    StrAttr:$kind,
+    I64Attr:$target_loop_source_id,
+    I64Attr:$source_control_id,
+    Variadic<AnyType>:$state
+  );
+}
+
 def Ora_AssumeOp : Ora_ConditionMarkerOp<"assume", "Assume operation"> {
   let summary = "Assume operation";
   let description = [{

@@ -261,7 +261,7 @@ pub fn mapFp2ToG2(input: []const u8, output: []u8) Error!void {
 }
 
 test "BLS field words reject noncanonical high bytes" {
-    var word = [_]u8{0} ** 64;
+    var word = @as([64]u8, @splat(0));
     var out: [48]u8 = undefined;
     word[0] = 1;
     try std.testing.expectError(error.InvalidInput, compactFieldFromWord(&word, &out));

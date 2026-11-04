@@ -10,7 +10,7 @@ pub const Scope = enum {
     temp_analysis,
 };
 
-const scope_count = std.meta.fields(Scope).len;
+const scope_count = @typeInfo(Scope).@"enum".field_names.len;
 
 pub const ScopedStats = struct {
     alloc_calls: usize = 0,
@@ -30,10 +30,10 @@ pub const Stats = struct {
     bytes_freed: usize = 0,
     bytes_live: usize = 0,
     bytes_peak: usize = 0,
-    scopes: [scope_count]ScopedStats = [_]ScopedStats{.{}} ** scope_count,
+    scopes: [scope_count]ScopedStats = @as([scope_count]ScopedStats, @splat(.{})),
 
     pub fn scope(self: *const Stats, allocation_scope: Scope) ScopedStats {
-        return self.scopes[@intFromEnum(allocation_scope)];
+        return self.scopes[@backingInt(allocation_scope)];
     }
 };
 
@@ -126,7 +126,7 @@ pub const CountingAllocator = struct {
     }
 
     fn scopeStats(self: *CountingAllocator) *ScopedStats {
-        return &self.stats.scopes[@intFromEnum(self.current_scope)];
+        return &self.stats.scopes[@backingInt(self.current_scope)];
     }
 };
 

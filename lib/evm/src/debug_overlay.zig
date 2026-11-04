@@ -55,10 +55,10 @@ const testing = std.testing;
 
 test "OverlayMode: cycle covers all modes and returns to none" {
     var mode: OverlayMode = .none;
-    var seen = [_]bool{false} ** @typeInfo(OverlayMode).@"enum".fields.len;
+    var seen = @as([@typeInfo(OverlayMode).@"enum".field_names.len]bool, @splat(false));
     var iters: usize = 0;
     while (iters < seen.len) : (iters += 1) {
-        seen[@intFromEnum(mode)] = true;
+        seen[@backingInt(mode)] = true;
         mode = mode.next();
     }
     try testing.expectEqual(OverlayMode.none, mode);

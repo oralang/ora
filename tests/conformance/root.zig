@@ -112,10 +112,12 @@ test "falsification corpus executes with checks removed and checks kept" {
     const stems = [_][]const u8{
         "falsification_arith",
         "falsification_error_union_ok",
-        "falsification_loop_invariant",
         "falsification_map_effect",
         "falsification_map_frame",
         "falsification_storage_branch",
+    };
+    const expected_refusals = [_]struct { stem: []const u8, reason: runner.VerifiedRejectionReason }{
+        .{ .stem = "falsification_loop_invariant", .reason = .storage_counter_loop_projection_unavailable },
     };
 
     const allocator = testing.allocator;
@@ -134,6 +136,18 @@ test "falsification corpus executes with checks removed and checks kept" {
             return err;
         };
     }
+    for (expected_refusals) |entry| {
+        const source_path = try std.fmt.allocPrint(allocator, "{s}/{s}.ora", .{ types.CONFORMANCE_DIR_REL, entry.stem });
+        defer allocator.free(source_path);
+        try runner.expectVerifiedRefusal(allocator, source_path, entry.reason);
+    }
+    // A successfully verified build must trip the refusal assertion. When
+    // the storage-loop capability lands, move its stem back to `stems`.
+    try testing.expectError(error.ExpectedVerifiedRefusal, runner.expectVerifiedRefusal(
+        allocator,
+        types.CONFORMANCE_DIR_REL ++ "/counter.ora",
+        .storage_counter_loop_projection_unavailable,
+    ));
 }
 
 fn runFalsificationHarnessSmoke(
@@ -531,12 +545,12 @@ test "conformance slot expressions compute domain-separated computed-storage slo
 }
 
 test "conformance static return comparison requires canonical narrow signed words" {
-    var zero_extended: [32]u8 = [_]u8{0} ** 32;
+    var zero_extended: [32]u8 = @splat(0);
     zero_extended[30] = 0xff;
     zero_extended[31] = 0xf9;
     try testing.expectError(error.NonCanonicalAbiReturn, abi.expectStaticReturn("int16", .{ .literal = "-7" }, &zero_extended));
 
-    var sign_extended: [32]u8 = [_]u8{0xff} ** 32;
+    var sign_extended: [32]u8 = @splat(0xff);
     sign_extended[30] = 0xff;
     sign_extended[31] = 0xf9;
     try abi.expectStaticReturn("int16", .{ .literal = "-7" }, &sign_extended);

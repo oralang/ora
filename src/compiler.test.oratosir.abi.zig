@@ -1943,7 +1943,7 @@ test "compiler converts runtime abiDecode u256 tuple memory result through OraTo
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn decode_pair:"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "mload256"));
     try expectStaticAbiDecodeGuardBeforePayloadLoad(decode_fn);
-    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "const 0x20"));
+    try expectOrderedNeedles(decode_fn, &.{ "mload256", "mload256", "malloc 0x40", "mstore256", "add", "mstore256" });
     try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "lt"));
     try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "gt"));
     try testing.expect(!std.mem.containsAtLeast(u8, decode_fn, 1, "bitcast"));
@@ -2010,7 +2010,8 @@ test "compiler converts runtime abiDecode nested static tuple memory result thro
 
     try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 3, "mload256"));
     try expectStaticAbiDecodeGuardBeforePayloadLoad(decode_fn);
-    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 2, "const 0x20"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "const 0x20"));
+    try expectOrderedNeedles(decode_fn, &.{ "malloc 0x40", "mstore256", "add", "mstore256" });
     try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 2, "eq"));
     try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "or"));
     try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "lt"));

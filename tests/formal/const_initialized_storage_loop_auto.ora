@@ -1,0 +1,15 @@
+contract ConstInitializedStorageLoopAuto {
+    storage var values: [u256; 128];
+    comptime const START: u256 = 16;
+
+    pub fn fill(unused_words: slice[u256]) {
+        var i: u256 = START;
+        while (i < 128)
+            invariant i >= START
+            invariant i <= 128
+        {
+            values[i] = i;
+            i = i + 1;
+        }
+    }
+}

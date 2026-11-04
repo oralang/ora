@@ -8,4 +8,17 @@ contract DynamicArrayStorageSmoke {
     pub fn get(index: u256) -> u256 {
         return history[index];
     }
+
+    pub fn write(index: u256, value: u256) {
+        history[index] = value;
+    }
+
+    fn replaceAndReturn(replacement: slice[u256], value: u256) -> u256 {
+        history = replacement;
+        return value;
+    }
+
+    pub fn compoundAfterReplace(index: u256, replacement: slice[u256], value: u256) {
+        history[index] +%= replaceAndReturn(replacement, value);
+    }
 }

@@ -29,6 +29,9 @@ pub const Options = struct {
     artifact_display_dir: ?[]const u8 = null,
     process_environ: std.process.Environ,
     suppress_artifact_logs: bool = false,
+    module: ?@import("mlir_c_api").c.MlirModule = null,
+    lifecycle: ?*@import("../storage_lifecycle_consume.zig").Consumer = null,
+    lifecycle_checks_retained: bool = false,
 };
 
 /// Userland proofs may authorize artifact emission only. This type
@@ -47,6 +50,12 @@ pub fn coordinate(
     options: Options,
     stdout: anytype,
 ) !Outcome {
+    if (!try runtimeLoopCertificateTargetsComplete(formal_result.set, stdout)) {
+        return .{
+            .artifact_emission_authorized = false,
+            .certificate_emitted = false,
+        };
+    }
     return switch (mode) {
         .manifest => |path| coordinateManifest(
             allocator,
@@ -86,6 +95,10 @@ pub fn emitUnknownRecipe(
     var unavailable_count: usize = 0;
     for (context.merged_result.set.queries) |query| {
         if (!isLeanProofTarget(query)) continue;
+        if (query.function_summary_id != null) {
+            recipe_count += 1;
+            continue;
+        }
         const projection = projectionForQuery(context.merged_result.set, query);
         const semantic_support = obligation_to_lean.querySemanticSupport(context.merged_result.set, query);
         if (projection.hasOpaqueFormula() or !semanticSupportAvailable(semantic_support)) {
@@ -102,6 +115,7 @@ pub fn emitUnknownRecipe(
         try stdout.writeAll("Lean proof recipe unavailable for some required userland obligations:\n");
         for (context.merged_result.set.queries) |query| {
             if (!isLeanProofTarget(query)) continue;
+            if (query.function_summary_id != null) continue;
             const projection = projectionForQuery(context.merged_result.set, query);
             const semantic_support = obligation_to_lean.querySemanticSupport(context.merged_result.set, query);
             if (!projection.hasOpaqueFormula() and semanticSupportAvailable(semantic_support)) continue;
@@ -129,7 +143,7 @@ pub fn emitUnknownRecipe(
 
     const source = renderObligationsSource(
         allocator,
-        context.merged_result.set,
+        if (formal_result.set.function_summaries.len != 0) formal_result.set else context.merged_result.set,
         context.generated_namespace,
     ) catch |err| switch (err) {
         error.UnsupportedOriginValue, error.UnsupportedObligationKind => {
@@ -150,20 +164,27 @@ pub fn emitUnknownRecipe(
     for (context.merged_result.set.queries) |query| {
         if (!isLeanProofTarget(query)) continue;
         const projection = projectionForQuery(context.merged_result.set, query);
-        if (projection.hasOpaqueFormula() or
-            !semanticSupportAvailable(obligation_to_lean.querySemanticSupport(context.merged_result.set, query))) continue;
-        try stdout.print("  - query: emittedQuery_{d} (", .{query.id});
+        if (query.function_summary_id == null and (projection.hasOpaqueFormula() or
+            !semanticSupportAvailable(obligation_to_lean.querySemanticSupport(context.merged_result.set, query)))) continue;
+        const adapter_loop = if (query.loop_summary_id) |id|
+            obligation_to_lean.loopUsesCallAdapter(context.merged_result.set, obligation.findById(context.merged_result.set.loop_summaries, id).?)
+        else
+            false;
+        const target_id = query.function_summary_id orelse (if (adapter_loop) query.loop_summary_id.? else query.id);
+        const target_name = if (query.function_summary_id != null) "emittedCallCustody" else if (adapter_loop) "emittedCallLoop" else "emittedQuery";
+        try stdout.print("  - query: {s}_{d} (", .{ target_name, target_id });
         try printRecipeSource(stdout, query.source);
-        try stdout.print(")\n    theorem shape: theorem discharge_q{d} : {s}.emittedQuery_{d} := by ...\n    proof row: query_id={d}, obligation_ids=", .{
+        try stdout.print(")\n    theorem shape: theorem discharge_q{d} : {s}.{s}_{d} := by ...\n    proof row: query_id={d}, obligation_ids=", .{
             query.id,
             context.generated_namespace,
-            query.id,
+            target_name,
+            target_id,
             query.id,
         });
         try printIds(stdout, query.obligation_ids);
         try stdout.writeAll(", assumption_ids=");
         try printIds(stdout, query.assumption_ids);
-        try stdout.writeByte('\n');
+        try stdout.writeAll(", path=<user-proof.lean>, inline_source=true\n");
     }
     try stdout.writeAll("  pass the proof manifest with `--lean-proofs <proofs.json>`\n\n");
 }
@@ -189,6 +210,14 @@ fn collectContext(
     smt_report: z3_verification.SmtReportArtifacts,
 ) !ObligationContext {
     const query_manifest = smt_report.query_manifest orelse return error.MissingPreparedQueryManifest;
+    for (query_manifest.certified_calls) |used| {
+        const bound = for (formal_result.call_bindings) |binding| {
+            if (binding.source_op_id == used.source_op_id and binding.function_id == used.function_id) break true;
+        } else false;
+        if (!bound) return error.CallInvocationBindingMissing;
+        const digest = try obligation_to_lean.functionVcSha256(formal_result.set, used.function_id);
+        if (!std.mem.eql(u8, &digest, &used.digest)) return error.CallInvocationDigestMismatch;
+    }
     var merged_result = try obligation_from_z3.overlayPreparedQueryResults(
         allocator,
         formal_result.set,
@@ -214,7 +243,7 @@ fn buildContext(
     errdefer context.deinit();
     context.obligations_source = try renderObligationsSource(
         allocator,
-        context.merged_result.set,
+        if (formal_result.set.function_summaries.len != 0) formal_result.set else context.merged_result.set,
         context.generated_namespace,
     );
     return context;
@@ -227,7 +256,7 @@ fn renderObligationsSource(
 ) ![]const u8 {
     var out = std.Io.Writer.Allocating.init(allocator);
     errdefer out.deinit();
-    try obligation_to_lean.writeModule(&out.writer, set, .{
+    if (set.function_summaries.len != 0) try obligation_to_lean.writeCallCustodyModule(&out.writer, set, generated_namespace) else try obligation_to_lean.writeModule(&out.writer, set, .{
         .namespace = generated_namespace,
         .proof_surface = true,
     });
@@ -256,15 +285,18 @@ fn coordinateManifest(
     var parsed_manifest = try proof_manifest.parseProofManifestJson(allocator, manifest_bytes);
     defer parsed_manifest.deinit();
 
-    var applied = try proof_check.applyProofRows(
-        allocator,
-        context.merged_result.set,
-        parsed_manifest.rows,
-        context.generated_namespace,
-        context.obligations_source.?,
-        options.process_environ,
-        stdout,
-    );
+    var applied: ?proof_check.ApplyResult = if (context.merged_result.set.function_summaries.len != 0)
+        try proof_check.applyCallProofRows(allocator, options.module orelse return error.CallCustodyHIRMissing, context.merged_result.set, parsed_manifest.rows, context.generated_namespace, options.process_environ, stdout)
+    else
+        try proof_check.applyProofRows(
+            allocator,
+            context.merged_result.set,
+            parsed_manifest.rows,
+            context.generated_namespace,
+            context.obligations_source.?,
+            options.process_environ,
+            stdout,
+        );
     defer if (applied) |*result| result.deinit();
 
     const decided_set = if (applied) |*result| result.set else context.merged_result.set;
@@ -273,12 +305,19 @@ fn coordinateManifest(
         try writeCertificate(allocator, file_path, options, result.certificate_json, stdout);
         certificate_emitted = true;
     }
+    const artifact_emission_authorized = try reportDecision(
+        stdout,
+        "Lean proof gate",
+        decided_set,
+        file_path,
+        smt_report,
+        options,
+    );
+    if (artifact_emission_authorized and applied != null) {
+        try printAcceptedLoopCertificates(stdout, decided_set, parsed_manifest.rows);
+    }
     return .{
-        .artifact_emission_authorized = try reportDecision(
-            stdout,
-            "Lean proof gate",
-            decided_set,
-        ),
+        .artifact_emission_authorized = artifact_emission_authorized,
         .certificate_emitted = certificate_emitted,
     };
 }
@@ -286,8 +325,18 @@ fn coordinateManifest(
 fn reportDecision(
     stdout: anytype,
     label: []const u8,
-    set: obligation.ObligationSet,
+    input_set: obligation.ObligationSet,
+    file_path: []const u8,
+    smt_report: z3_verification.SmtReportArtifacts,
+    options: Options,
 ) !bool {
+    var set = input_set;
+    if (options.lifecycle) |consumer| {
+        if (smt_report.blocksTrustedArtifacts()) return error.LifecycleNativeReportRejected;
+        const manifest = smt_report.query_manifest orelse return error.MissingLifecycleQuery;
+        set.lifecycle_evidence = try consumer.evidence(manifest.rows, set, options.lifecycle_checks_retained);
+        try consumer.writeReport(file_path, options.output_dir, set.lifecycle_evidence.?);
+    }
     return switch (set.artifactDecision()) {
         .allowed => true,
         .blocked => |reason| blk: {
@@ -296,6 +345,33 @@ fn reportDecision(
             break :blk false;
         },
     };
+}
+
+fn printAcceptedLoopCertificates(
+    stdout: anytype,
+    set: obligation.ObligationSet,
+    rows: []const proof_check.ProofRow,
+) !void {
+    var count: usize = 0;
+    for (rows) |row| {
+        const query = obligation.findById(set.queries, row.query_id) orelse continue;
+        if (query.kind == .loop_induction) count += 1;
+    }
+    if (count == 0) return;
+
+    try stdout.print(
+        "Lean loop proof gate accepted:\n  kernel-checked certificates: {d}\n  query ids: ",
+        .{count},
+    );
+    var written: usize = 0;
+    for (rows) |row| {
+        const query = obligation.findById(set.queries, row.query_id) orelse continue;
+        if (query.kind != .loop_induction) continue;
+        if (written != 0) try stdout.writeAll(", ");
+        try stdout.print("{d}", .{row.query_id});
+        written += 1;
+    }
+    try stdout.writeByte('\n');
 }
 
 fn writeCertificate(
@@ -324,7 +400,7 @@ fn writeCertificate(
     }
 }
 
-fn printBlockingDiagnostics(stdout: anytype, set: obligation.ObligationSet) !void {
+pub fn printBlockingDiagnostics(stdout: anytype, set: obligation.ObligationSet) !void {
     var printed_header = false;
     for (set.diagnostics) |diagnostic| {
         if (!diagnostic.blocks_artifacts) continue;
@@ -369,6 +445,10 @@ fn generatedNamespace(allocator: std.mem.Allocator, file_path: []const u8) ![]co
 fn isPlainUnknownTarget(query: obligation.VerificationQuery) bool {
     if (query.artifact_policy == .diagnostic_only) return false;
     if (query.backend != .z3 or query.obligation_ids.len == 0) return false;
+    // LoopVC policy requires an independent conclusive Z3 result. Sending a
+    // loop-owned UNKNOWN row to Lean would create evidence that cannot and
+    // must not authorize artifacts.
+    if (query.loop_summary_id != null) return false;
     const result = query.result orelse return false;
     return result.status == .unknown and
         !result.degraded and
@@ -377,16 +457,65 @@ fn isPlainUnknownTarget(query: obligation.VerificationQuery) bool {
 }
 
 fn isLeanProofTarget(query: obligation.VerificationQuery) bool {
-    if (query.kind == .loop_induction) {
+    if (query.kind == .loop_induction or query.function_summary_id != null) {
         return query.artifact_policy == .blocks_verified_artifacts and
             query.proof_requirement == .lean_certificate and
             query.backend == .unspecified and
             query.result == null and
-            query.loop_summary_id != null and
+            (query.loop_summary_id != null or query.function_summary_id != null) and
             query.obligation_ids.len == 0;
     }
     if (isPlainUnknownTarget(query)) return true;
     return false;
+}
+
+fn runtimeLoopCertificateTarget(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+) ?obligation.VerificationQuery {
+    if (!summary.projectionSupported() or summary.query_ids.induction.len != 1) return null;
+    const query = obligation.findById(set.queries, summary.query_ids.induction[0]) orelse return null;
+    if (!isLeanProofTarget(query) or query.loop_summary_id != summary.id) return null;
+    return query;
+}
+
+fn runtimeLoopCertificateTargetsComplete(
+    set: obligation.ObligationSet,
+    stdout: anytype,
+) !bool {
+    var complete = true;
+    var printed_header = false;
+    for (set.loop_summaries) |summary| {
+        if (runtimeLoopCertificateTarget(set, summary) != null) continue;
+        complete = false;
+        if (!printed_header) {
+            try stdout.writeAll("Lean proof gate cannot cover every runtime loop:\n");
+            printed_header = true;
+        }
+        try stdout.writeAll("  - ");
+        if (summary.source.file) |file| try stdout.writeAll(file) else try stdout.writeAll("<generated>");
+        if (summary.source.line != 0) try stdout.print(":{d}", .{summary.source.line});
+        if (summary.owner == .statement) {
+            try stdout.print(" ({s})", .{summary.owner.statement.function_name});
+        }
+        try stdout.writeAll(" excluded_by=");
+        if (summary.unsupported_reasons.len != 0) {
+            for (summary.unsupported_reasons, 0..) |reason, index| {
+                if (index != 0) try stdout.writeByte(',');
+                try stdout.writeAll(@tagName(reason));
+            }
+        } else if (summary.validationReason()) |reason| {
+            try stdout.writeAll(@tagName(reason));
+        } else {
+            try stdout.writeAll("loop_certificate_target_missing");
+        }
+        try stdout.writeByte('\n');
+        if (std.mem.indexOfScalar(obligation.LoopUnsupportedReason, summary.unsupported_reasons, .loop_has_call) != null) {
+            try stdout.writeAll("    unsupported_call_in_loop: automatic verification is unavailable; no bytecode is authorized.\n");
+            try stdout.writeAll("    Supply --lean-proofs=<manifest>, or explicitly use --no-verify with runtime checks retained.\n");
+        }
+    }
+    return complete;
 }
 
 fn coordinateAutomatic(
@@ -403,19 +532,31 @@ fn coordinateAutomatic(
     var targets: std.ArrayList(obligation.VerificationQuery) = .empty;
     defer targets.deinit(allocator);
     var unavailable_count: usize = 0;
+    var automatic_fragment_unavailable_count: usize = 0;
     for (context.merged_result.set.queries) |query| {
         if (!isLeanProofTarget(query)) continue;
         if (!semanticSupportAvailable(obligation_to_lean.querySemanticSupport(context.merged_result.set, query))) {
             unavailable_count += 1;
             continue;
         }
+        if (query.kind == .loop_induction) switch (automaticLoopPlan(context.merged_result.set, query)) {
+            .supported => {},
+            .unsupported => |reason| {
+                automatic_fragment_unavailable_count += 1;
+                try stdout.print(
+                    "Automatic Lean loop proof unavailable: {s}\n",
+                    .{automaticLoopProofReasonName(reason)},
+                );
+                continue;
+            },
+        };
         try targets.append(allocator, query);
     }
 
     const unknown_rows = plainUnknownPreparedRows(smt_report);
     const classified_targets = plainUnknownTargetCount(context.merged_result.set);
     const unmatched = if (unknown_rows > classified_targets) unknown_rows - classified_targets else 0;
-    if (unavailable_count != 0 or unmatched != 0) {
+    if (unavailable_count != 0 or automatic_fragment_unavailable_count != 0 or unmatched != 0) {
         try stdout.writeAll("Automatic Lean proof gate cannot cover all required userland obligations.\n");
         if (unavailable_count != 0) {
             try stdout.print("  unsupported Lean-fragment proof targets: {d}\n", .{unavailable_count});
@@ -423,10 +564,19 @@ fn coordinateAutomatic(
         if (unmatched != 0) {
             try stdout.print("  unmatched UNKNOWN prepared rows: {d}\n", .{unmatched});
         }
+        if (automatic_fragment_unavailable_count != 0) {
+            try stdout.print(
+                "  obligations requiring an external Lean certificate: {d}\n",
+                .{automatic_fragment_unavailable_count},
+            );
+        }
         return .{ .artifact_emission_authorized = false, .certificate_emitted = false };
     }
     if (targets.items.len == 0) {
-        return .{ .artifact_emission_authorized = true, .certificate_emitted = false };
+        return .{
+            .artifact_emission_authorized = try reportDecision(stdout, "Automatic Lean proof gate", context.merged_result.set, file_path, smt_report, options),
+            .certificate_emitted = false,
+        };
     }
 
     context.obligations_source = try renderObligationsSource(
@@ -434,28 +584,13 @@ fn coordinateAutomatic(
         context.merged_result.set,
         context.generated_namespace,
     );
-    const scratch_segment = try automaticScratchSegment(allocator, file_path);
-    defer allocator.free(scratch_segment);
-    const scratch_dir = try std.fmt.allocPrint(allocator, "formal/Ora/AutoProofScratch/{s}", .{scratch_segment});
-    defer allocator.free(scratch_dir);
-    const io = std.Io.Threaded.global_single_threaded.io();
-    try std.Io.Dir.cwd().createDirPath(io, scratch_dir);
-    defer std.Io.Dir.cwd().deleteTree(io, scratch_dir) catch {};
-    defer std.Io.Dir.cwd().deleteDir(io, "formal/Ora/AutoProofScratch") catch {};
-
-    const module_name = try std.fmt.allocPrint(allocator, "Ora.AutoProofScratch.{s}.Proofs", .{scratch_segment});
-    defer allocator.free(module_name);
-    const proof_path = try std.fmt.allocPrint(allocator, "{s}/Proofs.lean", .{scratch_dir});
-    defer allocator.free(proof_path);
     const proof_source = try buildAutomaticProofSource(
         allocator,
-        context.obligations_source.?,
-        module_name,
+        context.generated_namespace,
         context.merged_result.set,
         targets.items,
     );
     defer allocator.free(proof_source);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = proof_path, .data = proof_source });
 
     const rows = try allocator.alloc(proof_check.ProofRow, targets.items.len);
     defer allocator.free(rows);
@@ -465,56 +600,86 @@ fn coordinateAutomatic(
         theorem_names.deinit(allocator);
     }
     for (targets.items, rows) |query, *row| {
-        const theorem_name = try std.fmt.allocPrint(allocator, "{s}.discharge_q{d}", .{ module_name, query.id });
+        const theorem_name = try std.fmt.allocPrint(
+            allocator,
+            "Ora.CompilerAutomaticProof.Query_{d}.discharge_q{d}",
+            .{ query.id, query.id },
+        );
         try theorem_names.append(allocator, theorem_name);
         row.* = .{
             .query_id = query.id,
             .obligation_ids = query.obligation_ids,
             .assumption_ids = query.assumption_ids,
-            .module_name = module_name,
+            .module_name = "Ora.CompilerAutomaticProof",
             .theorem_name = theorem_name,
-            .path = proof_path,
+            .path = null,
             .content_sha256 = null,
         };
     }
 
-    var applied = proof_check.applyProofRows(
+    var applied = proof_check.applyInlineProofRows(
         allocator,
         context.merged_result.set,
         rows,
         context.generated_namespace,
         context.obligations_source.?,
+        proof_source,
         options.process_environ,
         stdout,
-    ) catch |err| switch (err) {
-        error.LeanProofCheckFailed => {
-            try printAutomaticProofFailure(stdout);
+    ) catch |err| {
+        if (proof_check.leanProofFailureReason(err)) |_| {
+            try printAutomaticProofFailure(stdout, err);
             return .{ .artifact_emission_authorized = false, .certificate_emitted = false };
-        },
-        else => return err,
+        }
+        return err;
     };
     defer if (applied) |*result| result.deinit();
     if (applied == null) {
-        try printAutomaticProofFailure(stdout);
+        try printAutomaticProofFailure(stdout, error.LeanProofCheckFailed);
         return .{ .artifact_emission_authorized = false, .certificate_emitted = false };
     }
 
     try writeCertificate(allocator, file_path, options, applied.?.certificate_json, stdout);
+    const artifact_emission_authorized = try reportDecision(
+        stdout,
+        "Automatic Lean proof gate",
+        applied.?.set,
+        file_path,
+        smt_report,
+        options,
+    );
+    if (artifact_emission_authorized) {
+        try printAcceptedLoopCertificates(stdout, applied.?.set, rows);
+    }
     return .{
-        .artifact_emission_authorized = try reportDecision(
-            stdout,
-            "Automatic Lean proof gate",
-            applied.?.set,
-        ),
+        .artifact_emission_authorized = artifact_emission_authorized,
         .certificate_emitted = true,
     };
 }
 
-fn printAutomaticProofFailure(stdout: anytype) !void {
-    try stdout.writeAll(
-        "Automatic Lean proof gate failed: generated tactics did not discharge every certificate-required obligation.\n" ++
-            "  Use the emitted obligation module and theorem shape from the following recipe, then pass the proof manifest with `--lean-proofs <proofs.json>`.\n",
-    );
+fn printAutomaticProofFailure(stdout: anytype, err: anyerror) !void {
+    const reason = proof_check.leanProofFailureReason(err) orelse "lean_proof_rejected";
+    try stdout.print("Automatic Lean proof gate failed: reason={s}.\n", .{reason});
+    try stdout.writeAll("  No Lean certificate was produced; artifact emission remains blocked.\n");
+    switch (err) {
+        error.LeanProofParseError => try stdout.writeAll(
+            "  The compiler-generated Lean proof source did not parse; this is a compiler proof-generator defect.\n",
+        ),
+        error.LeanProofUnsolvedGoals, error.LeanProofCheckFailed => try stdout.writeAll(
+            "  Use the emitted obligation module and theorem shape from the following recipe, then pass the proof manifest with `--lean-proofs <proofs.json>`.\n" ++
+                "  A manifest path containing user-authored proof source for the transient obligation module must set `inline_source=true`.\n",
+        ),
+        error.LeanProofTimeout => try stdout.writeAll(
+            "  Lean exhausted its deterministic proof-search budget while checking the generated proof.\n",
+        ),
+        error.LeanToolUnavailable => try stdout.writeAll(
+            "  The configured Lean/Lake toolchain was unavailable.\n",
+        ),
+        error.LeanProofAbnormalTermination => try stdout.writeAll(
+            "  The Lean checker terminated abnormally.\n",
+        ),
+        else => unreachable,
+    }
 }
 
 fn semanticSupportAvailable(support: obligation_to_lean.SemanticSupport) bool {
@@ -544,21 +709,6 @@ fn plainUnknownTargetCount(set: obligation.ObligationSet) usize {
     return count;
 }
 
-fn automaticScratchSegment(allocator: std.mem.Allocator, file_path: []const u8) ![]const u8 {
-    const stem = std.fs.path.stem(file_path);
-    var component = std.Io.Writer.Allocating.init(allocator);
-    defer component.deinit();
-    try component.writer.writeAll("AutoProof_");
-    for (stem) |byte| {
-        try component.writer.writeByte(if (std.ascii.isAlphanumeric(byte) or byte == '_') byte else '_');
-    }
-    return try std.fmt.allocPrint(
-        allocator,
-        "{s}_{x}_{d}",
-        .{ component.written(), std.hash.Wyhash.hash(0, file_path), std.posix.system.getpid() },
-    );
-}
-
 fn findObligation(set: obligation.ObligationSet, id: obligation.Id) ?obligation.Obligation {
     for (set.obligations) |item| if (item.id == id) return item;
     return null;
@@ -569,61 +719,63 @@ fn findAssumption(set: obligation.ObligationSet, id: obligation.Id) ?obligation.
     return null;
 }
 
-fn freeVarIdsEqual(lhs: obligation.FreeVarId, rhs: obligation.FreeVarId) bool {
-    return lhs.file_id == rhs.file_id and lhs.pattern_id == rhs.pattern_id;
-}
-
-fn appendUniqueFreeVar(
-    allocator: std.mem.Allocator,
-    ids: *std.ArrayList(obligation.FreeVarId),
-    id: obligation.FreeVarId,
-) !void {
-    for (ids.items) |existing| if (freeVarIdsEqual(existing, id)) return;
-    try ids.append(allocator, id);
-}
-
-fn collectTermFreeVars(
+fn collectLoopStorageLocationFreeVars(
     allocator: std.mem.Allocator,
     set: obligation.ObligationSet,
-    term_id: obligation.TermId,
+    location: obligation.LoopStorageLocationExpr,
     ids: *std.ArrayList(obligation.FreeVarId),
-    fuel: u32,
 ) !void {
-    if (fuel == 0) return error.LeanAutoProofTermCycle;
-    if (term_id >= set.terms.len) return error.InvalidTermReference;
-    switch (set.terms[term_id]) {
-        .variable => |variable| switch (variable) {
-            .free => |free| try appendUniqueFreeVar(allocator, ids, free.id),
-            .bound => {},
-        },
-        .old => |operand| try collectTermFreeVars(allocator, set, operand, ids, fuel - 1),
-        .unary => |unary| try collectTermFreeVars(allocator, set, unary.operand, ids, fuel - 1),
-        .binary => |binary| {
-            try collectTermFreeVars(allocator, set, binary.lhs, ids, fuel - 1);
-            try collectTermFreeVars(allocator, set, binary.rhs, ids, fuel - 1);
-        },
-        .refinement_predicate => |predicate| {
-            try collectTermFreeVars(allocator, set, predicate.value, ids, fuel - 1);
-            for (predicate.args) |arg| try collectTermFreeVars(allocator, set, arg, ids, fuel - 1);
-        },
-        .quantified => |quantified| {
-            if (quantified.condition) |condition| try collectTermFreeVars(allocator, set, condition, ids, fuel - 1);
-            try collectTermFreeVars(allocator, set, quantified.body, ids, fuel - 1);
-        },
-        .bool_lit, .int_lit, .result, .place_read => {},
-    }
+    for (location.projections) |projection| switch (projection) {
+        .field => {},
+        .fixed_index => |fixed| try set.collectFormulaFreeVars(
+            allocator,
+            fixed.index.value.formula,
+            ids,
+        ),
+        .mapping_key => |typed| try set.collectFormulaFreeVars(
+            allocator,
+            typed.value.formula,
+            ids,
+        ),
+    };
 }
 
-fn collectFormulaFreeVars(
+fn collectLoopSummaryFreeVars(
     allocator: std.mem.Allocator,
     set: obligation.ObligationSet,
-    formula: obligation.FormulaRef,
+    summary: obligation.LoopSummaryRow,
     ids: *std.ArrayList(obligation.FreeVarId),
+    fuel: usize,
 ) !void {
-    switch (formula) {
-        .term => |term| try collectTermFreeVars(allocator, set, term, ids, 256),
-        .origin_value => {},
+    if (fuel == 0) return error.InvalidDependency;
+    for (summary.init_formulas) |formula| try set.collectFormulaFreeVars(allocator, formula, ids);
+    for (summary.invariant_formulas) |formula| try set.collectFormulaFreeVars(allocator, formula, ids);
+    for (summary.edges) |edge| {
+        for (edge.timeline) |event| switch (event.payload) {
+            .call => return error.UnsupportedLoopCall,
+            .path_assumption, .safety_checkpoint => |formulas| for (formulas.formulas) |formula| {
+                try set.collectFormulaFreeVars(allocator, formula.formula, ids);
+            },
+            .summary_dependency => |dependency| {
+                const child = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
+                    return error.InvalidDependency;
+                try collectLoopSummaryFreeVars(allocator, set, child, ids, fuel - 1);
+            },
+            .storage_read => |read| {
+                try collectLoopStorageLocationFreeVars(allocator, set, read.location, ids);
+            },
+            .indexed_region_read => |read| {
+                try set.collectFormulaFreeVars(allocator, read.index.formula, ids);
+            },
+            .storage_write => |write| {
+                try collectLoopStorageLocationFreeVars(allocator, set, write.location, ids);
+                try set.collectFormulaFreeVars(allocator, write.value.formula, ids);
+            },
+        };
+        for (edge.target_formulas) |formula| try set.collectFormulaFreeVars(allocator, formula, ids);
+        for (edge.next_state) |binding| try set.collectFormulaFreeVars(allocator, binding.value, ids);
     }
+    for (summary.post_formulas) |formula| try set.collectFormulaFreeVars(allocator, formula, ids);
 }
 
 fn collectQueryFreeVars(
@@ -635,22 +787,23 @@ fn collectQueryFreeVars(
     errdefer ids.deinit(allocator);
     for (query.assumption_ids) |id| {
         const assumption = findAssumption(set, id) orelse return error.InvalidDependency;
-        if (assumption.formula) |formula| try collectFormulaFreeVars(allocator, set, formula, &ids);
+        if (assumption.formula) |formula| try set.collectFormulaFreeVars(allocator, formula, &ids);
     }
     for (query.obligation_ids) |id| {
         const item = findObligation(set, id) orelse return error.InvalidDependency;
-        if (obligation.kindFormula(item.kind)) |formula| try collectFormulaFreeVars(allocator, set, formula, &ids);
+        if (obligation.kindFormula(item.kind)) |formula| try set.collectFormulaFreeVars(allocator, formula, &ids);
     }
     if (query.kind == .loop_induction) {
         const summary_id = query.loop_summary_id orelse return error.InvalidDependency;
         const loop_summary = obligation.findById(set.loop_summaries, summary_id) orelse
             return error.InvalidDependency;
-        for (loop_summary.init_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, &ids);
-        if (loop_summary.guard_formula) |formula| try collectFormulaFreeVars(allocator, set, formula, &ids);
-        for (loop_summary.invariant_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, &ids);
-        for (loop_summary.step_assignments) |assignment| try collectFormulaFreeVars(allocator, set, assignment.value, &ids);
-        for (loop_summary.body_safety_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, &ids);
-        for (loop_summary.post_formulas) |formula| try collectFormulaFreeVars(allocator, set, formula, &ids);
+        try collectLoopSummaryFreeVars(
+            allocator,
+            set,
+            loop_summary,
+            &ids,
+            set.loop_summaries.len + 1,
+        );
     }
     return try ids.toOwnedSlice(allocator);
 }
@@ -672,14 +825,32 @@ fn writeWitnessEnv(writer: anytype, free_vars: []const obligation.FreeVarId) !vo
     }
 }
 
-fn writeFreeVarEqualityFacts(writer: anytype, free_vars: []const obligation.FreeVarId) !void {
+const FreeVarEqualityForm = enum {
+    local_haves,
+    attributed_theorems,
+};
+
+fn writeFreeVarEqualityFacts(
+    writer: anytype,
+    free_vars: []const obligation.FreeVarId,
+    form: FreeVarEqualityForm,
+) !void {
     for (free_vars, 0..) |lhs, lhs_index| for (free_vars, 0..) |rhs, rhs_index| {
-        try writer.print("  have h_auto_free_{d}_{d} : ((", .{ lhs_index, rhs_index });
+        switch (form) {
+            .local_haves => try writer.print("  have h_auto_free_{d}_{d} : ((", .{ lhs_index, rhs_index }),
+            .attributed_theorems => try writer.print("private theorem auto_free_{d}_{d} : ((", .{ lhs_index, rhs_index }),
+        }
         try writeFreeVarId(writer, lhs);
         try writer.writeAll(" : FreeVarId) == ");
         try writeFreeVarId(writer, rhs);
-        try writer.print(") = {s} := by rfl\n", .{if (freeVarIdsEqual(lhs, rhs)) "true" else "false"});
+        try writer.print(") = {s} := by rfl\n", .{if (obligation.freeVarIdEql(lhs, rhs)) "true" else "false"});
     };
+    if (form == .local_haves) return;
+    try writer.writeAll("attribute [local ora_loop_data]");
+    for (free_vars, 0..) |_, lhs| for (free_vars, 0..) |_, rhs| {
+        try writer.print(" auto_free_{d}_{d}", .{ lhs, rhs });
+    };
+    try writer.writeByte('\n');
 }
 
 fn writeAutomaticSimpSet(writer: anytype, free_var_count: usize) !void {
@@ -737,21 +908,6 @@ fn writeAutomaticSimpSet(writer: anytype, free_var_count: usize) !void {
     );
 }
 
-const AutomaticCounterBound = union(enum) {
-    literal: []const u8,
-    context: obligation.FreeVarId,
-};
-
-const AutomaticCounterLoop = struct {
-    summary_id: obligation.Id,
-    loop_variable: obligation.FreeVarId,
-    guard_term: obligation.TermId,
-    invariant_term: obligation.TermId,
-    post_term: ?obligation.TermId,
-    has_body_safety: bool,
-    bound: AutomaticCounterBound,
-};
-
 fn formulaTermId(formula: obligation.FormulaRef) ?obligation.TermId {
     return switch (formula) {
         .term => |id| id,
@@ -764,697 +920,930 @@ fn termAt(set: obligation.ObligationSet, id: obligation.TermId) ?obligation.Term
     return set.terms[id];
 }
 
-fn termIsFreeVariable(
-    set: obligation.ObligationSet,
-    id: obligation.TermId,
-    expected: obligation.FreeVarId,
-) bool {
-    const term = termAt(set, id) orelse return false;
-    return switch (term) {
-        .variable => |variable| switch (variable) {
-            .free => |free| obligation.freeVarIdEql(free.id, expected),
-            .bound => false,
-        },
-        else => false,
-    };
-}
-
-fn termIsIntegerLiteral(
-    set: obligation.ObligationSet,
-    id: obligation.TermId,
-    expected: []const u8,
-) bool {
-    const term = termAt(set, id) orelse return false;
-    return switch (term) {
-        .int_lit => |literal| std.mem.eql(u8, literal.value, expected),
-        else => false,
-    };
-}
-
-fn scalarTermsEquivalent(
-    set: obligation.ObligationSet,
-    lhs_id: obligation.TermId,
-    rhs_id: obligation.TermId,
-    fuel: u32,
-) bool {
-    if (fuel == 0) return false;
-    const lhs = termAt(set, lhs_id) orelse return false;
-    const rhs = termAt(set, rhs_id) orelse return false;
-    if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
-    return switch (lhs) {
-        .bool_lit => |value| value == rhs.bool_lit,
-        .int_lit => |literal| std.mem.eql(u8, literal.value, rhs.int_lit.value),
-        .variable => |variable| switch (variable) {
-            .free => |free| switch (rhs.variable) {
-                .free => |other| obligation.freeVarIdEql(free.id, other.id),
-                .bound => false,
-            },
-            .bound => |bound| switch (rhs.variable) {
-                .free => false,
-                .bound => |other| bound.index == other.index,
-            },
-        },
-        .unary => |unary| unary.op == rhs.unary.op and
-            scalarTermsEquivalent(set, unary.operand, rhs.unary.operand, fuel - 1),
-        .binary => |binary| binary.op == rhs.binary.op and
-            scalarTermsEquivalent(set, binary.lhs, rhs.binary.lhs, fuel - 1) and
-            scalarTermsEquivalent(set, binary.rhs, rhs.binary.rhs, fuel - 1),
-        else => false,
-    };
-}
-
 fn decimalLiteralCanBeEmitted(value: []const u8) bool {
     if (value.len == 0) return false;
     for (value) |byte| if (!std.ascii.isDigit(byte)) return false;
     return true;
 }
 
-fn typeRefIsAutomaticU256(ty: obligation.TypeRef) bool {
-    return switch (ty) {
-        .compiler_type_id => |id| id == ora_types.builtin.lookupBuiltinById(.u256).comptime_type_id,
-        .spelling => |name| std.mem.eql(u8, name, "u256") or std.mem.eql(u8, name, "uint256"),
+const AutomaticIntegerShape = struct {
+    width: u16,
+    signed: bool,
+
+    fn eql(lhs: AutomaticIntegerShape, rhs: AutomaticIntegerShape) bool {
+        return lhs.width == rhs.width and lhs.signed == rhs.signed;
+    }
+};
+
+const AutomaticLoopProofReason = enum {
+    automatic_query_shape_unsupported,
+    automatic_assumptions_require_external_certificate,
+    automatic_nested_summary_requires_external_certificate,
+    automatic_call_relation_unsupported,
+    automatic_storage_timeline_requires_external_certificate,
+    loop_indexed_region_read_formula_unreviewed,
+    automatic_control_shape_unsupported,
+    automatic_formula_reference_unsupported,
+    automatic_term_kind_unsupported,
+    automatic_integer_type_missing,
+    automatic_integer_type_unsupported,
+    automatic_mixed_integer_shapes,
+    automatic_foreign_variable,
+    automatic_initial_state_dependency,
+    automatic_nonlinear_arithmetic,
+};
+
+const AutomaticLoopPlan = struct {
+    summary: obligation.LoopSummaryRow,
+};
+
+const AutomaticLoopPlanResult = union(enum) {
+    supported: AutomaticLoopPlan,
+    unsupported: AutomaticLoopProofReason,
+};
+
+fn automaticLoopProofReasonName(reason: AutomaticLoopProofReason) []const u8 {
+    return @tagName(reason);
+}
+
+fn loopSummaryHasDependencies(summary: obligation.LoopSummaryRow) bool {
+    for (summary.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
+        .summary_dependency => return true,
+        else => {},
+    };
+    return false;
+}
+
+fn appendAutomaticSummaryClosure(
+    allocator: std.mem.Allocator,
+    set: obligation.ObligationSet,
+    rows: *std.ArrayList(obligation.LoopSummaryRow),
+    summary: obligation.LoopSummaryRow,
+    fuel: usize,
+) !void {
+    if (fuel == 0) return error.InvalidDependency;
+    for (rows.items) |existing| if (existing.id == summary.id) return;
+    try rows.append(allocator, summary);
+    for (summary.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
+        .summary_dependency => |dependency| {
+            const child = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
+                return error.InvalidDependency;
+            try appendAutomaticSummaryClosure(allocator, set, rows, child, fuel - 1);
+        },
+        else => {},
     };
 }
 
-fn classifyAutomaticCounterLoop(
+fn automaticSummaryClosure(
+    allocator: std.mem.Allocator,
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+) ![]obligation.LoopSummaryRow {
+    var rows: std.ArrayList(obligation.LoopSummaryRow) = .empty;
+    errdefer rows.deinit(allocator);
+    try appendAutomaticSummaryClosure(
+        allocator,
+        set,
+        &rows,
+        summary,
+        set.loop_summaries.len + 1,
+    );
+    return rows.toOwnedSlice(allocator);
+}
+
+fn automaticIntegerShape(ty: obligation.TypeRef) ?AutomaticIntegerShape {
+    const info = switch (ty) {
+        .compiler_type_id => |id| ora_types.builtin.integerInfoByComptimeTypeId(id),
+        .spelling => |name| ora_types.builtin.integerInfoByName(name),
+    } orelse return null;
+    return .{ .width = info.width, .signed = info.signed };
+}
+
+fn automaticTermType(
+    set: obligation.ObligationSet,
+    term_id: obligation.TermId,
+) ?obligation.TypeRef {
+    const term = termAt(set, term_id) orelse return null;
+    return switch (term) {
+        .int_lit => |literal| literal.ty,
+        .variable => |variable| switch (variable) {
+            .free => |free| free.ty,
+            .bound => |bound| bound.ty,
+        },
+        .binary => |binary| binary.ty,
+        else => null,
+    };
+}
+
+fn automaticVariableKnown(
+    summary: obligation.LoopSummaryRow,
+    id: obligation.FreeVarId,
+) bool {
+    for (summary.variables) |variable| {
+        if (variable.id) |candidate| if (obligation.freeVarIdEql(candidate, id)) return true;
+    }
+    for (summary.context_variables) |variable| {
+        if (variable.id) |candidate| if (obligation.freeVarIdEql(candidate, id)) return true;
+    }
+    return false;
+}
+
+fn automaticDependencyVariable(
+    set: obligation.ObligationSet,
+    edge: obligation.LoopEdgeRow,
+    id: obligation.FreeVarId,
+) ?obligation.LoopVariable {
+    for (edge.timeline) |event| switch (event.payload) {
+        .storage_read => |read| if (obligation.freeVarIdEql(read.result, id)) {
+            return .{
+                .index = 0,
+                .id = read.result,
+                .name = "storage_read",
+                .ty = read.location.value_ty,
+            };
+        },
+        .indexed_region_read => |read| if (obligation.freeVarIdEql(read.result, id)) {
+            return .{
+                .index = 0,
+                .id = read.result,
+                .name = "indexed_region_read",
+                .ty = read.element_ty,
+            };
+        },
+        .summary_dependency => |dependency| {
+            const child = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
+                continue;
+            for (child.variables) |variable| {
+                const candidate = variable.id orelse continue;
+                if (obligation.freeVarIdEql(candidate, id)) return variable;
+            }
+        },
+        else => {},
+    };
+    return null;
+}
+
+fn automaticVariableKnownOnEdge(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    edge: ?obligation.LoopEdgeRow,
+    id: obligation.FreeVarId,
+) bool {
+    if (automaticVariableKnown(summary, id)) return true;
+    return if (edge) |row| automaticDependencyVariable(set, row, id) != null else false;
+}
+
+const AutomaticValueShapeResult = union(enum) {
+    supported: AutomaticIntegerShape,
+    unsupported: AutomaticLoopProofReason,
+};
+
+fn automaticValueShapeInScope(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    edge: ?obligation.LoopEdgeRow,
+    term_id: obligation.TermId,
+    fuel: u32,
+) AutomaticValueShapeResult {
+    if (fuel == 0) return .{ .unsupported = .automatic_term_kind_unsupported };
+    const term = termAt(set, term_id) orelse
+        return .{ .unsupported = .automatic_formula_reference_unsupported };
+    switch (term) {
+        .int_lit => |literal| {
+            const ty = literal.ty orelse
+                return .{ .unsupported = .automatic_integer_type_missing };
+            const shape = automaticIntegerShape(ty) orelse
+                return .{ .unsupported = .automatic_integer_type_unsupported };
+            if (!decimalLiteralCanBeEmitted(literal.value)) {
+                return .{ .unsupported = .automatic_term_kind_unsupported };
+            }
+            return .{ .supported = shape };
+        },
+        .variable => |variable| switch (variable) {
+            .bound => return .{ .unsupported = .automatic_term_kind_unsupported },
+            .free => |free| {
+                if (!automaticVariableKnownOnEdge(set, summary, edge, free.id)) {
+                    return .{ .unsupported = .automatic_foreign_variable };
+                }
+                const ty = free.ty orelse
+                    return .{ .unsupported = .automatic_integer_type_missing };
+                return .{ .supported = automaticIntegerShape(ty) orelse
+                    return .{ .unsupported = .automatic_integer_type_unsupported } };
+            },
+        },
+        .binary => |binary| {
+            if (binary.op != .add and binary.op != .sub and
+                binary.op != .bit_and and binary.op != .bit_xor and binary.op != .div)
+            {
+                return .{ .unsupported = switch (binary.op) {
+                    .mul, .pow, .shl, .shr, .mod => .automatic_nonlinear_arithmetic,
+                    else => .automatic_term_kind_unsupported,
+                } };
+            }
+            const ty = binary.ty orelse
+                return .{ .unsupported = .automatic_integer_type_missing };
+            const result_shape = automaticIntegerShape(ty) orelse
+                return .{ .unsupported = .automatic_integer_type_unsupported };
+            if (binary.op == .div and result_shape.signed)
+                return .{ .unsupported = .automatic_nonlinear_arithmetic };
+            const lhs = automaticValueShapeInScope(set, summary, edge, binary.lhs, fuel - 1);
+            const lhs_shape = switch (lhs) {
+                .supported => |shape| shape,
+                .unsupported => |reason| return .{ .unsupported = reason },
+            };
+            const rhs = automaticValueShapeInScope(set, summary, edge, binary.rhs, fuel - 1);
+            const rhs_shape = switch (rhs) {
+                .supported => |shape| shape,
+                .unsupported => |reason| return .{ .unsupported = reason },
+            };
+            if (!result_shape.eql(lhs_shape) or !result_shape.eql(rhs_shape)) {
+                return .{ .unsupported = .automatic_mixed_integer_shapes };
+            }
+            return .{ .supported = result_shape };
+        },
+        else => return .{ .unsupported = .automatic_term_kind_unsupported },
+    }
+}
+
+fn automaticValueShape(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    term_id: obligation.TermId,
+    fuel: u32,
+) AutomaticValueShapeResult {
+    return automaticValueShapeInScope(set, summary, null, term_id, fuel);
+}
+
+fn automaticFormulaReasonInScope(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    edge: ?obligation.LoopEdgeRow,
+    formula: obligation.FormulaRef,
+    fuel: u32,
+) ?AutomaticLoopProofReason {
+    const term_id = formulaTermId(formula) orelse return .automatic_formula_reference_unsupported;
+    if (fuel == 0) return .automatic_term_kind_unsupported;
+    const term = termAt(set, term_id) orelse return .automatic_formula_reference_unsupported;
+    return switch (term) {
+        .bool_lit => null,
+        .unary => |unary| if (unary.op == .not)
+            automaticFormulaReasonInScope(
+                set,
+                summary,
+                edge,
+                .{ .term = unary.operand },
+                fuel - 1,
+            )
+        else
+            .automatic_term_kind_unsupported,
+        .binary => |binary| switch (binary.op) {
+            .eq, .ne, .lt, .le, .gt, .ge, .slt, .sle, .sgt, .sge => blk: {
+                const lhs = automaticValueShapeInScope(
+                    set,
+                    summary,
+                    edge,
+                    binary.lhs,
+                    fuel - 1,
+                );
+                const lhs_shape = switch (lhs) {
+                    .supported => |shape| shape,
+                    .unsupported => |reason| break :blk reason,
+                };
+                const rhs = automaticValueShapeInScope(
+                    set,
+                    summary,
+                    edge,
+                    binary.rhs,
+                    fuel - 1,
+                );
+                const rhs_shape = switch (rhs) {
+                    .supported => |shape| shape,
+                    .unsupported => |reason| break :blk reason,
+                };
+                if (!lhs_shape.eql(rhs_shape)) break :blk .automatic_mixed_integer_shapes;
+                break :blk null;
+            },
+            .and_, .or_, .implies => automaticFormulaReasonInScope(
+                set,
+                summary,
+                edge,
+                .{ .term = binary.lhs },
+                fuel - 1,
+            ) orelse automaticFormulaReasonInScope(
+                set,
+                summary,
+                edge,
+                .{ .term = binary.rhs },
+                fuel - 1,
+            ),
+            else => .automatic_term_kind_unsupported,
+        },
+        else => .automatic_term_kind_unsupported,
+    };
+}
+
+fn automaticFormulaReason(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    formula: obligation.FormulaRef,
+    fuel: u32,
+) ?AutomaticLoopProofReason {
+    return automaticFormulaReasonInScope(set, summary, null, formula, fuel);
+}
+
+fn automaticValueReason(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    formula: obligation.FormulaRef,
+) ?AutomaticLoopProofReason {
+    const term_id = formulaTermId(formula) orelse return .automatic_formula_reference_unsupported;
+    return switch (automaticValueShape(set, summary, term_id, 256)) {
+        .supported => null,
+        .unsupported => |reason| reason,
+    };
+}
+
+fn automaticValueReasonOnEdge(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    edge: obligation.LoopEdgeRow,
+    formula: obligation.FormulaRef,
+) ?AutomaticLoopProofReason {
+    const term_id = formulaTermId(formula) orelse return .automatic_formula_reference_unsupported;
+    return switch (automaticValueShapeInScope(set, summary, edge, term_id, 256)) {
+        .supported => null,
+        .unsupported => |reason| reason,
+    };
+}
+
+fn automaticVariableIndex(
+    variables: []const obligation.LoopVariable,
+    id: obligation.FreeVarId,
+) ?usize {
+    for (variables, 0..) |variable, index| {
+        const candidate = variable.id orelse continue;
+        if (obligation.freeVarIdEql(candidate, id)) return index;
+    }
+    return null;
+}
+
+fn automaticValueUsesLoopVariable(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    term_id: obligation.TermId,
+    fuel: u32,
+) bool {
+    if (fuel == 0) return true;
+    const term = termAt(set, term_id) orelse return true;
+    return switch (term) {
+        .variable => |variable| switch (variable) {
+            .bound => true,
+            .free => |free| automaticVariableIndex(summary.variables, free.id) != null,
+        },
+        .binary => |binary| automaticValueUsesLoopVariable(
+            set,
+            summary,
+            binary.lhs,
+            fuel - 1,
+        ) or automaticValueUsesLoopVariable(
+            set,
+            summary,
+            binary.rhs,
+            fuel - 1,
+        ),
+        .int_lit => false,
+        else => true,
+    };
+}
+
+fn timelineHasStorageReadBeforeSafetyCheckpoint(events: []const obligation.LoopTimelineEvent) bool {
+    var later_checkpoint = false;
+    var index = events.len;
+    while (index > 0) {
+        index -= 1;
+        switch (events[index].payload) {
+            .safety_checkpoint => later_checkpoint = true,
+            .storage_read => if (later_checkpoint) return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
+// Called only after term/ID validation. This permits an automatic attempt;
+// every assumption still enters both prover queries and the complete witness.
+// An inherited requires is not a same-block fact: never manufacture such rows.
+fn automaticLoopAssumptionsSupported(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    assumption_ids: []const obligation.Id,
+) bool {
+    if (set.loopHeaderFactsMatchAssumptions(summary, assumption_ids)) return true;
+    if (summary.header_facts.len != 0 or summary.owner != .statement) return false;
+    for (set.loop_summaries) |parent| {
+        if (parent.id >= summary.id or parent.owner != .statement or
+            !std.mem.eql(u8, parent.owner.statement.function_name, summary.owner.statement.function_name) or
+            !parent.projectionSupported() or parent.query_ids.induction.len != 1) continue;
+        const query = obligation.findById(set.queries, parent.query_ids.induction[0]) orelse continue;
+        if (!std.mem.eql(obligation.Id, query.assumption_ids, assumption_ids) or
+            !set.loopHeaderFactsMatchAssumptions(parent, assumption_ids)) continue;
+        var captured = true;
+        for (parent.header_facts) |fact| {
+            if (fact.source_kind != .function_requires) continue;
+            for (fact.stable_values) |value| {
+                const expected = automaticIntegerShape(value.ty) orelse return false;
+                const found = for (summary.context_variables) |variable| {
+                    const id = variable.id orelse continue;
+                    if (!obligation.freeVarIdEql(id, value.id)) continue;
+                    const actual = automaticIntegerShape(variable.ty) orelse return false;
+                    if (expected.eql(actual)) break true;
+                } else false;
+                if (!found) captured = false;
+            }
+        }
+        if (!captured) continue;
+        for (parent.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
+            .summary_dependency => |dependency| if (dependency.summary_id == summary.id) return true,
+            else => {},
+        };
+    }
+    return false;
+}
+
+fn automaticLoopPlan(
     set: obligation.ObligationSet,
     query: obligation.VerificationQuery,
-) ?AutomaticCounterLoop {
-    if (query.kind != .loop_induction or query.assumption_ids.len != 0) return null;
-    const summary_id = query.loop_summary_id orelse return null;
-    const summary = obligation.findById(set.loop_summaries, summary_id) orelse return null;
-    if (!summary.projectionSupported() or
-        summary.variables.len != 1 or
-        summary.init_formulas.len != 1 or
-        summary.invariant_formulas.len != 1 or
-        summary.step_assignments.len != 1 or
-        summary.body_safety_formulas.len > 1 or
-        summary.post_formulas.len > 1) return null;
-    if (!typeRefIsAutomaticU256(summary.variables[0].ty)) return null;
+) AutomaticLoopPlanResult {
+    if (query.kind != .loop_induction or query.loop_summary_id == null) {
+        return .{ .unsupported = .automatic_query_shape_unsupported };
+    }
+    const summary = obligation.findById(set.loop_summaries, query.loop_summary_id.?) orelse
+        return .{ .unsupported = .automatic_query_shape_unsupported };
+    set.validateTermReferences() catch return .{ .unsupported = .automatic_query_shape_unsupported };
+    set.validateIdReferences() catch return .{ .unsupported = .automatic_query_shape_unsupported };
+    if (set.loopSummaryArtifactAuthorityBlockReason(summary) ==
+        .loop_indexed_region_read_formula_unreviewed)
+    {
+        return .{ .unsupported = .loop_indexed_region_read_formula_unreviewed };
+    }
+    if (!automaticLoopAssumptionsSupported(set, summary, query.assumption_ids))
+        return .{ .unsupported = .automatic_assumptions_require_external_certificate };
+    if (!summary.projectionSupported() or summary.edges.len < 2) {
+        return .{ .unsupported = .automatic_control_shape_unsupported };
+    }
+    if (summary.variables.len == 0 or summary.init_formulas.len != summary.variables.len) {
+        return .{ .unsupported = .automatic_control_shape_unsupported };
+    }
+    var has_backedge = false;
+    var has_exit = false;
+    for (summary.edges) |edge| switch (edge.target orelse
+        return .{ .unsupported = .automatic_control_shape_unsupported }) {
+        .backedge => has_backedge = true,
+        .successor, .function_return, .error_return => has_exit = true,
+        .explicit_revert => return .{ .unsupported = .automatic_control_shape_unsupported },
+    };
+    if (!has_backedge or !has_exit) {
+        return .{ .unsupported = .automatic_control_shape_unsupported };
+    }
+    for (summary.variables) |variable| {
+        if (automaticIntegerShape(variable.ty) == null) {
+            return .{ .unsupported = .automatic_integer_type_unsupported };
+        }
+    }
     for (summary.context_variables) |variable| {
-        if (!typeRefIsAutomaticU256(variable.ty)) return null;
+        if (automaticIntegerShape(variable.ty) == null) {
+            return .{ .unsupported = .automatic_integer_type_unsupported };
+        }
     }
-
-    const loop_variable = summary.variables[0].id orelse return null;
-    const init_id = formulaTermId(summary.init_formulas[0]) orelse return null;
-    if (!termIsIntegerLiteral(set, init_id, "0")) return null;
-
-    const guard_term = formulaTermId(summary.guard_formula orelse return null) orelse return null;
-    const guard = switch (termAt(set, guard_term) orelse return null) {
-        .binary => |binary| binary,
-        else => return null,
-    };
-    if (guard.op != .lt or !termIsFreeVariable(set, guard.lhs, loop_variable)) return null;
-
-    const bound: AutomaticCounterBound = switch (termAt(set, guard.rhs) orelse return null) {
-        .int_lit => |literal| blk: {
-            if (summary.context_variables.len != 0 or !decimalLiteralCanBeEmitted(literal.value)) return null;
-            break :blk .{ .literal = literal.value };
-        },
-        .variable => |variable| blk: {
-            const free = switch (variable) {
-                .free => |value| value,
-                .bound => return null,
-            };
-            if (summary.context_variables.len != 1) return null;
-            const context_id = summary.context_variables[0].id orelse return null;
-            if (!obligation.freeVarIdEql(context_id, free.id)) return null;
-            break :blk .{ .context = context_id };
-        },
-        else => return null,
-    };
-
-    const invariant_term = formulaTermId(summary.invariant_formulas[0]) orelse return null;
-    const invariant = switch (termAt(set, invariant_term) orelse return null) {
-        .binary => |binary| binary,
-        else => return null,
-    };
-    if (invariant.op != .le or
-        !termIsFreeVariable(set, invariant.lhs, loop_variable) or
-        !scalarTermsEquivalent(set, invariant.rhs, guard.rhs, 64)) return null;
-
-    const assignment = summary.step_assignments[0];
-    if (assignment.variable_index != 0 or
-        assignment.target == null or
-        !obligation.freeVarIdEql(assignment.target.?, loop_variable)) return null;
-    const step_term = formulaTermId(assignment.value) orelse return null;
-    const step = switch (termAt(set, step_term) orelse return null) {
-        .binary => |binary| binary,
-        else => return null,
-    };
-    if (step.op != .add or
-        !termIsFreeVariable(set, step.lhs, loop_variable) or
-        !termIsIntegerLiteral(set, step.rhs, "1")) return null;
-
-    if (summary.body_safety_formulas.len == 1) {
-        const safety_term = formulaTermId(summary.body_safety_formulas[0]) orelse return null;
-        const safety_not = switch (termAt(set, safety_term) orelse return null) {
-            .unary => |unary| unary,
-            else => return null,
-        };
-        if (safety_not.op != .not) return null;
-        const safety_lt = switch (termAt(set, safety_not.operand) orelse return null) {
-            .binary => |binary| binary,
-            else => return null,
-        };
-        if (safety_lt.op != .lt or
-            !scalarTermsEquivalent(set, safety_lt.lhs, step_term, 64) or
-            !termIsFreeVariable(set, safety_lt.rhs, loop_variable)) return null;
+    for (summary.init_formulas) |formula| {
+        if (automaticValueReason(set, summary, formula)) |reason| {
+            return .{ .unsupported = reason };
+        }
+        const term_id = formulaTermId(formula) orelse
+            return .{ .unsupported = .automatic_formula_reference_unsupported };
+        if (automaticValueUsesLoopVariable(set, summary, term_id, 256)) {
+            return .{ .unsupported = .automatic_initial_state_dependency };
+        }
     }
-
-    const post_term = if (summary.post_formulas.len == 1)
-        formulaTermId(summary.post_formulas[0]) orelse return null
-    else
-        null;
-    if (post_term) |id| if (!scalarTermsEquivalent(set, id, invariant_term, 64)) return null;
-
-    return .{
-        .summary_id = summary_id,
-        .loop_variable = loop_variable,
-        .guard_term = guard_term,
-        .invariant_term = invariant_term,
-        .post_term = post_term,
-        .has_body_safety = summary.body_safety_formulas.len == 1,
-        .bound = bound,
+    for (summary.invariant_formulas) |formula| if (automaticFormulaReason(set, summary, formula, 256)) |reason| {
+        return .{ .unsupported = reason };
     };
+    for (summary.edges) |edge| {
+        if (timelineHasStorageReadBeforeSafetyCheckpoint(edge.timeline)) {
+            return .{ .unsupported = .automatic_storage_timeline_requires_external_certificate };
+        }
+        var dependency_count: usize = 0;
+        for (edge.timeline) |event| switch (event.payload) {
+            .call => return .{ .unsupported = .automatic_call_relation_unsupported },
+            .summary_dependency => |dependency| {
+                dependency_count += 1;
+                if (dependency_count > 1) return .{
+                    .unsupported = .automatic_nested_summary_requires_external_certificate,
+                };
+                const child = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
+                    return .{ .unsupported = .automatic_nested_summary_requires_external_certificate };
+                if (!child.projectionSupported()) {
+                    return .{ .unsupported = .automatic_nested_summary_requires_external_certificate };
+                }
+                for (child.variables) |variable| {
+                    if (variable.id == null or automaticIntegerShape(variable.ty) == null) {
+                        return .{ .unsupported = .automatic_nested_summary_requires_external_certificate };
+                    }
+                }
+                if (loopSummaryHasDependencies(child)) {
+                    return .{ .unsupported = .automatic_nested_summary_requires_external_certificate };
+                }
+                var matching_targets: usize = 0;
+                for (child.edges) |child_edge| {
+                    if (child_edge.target == dependency.target) matching_targets += 1;
+                }
+                if (matching_targets != 1) {
+                    return .{ .unsupported = .automatic_nested_summary_requires_external_certificate };
+                }
+            },
+            .path_assumption => |path| for (path.formulas) |formula| {
+                if (automaticFormulaReason(set, summary, formula.formula, 256)) |reason| {
+                    return .{ .unsupported = reason };
+                }
+            },
+            .safety_checkpoint => |checkpoint| for (checkpoint.formulas) |formula| {
+                if (automaticFormulaReasonInScope(set, summary, edge, formula.formula, 256)) |reason| {
+                    return .{ .unsupported = reason };
+                }
+            },
+            .storage_write => |write| {
+                if (automaticValueReasonOnEdge(set, summary, edge, write.value.formula)) |reason| {
+                    return .{ .unsupported = reason };
+                }
+            },
+            .storage_read => {},
+            .indexed_region_read => |read| {
+                if (automaticValueReasonOnEdge(set, summary, edge, read.index.formula)) |reason| {
+                    return .{ .unsupported = reason };
+                }
+                if (automaticIntegerShape(read.element_ty) == null) {
+                    return .{ .unsupported = .automatic_integer_type_unsupported };
+                }
+            },
+        };
+        if (edge.next_state.len != summary.variables.len) {
+            return .{ .unsupported = .automatic_control_shape_unsupported };
+        }
+        for (edge.next_state, 0..) |binding, index| {
+            if (binding.variable_index != index) {
+                return .{ .unsupported = .automatic_control_shape_unsupported };
+            }
+            const expected = summary.variables[index].id orelse
+                return .{ .unsupported = .automatic_control_shape_unsupported };
+            const actual = binding.target orelse
+                return .{ .unsupported = .automatic_control_shape_unsupported };
+            if (!obligation.freeVarIdEql(expected, actual)) {
+                return .{ .unsupported = .automatic_control_shape_unsupported };
+            }
+        }
+        for (edge.target_formulas) |formula| if (automaticFormulaReason(set, summary, formula, 256)) |reason| {
+            return .{ .unsupported = reason };
+        };
+        for (edge.next_state) |binding| if (automaticValueReasonOnEdge(set, summary, edge, binding.value)) |reason| {
+            return .{ .unsupported = reason };
+        };
+    }
+    for (summary.post_formulas) |formula| if (automaticFormulaReason(set, summary, formula, 256)) |reason| {
+        return .{ .unsupported = reason };
+    };
+    return .{ .supported = .{ .summary = summary } };
 }
 
-fn writeAutomaticCounterNotations(
+fn writeAutomaticLoopProof(
+    allocator: std.mem.Allocator,
     writer: anytype,
+    set: obligation.ObligationSet,
     query: obligation.VerificationQuery,
-    counter: AutomaticCounterLoop,
+    plan: AutomaticLoopPlan,
+    free_vars: []const obligation.FreeVarId,
 ) !void {
+    const term_ids = try automaticLoopTermIds(allocator, set, query);
+    defer allocator.free(term_ids);
+    const summary = plan.summary;
+    const nested = loopSummaryHasDependencies(summary);
+
     try writer.writeAll("section\n");
     try writer.print(
-        "private abbrev autoSummary_q{d} : Ora.Loop.SummaryRow := emittedLoopSummary_{d}\n" ++
-            "local notation \"autoSummary\" => autoSummary_q{d}\n" ++
-            "attribute [local simp] autoSummary_q{d} emittedLoopSummary_{d}\n",
-        .{ query.id, counter.summary_id, query.id, query.id, counter.summary_id },
+        "private abbrev autoSummary : Ora.Loop.SummaryRow := emittedLoopSummary_{d}\n" ++
+            "attribute [local ora_loop_row] autoSummary",
+        .{summary.id},
     );
-    try writer.print(
-        "private abbrev autoLoopId_q{d} : FreeVarId := {{ file_id := {d}, pattern_id := {d} }}\n" ++
-            "local notation \"autoLoopId\" => autoLoopId_q{d}\n" ++
-            "attribute [local simp] autoLoopId_q{d}\n",
-        .{ query.id, counter.loop_variable.file_id, counter.loop_variable.pattern_id, query.id, query.id },
-    );
-    try writer.print(
-        "private abbrev autoGuard_q{d} : FormulaRef := .term {d}\n" ++
-            "local notation \"autoGuard\" => autoGuard_q{d}\n" ++
-            "attribute [local simp] autoGuard_q{d}\n",
-        .{ query.id, counter.guard_term, query.id, query.id },
-    );
-    try writer.print(
-        "private abbrev autoInvariant_q{d} : FormulaRef := .term {d}\n" ++
-            "local notation \"autoInvariant\" => autoInvariant_q{d}\n" ++
-            "attribute [local simp] autoInvariant_q{d}\n",
-        .{ query.id, counter.invariant_term, query.id, query.id },
-    );
-    if (counter.post_term) |post_term| {
+    if (nested) {
+        const summary_rows = try automaticSummaryClosure(allocator, set, summary);
+        defer allocator.free(summary_rows);
+        // The denotation's fuel uses the whole emitted list, not this query's
+        // dependency closure. Match writeLoopSummaryDefinitions' row filter.
+        var emitted_summary_count: usize = 0;
+        for (set.loop_summaries) |row| {
+            if (row.projectionSupported()) emitted_summary_count += 1;
+        }
+        for (summary_rows) |row| try writer.print(" emittedLoopSummary_{d}", .{row.id});
+        try writer.writeByte('\n');
+        if (set.terms.len > obligation_to_lean.lean_term_chunk_size) {
+            try writer.writeAll("attribute [local irreducible] emittedManifest\n");
+        }
+        try writer.writeAll(
+            "attribute [local ora_loop_manifest] emitted_manifest_wf emitted_terms_topological\n",
+        );
+        try writeTermLookupAttributes(writer, "ora_loop_data", term_ids);
+        try writeFreeVarEqualityFacts(writer, free_vars, .attributed_theorems);
         try writer.print(
-            "private abbrev autoPost_q{d} : FormulaRef := .term {d}\n" ++
-                "local notation \"autoPost\" => autoPost_q{d}\n" ++
-                "attribute [local simp] autoPost_q{d}\n",
-            .{ query.id, post_term, query.id, query.id },
+            "private theorem autoNestedSummaryCount : " ++
+                "emittedLoopSummaries.length = {d} := by rfl\n" ++
+                "attribute [local ora_loop_nested] autoNestedSummaryCount\n",
+            .{emitted_summary_count},
+        );
+        for (summary_rows) |row| {
+            try writer.print(
+                "private theorem autoNestedFind_{d} : " ++
+                    "Ora.Loop.findSummaryRow? emittedLoopSummaries {d} = " ++
+                    "some emittedLoopSummary_{d} := by rfl\n" ++
+                    "attribute [local ora_loop_nested] autoNestedFind_{d}\n",
+                .{ row.id, row.id, row.id, row.id },
+            );
+        }
+        for (summary_rows) |row| {
+            try writer.print(
+                "private theorem autoNestedSupported_{d} : " ++
+                    "emittedLoopSummary_{d}.supportedIn emittedManifest " ++
+                    "emittedLoopSummaries = true := by\n" ++
+                    "  ora_loop_support_in emittedManifest emittedLoopSummaries " ++
+                    "emittedLoopSummary_{d}\n" ++
+                    "attribute [local ora_loop_nested] autoNestedSupported_{d}\n",
+                .{ row.id, row.id, row.id, row.id },
+            );
+        }
+        var reverse_index = summary_rows.len;
+        while (reverse_index > 0) {
+            reverse_index -= 1;
+            const row = summary_rows[reverse_index];
+            if (row.id == summary.id) continue;
+            try writer.print(
+                "private theorem autoNestedDenotes_{d} (base : Env) :\n" ++
+                    "    (Ora.Loop.denoteLoopSummaryWithFuel? {d} " ++
+                    "emittedManifest emittedLoopSummaries " ++
+                    "base emittedLoopSummary_{d}).isSome = true := by\n" ++
+                    "  unfold Ora.Loop.denoteLoopSummaryWithFuel?\n" ++
+                    "  simp only [Ora.Loop.denoteLoopSummaryWithResolver?, " ++
+                    "autoNestedSupported_{d}, if_true]\n" ++
+                    "  simp only [ora_loop_row, ora_loop_nested, " ++
+                    "Ora.Loop.denoteEdgesWithResolver?, " ++
+                    "Ora.Loop.denoteEdgeWithResolver?, " ++
+                    "Ora.Loop.denoteSummaryDependencies?, " ++
+                    "Ora.Loop.EdgeRow.path, " ++
+                    "Ora.Loop.EdgeRow.safetyCheckpoints, " ++
+                    "Ora.Loop.EdgeRow.summaryDependencies, " ++
+                    "Ora.Loop.timelinePathView, " ++
+                    "Ora.Loop.timelineSafetyView, " ++
+                    "Ora.Loop.timelineDependencyView, " ++
+                    "Ora.Loop.denoteSummaryDependency?, Ora.Loop.findSummaryRow?, " ++
+                    "Ora.Loop.denoteControlTarget?, Option.bind_eq_bind, " ++
+                    "Option.pure_def, Option.some_bind, Option.none_bind, Option.isSome, " ++
+                    "if_pos, if_false, Bool.false_eq_true]\n" ++
+                    "attribute [local ora_loop_nested] autoNestedDenotes_{d}\n",
+                .{ row.id, emitted_summary_count, row.id, row.id, row.id },
+            );
+        }
+    } else {
+        try writer.print(" emittedLoopSummary_{d}\n", .{summary.id});
+        if (set.terms.len > obligation_to_lean.lean_term_chunk_size) {
+            try writer.writeAll("attribute [local irreducible] emittedManifest\n");
+        }
+        try writer.writeAll(
+            "attribute [local ora_loop_manifest] emitted_manifest_wf emitted_terms_topological\n",
+        );
+        try writeTermLookupAttributes(writer, "ora_loop_data", term_ids);
+        try writeFreeVarEqualityFacts(writer, free_vars, .attributed_theorems);
+        try writer.writeAll(
+            "private theorem autoShape : autoSummary.shapeSupported = true := by decide +kernel\n" ++
+                "attribute [local ora_loop_shape] autoShape\n",
+        );
+        try writer.print(
+            "private theorem autoSummarySupported : " ++
+                "emittedLoopSummary_{d}.supported emittedManifest = true := by\n" ++
+                "  change autoSummary.supported emittedManifest = true\n" ++
+                "  ora_loop_support\n" ++
+                "attribute [local ora_loop_supported] autoSummarySupported\n",
+            .{summary.id},
         );
     }
-    switch (counter.bound) {
-        .literal => |literal| try writer.print(
-            "private abbrev autoBound_q{d} : U256 := BitVec.ofNat 256 {s}\n" ++
-                "local notation \"autoBound\" => autoBound_q{d}\n" ++
-                "attribute [local simp] autoBound_q{d}\n",
-            .{ query.id, literal, query.id, query.id },
-        ),
-        .context => |context| try writer.print(
-            "private abbrev autoContextId_q{d} : FreeVarId := {{ file_id := {d}, pattern_id := {d} }}\n" ++
-                "local notation \"autoContextId\" => autoContextId_q{d}\n" ++
-                "attribute [local simp] autoContextId_q{d}\n",
-            .{ query.id, context.file_id, context.pattern_id, query.id, query.id },
-        ),
+    try writer.writeAll("private abbrev autoAssumptions : List AssumptionRow := [");
+    for (query.assumption_ids, 0..) |id, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writer.print("emittedAssumptionRow_{d}", .{id});
     }
-    try writer.print(
-        "private abbrev autoValue_q{d} (bits : U256) : Ora.Integer.Value :=\n" ++
-            "  {{ shape := .unsigned .w256, bits := bits }}\n" ++
-            "local notation \"autoValue\" => autoValue_q{d}\n" ++
-            "private abbrev autoZero_q{d} : Ora.Integer.Value := autoValue (BitVec.ofNat 256 0)\n" ++
-            "local notation \"autoZero\" => autoZero_q{d}\n" ++
-            "attribute [local simp] autoValue_q{d} autoZero_q{d}\n",
-        .{ query.id, query.id, query.id, query.id, query.id, query.id },
-    );
-    try writer.print("theorem discharge_q{d} : emittedQuery_{d} := by\n", .{ query.id, query.id });
-    try writer.print(
-        "  unfold emittedQuery_{d} Ora.Loop.loopInductionProofFromAssumptions\n",
-        .{query.id},
-    );
-    try writer.writeAll(
-        \\  have hSupported : (autoSummary).supported emittedManifest = true := by decide
-        \\  have hGuard : (autoSummary).guard = some autoGuard := rfl
-        \\
-    );
-}
-
-fn writeAutomaticLoopFormulaEquality(writer: anytype) !void {
-    try writer.writeAll(
-        \\  have hFormulaEquality : ∀ env,
-        \\      formulaDenotes? emittedManifest env autoInvariant =
-        \\        formulaDenotes? emittedManifest env autoPost := by
-        \\    intro env
-        \\    simp [formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
-        \\      emittedTerms]
-        \\
-    );
-}
-
-fn writeAutomaticCounterBase(
-    writer: anytype,
-    witness_env: []const u8,
-) !void {
-    try writer.writeAll("  constructor\n  · refine ⟨");
-    try writer.writeAll(witness_env);
-    try writer.writeAll(
-        \\, [autoZero], ?_⟩
-        \\    constructor
-        \\    · simp [assumptionsDenoteInEnv, assumptionsDenoteInEnv?]
-        \\    constructor
-        \\
-    );
-}
-
-fn writeAutomaticCounterInitialProof(
-    writer: anytype,
-    witness_env: []const u8,
-    has_context: bool,
-) !void {
-    try writer.writeAll(
-        \\    ·
-        \\
-    );
-    if (has_context) {
+    try writer.writeAll("]\nattribute [local ora_loop_row] autoAssumptions");
+    for (query.assumption_ids) |id| try writer.print(" emittedAssumptionRow_{d}", .{id});
+    try writer.writeByte('\n');
+    if (!nested and obligation_to_lean.loopSummaryUsesDirectStorageCertificate(summary)) {
         try writer.writeAll(
-            \\      intro loopVar hLoopVar
-            \\      simp at hLoopVar
-            \\      subst loopVar
-            \\      exact ⟨autoZero, rfl, rfl⟩
+            \\private abbrev autoEdgeCompatible (env : Env) (edge : Ora.Loop.EdgeRow) : Prop :=
+            \\  Ora.Loop.DirectStorageEdgeCompatible emittedManifest env autoSummary.variables autoSummary.post edge
+            \\    (fun locals => Ora.Loop.stateReady autoSummary.variables locals ∧
+            \\      Ora.Loop.headerFactsHoldInEnv emittedManifest env autoSummary.headerFacts ∧
+            \\      Ora.Loop.formulasHoldInState emittedManifest env autoSummary.variables locals autoSummary.invariants)
             \\
+        );
+        const context = "(env : Env)\n" ++
+            "    (hAssumptions : assumptionsDenoteInEnv emittedManifest env autoAssumptions)\n" ++
+            "    (hContext : Ora.Loop.contextReady env autoSummary.contextVariables)";
+        for (summary.edges, 0..) |_, index| try writer.print(
+            "private theorem autoEdgeCompatible_{d} {s} :\n" ++
+                "    autoEdgeCompatible env (autoSummary.edges.get ⟨{d}, by decide⟩) := by\n" ++
+                "  ora_loop_prepare_context hContext\n" ++
+                "  ora_loop_direct_edge_compatible autoSummary env\n",
+            .{ index, context, index },
+        );
+        try writer.print(
+            "private theorem autoEdgesCompatible {s} :\n" ++
+                "    ∀ edge, edge ∈ autoSummary.edges → autoEdgeCompatible env edge := by\n" ++
+                "  intro edge hMember\n" ++
+                "  simp only [ora_loop_row, List.mem_cons, List.not_mem_nil, or_false] at hMember\n" ++
+                "  rcases hMember with ",
+            .{context},
+        );
+        for (summary.edges, 0..) |_, index| try writer.writeAll(if (index == 0) "rfl" else " | rfl");
+        try writer.writeByte('\n');
+        for (summary.edges, 0..) |_, index| try writer.print("  · exact autoEdgeCompatible_{d} env hAssumptions hContext\n", .{index});
+        try writer.writeAll(
+            "set_option maxHeartbeats 500000 in\n" ++
+                "private theorem autoScalarAuthorization : " ++
+                "Ora.Loop.loopProofAuthorizationFromAssumptions " ++
+                "emittedManifest autoAssumptions autoSummary := by\n" ++
+                "  set_option maxRecDepth 4096 in ora_loop_auto_plain\n",
+        );
+        try writer.print(
+            "theorem discharge_q{d} : emittedQuery_{d} := by\n" ++
+                "  ora_loop_auto_direct_storage_from autoScalarAuthorization autoEdgesCompatible\n" ++
+                "end\n",
+            .{ query.id, query.id },
         );
     } else {
-        try writer.writeAll("      simp [Ora.Loop.contextReady]\n");
-    }
-    try writer.writeAll(
-        \\    · simp only [Ora.Loop.loopInitialPremises,
-        \\        Ora.Loop.denoteLoopSummary?, hSupported, hGuard]
-        \\      change Ora.Loop.valuesInitializeState emittedManifest
-        \\
-    );
-    try writer.writeAll("        ");
-    try writer.writeAll(witness_env);
-    try writer.writeAll(
-        \\ (autoSummary).init [autoZero]
-        \\      simp [Ora.Loop.valuesInitializeState,
-        \\        formulaValue?, denoteValue?, IntegerLiteralTerm.asU256?,
-        \\        Ora.Integer.Value.ofNat,
-        \\        TyRef.isU256Carrier, TyRef.isU256, TyRef.isI256,
-        \\        compilerTypeIdU256, compilerTypeIdI256,
-        \\        Ora.Spec.expectedCompilerTypeIdU256,
-        \\        Ora.Spec.expectedCompilerTypeIdI256, emittedManifest, emittedTerms] <;> rfl
-        \\
-    );
-}
-
-fn writeAutomaticCounterInductionStart(writer: anytype) !void {
-    try writer.writeAll(
-        \\    constructor
-        \\    · intro state hInitial
-        \\      change Ora.Loop.valuesInitializeState emittedManifest env
-        \\        (autoSummary).init state at hInitial
-        \\      have hState : state = [autoZero] := by
-        \\        rcases state with _ | ⟨value, state⟩
-        \\        · simp [Ora.Loop.valuesInitializeState] at hInitial
-        \\        · rcases state with _ | ⟨extra, state⟩
-        \\          · have hValue : autoZero = value := by
-        \\              simpa [Ora.Loop.valuesInitializeState, formulaValue?, denoteValue?,
-        \\                IntegerLiteralTerm.asU256?,
-        \\                Ora.Integer.Value.ofNat, TyRef.isU256Carrier, TyRef.isU256,
-        \\                TyRef.isI256, compilerTypeIdU256, compilerTypeIdI256,
-        \\                Ora.Spec.expectedCompilerTypeIdU256,
-        \\                Ora.Spec.expectedCompilerTypeIdI256,
-        \\                emittedManifest, emittedTerms] using hInitial
-        \\            subst value
-        \\            rfl
-        \\          · simp [Ora.Loop.valuesInitializeState] at hInitial
-        \\      subst state
-        \\      intro formula hFormula
-        \\      simp [] at hFormula
-        \\      subst formula
-        \\      simpa [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
-        \\        formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
-        \\        emittedTerms, hAutoBound, U256.ule, Env.setFree, Env.lookupVar,
-        \\        Env.lookupFree, lookupFreeBinding, hAutoIdentityA, hAutoIdentityB,
-        \\        IntegerLiteralTerm.asU256?,
-        \\        Value.u256, Ora.Integer.Value.ofNat,
-        \\        Ora.Integer.Value.relation_u256, Ora.Integer.unsignedLe,
-        \\        TyRef.isU256Carrier,
-        \\        TyRef.isU256, TyRef.isI256, compilerTypeIdU256,
-        \\        compilerTypeIdI256, Ora.Spec.expectedCompilerTypeIdU256,
-        \\        Ora.Spec.expectedCompilerTypeIdI256]
-        \\    · intro current following hInvariant hLoopGuard hStep
-        \\      change Ora.Loop.formulasHoldInState emittedManifest env
-        \\        (autoSummary).variables current (autoSummary).invariants at hInvariant
-        \\      change Ora.Loop.formulaHoldsInState emittedManifest env
-        \\        (autoSummary).variables current autoGuard at hLoopGuard
-        \\      change Ora.Loop.assignmentsProduceState emittedManifest env
-        \\        (autoSummary).variables current (autoSummary).step following at hStep
-        \\      change Ora.Loop.formulasHoldInState emittedManifest env
-        \\        (autoSummary).variables following (autoSummary).invariants
-        \\      have hCurrentShape : ∃ i, current = [i] := by
-        \\        rcases current with _ | ⟨i, current⟩
-        \\        · simp [Ora.Loop.formulasHoldInState, Ora.Loop.formulaHoldsInState,
-        \\            Ora.Loop.bindState] at hInvariant
-        \\        · rcases current with _ | ⟨extra, current⟩
-        \\          · exact ⟨i, rfl⟩
-        \\          · simp [Ora.Loop.formulasHoldInState, Ora.Loop.formulaHoldsInState,
-        \\              Ora.Loop.bindState] at hInvariant
-        \\      rcases hCurrentShape with ⟨i, rfl⟩
-        \\      rcases i with ⟨iShape, i⟩
-        \\      have hIShapeBinding :
-        \\          (.compilerTypeId 6 : TyRef).integerShape? = some iShape := by
-        \\        by_cases hShape :
-        \\            (.compilerTypeId 6 : TyRef).integerShape? = some iShape
-        \\        · exact hShape
-        \\        · exfalso
-        \\          have hNe : ¬(.unsigned .w256 = iShape) := by
-        \\            simpa using hShape
-        \\          simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
-        \\            hNe] at hLoopGuard
-        \\      have hIShape : iShape = .unsigned .w256 := by
-        \\        have hSome : some (.unsigned .w256) = some iShape := by
-        \\          simpa using
-        \\            hIShapeBinding
-        \\        exact (Option.some.inj hSome).symm
-        \\      subst iShape
-        \\      have hFollowingShape : ∃ next, following = [next] := by
-        \\        rcases following with _ | ⟨next, following⟩
-        \\        · simp [Ora.Loop.assignmentsProduceState, Ora.Loop.bindState] at hStep
-        \\        · rcases following with _ | ⟨extra, following⟩
-        \\          · exact ⟨next, rfl⟩
-        \\          · simp [Ora.Loop.assignmentsProduceState, Ora.Loop.bindState] at hStep
-        \\      rcases hFollowingShape with ⟨next, rfl⟩
-        \\      simp [Ora.Loop.assignmentsProduceState, Ora.Loop.bindState,
-        \\        formulaValue?, denoteValue?, emittedManifest, emittedTerms,
-        \\        Env.setFree, Env.lookupVar, Env.lookupFree,
-        \\        lookupFreeBinding, hAutoIdentityA, hAutoIdentityB,
-        \\        IntegerLiteralTerm.asU256?, Value.u256, Value.binaryU256?,
-        \\        Ora.Integer.Value.binary_u256,
-        \\        Ora.Integer.Value.ofNat, Ora.Integer.wrappingResult,
-        \\        TyRef.isU256Carrier,
-        \\        TyRef.isU256, TyRef.isI256, compilerTypeIdU256,
-        \\        compilerTypeIdI256, Ora.Spec.expectedCompilerTypeIdU256,
-        \\        Ora.Spec.expectedCompilerTypeIdI256] at hStep
-        \\      subst next
-        \\      intro formula hFormula
-        \\      simp [] at hFormula
-        \\      subst formula
-        \\      have hGuardDecoded : U256.ult i n := by
-        \\        simpa [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
-        \\          formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
-        \\          emittedTerms, hAutoBound, Env.setFree, Env.lookupVar, Env.lookupFree,
-        \\          lookupFreeBinding, TyRef.isU256, TyRef.isI256,
-        \\          TyRef.isU256Carrier, compilerTypeIdU256, compilerTypeIdI256,
-        \\          Ora.Spec.expectedCompilerTypeIdU256,
-        \\          Ora.Spec.expectedCompilerTypeIdI256, hAutoIdentityA,
-        \\          hAutoIdentityB, IntegerLiteralTerm.asU256?,
-        \\          Ora.Integer.unsignedLt,
-        \\          Value.u256, Value.binaryU256?,
-        \\          Ora.Integer.Value.relation_u256] using hLoopGuard
-        \\      have hNextInvariant := U256.lt_add_one_ule_bound i n hGuardDecoded
-        \\      have hNextInvariantWrapped :
-        \\          Ora.Integer.unsignedLe
-        \\            (Ora.Integer.wrappingResult (.unsigned .w256) .add i
-        \\              (BitVec.ofNat 256 1)) n := by
-        \\        simpa [U256.ule, U256.add, Ora.Integer.unsignedLe,
-        \\          Ora.Integer.wrappingResult] using hNextInvariant
-        \\      simpa [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
-        \\        formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
-        \\        emittedTerms, hAutoBound, Env.setFree, Env.lookupVar, Env.lookupFree,
-        \\        lookupFreeBinding, TyRef.isU256, TyRef.isI256,
-        \\        TyRef.isU256Carrier, compilerTypeIdU256, compilerTypeIdI256,
-        \\        Ora.Spec.expectedCompilerTypeIdU256,
-        \\        Ora.Spec.expectedCompilerTypeIdI256, hAutoIdentityA, hAutoIdentityB,
-        \\        IntegerLiteralTerm.asU256?, Ora.Integer.unsignedLe,
-        \\        Value.u256, Value.binaryU256?,
-        \\        Ora.Integer.Value.binary_u256,
-        \\        Ora.Integer.Value.relation_u256] using hNextInvariantWrapped
-        \\
-    );
-}
-
-fn writeAutomaticCounterSafety(writer: anytype, has_body_safety: bool) !void {
-    try writer.writeAll(
-        \\    · intro state hInvariant hLoopGuard
-        \\      change Ora.Loop.formulasHoldInState emittedManifest env
-        \\        (autoSummary).variables state (autoSummary).bodySafety
-        \\
-    );
-    if (!has_body_safety) {
-        try writer.writeAll("      simp []\n");
-        return;
-    }
-    try writer.writeAll(
-        \\      change Ora.Loop.formulasHoldInState emittedManifest env
-        \\        (autoSummary).variables state (autoSummary).invariants at hInvariant
-        \\      change Ora.Loop.formulaHoldsInState emittedManifest env
-        \\        (autoSummary).variables state autoGuard at hLoopGuard
-        \\      have hStateShape : ∃ i, state = [i] := by
-        \\        rcases state with _ | ⟨i, state⟩
-        \\        · simp [Ora.Loop.formulasHoldInState, Ora.Loop.formulaHoldsInState,
-        \\            Ora.Loop.bindState] at hInvariant
-        \\        · rcases state with _ | ⟨extra, state⟩
-        \\          · exact ⟨i, rfl⟩
-        \\          · simp [Ora.Loop.formulasHoldInState, Ora.Loop.formulaHoldsInState,
-        \\              Ora.Loop.bindState] at hInvariant
-        \\      rcases hStateShape with ⟨i, rfl⟩
-        \\      rcases i with ⟨iShape, i⟩
-        \\      have hIShapeBinding :
-        \\          (.compilerTypeId 6 : TyRef).integerShape? = some iShape := by
-        \\        by_cases hShape :
-        \\            (.compilerTypeId 6 : TyRef).integerShape? = some iShape
-        \\        · exact hShape
-        \\        · exfalso
-        \\          have hNe : ¬(.unsigned .w256 = iShape) := by
-        \\            simpa using hShape
-        \\          simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
-        \\            hNe] at hLoopGuard
-        \\      have hIShape : iShape = .unsigned .w256 := by
-        \\        have hSome : some (.unsigned .w256) = some iShape := by
-        \\          simpa using hIShapeBinding
-        \\        exact (Option.some.inj hSome).symm
-        \\      subst iShape
-        \\      intro formula hFormula
-        \\      simp [] at hFormula
-        \\      subst formula
-        \\      have hGuardDecoded : U256.ult i n := by
-        \\        simpa [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
-        \\          formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
-        \\          emittedTerms, hAutoBound, Env.setFree, Env.lookupVar, Env.lookupFree,
-        \\          lookupFreeBinding, TyRef.isU256, TyRef.isI256,
-        \\          TyRef.isU256Carrier, compilerTypeIdU256, compilerTypeIdI256,
-        \\          Ora.Spec.expectedCompilerTypeIdU256,
-        \\          Ora.Spec.expectedCompilerTypeIdI256, hAutoIdentityA,
-        \\          hAutoIdentityB, IntegerLiteralTerm.asU256?,
-        \\          Ora.Integer.unsignedLt,
-        \\          Value.u256, Value.binaryU256?,
-        \\          Ora.Integer.Value.relation_u256] using hLoopGuard
-        \\      have hSafe := U256.lt_bound_add_one_not_lt_self i n hGuardDecoded
-        \\      have hSafeNat :
-        \\          i.toNat ≤
-        \\            (Ora.Integer.wrappingResult (.unsigned .w256) .add i
-        \\              (BitVec.ofNat 256 1)).toNat := by
-        \\        apply Nat.le_of_not_gt
-        \\        simpa [U256.ult, U256.add, Ora.Integer.wrappingResult] using hSafe
-        \\      simp [Ora.Loop.formulaHoldsInState, Ora.Loop.bindState,
-        \\        formulaDenotes?, denoteFormula?, denoteValue?, emittedManifest,
-        \\        emittedTerms, hAutoBound, Env.setFree, Env.lookupVar, Env.lookupFree,
-        \\        lookupFreeBinding, TyRef.isU256, TyRef.isI256,
-        \\        TyRef.isU256Carrier, compilerTypeIdU256, compilerTypeIdI256,
-        \\        Ora.Spec.expectedCompilerTypeIdU256,
-        \\        Ora.Spec.expectedCompilerTypeIdI256, hAutoIdentityA, hAutoIdentityB,
-        \\        IntegerLiteralTerm.asU256?, Ora.Integer.unsignedLt,
-        \\        Value.u256, Value.binaryU256?, Ora.Integer.Value.binary_u256,
-        \\        Ora.Integer.Value.relation_u256, hSafeNat]
-        \\
-    );
-}
-
-fn writeAutomaticCounterExit(
-    writer: anytype,
-    query_id: obligation.Id,
-    has_post: bool,
-) !void {
-    try writer.writeAll("    · intro state hInvariant _\n");
-    if (!has_post) {
-        try writer.writeAll(
-            \\      change Ora.Loop.formulasHoldInState emittedManifest env
-            \\        (autoSummary).variables state (autoSummary).post
-            \\      simp [Ora.Loop.formulasHoldInState]
-            \\
+        try writer.print(
+            "theorem discharge_q{d} : emittedQuery_{d} := by ora_loop_auto\n" ++
+                "end\n",
+            .{ query.id, query.id },
         );
-        return;
     }
-    try writer.writeAll(
-        \\      change Ora.Loop.formulasHoldInState emittedManifest env
-        \\        (autoSummary).variables state (autoSummary).invariants at hInvariant
-        \\      change Ora.Loop.formulasHoldInState emittedManifest env
-        \\        (autoSummary).variables state (autoSummary).post
-        \\      intro formula hFormula
-        \\      simp [] at hFormula
-        \\      subst formula
-        \\      have hInvariantFormula := hInvariant autoInvariant (by simp [])
-        \\      unfold Ora.Loop.formulaHoldsInState at hInvariantFormula ⊢
-        \\      cases hBind : Ora.Loop.bindState env (autoSummary).variables state with
-        \\      | none =>
-        \\
-    );
-    try writer.print(
-        "          dsimp [autoSummary_q{d}] at hBind hInvariantFormula ⊢\n",
-        .{query_id},
-    );
-    try writer.writeAll(
-        \\          simp [hBind] at hInvariantFormula
-        \\      | some bound =>
-        \\
-    );
-    try writer.print(
-        "          dsimp [autoSummary_q{d}] at hBind hInvariantFormula ⊢\n",
-        .{query_id},
-    );
-    try writer.writeAll(
-        \\          simp only [hBind] at hInvariantFormula ⊢
-        \\          rw [← hFormulaEquality]
-        \\          exact hInvariantFormula
-        \\
-    );
 }
 
-fn writeAutomaticLiteralCounterProof(
-    writer: anytype,
-    query: obligation.VerificationQuery,
-    counter: AutomaticCounterLoop,
-    literal: []const u8,
+fn markAutomaticTermClosure(
+    set: obligation.ObligationSet,
+    term_id: obligation.TermId,
+    marked: []bool,
 ) !void {
-    try writeAutomaticCounterNotations(writer, query, counter);
-    try writer.print(
-        "  have hBoundLiteral : parseDecimalNat? \"{s}\" = some {s} := by rfl\n",
-        .{ literal, literal },
-    );
-    if (counter.post_term != null) try writeAutomaticLoopFormulaEquality(writer);
-    try writeAutomaticCounterBase(writer, "Env.empty");
-    try writeAutomaticCounterInitialProof(writer, "Env.empty", false);
-    try writer.writeAll(
-        \\  · intro env _ _
-        \\    simp only [Ora.Loop.loopInductionObligationsAtEnv,
-        \\      Ora.Loop.denoteLoopSummary?, hSupported, hGuard]
-        \\    let n : U256 := autoBound
-        \\    have hAutoBound := hBoundLiteral
-        \\    have hAutoIdentityA : (autoLoopId == autoLoopId) = true := by rfl
-        \\    have hAutoIdentityB := hAutoIdentityA
-        \\
-    );
-    try writeAutomaticCounterInductionStart(writer);
-    try writeAutomaticCounterSafety(writer, counter.has_body_safety);
-    try writeAutomaticCounterExit(writer, query.id, counter.post_term != null);
-    try writer.writeAll("end\n");
+    if (term_id >= set.terms.len or term_id >= marked.len) return error.InvalidDependency;
+    if (marked[term_id]) return;
+    marked[term_id] = true;
+    switch (set.terms[term_id]) {
+        .old => |operand| try markAutomaticTermClosure(set, operand, marked),
+        .unary => |unary| try markAutomaticTermClosure(set, unary.operand, marked),
+        .binary => |binary| {
+            try markAutomaticTermClosure(set, binary.lhs, marked);
+            try markAutomaticTermClosure(set, binary.rhs, marked);
+        },
+        .refinement_predicate => |predicate| {
+            try markAutomaticTermClosure(set, predicate.value, marked);
+            for (predicate.args) |arg| try markAutomaticTermClosure(set, arg, marked);
+        },
+        .quantified => |quantified| {
+            if (quantified.condition) |condition| try markAutomaticTermClosure(set, condition, marked);
+            try markAutomaticTermClosure(set, quantified.body, marked);
+        },
+        .bool_lit,
+        .int_lit,
+        .variable,
+        .result,
+        .place_read,
+        .invocation_caller,
+        => {},
+    }
 }
 
-fn writeAutomaticContextCounterProof(
-    writer: anytype,
-    query: obligation.VerificationQuery,
-    counter: AutomaticCounterLoop,
-    context: obligation.FreeVarId,
+fn markAutomaticFormulaClosure(
+    set: obligation.ObligationSet,
+    formula: obligation.FormulaRef,
+    marked: []bool,
 ) !void {
-    _ = context;
-    try writeAutomaticCounterNotations(writer, query, counter);
-    if (counter.post_term != null) try writeAutomaticLoopFormulaEquality(writer);
-    try writeAutomaticCounterBase(
-        writer,
-        "Env.empty.setFree autoContextId (.u256 (BitVec.ofNat 256 0))",
-    );
-    try writeAutomaticCounterInitialProof(
-        writer,
-        "(Env.empty.setFree autoContextId (.u256 (BitVec.ofNat 256 0)))",
-        true,
-    );
-    try writer.writeAll(
-        \\  · intro env _ hContext
-        \\    simp only [Ora.Loop.loopInductionObligationsAtEnv,
-        \\      Ora.Loop.denoteLoopSummary?, hSupported, hGuard]
-        \\    rcases hContext (autoSummary).contextVariables[0]
-        \\        (by simp []) with ⟨nValue, hNShapeBinding, hn⟩
-        \\    rcases nValue with ⟨nShape, n⟩
-        \\    have hNShape : nShape = .unsigned .w256 := by
-        \\      have hSome : some (.unsigned .w256) = some nShape := by
-        \\        simpa using hNShapeBinding
-        \\      exact (Option.some.inj hSome).symm
-        \\    subst nShape
-        \\    change lookupFreeBinding env.freeBindings autoContextId = some (.u256 n) at hn
-        \\
-    );
-    try writer.print("    dsimp [autoContextId_q{d}] at hn\n", .{query.id});
-    try writer.writeAll(
-        \\    have hAutoBound := hn
-        \\    have hAutoIdentityA : (autoLoopId == autoLoopId) = true := by rfl
-        \\    have hAutoIdentityB : (autoLoopId == autoContextId) = false := by rfl
-        \\
-    );
-    try writeAutomaticCounterInductionStart(writer);
-    try writeAutomaticCounterSafety(writer, counter.has_body_safety);
-    try writeAutomaticCounterExit(writer, query.id, counter.post_term != null);
-    try writer.writeAll("end\n");
+    switch (formula) {
+        .term => |term_id| try markAutomaticTermClosure(set, term_id, marked),
+        .origin_value => return error.InvalidDependency,
+    }
 }
 
-fn writeAutomaticCounterLoopProof(
-    writer: anytype,
-    query: obligation.VerificationQuery,
-    counter: AutomaticCounterLoop,
+fn markAutomaticSummaryClosure(
+    set: obligation.ObligationSet,
+    summary: obligation.LoopSummaryRow,
+    marked: []bool,
+    fuel: usize,
 ) !void {
-    return switch (counter.bound) {
-        .literal => |literal| writeAutomaticLiteralCounterProof(writer, query, counter, literal),
-        .context => |context| writeAutomaticContextCounterProof(writer, query, counter, context),
+    if (fuel == 0) return error.InvalidDependency;
+    for (summary.header_facts) |fact| try markAutomaticFormulaClosure(set, fact.formula, marked);
+    for (summary.init_formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
+    for (summary.invariant_formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
+    for (summary.edges) |edge| {
+        for (edge.timeline) |event| switch (event.payload) {
+            .call => return error.UnsupportedLoopCall,
+            .path_assumption, .safety_checkpoint => |formulas| for (formulas.formulas) |formula| {
+                try markAutomaticFormulaClosure(set, formula.formula, marked);
+            },
+            .storage_write => |write| try markAutomaticFormulaClosure(set, write.value.formula, marked),
+            .indexed_region_read => |read| try markAutomaticFormulaClosure(set, read.index.formula, marked),
+            .summary_dependency => |dependency| {
+                const child = obligation.findById(set.loop_summaries, dependency.summary_id) orelse
+                    return error.InvalidDependency;
+                try markAutomaticSummaryClosure(set, child, marked, fuel - 1);
+            },
+            .storage_read => {},
+        };
+        for (edge.target_formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
+        for (edge.next_state) |binding| try markAutomaticFormulaClosure(set, binding.value, marked);
+    }
+    for (summary.post_formulas) |formula| try markAutomaticFormulaClosure(set, formula, marked);
+}
+
+fn automaticLoopTermIds(
+    allocator: std.mem.Allocator,
+    set: obligation.ObligationSet,
+    query: obligation.VerificationQuery,
+) ![]obligation.TermId {
+    const summary_id = query.loop_summary_id orelse return error.InvalidDependency;
+    const summary = obligation.findById(set.loop_summaries, summary_id) orelse
+        return error.InvalidDependency;
+    const marked = try allocator.alloc(bool, set.terms.len);
+    defer allocator.free(marked);
+    @memset(marked, false);
+
+    for (query.assumption_ids) |assumption_id| {
+        const assumption = obligation.findById(set.assumptions, assumption_id) orelse
+            return error.InvalidDependency;
+        if (assumption.formula) |formula| try markAutomaticFormulaClosure(set, formula, marked);
+    }
+    try markAutomaticSummaryClosure(set, summary, marked, set.loop_summaries.len + 1);
+
+    var count: usize = 0;
+    for (marked) |is_marked| if (is_marked) {
+        count += 1;
     };
+    const ids = try allocator.alloc(obligation.TermId, count);
+    var next: usize = 0;
+    for (marked, 0..) |is_marked, term_id| {
+        if (!is_marked) continue;
+        ids[next] = @intCast(term_id);
+        next += 1;
+    }
+    return ids;
+}
+
+fn writeTermLookupAttributes(
+    writer: anytype,
+    attribute_name: []const u8,
+    term_ids: []const obligation.TermId,
+) !void {
+    try writer.writeAll(
+        "attribute [local ",
+    );
+    try writer.writeAll(attribute_name);
+    try writer.writeAll("]");
+    try writer.writeAll(" emitted_terms_length");
+    for (term_ids) |term_id| {
+        try writer.print(" emitted_term_{d}_lookup", .{term_id});
+    }
+    try writer.writeByte('\n');
 }
 
 fn buildAutomaticProofSource(
     allocator: std.mem.Allocator,
-    obligations_source: []const u8,
-    module_namespace: []const u8,
+    generated_namespace: []const u8,
     set: obligation.ObligationSet,
     queries: []const obligation.VerificationQuery,
 ) ![]const u8 {
-    const namespace_start = std.mem.indexOf(u8, obligations_source, "namespace ") orelse return error.LeanObligationsMissingNamespace;
-    const body_start = (std.mem.indexOfPos(u8, obligations_source, namespace_start, "\n") orelse return error.LeanObligationsMissingNamespace) + 1;
-    const end_start = std.mem.lastIndexOf(u8, obligations_source, "\nend ") orelse return error.LeanObligationsMissingNamespace;
     var out = std.Io.Writer.Allocating.init(allocator);
     errdefer out.deinit();
     const writer = &out.writer;
-    try writer.writeAll(obligations_source[0..namespace_start]);
-    try writer.print("namespace {s}\n", .{module_namespace});
-    try writer.writeAll(obligations_source[body_start..end_start]);
-    try writer.writeByte('\n');
+    try writer.writeAll("namespace Ora.CompilerAutomaticProof\n");
+    try writer.writeAll("open Ora.Obligation\n");
+    try writer.print("open {s}\n\n", .{generated_namespace});
     for (queries) |query| {
+        try writer.print("namespace Query_{d}\n", .{query.id});
         const free_vars = try collectQueryFreeVars(allocator, set, query);
         defer allocator.free(free_vars);
         if (query.kind == .loop_induction) {
-            const counter = classifyAutomaticCounterLoop(set, query) orelse {
-                try writer.print("theorem discharge_q{d} : emittedQuery_{d} := by\n", .{ query.id, query.id });
-                try writer.writeAll(
-                    "  fail \"automatic scalar-loop synthesis does not support this induction shape; use the emitted proof manifest workflow\"\n\n",
-                );
-                continue;
+            const plan = switch (automaticLoopPlan(set, query)) {
+                .supported => |value| value,
+                .unsupported => return error.InvalidDependency,
             };
-            try writeAutomaticCounterLoopProof(writer, query, counter);
-            try writer.writeByte('\n');
+            try writeAutomaticLoopProof(allocator, writer, set, query, plan, free_vars);
+            try writer.print("\nend Query_{d}\n\n", .{query.id});
             continue;
         }
         try writer.print("theorem discharge_q{d} : emittedQuery_{d} := by\n", .{ query.id, query.id });
-        try writeFreeVarEqualityFacts(writer, free_vars);
+        try writeFreeVarEqualityFacts(writer, free_vars, .local_haves);
         try writer.print("  unfold emittedQuery_{d} obligationFollowsFromAssumptions\n", .{query.id});
         try writer.writeAll("  constructor\n  · refine ⟨");
         try writeWitnessEnv(writer, free_vars);
@@ -1465,8 +1854,9 @@ fn buildAutomaticProofSource(
         try writer.writeAll(" at hAssumptions ⊢\n    repeat intro\n    first\n    | assumption\n    | exact U256.ult_implies_ule _ _ (by assumption)\n    | exact stable_place_read_self_eq_denotes env _\n    | simp_all ");
         try writeAutomaticSimpSet(writer, free_vars.len);
         try writer.writeAll("\n\n");
+        try writer.print("end Query_{d}\n\n", .{query.id});
     }
-    try writer.print("end {s}\n", .{module_namespace});
+    try writer.writeAll("end Ora.CompilerAutomaticProof\n");
     return try out.toOwnedSlice();
 }
 
@@ -1514,10 +1904,20 @@ fn projectionForQuery(set: obligation.ObligationSet, query: obligation.Verificat
         const summary_id = query.loop_summary_id orelse return summary;
         const loop_summary = obligation.findById(set.loop_summaries, summary_id) orelse return summary;
         for (loop_summary.init_formulas) |formula| summary.addFormula(formula);
-        if (loop_summary.guard_formula) |formula| summary.addFormula(formula);
         for (loop_summary.invariant_formulas) |formula| summary.addFormula(formula);
-        for (loop_summary.step_assignments) |assignment| summary.addFormula(assignment.value);
-        for (loop_summary.body_safety_formulas) |formula| summary.addFormula(formula);
+        for (loop_summary.edges) |edge| {
+            for (edge.timeline) |event| switch (event.payload) {
+                .path_assumption, .safety_checkpoint => |formulas| for (formulas.formulas) |formula| {
+                    summary.addFormula(formula.formula);
+                },
+                .storage_write => |write| summary.addFormula(write.value.formula),
+                .indexed_region_read => |read| summary.addFormula(read.index.formula),
+                .call => |invocation| for (invocation.arguments) |argument| summary.addFormula(argument.value.formula),
+                .storage_read, .summary_dependency => {},
+            };
+            for (edge.target_formulas) |formula| summary.addFormula(formula);
+            for (edge.next_state) |binding| summary.addFormula(binding.value);
+        }
         for (loop_summary.post_formulas) |formula| summary.addFormula(formula);
         return summary;
     }
@@ -1629,6 +2029,511 @@ fn printIds(writer: anytype, ids: []const obligation.Id) !void {
     try writer.writeByte(']');
 }
 
+test "loop blocker batch unsigned division eligibility retains type and operator boundaries" {
+    const summary: obligation.LoopSummaryRow = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "division" } },
+        .source = .{},
+        .phase = .ora_mlir,
+        .origin = .source,
+        .loop_source_op_id = 1,
+        .loop_kind = .scf_while,
+    };
+    for ([_]obligation.BinaryOp{ .div, .mod, .mul }) |op| {
+        for ([_][]const u8{ "u64", "u256", "i256" }) |name| {
+            const ty: obligation.TypeRef = .{ .spelling = name };
+            const terms = [_]obligation.Term{
+                .{ .int_lit = .{ .value = "1", .ty = ty } },
+                .{ .int_lit = .{ .value = "2", .ty = ty } },
+                .{ .binary = .{ .op = op, .lhs = 0, .rhs = 1, .ty = ty } },
+            };
+            const shape = automaticValueShape(.{ .terms = &terms }, summary, 2, 4);
+            try std.testing.expectEqual(op == .div and name[0] == 'u', shape == .supported);
+            if (shape == .unsupported) try std.testing.expectEqual(
+                AutomaticLoopProofReason.automatic_nonlinear_arithmetic,
+                shape.unsupported,
+            );
+        }
+    }
+}
+
+test "automatic proof failures retain stable named diagnostics" {
+    const cases = [_]struct {
+        err: anyerror,
+        reason: []const u8,
+        detail: []const u8,
+    }{
+        .{ .err = error.LeanProofParseError, .reason = "lean_tactic_parse_error", .detail = "proof-generator defect" },
+        .{ .err = error.LeanProofUnsolvedGoals, .reason = "lean_unsolved_goals", .detail = "proof manifest" },
+        .{ .err = error.LeanProofTimeout, .reason = "lean_tactic_timeout", .detail = "proof-search budget" },
+        .{ .err = error.LeanToolUnavailable, .reason = "lean_tool_unavailable", .detail = "toolchain was unavailable" },
+        .{ .err = error.LeanProofAbnormalTermination, .reason = "lean_abnormal_termination", .detail = "terminated abnormally" },
+    };
+
+    for (cases) |case| {
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        try printAutomaticProofFailure(&output.writer, case.err);
+        try std.testing.expect(std.mem.indexOf(u8, output.written(), case.reason) != null);
+        try std.testing.expect(std.mem.indexOf(u8, output.written(), case.detail) != null);
+        try std.testing.expect(std.mem.indexOf(u8, output.written(), "artifact emission remains blocked") != null);
+    }
+}
+
+test "automatic loop proof source delegates to repository tactic deterministically" {
+    const u256_ty: obligation.TypeRef = .{ .compiler_type_id = 6 };
+    const loop_id: obligation.FreeVarId = .{ .file_id = 1, .pattern_id = 1 };
+    const context_id: obligation.FreeVarId = .{ .file_id = 1, .pattern_id = 2 };
+    const terms = [_]obligation.Term{
+        .{ .int_lit = .{ .value = "0", .ty = u256_ty } },
+        .{ .variable = .{ .free = .{ .id = loop_id, .name = "i", .ty = u256_ty } } },
+        .{ .variable = .{ .free = .{ .id = context_id, .name = "n", .ty = u256_ty } } },
+        .{ .binary = .{ .op = .lt, .lhs = 1, .rhs = 2, .ty = u256_ty } },
+        .{ .binary = .{ .op = .le, .lhs = 1, .rhs = 2, .ty = u256_ty } },
+        .{ .int_lit = .{ .value = "1", .ty = u256_ty } },
+        .{ .binary = .{ .op = .add, .lhs = 1, .rhs = 5, .ty = u256_ty } },
+        .{ .binary = .{ .op = .lt, .lhs = 6, .rhs = 1, .ty = u256_ty } },
+        .{ .unary = .{ .op = .not, .operand = 7 } },
+        .{ .unary = .{ .op = .not, .operand = 3 } },
+    };
+    const variables = [_]obligation.LoopVariable{.{
+        .index = 0,
+        .id = loop_id,
+        .name = "i",
+        .ty = u256_ty,
+    }};
+    const context_variables = [_]obligation.LoopVariable{.{
+        .index = 0,
+        .id = context_id,
+        .name = "n",
+        .ty = u256_ty,
+    }};
+    const backedge_bindings = [_]obligation.LoopStepAssignment{.{
+        .variable_index = 0,
+        .target = loop_id,
+        .source_key = "loop:add-one",
+        .value = .{ .term = 6 },
+    }};
+    const exit_bindings = [_]obligation.LoopStepAssignment{.{
+        .variable_index = 0,
+        .target = loop_id,
+        .source_key = "loop:identity",
+        .value = .{ .term = 1 },
+    }};
+    const backedge_path_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 3 } }};
+    const exit_path_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 9 } }};
+    const safety_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 8 } }};
+    const backedge_timeline = [_]obligation.LoopTimelineEvent{
+        .{
+            .id = 0,
+            .structural_key = "loop:backedge/path",
+            .payload = .{ .path_assumption = .{ .formulas = &backedge_path_exprs } },
+        },
+        .{
+            .id = 1,
+            .structural_key = "op:checked-add",
+            .payload = .{ .safety_checkpoint = .{ .formulas = &safety_exprs } },
+        },
+    };
+    const exit_timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "loop:exit/path",
+        .payload = .{ .path_assumption = .{ .formulas = &exit_path_exprs } },
+    }};
+    const edges = [_]obligation.LoopEdgeRow{
+        .{
+            .id = 0,
+            .structural_key = "loop:backedge",
+            .timeline = &backedge_timeline,
+            .next_state = &backedge_bindings,
+            .target = .backedge,
+        },
+        .{
+            .id = 1,
+            .structural_key = "loop:exit",
+            .timeline = &exit_timeline,
+            .next_state = &exit_bindings,
+            .target = .successor,
+        },
+    };
+    const summaries = [_]obligation.LoopSummaryRow{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "countTo" } },
+        .source = .{},
+        .phase = .ora_mlir,
+        .origin = .source,
+        .loop_source_op_id = 1,
+        .loop_kind = .scf_while,
+        .context_variables = &context_variables,
+        .variables = &variables,
+        .init_formulas = &.{.{ .term = 0 }},
+        .invariant_formulas = &.{.{ .term = 4 }},
+        .edges = &edges,
+        .projection_completeness = .complete,
+        .post_formulas = &.{.{ .term = 4 }},
+        .query_ids = .{
+            .base = &.{11},
+            .induction = &.{10},
+            .body_safety = &.{ 12, 13 },
+            .step = &.{14},
+            .post = &.{15},
+        },
+    }};
+    const digest = @as([32]u8, @splat(0xA5));
+    const owner: obligation.Owner = .{ .function = .{ .name = "countTo" } };
+    const queries = [_]obligation.VerificationQuery{
+        .{ .id = 10, .owner = owner, .source = .{}, .phase = .ora_mlir, .origin = .source, .proof_requirement = .lean_certificate, .kind = .loop_induction, .loop_summary_id = 1, .loop_vc_sha256 = digest },
+        .{ .id = 11, .owner = owner, .source = .{}, .phase = .ora_mlir, .origin = .source, .backend = .z3, .kind = .loop_base, .loop_summary_id = 1, .loop_vc_sha256 = digest },
+        .{ .id = 12, .owner = owner, .source = .{}, .phase = .ora_mlir, .origin = .source, .backend = .z3, .kind = .loop_body_safety, .loop_summary_id = 1, .loop_edge_id = 0, .loop_vc_sha256 = digest },
+        .{ .id = 13, .owner = owner, .source = .{}, .phase = .ora_mlir, .origin = .source, .backend = .z3, .kind = .loop_body_safety, .loop_summary_id = 1, .loop_edge_id = 1, .loop_vc_sha256 = digest },
+        .{ .id = 14, .owner = owner, .source = .{}, .phase = .ora_mlir, .origin = .source, .backend = .z3, .kind = .loop_invariant_step, .loop_summary_id = 1, .loop_edge_id = 0, .loop_vc_sha256 = digest },
+        .{ .id = 15, .owner = owner, .source = .{}, .phase = .ora_mlir, .origin = .source, .backend = .z3, .kind = .loop_invariant_post, .loop_summary_id = 1, .loop_edge_id = 1, .loop_vc_sha256 = digest },
+    };
+    const set: obligation.ObligationSet = .{
+        .terms = &terms,
+        .queries = &queries,
+        .loop_summaries = &summaries,
+    };
+
+    const first = try buildAutomaticProofSource(
+        std.testing.allocator,
+        "Ora.Generated.Test",
+        set,
+        &queries,
+    );
+    defer std.testing.allocator.free(first);
+    const second = try buildAutomaticProofSource(
+        std.testing.allocator,
+        "Ora.Generated.Test",
+        set,
+        &queries,
+    );
+    defer std.testing.allocator.free(second);
+    try std.testing.expectEqualStrings(first, second);
+    try std.testing.expect(std.mem.containsAtLeast(
+        u8,
+        first,
+        1,
+        "theorem discharge_q10 : emittedQuery_10 := by ora_loop_auto",
+    ));
+    try std.testing.expect(!std.mem.containsAtLeast(
+        u8,
+        first,
+        1,
+        "Ora.Loop.bound_state_ready",
+    ));
+
+    const storage_backedge_timeline = [_]obligation.LoopTimelineEvent{
+        backedge_timeline[0],
+        backedge_timeline[1],
+        .{
+            .id = 2,
+            .structural_key = "op:store",
+            .payload = .{ .storage_write = .{
+                .location = .{ .root = "values", .value_ty = u256_ty },
+                .value = .{ .formula = .{ .term = 1 } },
+            } },
+        },
+    };
+    var storage_edges = edges;
+    storage_edges[0].timeline = &storage_backedge_timeline;
+    var storage_summary = summaries[0];
+    storage_summary.edges = &storage_edges;
+    const storage_set: obligation.ObligationSet = .{
+        .terms = &terms,
+        .queries = &queries,
+        .loop_summaries = &.{storage_summary},
+    };
+    const storage_source = try buildAutomaticProofSource(
+        std.testing.allocator,
+        "Ora.Generated.Test",
+        storage_set,
+        &queries,
+    );
+    defer std.testing.allocator.free(storage_source);
+    try std.testing.expect(std.mem.containsAtLeast(
+        u8,
+        storage_source,
+        1,
+        "private theorem autoScalarAuthorization",
+    ));
+    try std.testing.expect(std.mem.containsAtLeast(
+        u8,
+        storage_source,
+        1,
+        "ora_loop_auto_direct_storage_from autoScalarAuthorization",
+    ));
+
+    // Inherited eligibility uses the actual parent dependency, not merely a
+    // same-function summary elsewhere in the manifest. Both queries keep IDs.
+    const inherited_terms = terms ++ [_]obligation.Term{
+        .{ .binary = .{ .op = .ge, .lhs = 2, .rhs = 5, .ty = u256_ty } },
+        .{ .int_lit = .{ .value = "4", .ty = u256_ty } },
+        .{ .binary = .{ .op = .le, .lhs = 2, .rhs = 11, .ty = u256_ty } },
+    };
+    const stable = [_]obligation.LoopHeaderFactValue{.{ .id = context_id, .ty = u256_ty }};
+    var facts: [2]obligation.LoopHeaderFactRow = undefined;
+    var assumptions: [3]obligation.Assumption = undefined;
+    for (&facts, 0..) |*fact, index| {
+        const key = ([_][]const u8{ "requires:lower", "requires:upper" })[index];
+        const term = ([_]obligation.TermId{ 10, 12 })[index];
+        fact.* = .{
+            .id = @intCast(index),
+            .structural_key = key,
+            .formula = .{ .term = term },
+            .source_kind = .function_requires,
+            .source = .{ .structural_key = key, .block_key = "entry", .position = @intCast(index) },
+            .target = .{ .structural_key = "parent", .block_key = "entry", .position = 4 },
+            .stable_values = &stable,
+            .assumption_id = @intCast(21 + index),
+        };
+        assumptions[index] = .{
+            .id = @intCast(21 + index),
+            .owner = owner,
+            .source = .{},
+            .phase = .ora_mlir,
+            .origin = .source,
+            .kind = .requires,
+            .formula = .{ .term = term },
+        };
+    }
+    assumptions[2] = assumptions[0];
+    assumptions[2].id = 23;
+    var parent = summaries[0];
+    parent.id = 0;
+    parent.owner = .{ .statement = .{ .function_name = "countTo", .ordinal = 0 } };
+    parent.header_facts = &facts;
+    parent.query_ids = .{ .base = &.{111}, .induction = &.{110}, .body_safety = &.{ 112, 113 }, .step = &.{114}, .post = &.{115} };
+    const parent_timeline = backedge_timeline ++ [_]obligation.LoopTimelineEvent{.{
+        .id = 2,
+        .structural_key = "child",
+        .payload = .{ .summary_dependency = .{
+            .id = 0,
+            .structural_key = "child",
+            .summary_id = 1,
+            .loop_vc_sha256 = digest,
+            .target = .successor,
+            .write_footprint_complete = true,
+        } },
+    }};
+    var parent_edges = edges;
+    parent_edges[0].timeline = &parent_timeline;
+    parent.edges = &parent_edges;
+    var child = summaries[0];
+    child.owner = .{ .statement = .{ .function_name = "countTo", .ordinal = 1 } };
+    var inherited_queries = queries ++ queries;
+    for (&inherited_queries, 0..) |*query, index| {
+        query.assumption_ids = &.{ 21, 22 };
+        if (index >= queries.len) {
+            query.id += 100;
+            query.loop_summary_id = 0;
+        }
+    }
+    const changed_context = [_]obligation.LoopVariable{.{
+        .index = 0,
+        .id = context_id,
+        .name = "n",
+        .ty = .{ .compiler_type_id = 3 },
+    }};
+    const Case = enum {
+        inherited,
+        no_dependency,
+        wrong_function,
+        missing_context,
+        wrong_input_type,
+        wrong_formula,
+        wrong_assumption_owner,
+        reordered_ids,
+        extra_ids,
+        missing_parent_query,
+        unmatched_parent,
+    };
+    for (std.meta.tags(Case)) |case| {
+        errdefer std.debug.print("inherited assumption case: {s}\n", .{@tagName(case)});
+        var rows = [_]obligation.LoopSummaryRow{ parent, child };
+        var case_queries = inherited_queries;
+        var case_assumptions = assumptions;
+        switch (case) {
+            .inherited => {},
+            .no_dependency => rows[0].edges = &edges,
+            .wrong_function => rows[0].owner = .{ .statement = .{ .function_name = "other", .ordinal = 0 } },
+            .missing_context => rows[1].context_variables = &.{},
+            .wrong_input_type => rows[1].context_variables = &changed_context,
+            .wrong_formula => case_assumptions[0].formula = .{ .term = 12 },
+            .wrong_assumption_owner => case_assumptions[0].owner = .{ .function = .{ .name = "other" } },
+            .reordered_ids => for (case_queries[0..queries.len]) |*query| {
+                query.assumption_ids = &.{ 22, 21 };
+            },
+            .extra_ids => for (case_queries[0..queries.len]) |*query| {
+                query.assumption_ids = &.{ 21, 22, 23 };
+            },
+            .missing_parent_query => rows[0].query_ids.induction = &.{999},
+            .unmatched_parent => rows[0].header_facts = &.{},
+        }
+        const inherited_set: obligation.ObligationSet = .{
+            .terms = &inherited_terms,
+            .assumptions = &case_assumptions,
+            .queries = &case_queries,
+            .loop_summaries = &rows,
+        };
+        if (case != .missing_parent_query) {
+            try inherited_set.validateTermReferences();
+            try inherited_set.validateIdReferences();
+        }
+        const result = automaticLoopPlan(inherited_set, case_queries[0]);
+        switch (result) {
+            .supported => try std.testing.expectEqual(Case.inherited, case),
+            .unsupported => |reason| {
+                try std.testing.expect(case != .inherited);
+                try std.testing.expectEqual(
+                    if (case == .missing_parent_query) AutomaticLoopProofReason.automatic_query_shape_unsupported else AutomaticLoopProofReason.automatic_assumptions_require_external_certificate,
+                    reason,
+                );
+            },
+        }
+    }
+}
+
+test "automatic proof environment includes storage projection keys" {
+    const allocator = std.testing.allocator;
+    const u256_ty: obligation.TypeRef = .{ .compiler_type_id = 6 };
+    const key_id: obligation.FreeVarId = .{ .file_id = 7, .pattern_id = 9 };
+    const terms = [_]obligation.Term{
+        .{ .variable = .{ .free = .{ .id = key_id, .name = "key", .ty = u256_ty } } },
+        .{ .int_lit = .{ .value = "0", .ty = u256_ty } },
+    };
+    const projections = [_]obligation.LoopStorageProjection{.{
+        .mapping_key = .{
+            .value = .{ .formula = .{ .term = 0 } },
+            .ty = u256_ty,
+        },
+    }};
+    const timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "op:store",
+        .payload = .{ .storage_write = .{
+            .location = .{
+                .root = "values",
+                .projections = &projections,
+                .value_ty = u256_ty,
+            },
+            .value = .{ .formula = .{ .term = 1 } },
+        } },
+    }};
+    const edges = [_]obligation.LoopEdgeRow{.{
+        .id = 0,
+        .structural_key = "body",
+        .timeline = &timeline,
+    }};
+    const summaries = [_]obligation.LoopSummaryRow{.{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "storeAt" } },
+        .source = .{},
+        .phase = .ora_mlir,
+        .origin = .source,
+        .loop_source_op_id = 1,
+        .loop_kind = .scf_while,
+        .edges = &edges,
+    }};
+    const query: obligation.VerificationQuery = .{
+        .id = 2,
+        .owner = .{ .function = .{ .name = "storeAt" } },
+        .source = .{},
+        .phase = .ora_mlir,
+        .origin = .source,
+        .kind = .loop_induction,
+        .loop_summary_id = 1,
+    };
+    const set: obligation.ObligationSet = .{
+        .terms = &terms,
+        .queries = &.{query},
+        .loop_summaries = &summaries,
+    };
+
+    const free_vars = try collectQueryFreeVars(allocator, set, query);
+    defer allocator.free(free_vars);
+    try std.testing.expectEqual(@as(usize, 1), free_vars.len);
+    try std.testing.expect(obligation.freeVarIdEql(key_id, free_vars[0]));
+}
+
+test "automatic dependency variables are scoped to their declaring edge" {
+    const parent_id: obligation.FreeVarId = .{ .file_id = 1, .pattern_id = 1 };
+    const child_id: obligation.FreeVarId = .{ .file_id = 1, .pattern_id = 2 };
+    const parent_variables = [_]obligation.LoopVariable{.{
+        .index = 0,
+        .id = parent_id,
+        .ty = .{ .spelling = "u256" },
+    }};
+    const child_variables = [_]obligation.LoopVariable{.{
+        .index = 0,
+        .id = child_id,
+        .ty = .{ .spelling = "u256" },
+    }};
+    const dependency: obligation.LoopSummaryDependency = .{
+        .id = 0,
+        .structural_key = "op:2/scf.while",
+        .summary_id = 2,
+        .loop_vc_sha256 = @as([32]u8, @splat(0)),
+        .target = .successor,
+    };
+    const dependency_timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = dependency.structural_key,
+        .payload = .{ .summary_dependency = dependency },
+    }};
+    const edge: obligation.LoopEdgeRow = .{
+        .id = 0,
+        .structural_key = "body/straight-line-yield",
+        .timeline = &dependency_timeline,
+    };
+    const summaries = [_]obligation.LoopSummaryRow{
+        .{
+            .id = 1,
+            .owner = .{ .function = .{ .name = "run" } },
+            .source = .{},
+            .phase = .ora_mlir,
+            .origin = .source,
+            .loop_source_op_id = 1,
+            .loop_kind = .scf_while,
+            .variables = &parent_variables,
+        },
+        .{
+            .id = 2,
+            .owner = .{ .function = .{ .name = "run" } },
+            .source = .{},
+            .phase = .ora_mlir,
+            .origin = .source,
+            .loop_source_op_id = 2,
+            .loop_kind = .scf_while,
+            .variables = &child_variables,
+        },
+    };
+    const terms = [_]obligation.Term{.{ .variable = .{ .free = .{
+        .id = child_id,
+        .name = "inner",
+        .ty = .{ .spelling = "u256" },
+    } } }};
+    const set: obligation.ObligationSet = .{
+        .terms = &terms,
+        .loop_summaries = &summaries,
+    };
+
+    switch (automaticValueShape(set, summaries[0], 0, 16)) {
+        .supported => return error.TestUnexpectedResult,
+        .unsupported => |reason| try std.testing.expectEqual(
+            AutomaticLoopProofReason.automatic_foreign_variable,
+            reason,
+        ),
+    }
+    switch (automaticValueShapeInScope(set, summaries[0], edge, 0, 16)) {
+        .unsupported => return error.TestUnexpectedResult,
+        .supported => |shape| try std.testing.expect(shape.eql(.{
+            .width = 256,
+            .signed = false,
+        })),
+    }
+}
+
 test "coordinator outcome cannot authorize runtime-check erasure" {
     try std.testing.expect(@hasField(Outcome, "artifact_emission_authorized"));
     try std.testing.expect(!@hasField(Outcome, "proven_guard_ids"));
@@ -1649,10 +2554,184 @@ test "Lean targets reject vacuous and inconclusive Z3 rows" {
         .result = .{ .status = .unknown },
     };
     try std.testing.expect(isPlainUnknownTarget(base));
+    var loop_owned = base;
+    loop_owned.loop_summary_id = 7;
+    try std.testing.expect(!isPlainUnknownTarget(loop_owned));
     var vacuous = base;
     vacuous.result.?.vacuous = true;
     try std.testing.expect(!isPlainUnknownTarget(vacuous));
     var inconclusive = base;
     inconclusive.result.?.vacuity_unknown = true;
     try std.testing.expect(!isPlainUnknownTarget(inconclusive));
+}
+
+test "runtime loop certificate coverage accepts no loops and one exact target" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+
+    try std.testing.expect(try runtimeLoopCertificateTargetsComplete(.{}, &output.writer));
+    try std.testing.expectEqual(@as(usize, 0), output.written().len);
+
+    const loop_id: obligation.FreeVarId = .{ .file_id = 1, .pattern_id = 2 };
+    const variables = [_]obligation.LoopVariable{.{
+        .index = 0,
+        .id = loop_id,
+        .name = "i",
+        .ty = .{ .spelling = "u256" },
+    }};
+    const next_state = [_]obligation.LoopStepAssignment{.{
+        .variable_index = 0,
+        .target = loop_id,
+        .source_key = "loop-state:0",
+        .value = .{ .term = 0 },
+    }};
+    const path_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
+    const backedge_timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "body/straight-line-yield/path",
+        .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+    }};
+    const exit_timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "guard/false-successor/path",
+        .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+    }};
+    const edges = [_]obligation.LoopEdgeRow{
+        .{
+            .id = 0,
+            .structural_key = "body/straight-line-yield",
+            .timeline = &backedge_timeline,
+            .next_state = &next_state,
+            .target = .backedge,
+        },
+        .{
+            .id = 1,
+            .structural_key = "guard/false-successor",
+            .timeline = &exit_timeline,
+            .next_state = &next_state,
+            .target = .successor,
+        },
+    };
+    const induction_ids = [_]obligation.Id{20};
+    const summaries = [_]obligation.LoopSummaryRow{.{
+        .id = 10,
+        .owner = .{ .statement = .{ .function_name = "run", .ordinal = 0 } },
+        .source = .{ .file = "loop.ora", .line = 4 },
+        .phase = .ora_mlir,
+        .origin = .source,
+        .loop_source_op_id = 1,
+        .loop_kind = .scf_while,
+        .variables = &variables,
+        .edges = &edges,
+        .projection_completeness = .complete,
+        .query_ids = .{ .induction = &induction_ids },
+    }};
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 20,
+        .owner = .{ .statement = .{ .function_name = "run", .ordinal = 0 } },
+        .source = .{ .file = "loop.ora", .line = 4 },
+        .phase = .ora_mlir,
+        .origin = .source,
+        .proof_requirement = .lean_certificate,
+        .kind = .loop_induction,
+        .loop_summary_id = 10,
+    }};
+
+    try std.testing.expect(try runtimeLoopCertificateTargetsComplete(
+        .{ .queries = &queries, .loop_summaries = &summaries },
+        &output.writer,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), output.written().len);
+}
+
+test "runtime loop certificate coverage rejects named exclusions and missing targets" {
+    const loop_id: obligation.FreeVarId = .{ .file_id = 1, .pattern_id = 2 };
+    const variables = [_]obligation.LoopVariable{.{
+        .index = 0,
+        .id = loop_id,
+        .name = "i",
+        .ty = .{ .spelling = "u256" },
+    }};
+    const next_state = [_]obligation.LoopStepAssignment{.{
+        .variable_index = 0,
+        .target = loop_id,
+        .source_key = "loop-state:0",
+        .value = .{ .term = 0 },
+    }};
+    const path_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
+    const backedge_timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "body/straight-line-yield/path",
+        .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+    }};
+    const exit_timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "guard/false-successor/path",
+        .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+    }};
+    const edges = [_]obligation.LoopEdgeRow{
+        .{
+            .id = 0,
+            .structural_key = "body/straight-line-yield",
+            .timeline = &backedge_timeline,
+            .next_state = &next_state,
+            .target = .backedge,
+        },
+        .{
+            .id = 1,
+            .structural_key = "guard/false-successor",
+            .timeline = &exit_timeline,
+            .next_state = &next_state,
+            .target = .successor,
+        },
+    };
+    const induction_ids = [_]obligation.Id{20};
+    const missing_invariant = [_]obligation.LoopUnsupportedReason{.loop_invariant_missing};
+
+    var unsupported_output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer unsupported_output.deinit();
+    const unsupported = [_]obligation.LoopSummaryRow{.{
+        .id = 10,
+        .owner = .{ .statement = .{ .function_name = "run", .ordinal = 0 } },
+        .source = .{ .file = "unsupported.ora", .line = 4 },
+        .phase = .ora_mlir,
+        .origin = .source,
+        .loop_source_op_id = 1,
+        .loop_kind = .scf_while,
+        .unsupported_reasons = &missing_invariant,
+    }};
+    try std.testing.expect(!try runtimeLoopCertificateTargetsComplete(
+        .{ .loop_summaries = &unsupported },
+        &unsupported_output.writer,
+    ));
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        unsupported_output.written(),
+        "unsupported.ora:4 (run) excluded_by=loop_invariant_missing",
+    ) != null);
+
+    var missing_target_output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer missing_target_output.deinit();
+    const missing_target = [_]obligation.LoopSummaryRow{.{
+        .id = 10,
+        .owner = .{ .statement = .{ .function_name = "run", .ordinal = 0 } },
+        .source = .{ .file = "missing-target.ora", .line = 4 },
+        .phase = .ora_mlir,
+        .origin = .source,
+        .loop_source_op_id = 1,
+        .loop_kind = .scf_while,
+        .variables = &variables,
+        .edges = &edges,
+        .projection_completeness = .complete,
+        .query_ids = .{ .induction = &induction_ids },
+    }};
+    try std.testing.expect(!try runtimeLoopCertificateTargetsComplete(
+        .{ .loop_summaries = &missing_target },
+        &missing_target_output.writer,
+    ));
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        missing_target_output.written(),
+        "missing-target.ora:4 (run) excluded_by=loop_certificate_target_missing",
+    ) != null);
 }

@@ -1,0 +1,24 @@
+contract DynamicBytesStringBounds {
+    storage var blob: bytes;
+    storage var text: string;
+
+    pub fn set_blob(value: bytes) {
+        blob = value;
+    }
+
+    pub fn set_text(value: string) {
+        text = value;
+    }
+
+    pub fn read_blob(index: u256) -> u8 {
+        return blob[index];
+    }
+
+    pub fn read_text(index: u256) -> u8 {
+        return text[index];
+    }
+
+    pub fn read_address(values: slice[address], index: u256) -> address {
+        return values[index];
+    }
+}

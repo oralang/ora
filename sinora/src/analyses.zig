@@ -62,11 +62,11 @@ pub const AnalysesMask = struct {
     }
 
     fn bit(kind: AnalysisKind) u32 {
-        return @as(u32, 1) << @intFromEnum(kind);
+        return @as(u32, 1) << @backingInt(kind);
     }
 };
 
-const analysis_count = @typeInfo(AnalysisKind).@"enum".fields.len;
+const analysis_count = @typeInfo(AnalysisKind).@"enum".field_names.len;
 comptime {
     std.debug.assert(analysis_count <= @bitSizeOf(u32));
 }

@@ -34,7 +34,24 @@ inductive TyRef where
 structure FreeVarId where
   file_id : Nat
   pattern_id : Nat
-  deriving Repr, BEq, DecidableEq
+  deriving Repr, DecidableEq
+
+instance : BEq FreeVarId where
+  beq lhs rhs :=
+    lhs.file_id == rhs.file_id && lhs.pattern_id == rhs.pattern_id
+
+instance : LawfulBEq FreeVarId where
+  eq_of_beq := by
+    intro lhs rhs hEqual
+    cases lhs
+    cases rhs
+    simp only [BEq.beq, Bool.and_eq_true, decide_eq_true_eq,
+      FreeVarId.mk.injEq] at hEqual ⊢
+    exact hEqual
+  rfl := by
+    intro id
+    cases id
+    simp only [BEq.beq, decide_eq_true_eq, Bool.and_self]
 
 structure FreeVarRef where
   id : FreeVarId
@@ -72,10 +89,16 @@ inductive PlaceKey where
   | unknown
   deriving Repr, BEq, DecidableEq
 
+inductive PlaceProjectionDomain where
+  | mapping
+  | fixedIndex
+  deriving Repr, BEq, DecidableEq
+
 structure PlaceRef where
   root : String
   region : RegionRef
   fields : List String := []
+  projectionDomain : PlaceProjectionDomain := .mapping
   keys : List PlaceKey := []
   deriving Repr, BEq, DecidableEq
 
@@ -183,6 +206,8 @@ inductive Term where
   | binary : BinaryTerm → Term
   | refinementPredicate : RefinementPredicateTerm → Term
   | quantified : QuantifiedTerm → Term
+  /-- Address id is pinned to canonical_types.zig / builtin.address. -/
+  | invocationCaller : Nat → TyRef → Term
   deriving Repr, BEq, DecidableEq
 
 inductive FormulaRef where
@@ -320,6 +345,9 @@ inductive ProofArtifactKind where
 structure AssumptionRow where
   id : Id
   owner : String
+  functionOwner : Bool := true
+  moduleName : Option String := none
+  contractName : Option String := none
   kind : AssumptionKind
   formula : Option FormulaRef := none
   deriving Repr, BEq, DecidableEq
@@ -327,6 +355,7 @@ structure AssumptionRow where
 structure ObligationRow where
   id : Id
   owner : String
+  contractOwner : Bool := false
   kind : ObligationKind
   deriving Repr, BEq, DecidableEq
 
@@ -364,6 +393,7 @@ def Term.wf (terms : List Term) : Term → Bool
   | .variable _ => true
   | .old id => termRefInBounds terms id
   | .result => true
+  | .invocationCaller owner ty => owner > 0 && ty == .compilerTypeId 14
   | .placeRead _ => true
   | .unary u => termRefInBounds terms u.operand
   | .binary b =>
@@ -389,6 +419,7 @@ def Term.refsBefore (id : TermId) : Term → Bool
   | .variable _ => true
   | .old ref => termRefBefore id ref
   | .result => true
+  | .invocationCaller owner ty => owner > 0 && ty == .compilerTypeId 14
   | .placeRead _ => true
   | .unary u => termRefBefore id u.operand
   | .binary b =>
@@ -406,6 +437,17 @@ def termsTopologicalFrom : TermId → List Term → Bool
   | id, term :: rest =>
       term.refsBefore id &&
       termsTopologicalFrom (id + 1) rest
+
+theorem termsTopologicalFrom_append
+    (start : TermId) (lhs rhs : List Term) :
+    termsTopologicalFrom start (lhs ++ rhs) =
+      (termsTopologicalFrom start lhs &&
+        termsTopologicalFrom (start + lhs.length) rhs) := by
+  induction lhs generalizing start with
+  | nil => simp [termsTopologicalFrom]
+  | cons term rest ih =>
+      simp [termsTopologicalFrom, ih, Nat.add_assoc, Nat.add_left_comm,
+        Nat.add_comm, Bool.and_assoc]
 
 def ObligationKind.wf (terms : List Term) : ObligationKind → Bool
   | .logical _ formula => formula.wf terms

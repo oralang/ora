@@ -33,8 +33,8 @@ pub const OptimizeProfile = enum {
 };
 
 pub fn optimizeProfileFromString(value: []const u8) ConfigError!OptimizeProfile {
-    inline for (@typeInfo(OptimizeProfile).@"enum".fields) |field| {
-        if (std.mem.eql(u8, value, field.name)) return @field(OptimizeProfile, field.name);
+    inline for (@typeInfo(OptimizeProfile).@"enum".field_names) |field| {
+        if (std.mem.eql(u8, value, field)) return @field(OptimizeProfile, field);
     }
     return ConfigError.InvalidToml;
 }

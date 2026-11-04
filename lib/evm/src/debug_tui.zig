@@ -122,18 +122,18 @@ const Snapshot = struct {
     gas_remaining: i64 = 0,
     stack_len: usize = 0,
     stack_top_count: usize = 0,
-    stack_top: [8]u256 = [_]u256{0} ** 8,
+    stack_top: [8]u256 = @as([8]u256, @splat(0)),
     memory_size: u32 = 0,
     memory_word_count: usize = 0,
-    memory_words: [8]u256 = [_]u256{0} ** 8,
+    memory_words: [8]u256 = @as([8]u256, @splat(0)),
     storage_count: usize = 0,
     storage_top_count: usize = 0,
-    storage_top_slots: [8]u256 = [_]u256{0} ** 8,
-    storage_top_values: [8]u256 = [_]u256{0} ** 8,
+    storage_top_slots: [8]u256 = @as([8]u256, @splat(0)),
+    storage_top_values: [8]u256 = @as([8]u256, @splat(0)),
     tstore_count: usize = 0,
     tstore_top_count: usize = 0,
-    tstore_top_slots: [8]u256 = [_]u256{0} ** 8,
-    tstore_top_values: [8]u256 = [_]u256{0} ** 8,
+    tstore_top_slots: [8]u256 = @as([8]u256, @splat(0)),
+    tstore_top_values: [8]u256 = @as([8]u256, @splat(0)),
 };
 
 const BindingSnapshotEntry = struct {
@@ -5042,8 +5042,8 @@ fn configureTtyReadTimeout(tty: *vaxis.Tty) !void {
     // a terminal status query. Some terminals/PTYs do not answer that query;
     // a short read timeout lets the thread observe the flag without relying on
     // terminal-specific DSR behavior.
-    termios.cc[@intFromEnum(std.posix.V.MIN)] = 0;
-    termios.cc[@intFromEnum(std.posix.V.TIME)] = 1;
+    termios.cc[@backingInt(std.posix.V.MIN)] = 0;
+    termios.cc[@backingInt(std.posix.V.TIME)] = 1;
     try std.posix.tcsetattr(tty.fd, .NOW, termios);
 }
 
@@ -5581,7 +5581,7 @@ fn encodeAbiWord(type_name: []const u8, value_text: []const u8, out_word: []u8) 
     if (std.mem.eql(u8, type_name, "address")) {
         const text = if (std.mem.startsWith(u8, value_text, "0x")) value_text[2..] else value_text;
         if (text.len > 40) return error.InvalidAddress;
-        var buf: [20]u8 = [_]u8{0} ** 20;
+        var buf: [20]u8 = @as([20]u8, @splat(0));
         const start = 20 - text.len / 2;
         _ = try std.fmt.hexToBytes(buf[start..], text);
         @memcpy(out_word[12..32], &buf);

@@ -1,0 +1,17 @@
+contract MulGuardOrientation {
+    storage var calls: u256;
+    storage var order: u256;
+    fn next(tag: u256) -> u256 { calls = calls +% 1; order = order *% 10 +% tag; return tag; }
+    pub fn left(a: u256) -> u256 { return 100 * a; }
+    pub fn right(a: u256) -> u256 { return a * 100; }
+    pub fn compoundLeft(a: u256) -> u256 { var x: u256 = 100; x *= a; return x; }
+    pub fn compoundRight(a: u256) -> u256 { var x: u256 = a; x *= 100; return x; }
+    pub fn symbolic(a: u256, b: u256) -> u256 { return a * b; }
+    pub fn zeroLeft(a: u256) -> u256 { return 0 * a; }
+    pub fn zeroRight(a: u256) -> u256 { return a * 0; }
+    pub fn constants() -> u256 { return 100 * 2; }
+    pub fn effectLeft() -> u256 { calls = 0; order = 0; let product = 100 * next(2); assert(calls == 1 && order == 2, "one left effect"); return product; }
+    pub fn effectRight() -> u256 { calls = 0; order = 0; let product = next(2) * 100; assert(calls == 1 && order == 2, "one right effect"); return product; }
+    pub fn effectBoth() -> u256 { calls = 0; order = 0; let product = next(2) * next(3); assert(calls == 2 && order == 23, "left-to-right effects"); return product; }
+    pub fn effectCompound() -> u256 { calls = 0; order = 0; var product: u256 = 100; product *= next(2); assert(calls == 1 && order == 2, "one compound effect"); return product; }
+}

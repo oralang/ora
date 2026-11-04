@@ -2392,6 +2392,164 @@ test "compiler reports heterogeneous array literals and keeps tuple element type
     try testing.expectEqual(compiler.sema.TypeKind.bool, typecheck.exprType(ret_stmt.value.?).kind());
 }
 
+test "compiler rejects constant fixed-array indexes outside the resolved extent" {
+    const accepted_source =
+        \\contract FixedArrayBounds {
+        \\    storage var stored: [u256; 4];
+        \\
+        \\    pub fn accepted(index: u256) -> u256 {
+        \\        var local: [u256; 4] = [0, 0, 0, 0];
+        \\        local[0] = 1;
+        \\        local[3] = 2;
+        \\        stored[0] = local[0];
+        \\        stored[3] = local[3];
+        \\        stored[index] = local[0];
+        \\        return stored[index] + stored[3];
+        \\    }
+        \\
+        \\    pub fn extentThree() {
+        \\        var dest: [u256; 3] = [0, 0, 0];
+        \\        dest[2] = 1;
+        \\    }
+        \\
+        \\    pub fn extentFour() {
+        \\        var dest: [u256; 4] = [0, 0, 0, 0];
+        \\        dest[3] = 1;
+        \\    }
+        \\}
+    ;
+
+    var accepted = try compileText(accepted_source);
+    defer accepted.deinit();
+    const accepted_typecheck = try accepted.db.moduleTypeCheck(accepted.root_module_id);
+    try testing.expect(accepted_typecheck.diagnostics.isEmpty());
+
+    const rejected_source =
+        \\contract FixedArrayBounds {
+        \\    storage var stored: [u256; 4];
+        \\
+        \\    pub fn rejected() -> u256 {
+        \\        var local: [u256; 4] = [0, 0, 0, 0];
+        \\        local[4] = 1;
+        \\        local[(2 + 3)] = 2;
+        \\        stored[4] = 3;
+        \\        let direct = local[4];
+        \\        let grouped = stored[(2 + 2)];
+        \\        let huge = stored[4294967296];
+        \\        var empty: [u256; 0] = [];
+        \\        empty[0] = 0;
+        \\        return direct + grouped + huge + empty[0];
+        \\    }
+        \\
+        \\    pub fn earlierExtentFour() {
+        \\        var dest: [u256; 4] = [0, 0, 0, 0];
+        \\        dest[3] = 1;
+        \\    }
+        \\
+        \\    pub fn laterExtentThree() {
+        \\        var dest: [u256; 3] = [0, 0, 0];
+        \\        dest[3] = 1;
+        \\    }
+        \\}
+    ;
+
+    var rejected = try compileText(rejected_source);
+    defer rejected.deinit();
+    const rejected_typecheck = try rejected.db.moduleTypeCheck(rejected.root_module_id);
+    try testing.expectEqual(@as(usize, 9), rejected_typecheck.diagnostics.len());
+    try testing.expectEqual(@as(usize, 4), countDiagnosticMessages(
+        &rejected_typecheck.diagnostics,
+        "fixed-array index 4 is out of bounds for array extent 4",
+    ));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(
+        &rejected_typecheck.diagnostics,
+        "fixed-array index 5 is out of bounds for array extent 4",
+    ));
+    try testing.expectEqual(@as(usize, 2), countDiagnosticMessages(
+        &rejected_typecheck.diagnostics,
+        "fixed-array index 0 is out of bounds for array extent 0",
+    ));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(
+        &rejected_typecheck.diagnostics,
+        "fixed-array index 4294967296 is out of bounds for array extent 4",
+    ));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(
+        &rejected_typecheck.diagnostics,
+        "fixed-array index 3 is out of bounds for array extent 3",
+    ));
+}
+
+test "compiler rejects invalid dynamic indexed writes and constant literal bounds" {
+    const accepted_source =
+        \\pub fn accepted() -> u256 {
+        \\    let from_string: u8 = "hi"[1];
+        \\    let from_bytes: u8 = hex"deadbeef"[3];
+        \\    _ = from_string;
+        \\    _ = from_bytes;
+        \\    return @cast(slice[u256], [1, 2])[1];
+        \\}
+    ;
+    var accepted = try compileText(accepted_source);
+    defer accepted.deinit();
+    const accepted_typecheck = try accepted.db.moduleTypeCheck(accepted.root_module_id);
+    try testing.expect(accepted_typecheck.diagnostics.isEmpty());
+
+    const source_text =
+        \\contract DynamicIndexDiagnostics {
+        \\    storage var blob: bytes;
+        \\    storage var text: string;
+        \\    pub fn calldataWrite(values: slice[u256], index: u256, value: u256) {
+        \\        values[index] = value;
+        \\    }
+        \\    pub fn calldataCompound(values: slice[u256], index: u256, value: u256) {
+        \\        values[index] +%= value;
+        \\    }
+        \\    pub fn byteWrite(index: u256, value: u8) { blob[index] = value; }
+        \\    pub fn stringWrite(index: u256, value: u8) { text[index] = value; }
+        \\    pub fn stringLiteralRead() -> u8 { return "hi"[2]; }
+        \\    pub fn bytesLiteralRead() -> u8 { return hex"deadbeef"[4]; }
+        \\    pub fn sliceLiteralRead() -> u256 { return @cast(slice[u256], [1, 2])[2]; }
+        \\    pub fn emptyStringRead() -> u8 { return ""[0]; }
+        \\    pub fn bytesIteration(input: bytes) { for (input) |value| { _ = value; } }
+        \\    pub fn stringIteration(input: string) { for (input) |value| { _ = value; } }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+
+    try testing.expectEqual(@as(usize, 10), typecheck.diagnostics.len());
+    try testing.expectEqual(@as(usize, 2), countDiagnosticMessages(
+        &typecheck.diagnostics,
+        "cannot assign through calldata parameter 'values'",
+    ));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(
+        &typecheck.diagnostics,
+        "indexed assignment to 'bytes' is not supported",
+    ));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(
+        &typecheck.diagnostics,
+        "cannot assign to indexed element of immutable type 'string'",
+    ));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(
+        &typecheck.diagnostics,
+        "dynamic index 4 is out of bounds for runtime length 4",
+    ));
+    try testing.expectEqual(@as(usize, 2), countDiagnosticMessages(
+        &typecheck.diagnostics,
+        "dynamic index 2 is out of bounds for runtime length 2",
+    ));
+    try testing.expectEqual(@as(usize, 2), countDiagnosticMessages(
+        &typecheck.diagnostics,
+        "dynamic bytes/string iteration lowering is not supported",
+    ));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(
+        &typecheck.diagnostics,
+        "dynamic index 0 is out of bounds for runtime length 0",
+    ));
+}
+
 test "compiler rejects first-class runtime map handles" {
     const source_text =
         \\contract NestedMaps {

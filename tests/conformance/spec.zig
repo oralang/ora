@@ -313,19 +313,19 @@ fn parseBuilderKey(comptime Builder: type, allocator: std.mem.Allocator, builder
     comptime assertBuilderFieldsSupported(Builder);
     if (keyMap(Builder).get(key) == null) return error.UnknownKey;
 
-    inline for (@typeInfo(Builder).@"struct".fields) |field| {
-        if (comptime (std.mem.eql(u8, field.name, "storage") or std.mem.eql(u8, field.name, "logs"))) continue;
-        if (std.mem.eql(u8, key, field.name)) {
-            return assignField(Builder, allocator, builder, field.name, value);
+    inline for (@typeInfo(Builder).@"struct".field_names) |field| {
+        if (comptime (std.mem.eql(u8, field, "storage") or std.mem.eql(u8, field, "logs"))) continue;
+        if (std.mem.eql(u8, key, field)) {
+            return assignField(Builder, allocator, builder, field, value);
         }
     }
     return error.UnknownKey;
 }
 
 fn assertBuilderFieldsSupported(comptime Builder: type) void {
-    inline for (@typeInfo(Builder).@"struct".fields) |field| {
-        if (comptime (std.mem.eql(u8, field.name, "storage") or std.mem.eql(u8, field.name, "logs"))) continue;
-        _ = ParsedField(field.name, field.type);
+    inline for (@typeInfo(Builder).@"struct".field_names) |field| {
+        if (comptime (std.mem.eql(u8, field, "storage") or std.mem.eql(u8, field, "logs"))) continue;
+        _ = ParsedField(field, @FieldType(Builder, field));
     }
 }
 

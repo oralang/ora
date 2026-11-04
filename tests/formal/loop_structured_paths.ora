@@ -1,0 +1,89 @@
+contract LoopStructuredPaths {
+    pub fn branchUpdate(n: u256) -> u256
+        requires n <= 4
+    {
+        var i: u256 = 0;
+        var acc: u256 = 0;
+
+        while (i < n)
+            invariant i <= n
+            invariant acc <= 8
+        {
+            if (i < 2) {
+                acc = acc + 1;
+            } else {
+                acc = acc + 2;
+            }
+            i = i + 1;
+        }
+
+        return acc;
+    }
+
+    pub fn switchUpdate() -> u256 {
+        var i: u256 = 0;
+        var acc: u256 = 0;
+
+        while (i < 3)
+            invariant i <= 3
+            invariant acc <= 6
+        {
+            switch (i) {
+                0 => {
+                    acc = acc + 1;
+                },
+                1...2 => {
+                    acc = acc + 2;
+                },
+                else => {
+                    acc = acc + 3;
+                }
+            }
+            i = i + 1;
+        }
+
+        return acc;
+    }
+
+    pub fn nestedBranch(n: u256) -> u256
+        requires n <= 3
+    {
+        var i: u256 = 0;
+        var acc: u256 = 0;
+
+        while (i < n)
+            invariant i <= n
+            invariant acc <= 9
+        {
+            if (i < 2) {
+                if (acc < 2) {
+                    acc = acc + 1;
+                } else {
+                    acc = acc + 2;
+                }
+            } else {
+                acc = acc + 3;
+            }
+            i = i + 1;
+        }
+
+        return acc;
+    }
+
+    pub fn switchNoDefault() -> u256 {
+        var i: u256 = 0;
+
+        while (i < 2)
+            invariant i <= 2
+        {
+            switch (i) {
+                0 => {
+                    assert(i == 0, "zero case");
+                }
+            }
+            i = i + 1;
+        }
+
+        return i;
+    }
+}

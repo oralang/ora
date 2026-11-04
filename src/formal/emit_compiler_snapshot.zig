@@ -34,9 +34,9 @@ const header =
 
 fn emitStringList(out: anytype, comptime name: []const u8, comptime T: type) !void {
     try out.print("def {s} : List String :=\n  [", .{name});
-    inline for (@typeInfo(T).@"enum".fields, 0..) |f, i| {
+    inline for (@typeInfo(T).@"enum".field_names, 0..) |f, i| {
         if (i != 0) try out.writeAll(", ");
-        try out.print("\"{s}\"", .{f.name});
+        try out.print("\"{s}\"", .{f});
     }
     try out.writeAll("]\n\n");
 }
@@ -141,14 +141,14 @@ pub fn main(init: std.process.Init) !void {
     try out.writeAll("def compilerRegionTable : List (String × String × Bool) :=\n  [");
     {
         var first = true;
-        inline for (@typeInfo(semantic.Region).@"enum".fields) |fa| {
-            const a = @field(semantic.Region, fa.name);
-            inline for (@typeInfo(semantic.Region).@"enum".fields) |fb| {
-                const b = @field(semantic.Region, fb.name);
+        inline for (@typeInfo(semantic.Region).@"enum".field_names) |fa| {
+            const a = @field(semantic.Region, fa);
+            inline for (@typeInfo(semantic.Region).@"enum".field_names) |fb| {
+                const b = @field(semantic.Region, fb);
                 if (!first) try out.writeAll(",\n   ");
                 first = false;
                 const v = region_assign.regionAssignable(a, b);
-                try out.print("(\"{s}\", \"{s}\", {s})", .{ fa.name, fb.name, if (v) "true" else "false" });
+                try out.print("(\"{s}\", \"{s}\", {s})", .{ fa, fb, if (v) "true" else "false" });
             }
         }
     }

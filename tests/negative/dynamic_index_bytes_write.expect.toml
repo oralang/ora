@@ -1,0 +1,1 @@
+expect_error = "indexed assignment to 'bytes' is not supported"

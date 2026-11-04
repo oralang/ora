@@ -1,0 +1,121 @@
+contract IndexedRegionReadProjection {
+    storage var output: [u256; 32];
+    storage var saved: slice[u256];
+
+    fn identity(input: slice[u256]) -> slice[u256] {
+        return input;
+    }
+
+    fn passthrough(value: u256) -> u256 {
+        return value;
+    }
+
+    pub fn affine(input: slice[u256], count: u256)
+        requires count <= input.len
+        requires count <= 28
+    {
+        var i: u256 = 0;
+        while (i < count)
+            invariant i <= count
+        {
+            output[4 + i] = input[i];
+            i = i + 1;
+        }
+    }
+
+    pub fn sameBackingAlias(input: slice[u256], count: u256)
+        requires count <= input.len
+        requires count <= 32
+    {
+        memory var alias: slice[u256] = input;
+        var i: u256 = 0;
+        while (i < count)
+            invariant i <= count
+        {
+            let direct = input[i];
+            let indirect = alias[i];
+            assert(direct == indirect, "same backing buffer");
+            output[i] = direct +% indirect;
+            i = i + 1;
+        }
+    }
+
+    pub fn twoOwners(first: slice[u256], second: slice[u256], count: u256)
+        requires count <= first.len
+        requires count <= second.len
+        requires count <= 32
+    {
+        var i: u256 = 0;
+        while (i < count)
+            invariant i <= count
+        {
+            output[i] = first[i] +% second[i];
+            i = i + 1;
+        }
+    }
+
+    pub fn mergedOwner(first: slice[u256], second: slice[u256], choose_second: bool)
+        requires first.len > 0
+        requires second.len > 0
+    {
+        memory var selected: slice[u256] = first;
+        if (choose_second) {
+            selected = second;
+        }
+        var i: u256 = 0;
+        while (i < 1)
+            invariant i <= 1
+        {
+            output[i] = selected[i];
+            i = i + 1;
+        }
+    }
+
+    pub fn writeThroughAlias(input: slice[u256], count: u256)
+        requires count <= input.len
+    {
+        memory var alias: slice[u256] = input;
+        var i: u256 = 0;
+        while (i < count)
+            invariant i <= count
+        {
+            alias[i] = i;
+            i = i + 1;
+        }
+    }
+
+    pub fn callProducedOwner(input: slice[u256]) {
+        memory var produced: slice[u256] = identity(input);
+        var i: u256 = 0;
+        while (i < 1)
+            invariant i <= 1
+        {
+            output[i] = produced[i];
+            i = i + 1;
+        }
+    }
+
+    pub fn storageLoadedOwner() {
+        memory var loaded: slice[u256] = saved;
+        var i: u256 = 0;
+        while (i < 1)
+            invariant i <= 1
+        {
+            output[i] = loaded[i];
+            i = i + 1;
+        }
+    }
+
+    pub fn callInBody(input: slice[u256], count: u256)
+        requires count <= input.len
+        requires count <= 32
+    {
+        var i: u256 = 0;
+        while (i < count)
+            invariant i <= count
+        {
+            output[i] = passthrough(input[i]);
+            i = i + 1;
+        }
+    }
+}

@@ -80,6 +80,191 @@ const cases = [_]Mutation{
     .query_id_mismatch,
 };
 
+const TimelineMutation = enum {
+    supported,
+    child_results,
+    child_results_empty,
+    child_results_type,
+    child_results_parameter,
+    child_results_previous,
+    child_results_duplicate,
+    child_results_index,
+    timeline_missing,
+    event_order_invalid,
+    event_identity_missing,
+    event_identity_duplicate,
+    path_missing,
+    storage_root_missing,
+    storage_projection_invalid,
+    storage_type_invalid,
+    read_identity_duplicate,
+    read_identity_foreign,
+    read_identity_forward,
+    child_footprint_missing,
+    dependency_order_invalid,
+    dependency_target_unsupported,
+    body_safety_missing,
+};
+
+const timeline_cases = std.meta.tags(TimelineMutation);
+
+const IndexedRegionMutation = enum {
+    supported,
+    read_missing_shape_valid,
+    read_duplicated,
+    read_order_invalid,
+    checkpoint_missing,
+    checkpoint_after_read,
+    checkpoint_wrong_event,
+    checkpoint_not_dynamic,
+    owner_changed_shape_valid,
+    index_changed_shape_valid,
+    region_changed_shape_valid,
+    element_type_changed_shape_valid,
+    element_type_invalid,
+    read_identity_duplicate,
+    read_identity_cross_domain,
+    index_read_foreign,
+    index_read_forward,
+};
+
+const CallMutation = enum {
+    supported,
+    result_duplicate,
+    result_alias_parameter,
+    result_forward,
+    result_foreign,
+    result_index,
+    argument_type,
+    result_type,
+    empty_digest,
+    two_results,
+    void_result,
+};
+
+fn callReason(mutation: CallMutation) ?obligation.LoopUnsupportedReason {
+    const result_id: obligation.FreeVarId = .{ .file_id = 10, .pattern_id = 90 };
+    const second_id: obligation.FreeVarId = .{ .file_id = 10, .pattern_id = 91 };
+    const b: obligation.TypeRef = .{ .spelling = "bool" };
+    const value: obligation.LoopFormulaExpr = .{ .formula = .{ .term = 1 }, .read_results = &.{result_id} };
+    var results = [_]obligation.LoopVariable{
+        .{ .index = 0, .id = result_id, .ty = b }, .{ .index = 1, .id = second_id, .ty = b },
+    };
+    var arguments = [_]obligation.LoopTypedFormula{.{ .value = .{ .formula = .{ .term = 1 } }, .ty = b }};
+    switch (mutation) {
+        .result_duplicate => results[1].id = result_id,
+        .result_alias_parameter => results[0].id = loop_id,
+        .result_forward => arguments[0].value = value,
+        .result_foreign => arguments[0].value.read_results = &.{other_id},
+        .result_index => results[0].index = 1,
+        .argument_type => arguments[0].ty = .{ .spelling = "" },
+        .result_type => results[0].ty = .{ .spelling = "" },
+        else => {},
+    }
+    const result_count: usize = switch (mutation) {
+        .two_results, .result_duplicate => 2,
+        .void_result => 0,
+        else => 1,
+    };
+    const events = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "call",
+        .payload = .{ .call = .{
+            .callee_summary_id = 1,
+            .callee_vc_sha256 = @splat(if (mutation == .empty_digest) 0 else 0x11),
+            .arguments = &arguments,
+            .outcome = .success,
+            .results = results[0..result_count],
+        } },
+    }};
+    const summary: obligation.LoopSummaryRow = .{
+        .id = 100,
+        .owner = .{ .function = .{ .name = "run" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .loop_source_op_id = 0,
+        .loop_kind = .scf_while,
+        .context_variables = &.{.{ .index = 0, .id = loop_id, .ty = b }},
+        .preheader_timeline = &events,
+    };
+    return summary.preheaderTimelineValidationReason();
+}
+
+const indexed_region_cases = std.meta.tags(IndexedRegionMutation);
+
+// Common order, identity, duplicate, location, and read-reference mutations
+// are pinned above against the same `validateTimeline` core used by preheaders.
+// If edge and preheader validation are ever split, duplicate those rows here;
+// these cases cover only the preheader-specific policy differences.
+const PreheaderMutation = enum {
+    supported,
+    read_identity_forward,
+    dependency_unsupported,
+};
+
+const preheader_cases = std.meta.tags(PreheaderMutation);
+
+const FixedIndexMutation = enum {
+    supported,
+    extent_invalid,
+    checkpoint_missing,
+    checkpoint_late,
+    checkpoint_wrong_shape,
+    checkpoint_wrong_index,
+    checkpoint_wrong_type,
+    checkpoint_inconsistent,
+    checkpoint_noncanonical_literal,
+};
+
+const FixedIndexTimelineShape = enum { normal, missing, late };
+const FixedIndexFormulaShape = enum { canonical, wrong_operator, wrong_index, wrong_type };
+
+const FixedIndexFixtureConfig = struct {
+    literal_value: []const u8 = "4",
+    extent: u64 = 4,
+    timeline_shape: FixedIndexTimelineShape = .normal,
+    formula_shape: FixedIndexFormulaShape = .canonical,
+};
+
+fn fixedIndexFixtureConfig(mutation: FixedIndexMutation) FixedIndexFixtureConfig {
+    return switch (mutation) {
+        .supported => .{},
+        .extent_invalid => .{ .extent = 0 },
+        .checkpoint_missing => .{ .timeline_shape = .missing },
+        .checkpoint_late => .{ .timeline_shape = .late },
+        .checkpoint_wrong_shape => .{ .formula_shape = .wrong_operator },
+        .checkpoint_wrong_index => .{ .formula_shape = .wrong_index },
+        .checkpoint_wrong_type => .{ .formula_shape = .wrong_type },
+        .checkpoint_inconsistent => .{ .extent = 3 },
+        .checkpoint_noncanonical_literal => .{ .literal_value = "04" },
+    };
+}
+
+const fixed_index_cases = std.meta.tags(FixedIndexMutation);
+
+const HeaderFactMutation = enum {
+    supported,
+    row_id_invalid,
+    row_order_invalid,
+    identity_missing,
+    identity_duplicate,
+    source_unresolved,
+    block_mismatch,
+    source_not_earlier,
+    target_mismatch,
+    value_identity_duplicate,
+    value_type_missing,
+    assumption_missing,
+    assumption_unexpected,
+    unmatched_assumption,
+    extra_assumption,
+    formula_mismatch,
+    owner_mismatch,
+};
+
+const header_fact_cases = std.meta.tags(HeaderFactMutation);
+
 const ty_u256: obligation.TypeRef = .{
     .compiler_type_id = builtin.lookupBuiltinById(.u256).comptime_type_id,
 };
@@ -120,6 +305,15 @@ fn writeLeanString(writer: anytype, value: []const u8) !void {
         else => try writer.writeByte(byte),
     };
     try writer.writeByte('"');
+}
+
+fn writeTagNames(writer: anytype, comptime T: type) !void {
+    try writer.writeByte('[');
+    inline for (std.meta.tags(T), 0..) |tag, index| {
+        if (index != 0) try writer.writeAll(", ");
+        try writeLeanString(writer, @tagName(tag));
+    }
+    try writer.writeByte(']');
 }
 
 fn reasonName(support: obligation_to_lean.SemanticSupport) []const u8 {
@@ -211,11 +405,69 @@ fn supportFor(mutation: Mutation) obligation_to_lean.SemanticSupport {
         .name = "collision",
         .ty = ty_u256,
     }};
-    var assignments = [_]obligation.LoopStepAssignment{.{
+    const assignments = [_]obligation.LoopStepAssignment{.{
         .variable_index = 0,
         .target = if (mutation == .bad_update_target) other_id else loop_id,
+        .source_key = "body/straight-line-yield/operand:0",
         .value = .{ .term = 0 },
     }};
+    const exit_assignments = [_]obligation.LoopStepAssignment{.{
+        .variable_index = 0,
+        .target = loop_id,
+        .source_key = "loop-state:0",
+        .value = .{ .term = 0 },
+    }};
+    const invariant_path_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 1 } }};
+    const unsupported_path_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
+    const backedge_path_exprs: []const obligation.LoopFormulaExpr = if (mutation == .missing_guard)
+        &.{}
+    else if (mutation == .unsupported_formula)
+        &unsupported_path_exprs
+    else
+        &invariant_path_exprs;
+    const safety_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 1 } }};
+    const backedge_timeline_with_safety = [_]obligation.LoopTimelineEvent{
+        .{
+            .id = 0,
+            .structural_key = "body/straight-line-yield/path",
+            .payload = .{ .path_assumption = .{ .formulas = backedge_path_exprs } },
+        },
+        .{
+            .id = 1,
+            .structural_key = "body/ora.assert:0",
+            .payload = .{ .safety_checkpoint = .{ .formulas = &safety_exprs } },
+        },
+    };
+    const backedge_timeline_without_safety = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "body/straight-line-yield/path",
+        .payload = .{ .path_assumption = .{ .formulas = backedge_path_exprs } },
+    }};
+    const backedge_timeline: []const obligation.LoopTimelineEvent = if (mutation == .missing_body_safety)
+        &backedge_timeline_without_safety
+    else
+        &backedge_timeline_with_safety;
+    const exit_timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "guard/false-successor/path",
+        .payload = .{ .path_assumption = .{ .formulas = &invariant_path_exprs } },
+    }};
+    const edges = [_]obligation.LoopEdgeRow{
+        .{
+            .id = 0,
+            .structural_key = "body/straight-line-yield",
+            .timeline = backedge_timeline,
+            .next_state = assignments[0..],
+            .target = .backedge,
+        },
+        .{
+            .id = 1,
+            .structural_key = "guard/false-successor",
+            .timeline = &exit_timeline,
+            .next_state = exit_assignments[0..],
+            .target = .successor,
+        },
+    };
     var reasons: [1]obligation.LoopUnsupportedReason = undefined;
     const reason_slice: []const obligation.LoopUnsupportedReason = if (unsupportedReason(mutation)) |reason| blk: {
         reasons[0] = reason;
@@ -233,10 +485,9 @@ fn supportFor(mutation: Mutation) obligation_to_lean.SemanticSupport {
         .context_variables = if (mutation == .identity_collision) context_variables[0..] else &.{},
         .variables = variables[0..],
         .init_formulas = &init_formulas,
-        .guard_formula = if (mutation == .missing_guard) null else if (mutation == .unsupported_formula) .{ .term = 0 } else .{ .term = 1 },
         .invariant_formulas = if (mutation == .missing_invariant) &.{} else &invariant_formulas,
-        .step_assignments = assignments[0..],
-        .body_safety_formulas = &body_safety_formulas,
+        .edges = &edges,
+        .projection_completeness = .complete,
         .post_formulas = &post_formulas,
         .query_ids = .{ .induction = if (mutation == .query_id_mismatch) &.{} else &induction_query_ids },
         .unsupported_reasons = reason_slice,
@@ -259,6 +510,432 @@ fn supportFor(mutation: Mutation) obligation_to_lean.SemanticSupport {
         .loop_summaries = &summaries,
     };
     return obligation_to_lean.querySemanticSupport(set, query);
+}
+
+fn timelineReason(mutation: TimelineMutation) ?obligation.LoopUnsupportedReason {
+    const path_exprs = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
+    const dependency: obligation.LoopSummaryDependency = .{
+        .id = 0,
+        .structural_key = "body/child",
+        .summary_id = 2,
+        .loop_vc_sha256 = @as([32]u8, @splat(0)),
+        .write_footprint_complete = true,
+        .target = .successor,
+    };
+    const read_id: obligation.FreeVarId = .{ .file_id = 10, .pattern_id = 90 };
+    const foreign_id: obligation.FreeVarId = .{ .file_id = 10, .pattern_id = 91 };
+    const read_refs = [_]obligation.FreeVarId{read_id};
+    const foreign_refs = [_]obligation.FreeVarId{foreign_id};
+    const location: obligation.LoopStorageLocationExpr = .{ .root = "counter", .value_ty = ty_u256 };
+    const path_event: obligation.LoopTimelineEvent = .{
+        .id = 0,
+        .structural_key = "body/path",
+        .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+    };
+    const read_event: obligation.LoopTimelineEvent = .{
+        .id = 1,
+        .structural_key = "body/read",
+        .payload = .{ .storage_read = .{ .result = read_id, .location = location } },
+    };
+    const write_event: obligation.LoopTimelineEvent = .{
+        .id = 2,
+        .structural_key = "body/write",
+        .payload = .{ .storage_write = .{
+            .location = location,
+            .value = .{ .formula = .{ .term = 0 }, .read_results = &read_refs },
+        } },
+    };
+    const safety_event: obligation.LoopTimelineEvent = .{
+        .id = 3,
+        .structural_key = "body/safety",
+        .payload = .{ .safety_checkpoint = .{ .formulas = &path_exprs } },
+    };
+    const dependency_event: obligation.LoopTimelineEvent = .{
+        .id = 4,
+        .structural_key = "body/child",
+        .payload = .{ .summary_dependency = dependency },
+    };
+    var timeline = [_]obligation.LoopTimelineEvent{
+        path_event,
+        read_event,
+        write_event,
+        safety_event,
+        dependency_event,
+    };
+    const no_path_timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "body/safety",
+        .payload = .{ .safety_checkpoint = .{ .formulas = &path_exprs } },
+    }};
+    const forward_timeline = [_]obligation.LoopTimelineEvent{
+        path_event,
+        .{
+            .id = 1,
+            .structural_key = "body/write",
+            .payload = write_event.payload,
+        },
+        .{
+            .id = 2,
+            .structural_key = "body/read",
+            .payload = read_event.payload,
+        },
+        safety_event,
+        dependency_event,
+    };
+    var timeline_slice: []const obligation.LoopTimelineEvent = &timeline;
+    var results = [_]obligation.LoopVariable{
+        .{ .index = 0, .id = foreign_id, .ty = ty_u256 },
+        .{ .index = 1, .id = .{ .file_id = 10, .pattern_id = 92 }, .ty = ty_u256 },
+    };
+    switch (mutation) {
+        .supported => {},
+        .child_results, .child_results_empty, .child_results_type, .child_results_parameter, .child_results_previous, .child_results_duplicate, .child_results_index => {
+            if (mutation == .child_results_type) results[0].ty = .{ .spelling = "" };
+            if (mutation == .child_results_parameter) results[0].id = loop_id;
+            if (mutation == .child_results_previous) results[0].id = read_id;
+            if (mutation == .child_results_duplicate) results[1].id = results[0].id;
+            if (mutation == .child_results_index) results[1].index = 0;
+            timeline[4].payload.summary_dependency.result_bindings = results[0..if (mutation == .child_results_empty) 0 else 2];
+        },
+        .timeline_missing => timeline_slice = &.{},
+        .event_order_invalid => timeline[1].id = 7,
+        .event_identity_missing => timeline[1].structural_key = "",
+        .event_identity_duplicate => timeline[1].structural_key = timeline[0].structural_key,
+        .path_missing => timeline_slice = &no_path_timeline,
+        .storage_root_missing => timeline[1].payload.storage_read.location.root = "",
+        .storage_projection_invalid => timeline[1].payload.storage_read.location.projections = &.{.{ .field = "" }},
+        .storage_type_invalid => timeline[1].payload.storage_read.location.value_ty = .{ .compiler_type_id = 0 },
+        .read_identity_duplicate => timeline[1].payload.storage_read.result = loop_id,
+        .read_identity_foreign => timeline[2].payload.storage_write.value.read_results = &foreign_refs,
+        .read_identity_forward => timeline_slice = &forward_timeline,
+        .child_footprint_missing => timeline[4].payload.summary_dependency.write_footprint_complete = false,
+        .dependency_order_invalid => timeline[4].payload.summary_dependency.id = 1,
+        .dependency_target_unsupported => timeline[4].payload.summary_dependency.target = .backedge,
+        .body_safety_missing => timeline[3].payload.safety_checkpoint.formulas = &.{},
+    }
+
+    const binding = [_]obligation.LoopStepAssignment{.{
+        .variable_index = 0,
+        .target = loop_id,
+        .source_key = "loop-state:0",
+        .value = .{ .term = 0 },
+        .read_results = &read_refs,
+    }};
+    const exit_timeline = [_]obligation.LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "exit/path",
+        .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+    }};
+    const edges = [_]obligation.LoopEdgeRow{
+        .{
+            .id = 0,
+            .structural_key = "body",
+            .timeline = timeline_slice,
+            .next_state = &binding,
+            .target = .backedge,
+        },
+        .{
+            .id = 1,
+            .structural_key = "exit",
+            .timeline = &exit_timeline,
+            .next_state = &.{.{
+                .variable_index = 0,
+                .target = loop_id,
+                .source_key = "loop-state:0",
+                .value = .{ .term = 0 },
+            }},
+            .target = .successor,
+        },
+    };
+    const variables = [_]obligation.LoopVariable{.{
+        .index = 0,
+        .id = loop_id,
+        .name = "i",
+        .ty = ty_u256,
+    }};
+    const summary: obligation.LoopSummaryRow = .{
+        .id = summary_id,
+        .owner = .{ .statement = .{ .function_name = "run", .ordinal = 0 } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .loop_source_op_id = 0,
+        .loop_kind = .scf_while,
+        .variables = &variables,
+        .edges = &edges,
+        .projection_completeness = .complete,
+    };
+    return summary.validationReason();
+}
+
+fn preheaderReason(mutation: PreheaderMutation) ?obligation.LoopUnsupportedReason {
+    const formula = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
+    const read_id: obligation.FreeVarId = .{ .file_id = 10, .pattern_id = 90 };
+    const read_refs = [_]obligation.FreeVarId{read_id};
+    const location: obligation.LoopStorageLocationExpr = .{ .root = "counter", .value_ty = ty_u256 };
+    var events = [_]obligation.LoopTimelineEvent{
+        .{ .id = 0, .structural_key = "preheader/read", .payload = .{ .storage_read = .{ .result = read_id, .location = location } } },
+        .{ .id = 1, .structural_key = "preheader/write", .payload = .{ .storage_write = .{ .location = location, .value = .{ .formula = .{ .term = 0 }, .read_results = &read_refs } } } },
+        .{ .id = 2, .structural_key = "preheader/check", .payload = .{ .safety_checkpoint = .{ .formulas = &formula } } },
+    };
+    switch (mutation) {
+        .supported => {},
+        .read_identity_forward => std.mem.swap(obligation.LoopTimelineEvent, &events[0], &events[1]),
+        .dependency_unsupported => events[0].payload = .{ .summary_dependency = .{
+            .id = 0,
+            .structural_key = "preheader/child",
+            .summary_id = 2,
+            .loop_vc_sha256 = @as([32]u8, @splat(0)),
+            .write_footprint_complete = true,
+            .target = .successor,
+        } },
+    }
+    for (&events, 0..) |*event, index| event.id = @intCast(index);
+    const variables = [_]obligation.LoopVariable{.{ .index = 0, .id = loop_id, .ty = ty_u256 }};
+    return (obligation.LoopSummaryRow{
+        .id = summary_id,
+        .owner = .{ .function = .{ .name = "run" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .loop_source_op_id = 0,
+        .loop_kind = .scf_while,
+        .variables = &variables,
+        .preheader_timeline = &events,
+    }).preheaderTimelineValidationReason();
+}
+
+fn indexedRegionReason(mutation: IndexedRegionMutation) ?obligation.LoopUnsupportedReason {
+    const read_id: obligation.FreeVarId = .{ .file_id = 10, .pattern_id = 90 };
+    const forward_id: obligation.FreeVarId = .{ .file_id = 10, .pattern_id = 91 };
+    const foreign_id: obligation.FreeVarId = .{ .file_id = 10, .pattern_id = 92 };
+    const foreign_refs = [_]obligation.FreeVarId{foreign_id};
+    const forward_refs = [_]obligation.FreeVarId{forward_id};
+    const checkpoint: obligation.LoopTimelineEvent = .{
+        .id = 0,
+        .structural_key = "body/dynamic-check",
+        .payload = .{ .safety_checkpoint = .{
+            .formulas = &.{.{ .formula = .{ .term = 0 } }},
+            .dynamic_index_bounds = mutation != .checkpoint_not_dynamic,
+        } },
+    };
+    const read: obligation.LoopTimelineEvent = .{
+        .id = 1,
+        .structural_key = "body/region-read",
+        .payload = .{ .indexed_region_read = .{
+            .result = if (mutation == .read_identity_duplicate) loop_id else read_id,
+            .region = if (mutation == .region_changed_shape_valid) .memory else .calldata,
+            .owner = .{
+                .file_id = 10,
+                .pattern_id = if (mutation == .owner_changed_shape_valid) 8 else 7,
+            },
+            .index = .{
+                .formula = .{ .term = if (mutation == .index_changed_shape_valid) 1 else 0 },
+                .read_results = switch (mutation) {
+                    .index_read_foreign => &foreign_refs,
+                    .index_read_forward => &forward_refs,
+                    else => &.{},
+                },
+            },
+            .element_ty = switch (mutation) {
+                .element_type_changed_shape_valid => ty_u8,
+                .element_type_invalid => .{ .compiler_type_id = 0 },
+                else => ty_u256,
+            },
+            .checkpoint_structural_key = if (mutation == .checkpoint_missing)
+                ""
+            else
+                checkpoint.structural_key,
+        } },
+    };
+    const prior_storage_read: obligation.LoopTimelineEvent = .{
+        .id = 0,
+        .structural_key = "body/storage-read",
+        .payload = .{ .storage_read = .{
+            .result = read_id,
+            .location = .{ .root = "counter", .value_ty = ty_u256 },
+        } },
+    };
+    const forward_read: obligation.LoopTimelineEvent = .{
+        .id = 2,
+        .structural_key = "body/forward-read",
+        .payload = .{ .indexed_region_read = .{
+            .result = forward_id,
+            .region = .calldata,
+            .owner = .{ .file_id = 10, .pattern_id = 7 },
+            .index = .{ .formula = .{ .term = 0 } },
+            .element_ty = ty_u256,
+            .checkpoint_structural_key = checkpoint.structural_key,
+        } },
+    };
+    var events = [_]obligation.LoopTimelineEvent{ checkpoint, read, forward_read };
+    var event_slice: []const obligation.LoopTimelineEvent = events[0..2];
+    switch (mutation) {
+        .supported,
+        .read_missing_shape_valid,
+        .read_duplicated,
+        .read_order_invalid,
+        .checkpoint_missing,
+        .checkpoint_not_dynamic,
+        .owner_changed_shape_valid,
+        .index_changed_shape_valid,
+        .region_changed_shape_valid,
+        .element_type_changed_shape_valid,
+        .element_type_invalid,
+        .read_identity_duplicate,
+        .index_read_foreign,
+        => {},
+        .checkpoint_after_read => {
+            std.mem.swap(obligation.LoopTimelineEvent, &events[0], &events[1]);
+            for (events[0..2], 0..) |*event, index| event.id = @intCast(index);
+        },
+        .checkpoint_wrong_event => events[0].payload = .{ .storage_read = .{
+            .result = forward_id,
+            .location = .{ .root = "counter", .value_ty = ty_u256 },
+        } },
+        .read_identity_cross_domain => {
+            events[0] = prior_storage_read;
+            events[1] = read;
+        },
+        .index_read_forward => event_slice = &events,
+    }
+    switch (mutation) {
+        .read_missing_shape_valid => event_slice = events[0..1],
+        .read_duplicated => event_slice = &.{ checkpoint, read, .{
+            .id = 2,
+            .structural_key = read.structural_key,
+            .payload = read.payload,
+        } },
+        .read_order_invalid => events[1].id = 7,
+        else => {},
+    }
+    const variables = [_]obligation.LoopVariable{.{ .index = 0, .id = loop_id, .ty = ty_u256 }};
+    return (obligation.LoopSummaryRow{
+        .id = summary_id,
+        .owner = .{ .function = .{ .name = "run" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .loop_source_op_id = 0,
+        .loop_kind = .scf_while,
+        .variables = &variables,
+        .preheader_timeline = event_slice,
+    }).preheaderTimelineValidationReason();
+}
+
+fn fixedIndexReason(mutation: FixedIndexMutation) ?obligation.LoopUnsupportedReason {
+    const config = fixedIndexFixtureConfig(mutation);
+    const index_id: obligation.FreeVarId = .{ .file_id = 10, .pattern_id = 7 };
+    const terms = [_]obligation.Term{
+        .{ .variable = .{ .free = .{ .id = index_id, .name = "i", .ty = ty_u256 } } },
+        .{ .int_lit = .{
+            .value = config.literal_value,
+            .ty = ty_u256,
+        } },
+        .{ .binary = .{
+            .op = if (config.formula_shape == .wrong_operator) .le else .lt,
+            .lhs = if (config.formula_shape == .wrong_index) 1 else 0,
+            .rhs = 1,
+            .ty = if (config.formula_shape == .wrong_type) ty_u8 else ty_u256,
+        } },
+    };
+    const formulas = [_]obligation.LoopFormulaExpr{.{ .formula = .{ .term = 2 } }};
+    const projection = [_]obligation.LoopStorageProjection{.{ .fixed_index = .{
+        .index = .{ .value = .{ .formula = .{ .term = 0 } }, .ty = ty_u256 },
+        .extent = config.extent,
+    } }};
+    const checkpoint: obligation.LoopTimelineEvent = .{
+        .id = 0,
+        .structural_key = "body/check",
+        .payload = .{ .safety_checkpoint = .{ .formulas = &formulas } },
+    };
+    const write: obligation.LoopTimelineEvent = .{
+        .id = 1,
+        .structural_key = "body/write",
+        .payload = .{ .storage_write = .{
+            .location = .{ .root = "values", .projections = &projection, .value_ty = ty_u256 },
+            .value = .{ .formula = .{ .term = 0 } },
+        } },
+    };
+    const events: []const obligation.LoopTimelineEvent = switch (config.timeline_shape) {
+        .missing => &.{write},
+        .late => &.{ write, checkpoint },
+        .normal => &.{ checkpoint, write },
+    };
+    return (obligation.ObligationSet{ .terms = &terms }).fixedIndexBoundsReason(events);
+}
+
+fn headerFactOutcome(mutation: HeaderFactMutation) struct { shape: bool, assumptions: bool } {
+    // Rows below intentionally retain slices into this array so the type and
+    // duplicate-identity mutations exercise the exact referenced row data.
+    var values = [_]obligation.LoopHeaderFactValue{
+        .{ .id = loop_id, .ty = ty_u256 },
+        .{ .id = loop_id, .ty = ty_u256 },
+    };
+    const fact: obligation.LoopHeaderFactRow = .{
+        .id = 0,
+        .structural_key = "header-fact:0",
+        .formula = .{ .term = 1 },
+        .source_kind = .function_requires,
+        .source = .{ .structural_key = "requires:0", .block_key = "block:0", .position = 1 },
+        .target = .{ .structural_key = "loop:0", .block_key = "block:0", .position = 4 },
+        .stable_values = values[0..1],
+        .assumption_id = 7,
+    };
+    var rows = [_]obligation.LoopHeaderFactRow{ fact, fact };
+    var row_count: usize = 1;
+    switch (mutation) {
+        .supported, .unmatched_assumption, .extra_assumption, .formula_mismatch, .owner_mismatch => {},
+        .row_id_invalid => rows[0].id = 1,
+        .row_order_invalid => {
+            row_count = 2;
+            rows[1].id = 1;
+            rows[1].structural_key = "header-fact:1";
+            rows[1].source.structural_key = "requires:1";
+        },
+        .identity_missing => rows[0].structural_key = "",
+        .identity_duplicate, .target_mismatch => {
+            row_count = 2;
+            rows[1].id = 1;
+            rows[1].source.position = 2;
+            rows[1].source.structural_key = "requires:1";
+            if (mutation == .target_mismatch) {
+                rows[1].structural_key = "header-fact:1";
+                rows[1].target.structural_key = "loop:1";
+            }
+        },
+        .source_unresolved => rows[0].source_kind = .unresolved,
+        .block_mismatch => rows[0].source.block_key = "block:1",
+        .source_not_earlier => rows[0].source.position = 4,
+        .value_identity_duplicate => rows[0].stable_values = values[0..2],
+        .value_type_missing => values[0].ty = .{ .compiler_type_id = 0 },
+        .assumption_missing => rows[0].assumption_id = null,
+        .assumption_unexpected => rows[0].source_kind = .path_assume,
+    }
+    const assumptions = [_]obligation.Assumption{
+        .{ .id = 7, .owner = .{ .function = .{ .name = if (mutation == .owner_mismatch) "other" else "run" } }, .source = .generated(), .phase = .sema, .origin = .source, .kind = .requires, .formula = .{ .term = if (mutation == .formula_mismatch) 0 else 1 } },
+        .{ .id = 8, .owner = .{ .function = .{ .name = "run" } }, .source = .generated(), .phase = .sema, .origin = .source, .kind = .requires, .formula = .{ .term = 1 } },
+    };
+    const summary: obligation.LoopSummaryRow = .{
+        .id = 1,
+        .owner = .{ .statement = .{ .function_name = "run", .ordinal = 0 } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .loop_source_op_id = 0,
+        .loop_kind = .scf_while,
+        .header_facts = rows[0..row_count],
+    };
+    const ids: []const obligation.Id = switch (mutation) {
+        .unmatched_assumption => &.{},
+        .extra_assumption => &.{ 7, 8 },
+        else => &.{7},
+    };
+    const set: obligation.ObligationSet = .{ .assumptions = &assumptions };
+    return .{
+        .shape = obligation.loopHeaderFactsReason(summary.header_facts) == null,
+        .assumptions = set.loopHeaderFactsMatchAssumptions(summary, ids),
+    };
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -290,6 +967,99 @@ pub fn main(init: std.process.Init) !void {
         try writer.writeAll(if (leanDenotable(mutation)) ", true)" else ", false)");
         try writer.writeAll(if (index + 1 == cases.len) "\n" else ",\n");
     }
+    try writer.writeAll("]\n\n");
+    try writer.writeAll("def loopTimelineEventTags : List String := ");
+    try writeTagNames(writer, obligation.LoopTimelineEventTag);
+    try writer.writeAll("\n\ndef loopStorageProjectionTags : List String := ");
+    try writeTagNames(writer, obligation.LoopStorageProjectionTag);
+    try writer.writeAll("\n\ndef loopTimelineValidationRows : List (String × String) := [\n");
+    for (timeline_cases, 0..) |mutation, index| {
+        try writer.writeAll("  (");
+        try writeLeanString(writer, @tagName(mutation));
+        try writer.writeAll(", ");
+        if (timelineReason(mutation)) |reason| {
+            try writeLeanString(writer, @tagName(reason));
+        } else {
+            try writeLeanString(writer, "");
+        }
+        try writer.writeAll(if (index + 1 == timeline_cases.len) ")\n" else "),\n");
+    }
+    try writer.writeAll("]\n\ndef callTimelineValidationRows : List (String × String) := [\n");
+    for (std.meta.tags(CallMutation), 0..) |mutation, index| {
+        if (index != 0) try writer.writeAll(",\n");
+        try writer.writeAll("  (");
+        try writeLeanString(writer, @tagName(mutation));
+        try writer.writeAll(", ");
+        try writeLeanString(writer, if (callReason(mutation)) |reason| @tagName(reason) else "");
+        try writer.writeByte(')');
+    }
+    try writer.writeAll("]\n\ndef loopPreheaderValidationRows : List (String × String) := [\n");
+    for (preheader_cases, 0..) |mutation, index| {
+        try writer.writeAll("  (");
+        try writeLeanString(writer, @tagName(mutation));
+        try writer.writeAll(", ");
+        try writeLeanString(writer, if (preheaderReason(mutation)) |reason| @tagName(reason) else "");
+        try writer.writeAll(if (index + 1 == preheader_cases.len) ")\n" else "),\n");
+    }
+    try writer.writeAll("]\n\ndef loopFixedIndexBoundsRows : List (String × String) := [\n");
+    for (fixed_index_cases, 0..) |mutation, index| {
+        try writer.writeAll("  (");
+        try writeLeanString(writer, @tagName(mutation));
+        try writer.writeAll(", ");
+        try writeLeanString(writer, if (fixedIndexReason(mutation)) |reason| @tagName(reason) else "");
+        try writer.writeAll(if (index + 1 == fixed_index_cases.len) ")\n" else "),\n");
+    }
+    try writer.writeAll("]\n\ndef loopIndexedRegionValidationRows : List (String × String) := [\n");
+    for (indexed_region_cases, 0..) |mutation, index| {
+        try writer.writeAll("  (");
+        try writeLeanString(writer, @tagName(mutation));
+        try writer.writeAll(", ");
+        try writeLeanString(writer, if (indexedRegionReason(mutation)) |reason| @tagName(reason) else "");
+        try writer.writeAll(if (index + 1 == indexed_region_cases.len) ")\n" else "),\n");
+    }
+    try writer.writeAll("]\n\ndef loopHeaderFactValidationRows : List (String × Bool × Bool) := [\n");
+    for (header_fact_cases, 0..) |mutation, index| {
+        const outcome = headerFactOutcome(mutation);
+        try writer.writeAll("  (");
+        try writeLeanString(writer, @tagName(mutation));
+        try writer.writeAll(if (outcome.shape) ", true" else ", false");
+        try writer.writeAll(if (outcome.assumptions) ", true)" else ", false)");
+        try writer.writeAll(if (index + 1 == header_fact_cases.len) "\n" else ",\n");
+    }
+    try writer.writeAll("]\n\ndef loopPrefixSafetyRows : List (List Bool × Bool) := [\n");
+    // All binary event orders through length three; true is a checkpoint,
+    // false is a path assumption. This pins order, not formula evaluation.
+    var first_prefix = true;
+    for (0..4) |len| for (0..(@as(usize, 1) << @intCast(len))) |bits| {
+        if (!first_prefix) try writer.writeAll(",\n");
+        first_prefix = false;
+        var events: [3]obligation.LoopTimelineEvent = undefined;
+        try writer.writeAll("  ([");
+        for (0..len) |index| {
+            const checked = (bits & (@as(usize, 1) << @intCast(index))) != 0;
+            events[index] = .{
+                .id = @intCast(index),
+                .structural_key = "prefix",
+                .payload = if (checked) .{ .safety_checkpoint = .{ .formulas = &.{} } } else .{ .path_assumption = .{ .formulas = &.{} } },
+            };
+            if (index != 0) try writer.writeAll(", ");
+            try writer.writeAll(if (checked) "true" else "false");
+        }
+        const row: obligation.LoopSummaryRow = .{
+            .id = 0,
+            .owner = .{ .function = .{ .name = "prefix" } },
+            .source = .{},
+            .phase = .ora_mlir,
+            .origin = .source,
+            .loop_source_op_id = 0,
+            .loop_kind = .scf_while,
+            .edges = &.{.{ .id = 0, .timeline = events[0..len] }},
+        };
+        try writer.writeAll(if (obligation_to_lean.loopSummaryNeedsPrefixSafety(row))
+            "], true)"
+        else
+            "], false)");
+    };
     try writer.writeAll("]\n\nend Ora.Generated\n");
     try writer.flush();
 }

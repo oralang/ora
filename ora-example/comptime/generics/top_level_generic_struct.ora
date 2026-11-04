@@ -1,0 +1,21 @@
+struct Pair(comptime T: type) {
+    first: T;
+    second: T;
+}
+
+fn make_pair(a: u256, b: u256) -> Pair(u256) {
+    // A top-level factory can instantiate and return a generic struct.
+    return Pair(u256) { first: a, second: b };
+}
+
+contract TopLevelGenericStruct {
+    pub fn first(a: u256, b: u256) -> u256 {
+        let pair = make_pair(a, b);
+        return pair.first;
+    }
+
+    pub fn second(a: u256, b: u256) -> u256 {
+        let pair = make_pair(a, b);
+        return pair.second;
+    }
+}

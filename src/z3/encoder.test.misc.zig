@@ -220,6 +220,45 @@ test "error_union uses distinct constructors for declared error payload types" {
     try testing.expect(!encoder.isDegraded());
 }
 
+test "payloadless named error return uses registered error id without opaque product fallback" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const text =
+        \\module {
+        \\  "ora.error.decl"() <{sym_name = "Failure"}> {ora.error_decl = true, ora.error_id = 7 : i256} : () -> ()
+        \\  func.func @f() -> !ora.struct<"Failure"> {
+        \\    %err = ora.error.return "Failure" : !ora.struct<"Failure">
+        \\    func.return %err : !ora.struct<"Failure">
+        \\  }
+        \\}
+    ;
+    const module = mlir.oraModuleCreateParse(mlir_ctx, stringRef(text));
+    defer mlir.oraModuleDestroy(module);
+    try testing.expect(!mlir.oraModuleIsNull(module));
+
+    const module_body = mlir.oraModuleGetBody(module);
+    const error_decl = mlir.oraBlockGetFirstOperation(module_body);
+    try encoder.registerErrorDeclOperation(error_decl);
+    const func_op = mlir.oraOperationGetNextInBlock(error_decl);
+    const func_region = mlir.oraOperationGetRegion(func_op, 0);
+    const func_block = mlir.oraRegionGetFirstBlock(func_region);
+    const error_return = mlir.oraBlockGetFirstOperation(func_block);
+
+    const encoded = try encoder.encodeOperation(error_return);
+    const expected = try encoder.encodeIntegerConstant(7, 256);
+    try expectAstEquivalent(&z3_ctx, encoded, expected);
+    try testing.expect(!encoder.isDegraded());
+}
+
 test "ora.bytes.constant encodes canonical hex string" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -1352,8 +1391,10 @@ test "tensor.dim encodes dynamic shape dims consistently and folds static dims" 
     const null_attr = mlir.MlirAttribute{ .ptr = null };
 
     const c0_attr = mlir.oraIntegerAttrCreateI64FromType(index_ty, 0);
-    const c0_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c0_attr);
-    const c0 = mlir.oraOperationGetResult(c0_op, 0);
+    const c0_a_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c0_attr);
+    const c0_a = mlir.oraOperationGetResult(c0_a_op, 0);
+    const c0_b_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, index_ty, c0_attr);
+    const c0_b = mlir.oraOperationGetResult(c0_b_op, 0);
     const empty_attrs = [_]mlir.MlirNamedAttribute{};
 
     const dyn_shape: [1]i64 = .{mlir.oraShapedTypeDynamicSize()};
@@ -1364,10 +1405,14 @@ test "tensor.dim encodes dynamic shape dims consistently and folds static dims" 
     const dyn_body = mlir.oraFuncOpGetBodyBlock(dyn_func);
     const dyn_arg = mlir.oraBlockGetArgument(dyn_body, 0);
 
-    const dyn_dim_a_op = mlir.oraTensorDimOpCreate(mlir_ctx, loc, dyn_arg, c0);
-    const dyn_dim_b_op = mlir.oraTensorDimOpCreate(mlir_ctx, loc, dyn_arg, c0);
+    const dyn_dim_a_op = mlir.oraTensorDimOpCreate(mlir_ctx, loc, dyn_arg, c0_a);
+    const dyn_dim_b_op = mlir.oraTensorDimOpCreate(mlir_ctx, loc, dyn_arg, c0_b);
     const dyn_dim_a = try encoder.encodeOperation(dyn_dim_a_op);
     const dyn_dim_b = try encoder.encodeOperation(dyn_dim_b_op);
+    try testing.expectEqualStrings(
+        "shape_dim_0_axis_0_cur",
+        std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, dyn_dim_a)),
+    );
 
     var solver_dyn = try Solver.init(&z3_ctx, testing.allocator);
     defer solver_dyn.deinit();
@@ -1382,7 +1427,7 @@ test "tensor.dim encodes dynamic shape dims consistently and folds static dims" 
     const static_body = mlir.oraFuncOpGetBodyBlock(static_func);
     const static_arg = mlir.oraBlockGetArgument(static_body, 0);
 
-    const static_dim_op = mlir.oraTensorDimOpCreate(mlir_ctx, loc, static_arg, c0);
+    const static_dim_op = mlir.oraTensorDimOpCreate(mlir_ctx, loc, static_arg, c0_a);
     const static_dim = try encoder.encodeOperation(static_dim_op);
     const static_sort = z3.Z3_get_sort(z3_ctx.ctx, static_dim);
     const expected = z3.Z3_mk_unsigned_int64(z3_ctx.ctx, 7, static_sort);
@@ -2678,7 +2723,7 @@ test "degradation reasons are capped and preserve encounter order" {
 }
 
 test "soundness loss kinds are structured and capped" {
-    comptime std.debug.assert(std.meta.fields(Encoder.SoundnessLoss).len > 10);
+    comptime std.debug.assert(@typeInfo(Encoder.SoundnessLoss).@"enum".field_names.len > 10);
 
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -2687,10 +2732,10 @@ test "soundness loss kinds are structured and capped" {
     defer encoder.deinit();
 
     // Pillar 4.5 self-introspection: labels are a stable machine-facing API.
-    inline for (std.meta.fields(Encoder.SoundnessLoss)) |field| {
-        const loss: Encoder.SoundnessLoss = @enumFromInt(field.value);
+    inline for (@typeInfo(Encoder.SoundnessLoss).@"enum".field_names) |field| {
+        const loss: Encoder.SoundnessLoss = @fromBackingInt(@intCast(@backingInt(@field(Encoder.SoundnessLoss, field))));
         const label = Encoder.soundnessLossLabel(loss);
-        try testing.expectEqualStrings(field.name, label);
+        try testing.expectEqualStrings(field, label);
         encoder.noteSoundnessLoss(loss, label);
     }
 

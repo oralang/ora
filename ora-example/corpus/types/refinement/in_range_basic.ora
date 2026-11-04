@@ -1,3 +1,5 @@
+// Refined getters require valid stored values; call the checked setters first.
+// These entry checks do not assume or prove a storage lifecycle invariant.
 // InRange<u256, 1, 100> — basic range-bounded parameter
 
 contract InRangeBasic {
@@ -7,7 +9,9 @@ contract InRangeBasic {
         level = val;
     }
 
-    pub fn getLevel() -> InRange<u256, 1, 100> {
+    pub fn getLevel() -> InRange<u256, 1, 100>
+        requires(level >= 1 and level <= 100)
+    {
         return level;
     }
 

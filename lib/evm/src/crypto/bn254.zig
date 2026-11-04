@@ -132,7 +132,7 @@ test "bn254 add generator plus generator" {
 }
 
 test "bn254 rejects coordinates outside the field" {
-    var input = [_]u8{0} ** 128;
+    var input = @as([128]u8, @splat(0));
     std.mem.writeInt(u256, input[0..32], curve_parameters.FP_MOD, .big);
     input[63] = 2;
     try std.testing.expectError(error.InvalidPoint, add(&input, input[64..128]));
@@ -196,10 +196,10 @@ test "bn254 pairing bilinearity identity" {
 }
 
 test "bn254 pairing rejects invalid length and out-of-field coordinates" {
-    const short_input = [_]u8{0} ** 191;
+    const short_input = @as([191]u8, @splat(0));
     try std.testing.expectError(error.InvalidInput, pairing(&short_input));
 
-    var bad_input = [_]u8{0} ** 192;
+    var bad_input = @as([192]u8, @splat(0));
     std.mem.writeInt(u256, bad_input[64..96], curve_parameters.FP_MOD, .big);
     bad_input[159] = 1;
     try std.testing.expectError(error.InvalidPoint, pairing(&bad_input));

@@ -13,7 +13,7 @@ Run our setup script to install all dependencies automatically:
 ```
 
 This script will:
-- ✅ Check for Zig 0.15.x
+- ✅ Check for stable Zig 0.17.x
 - ✅ Install system dependencies (CMake, Boost, OpenSSL, Clang)
 - ✅ Initialize Git submodules (vendor/solidity)
 - ✅ Build the compiler
@@ -25,7 +25,7 @@ If you prefer to set up manually or the script doesn't work for your platform:
 
 #### 1. Install Zig
 
-Download and install Zig 0.15.x from [ziglang.org/download](https://ziglang.org/download/).
+Download and install a stable Zig 0.17.x release from [ziglang.org/download](https://ziglang.org/download/).
 
 **macOS:**
 ```bash
@@ -34,12 +34,12 @@ brew install zig
 
 **Linux (Ubuntu/Debian):**
 ```bash
-snap install zig --classic --beta
+snap install zig --classic
 ```
 
 **Verify installation:**
 ```bash
-zig version  # Should be 0.14.1 or higher
+zig version  # Should be 0.17.x, without a -dev suffix
 ```
 
 #### 2. Install System Dependencies

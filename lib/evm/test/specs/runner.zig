@@ -2440,7 +2440,7 @@ fn parseFixedHexBytes(comptime N: usize, allocator: std.mem.Allocator, value: st
 
     if (bytes.len > N) return primitives.Hex.HexError.InvalidLength;
 
-    var out: [N]u8 = [_]u8{0} ** N;
+    var out: [N]u8 = @splat(0);
     @memcpy(out[N - bytes.len ..], bytes);
     return out;
 }

@@ -1,0 +1,1 @@
+contract Narrow { pub fn run(a: u8, b: u8) -> u8 { var x: u8 = a; x = x + b; return x; } }

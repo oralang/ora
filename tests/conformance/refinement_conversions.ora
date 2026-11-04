@@ -1,0 +1,85 @@
+type RBound = MinValue<u256, 100>;
+struct RBox { value: MinValue<u256, 100>; sibling: u256; }
+error RFailure;
+contract RefinementConversions {
+    storage var stored: MinValue<u256, 100> = 150;
+    storage var values: map<u256, MinValue<u256, 100>>;
+    storage var calls: u256 = 0;
+    storage var pair: RBox;
+    fn next() -> u256 { calls = calls +% 1; return 0; }
+    fn rhs(x: u256) -> u256 { pair.sibling = 77; return x; }
+    fn checkedResult(x: u256, fail: bool) -> !MinValue<u256, 100> | RFailure {
+        if (fail) { return RFailure; }
+        return x;
+    }
+    fn specialized(comptime T: type, x: T) -> MinValue<T, 100> { return x; }
+    fn signedBound(x: i256) -> InRange<i256, -10, 10> { return x; }
+    pub fn ret(x: u256) -> MinValue<u256, 100> { return x; }
+    pub fn local(x: u256) -> u256 { let y: MinValue<u256, 100> = x; return y; }
+    pub fn assign(x: u256) -> u256 { var y: MinValue<u256, 100> = 150; y = x; return y; }
+    pub fn alias(x: u256) -> RBound { let y: RBound = x; return y; }
+    pub fn generic(x: u256) -> u256 { return specialized(u256, x); }
+    pub fn store(x: u256) -> u256 { stored = x; return stored; }
+    pub fn read() -> u256 { return stored; }
+    pub fn map(x: u256) -> u256 { values[0] = x; return values[0]; }
+    pub fn field(x: u256) -> u256 { var b = RBox { value: 150, sibling: 7 }; b.value = x; assert(b.sibling == 7, "neighbor"); return b.value; }
+    pub fn struct_init(x: u256) -> u256 { let b = RBox { value: x, sibling: 7 }; return b.value; }
+    pub fn tuple_init(x: u256) -> u256 { let t: (MinValue<u256, 100>, u256) = (x, 7); return t.0; }
+    pub fn array_init(x: u256) -> u256 { let a: [MinValue<u256, 100>; 2] = [x, 150]; return a[0]; }
+    pub fn array_assign(x: u256) -> u256 { var a: [MinValue<u256, 100>; 2] = [150, 175]; a[0] = x; assert(a[1] == 175, "neighbor"); return a[0]; }
+    pub fn cast(x: u256) -> u256 { return @cast(MinValue<u256, 100>, x); }
+    pub fn truncate(x: u256) -> u8 { return @truncate(MinValue<u8, 100>, x); }
+    pub fn bitcast(x: u256) -> i256 { return @bitCast(MinValue<i256, 100>, x); }
+    pub fn maximum(x: u256) -> MaxValue<u256, 100> { return x; }
+    pub fn range(x: u256) -> InRange<u256, 100, 200> { return x; }
+    pub fn nonzero(x: u256) -> NonZero<u256> { return x; }
+    pub fn signed(x: i256) -> i256 { return signedBound(x); }
+    pub fn branch(x: u256, skip: bool) -> MinValue<u256, 100> { if (skip) { return 150; } return x; }
+    pub fn union(x: u256, fail: bool) -> u256 {
+        try {
+            let value = try checkedResult(x, fail);
+            return value;
+        } catch (e) {
+            return 999;
+        }
+    }
+    pub fn indexed() -> u256 {
+        calls = 0; values[0] = 125; values[1] = 175;
+        values[next()] = 126;
+        assert(values[0] == 126 && values[1] == 175, "indexed state");
+        return calls;
+    }
+    pub fn sibling(x: u256) -> u256 {
+        pair = RBox { value: 125, sibling: 7 };
+        pair.value = rhs(x);
+        assert(pair.sibling == 77, "RHS sibling retained");
+        return pair.value;
+    }
+    pub fn checked_param(x: MinValue<u256, 100>) -> MinValue<u256, 100> {
+        let y: MinValue<u256, 100> = x; return y;
+    }
+    pub fn checked_roundtrip(x: MinValue<u256, 100>) -> MinValue<u256, 100> {
+        let y: u256 = x; return @cast(MinValue<u256, 100>, y);
+    }
+    pub fn stronger(x: MinValue<u256, 100>) -> MinValue<u256, 200> { return x; }
+    pub fn carrier(x: NonZero<u256>) -> BasisPoints<u256> { return x; }
+    pub fn checked_narrow(x: MinValue<u256, 100>) -> u8 { return @truncate(MinValue<u8, 100>, x); }
+    pub fn checked_signed(x: MinValue<u256, 100>) -> i256 { return @bitCast(MinValue<i256, 100>, x); }
+    pub fn checked_wide(x: MinValue<u8, 100>) -> u256 { return @cast(MinValue<u256, 100>, x); }
+    pub fn arms(x: u256, flag: bool) -> u256 {
+        if (flag) { let y: MinValue<u256, 100> = x; return y; }
+        else { let z: MinValue<u256, 100> = x; return z; }
+    }
+    pub fn join(x: u256, flag: bool) -> u256 {
+        if (flag) { let y: MinValue<u256, 100> = x; }
+        let z: MinValue<u256, 100> = x; return z;
+    }
+    pub fn rebind(x: u256, y: u256) -> u256 {
+        var a: MinValue<u256, 100> = x; a = y; return a;
+    }
+    pub fn iterations() -> u256 {
+        var i: u256 = 100;
+        while (i > 98) { let x: MinValue<u256, 100> = i; i = i -% 1; }
+        return i;
+    }
+}

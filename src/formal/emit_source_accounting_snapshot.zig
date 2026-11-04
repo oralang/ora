@@ -76,9 +76,9 @@ fn writeLeanString(out: anytype, value: []const u8) !void {
 
 fn writeEnumTags(out: anytype, comptime T: type) !void {
     try out.writeByte('[');
-    inline for (std.meta.fields(T), 0..) |field, index| {
+    inline for (@typeInfo(T).@"enum".field_names, 0..) |field, index| {
         if (index != 0) try out.writeAll(", ");
-        try writeLeanString(out, field.name);
+        try writeLeanString(out, field);
     }
     try out.writeByte(']');
 }
@@ -131,9 +131,9 @@ pub fn main(init: std.process.Init) !void {
     const failure_witnesses = try gate.observeFailureWitnesses(init.gpa);
     try out.writeAll("\n\ndef sourceAccountingFailureWitnessTags : List String := [");
     var first_witness = true;
-    inline for (std.meta.fields(gate.FailureCode)) |field| {
-        const code: gate.FailureCode = @enumFromInt(field.value);
-        if (failure_witnesses.rows[@intFromEnum(code)].observed) {
+    inline for (@typeInfo(gate.FailureCode).@"enum".field_names) |field| {
+        const code: gate.FailureCode = @fromBackingInt(@intCast(@backingInt(@field(gate.FailureCode, field))));
+        if (failure_witnesses.rows[@backingInt(code)].observed) {
             if (!first_witness) try out.writeAll(", ");
             first_witness = false;
             try writeLeanString(out, @tagName(code));
@@ -144,10 +144,10 @@ pub fn main(init: std.process.Init) !void {
         "\n\ndef sourceAccountingFailureWitnessRows :\n" ++
             "    List (String × Bool × Option String × List String) :=\n[\n",
     );
-    inline for (std.meta.fields(gate.FailureCode), 0..) |field, witness_index| {
+    inline for (@typeInfo(gate.FailureCode).@"enum".field_names, 0..) |field, witness_index| {
         if (witness_index != 0) try out.writeAll(",\n");
-        const code: gate.FailureCode = @enumFromInt(field.value);
-        const observation = &failure_witnesses.rows[@intFromEnum(code)];
+        const code: gate.FailureCode = @fromBackingInt(@intCast(@backingInt(@field(gate.FailureCode, field))));
+        const observation = &failure_witnesses.rows[@backingInt(code)];
         try out.writeAll("  (");
         try writeLeanString(out, @tagName(code));
         try out.writeAll(", ");
@@ -168,12 +168,12 @@ pub fn main(init: std.process.Init) !void {
 
     try out.writeAll("\n\ndef sourceAccountingPolicyRows : List (String × String × String × String) :=\n[\n");
     var first_policy_row = true;
-    inline for (std.meta.fields(accounting.CompilationMode)) |mode_field| {
-        const mode: accounting.CompilationMode = @enumFromInt(mode_field.value);
-        inline for (std.meta.fields(accounting.FactOrigin)) |origin_field| {
-            const origin: accounting.FactOrigin = @enumFromInt(origin_field.value);
-            inline for (std.meta.fields(accounting.SourceFactKind)) |kind_field| {
-                const kind: accounting.SourceFactKind = @enumFromInt(kind_field.value);
+    inline for (@typeInfo(accounting.CompilationMode).@"enum".field_names) |mode_field| {
+        const mode: accounting.CompilationMode = @fromBackingInt(@intCast(@backingInt(@field(accounting.CompilationMode, mode_field))));
+        inline for (@typeInfo(accounting.FactOrigin).@"enum".field_names) |origin_field| {
+            const origin: accounting.FactOrigin = @fromBackingInt(@intCast(@backingInt(@field(accounting.FactOrigin, origin_field))));
+            inline for (@typeInfo(accounting.SourceFactKind).@"enum".field_names) |kind_field| {
+                const kind: accounting.SourceFactKind = @fromBackingInt(@intCast(@backingInt(@field(accounting.SourceFactKind, kind_field))));
                 if (!first_policy_row) try out.writeAll(",\n");
                 first_policy_row = false;
                 try out.writeAll("  (");
@@ -183,12 +183,12 @@ pub fn main(init: std.process.Init) !void {
                 try out.writeAll(", ");
                 try writeLeanString(out, @tagName(kind));
                 try out.writeAll(", \"");
-                inline for (std.meta.fields(accounting.UseRole)) |role_field| {
-                    const role: accounting.UseRole = @enumFromInt(role_field.value);
-                    inline for (std.meta.fields(accounting.HandlingKind)) |handling_field| {
-                        const handling: accounting.HandlingKind = @enumFromInt(handling_field.value);
-                        inline for (std.meta.fields(accounting.ExpansionDisposition)) |disposition_field| {
-                            const disposition: accounting.ExpansionDisposition = @enumFromInt(disposition_field.value);
+                inline for (@typeInfo(accounting.UseRole).@"enum".field_names) |role_field| {
+                    const role: accounting.UseRole = @fromBackingInt(@intCast(@backingInt(@field(accounting.UseRole, role_field))));
+                    inline for (@typeInfo(accounting.HandlingKind).@"enum".field_names) |handling_field| {
+                        const handling: accounting.HandlingKind = @fromBackingInt(@intCast(@backingInt(@field(accounting.HandlingKind, handling_field))));
+                        inline for (@typeInfo(accounting.ExpansionDisposition).@"enum".field_names) |disposition_field| {
+                            const disposition: accounting.ExpansionDisposition = @fromBackingInt(@intCast(@backingInt(@field(accounting.ExpansionDisposition, disposition_field))));
                             try out.writeByte(if (gate.handlingPermitted(mode, origin, kind, role, handling, disposition)) '1' else '0');
                         }
                     }

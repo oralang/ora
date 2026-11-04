@@ -48,6 +48,292 @@ fn firstContract(ast_file: *const compiler.ast.AstFile) !compiler.ast.ContractIt
     return error.TestUnexpectedResult;
 }
 
+const EffectQueryProbe = struct {
+    db: *compiler.CompilerDb,
+    calls: usize = 0,
+    fail_at: ?usize = null,
+    failure: anyerror = error.EffectQueryFailed,
+
+    fn next(context: *anyopaque) !*EffectQueryProbe {
+        const self: *EffectQueryProbe = @ptrCast(@alignCast(context));
+        const index = self.calls;
+        self.calls += 1;
+        if (self.fail_at == index) return self.failure;
+        return self;
+    }
+
+    fn astFile(context: *anyopaque, module_id: compiler.ModuleId) anyerror!*const compiler.ast.AstFile {
+        const self = try next(context);
+        return self.db.astFile(self.db.sources.module(module_id).file_id);
+    }
+
+    fn modulePath(context: *anyopaque, module_id: compiler.ModuleId) anyerror![]const u8 {
+        const self = try next(context);
+        return self.db.sources.file(self.db.sources.module(module_id).file_id).path;
+    }
+
+    fn itemIndex(context: *anyopaque, module_id: compiler.ModuleId) anyerror!*const compiler.sema.ItemIndexResult {
+        const self = try next(context);
+        return self.db.itemIndex(module_id);
+    }
+
+    fn resolution(context: *anyopaque, module_id: compiler.ModuleId) anyerror!*const compiler.sema.NameResolutionResult {
+        const self = try next(context);
+        return self.db.resolveNames(module_id);
+    }
+
+    fn moduleTypeCheck(context: *anyopaque, module_id: compiler.ModuleId) anyerror!*const compiler.sema.TypeCheckResult {
+        const self = try next(context);
+        return self.db.moduleTypeCheck(module_id);
+    }
+
+    fn lookupItem(context: *anyopaque, module_id: compiler.ModuleId, name: []const u8) anyerror!?compiler.ast.ItemId {
+        const self = try next(context);
+        return (try self.db.itemIndex(module_id)).lookup(name);
+    }
+
+    fn resolveImportAlias(context: *anyopaque, module_id: compiler.ModuleId, alias: []const u8) anyerror!?compiler.ModuleId {
+        const self = try next(context);
+        const graph = try self.db.moduleGraph(self.db.sources.module(module_id).package_id);
+        for (graph.modules) |module| {
+            if (module.module_id != module_id) continue;
+            for (module.imports) |import| {
+                const name = import.alias orelse std.fs.path.stem(std.fs.path.basename(import.path));
+                if (std.mem.eql(u8, name, alias)) return import.target_module_id;
+            }
+        }
+        return null;
+    }
+
+    fn check(self: *EffectQueryProbe, module_id: compiler.ModuleId, expected_write: []const u8) !void {
+        const file = try self.db.astFile(self.db.sources.module(module_id).file_id);
+        const index = try self.db.itemIndex(module_id);
+        const names = try self.db.resolveNames(module_id);
+        const constants = try self.db.constEval(module_id);
+        const contract_id = index.lookup("Vault") orelse return error.TestUnexpectedResult;
+        var checked = try compiler.sema.typeCheck(testing.allocator, module_id, file.file_id, file, index, names, constants, .{ .item = contract_id }, .{
+            .context = self,
+            .ast_file = astFile,
+            .module_path = modulePath,
+            .item_index = itemIndex,
+            .resolution = resolution,
+            .module_typecheck = moduleTypeCheck,
+            .lookup_item = lookupItem,
+            .resolve_import_alias = resolveImportAlias,
+        }, false);
+        defer checked.deinit();
+        try testing.expect(checked.diagnostics.isEmpty());
+        var found = false;
+        for (file.item(contract_id).Contract.members) |item| {
+            if (file.item(item).* != .Function or !std.mem.eql(u8, file.item(item).Function.name, "run")) continue;
+            const writes = checked.itemEffect(item).writeSlots();
+            try testing.expectEqual(@as(usize, 1), writes.len);
+            try expectEffectSlotPath(writes[0], expected_write);
+            found = true;
+        }
+        try testing.expect(found);
+    }
+};
+
+fn checkEffectQueryFailures(source_text: []const u8, expected_write: []const u8) !void {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const helper_file = try compilation.db.addSourceFile("effect_helper.ora",
+        \\pub fn slot(owner: address) -> StorageSlot {
+        \\    return @storageDerive("query", owner);
+        \\}
+        \\pub fn range(owner: address) -> StorageRange {
+        \\    return @storageRange(@storageDerive("query", owner), 2);
+        \\}
+    );
+    _ = try compilation.db.addModule(compilation.package_id, helper_file, "effect_helper");
+    var probe = EffectQueryProbe{ .db = &compilation.db };
+    try probe.check(compilation.root_module_id, expected_write);
+    const count = probe.calls;
+    try testing.expect(count > 0);
+    // Fail each query exactly once, including queries made after successful
+    // callee resolution. A later fallback/retry must not hide the original error.
+    for ([_]anyerror{ error.EffectQueryFailed, error.OutOfMemory }) |failure| {
+        for (0..count) |fail_at| {
+            probe = .{ .db = &compilation.db, .fail_at = fail_at, .failure = failure };
+            try testing.expectError(failure, probe.check(compilation.root_module_id, expected_write));
+            try testing.expectEqual(fail_at + 1, probe.calls);
+        }
+    }
+}
+
+test "compiler propagates computed storage derive query failures" {
+    try checkEffectQueryFailures(
+        \\comptime const std_storage = @import("std/storage");
+        \\contract Vault {
+        \\    pub fn run(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("query", owner), 2)
+        \\    {
+        \\        @storageWordStore(std_storage.derive("query", owner), 1, value);
+        \\    }
+        \\}
+    , "$computed_storage[query][param#0][1]");
+}
+
+test "compiler propagates computed storage range query failures" {
+    try checkEffectQueryFailures(
+        \\comptime const std_storage = @import("std/storage");
+        \\contract Vault {
+        \\    pub fn run(owner: address)
+        \\        modifies @storageRange(@storageDerive("query", owner), 2)
+        \\    {
+        \\        @storageRangeErase(std_storage.range(@storageDerive("query", owner), 2));
+        \\    }
+        \\}
+    , "$computed_storage[query][param#0][0..2]");
+}
+
+test "compiler propagates imported computed slot return query failures" {
+    try checkEffectQueryFailures(
+        \\comptime const helper = @import("./effect_helper.ora");
+        \\contract Vault {
+        \\    pub fn run(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("query", owner), 2)
+        \\    {
+        \\        @storageWordStore(helper.slot(owner), 1, value);
+        \\    }
+        \\}
+    , "$computed_storage[query][param#0][1]");
+}
+
+test "compiler propagates imported computed range return query failures" {
+    try checkEffectQueryFailures(
+        \\comptime const helper = @import("./effect_helper.ora");
+        \\contract Vault {
+        \\    pub fn run(owner: address)
+        \\        modifies @storageRange(@storageDerive("query", owner), 2)
+        \\    {
+        \\        @storageRangeErase(helper.range(owner));
+        \\    }
+        \\}
+    , "$computed_storage[query][param#0][0..2]");
+}
+
+test "compiler propagates fixed data effect specialization query failures" {
+    try checkEffectQueryFailures(
+        \\comptime const fixed = @import("std/storage/fixed_size_data");
+        \\contract Vault {
+        \\    pub fn run(owner: address)
+        \\        modifies @storageRange(@storageDerive("query", owner), 2)
+        \\    {
+        \\        fixed.erase(@storageDerive("query", owner), 2);
+        \\    }
+        \\}
+    , "$computed_storage[query][param#0][0..2]");
+}
+
+fn checkEffectAllocationFailures(source_text: []const u8) !void {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const file = try compilation.db.astFile(module.file_id);
+    const index = try compilation.db.itemIndex(compilation.root_module_id);
+    const resolution = try compilation.db.resolveNames(compilation.root_module_id);
+    const const_eval = try compilation.db.constEval(compilation.root_module_id);
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator, module_id: compiler.source.ModuleId, ast_file: *const compiler.ast.AstFile, items: *const compiler.sema.ItemIndexResult, names: *const compiler.sema.NameResolutionResult, constants: *const compiler.sema.ConstEvalResult) !void {
+            for (ast_file.root_items) |item| {
+                if (ast_file.item(item).* != .Contract) continue;
+                var checked = try compiler.sema.typeCheck(allocator, module_id, ast_file.file_id, ast_file, items, names, constants, .{ .item = item }, null, false);
+                defer checked.deinit();
+                try testing.expect(checked.diagnostics.isEmpty());
+            }
+        }
+    };
+    var observed_failure = false;
+    for (0..256) |fail_index| {
+        var backing_arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer backing_arena.deinit();
+        var failing = testing.FailingAllocator.init(backing_arena.allocator(), .{ .fail_index = fail_index });
+        if (Probe.run(failing.allocator(), compilation.root_module_id, file, index, resolution, const_eval)) |_| {
+            if (failing.has_induced_failure) {
+                const trace = failing.getStackTrace();
+                std.debug.dumpStackTrace(&trace);
+                return error.SwallowedOutOfMemoryError;
+            }
+            try testing.expect(observed_failure);
+            return;
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expect(failing.has_induced_failure);
+            observed_failure = true;
+        }
+    }
+    return error.AllocationFailureSweepIncomplete;
+}
+
+test "compiler propagates slot-builder OOM through named map and field effects" {
+    try checkEffectAllocationFailures(
+        \\contract Slots {
+        \\    struct Config { value: u256 }
+        \\    storage config: Config;
+        \\    storage m: map<u256, map<u256, u256>>;
+        \\    pub fn write(a: u256, b: u256, value: u256)
+        \\        modifies m[a][b], config.value
+        \\    {
+        \\        m[a][b] = value;
+        \\        config.value = m[a][b];
+        \\    }
+        \\}
+    );
+}
+
+test "compiler propagates slot-builder OOM without dropping deep map writes" {
+    for (1..33) |depth| {
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(testing.allocator);
+        try text.appendSlice(testing.allocator, "contract Slots { storage m: ");
+        for (0..depth) |_| try text.appendSlice(testing.allocator, "map<u256, ");
+        try text.appendSlice(testing.allocator, "u256");
+        for (0..depth) |_| try text.append(testing.allocator, '>');
+        try text.appendSlice(testing.allocator, "; pub fn write(value: u256) modifies m { m");
+        for (0..depth) |_| try text.appendSlice(testing.allocator, "[0]");
+        try text.appendSlice(testing.allocator, " = value; } }");
+        try checkEffectAllocationFailures(text.items);
+    }
+}
+
+test "compiler propagates slot-builder OOM through computed storage effects" {
+    try checkEffectAllocationFailures(
+        \\contract Slots {
+        \\    fn write(slot: StorageSlot, value: u256) {
+        \\        @storageWordStore(slot, 0, value);
+        \\    }
+        \\    pub fn run(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("oom.slots", owner), 2)
+        \\    {
+        \\        let slot: StorageSlot = @storageDerive("oom.slots", owner);
+        \\        write(slot, value);
+        \\        @storageWordStore(slot, 1, @storageWordLoad(slot, 0));
+        \\        @storageRangeErase(@storageRange(slot, 2));
+        \\    }
+        \\}
+    );
+}
+
+test "compiler propagates slot-builder OOM through lock and resource effects" {
+    try checkEffectAllocationFailures(
+        \\resource Token = u256;
+        \\contract Slots {
+        \\    storage balances: map<address, u256>;
+        \\    storage pending: map<address, Resource<Token>>;
+        \\    storage settled: map<address, Resource<Token>>;
+        \\    pub fn run(from: address, to: address, amount: Token) {
+        \\        @lock(balances[from]);
+        \\        let value = balances[from];
+        \\        @unlock(balances[from]);
+        \\        balances[from] = value;
+        \\        @move(pending[from], settled[to], amount);
+        \\    }
+        \\}
+    );
+}
+
 test "compiler lowers ensures on implicit void returns" {
     const source_text =
         \\contract Counter {
@@ -66,8 +352,8 @@ test "compiler lowers ensures on implicit void returns" {
     const hir_text = try hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
 
-    const ensures_index = std.mem.indexOf(u8, hir_text, "ora.ensures") orelse return error.TestUnexpectedResult;
-    const return_index = std.mem.indexOf(u8, hir_text, "ora.return") orelse return error.TestUnexpectedResult;
+    const ensures_index = std.mem.indexOf(u8, hir_text, "ora.ensures ") orelse return error.TestUnexpectedResult;
+    const return_index = std.mem.indexOf(u8, hir_text, "ora.return ") orelse return error.TestUnexpectedResult;
     try testing.expect(ensures_index < return_index);
 }
 
@@ -307,6 +593,34 @@ test "compiler enforces modifies declarations against storage writes" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to 'balances[other]' is not covered by this function's `modifies` clause"));
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to 'balances[tx.origin]' is not covered by this function's `modifies` clause"));
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to 'config.admin' is not covered by this function's `modifies` clause"));
+}
+
+test "compiler accepts aggregate modifies roots for fixed-array elements" {
+    const source_text =
+        \\contract Arrays {
+        \\    storage var values: [u256; 4];
+        \\    storage var balances: [u256; 4];
+        \\
+        \\    pub fn update(index: u256, value: u256)
+        \\        modifies values
+        \\    {
+        \\        values[index] = value;
+        \\    }
+        \\
+        \\    pub fn wrongRoot(index: u256, value: u256)
+        \\        modifies values
+        \\    {
+        \\        balances[index] = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 1), typecheck.diagnostics.items.items.len);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to 'balances[index]' is not covered by this function's `modifies` clause"));
 }
 
 test "compiler matches modifies environment keys through direct uses and stable let or const local aliases" {
@@ -767,6 +1081,40 @@ test "compiler rejects computed storage writes with unknown offsets under bounde
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "[?]' is not covered by this function's `modifies` clause"));
 }
 
+test "compiler rejects unknown declared range tails instead of covering arbitrary offsets" {
+    const source_text =
+        \\comptime const std_storage = @import("std/storage");
+        \\contract Vault {
+        \\    pub fn builtin(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("range.unknown", owner), 2)
+        \\    {
+        \\        @storageWordStore(@storageDerive("range.unknown", owner), 7, value);
+        \\    }
+        \\    pub fn library(owner: address, value: u256)
+        \\        modifies std_storage.range(std_storage.derive("range.unknown", owner), 2)
+        \\    {
+        \\        std_storage.words.store(std_storage.derive("range.unknown", owner), 7, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const ast_file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+    // Inject an unparseable range literal after parsing, so this exercises
+    // coverage's unknown-tail refusal rather than stopping at a lexer error.
+    var corrupted: usize = 0;
+    for (ast_file.expressions) |*expr| {
+        if (expr.* == .IntegerLiteral and std.mem.eql(u8, expr.IntegerLiteral.text, "2")) {
+            expr.IntegerLiteral.text = "0x";
+            corrupted += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), corrupted);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 2), countDiagnosticMessages(&typecheck.diagnostics, "storage write to '$computed_storage[range.unknown][owner][7]' is not covered by this function's `modifies` clause"));
+}
+
 test "compiler rejects fixed size data helper writes outside declared bounded range" {
     const source_text =
         \\comptime const std_storage = @import("std/storage");
@@ -789,6 +1137,118 @@ test "compiler rejects fixed size data helper writes outside declared bounded ra
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to '$computed_storage"));
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "[0..3]' is not covered by this function's `modifies` clause"));
+}
+
+test "compiler substitutes named storage helper effects and rejects the wrong forwarded frame" {
+    var wrong = try compilePackage("tests/negative/modifies_helper_wrong_forwarded_key.ora");
+    defer wrong.deinit();
+    const wrong_typecheck = try wrong.db.moduleTypeCheck(wrong.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&wrong_typecheck.diagnostics, "storage write to 'm[b]' is not covered by this function's `modifies` clause"));
+
+    const source_text =
+        \\contract CorrectForwardedKey {
+        \\    storage m: map<u256, u256>;
+        \\    fn leaf(k: u256) -> u256 modifies m[k] { m[k] = 1; return 0; }
+        \\    pub fn relay(a: u256, b: u256) -> u256
+        \\        requires a != b
+        \\        modifies m[b]
+        \\    { return leaf(b); }
+        \\}
+    ;
+    var correct = try compileText(source_text);
+    defer correct.deinit();
+    const correct_typecheck = try correct.db.moduleTypeCheck(correct.root_module_id);
+    try testing.expect(correct_typecheck.diagnostics.isEmpty());
+    _ = try correct.db.lowerToHir(correct.root_module_id);
+}
+
+test "compiler substitutes named storage helper effects for literals forwarding and nested keys" {
+    const source_text =
+        \\contract Effects {
+        \\    storage m: map<u256, u256>;
+        \\    storage nested: map<u256, map<u256, u256>>;
+        \\    fn lookup(k: u256) -> u256 { return m[k]; }
+        \\    fn write(k: u256) modifies m[k] { m[k] = 1; }
+        \\    fn pair(x: u256, y: u256) modifies nested[x][y] { nested[x][y] = 1; }
+        \\    fn middle(x: u256, y: u256) modifies m[y] { write(y); }
+        \\    pub fn literal() -> u256 { return lookup(7); }
+        \\    pub fn forward(a: u256, b: u256) -> u256 { return lookup(b); }
+        \\    pub fn aligned(k: u256) -> u256 { return lookup(k); }
+        \\    pub fn writeLiteral() modifies m[7] { write(7); }
+        \\    pub fn writeForward(a: u256, b: u256) modifies m[b] { write(b); }
+        \\    pub fn writeAligned(k: u256) modifies m[k] { write(k); }
+        \\    pub fn writeTwice(a: u256, b: u256) modifies m[a] { middle(b, a); }
+        \\    pub fn writePair(a: u256, b: u256) modifies nested[b][a] { pair(b, a); }
+        \\}
+    ;
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+    const ast_file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+    const contract = try firstContract(ast_file);
+    const expectations = .{
+        .{ "literal", "m[7]", false },
+        .{ "forward", "m[param#1]", false },
+        .{ "aligned", "m[param#0]", false },
+        .{ "writeLiteral", "m[7]", true },
+        .{ "writeForward", "m[param#1]", true },
+        .{ "writeAligned", "m[param#0]", true },
+        .{ "writeTwice", "m[param#0]", true },
+        .{ "writePair", "nested[param#1][param#0]", true },
+    };
+    inline for (expectations) |expected| {
+        var found = false;
+        for (contract.members) |member| {
+            const item = ast_file.item(member);
+            if (item.* != .Function or !std.mem.eql(u8, item.Function.name, expected[0])) continue;
+            const effect = typecheck.itemEffect(member);
+            const slots = if (expected[2]) effect.writeSlots() else effect.readSlots();
+            try testing.expectEqual(@as(usize, 1), slots.len);
+            try expectEffectSlotPath(slots[0], expected[1]);
+            found = true;
+        }
+        try testing.expect(found);
+    }
+}
+
+test "compiler substitutes named storage helper effects with unknown arguments conservatively" {
+    const source_text =
+        \\contract Effects {
+        \\    storage m: map<u256, u256>;
+        \\    fn write(k: u256) modifies m[k] { m[k] = 1; }
+        \\    pub fn wrong(a: u256) modifies m[a] { write(a +% 1); }
+        \\    pub fn broad(a: u256) modifies m { write(a +% 1); }
+        \\}
+    ;
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(&typecheck.diagnostics, "storage write to 'm[?]' is not covered by this function's `modifies` clause"));
+    const ast_file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+    const contract = try firstContract(ast_file);
+    for (contract.members) |member| {
+        const item = ast_file.item(member);
+        if (item.* != .Function or std.mem.eql(u8, item.Function.name, "write")) continue;
+        const slots = typecheck.itemEffect(member).writeSlots();
+        try testing.expectEqual(@as(usize, 1), slots.len);
+        try expectEffectSlotPath(slots[0], "m[?]");
+    }
+}
+
+test "compiler substitutes named storage helper effects with environment keys" {
+    const source_text =
+        \\contract Effects {
+        \\    storage balances: map<address, u256>;
+        \\    fn write(owner: address) modifies balances[owner] { balances[owner] = 1; }
+        \\    pub fn caller() modifies balances[std.msg.sender()] { write(std.msg.sender()); }
+        \\    pub fn origin() modifies balances[std.tx.origin()] { write(std.tx.origin()); }
+        \\}
+    ;
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
 }
 
 test "compiler substitutes computed storage slot arguments through helper effects" {

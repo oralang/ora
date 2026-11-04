@@ -1401,8 +1401,8 @@ pub fn mixin(Builder: type) type {
             if (firstDirectExprChild(node)) |expr_node| {
                 if (firstDirectTokenOfKind(expr_node, .Identifier)) |name_token| {
                     const name = tokenText(name_token);
-                    inline for (@typeInfo(nodes.CallHint).@"enum".fields) |field| {
-                        if (std.mem.eql(u8, name, field.name)) hint = @field(nodes.CallHint, field.name);
+                    inline for (@typeInfo(nodes.CallHint).@"enum".field_names) |field| {
+                        if (std.mem.eql(u8, name, field)) hint = @field(nodes.CallHint, field);
                     }
                 }
             }

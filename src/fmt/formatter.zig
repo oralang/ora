@@ -29,7 +29,16 @@ pub const Formatter = struct {
     paren_depth: usize = 0,
     bracket_depth: usize = 0,
     pending_space: bool = false,
+    /// Set when the previous token was a spaced binary operator (`=`, `+`,
+    /// `>>`, …). Distinguishes `a + (b)` from call-style keywords like
+    /// `call(...)`, which set `pending_space` but must keep `(` tight.
+    pending_operator_space: bool = false,
     last_token_type: ?lib.TokenType = null,
+    /// Offsets of `<` / `>` / `>>` tokens in binary-operator position. The
+    /// same token types close generic argument lists (`>>` as a one-token
+    /// double closer), so spacing them needs AST classification, not a
+    /// token-type rule.
+    angle_binary_offsets: std.AutoHashMapUnmanaged(u32, void) = .{},
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8, options: FormatOptions) Formatter {
         return .{
@@ -69,6 +78,9 @@ pub const Formatter = struct {
         };
         defer self.allocator.free(self.tokens);
         self.trivia = lex.getTrivia();
+
+        try self.collectAngleBinaryOffsets(&lower_result.file);
+        defer self.angle_binary_offsets.deinit(self.allocator);
 
         for (self.tokens, 0..) |token, index| {
             if (token.type == .Eof) break;
@@ -278,6 +290,40 @@ pub const Formatter = struct {
         self.pending_space = false;
     }
 
+    fn collectAngleBinaryOffsets(self: *Formatter, file: *const lib.compiler.ast.AstFile) FormatError!void {
+        for (file.expressions) |expr| {
+            const bin = switch (expr) {
+                .Binary => |b| b,
+                else => continue,
+            };
+            const wanted: lib.TokenType = switch (bin.op) {
+                .lt => .Less,
+                .gt => .Greater,
+                .shr => .GreaterGreater,
+                else => continue,
+            };
+            const window_start = lib.compiler.source.rangeOf(file.expression(bin.lhs).*).end;
+            const window_end = lib.compiler.source.rangeOf(file.expression(bin.rhs).*).start;
+            var index = lowerBoundByOffset(self.tokens, window_start);
+            while (index < self.tokens.len) : (index += 1) {
+                const token = self.tokens[index];
+                if (token.range.start_offset >= window_end) break;
+                if (token.type == wanted) {
+                    self.angle_binary_offsets.put(self.allocator, token.range.start_offset, {}) catch
+                        return FormatError.OutOfMemory;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn isAngleBinaryOperator(self: *const Formatter, token: lib.Token) bool {
+        return switch (token.type) {
+            .Less, .Greater, .GreaterGreater => self.angle_binary_offsets.contains(token.range.start_offset),
+            else => false,
+        };
+    }
+
     fn emitPreTokenSpacing(self: *Formatter, token: lib.Token) FormatError!void {
         if (token.type == .RightBrace) return;
 
@@ -285,8 +331,15 @@ pub const Formatter = struct {
             try self.ensureSpaceBefore();
         } else if (shouldForceLeadingSpace(token.type, self.last_token_type)) {
             try self.ensureSpaceBefore();
+        } else if (self.isAngleBinaryOperator(token)) {
+            try self.ensureSpaceBefore();
+        } else if (self.pending_operator_space and
+            (token.type == .LeftParen or token.type == .LeftBracket))
+        {
+            try self.ensureSpaceBefore();
         }
         self.pending_space = false;
+        self.pending_operator_space = false;
     }
 
     fn emitPostTokenSpacing(self: *Formatter, token: lib.Token, next: ?lib.Token) FormatError!void {
@@ -295,13 +348,21 @@ pub const Formatter = struct {
             return;
         }
 
-        if (isAlwaysSpacedOperator(token.type)) {
-            self.pending_space = true;
+        // Prefix position wins over the spaced-operator rule (`-1`, not `- 1`).
+        if (isPrefixOperator(token.type, self.last_token_type)) {
+            self.pending_space = false;
             return;
         }
 
-        if (isPrefixOperator(token.type, self.last_token_type)) {
-            self.pending_space = false;
+        if (isAlwaysSpacedOperator(token.type)) {
+            self.pending_space = true;
+            self.pending_operator_space = true;
+            return;
+        }
+
+        if (self.isAngleBinaryOperator(token)) {
+            self.pending_space = true;
+            self.pending_operator_space = true;
             return;
         }
 
@@ -386,6 +447,20 @@ fn shouldForceLeadingSpace(current: lib.TokenType, previous: ?lib.TokenType) boo
         .Dot => !canEndExpression(prev),
         else => isAlwaysSpacedOperator(current) and !isPrefixOperator(current, previous),
     };
+}
+
+fn lowerBoundByOffset(tokens: []const lib.Token, offset: u32) usize {
+    var low: usize = 0;
+    var high: usize = tokens.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (tokens[mid].range.start_offset < offset) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
 }
 
 fn isKeywordThatNeedsSpaceAfter(source: []const u8, token: lib.Token, next: ?lib.Token) bool {
@@ -558,6 +633,11 @@ fn isAlwaysSpacedOperator(token: lib.TokenType) bool {
         .Percent,
         .StarStar,
         .StarStarPercent,
+        .Ampersand,
+        .Caret,
+        .LessLess,
+        .LessLessPercent,
+        .GreaterGreaterPercent,
         .LessEqual,
         .GreaterEqual,
         .AmpersandEqual,

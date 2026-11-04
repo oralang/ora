@@ -8,14 +8,17 @@
 //! emission, and optimization/simplification belong in separate adapter files.
 
 const std = @import("std");
+const timeline_validation = @import("loop_timeline_validation.zig").Validator(@This());
 
 pub const Id = u32;
 pub const TermId = u32;
 
-pub const obligation_dump_schema_version: u32 = 8;
-pub const proof_certificate_schema_version: u32 = 2;
+pub const obligation_dump_schema_version: u32 = 12;
+pub const proof_certificate_schema_version: u32 = 3;
 
 pub const ObligationSet = struct {
+    lifecycle_evidence: ?@import("storage_lifecycle.zig").Evidence = null,
+    lifecycle_uses: []const @import("ora_prepared_query_row").LifecycleQueryUse = &.{},
     obligations: []const Obligation = &.{},
     assumptions: []const Assumption = &.{},
     queries: []const VerificationQuery = &.{},
@@ -24,6 +27,7 @@ pub const ObligationSet = struct {
     /// certificate before verified artifacts may be emitted. Function
     /// postconditions enrich the induction theorem but do not arm the gate.
     loop_summaries: []const LoopSummaryRow = &.{},
+    function_summaries: []const FunctionSummaryRow = &.{},
     proof_artifacts: []const ProofArtifact = &.{},
     diagnostics: []const ObligationDiagnostic = &.{},
     terms: []const Term = &.{},
@@ -36,11 +40,18 @@ pub const ObligationSet = struct {
     }
 
     pub fn artifactDecision(self: ObligationSet) ArtifactDecision {
+        // Additive conjunction: lifecycle evidence never discharges any of the
+        // ordinary query, loop, call, binding or obligation checks below.
+        self.validateLifecycleEvidence() catch |err| return .{ .blocked = lifecycleBlockReason(err) };
         for (self.diagnostics) |diagnostic| {
             if (diagnostic.blocks_artifacts) return .{ .blocked = .blocking_diagnostic };
         }
         self.validateTermReferences() catch return .{ .blocked = .invalid_dependency };
         self.validateIdReferences() catch return .{ .blocked = .invalid_dependency };
+        if (self.callArtifactAuthorityBlockReason()) |reason| return .{ .blocked = reason };
+        if (self.loopArtifactAuthorityBlockReason()) |reason| {
+            return .{ .blocked = reason };
+        }
 
         for (self.queries) |query| {
             if (query.artifact_policy == .diagnostic_only) continue;
@@ -55,7 +66,11 @@ pub const ObligationSet = struct {
                     else
                         .unknown_query };
                 }
-                if (!querySucceeded(query, result)) {
+                const retained_input_check = query.artifact_policy == .runtime_checked_input and
+                    query.kind == .guard_violate and query.backend == .z3 and
+                    query.loop_summary_id == null and query.proof_requirement == .backend_result and
+                    result.status == .sat;
+                if (!retained_input_check and !querySucceeded(query, result)) {
                     return .{ .blocked = if (query.backend == .lean) .lean_required_failure else .failed_query };
                 }
                 if (query.proof_requirement == .lean_certificate and
@@ -63,10 +78,9 @@ pub const ObligationSet = struct {
                 {
                     return .{ .blocked = .lean_required_failure };
                 }
-            } else if (query.obligation_ids.len > 0 or
-                query.proof_requirement == .lean_certificate)
-            {
-                if (self.hasSuccessfulLeanProofForQuery(query)) continue;
+            } else {
+                const canonical_z3 = query.backend == .z3 and (query.loop_summary_id != null or query.function_summary_id != null);
+                if (!canonical_z3 and self.hasSuccessfulLeanProofForQuery(query)) continue;
                 return .{ .blocked = if (query.backend == .lean or query.proof_requirement == .lean_certificate)
                     .lean_required_failure
                 else
@@ -82,6 +96,367 @@ pub const ObligationSet = struct {
         }
 
         return .allowed;
+    }
+
+    /// Validate both independently produced evidence and every exact use.
+    pub fn validateLifecycleEvidence(self: ObligationSet) !void {
+        const evidence = self.lifecycle_evidence orelse {
+            if (self.lifecycle_uses.len != 0) return error.MissingLifecycleCustody;
+            for (self.queries) |query| if (query.lifecycle_use != null) return error.MissingLifecycleCustody;
+            return;
+        };
+        try evidence.validate();
+        if (self.lifecycle_uses.len != evidence.expected_uses.len) return error.MissingLifecycleUse;
+        for (self.lifecycle_uses, evidence.checked_uses) |use, checked| {
+            if (!std.meta.eql(use, checked.use)) return error.LifecycleUseMismatch;
+            if (use.kind == .base) continue;
+            var matched: ?VerificationQuery = null;
+            for (self.queries) |query| if (query.lifecycle_use) |actual| {
+                if (!std.meta.eql(use, actual)) continue;
+                if (matched != null) return error.DuplicateLifecycleQuery;
+                matched = query;
+            };
+            const query = matched orelse return error.LifecycleSourceBindingMissing;
+            if (query.backend != .z3 or query.loop_summary_id != null or query.function_summary_id != null or
+                query.proof_requirement != .backend_result or query.artifact_policy == .diagnostic_only or
+                query.smtlib_hash != use.smtlib_hash or query.constraint_count != use.constraint_count or
+                (query.artifact_policy == .runtime_checked_input) != checked.runtime_input) return error.LifecycleQueryIdentityMismatch;
+            const kind: VerificationQueryKind = switch (use.kind) {
+                .base => .base,
+                .obligation => .obligation,
+                .guard_satisfy => .guard_satisfy,
+                .guard_violate => .guard_violate,
+            };
+            if (query.kind != kind) return error.LifecycleQueryIdentityMismatch;
+            const result = query.result orelse return error.LifecycleQueryMissing;
+            if (result.degraded) return error.LifecycleQueryDegraded;
+            if (result.vacuous) return error.LifecycleQueryVacuous;
+            if (result.vacuity_unknown or result.status == .unknown) return error.LifecycleQueryUnknown;
+            const status: VerificationQueryStatus = switch (checked.status) {
+                .sat => .sat,
+                .unsat => .unsat,
+                .unknown => .unknown,
+            };
+            if (result.status != status) return error.LifecycleQueryIdentityMismatch;
+        }
+        for (self.queries) |query| if (query.lifecycle_use) |use| {
+            for (self.lifecycle_uses) |actual| {
+                if (std.meta.eql(use, actual)) break;
+            } else return error.ForeignLifecycleUse;
+        };
+    }
+
+    fn callArtifactAuthorityBlockReason(self: ObligationSet) ?ArtifactBlockReason {
+        for (self.function_summaries) |row| {
+            if (self.callFunctionAuthorityBlockReason(row)) |reason| return reason;
+            for (row.paths) |path| for (path.timeline) |event| {
+                if (self.callEventAuthorityBlockReason(event)) |reason| return reason;
+            };
+        }
+        return null;
+    }
+
+    fn independentZ3BlockReason(query: VerificationQuery, missing: ArtifactBlockReason) ?ArtifactBlockReason {
+        if (query.backend != .z3 or query.smtlib_hash == null or
+            query.artifact_policy != .blocks_verified_artifacts or query.proof_requirement != .backend_result) return missing;
+        const result = query.result orelse return missing;
+        if (result.degraded) return .degraded_query;
+        if (result.vacuous) return .vacuous_query;
+        if (result.vacuity_unknown or result.status == .unknown) return .unknown_query;
+        if (!querySucceeded(query, result)) return .failed_query;
+        return null;
+    }
+
+    fn callFunctionAuthorityBlockReason(self: ObligationSet, row: FunctionSummaryRow) ?ArtifactBlockReason {
+        if (row.projection_completeness != .complete or !row.write_footprint_complete) return .call_relation_unsupported;
+        if (row.query_ids.safety.len == 0) return .call_z3_relation_missing;
+        for (row.query_ids.safety) |id| {
+            const query = findById(self.queries, id) orelse return .call_z3_relation_missing;
+            if (!functionOwnerEqual(query.owner, row.owner)) return .call_identity_mismatch;
+            if (independentZ3BlockReason(query, .call_z3_relation_missing)) |reason| return reason;
+        }
+        const target = findById(self.queries, row.query_ids.certificate orelse return .call_lean_custody_missing) orelse return .call_lean_custody_missing;
+        const digest = target.function_vc_sha256 orelse return .call_identity_mismatch;
+        if (target.function_summary_id != row.id or target.loop_summary_id != null or target.discharges_query_id != null or
+            target.backend != .unspecified or target.proof_requirement != .lean_certificate or target.result != null or
+            target.artifact_policy != .blocks_verified_artifacts or target.kind != .obligation or target.logical_role != null or
+            target.obligation_ids.len != 0 or !functionOwnerEqual(target.owner, row.owner) or
+            !equalIdSlices(target.assumption_ids, row.assumption_ids)) return .call_identity_mismatch;
+        for (row.query_ids.safety) |id| {
+            const query = findById(self.queries, id) orelse return .call_z3_relation_missing;
+            if (query.function_summary_id != row.id or query.loop_summary_id != null or query.discharges_query_id != null or
+                query.kind != .obligation or query.logical_role != null or query.obligation_ids.len != 0 or
+                !functionOwnerEqual(query.owner, row.owner) or !equalIdSlices(query.assumption_ids, row.assumption_ids)) return .call_identity_mismatch;
+            if (!std.meta.eql(query.function_vc_sha256, @as(?[32]u8, digest))) return .call_digest_mismatch;
+        }
+        if (!self.hasSuccessfulLeanProofForQuery(target)) return .call_lean_custody_missing;
+        return null;
+    }
+
+    fn callLoopAuthorityBlockReason(self: ObligationSet, summary: LoopSummaryRow, expected: ?[32]u8) ?ArtifactBlockReason {
+        if (!summary.projectionSupported() or !summary.preheader_projection_complete or summary.owner != .statement) return .call_relation_unsupported;
+        const owner = for (self.function_summaries) |row| {
+            if (row.owner == .function and std.mem.eql(u8, row.owner.function.name, summary.owner.statement.function_name)) break row;
+        } else return .call_relation_unsupported;
+        if (self.callFunctionAuthorityBlockReason(owner)) |reason| return reason;
+        if (summary.query_ids.induction.len != 1) return .call_loop_obligation_missing;
+        const induction = findById(self.queries, summary.query_ids.induction[0]) orelse return .call_loop_obligation_missing;
+        const digest = induction.loop_vc_sha256 orelse return .call_identity_mismatch;
+        if (expected) |wanted| if (!std.mem.eql(u8, &wanted, &digest)) return .call_digest_mismatch;
+        self.validateLoopQueryIds(summary) catch return .call_loop_obligation_missing;
+        for (self.queries) |query| {
+            if (query.loop_summary_id != summary.id or query.discharges_query_id != null) continue;
+            if (query.owner != .function or !std.mem.eql(u8, query.owner.function.name, summary.owner.statement.function_name)) return .call_identity_mismatch;
+            if (query.kind != .loop_induction) {
+                if (independentZ3BlockReason(query, .call_loop_obligation_missing)) |reason| return reason;
+            }
+        }
+        if (!self.hasSuccessfulLeanProofForQuery(induction)) return .lean_required_failure;
+        return null;
+    }
+
+    fn callEventAuthorityBlockReason(self: ObligationSet, event: LoopTimelineEvent) ?ArtifactBlockReason {
+        switch (event.payload) {
+            .call => |call| {
+                const callee = findById(self.function_summaries, call.callee_summary_id) orelse return .call_relation_unsupported;
+                if (self.callFunctionAuthorityBlockReason(callee)) |reason| return reason;
+                const target = findById(self.queries, callee.query_ids.certificate.?).?;
+                if (!std.meta.eql(target.function_vc_sha256, @as(?[32]u8, call.callee_vc_sha256))) return .call_digest_mismatch;
+            },
+            .summary_dependency => |dependency| {
+                const child = findById(self.loop_summaries, dependency.summary_id) orelse return .call_loop_obligation_missing;
+                if (self.callLoopAuthorityBlockReason(child, dependency.loop_vc_sha256)) |reason| return reason;
+            },
+            else => {},
+        }
+        return null;
+    }
+
+    fn loopArtifactAuthorityBlockReason(self: ObligationSet) ?ArtifactBlockReason {
+        for (self.loop_summaries) |summary| {
+            if (!self.loopSummaryRequiresLeanCertificate(summary.id)) continue;
+            if (self.loopSummaryArtifactAuthorityBlockReason(summary)) |reason| return reason;
+        }
+        return null;
+    }
+
+    pub fn loopSummaryArtifactAuthorityBlockReason(
+        self: ObligationSet,
+        summary: LoopSummaryRow,
+    ) ?ArtifactBlockReason {
+        for (summary.preheader_timeline) |event| if (event.payload == .indexed_region_read) {
+            return .dynamic_sequence_authority_unreviewed;
+        };
+        if (self.timelineArtifactAuthorityBlockReason(summary, summary.preheader_timeline)) |reason| return reason;
+        for (summary.edges) |edge| {
+            if (edge.return_value != null) if (self.callLoopAuthorityBlockReason(summary, null)) |reason| return reason;
+            if (self.timelineArtifactAuthorityBlockReason(summary, edge.timeline)) |reason| return reason;
+            for ([_][]const FormulaRef{
+                summary.init_formulas,
+                summary.invariant_formulas,
+                summary.post_formulas,
+            }) |formulas| for (formulas) |formula| if (self.formulaUsesIndexedRead(
+                edge.timeline,
+                formula,
+            )) return .loop_indexed_region_read_formula_unreviewed;
+            for (edge.next_state) |binding| if (self.formulaUsesIndexedRead(
+                edge.timeline,
+                binding.value,
+            )) return .loop_indexed_region_read_formula_unreviewed;
+            for (edge.target_formulas) |formula| if (self.formulaUsesIndexedRead(
+                edge.timeline,
+                formula,
+            )) return .loop_indexed_region_read_formula_unreviewed;
+        }
+        return null;
+    }
+
+    fn formulaUsesIndexedRead(
+        self: ObligationSet,
+        timeline: []const LoopTimelineEvent,
+        formula: FormulaRef,
+    ) bool {
+        for (timeline) |event| if (event.payload == .indexed_region_read) {
+            if (self.formulaReferencesFreeVar(formula, event.payload.indexed_region_read.result)) return true;
+        };
+        return false;
+    }
+
+    fn expressionUsesIndexedRead(
+        self: ObligationSet,
+        timeline: []const LoopTimelineEvent,
+        expression: LoopFormulaExpr,
+    ) bool {
+        if (self.formulaUsesIndexedRead(timeline, expression.formula)) return true;
+        for (expression.read_results) |id| for (timeline) |event| switch (event.payload) {
+            .indexed_region_read => |read| if (freeVarIdEql(id, read.result)) return true,
+            else => {},
+        };
+        return false;
+    }
+
+    fn locationUsesIndexedRead(
+        self: ObligationSet,
+        timeline: []const LoopTimelineEvent,
+        location: LoopStorageLocationExpr,
+    ) bool {
+        for (location.projections) |projection| switch (projection) {
+            .field => {},
+            .fixed_index => |fixed| if (self.expressionUsesIndexedRead(timeline, fixed.index.value)) return true,
+            .mapping_key => |key| if (self.expressionUsesIndexedRead(timeline, key.value)) return true,
+        };
+        return false;
+    }
+
+    fn timelineArtifactAuthorityBlockReason(
+        self: ObligationSet,
+        summary: LoopSummaryRow,
+        timeline: []const LoopTimelineEvent,
+    ) ?ArtifactBlockReason {
+        for (timeline, 0..) |event, event_index| switch (event.payload) {
+            .call => {
+                if (self.callEventAuthorityBlockReason(event)) |reason| return reason;
+                if (self.callLoopAuthorityBlockReason(summary, null)) |reason| return reason;
+            },
+            .indexed_region_read => |read| {
+                const matched = for (timeline[0..event_index]) |candidate| switch (candidate.payload) {
+                    .safety_checkpoint => |checkpoint| if (checkpoint.dynamic_index_bounds and
+                        std.mem.eql(u8, candidate.structural_key, read.checkpoint_structural_key)) break true,
+                    else => {},
+                } else false;
+                if (!matched) return .dynamic_sequence_authority_unreviewed;
+                if (self.expressionUsesIndexedRead(timeline, read.index)) {
+                    return .loop_indexed_region_read_formula_unreviewed;
+                }
+            },
+            .storage_read => |read| {
+                if (self.locationUsesIndexedRead(timeline, read.location)) {
+                    return .loop_indexed_region_read_formula_unreviewed;
+                }
+                if (read.location.projections.len != 0 and
+                    !self.reviewedStorageProjection(summary, timeline, read.location)) return .storage_projection_authority_unreviewed;
+            },
+            .storage_write => |write| {
+                if (self.locationUsesIndexedRead(timeline, write.location)) {
+                    return .loop_indexed_region_read_formula_unreviewed;
+                }
+                if (write.location.projections.len != 0 and
+                    !self.reviewedStorageProjection(summary, timeline, write.location)) return .storage_projection_authority_unreviewed;
+            },
+            .summary_dependency => |dependency| {
+                if (dependency.result_bindings != null) {
+                    if (self.callEventAuthorityBlockReason(event)) |reason| return reason;
+                    if (self.callLoopAuthorityBlockReason(summary, null)) |reason| return reason;
+                    continue;
+                }
+                if (self.loopSummaryClosureHasStorageEvents(
+                    dependency.summary_id,
+                    self.loop_summaries.len + 1,
+                )) return .storage_child_frame_authority_unreviewed;
+            },
+            .safety_checkpoint => |checkpoint| {
+                for (checkpoint.formulas) |formula| if (self.expressionUsesIndexedRead(timeline, formula)) {
+                    return .loop_indexed_region_read_formula_unreviewed;
+                };
+                if (checkpoint.dynamic_index_bounds) {
+                    const reviewed = for (timeline) |candidate| switch (candidate.payload) {
+                        .indexed_region_read => |read| if (std.mem.eql(
+                            u8,
+                            read.checkpoint_structural_key,
+                            event.structural_key,
+                        )) break true,
+                        else => {},
+                    } else false;
+                    if (!reviewed) return .dynamic_sequence_authority_unreviewed;
+                }
+            },
+            .path_assumption => |path| for (path.formulas) |formula| {
+                if (self.expressionUsesIndexedRead(timeline, formula)) {
+                    return .loop_indexed_region_read_formula_unreviewed;
+                }
+            },
+        };
+        return null;
+    }
+
+    fn reviewedStorageProjection(
+        self: ObligationSet,
+        summary: LoopSummaryRow,
+        timeline: []const LoopTimelineEvent,
+        location: LoopStorageLocationExpr,
+    ) bool {
+        if (location.projections.len != 1) return false;
+        return switch (location.projections[0]) {
+            .mapping_key => summary.preheader_projection_complete and
+                self.reviewedMappingProjection(summary, location),
+            // The bounds validator ties this exact projected index and extent
+            // to a preceding source-owned checkpoint in the same timeline.
+            // An empty incomplete preheader denotes an unconstrained current
+            // store in both provers; no entry-store equality is assumed.
+            .fixed_index => (summary.preheader_timeline.len == 0 or
+                summary.preheader_projection_complete) and
+                self.fixedIndexBoundsReason(timeline) == null,
+            .field => false,
+        };
+    }
+
+    fn reviewedMappingProjection(
+        self: ObligationSet,
+        summary: LoopSummaryRow,
+        location: LoopStorageLocationExpr,
+    ) bool {
+        if (location.projections.len != 1) return false;
+        const key = switch (location.projections[0]) {
+            .mapping_key => |key| key,
+            .field, .fixed_index => return false,
+        };
+        if (key.value.read_results.len != 0) return false;
+        const term_id = switch (key.value.formula) {
+            .term => |id| id,
+            .origin_value => return false,
+        };
+        if (term_id >= self.terms.len) return false;
+        const id = switch (self.terms[term_id]) {
+            .variable => |variable| switch (variable) {
+                .free => |free| free.id,
+                .bound => return false,
+            },
+            else => return false,
+        };
+        for (summary.context_variables) |variable| {
+            if (variable.id) |context_id| {
+                if (freeVarIdEql(context_id, id)) return true;
+            }
+        }
+        return false;
+    }
+
+    fn loopSummaryRequiresLeanCertificate(self: ObligationSet, summary_id: Id) bool {
+        for (self.queries) |query| {
+            if (query.loop_summary_id == summary_id and
+                query.kind == .loop_induction and
+                query.artifact_policy == .blocks_verified_artifacts and
+                query.proof_requirement == .lean_certificate) return true;
+        }
+        return false;
+    }
+
+    fn loopSummaryClosureHasStorageEvents(
+        self: ObligationSet,
+        summary_id: Id,
+        remaining: usize,
+    ) bool {
+        if (remaining == 0) return true;
+        const summary = findById(self.loop_summaries, summary_id) orelse return true;
+        for (summary.edges) |edge| for (edge.timeline) |event| switch (event.payload) {
+            .storage_read, .storage_write, .call => return true,
+            .summary_dependency => |dependency| if (self.loopSummaryClosureHasStorageEvents(
+                dependency.summary_id,
+                remaining - 1,
+            )) return true,
+            .path_assumption, .safety_checkpoint, .indexed_region_read => {},
+        };
+        return false;
     }
 
     pub fn hasLeanCertificateRequirements(self: ObligationSet) bool {
@@ -104,12 +479,53 @@ pub const ObligationSet = struct {
         }
         for (self.loop_summaries) |summary| {
             for (summary.init_formulas) |formula| try self.validateFormulaRef(formula);
-            if (summary.guard_formula) |formula| try self.validateFormulaRef(formula);
             for (summary.invariant_formulas) |formula| try self.validateFormulaRef(formula);
-            for (summary.step_assignments) |assignment| try self.validateFormulaRef(assignment.value);
-            for (summary.body_safety_formulas) |formula| try self.validateFormulaRef(formula);
+            for (summary.header_facts) |fact| try self.validateFormulaRef(fact.formula);
+            try self.validateLoopTimelineTermReferences(summary.preheader_timeline);
+            for (summary.edges) |edge| {
+                if (edge.return_value) |value| try self.validateCallReturn(edge.timeline, value);
+                for (edge.target_formulas) |formula| try self.validateFormulaRef(formula);
+                for (edge.next_state) |binding| try self.validateFormulaRef(binding.value);
+                try self.validateLoopTimelineTermReferences(edge.timeline);
+                for (edge.next_state) |binding| {
+                    try self.validateLoopFormulaExpr(edge.timeline, edge.timeline.len, .{
+                        .formula = binding.value,
+                        .read_results = binding.read_results,
+                    });
+                }
+            }
             for (summary.post_formulas) |formula| try self.validateFormulaRef(formula);
         }
+        for (self.function_summaries) |summary| for (summary.paths) |path| {
+            try self.validateLoopTimelineTermReferences(path.timeline);
+            try self.validateCallReturn(path.timeline, path.returns);
+        };
+    }
+
+    fn validateCallReturn(self: ObligationSet, events: []const LoopTimelineEvent, value: CallReturnExpr) !void {
+        if (value == .direct) for (value.direct.values) |item| try self.validateLoopFormulaExpr(events, events.len, item.value);
+    }
+
+    fn validateLoopTimelineTermReferences(
+        self: ObligationSet,
+        events: []const LoopTimelineEvent,
+    ) !void {
+        for (events, 0..) |event, event_index| switch (event.payload) {
+            .path_assumption => |path| for (path.formulas) |formula| {
+                try self.validateLoopFormulaExpr(events, event_index, formula);
+            },
+            .safety_checkpoint => |checkpoint| for (checkpoint.formulas) |formula| {
+                try self.validateLoopFormulaExpr(events, event_index, formula);
+            },
+            .storage_read => |read| try self.validateLoopStorageLocation(events, event_index, read.location),
+            .indexed_region_read => |read| try self.validateLoopFormulaExpr(events, event_index, read.index),
+            .storage_write => |write| {
+                try self.validateLoopStorageLocation(events, event_index, write.location);
+                try self.validateLoopFormulaExpr(events, event_index, write.value);
+            },
+            .summary_dependency => {},
+            .call => |invocation| for (invocation.arguments) |argument| try self.validateLoopFormulaExpr(events, event_index, argument.value),
+        };
     }
 
     fn validateKindTermRefs(self: ObligationSet, kind: Kind) !void {
@@ -135,8 +551,176 @@ pub const ObligationSet = struct {
         }
     }
 
+    fn validateLoopStorageLocation(
+        self: ObligationSet,
+        events: []const LoopTimelineEvent,
+        event_index: usize,
+        location: LoopStorageLocationExpr,
+    ) !void {
+        for (location.projections) |projection| switch (projection) {
+            .field => {},
+            .fixed_index => |fixed| try self.validateLoopFormulaExpr(
+                events,
+                event_index,
+                fixed.index.value,
+            ),
+            .mapping_key => |key| try self.validateLoopFormulaExpr(events, event_index, key.value),
+        };
+    }
+
+    pub fn fixedIndexBoundsReason(
+        self: ObligationSet,
+        events: []const LoopTimelineEvent,
+    ) ?LoopUnsupportedReason {
+        return timeline_validation.fixedIndexBoundsReason(self.terms, events);
+    }
+
+    fn validateLoopFormulaExpr(
+        self: ObligationSet,
+        events: []const LoopTimelineEvent,
+        event_index: usize,
+        expression: LoopFormulaExpr,
+    ) !void {
+        try self.validateFormulaRef(expression.formula);
+        for (expression.read_results) |read_id| {
+            if (!self.formulaReferencesFreeVar(expression.formula, read_id)) {
+                return error.InvalidTimelineReadReference;
+            }
+        }
+        for (events) |event| for (0..loopTimelineReadCount(event.payload)) |result_index| if (loopTimelineReadId(event.payload, result_index)) |read_id| {
+            if (!self.formulaReferencesFreeVar(expression.formula, read_id)) continue;
+            if (!freeVarInList(read_id, expression.read_results)) {
+                return error.InvalidTimelineReadReference;
+            }
+            if (event.id >= event_index) return error.InvalidTimelineReadReference;
+        };
+    }
+
+    pub fn formulaReferencesFreeVar(self: ObligationSet, formula: FormulaRef, target: FreeVarId) bool {
+        return switch (formula) {
+            .origin_value => false,
+            .term => |id| self.termReferencesFreeVar(id, target, self.terms.len + 1),
+        };
+    }
+
+    pub fn collectFormulaFreeVars(
+        self: ObligationSet,
+        allocator: std.mem.Allocator,
+        formula: FormulaRef,
+        ids: *std.ArrayList(FreeVarId),
+    ) !void {
+        if (formula == .term) try self.collectTermFreeVars(allocator, formula.term, ids, self.terms.len + 1);
+    }
+
+    pub fn freeVarType(self: ObligationSet, id: FreeVarId) ?TypeRef {
+        for (self.terms) |term| if (term == .variable and term.variable == .free and
+            freeVarIdEql(term.variable.free.id, id)) return term.variable.free.ty;
+        return null;
+    }
+
+    fn collectTermFreeVars(
+        self: ObligationSet,
+        allocator: std.mem.Allocator,
+        id: TermId,
+        ids: *std.ArrayList(FreeVarId),
+        fuel: usize,
+    ) !void {
+        if (fuel == 0 or id >= self.terms.len) return error.InvalidTermReference;
+        switch (self.terms[id]) {
+            .variable => |variable| if (variable == .free) {
+                for (ids.items) |existing| if (freeVarIdEql(existing, variable.free.id)) return;
+                try ids.append(allocator, variable.free.id);
+            },
+            .old => |operand| try self.collectTermFreeVars(allocator, operand, ids, fuel - 1),
+            .unary => |unary| try self.collectTermFreeVars(allocator, unary.operand, ids, fuel - 1),
+            .binary => |binary| {
+                try self.collectTermFreeVars(allocator, binary.lhs, ids, fuel - 1);
+                try self.collectTermFreeVars(allocator, binary.rhs, ids, fuel - 1);
+            },
+            .refinement_predicate => |predicate| {
+                try self.collectTermFreeVars(allocator, predicate.value, ids, fuel - 1);
+                for (predicate.args) |arg| try self.collectTermFreeVars(allocator, arg, ids, fuel - 1);
+            },
+            .quantified => |quantified| {
+                if (quantified.condition) |condition| try self.collectTermFreeVars(allocator, condition, ids, fuel - 1);
+                try self.collectTermFreeVars(allocator, quantified.body, ids, fuel - 1);
+            },
+            .bool_lit, .int_lit, .result, .place_read, .invocation_caller => {},
+        }
+    }
+
+    /// Exact one-to-one match used by the later automatic-authority task.
+    /// Callers must first validate the set's term references; this matcher
+    /// deliberately compares canonical IDs rather than revalidating them.
+    /// Defining it here does not relax the current assumption policy.
+    pub fn loopHeaderFactsMatchAssumptions(
+        self: ObligationSet,
+        summary: LoopSummaryRow,
+        assumption_ids: []const Id,
+    ) bool {
+        if (loopHeaderFactsReason(summary.header_facts) != null) return false;
+        var expected: usize = 0;
+        for (summary.header_facts) |fact| switch (fact.source_kind) {
+            .path_assume => {},
+            .unresolved => return false,
+            .function_requires => {
+                const id = fact.assumption_id orelse return false;
+                if (expected >= assumption_ids.len or assumption_ids[expected] != id) return false;
+                const assumption = findById(self.assumptions, id) orelse return false;
+                if (assumption.kind != .requires) return false;
+                const assumption_term = switch (assumption.formula orelse return false) {
+                    .term => |term| term,
+                    .origin_value => return false,
+                };
+                const fact_term = switch (fact.formula) {
+                    .term => |term| term,
+                    .origin_value => return false,
+                };
+                if (assumption_term != fact_term or assumption.owner != .function or
+                    summary.owner != .statement or
+                    !std.mem.eql(u8, assumption.owner.function.name, summary.owner.statement.function_name))
+                    return false;
+                expected += 1;
+            },
+        };
+        return expected == assumption_ids.len;
+    }
+
+    fn termReferencesFreeVar(self: ObligationSet, id: TermId, target: FreeVarId, fuel: usize) bool {
+        if (fuel == 0 or id >= self.terms.len) return false;
+        return switch (self.terms[id]) {
+            .variable => |variable| switch (variable) {
+                .free => |free| freeVarIdEql(free.id, target),
+                .bound => false,
+            },
+            .old => |operand| self.termReferencesFreeVar(operand, target, fuel - 1),
+            .unary => |unary| self.termReferencesFreeVar(unary.operand, target, fuel - 1),
+            .binary => |binary| self.termReferencesFreeVar(binary.lhs, target, fuel - 1) or
+                self.termReferencesFreeVar(binary.rhs, target, fuel - 1),
+            .refinement_predicate => |predicate| blk: {
+                if (self.termReferencesFreeVar(predicate.value, target, fuel - 1)) break :blk true;
+                for (predicate.args) |arg| {
+                    if (self.termReferencesFreeVar(arg, target, fuel - 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .quantified => |quantified| blk: {
+                if (quantified.condition) |condition| {
+                    if (self.termReferencesFreeVar(condition, target, fuel - 1)) break :blk true;
+                }
+                break :blk self.termReferencesFreeVar(quantified.body, target, fuel - 1);
+            },
+            .bool_lit, .int_lit, .result, .place_read, .invocation_caller => false,
+        };
+    }
+
     fn validateTerm(self: ObligationSet, term: Term) !void {
         switch (term) {
+            .invocation_caller => |caller| {
+                if (!caller.validType()) return error.InvalidTermReference;
+                if (caller.function_id == 0 or findById(self.function_summaries, caller.function_id) == null)
+                    return error.InvalidDependency;
+            },
             .bool_lit,
             .int_lit,
             .variable,
@@ -165,6 +749,19 @@ pub const ObligationSet = struct {
     }
 
     pub fn validateIdReferences(self: ObligationSet) !void {
+        for (self.function_summaries, 0..) |summary, index| {
+            for (self.function_summaries[0..index]) |previous| if (previous.id == summary.id) return error.InvalidDependency;
+            try self.validateFunctionSummary(summary);
+        }
+        for (self.loop_summaries, 0..) |summary, summary_index| {
+            for (self.loop_summaries[0..summary_index]) |previous| {
+                if (previous.id == summary.id) return error.InvalidDependency;
+            }
+            try self.validateLoopSummaryDependencies(summary);
+            try self.validateLoopQueryIds(summary);
+            try self.validateCallReferences(summary.preheader_timeline);
+            for (summary.edges) |edge| try self.validateCallReferences(edge.timeline);
+        }
         for (self.obligations) |item| {
             for (item.dependencies) |id| {
                 if (!self.obligationIdExists(id)) return error.InvalidDependency;
@@ -189,7 +786,10 @@ pub const ObligationSet = struct {
                 if (!self.obligationIdExists(id)) return error.InvalidDependency;
             }
         }
-        for (self.queries) |query| {
+        for (self.queries, 0..) |query, query_index| {
+            for (self.queries[0..query_index]) |candidate| {
+                if (candidate.id == query.id) return error.InvalidDependency;
+            }
             for (query.obligation_ids) |id| {
                 if (!self.obligationIdExists(id)) return error.InvalidDependency;
             }
@@ -204,10 +804,226 @@ pub const ObligationSet = struct {
                 }
             }
             if (query.loop_summary_id) |loop_summary_id| {
-                if (query.kind != .loop_induction and query.kind != .loop_invariant_post) {
+                if (query.kind != .loop_induction and
+                    query.kind != .loop_base and
+                    query.kind != .loop_invariant_step and
+                    query.kind != .loop_body_safety and
+                    query.kind != .loop_invariant_post)
+                {
                     return error.InvalidDependency;
                 }
                 if (!self.loopSummaryIdExists(loop_summary_id)) return error.InvalidDependency;
+                if (query.loop_vc_sha256 != null) {
+                    if (query.kind == .loop_base and query.loop_edge_id != null) return error.InvalidDependency;
+                    if (query.kind != .loop_base and query.kind != .loop_induction and query.loop_edge_id == null) {
+                        return error.InvalidDependency;
+                    }
+                }
+            }
+            if (query.function_summary_id) |id| {
+                const function = findById(self.function_summaries, id) orelse return error.InvalidDependency;
+                if (query.loop_summary_id != null or query.kind != .obligation or query.function_vc_sha256 == null or
+                    !functionOwnerEqual(query.owner, function.owner) or !equalIdSlices(query.assumption_ids, function.assumption_ids)) return error.InvalidDependency;
+                const target = query.discharges_query_id orelse query.id;
+                if (!containsId(function.query_ids.safety, target) and function.query_ids.certificate != target) return error.InvalidDependency;
+            } else if (query.function_vc_sha256 != null) return error.InvalidDependency;
+        }
+    }
+
+    fn validateFunctionSummary(self: ObligationSet, row: FunctionSummaryRow) !void {
+        if (row.owner != .function or row.structural_key.len == 0 or row.outcomes.len == 0 or row.paths.len == 0) return error.InvalidFunctionShape;
+        for (row.parameters, 0..) |parameter, index| {
+            if (parameter.id == null or parameter.index != index or !typeRefExplicit(parameter.ty)) return error.InvalidCallSignature;
+            for (row.parameters[0..index]) |previous| if (freeVarIdEql(previous.id.?, parameter.id.?)) return error.InvalidCallSignature;
+        }
+        for (row.outcomes, 0..) |outcome, index| {
+            for (outcome.types) |ty| if (!typeRefExplicit(ty)) return error.InvalidCallSignature;
+            for (row.outcomes[0..index]) |previous| if (std.meta.eql(previous.outcome, outcome.outcome)) return error.InvalidCallSignature;
+        }
+        var required: usize = 0;
+        for (self.assumptions) |assumption| if (assumption.kind == .requires and functionOwnerEqual(assumption.owner, row.owner)) {
+            if (required >= row.assumption_ids.len or row.assumption_ids[required] != assumption.id or assumption.formula == null) return error.InvalidDependency;
+            required += 1;
+        };
+        if (required != row.assumption_ids.len) return error.InvalidDependency;
+        if (row.entry_scope) |scope| if (scope.len == 0) return error.InvalidDependency;
+        var invariants: usize = 0;
+        for (self.obligations) |fact| if (row.ownsEntryInvariant(fact)) {
+            if (invariants >= row.entry_invariant_ids.len or row.entry_invariant_ids[invariants] != fact.id) return error.InvalidDependency;
+            invariants += 1;
+        };
+        if (invariants != row.entry_invariant_ids.len) return error.InvalidDependency;
+        for (row.write_footprint) |place| if (place.region != .storage or place.root.len == 0) return error.InvalidFunctionShape;
+        for (row.paths, 0..) |path, index| {
+            if (path.id != index or path.structural_key.len == 0) return error.InvalidFunctionShape;
+            for (path.timeline) |event| if (event.payload == .summary_dependency and
+                event.payload.summary_dependency.result_bindings == null) return error.InvalidFunctionShape;
+            for (row.paths[0..index]) |previous| if (std.mem.eql(u8, previous.structural_key, path.structural_key)) return error.InvalidFunctionShape;
+            if (timeline_validation.scopedTimelineReason(row.parameters, &.{}, path.timeline, false, true) != null or
+                timeline_validation.returnReason(path.timeline, path.returns) != null or self.fixedIndexBoundsReason(path.timeline) != null) return error.InvalidFunctionShape;
+            try self.validateCallReferences(path.timeline);
+            if (path.returns == .direct) {
+                const direct = path.returns.direct;
+                const types = callOutcomeTypes(row, direct.outcome) orelse return error.InvalidCallSignature;
+                if (types.len != direct.values.len) return error.InvalidCallSignature;
+                for (types, direct.values) |ty, value| if (!typeRefEqual(ty, value.ty)) return error.InvalidCallSignature;
+            }
+        }
+    }
+
+    fn validateCallReferences(self: ObligationSet, events: []const LoopTimelineEvent) !void {
+        for (events) |event| if (event.payload == .summary_dependency) {
+            const dependency = event.payload.summary_dependency;
+            if (dependency.result_bindings) |bindings| {
+                const child = findById(self.loop_summaries, dependency.summary_id) orelse return error.InvalidDependency;
+                for (bindings) |binding| {
+                    if (binding.index >= child.variables.len or !typeRefEqual(binding.ty, child.variables[binding.index].ty))
+                        return error.InvalidCallSignature;
+                }
+            }
+        } else if (event.payload == .call) {
+            const invocation = event.payload.call;
+            const callee = findById(self.function_summaries, invocation.callee_summary_id) orelse return error.InvalidDependency;
+            const types = callOutcomeTypes(callee, invocation.outcome) orelse return error.InvalidCallSignature;
+            if (invocation.arguments.len != callee.parameters.len or invocation.results.len != types.len) return error.InvalidCallSignature;
+            for (invocation.arguments, callee.parameters) |argument, parameter| if (!typeRefEqual(argument.ty, parameter.ty)) return error.InvalidCallSignature;
+            for (invocation.results, types) |result, ty| if (!typeRefEqual(result.ty, ty)) return error.InvalidCallSignature;
+        };
+    }
+
+    fn validateLoopSummaryDependencies(self: ObligationSet, summary: LoopSummaryRow) !void {
+        for (summary.edges) |edge| {
+            for (edge.timeline) |event| switch (event.payload) {
+                .summary_dependency => |dependency| {
+                    // Loop summaries are collected outer-before-inner. Requiring a
+                    // strict forward reference both pins that ownership order and
+                    // makes dependency cycles unrepresentable.
+                    if (dependency.summary_id <= summary.id) return error.InvalidDependency;
+                    if (!dependency.targetSupported()) return error.InvalidDependency;
+                    const inner = findById(self.loop_summaries, dependency.summary_id) orelse
+                        return error.InvalidDependency;
+                    if (!inner.projectionSupported()) return error.InvalidDependency;
+
+                    if (inner.query_ids.induction.len != 1) return error.InvalidDependency;
+                    const induction = findById(self.queries, inner.query_ids.induction[0]) orelse
+                        return error.InvalidDependency;
+                    if (induction.kind != .loop_induction or induction.loop_summary_id != inner.id) {
+                        return error.InvalidDependency;
+                    }
+                    const digest = induction.loop_vc_sha256 orelse
+                        return error.InvalidDependency;
+                    if (!std.mem.eql(u8, &digest, &dependency.loop_vc_sha256)) {
+                        return error.InvalidDependency;
+                    }
+
+                    var target_exists = false;
+                    for (inner.edges) |inner_edge| {
+                        if (inner_edge.target == dependency.target) {
+                            target_exists = true;
+                            break;
+                        }
+                    }
+                    if (!target_exists) return error.InvalidDependency;
+                },
+                else => {},
+            };
+        }
+    }
+
+    fn validateLoopQueryIds(self: ObligationSet, summary: LoopSummaryRow) !void {
+        // Unsupported summaries carry diagnostic-only census rows and no proof
+        // authority. Exact query inventory is mandatory once the VC is a
+        // production certificate target.
+        if (!summary.projectionSupported()) return;
+        if (summary.query_ids.base.len != 1 or summary.query_ids.induction.len != 1) {
+            return error.InvalidDependency;
+        }
+        try self.validateLoopQueryIdList(summary, summary.query_ids.base, .loop_base, null);
+        try self.validateLoopQueryIdList(summary, summary.query_ids.induction, .loop_induction, null);
+
+        var expected_step: usize = 0;
+        var expected_post: usize = 0;
+        if (summary.query_ids.body_safety.len != summary.edges.len) return error.InvalidDependency;
+        for (summary.edges) |edge| switch (edge.target orelse return error.InvalidDependency) {
+            .backedge => expected_step += 1,
+            else => expected_post += 1,
+        };
+        if (summary.query_ids.step.len != expected_step or summary.query_ids.post.len != expected_post) {
+            return error.InvalidDependency;
+        }
+
+        for (summary.edges, summary.query_ids.body_safety) |edge, id| {
+            try self.validateLoopQueryIdList(summary, &.{id}, .loop_body_safety, edge.id);
+        }
+        var step_index: usize = 0;
+        var post_index: usize = 0;
+        for (summary.edges) |edge| switch (edge.target orelse return error.InvalidDependency) {
+            .backedge => {
+                try self.validateLoopQueryIdList(
+                    summary,
+                    &.{summary.query_ids.step[step_index]},
+                    .loop_invariant_step,
+                    edge.id,
+                );
+                step_index += 1;
+            },
+            else => {
+                try self.validateLoopQueryIdList(
+                    summary,
+                    &.{summary.query_ids.post[post_index]},
+                    .loop_invariant_post,
+                    edge.id,
+                );
+                post_index += 1;
+            },
+        };
+
+        if (summary.projectionSupported()) {
+            const induction = findById(self.queries, summary.query_ids.induction[0]) orelse
+                return error.InvalidDependency;
+            const digest = induction.loop_vc_sha256 orelse return error.InvalidDependency;
+            for (self.queries) |query| {
+                if (query.loop_summary_id != summary.id) continue;
+                if (!equalIdSlices(query.assumption_ids, induction.assumption_ids)) {
+                    return error.InvalidDependency;
+                }
+                if (query.loop_vc_sha256 == null or !std.mem.eql(u8, &digest, &query.loop_vc_sha256.?)) {
+                    return error.InvalidDependency;
+                }
+            }
+        }
+    }
+
+    fn validateLoopQueryIdList(
+        self: ObligationSet,
+        summary: LoopSummaryRow,
+        ids: []const Id,
+        kind: VerificationQueryKind,
+        edge_id: ?u32,
+    ) !void {
+        var previous: ?Id = null;
+        for (ids) |id| {
+            if (previous) |value| if (id <= value) return error.InvalidDependency;
+            previous = id;
+            const query = findById(self.queries, id) orelse return error.InvalidDependency;
+            if (query.kind != kind or query.loop_summary_id != summary.id or query.loop_edge_id != edge_id) {
+                return error.InvalidDependency;
+            }
+            if (query.loop_vc_sha256 != null) {
+                if (kind == .loop_induction) {
+                    if (query.backend != .unspecified or
+                        query.artifact_policy != .blocks_verified_artifacts or
+                        query.proof_requirement != .lean_certificate or
+                        query.result != null)
+                    {
+                        return error.InvalidDependency;
+                    }
+                } else if (query.backend != .z3 or
+                    query.artifact_policy != .blocks_verified_artifacts or
+                    query.proof_requirement != .backend_result)
+                {
+                    return error.InvalidDependency;
+                }
             }
         }
     }
@@ -255,6 +1071,10 @@ pub const ObligationSet = struct {
 
     fn queryUnknownDischargedByLean(self: ObligationSet, query: VerificationQuery) bool {
         if (query.backend != .z3) return false;
+        // LoopVC authorization requires independent success from both proof
+        // backends. A Lean certificate may never replace an inconclusive Z3
+        // result for a loop-owned query.
+        if (query.loop_summary_id != null or query.function_summary_id != null) return false;
         if (query.obligation_ids.len == 0) return false;
         return self.hasSuccessfulLeanProofForQuery(query);
     }
@@ -263,9 +1083,7 @@ pub const ObligationSet = struct {
         for (self.queries) |candidate| {
             if (candidate.backend != .lean) continue;
             if (candidate.discharges_query_id != target.id) continue;
-            if (candidate.loop_summary_id != target.loop_summary_id) continue;
-            if (!equalIdSlices(candidate.obligation_ids, target.obligation_ids)) continue;
-            if (!equalIdSlices(candidate.assumption_ids, target.assumption_ids)) continue;
+            if (!proofTargetIdentityEqual(candidate, target)) continue;
             if (!self.queryHasValidProofArtifact(candidate)) continue;
             const result = candidate.result orelse continue;
             if (querySucceeded(candidate, result)) return true;
@@ -277,7 +1095,7 @@ pub const ObligationSet = struct {
         if (query.backend != .lean) return false;
         const artifact_id = query.proof_artifact_id orelse return false;
         const artifact = self.proofArtifactById(artifact_id) orelse return false;
-        return equalIdSlices(artifact.obligation_ids, query.obligation_ids);
+        return ownerEqual(artifact.owner, query.owner) and equalIdSlices(artifact.obligation_ids, query.obligation_ids);
     }
 };
 
@@ -299,6 +1117,7 @@ pub const Obligation = struct {
 };
 
 pub const VerificationQuery = struct {
+    lifecycle_use: ?@import("ora_prepared_query_row").LifecycleQueryUse = null,
     id: Id,
     owner: Owner,
     source: SourceRef,
@@ -323,6 +1142,13 @@ pub const VerificationQuery = struct {
     proof_artifact_id: ?Id = null,
     discharges_query_id: ?Id = null,
     loop_summary_id: ?Id = null,
+    loop_edge_id: ?u32 = null,
+    /// SHA-256 of the canonical LoopVC data, its term table, and the exact
+    /// assumptions used by the loop-induction target.
+    loop_vc_sha256: ?[32]u8 = null,
+    /// Compiler-owned FunctionVC identity; never a LoopVC or solver hash.
+    function_summary_id: ?Id = null,
+    function_vc_sha256: ?[32]u8 = null,
     result: ?VerificationQueryResult = null,
 };
 
@@ -346,6 +1172,9 @@ pub const VerificationBackend = enum(u8) {
 pub const VerificationQueryKind = enum(u8) {
     base,
     obligation,
+    /// Canonical LoopVC base obligation. Unlike the verifier-wide `base`
+    /// satisfiability query, success is UNSAT for its counterexample formula.
+    loop_base,
     /// Compiler-owned proof target for the whole Base/Step/Safety/Exit
     /// induction bundle. It is independent of any one Z3 query row.
     loop_induction,
@@ -388,6 +1217,7 @@ pub const VerificationQueryStatus = enum(u8) {
 pub const VerificationQuerySummary = struct {
     base: u32 = 0,
     obligation: u32 = 0,
+    loop_base: u32 = 0,
     loop_induction: u32 = 0,
     loop_invariant_step: u32 = 0,
     loop_body_safety: u32 = 0,
@@ -399,6 +1229,7 @@ pub const VerificationQuerySummary = struct {
         switch (kind) {
             .base => self.base += 1,
             .obligation => self.obligation += 1,
+            .loop_base => self.loop_base += 1,
             .loop_induction => self.loop_induction += 1,
             .loop_invariant_step => self.loop_invariant_step += 1,
             .loop_body_safety => self.loop_body_safety += 1,
@@ -474,6 +1305,8 @@ pub const Phase = enum(u8) {
 pub const ArtifactPolicy = enum(u8) {
     blocks_verified_artifacts,
     diagnostic_only,
+    /// Parameter GuardViolate SAT retains its runtime check; it is not a proof.
+    runtime_checked_input,
 };
 
 pub const ProofRequirement = enum(u8) {
@@ -493,7 +1326,54 @@ pub const ArtifactDecision = union(enum) {
     }
 };
 
+pub fn lifecycleBlockReason(err: anyerror) ArtifactBlockReason {
+    return switch (err) {
+        error.MissingLifecycleCustody => .lifecycle_custody_missing,
+        error.LifecycleChecksNotRetained => .lifecycle_checks_not_retained,
+        error.LifecycleInputsMismatch => .lifecycle_digest_mismatch,
+        error.LifecycleAxiomMismatch => .lifecycle_axiom_mismatch,
+        error.MissingLifecycleQuery, error.LifecycleQueryMissing => .lifecycle_query_missing,
+        error.DuplicateLifecycleQuery => .lifecycle_query_duplicate,
+        error.ForeignLifecycleQuery => .lifecycle_query_foreign,
+        error.LifecycleQueryFailed => .lifecycle_query_failed,
+        error.LifecycleQueryUnknown => .lifecycle_query_unknown,
+        error.LifecycleQueryVacuous => .lifecycle_query_vacuous,
+        error.LifecycleQueryDegraded => .lifecycle_query_degraded,
+        error.IncompleteLifecycleProofInputs => .lifecycle_inputs_incomplete,
+        error.MissingLifecycleUse => .lifecycle_use_missing,
+        error.LifecycleUseMismatch => .lifecycle_use_mismatch,
+        error.DuplicateLifecycleUse => .lifecycle_use_duplicate,
+        error.ForeignLifecycleUse => .lifecycle_use_foreign,
+        error.LifecycleSourceBindingMissing => .lifecycle_source_binding_missing,
+        else => .lifecycle_identity_mismatch,
+    };
+}
+
 pub const ArtifactBlockReason = enum(u8) {
+    lifecycle_custody_missing,
+    lifecycle_checks_not_retained,
+    lifecycle_digest_mismatch,
+    lifecycle_axiom_mismatch,
+    lifecycle_query_missing,
+    lifecycle_query_duplicate,
+    lifecycle_query_foreign,
+    lifecycle_query_failed,
+    lifecycle_query_unknown,
+    lifecycle_query_vacuous,
+    lifecycle_query_degraded,
+    lifecycle_inputs_incomplete,
+    lifecycle_use_missing,
+    lifecycle_use_mismatch,
+    lifecycle_use_duplicate,
+    lifecycle_use_foreign,
+    lifecycle_identity_mismatch,
+    lifecycle_source_binding_missing,
+    call_relation_unsupported,
+    call_z3_relation_missing,
+    call_lean_custody_missing,
+    call_loop_obligation_missing,
+    call_identity_mismatch,
+    call_digest_mismatch,
     blocking_diagnostic,
     invalid_dependency,
     unknown_query,
@@ -502,6 +1382,10 @@ pub const ArtifactBlockReason = enum(u8) {
     failed_query,
     missing_proof,
     lean_required_failure,
+    storage_projection_authority_unreviewed,
+    storage_child_frame_authority_unreviewed,
+    dynamic_sequence_authority_unreviewed,
+    loop_indexed_region_read_formula_unreviewed,
     source_accounting_failure,
 };
 
@@ -569,6 +1453,7 @@ fn querySucceeded(query: VerificationQuery, result: VerificationQueryResult) boo
             else => switch (query.kind) {
                 .base, .guard_satisfy => true,
                 .obligation,
+                .loop_base,
                 .loop_induction,
                 .loop_invariant_step,
                 .loop_body_safety,
@@ -581,6 +1466,7 @@ fn querySucceeded(query: VerificationQuery, result: VerificationQueryResult) boo
             .lean => false,
             else => switch (query.kind) {
                 .obligation,
+                .loop_base,
                 .loop_invariant_step,
                 .loop_body_safety,
                 .loop_invariant_post,
@@ -646,6 +1532,34 @@ pub const BackendComponent = enum(u8) {
     artifact_policy,
 };
 
+pub const LoopHeaderFactSource = enum(u8) {
+    path_assume,
+    function_requires,
+    unresolved,
+};
+
+pub const LoopHeaderPoint = struct {
+    structural_key: []const u8,
+    block_key: []const u8,
+    position: u32,
+};
+
+pub const LoopHeaderFactValue = struct {
+    id: FreeVarId,
+    ty: TypeRef,
+};
+
+pub const LoopHeaderFactRow = struct {
+    id: u32,
+    structural_key: []const u8,
+    formula: FormulaRef,
+    source_kind: LoopHeaderFactSource,
+    source: LoopHeaderPoint,
+    target: LoopHeaderPoint,
+    stable_values: []const LoopHeaderFactValue = &.{},
+    assumption_id: ?Id = null,
+};
+
 /// Backend-neutral data required to denote a loop proof. Unresolved identities
 /// and unsupported shapes remain explicit in `unsupported_reasons`; they can
 /// never become proof targets.
@@ -660,18 +1574,156 @@ pub const LoopSummaryRow = struct {
     context_variables: []const LoopVariable = &.{},
     variables: []const LoopVariable = &.{},
     init_formulas: []const FormulaRef = &.{},
-    guard_formula: ?FormulaRef = null,
     invariant_formulas: []const FormulaRef = &.{},
-    step_assignments: []const LoopStepAssignment = &.{},
-    body_safety_formulas: []const FormulaRef = &.{},
+    header_facts: []const LoopHeaderFactRow = &.{},
+    /// Storage actions from function entry to this loop's preheader.  The
+    /// first storage-authority boundary accepts only a complete empty trace.
+    preheader_timeline: []const LoopTimelineEvent = &.{},
+    preheader_projection_complete: bool = false,
+    /// Canonical semantic edges. These are the proof authority for paths,
+    /// safety, state transition, and control outcome. Ordering is part of the
+    /// certificate identity and must already be canonical.
+    edges: []const LoopEdgeRow = &.{},
+    /// Result of comparing the independently collected structured-control
+    /// inventory with the semantic edge projection.  A proof target cannot be
+    /// armed unless the two inventories agree exactly.
+    projection_completeness: LoopProjectionCompleteness = .unavailable,
     post_formulas: []const FormulaRef = &.{},
     query_ids: LoopQueryIds = .{},
     unsupported_reasons: []const LoopUnsupportedReason = &.{},
 
     pub fn projectionSupported(self: LoopSummaryRow) bool {
-        return self.unsupported_reasons.len == 0;
+        return self.unsupported_reasons.len == 0 and self.validationReason() == null;
+    }
+
+    pub fn preheaderTimelineValidationReason(self: LoopSummaryRow) ?LoopUnsupportedReason {
+        return timeline_validation.timelineReason(self, self.preheader_timeline, false, false);
+    }
+
+    pub fn validationReason(self: LoopSummaryRow) ?LoopUnsupportedReason {
+        switch (self.projection_completeness) {
+            .complete => {},
+            .unavailable => return .loop_projection_inventory_missing,
+            .control_manifest_missing => return .loop_control_manifest_missing,
+            .control_marker_missing => return .loop_control_marker_missing,
+            .control_marker_malformed => return .loop_control_marker_malformed,
+            .control_marker_duplicate => return .loop_control_marker_duplicate,
+            .control_marker_target_mismatch => return .loop_control_marker_target_mismatch,
+            .path_mismatch => return .loop_projection_path_mismatch,
+            .effect_mismatch => return .loop_projection_effect_mismatch,
+            .binding_mismatch => return .loop_projection_binding_mismatch,
+            .target_mismatch => return .loop_projection_target_mismatch,
+            .ambiguous_identity => return .loop_projection_identity_ambiguous,
+            .unsupported_control_flow => return .loop_projection_control_flow_unsupported,
+            .unsupported_effect => return .loop_projection_effect_unsupported,
+            .path_limit_exceeded => return .loop_projection_path_limit_exceeded,
+        }
+        if (loopHeaderFactsReason(self.header_facts)) |reason| return reason;
+        if (self.variables.len == 0) return .loop_state_empty;
+        if (self.edges.len == 0) return .loop_edge_missing;
+
+        for (self.variables, 0..) |variable, index| {
+            if (variable.index != index or variable.id == null) return .loop_identity_missing;
+            for (self.variables[0..index]) |previous| {
+                if (previous.id != null and freeVarIdEql(previous.id.?, variable.id.?)) {
+                    return .loop_duplicate_state_identity;
+                }
+            }
+        }
+
+        if (self.preheaderTimelineValidationReason()) |reason| return reason;
+
+        var has_backedge = false;
+        var has_exit = false;
+        for (self.edges, 0..) |edge, edge_index| {
+            for (self.edges[0..edge_index]) |previous| {
+                if (previous.id == edge.id) return .loop_duplicate_edge_identity;
+            }
+            if (edge.id != edge_index) return .loop_edge_order_invalid;
+            if (edge.structural_key.len == 0) return .loop_projection_identity_missing;
+            for (self.edges[0..edge_index]) |previous| {
+                if (std.mem.eql(u8, previous.structural_key, edge.structural_key)) {
+                    return .loop_projection_identity_ambiguous;
+                }
+            }
+            if (edge.timeline.len == 0) return .loop_timeline_missing;
+            const target = edge.target orelse return .loop_edge_target_unresolved;
+            switch (target) {
+                .backedge => {
+                    has_backedge = true;
+                    if (edge.target_formulas.len != 0) return .loop_formula_unsupported;
+                },
+                .successor => {
+                    has_exit = true;
+                    if (edge.target_formulas.len != 0) return .loop_formula_unsupported;
+                },
+                .function_return, .error_return => has_exit = true,
+                .explicit_revert => {},
+            }
+            if (edge.next_state.len < self.variables.len) return .loop_state_binding_missing;
+            if (edge.next_state.len > self.variables.len) return .loop_state_binding_extra;
+            for (edge.next_state, self.variables, 0..) |binding, variable, binding_index| {
+                if (binding.variable_index != binding_index or binding.target == null) {
+                    return .loop_state_binding_invalid;
+                }
+                if (binding.source_key.len == 0) return .loop_state_binding_source_missing;
+                for (edge.next_state[0..binding_index]) |previous| {
+                    if (previous.target != null and freeVarIdEql(previous.target.?, binding.target.?)) {
+                        return .loop_state_binding_duplicate;
+                    }
+                }
+                if (!freeVarIdEql(binding.target.?, variable.id.?)) {
+                    return .loop_state_binding_foreign;
+                }
+            }
+            if (timeline_validation.edgeReason(self, edge)) |reason| return reason;
+        }
+        if (!has_backedge) return .loop_backedge_missing;
+        if (!has_exit) return .loop_exit_edge_missing;
+        return null;
     }
 };
+
+pub fn loopHeaderFactsReason(rows: []const LoopHeaderFactRow) ?LoopUnsupportedReason {
+    for (rows, 0..) |row, index| {
+        if (row.id != index) return .loop_header_fact_id_invalid;
+        if (index != 0 and rows[index - 1].source.position >= row.source.position)
+            return .loop_header_fact_order_invalid;
+        if (row.structural_key.len == 0 or row.source.structural_key.len == 0 or
+            row.source.block_key.len == 0 or row.target.structural_key.len == 0 or
+            row.target.block_key.len == 0) return .loop_header_fact_identity_missing;
+        for (rows[0..index]) |previous| {
+            if (std.mem.eql(u8, previous.structural_key, row.structural_key) or
+                std.mem.eql(u8, previous.source.structural_key, row.source.structural_key))
+                return .loop_header_fact_identity_duplicate;
+            if (!std.mem.eql(u8, previous.target.structural_key, row.target.structural_key) or
+                !std.mem.eql(u8, previous.target.block_key, row.target.block_key) or
+                previous.target.position != row.target.position)
+                return .loop_header_fact_target_mismatch;
+        }
+        if (row.source_kind == .unresolved) return .loop_header_fact_source_unresolved;
+        if (!std.mem.eql(u8, row.source.block_key, row.target.block_key))
+            return .loop_header_fact_block_mismatch;
+        if (row.source.position >= row.target.position) return .loop_header_fact_source_not_earlier;
+        for (row.stable_values, 0..) |value, value_index| {
+            if (!typeRefExplicit(value.ty)) return .loop_value_type_unresolved;
+            for (row.stable_values[0..value_index]) |previous| {
+                if (freeVarIdEql(previous.id, value.id)) return .loop_header_fact_value_identity_duplicate;
+            }
+        }
+        switch (row.source_kind) {
+            .function_requires => if (row.assumption_id == null) return .loop_header_fact_assumption_missing,
+            .path_assume => if (row.assumption_id != null) return .loop_header_fact_assumption_unexpected,
+            .unresolved => unreachable,
+        }
+    }
+    return null;
+}
+
+/// Loop proof claims are made about the Ora MLIR module supplied to the
+/// verifier before Ora-to-SIR conversion. The frontend, projection from this
+/// module into formal rows, and later backend lowering remain trusted.
+pub const loop_verification_boundary = "verifier_input_ora_mlir";
 
 pub const LoopKind = enum(u8) {
     scf_while,
@@ -689,8 +1741,890 @@ pub const LoopVariable = struct {
 pub const LoopStepAssignment = struct {
     variable_index: u32,
     target: ?FreeVarId = null,
+    /// Deterministic identity of the verifier-input MLIR value supplying this
+    /// post-state component on the containing structural path.
+    source_key: []const u8 = "",
     value: FormulaRef,
+    read_results: []const FreeVarId = &.{},
 };
+
+pub const LoopControlTarget = enum(u8) {
+    backedge,
+    successor,
+    function_return,
+    error_return,
+    explicit_revert,
+};
+
+pub const LoopProjectionCompleteness = enum(u8) {
+    unavailable,
+    complete,
+    control_manifest_missing,
+    control_marker_missing,
+    control_marker_malformed,
+    control_marker_duplicate,
+    control_marker_target_mismatch,
+    path_mismatch,
+    effect_mismatch,
+    binding_mismatch,
+    target_mismatch,
+    ambiguous_identity,
+    unsupported_control_flow,
+    unsupported_effect,
+    path_limit_exceeded,
+};
+
+pub const LoopStorageProjectionTag = enum(u8) {
+    field,
+    fixed_index,
+    mapping_key,
+};
+
+pub const LoopFormulaExpr = struct {
+    formula: FormulaRef,
+    /// Read-result identities referenced by this expression. The manifest
+    /// validator checks these declarations against the term DAG and rejects
+    /// foreign or forward identities.
+    read_results: []const FreeVarId = &.{},
+};
+
+pub const LoopTypedFormula = struct {
+    value: LoopFormulaExpr,
+    ty: TypeRef,
+};
+
+pub const LoopFixedIndexProjection = struct {
+    index: LoopTypedFormula,
+    /// Exact positive extent of the resolved fixed-array dimension.
+    extent: u64,
+};
+
+/// One ordered projection from a persistent storage root. Keeping field and
+/// key projections in one sequence distinguishes `array[i].field` from
+/// `field.array[i]` and keeps fixed-array and mapping domains distinct.
+pub const LoopStorageProjection = union(LoopStorageProjectionTag) {
+    field: []const u8,
+    fixed_index: LoopFixedIndexProjection,
+    mapping_key: LoopTypedFormula,
+};
+
+pub const LoopStorageLocationExpr = struct {
+    root: []const u8,
+    projections: []const LoopStorageProjection = &.{},
+    value_ty: TypeRef,
+};
+
+pub const LoopTimelineFormulaEvent = struct {
+    formulas: []const LoopFormulaExpr,
+    /// The formula is the source-owned `index < runtime length` assertion.
+    /// Its terms carry the canonical index and length identities; the MLIR
+    /// projection inventory separately binds them to the actual access.
+    dynamic_index_bounds: bool = false,
+};
+
+pub const LoopStorageReadEvent = struct {
+    result: FreeVarId,
+    location: LoopStorageLocationExpr,
+};
+
+pub const LoopIndexedRegionKind = enum(u8) { calldata, memory };
+
+pub const LoopIndexedRegionReadEvent = struct {
+    result: FreeVarId,
+    region: LoopIndexedRegionKind,
+    owner: FreeVarId,
+    index: LoopFormulaExpr,
+    element_ty: TypeRef,
+    checkpoint_structural_key: []const u8,
+};
+
+pub const LoopStorageWriteEvent = struct {
+    location: LoopStorageLocationExpr,
+    value: LoopFormulaExpr,
+};
+
+pub const CallOutcome = union(enum) { success, error_return: u32 };
+
+pub const CallOutcomeShape = struct {
+    outcome: CallOutcome,
+    types: []const TypeRef = &.{},
+};
+
+/// Each path selects one outcome of the SAME callee execution. The independent
+/// inventory must cover every source outcome; returned values are fresh caller
+/// bindings, while the callee's parameter identities stay in its own scope.
+pub const LoopCallEvent = struct {
+    callee_summary_id: Id,
+    callee_vc_sha256: [32]u8,
+    arguments: []const LoopTypedFormula = &.{},
+    outcome: CallOutcome,
+    results: []const LoopVariable = &.{},
+};
+
+pub const CallReturnExpr = union(enum) {
+    direct: struct { outcome: CallOutcome, values: []const LoopTypedFormula = &.{} },
+    /// Forward the outcome and payload produced by the terminating child loop,
+    /// retaining the storage from that very execution.
+    loop_exit,
+};
+
+pub const FunctionPathRow = struct {
+    id: u32,
+    structural_key: []const u8,
+    timeline: []const LoopTimelineEvent = &.{},
+    returns: CallReturnExpr,
+};
+
+pub const FunctionQueryIds = struct {
+    safety: []const Id = &.{},
+    certificate: ?Id = null,
+};
+
+pub const FunctionSummaryRow = struct {
+    id: Id,
+    owner: Owner,
+    source: SourceRef,
+    origin: Origin,
+    structural_key: []const u8,
+    parameters: []const LoopVariable = &.{},
+    outcomes: []const CallOutcomeShape = &.{},
+    assumption_ids: []const Id = &.{},
+    entry_scope: ?[]const u8 = null,
+    entry_invariant_ids: []const Id = &.{},
+    paths: []const FunctionPathRow = &.{},
+    /// Derived from complete operation inventories, including dependencies.
+    write_footprint: []const PlaceRef = &.{},
+    write_footprint_complete: bool = false,
+    projection_completeness: LoopProjectionCompleteness = .control_manifest_missing,
+    query_ids: FunctionQueryIds = .{},
+
+    pub fn ownsEntryInvariant(row: FunctionSummaryRow, fact: Obligation) bool {
+        const scope = row.entry_scope orelse return false;
+        return fact.owner == .contract and std.mem.eql(u8, fact.owner.contract, scope) and
+            fact.kind == .logical and fact.kind.logical.role == .contract_invariant;
+    }
+};
+
+pub fn callOutcomeTypes(row: FunctionSummaryRow, outcome: CallOutcome) ?[]const TypeRef {
+    for (row.outcomes) |shape| if (std.meta.eql(shape.outcome, outcome)) return shape.types;
+    return null;
+}
+
+pub fn typeRefEqual(lhs: TypeRef, rhs: TypeRef) bool {
+    if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
+    return switch (lhs) {
+        .spelling => |name| std.mem.eql(u8, name, rhs.spelling),
+        .compiler_type_id => |id| id == rhs.compiler_type_id,
+    };
+}
+
+fn optionalStringEqual(lhs: ?[]const u8, rhs: ?[]const u8) bool {
+    if (lhs == null or rhs == null) return lhs == null and rhs == null;
+    return std.mem.eql(u8, lhs.?, rhs.?);
+}
+
+pub fn functionOwnerEqual(lhs: Owner, rhs: Owner) bool {
+    return lhs == .function and rhs == .function and std.mem.eql(u8, lhs.function.name, rhs.function.name) and
+        optionalStringEqual(lhs.function.module, rhs.function.module) and optionalStringEqual(lhs.function.contract, rhs.function.contract);
+}
+
+fn ownerEqual(lhs: Owner, rhs: Owner) bool {
+    if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
+    return switch (lhs) {
+        .module => |name| std.mem.eql(u8, name, rhs.module),
+        .contract => |name| std.mem.eql(u8, name, rhs.contract),
+        .function => functionOwnerEqual(lhs, rhs),
+        .statement => |item| item.ordinal == rhs.statement.ordinal and std.mem.eql(u8, item.function_name, rhs.statement.function_name),
+        .trait_method => |item| std.mem.eql(u8, item.trait_name, rhs.trait_method.trait_name) and std.mem.eql(u8, item.method_name, rhs.trait_method.method_name) and optionalStringEqual(item.impl_name, rhs.trait_method.impl_name),
+        .backend => |item| item.component == rhs.backend.component and std.mem.eql(u8, item.name, rhs.backend.name),
+    };
+}
+
+/// A checked proof may differ in backend/result, never in the target it proves.
+pub fn proofTargetIdentityEqual(lhs: VerificationQuery, rhs: VerificationQuery) bool {
+    return ownerEqual(lhs.owner, rhs.owner) and lhs.kind == rhs.kind and lhs.logical_role == rhs.logical_role and
+        optionalStringEqual(lhs.guard_id, rhs.guard_id) and lhs.artifact_policy == rhs.artifact_policy and
+        equalIdSlices(lhs.obligation_ids, rhs.obligation_ids) and equalIdSlices(lhs.assumption_ids, rhs.assumption_ids) and
+        lhs.loop_summary_id == rhs.loop_summary_id and lhs.loop_edge_id == rhs.loop_edge_id and
+        std.meta.eql(lhs.loop_vc_sha256, rhs.loop_vc_sha256) and lhs.function_summary_id == rhs.function_summary_id and
+        std.meta.eql(lhs.function_vc_sha256, rhs.function_vc_sha256);
+}
+
+pub const LoopTimelineEventTag = enum(u8) {
+    path_assumption,
+    safety_checkpoint,
+    storage_read,
+    indexed_region_read,
+    storage_write,
+    summary_dependency,
+    call,
+};
+
+pub const LoopTimelineEventPayload = union(LoopTimelineEventTag) {
+    path_assumption: LoopTimelineFormulaEvent,
+    safety_checkpoint: LoopTimelineFormulaEvent,
+    storage_read: LoopStorageReadEvent,
+    indexed_region_read: LoopIndexedRegionReadEvent,
+    storage_write: LoopStorageWriteEvent,
+    summary_dependency: LoopSummaryDependency,
+    call: LoopCallEvent,
+};
+
+pub fn loopTimelineReadCount(payload: LoopTimelineEventPayload) usize {
+    return switch (payload) {
+        .storage_read, .indexed_region_read => 1,
+        .call => |invocation| invocation.results.len,
+        .summary_dependency => |dependency| if (dependency.result_bindings) |bindings| bindings.len else 0,
+        else => 0,
+    };
+}
+
+pub fn loopTimelineReadId(payload: LoopTimelineEventPayload, index: usize) ?FreeVarId {
+    if (index >= loopTimelineReadCount(payload)) return null;
+    return switch (payload) {
+        .storage_read => |read| read.result,
+        .indexed_region_read => |read| read.result,
+        .call => |invocation| invocation.results[index].id,
+        .summary_dependency => |dependency| dependency.result_bindings.?[index].id,
+        else => null,
+    };
+}
+
+pub const LoopTimelineEvent = struct {
+    id: u32,
+    structural_key: []const u8,
+    payload: LoopTimelineEventPayload,
+};
+
+pub const LoopEdgeRow = struct {
+    id: u32,
+    /// Deterministic identity of the verifier-input MLIR path ending at this
+    /// edge.  It is proof-relevant certificate data, not a display label.
+    structural_key: []const u8 = "",
+    /// Single proof-relevant execution order for assumptions, safety checks,
+    /// storage actions, and certified child summaries.
+    timeline: []const LoopTimelineEvent = &.{},
+    next_state: []const LoopStepAssignment = &.{},
+    target: ?LoopControlTarget = null,
+    /// Edge-specific assertion for function and error returns. Ordinary loop
+    /// successors use `LoopSummaryRow.post_formulas`; backedges carry none.
+    target_formulas: []const FormulaRef = &.{},
+    /// Evaluated after this exact edge timeline, together with its final store.
+    return_value: ?CallReturnExpr = null,
+
+    pub fn safetyFormulaCount(self: LoopEdgeRow) usize {
+        var count: usize = 0;
+        for (self.timeline) |event| switch (event.payload) {
+            .safety_checkpoint => |checkpoint| count += checkpoint.formulas.len,
+            else => {},
+        };
+        return count;
+    }
+};
+
+fn freeVarInList(id: FreeVarId, values: []const FreeVarId) bool {
+    for (values) |candidate| if (freeVarIdEql(id, candidate)) return true;
+    return false;
+}
+
+pub const LoopSafetyCheckpoint = struct {
+    id: u32,
+    /// Deterministic identity of the verifier-input safety operation.
+    structural_key: []const u8,
+    after_dependency_count: u32,
+    formulas: []const FormulaRef,
+};
+
+pub const LoopSummaryDependency = struct {
+    id: u32,
+    /// Deterministic verifier-input MLIR identity of the nested loop operation
+    /// on the containing outer path.
+    structural_key: []const u8,
+    summary_id: Id,
+    loop_vc_sha256: [32]u8,
+    /// Certified over-approximation of persistent locations the child may
+    /// mutate. The child's certificate binds this list to its LoopVC digest.
+    write_footprint: []const PlaceRef = &.{},
+    write_footprint_complete: bool = false,
+    /// Exact terminating control relation consumed from the inner summary.
+    target: LoopControlTarget,
+    /// None retains scalar nested-state composition. Some exports typed child
+    /// variable indices to fresh caller identities, preserving caller locals.
+    result_bindings: ?[]const LoopVariable = null,
+
+    pub fn targetSupported(self: LoopSummaryDependency) bool {
+        return switch (self.target) {
+            .successor, .function_return, .error_return => true,
+            .backedge, .explicit_revert => false,
+        };
+    }
+};
+
+test "loop projection completeness and structural identities fail closed" {
+    const loop_id: FreeVarId = .{ .file_id = 1, .pattern_id = 2 };
+    const variables = [_]LoopVariable{.{
+        .index = 0,
+        .id = loop_id,
+        .ty = .{ .spelling = "u256" },
+    }};
+    const bindings = [_]LoopStepAssignment{.{
+        .variable_index = 0,
+        .target = loop_id,
+        .source_key = "loop-state:0",
+        .value = .{ .term = 0 },
+    }};
+    const path_exprs = [_]LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
+    const backedge_timeline = [_]LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "body/straight-line-yield/path",
+        .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+    }};
+    const exit_timeline = [_]LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "guard/false-successor/path",
+        .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+    }};
+    const canonical_edges = [_]LoopEdgeRow{
+        .{
+            .id = 0,
+            .structural_key = "body/straight-line-yield",
+            .timeline = &backedge_timeline,
+            .next_state = &bindings,
+            .target = .backedge,
+        },
+        .{
+            .id = 1,
+            .structural_key = "guard/false-successor",
+            .timeline = &exit_timeline,
+            .next_state = &bindings,
+            .target = .successor,
+        },
+    };
+    var row: LoopSummaryRow = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "run" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .loop_source_op_id = 0,
+        .loop_kind = .scf_while,
+        .variables = &variables,
+        .edges = &canonical_edges,
+    };
+
+    try std.testing.expectEqual(LoopUnsupportedReason.loop_projection_inventory_missing, row.validationReason().?);
+    row.projection_completeness = .complete;
+    try std.testing.expectEqual(@as(?LoopUnsupportedReason, null), row.validationReason());
+
+    var missing_key_edges = canonical_edges;
+    missing_key_edges[0].structural_key = "";
+    row.edges = &missing_key_edges;
+    try std.testing.expectEqual(LoopUnsupportedReason.loop_projection_identity_missing, row.validationReason().?);
+
+    var duplicate_key_edges = canonical_edges;
+    duplicate_key_edges[1].structural_key = duplicate_key_edges[0].structural_key;
+    row.edges = &duplicate_key_edges;
+    try std.testing.expectEqual(LoopUnsupportedReason.loop_projection_identity_ambiguous, row.validationReason().?);
+
+    row.edges = &canonical_edges;
+    row.projection_completeness = .effect_mismatch;
+    try std.testing.expectEqual(LoopUnsupportedReason.loop_projection_effect_mismatch, row.validationReason().?);
+    row.projection_completeness = .unsupported_effect;
+    try std.testing.expectEqual(LoopUnsupportedReason.loop_projection_effect_unsupported, row.validationReason().?);
+}
+
+test "loop header facts validate shape and exact function assumptions" {
+    const stable_id: FreeVarId = .{ .file_id = 1, .pattern_id = 2 };
+    const stable_values = [_]LoopHeaderFactValue{.{ .id = stable_id, .ty = .{ .spelling = "u256" } }};
+    const target: LoopHeaderPoint = .{ .structural_key = "op:9/scf.while", .block_key = "block:0", .position = 9 };
+    const fact: LoopHeaderFactRow = .{
+        .id = 0,
+        .structural_key = "header-fact:0",
+        .formula = .{ .term = 0 },
+        .source_kind = .function_requires,
+        .source = .{ .structural_key = "assumption:7", .block_key = "block:0", .position = 1 },
+        .target = target,
+        .stable_values = &stable_values,
+        .assumption_id = 7,
+    };
+    try std.testing.expectEqual(@as(?LoopUnsupportedReason, null), loopHeaderFactsReason(&.{fact}));
+
+    var changed = fact;
+    changed.id = 1;
+    try std.testing.expectEqual(LoopUnsupportedReason.loop_header_fact_id_invalid, loopHeaderFactsReason(&.{changed}).?);
+    const second_fact: LoopHeaderFactRow = .{
+        .id = 1,
+        .structural_key = "header-fact:1",
+        .formula = .{ .term = 0 },
+        .source_kind = .function_requires,
+        .source = .{ .structural_key = "assumption:8", .block_key = "block:0", .position = 1 },
+        .target = target,
+        .stable_values = &stable_values,
+        .assumption_id = 8,
+    };
+    try std.testing.expectEqual(
+        LoopUnsupportedReason.loop_header_fact_order_invalid,
+        loopHeaderFactsReason(&.{ fact, second_fact }).?,
+    );
+    changed = fact;
+    changed.source.block_key = "block:1";
+    try std.testing.expectEqual(LoopUnsupportedReason.loop_header_fact_block_mismatch, loopHeaderFactsReason(&.{changed}).?);
+    changed = fact;
+    changed.source.position = target.position;
+    try std.testing.expectEqual(LoopUnsupportedReason.loop_header_fact_source_not_earlier, loopHeaderFactsReason(&.{changed}).?);
+    changed = fact;
+    changed.assumption_id = null;
+    try std.testing.expectEqual(LoopUnsupportedReason.loop_header_fact_assumption_missing, loopHeaderFactsReason(&.{changed}).?);
+
+    const assumption: Assumption = .{
+        .id = 7,
+        .owner = .{ .function = .{ .name = "run" } },
+        .source = .generated(),
+        .phase = .sema,
+        .origin = .source,
+        .kind = .requires,
+        .formula = .{ .term = 0 },
+    };
+    const summary: LoopSummaryRow = .{
+        .id = 1,
+        .owner = .{ .statement = .{ .function_name = "run", .ordinal = 0 } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .loop_source_op_id = 0,
+        .loop_kind = .scf_while,
+        .header_facts = &.{fact},
+    };
+    const set: ObligationSet = .{ .assumptions = &.{assumption} };
+    try std.testing.expect(set.loopHeaderFactsMatchAssumptions(summary, &.{7}));
+    try std.testing.expect(!set.loopHeaderFactsMatchAssumptions(summary, &.{}));
+    try std.testing.expect(!set.loopHeaderFactsMatchAssumptions(summary, &.{ 7, 8 }));
+
+    var wrong_assumption = assumption;
+    wrong_assumption.formula = .{ .term = 1 };
+    try std.testing.expect(!(ObligationSet{ .assumptions = &.{wrong_assumption} })
+        .loopHeaderFactsMatchAssumptions(summary, &.{7}));
+
+    wrong_assumption = assumption;
+    wrong_assumption.owner = .{ .function = .{ .name = "other" } };
+    try std.testing.expect(!(ObligationSet{ .assumptions = &.{wrong_assumption} })
+        .loopHeaderFactsMatchAssumptions(summary, &.{7}));
+
+    const origin_formula: FormulaRef = .{ .origin_value = .{ .origin = .source } };
+    var origin_fact = fact;
+    origin_fact.formula = origin_formula;
+    var origin_assumption = assumption;
+    origin_assumption.formula = origin_formula;
+    var origin_summary = summary;
+    const origin_facts = [_]LoopHeaderFactRow{origin_fact};
+    origin_summary.header_facts = &origin_facts;
+    try std.testing.expect(!(ObligationSet{ .assumptions = &.{origin_assumption} })
+        .loopHeaderFactsMatchAssumptions(origin_summary, &.{7}));
+}
+
+test "loop summary dependencies are ordered bound and fail closed before denotation" {
+    const loop_id: FreeVarId = .{ .file_id = 1, .pattern_id = 2 };
+    const variables = [_]LoopVariable{.{
+        .index = 0,
+        .id = loop_id,
+        .ty = .{ .spelling = "u256" },
+    }};
+    const bindings = [_]LoopStepAssignment{.{
+        .variable_index = 0,
+        .target = loop_id,
+        .source_key = "loop-state:0",
+        .value = .{ .term = 0 },
+    }};
+    const path_exprs = [_]LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
+    const digest = @as([32]u8, @splat(7));
+    const dependency: LoopSummaryDependency = .{
+        .id = 0,
+        .structural_key = "body/op:4/scf.while",
+        .summary_id = 2,
+        .loop_vc_sha256 = digest,
+        .write_footprint_complete = true,
+        .target = .successor,
+    };
+    const outer_timeline = [_]LoopTimelineEvent{
+        .{
+            .id = 0,
+            .structural_key = "body/yield/path",
+            .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+        },
+        .{
+            .id = 1,
+            .structural_key = dependency.structural_key,
+            .payload = .{ .summary_dependency = dependency },
+        },
+    };
+    const outer_exit_timeline = [_]LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "guard/false-successor/path",
+        .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+    }};
+    var outer_edges = [_]LoopEdgeRow{
+        .{
+            .id = 0,
+            .structural_key = "body/yield",
+            .timeline = &outer_timeline,
+            .next_state = &bindings,
+            .target = .backedge,
+        },
+        .{
+            .id = 1,
+            .structural_key = "guard/false-successor",
+            .timeline = &outer_exit_timeline,
+            .next_state = &bindings,
+            .target = .successor,
+        },
+    };
+    var outer: LoopSummaryRow = .{
+        .id = 1,
+        .owner = .{ .statement = .{ .function_name = "nested", .ordinal = 1 } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .loop_source_op_id = 1,
+        .loop_kind = .scf_while,
+        .variables = &variables,
+        .edges = &outer_edges,
+        .projection_completeness = .complete,
+    };
+    try std.testing.expectEqual(@as(?LoopUnsupportedReason, null), outer.validationReason());
+
+    const safety_exprs = [_]LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
+    const outer_timeline_with_checkpoint = [_]LoopTimelineEvent{
+        outer_timeline[0],
+        outer_timeline[1],
+        .{
+            .id = 2,
+            .structural_key = "body/op:6/ora.assert",
+            .payload = .{ .safety_checkpoint = .{ .formulas = &safety_exprs } },
+        },
+    };
+    outer_edges[0].timeline = &outer_timeline_with_checkpoint;
+    try std.testing.expectEqual(@as(?LoopUnsupportedReason, null), outer.validationReason());
+
+    var malformed = dependency;
+    malformed.id = 1;
+    var malformed_timeline = outer_timeline;
+    malformed_timeline[1].payload.summary_dependency = malformed;
+    outer_edges[0].timeline = &malformed_timeline;
+    try std.testing.expectEqual(
+        LoopUnsupportedReason.loop_summary_dependency_order_invalid,
+        outer.validationReason().?,
+    );
+    malformed = dependency;
+    malformed.target = .backedge;
+    malformed_timeline = outer_timeline;
+    malformed_timeline[1].payload.summary_dependency = malformed;
+    outer_edges[0].timeline = &malformed_timeline;
+    try std.testing.expectEqual(
+        LoopUnsupportedReason.loop_summary_dependency_target_unsupported,
+        outer.validationReason().?,
+    );
+
+    outer_edges[0].timeline = &outer_timeline;
+    const inner_edges = [_]LoopEdgeRow{
+        .{
+            .id = 0,
+            .structural_key = "inner/body/yield",
+            .timeline = &.{.{
+                .id = 0,
+                .structural_key = "inner/body/yield/path",
+                .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+            }},
+            .next_state = &bindings,
+            .target = .backedge,
+        },
+        .{
+            .id = 1,
+            .structural_key = "inner/guard/false-successor",
+            .timeline = &.{.{
+                .id = 0,
+                .structural_key = "inner/guard/false-successor/path",
+                .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+            }},
+            .next_state = &bindings,
+            .target = .successor,
+        },
+    };
+    const inner: LoopSummaryRow = .{
+        .id = 2,
+        .owner = .{ .statement = .{ .function_name = "nested", .ordinal = 2 } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .loop_source_op_id = 2,
+        .loop_kind = .scf_while,
+        .variables = &variables,
+        .edges = &inner_edges,
+        .projection_completeness = .complete,
+        .query_ids = .{ .induction = &.{9} },
+    };
+    const induction: VerificationQuery = .{
+        .id = 9,
+        .owner = inner.owner,
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .proof_requirement = .lean_certificate,
+        .kind = .loop_induction,
+        .loop_summary_id = inner.id,
+        .loop_vc_sha256 = digest,
+    };
+    const summaries = [_]LoopSummaryRow{ outer, inner };
+    const set: ObligationSet = .{ .loop_summaries = &summaries, .queries = &.{induction} };
+    try set.validateLoopSummaryDependencies(outer);
+
+    var stale = dependency;
+    stale.loop_vc_sha256 = @as([32]u8, @splat(8));
+    var stale_timeline = outer_timeline;
+    stale_timeline[1].payload.summary_dependency = stale;
+    outer_edges[0].timeline = &stale_timeline;
+    var stale_outer = outer;
+    stale_outer.edges = &outer_edges;
+    try std.testing.expectError(error.InvalidDependency, set.validateLoopSummaryDependencies(stale_outer));
+
+    var cyclic = dependency;
+    cyclic.summary_id = outer.id;
+    var cyclic_timeline = outer_timeline;
+    cyclic_timeline[1].payload.summary_dependency = cyclic;
+    outer_edges[0].timeline = &cyclic_timeline;
+    var cyclic_outer = outer;
+    cyclic_outer.edges = &outer_edges;
+    try std.testing.expectError(error.InvalidDependency, set.validateLoopSummaryDependencies(cyclic_outer));
+}
+
+test "ordered loop timeline schema rejects identity order and read-reference mutations" {
+    const loop_id: FreeVarId = .{ .file_id = 1, .pattern_id = 1 };
+    const read_id: FreeVarId = .{ .file_id = 1, .pattern_id = 90 };
+    const foreign_id: FreeVarId = .{ .file_id = 1, .pattern_id = 91 };
+    const ty: TypeRef = .{ .compiler_type_id = 6 };
+    const terms = [_]Term{
+        .{ .bool_lit = true },
+        .{ .variable = .{ .free = .{ .id = read_id, .name = "read", .ty = ty } } },
+        .{ .int_lit = .{ .value = "0", .ty = ty } },
+    };
+    const path_exprs = [_]LoopFormulaExpr{.{ .formula = .{ .term = 0 } }};
+    const read_refs = [_]FreeVarId{read_id};
+    const location: LoopStorageLocationExpr = .{ .root = "counter", .value_ty = ty };
+    const timeline = [_]LoopTimelineEvent{
+        .{
+            .id = 0,
+            .structural_key = "body/path",
+            .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+        },
+        .{
+            .id = 1,
+            .structural_key = "body/read",
+            .payload = .{ .storage_read = .{ .result = read_id, .location = location } },
+        },
+        .{
+            .id = 2,
+            .structural_key = "body/write",
+            .payload = .{ .storage_write = .{
+                .location = location,
+                .value = .{ .formula = .{ .term = 1 }, .read_results = &read_refs },
+            } },
+        },
+    };
+    const variables = [_]LoopVariable{.{
+        .index = 0,
+        .id = loop_id,
+        .ty = ty,
+    }};
+    const bindings = [_]LoopStepAssignment{.{
+        .variable_index = 0,
+        .target = loop_id,
+        .source_key = "loop-state:0",
+        .value = .{ .term = 1 },
+        .read_results = &read_refs,
+    }};
+    const exit_bindings = [_]LoopStepAssignment{.{
+        .variable_index = 0,
+        .target = loop_id,
+        .source_key = "loop-state:0",
+        .value = .{ .term = 2 },
+    }};
+    var edges = [_]LoopEdgeRow{
+        .{
+            .id = 0,
+            .structural_key = "body/yield",
+            .timeline = &timeline,
+            .next_state = &bindings,
+            .target = .backedge,
+        },
+        .{
+            .id = 1,
+            .structural_key = "guard/false-successor",
+            .timeline = &.{.{
+                .id = 0,
+                .structural_key = "guard/false-successor/path",
+                .payload = .{ .path_assumption = .{ .formulas = &path_exprs } },
+            }},
+            .next_state = &exit_bindings,
+            .target = .successor,
+        },
+    };
+    var summary: LoopSummaryRow = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "run" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .loop_source_op_id = 0,
+        .loop_kind = .scf_while,
+        .variables = &variables,
+        .edges = &edges,
+        .projection_completeness = .complete,
+    };
+    try std.testing.expectEqual(@as(?LoopUnsupportedReason, null), summary.validationReason());
+    const set: ObligationSet = .{ .terms = &terms, .loop_summaries = &.{summary} };
+    try set.validateTermReferences();
+
+    const path_event = timeline[0];
+    const read_event = timeline[1];
+    const write_first_event: LoopTimelineEvent = .{
+        .id = 1,
+        .structural_key = "body/write",
+        .payload = .{ .storage_write = .{
+            .location = location,
+            .value = .{ .formula = .{ .term = 2 } },
+        } },
+    };
+    const read_second_event: LoopTimelineEvent = .{
+        .id = 2,
+        .structural_key = "body/read",
+        .payload = read_event.payload,
+    };
+    const second_write_event: LoopTimelineEvent = .{
+        .id = 2,
+        .structural_key = "body/write:1",
+        .payload = write_first_event.payload,
+    };
+    const checkpoint_event: LoopTimelineEvent = .{
+        .id = 1,
+        .structural_key = "body/check",
+        .payload = .{ .safety_checkpoint = .{ .formulas = &path_exprs } },
+    };
+    const dependency: LoopSummaryDependency = .{
+        .id = 0,
+        .structural_key = "body/child",
+        .summary_id = 2,
+        .loop_vc_sha256 = @as([32]u8, @splat(7)),
+        .write_footprint_complete = true,
+        .target = .successor,
+    };
+    const dependency_event: LoopTimelineEvent = .{
+        .id = 1,
+        .structural_key = dependency.structural_key,
+        .payload = .{ .summary_dependency = dependency },
+    };
+    const accepted_timelines = [_][]const LoopTimelineEvent{
+        &.{path_event},
+        &.{ path_event, read_event },
+        &.{ path_event, write_first_event },
+        &timeline,
+        &.{ path_event, write_first_event, read_second_event },
+        &.{ path_event, write_first_event, second_write_event },
+    };
+    edges[0].next_state = &exit_bindings;
+    for (accepted_timelines) |accepted| {
+        edges[0].timeline = accepted;
+        try std.testing.expectEqual(@as(?LoopUnsupportedReason, null), summary.validationReason());
+    }
+    edges[0].timeline = &.{ path_event, checkpoint_event };
+    try std.testing.expectEqual(@as(?LoopUnsupportedReason, null), summary.validationReason());
+    edges[0].timeline = &.{ path_event, dependency_event };
+    try std.testing.expectEqual(@as(?LoopUnsupportedReason, null), summary.validationReason());
+    edges[0].next_state = &bindings;
+
+    var malformed_timeline = timeline;
+    malformed_timeline[1].id = 7;
+    edges[0].timeline = &malformed_timeline;
+    try std.testing.expectEqual(
+        LoopUnsupportedReason.loop_timeline_event_order_invalid,
+        summary.validationReason().?,
+    );
+
+    malformed_timeline = timeline;
+    malformed_timeline[1].structural_key = timeline[0].structural_key;
+    edges[0].timeline = &malformed_timeline;
+    try std.testing.expectEqual(
+        LoopUnsupportedReason.loop_timeline_event_identity_duplicate,
+        summary.validationReason().?,
+    );
+
+    const forward_timeline = [_]LoopTimelineEvent{
+        timeline[0],
+        .{
+            .id = 1,
+            .structural_key = "body/write",
+            .payload = timeline[2].payload,
+        },
+        .{
+            .id = 2,
+            .structural_key = "body/read",
+            .payload = timeline[1].payload,
+        },
+    };
+    edges[0].timeline = &forward_timeline;
+    try std.testing.expectEqual(
+        LoopUnsupportedReason.loop_storage_read_identity_forward,
+        summary.validationReason().?,
+    );
+
+    var foreign_refs = [_]FreeVarId{foreign_id};
+    var foreign_write = timeline[2];
+    foreign_write.payload.storage_write.value.read_results = &foreign_refs;
+    const foreign_timeline = [_]LoopTimelineEvent{ timeline[0], timeline[1], foreign_write };
+    edges[0].timeline = &foreign_timeline;
+    try std.testing.expectEqual(
+        LoopUnsupportedReason.loop_storage_read_identity_foreign,
+        summary.validationReason().?,
+    );
+
+    edges[0].timeline = &timeline;
+    var undeclared_binding = bindings;
+    undeclared_binding[0].read_results = &.{};
+    edges[0].next_state = &undeclared_binding;
+    var invalid_summary = summary;
+    invalid_summary.edges = &edges;
+    const invalid_set: ObligationSet = .{ .terms = &terms, .loop_summaries = &.{invalid_summary} };
+    try std.testing.expectError(error.InvalidTimelineReadReference, invalid_set.validateTermReferences());
+
+    var preheader_read = read_event;
+    preheader_read.id = 0;
+    preheader_read.structural_key = "preheader/read";
+    var preheader_write = timeline[2];
+    preheader_write.id = 1;
+    preheader_write.structural_key = "preheader/write";
+    const preheader = [_]LoopTimelineEvent{ preheader_read, preheader_write };
+    summary.preheader_timeline = &preheader;
+    edges[0].timeline = &timeline;
+    edges[0].next_state = &bindings;
+    try std.testing.expectEqual(@as(?LoopUnsupportedReason, null), summary.validationReason());
+    try (ObligationSet{ .terms = &terms, .loop_summaries = &.{summary} }).validateTermReferences();
+
+    const forward_preheader = [_]LoopTimelineEvent{
+        .{ .id = 0, .structural_key = preheader_write.structural_key, .payload = preheader_write.payload },
+        .{ .id = 1, .structural_key = preheader_read.structural_key, .payload = preheader_read.payload },
+    };
+    summary.preheader_timeline = &forward_preheader;
+    try std.testing.expectEqual(
+        LoopUnsupportedReason.loop_storage_read_identity_forward,
+        summary.preheaderTimelineValidationReason().?,
+    );
+
+    preheader_write.payload.storage_write.value.read_results = &.{};
+    const undeclared_preheader = [_]LoopTimelineEvent{ preheader_read, preheader_write };
+    summary.preheader_timeline = &undeclared_preheader;
+    try std.testing.expectError(
+        error.InvalidTimelineReadReference,
+        (ObligationSet{ .terms = &terms, .loop_summaries = &.{summary} }).validateTermReferences(),
+    );
+}
 
 pub const LoopQueryIds = struct {
     induction: []const Id = &.{},
@@ -701,6 +2635,10 @@ pub const LoopQueryIds = struct {
 };
 
 pub const LoopUnsupportedReason = enum(u8) {
+    loop_call_digest_missing,
+    loop_call_binding_invalid,
+    loop_call_return_invalid,
+    loop_call_relation_unsupported,
     loop_has_storage_write,
     loop_has_storage_read,
     loop_has_call,
@@ -721,6 +2659,93 @@ pub const LoopUnsupportedReason = enum(u8) {
     loop_duplicate_update,
     loop_update_target_not_loop_variable,
     loop_body_safety_missing,
+    loop_state_empty,
+    loop_duplicate_state_identity,
+    loop_edge_missing,
+    loop_duplicate_edge_identity,
+    loop_edge_order_invalid,
+    loop_edge_path_missing,
+    loop_edge_target_unresolved,
+    loop_control_target_unsupported,
+    loop_backedge_missing,
+    loop_exit_edge_missing,
+    loop_state_binding_missing,
+    loop_state_binding_extra,
+    loop_state_binding_duplicate,
+    loop_state_binding_invalid,
+    loop_state_binding_source_missing,
+    loop_state_binding_foreign,
+    loop_projection_inventory_missing,
+    loop_control_manifest_missing,
+    loop_control_marker_missing,
+    loop_control_marker_malformed,
+    loop_control_marker_duplicate,
+    loop_control_marker_target_mismatch,
+    loop_projection_path_mismatch,
+    loop_projection_effect_mismatch,
+    loop_projection_binding_mismatch,
+    loop_projection_target_mismatch,
+    loop_projection_identity_missing,
+    loop_projection_identity_ambiguous,
+    loop_projection_control_flow_unsupported,
+    loop_projection_effect_unsupported,
+    loop_projection_path_limit_exceeded,
+    loop_preheader_storage_relation_unsupported,
+    loop_preheader_control_unsupported,
+    loop_preheader_effect_unsupported,
+    loop_preheader_value_unsupported,
+    loop_preheader_location_unsupported,
+    loop_preheader_inventory_mismatch,
+    loop_summary_dependency_order_invalid,
+    loop_summary_dependency_target_unsupported,
+    loop_summary_dependency_value_out_of_scope,
+    loop_prefix_checkpoint_dependency_unsupported,
+    loop_timeline_missing,
+    loop_timeline_event_order_invalid,
+    loop_timeline_event_identity_missing,
+    loop_timeline_event_identity_duplicate,
+    loop_timeline_path_missing,
+    loop_storage_root_missing,
+    loop_storage_projection_invalid,
+    loop_fixed_index_extent_invalid,
+    loop_fixed_index_bounds_checkpoint_missing,
+    loop_fixed_index_bounds_formula_shape_mismatch,
+    loop_fixed_index_bounds_index_identity_mismatch,
+    loop_fixed_index_bounds_type_mismatch,
+    loop_fixed_index_bounds_extent_literal_mismatch,
+    loop_storage_type_invalid,
+    loop_storage_read_identity_duplicate,
+    loop_storage_read_identity_foreign,
+    loop_storage_read_identity_forward,
+    loop_indexed_region_checkpoint_missing,
+    loop_indexed_region_checkpoint_invalid,
+    loop_indexed_region_checkpoint_after_read,
+    loop_indexed_region_alias_unsupported,
+    loop_indexed_region_owner_unsupported,
+    loop_indexed_region_owner_count_unsupported,
+    loop_indexed_region_write_unreviewed,
+    loop_indexed_region_inventory_mismatch,
+    loop_storage_child_footprint_missing,
+    loop_value_type_unresolved,
+    loop_value_width_mismatch,
+    loop_value_signedness_mismatch,
+    loop_header_fact_id_invalid,
+    loop_header_fact_order_invalid,
+    loop_header_fact_identity_missing,
+    loop_header_fact_identity_duplicate,
+    loop_header_fact_source_unresolved,
+    loop_header_fact_block_mismatch,
+    loop_header_fact_source_not_earlier,
+    loop_header_fact_target_mismatch,
+    loop_header_fact_value_identity_duplicate,
+    loop_header_fact_assumption_missing,
+    loop_header_fact_assumption_unexpected,
+    loop_header_fact_inventory_mismatch,
+    loop_header_fact_position_unsupported,
+    loop_header_fact_provenance_unsupported,
+    loop_header_fact_type_unsupported,
+    loop_header_fact_effect_unsupported,
+    loop_header_fact_assumption_mismatch,
 };
 
 pub const SourceRef = struct {
@@ -845,7 +2870,10 @@ pub const ArithmeticSafetyKind = enum(u8) {
     power_overflow,
     negation_overflow,
     division_by_zero,
+    signed_division_overflow,
     shift_amount_bounds,
+    fixed_array_bounds,
+    dynamic_index_bounds,
 };
 
 pub const RuntimeGuardGoal = struct {
@@ -1037,6 +3065,7 @@ pub const TermTag = enum(u8) {
     binary,
     refinement_predicate,
     quantified,
+    invocation_caller,
 };
 
 pub const Term = union(TermTag) {
@@ -1050,6 +3079,18 @@ pub const Term = union(TermTag) {
     binary: BinaryTerm,
     refinement_predicate: RefinementPredicateTerm,
     quantified: QuantifiedTerm,
+    invocation_caller: InvocationCaller,
+};
+
+/// Intrinsic invocation value; never a source binding or storage read.
+pub const InvocationCaller = struct {
+    function_id: Id,
+    ty: TypeRef,
+
+    pub fn validType(self: InvocationCaller) bool {
+        return self.ty == .compiler_type_id and self.ty.compiler_type_id ==
+            @import("ora_types").builtin.lookupBuiltinById(.address).comptime_type_id;
+    }
 };
 
 pub const IntegerLiteralTerm = struct {
@@ -1173,7 +3214,13 @@ pub const PlaceRef = struct {
     root: []const u8,
     region: RegionRef,
     fields: []const []const u8 = &.{},
+    projection_domain: PlaceProjectionDomain = .mapping,
     keys: []const PlaceKey = &.{},
+};
+
+pub const PlaceProjectionDomain = enum(u8) {
+    mapping,
+    fixed_index,
 };
 
 pub const PlaceKeyTag = enum(u8) {
@@ -1200,6 +3247,7 @@ pub fn placeRefEql(lhs: PlaceRef, rhs: PlaceRef) bool {
     if (!std.mem.eql(u8, lhs.root, rhs.root)) return false;
     if (lhs.region != rhs.region) return false;
     if (lhs.fields.len != rhs.fields.len) return false;
+    if (lhs.projection_domain != rhs.projection_domain) return false;
     if (lhs.keys.len != rhs.keys.len) return false;
     for (lhs.fields, rhs.fields) |left, right| {
         if (!std.mem.eql(u8, left, right)) return false;
@@ -1227,6 +3275,9 @@ pub fn placeDefinitelyDisjoint(lhs: PlaceRef, rhs: PlaceRef) bool {
     if (lhs.region != rhs.region) return true;
     if (!std.mem.eql(u8, lhs.root, rhs.root)) return true;
     if (!stringSlicesEql(lhs.fields, rhs.fields)) return false;
+    // Effect-slot metadata cannot yet distinguish array indices from mapping
+    // keys. A cross-domain pair is therefore unknown, never proven disjoint.
+    if (lhs.projection_domain != rhs.projection_domain) return false;
     return placeKeysDefinitelyDisjoint(lhs.keys, rhs.keys);
 }
 
@@ -1265,7 +3316,7 @@ fn stringSlicesEql(lhs: []const []const u8, rhs: []const []const u8) bool {
     return true;
 }
 
-fn parseDecimalU256(value: []const u8) ?u256 {
+pub fn parseDecimalU256(value: []const u8) ?u256 {
     if (value.len == 0) return null;
     for (value) |byte| {
         if (byte < '0' or byte > '9') return null;
@@ -1414,6 +3465,13 @@ pub const TypeRef = union(TypeRefTag) {
     compiler_type_id: u32,
 };
 
+pub fn typeRefExplicit(ty: TypeRef) bool {
+    return switch (ty) {
+        .spelling => |spelling| spelling.len != 0,
+        .compiler_type_id => |id| id != 0,
+    };
+}
+
 test "manifest enum tags stay byte-sized" {
     inline for (.{
         DiagnosticKind,
@@ -1424,6 +3482,9 @@ test "manifest enum tags stay byte-sized" {
         OwnerTag,
         BackendComponent,
         LoopKind,
+        LoopHeaderFactSource,
+        LoopStorageProjectionTag,
+        LoopTimelineEventTag,
         LoopUnsupportedReason,
         OriginTag,
         EffectAccess,
@@ -1454,6 +3515,7 @@ test "manifest enum tags stay byte-sized" {
         UnaryOp,
         BinaryOp,
         Quantifier,
+        PlaceProjectionDomain,
         PlaceKeyTag,
         RegionRef,
         TypeRefTag,
@@ -1473,6 +3535,29 @@ test "storage place disjointness fixtures match Zig relation" {
             placeDefinitelyDisjoint(fixture.rhs, fixture.lhs),
         );
     }
+}
+
+test "storage projection domains cannot manufacture disjointness" {
+    const key_one = [_]PlaceKey{.{ .constant = "1" }};
+    const key_two = [_]PlaceKey{.{ .constant = "2" }};
+    const mapping: PlaceRef = .{
+        .root = "values",
+        .region = .storage,
+        .projection_domain = .mapping,
+        .keys = &key_one,
+    };
+    const fixed_same_key: PlaceRef = .{
+        .root = "values",
+        .region = .storage,
+        .projection_domain = .fixed_index,
+        .keys = &key_one,
+    };
+    var fixed_other_key = fixed_same_key;
+    fixed_other_key.keys = &key_two;
+
+    try std.testing.expect(!placeRefEql(mapping, fixed_same_key));
+    try std.testing.expect(!placeDefinitelyDisjoint(mapping, fixed_other_key));
+    try std.testing.expect(!placeDefinitelyDisjoint(fixed_other_key, mapping));
 }
 
 test "verification query summary counts solver-facing categories" {
@@ -1717,6 +3802,38 @@ test "artifact policy blocks invalid dependencies and missing proofs" {
     }).artifactDecision());
 }
 
+test "artifact policy blocks a canonical loop Z3 row with no result" {
+    const digest = @as([32]u8, @splat(0));
+    const summaries = [_]LoopSummaryRow{.{
+        .id = 7,
+        .owner = .{ .statement = .{ .function_name = "count", .ordinal = 0 } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .loop_source_op_id = 0,
+        .loop_kind = .scf_while,
+        // Deliberately unsupported so this unit isolates the artifact policy
+        // from the complete canonical-query inventory validator.
+        .unsupported_reasons = &.{.loop_state_empty},
+    }};
+    const queries = [_]VerificationQuery{.{
+        .id = 8,
+        .owner = .{ .function = .{ .name = "count" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .backend = .z3,
+        .kind = .loop_base,
+        .loop_summary_id = 7,
+        .loop_vc_sha256 = digest,
+    }};
+
+    try expectArtifactBlocked(.missing_proof, (ObligationSet{
+        .loop_summaries = &summaries,
+        .queries = &queries,
+    }).artifactDecision());
+}
+
 test "artifact policy treats Lean-required proof gaps as hard failures" {
     const obligation_ids = [_]Id{1};
     const obligations = [_]Obligation{
@@ -1858,13 +3975,23 @@ test "loop induction certificate is independent and cannot override a failed Z3 
         .queries = &.{ induction_target, z3_query },
     }).artifactDecision());
 
-    const artifacts = [_]ProofArtifact{.{
-        .id = 10,
-        .owner = z3_query.owner,
-        .source = .generated(),
-        .module_name = "Ora.Proofs.Count",
-        .theorem_name = "count_induction",
-    }};
+    const artifacts = [_]ProofArtifact{
+        .{
+            .id = 10,
+            .owner = z3_query.owner,
+            .source = .generated(),
+            .module_name = "Ora.Proofs.Count",
+            .theorem_name = "count_induction",
+        },
+        .{
+            .id = 11,
+            .owner = z3_query.owner,
+            .source = .generated(),
+            .module_name = "Ora.Proofs.Count",
+            .theorem_name = "forged_post_override",
+            .obligation_ids = &obligation_ids,
+        },
+    };
     const lean_query: VerificationQuery = .{
         .id = 4,
         .owner = z3_query.owner,
@@ -1894,6 +4021,50 @@ test "loop induction certificate is independent and cannot override a failed Z3 
         .loop_summaries = &summaries,
         .proof_artifacts = &artifacts,
         .queries = &.{ induction_target, failed_z3_query, lean_query },
+    }).artifactDecision());
+
+    const forged_lean_override: VerificationQuery = .{
+        .id = 5,
+        .owner = z3_query.owner,
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .backend = .lean,
+        .kind = .loop_invariant_post,
+        .obligation_ids = &obligation_ids,
+        .proof_artifact_id = 11,
+        .discharges_query_id = 3,
+        .loop_summary_id = 7,
+        .result = .{ .status = .proved },
+    };
+    var unknown_z3_query = z3_query;
+    unknown_z3_query.result = .{ .status = .unknown };
+    try expectArtifactBlocked(.unknown_query, (ObligationSet{
+        .terms = &.{.{ .bool_lit = true }},
+        .obligations = &obligations,
+        .loop_summaries = &summaries,
+        .proof_artifacts = &artifacts,
+        .queries = &.{ induction_target, unknown_z3_query, lean_query, forged_lean_override },
+    }).artifactDecision());
+
+    var missing_z3_query = z3_query;
+    missing_z3_query.result = null;
+    try expectArtifactBlocked(.missing_proof, (ObligationSet{
+        .terms = &.{.{ .bool_lit = true }},
+        .obligations = &obligations,
+        .loop_summaries = &summaries,
+        .proof_artifacts = &artifacts,
+        .queries = &.{ induction_target, missing_z3_query, lean_query, forged_lean_override },
+    }).artifactDecision());
+
+    var degraded_z3_query = unknown_z3_query;
+    degraded_z3_query.result.?.degraded = true;
+    try expectArtifactBlocked(.degraded_query, (ObligationSet{
+        .terms = &.{.{ .bool_lit = true }},
+        .obligations = &obligations,
+        .loop_summaries = &summaries,
+        .proof_artifacts = &artifacts,
+        .queries = &.{ induction_target, degraded_z3_query, lean_query, forged_lean_override },
     }).artifactDecision());
 }
 
@@ -2438,6 +4609,472 @@ test "obligation can point at MLIR origin without proof term" {
     };
 
     try std.testing.expect(obligation.blocksArtifacts());
+}
+
+test "storage artifact authority admits reviewed mappings and bounded fixed indices without storage child frames" {
+    const ty: TypeRef = .{ .spelling = "u256" };
+    const direct_timeline = [_]LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "store/counter",
+        .payload = .{ .storage_write = .{
+            .location = .{ .root = "counter", .value_ty = ty },
+            .value = .{ .formula = .{ .term = 0 } },
+        } },
+    }};
+    const direct_edges = [_]LoopEdgeRow{.{
+        .id = 0,
+        .structural_key = "edge/direct",
+        .timeline = &direct_timeline,
+    }};
+    const direct_summary: LoopSummaryRow = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "direct" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .loop_source_op_id = 1,
+        .loop_kind = .scf_while,
+        .edges = &direct_edges,
+    };
+    const certificate_query: VerificationQuery = .{
+        .id = 2,
+        .owner = direct_summary.owner,
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .proof_requirement = .lean_certificate,
+        .kind = .loop_induction,
+        .loop_summary_id = direct_summary.id,
+    };
+    const direct_set: ObligationSet = .{
+        .queries = &.{certificate_query},
+        .loop_summaries = &.{direct_summary},
+    };
+    try std.testing.expectEqual(
+        @as(?ArtifactBlockReason, null),
+        direct_set.loopArtifactAuthorityBlockReason(),
+    );
+
+    const index_projection = [_]LoopStorageProjection{.{ .fixed_index = .{
+        .index = .{
+            .value = .{ .formula = .{ .term = 0 } },
+            .ty = ty,
+        },
+        .extent = 4,
+    } }};
+    var projected_timeline = direct_timeline;
+    projected_timeline[0].payload.storage_write.location.projections = &index_projection;
+    var projected_edges = direct_edges;
+    projected_edges[0].timeline = &projected_timeline;
+    var projected_summary = direct_summary;
+    projected_summary.edges = &projected_edges;
+    try std.testing.expectEqual(
+        ArtifactBlockReason.storage_projection_authority_unreviewed,
+        (ObligationSet{
+            .queries = &.{certificate_query},
+            .loop_summaries = &.{projected_summary},
+        }).loopArtifactAuthorityBlockReason().?,
+    );
+
+    const context_id: FreeVarId = .{ .file_id = 1, .pattern_id = 2 };
+    const context_terms = [_]Term{.{ .variable = .{ .free = .{
+        .id = context_id,
+        .name = "key",
+        .ty = ty,
+    } } }};
+    const context_variables = [_]LoopVariable{.{
+        .index = 0,
+        .id = context_id,
+        .name = "key",
+        .ty = ty,
+    }};
+    const mapping_projection = [_]LoopStorageProjection{.{ .mapping_key = .{
+        .value = .{ .formula = .{ .term = 0 } },
+        .ty = ty,
+    } }};
+    var mapping_timeline = direct_timeline;
+    mapping_timeline[0].payload.storage_write.location.projections = &mapping_projection;
+    var mapping_edges = direct_edges;
+    mapping_edges[0].timeline = &mapping_timeline;
+    var mapping_summary = direct_summary;
+    mapping_summary.context_variables = &context_variables;
+    mapping_summary.preheader_projection_complete = true;
+    mapping_summary.preheader_timeline = &mapping_timeline;
+    mapping_summary.edges = &mapping_edges;
+    try std.testing.expectEqual(
+        @as(?ArtifactBlockReason, null),
+        (ObligationSet{
+            .queries = &.{certificate_query},
+            .terms = &context_terms,
+            .loop_summaries = &.{mapping_summary},
+        }).loopArtifactAuthorityBlockReason(),
+    );
+
+    var fixed_preheader_summary = direct_summary;
+    fixed_preheader_summary.preheader_projection_complete = true;
+    fixed_preheader_summary.preheader_timeline = &projected_timeline;
+    try std.testing.expectEqual(
+        ArtifactBlockReason.storage_projection_authority_unreviewed,
+        (ObligationSet{
+            .queries = &.{certificate_query},
+            .loop_summaries = &.{fixed_preheader_summary},
+        }).loopArtifactAuthorityBlockReason().?,
+    );
+
+    const fixed_terms = [_]Term{
+        .{ .variable = .{ .free = .{ .id = context_id, .name = "index", .ty = ty } } },
+        .{ .int_lit = .{ .value = "4", .ty = ty } },
+        .{ .binary = .{ .op = .lt, .lhs = 0, .rhs = 1, .ty = ty } },
+    };
+    const fixed_timeline = [_]LoopTimelineEvent{
+        .{
+            .id = 0,
+            .structural_key = "check/index",
+            .payload = .{ .safety_checkpoint = .{ .formulas = &.{.{
+                .formula = .{ .term = 2 },
+            }} } },
+        },
+        .{
+            .id = 1,
+            .structural_key = "store/values",
+            .payload = .{ .storage_write = .{
+                .location = .{
+                    .root = "values",
+                    .projections = &index_projection,
+                    .value_ty = ty,
+                },
+                .value = .{ .formula = .{ .term = 0 } },
+            } },
+        },
+    };
+    const fixed_edges = [_]LoopEdgeRow{.{
+        .id = 0,
+        .structural_key = "edge/fixed",
+        .timeline = &fixed_timeline,
+    }};
+    var fixed_summary = direct_summary;
+    fixed_summary.preheader_projection_complete = true;
+    fixed_summary.edges = &fixed_edges;
+    try std.testing.expectEqual(
+        @as(?ArtifactBlockReason, null),
+        (ObligationSet{
+            .queries = &.{certificate_query},
+            .terms = &fixed_terms,
+            .loop_summaries = &.{fixed_summary},
+        }).loopArtifactAuthorityBlockReason(),
+    );
+
+    var fixed_empty_preheader_summary = fixed_summary;
+    fixed_empty_preheader_summary.preheader_projection_complete = false;
+    try std.testing.expectEqual(
+        @as(?ArtifactBlockReason, null),
+        (ObligationSet{
+            .queries = &.{certificate_query},
+            .terms = &fixed_terms,
+            .loop_summaries = &.{fixed_empty_preheader_summary},
+        }).loopArtifactAuthorityBlockReason(),
+    );
+
+    const mixed_projection = [_]LoopStorageProjection{
+        index_projection[0],
+        mapping_projection[0],
+    };
+    var mixed_timeline = fixed_timeline;
+    mixed_timeline[1].payload.storage_write.location.projections = &mixed_projection;
+    var mixed_edges = fixed_edges;
+    mixed_edges[0].timeline = &mixed_timeline;
+    var mixed_summary = fixed_summary;
+    mixed_summary.edges = &mixed_edges;
+    try std.testing.expectEqual(
+        ArtifactBlockReason.storage_projection_authority_unreviewed,
+        (ObligationSet{
+            .queries = &.{certificate_query},
+            .terms = &fixed_terms,
+            .loop_summaries = &.{mixed_summary},
+        }).loopArtifactAuthorityBlockReason().?,
+    );
+
+    const dependency_timeline = [_]LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "child/direct",
+        .payload = .{ .summary_dependency = .{
+            .id = 0,
+            .structural_key = "child/direct",
+            .summary_id = 2,
+            .loop_vc_sha256 = @as([32]u8, @splat(0)),
+            .write_footprint_complete = true,
+            .target = .successor,
+        } },
+    }};
+    const dependency_edges = [_]LoopEdgeRow{.{
+        .id = 0,
+        .structural_key = "edge/dependency",
+        .timeline = &dependency_timeline,
+    }};
+    var parent_summary = direct_summary;
+    parent_summary.edges = &dependency_edges;
+    var child_summary = direct_summary;
+    child_summary.id = 2;
+    try std.testing.expectEqual(
+        ArtifactBlockReason.storage_child_frame_authority_unreviewed,
+        (ObligationSet{
+            .queries = &.{certificate_query},
+            .loop_summaries = &.{ parent_summary, child_summary },
+        }).loopArtifactAuthorityBlockReason().?,
+    );
+}
+
+test "dynamic sequence authority is limited to reviewed reads as data" {
+    const ty: TypeRef = .{ .spelling = "u256" };
+    const read_id: FreeVarId = .{ .file_id = 1, .pattern_id = 3 };
+    const terms = [_]Term{
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 1, .pattern_id = 1 }, .name = "i", .ty = ty } } },
+        .{ .variable = .{ .free = .{ .id = .{ .file_id = 1, .pattern_id = 2 }, .name = "values.len", .ty = ty } } },
+        .{ .binary = .{ .op = .lt, .lhs = 0, .rhs = 1, .ty = ty } },
+        .{ .variable = .{ .free = .{ .id = read_id, .name = "read", .ty = ty } } },
+    };
+    const formulas = [_]LoopFormulaExpr{.{ .formula = .{ .term = 2 } }};
+    const timeline = [_]LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "body/check",
+        .payload = .{ .safety_checkpoint = .{
+            .formulas = &formulas,
+            .dynamic_index_bounds = true,
+        } },
+    }};
+    const summary: LoopSummaryRow = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "read" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .loop_source_op_id = 1,
+        .loop_kind = .scf_while,
+        .edges = &.{.{ .id = 0, .structural_key = "body", .timeline = &timeline }},
+        .query_ids = .{ .induction = &.{2} },
+    };
+    const query: VerificationQuery = .{
+        .id = 2,
+        .owner = summary.owner,
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .proof_requirement = .lean_certificate,
+        .kind = .loop_induction,
+        .loop_summary_id = summary.id,
+    };
+    try expectArtifactBlocked(.dynamic_sequence_authority_unreviewed, (ObligationSet{
+        .terms = &terms,
+        .queries = &.{query},
+        .loop_summaries = &.{summary},
+    }).artifactDecision());
+
+    const indexed_timeline = [_]LoopTimelineEvent{.{
+        .id = 0,
+        .structural_key = "body/read",
+        .payload = .{ .indexed_region_read = .{
+            .result = read_id,
+            .region = .calldata,
+            .owner = .{ .file_id = 1, .pattern_id = 4 },
+            .index = .{ .formula = .{ .term = 0 } },
+            .element_ty = ty,
+            .checkpoint_structural_key = "body/check",
+        } },
+    }};
+    var indexed_summary = summary;
+    indexed_summary.edges = &.{.{
+        .id = 0,
+        .structural_key = "body",
+        .timeline = &indexed_timeline,
+    }};
+    try std.testing.expectEqual(
+        ArtifactBlockReason.dynamic_sequence_authority_unreviewed,
+        (ObligationSet{
+            .queries = &.{query},
+            .loop_summaries = &.{indexed_summary},
+        }).loopArtifactAuthorityBlockReason().?,
+    );
+
+    const reviewed_timeline = [_]LoopTimelineEvent{
+        timeline[0],
+        .{
+            .id = 1,
+            .structural_key = "body/read",
+            .payload = indexed_timeline[0].payload,
+        },
+        .{
+            .id = 2,
+            .structural_key = "body/write",
+            .payload = .{ .storage_write = .{
+                .location = .{ .root = "output", .value_ty = ty },
+                .value = .{ .formula = .{ .term = 3 }, .read_results = &.{read_id} },
+            } },
+        },
+    };
+    var reviewed_summary = summary;
+    reviewed_summary.edges = &.{.{
+        .id = 0,
+        .structural_key = "body",
+        .timeline = &reviewed_timeline,
+    }};
+    const reviewed_set: ObligationSet = .{
+        .terms = &terms,
+        .queries = &.{query},
+        .loop_summaries = &.{reviewed_summary},
+    };
+    try std.testing.expectEqual(
+        @as(?ArtifactBlockReason, null),
+        reviewed_set.loopSummaryArtifactAuthorityBlockReason(reviewed_summary),
+    );
+
+    const read_next = [_]LoopStepAssignment{.{
+        .variable_index = 0,
+        .value = .{ .term = 3 },
+    }};
+    var formula_edges = [_]LoopEdgeRow{reviewed_summary.edges[0]};
+    formula_edges[0].next_state = &read_next;
+    var formula_summary = reviewed_summary;
+    formula_summary.edges = &formula_edges;
+    try std.testing.expectEqual(
+        ArtifactBlockReason.loop_indexed_region_read_formula_unreviewed,
+        reviewed_set.loopSummaryArtifactAuthorityBlockReason(formula_summary).?,
+    );
+
+    var invariant_summary = reviewed_summary;
+    invariant_summary.invariant_formulas = &.{.{ .term = 3 }};
+    try std.testing.expectEqual(
+        ArtifactBlockReason.loop_indexed_region_read_formula_unreviewed,
+        reviewed_set.loopSummaryArtifactAuthorityBlockReason(invariant_summary).?,
+    );
+
+    var formula_timeline = reviewed_timeline;
+    formula_timeline[2] = .{
+        .id = 2,
+        .structural_key = "body/read-check",
+        .payload = .{ .safety_checkpoint = .{
+            .formulas = &.{.{ .formula = .{ .term = 3 } }},
+        } },
+    };
+    var checkpoint_edges = [_]LoopEdgeRow{reviewed_summary.edges[0]};
+    checkpoint_edges[0].timeline = &formula_timeline;
+    var checkpoint_summary = reviewed_summary;
+    checkpoint_summary.edges = &checkpoint_edges;
+    try std.testing.expectEqual(
+        ArtifactBlockReason.loop_indexed_region_read_formula_unreviewed,
+        reviewed_set.loopSummaryArtifactAuthorityBlockReason(checkpoint_summary).?,
+    );
+}
+
+test "header facts use the ordinary mandatory Lean authority path" {
+    const fact: LoopHeaderFactRow = .{
+        .id = 0,
+        .structural_key = "header-fact:0",
+        .formula = .{ .term = 0 },
+        .source_kind = .path_assume,
+        .source = .{ .structural_key = "assume:0", .block_key = "block:0", .position = 1 },
+        .target = .{ .structural_key = "loop:0", .block_key = "block:0", .position = 2 },
+    };
+    const summary: LoopSummaryRow = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "run" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .loop_source_op_id = 1,
+        .loop_kind = .scf_while,
+        .header_facts = &.{fact},
+    };
+    const query: VerificationQuery = .{
+        .id = 2,
+        .owner = summary.owner,
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .proof_requirement = .lean_certificate,
+        .kind = .loop_induction,
+        .loop_summary_id = summary.id,
+    };
+    try std.testing.expectEqual(
+        @as(?ArtifactBlockReason, null),
+        (ObligationSet{ .queries = &.{query}, .loop_summaries = &.{summary} })
+            .loopArtifactAuthorityBlockReason(),
+    );
+}
+
+test "refinement header retained input checks do not become proofs or bypass failures" {
+    const owner: Owner = .{ .function = .{ .name = "accept" } };
+    const guard: Obligation = .{
+        .id = 1,
+        .owner = owner,
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .{ .mlir_op = .{ .op_name = "ora.refinement_guard", .symbol = "accept" } },
+        .kind = .{ .runtime_guard = .{ .guard_id = "input", .formula = .{ .term = 0 } } },
+    };
+    const satisfy: VerificationQuery = .{
+        .id = 2,
+        .owner = owner,
+        .source = .generated(),
+        .phase = .report,
+        .origin = guard.origin,
+        .kind = .guard_satisfy,
+        .guard_id = "input",
+        .obligation_ids = &.{1},
+        .backend = .z3,
+        .result = .{ .status = .sat },
+    };
+    var violate = satisfy;
+    violate.id = 3;
+    violate.kind = .guard_violate;
+    violate.artifact_policy = .runtime_checked_input;
+    var queries = [_]VerificationQuery{ satisfy, violate };
+    const set: ObligationSet = .{
+        .queries = &queries,
+        .obligations = &.{guard},
+        .terms = &.{.{ .bool_lit = true }},
+    };
+    try std.testing.expect(set.artifactDecision().isAllowed());
+    try std.testing.expect(!querySucceeded(violate, violate.result.?));
+    const cases = [_]struct { result: ?VerificationQueryResult, reason: ArtifactBlockReason }{
+        .{ .result = null, .reason = .missing_proof },
+        .{ .result = .{ .status = .unknown }, .reason = .unknown_query },
+        .{ .result = .{ .status = .failed }, .reason = .failed_query },
+        .{ .result = .{ .status = .sat, .degraded = true }, .reason = .degraded_query },
+        .{ .result = .{ .status = .sat, .vacuous = true }, .reason = .vacuous_query },
+        .{ .result = .{ .status = .sat, .vacuity_unknown = true }, .reason = .unknown_query },
+    };
+    for (cases) |case| {
+        queries[1] = violate;
+        queries[1].result = case.result;
+        try expectArtifactBlocked(case.reason, set.artifactDecision());
+    }
+    queries[1] = violate;
+    queries[1].result = .{ .status = .unsat };
+    try std.testing.expect(set.artifactDecision().isAllowed());
+    queries[1] = violate;
+    queries[1].artifact_policy = .blocks_verified_artifacts;
+    try expectArtifactBlocked(.failed_query, set.artifactDecision());
+    queries[1] = violate;
+    queries[1].proof_requirement = .lean_certificate;
+    try expectArtifactBlocked(.failed_query, set.artifactDecision());
+    queries[1] = violate;
+    queries[1].backend = .lean;
+    try expectArtifactBlocked(.lean_required_failure, set.artifactDecision());
+    for ([_]VerificationQueryKind{ .obligation, .loop_base, .loop_invariant_step, .loop_body_safety, .loop_invariant_post }) |kind| {
+        queries[1] = violate;
+        queries[1].kind = kind;
+        try expectArtifactBlocked(.failed_query, set.artifactDecision());
+    }
+    queries[1] = violate;
+    queries[1].loop_summary_id = 99;
+    try expectArtifactBlocked(.invalid_dependency, set.artifactDecision());
+    queries[1] = violate;
+    queries[0].result = .{ .status = .unsat };
+    try expectArtifactBlocked(.failed_query, set.artifactDecision());
+    // Retaining a check cannot stand in for its missing satisfiability proof.
+    var missing_satisfy = set;
+    missing_satisfy.queries = &.{violate};
+    try expectArtifactBlocked(.missing_proof, missing_satisfy.artifactDecision());
 }
 
 test "diagnostic-only query carries accounting identity without artifact authority" {

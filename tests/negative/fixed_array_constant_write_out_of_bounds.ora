@@ -1,0 +1,7 @@
+contract FixedArrayConstantWriteOutOfBounds {
+    storage var values: [u256; 4];
+
+    pub fn write(value: u256) {
+        values[7] = value;
+    }
+}

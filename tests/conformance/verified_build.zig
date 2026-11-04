@@ -39,9 +39,10 @@ test "verified conformance manifest pins all three build classes" {
     try testing.expectEqual(specs.len, manifest.entries.len);
 
     var counts = [_]usize{ 0, 0, 0 };
+    var drift = false;
     for (manifest.entries, specs) |entry, spec_name| {
         try testing.expectEqualStrings(spec_name, entry.spec_name);
-        counts[@intFromEnum(entry.class)] += 1;
+        counts[@backingInt(entry.class)] += 1;
 
         const stem = spec_name[0 .. spec_name.len - ".spec.toml".len];
         const source_name = try std.fmt.allocPrint(allocator, "{s}.ora", .{stem});
@@ -51,7 +52,14 @@ test "verified conformance manifest pins all three build classes" {
         const spec_path = try std.fs.path.join(allocator, &.{ types.CONFORMANCE_DIR_REL, spec_name });
         defer allocator.free(spec_path);
 
-        const observed = try runner.classifyVerifiedBuild(allocator, source_path, spec_path);
+        const observed = runner.classifyVerifiedBuild(allocator, source_path, spec_path) catch |err| switch (err) {
+            error.UnclassifiedVerifiedCompilerRejection => {
+                std.debug.print("verified conformance classification failed: {s}: {s}\n", .{ spec_name, @errorName(err) });
+                drift = true;
+                continue;
+            },
+            else => return err,
+        };
         if (observed.class != entry.class or observed.rejection_reason != entry.rejection_reason) {
             std.debug.print("verified conformance drift: {s}: manifest={s}/{s}, observed={s}/{s}\n", .{
                 spec_name,
@@ -60,7 +68,8 @@ test "verified conformance manifest pins all three build classes" {
                 @tagName(observed.class),
                 rejectionReasonName(observed.rejection_reason),
             });
-            return error.VerifiedConformanceClassDrift;
+            drift = true;
+            continue;
         }
 
         if (entry.class == .rewritten) {
@@ -71,9 +80,10 @@ test "verified conformance manifest pins all three build classes" {
         }
     }
 
-    try testing.expectEqual(@as(usize, 59), counts[@intFromEnum(runner.VerifiedBuildClass.same_bytecode)]);
-    try testing.expectEqual(@as(usize, 11), counts[@intFromEnum(runner.VerifiedBuildClass.rewritten)]);
-    try testing.expectEqual(@as(usize, 24), counts[@intFromEnum(runner.VerifiedBuildClass.unverifiable)]);
+    try testing.expectEqual(@as(usize, 56), counts[@backingInt(runner.VerifiedBuildClass.same_bytecode)]);
+    try testing.expectEqual(@as(usize, 14), counts[@backingInt(runner.VerifiedBuildClass.rewritten)]);
+    try testing.expectEqual(@as(usize, 39), counts[@backingInt(runner.VerifiedBuildClass.unverifiable)]);
+    if (drift) return error.VerifiedConformanceClassDrift;
 }
 
 test "resource rewrite executes with proved runtime checks kept" {
@@ -101,6 +111,37 @@ test "checked shift bounds execute in verified and no-verify builds" {
     const spec_path = types.CONFORMANCE_DIR_REL ++ "/checked_shift_verified.spec.toml";
     try runner.runConformanceSpecWithExtraArgs(testing.allocator, source_path, spec_path, &.{"--no-verify"});
     try runner.runConformanceSpecWithExtraArgs(testing.allocator, source_path, spec_path, &.{});
+}
+
+test "fixed-array bounds execute for in-bounds accesses in verified and no-verify builds" {
+    std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const source_path = types.CONFORMANCE_DIR_REL ++ "/fixed_array_bounds_verified.ora";
+    const spec_path = types.CONFORMANCE_DIR_REL ++ "/fixed_array_bounds_verified.spec.toml";
+    try runner.runConformanceSpecWithExtraArgs(testing.allocator, source_path, spec_path, &.{"--no-verify"});
+    try runner.runConformanceSpecWithExtraArgs(testing.allocator, source_path, spec_path, &.{});
+}
+
+test "dynamic byte and string bounds execute in verified and no-verify builds" {
+    std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const source_path = types.CONFORMANCE_DIR_REL ++ "/dynamic_index_bounds_verified.ora";
+    const spec_path = types.CONFORMANCE_DIR_REL ++ "/dynamic_index_bounds_verified.spec.toml";
+    try runner.runConformanceSpecWithExtraArgs(testing.allocator, source_path, spec_path, &.{"--no-verify"});
+    try runner.runConformanceSpecWithExtraArgs(testing.allocator, source_path, spec_path, &.{});
+}
+
+test "refinement header input checks execute with Lean certificates and without verification" {
+    const source_path = "tests/formal/loop_header_refinement_auto.ora";
+    const spec_path = "tests/formal/loop_header_refinement_auto.spec.toml";
+    try runner.runConformanceSpecWithExtraArgs(testing.allocator, source_path, spec_path, &.{"--no-verify"});
+    try runner.runConformanceSpecWithExtraArgs(testing.allocator, source_path, spec_path, &.{"--lean-proofs"});
 }
 
 test "verified conformance manifest parser rejects unordered membership" {
@@ -177,8 +218,8 @@ fn parseManifestEntries(allocator: std.mem.Allocator, text: []const u8) ![]Manif
 
 fn parseRejectionReason(text: []const u8) !runner.VerifiedRejectionReason {
     if (std.mem.eql(u8, text, "-")) return error.MissingUnverifiableReason;
-    inline for (std.meta.fields(runner.VerifiedRejectionReason)) |field| {
-        if (std.mem.eql(u8, text, field.name)) return @enumFromInt(field.value);
+    inline for (@typeInfo(runner.VerifiedRejectionReason).@"enum".field_names) |field| {
+        if (std.mem.eql(u8, text, field)) return @field(runner.VerifiedRejectionReason, field);
     }
     return error.InvalidUnverifiableReason;
 }

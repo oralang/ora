@@ -1,0 +1,55 @@
+contract LoopControlTargets {
+    pub fn whileBreak() -> u256 {
+        var i: u256 = 0;
+        while (i < 4)
+            invariant i <= 4
+        {
+            i = i +% 1;
+            if (i == 2) {
+                break;
+            }
+        }
+        return i;
+    }
+
+    pub fn whileContinue() -> u256 {
+        var i: u256 = 0;
+        while (i < 4)
+            invariant i <= 4
+        {
+            i = i +% 1;
+            if (i == 2) {
+                continue;
+            }
+        }
+        return i;
+    }
+
+    pub fn forBreak() -> u256 {
+        var count: u256 = 0;
+        for (0..4) |i, _|
+            invariant i <= 4
+            invariant count == i
+        {
+            count = count +% 1;
+            if (i == 2) {
+                break;
+            }
+        }
+        return count;
+    }
+
+    pub fn forContinue() -> u256 {
+        var count: u256 = 0;
+        for (0..4) |i, _|
+            invariant i <= 4
+            invariant count == i
+        {
+            count = count +% 1;
+            if (i == 2) {
+                continue;
+            }
+        }
+        return count;
+    }
+}

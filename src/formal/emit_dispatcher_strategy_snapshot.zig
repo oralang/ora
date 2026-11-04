@@ -39,9 +39,9 @@ fn emitStrategyRows(out: anytype) !void {
 
 fn emitDensePlanKinds(out: anytype) !void {
     try out.writeAll("def compilerDensePlanKinds : List String :=\n  [");
-    inline for (@typeInfo(switch_routing.DensePlanKind).@"enum".fields, 0..) |field, i| {
+    inline for (@typeInfo(switch_routing.DensePlanKind).@"enum".field_names, 0..) |field, i| {
         if (i != 0) try out.writeAll(", ");
-        const kind = @field(switch_routing.DensePlanKind, field.name);
+        const kind = @field(switch_routing.DensePlanKind, field);
         try out.print("\"{s}\"", .{kind.jsonName()});
     }
     try out.writeAll("]\n\n");
@@ -75,10 +75,10 @@ pub fn main(init: std.process.Init) !void {
     try out.print("def compilerDenseMultiplicativeExtraChecksX1000 : Nat := {d}\n", .{switch_routing.dense_multiplicative_extra_checks_x1000});
     try out.print("def compilerMultiplicativeSearchBudget : Nat := {d}\n", .{switch_routing.multiplicative_search_budget});
     try out.writeAll("def compilerDispatchPolicyLambdasX1000 : List (String × Nat) :=\n  [");
-    inline for (@typeInfo(switch_routing.DispatchPolicy).@"enum".fields, 0..) |field, i| {
+    inline for (@typeInfo(switch_routing.DispatchPolicy).@"enum".field_names, 0..) |field, i| {
         if (i != 0) try out.writeAll(", ");
-        const policy = @field(switch_routing.DispatchPolicy, field.name);
-        try out.print("(\"{s}\", {d})", .{ field.name, policy.lambdaX1000PerByte() });
+        const policy = @field(switch_routing.DispatchPolicy, field);
+        try out.print("(\"{s}\", {d})", .{ field, policy.lambdaX1000PerByte() });
     }
     try out.writeAll("]\n");
     try out.print("def compilerJumpTableEntryBytes : Nat := {d}\n", .{switch_routing.jump_table_entry_bytes});

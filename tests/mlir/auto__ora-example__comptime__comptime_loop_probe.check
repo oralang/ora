@@ -2,3 +2,7 @@
 // INPUT: ora-example/comptime/comptime_loop_probe.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK-LABEL: func.func @test_comptime_while
+// CHECK-NOT: scf.while
+// CHECK: %[[FIVE:.*]] = arith.constant 5 : i256
+// CHECK-NOT: scf.while
+// CHECK: ora.return %[[FIVE]] : i256

@@ -1,0 +1,19 @@
+contract FailPreheaderControlProjection {
+    storage var observed: map<u256, u256>;
+
+    pub fn run(observed_key: u256) {
+        var prior: u256 = 0;
+        while (prior < 1)
+            invariant prior <= 1
+        {
+            prior = prior +% 1;
+        }
+
+        var current: u256 = 0;
+        while (current < 1)
+            invariant observed[observed_key] == old(observed[observed_key])
+        {
+            current = current +% 1;
+        }
+    }
+}

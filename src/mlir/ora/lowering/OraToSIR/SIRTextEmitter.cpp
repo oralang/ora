@@ -32,6 +32,7 @@ namespace
         llvm::DenseMap<Block *, std::string> blockNames;
         std::unordered_set<std::string> usedNames;
         std::unordered_set<std::string> emittedDefs;
+        std::unordered_set<std::string> referencedValueNames;
         std::unordered_map<std::string, Value> constNames;
         unsigned nextValueId = 0;
 
@@ -525,6 +526,11 @@ namespace
         if (isConst && op.getNumResults() == 1)
         {
             std::string name = names.nameFor(op.getResult(0));
+            // A cross-block const use is emitted as an inline numeric because
+            // Plank locals are block-scoped. Do not also emit an unreferenced
+            // named definition in the const's defining block.
+            if (names.referencedValueNames.find(name) == names.referencedValueNames.end())
+                return;
             if (names.emittedDefs.find(name) != names.emittedDefs.end())
                 return;
             names.emittedDefs.insert(name);
@@ -743,6 +749,34 @@ namespace
         return {};
     }
 
+    static void collectReferencedValueNames(func::FuncOp func, NameTable &names)
+    {
+        for (Block &block : func.getBlocks())
+        {
+            for (Operation &op : block)
+            {
+                // Bitcasts have no SIR text representation. Their result is
+                // preassigned the source name, so the eventual textual user
+                // records that name instead.
+                if (isa<sir::BitcastOp>(op))
+                    continue;
+                for (Value operand : op.getOperands())
+                {
+                    std::string text = operandTextForUse(names, operand, op);
+                    if (names.usedNames.find(text) != names.usedNames.end())
+                        names.referencedValueNames.insert(text);
+                }
+            }
+
+            // Block outputs are printed in the block header, not by the
+            // terminator emitter, and may legally name a value defined in an
+            // earlier block. Keep such definitions even when the terminator's
+            // textual form itself contains no operand names.
+            for (Value output : computeBlockOutputs(block))
+                names.referencedValueNames.insert(names.nameFor(output));
+        }
+    }
+
     static SmallVector<func::FuncOp, 8> collectSortedFuncs(ModuleOp module)
     {
         SmallVector<func::FuncOp, 8> funcs;
@@ -927,6 +961,7 @@ namespace mlir
 
                 SmallVector<Block *, 16> blocks = collectOrderedBlocks(func, names);
                 preassignNamesForFunc(func, names);
+                collectReferencedValueNames(func, names);
 
                 os << "fn " << sanitizeGlobalName(func.getName()) << ":\n";
                 for (Block *blockPtr : blocks)
@@ -1112,6 +1147,7 @@ namespace mlir
                             names->nameFor(res);
                     }
                 }
+                collectReferencedValueNames(func, *names);
 
                 auto *ptr = names.get();
                 nameTables.emplace(func.getOperation(), std::move(names));
@@ -1143,6 +1179,8 @@ namespace mlir
                 if (isa<sir::ConstOp>(op) && op.getNumResults() == 1)
                 {
                     std::string name = names.nameFor(op.getResult(0));
+                    if (names.referencedValueNames.find(name) == names.referencedValueNames.end())
+                        return;
                     if (names.emittedDefs.find(name) != names.emittedDefs.end())
                         return;
                     names.emittedDefs.insert(name);

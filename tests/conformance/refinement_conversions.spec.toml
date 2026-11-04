@@ -1,0 +1,571 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "ret(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25"]
+reverts = { any = true }
+
+[[call]]
+fn = "ret(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125"]
+returns = { u256 = "125" }
+
+[[call]]
+fn = "local(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25"]
+reverts = { any = true }
+
+[[call]]
+fn = "local(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125"]
+returns = { u256 = "125" }
+
+[[call]]
+fn = "assign(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25"]
+reverts = { any = true }
+
+[[call]]
+fn = "assign(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125"]
+returns = { u256 = "125" }
+
+[[call]]
+fn = "alias(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25"]
+reverts = { any = true }
+
+[[call]]
+fn = "alias(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125"]
+returns = { u256 = "125" }
+
+[[call]]
+fn = "generic(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25"]
+reverts = { any = true }
+
+[[call]]
+fn = "generic(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125"]
+returns = { u256 = "125" }
+
+[[call]]
+fn = "map(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25"]
+reverts = { any = true }
+
+[[call]]
+fn = "map(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125"]
+returns = { u256 = "125" }
+
+[[call]]
+fn = "field(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25"]
+reverts = { any = true }
+
+[[call]]
+fn = "field(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125"]
+returns = { u256 = "125" }
+
+[[call]]
+fn = "struct_init(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25"]
+reverts = { any = true }
+
+[[call]]
+fn = "struct_init(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125"]
+returns = { u256 = "125" }
+
+[[call]]
+fn = "tuple_init(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25"]
+reverts = { any = true }
+
+[[call]]
+fn = "tuple_init(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125"]
+returns = { u256 = "125" }
+
+[[call]]
+fn = "array_init(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25"]
+reverts = { any = true }
+
+[[call]]
+fn = "array_init(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125"]
+returns = { u256 = "125" }
+
+[[call]]
+fn = "array_assign(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25"]
+reverts = { any = true }
+
+[[call]]
+fn = "array_assign(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125"]
+returns = { u256 = "125" }
+
+[[call]]
+fn = "cast(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25"]
+reverts = { any = true }
+
+[[call]]
+fn = "cast(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125"]
+returns = { u256 = "125" }
+
+[[call]]
+fn = "sibling(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25"]
+reverts = { any = true }
+
+[[call]]
+fn = "sibling(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125"]
+returns = { u256 = "125" }
+
+[[call]]
+fn = "store(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125"]
+returns = { u256 = "125" }
+
+[[call]]
+fn = "store(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25"]
+reverts = { any = true }
+
+[[call]]
+fn = "read()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = "125" }
+
+[[call]]
+fn = "truncate(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25"]
+reverts = { any = true }
+
+[[call]]
+fn = "truncate(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125"]
+returns = { u8 = "125" }
+
+[[call]]
+fn = "truncate(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["381"]
+returns = { u8 = "125" }
+
+[[call]]
+fn = "truncate(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["281"]
+reverts = { any = true }
+
+[[call]]
+fn = "bitcast(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25"]
+reverts = { any = true }
+
+[[call]]
+fn = "bitcast(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125"]
+returns = { i256 = "125" }
+
+[[call]]
+fn = "bitcast(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["115792089237316195423570985008687907853269984665640564039457584007913129639935"]
+reverts = { any = true }
+
+[[call]]
+fn = "maximum(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125"]
+reverts = { any = true }
+
+[[call]]
+fn = "maximum(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25"]
+returns = { u256 = "25" }
+
+[[call]]
+fn = "range(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["99"]
+reverts = { any = true }
+
+[[call]]
+fn = "range(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["201"]
+reverts = { any = true }
+
+[[call]]
+fn = "range(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["100"]
+returns = { u256 = "100" }
+
+[[call]]
+fn = "range(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["200"]
+returns = { u256 = "200" }
+
+[[call]]
+fn = "nonzero(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0"]
+reverts = { any = true }
+
+[[call]]
+fn = "nonzero(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["1"]
+returns = { u256 = "1" }
+
+[[call]]
+fn = "signed(int256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["-11"]
+reverts = { any = true }
+
+[[call]]
+fn = "signed(int256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["11"]
+reverts = { any = true }
+
+[[call]]
+fn = "signed(int256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["-10"]
+returns = { i256 = "-10" }
+
+[[call]]
+fn = "signed(int256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["10"]
+returns = { i256 = "10" }
+
+[[call]]
+fn = "branch(uint256,bool)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25", true]
+returns = { u256 = "150" }
+
+[[call]]
+fn = "branch(uint256,bool)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25", false]
+reverts = { any = true }
+
+[[call]]
+fn = "branch(uint256,bool)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125", false]
+returns = { u256 = "125" }
+
+[[call]]
+fn = "union(uint256,bool)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25", true]
+returns = { u256 = "999" }
+
+[[call]]
+fn = "union(uint256,bool)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25", false]
+reverts = { any = true }
+
+[[call]]
+fn = "union(uint256,bool)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125", false]
+returns = { u256 = "125" }
+
+[[call]]
+fn = "indexed()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = "1" }
+
+[[call]]
+fn = "checked_param(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25"]
+reverts = { any = true }
+
+[[call]]
+fn = "checked_param(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125"]
+returns = { u256 = "125" }
+
+[[call]]
+fn = "checked_roundtrip(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25"]
+reverts = { any = true }
+
+[[call]]
+fn = "checked_roundtrip(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125"]
+returns = { u256 = "125" }
+
+[[call]]
+fn = "stronger(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125"]
+reverts = { any = true }
+
+[[call]]
+fn = "stronger(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["225"]
+returns = { u256 = "225" }
+
+[[call]]
+fn = "carrier(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0"]
+reverts = { any = true }
+
+[[call]]
+fn = "carrier(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["10001"]
+reverts = { any = true }
+
+[[call]]
+fn = "carrier(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["500"]
+returns = { u256 = "500" }
+
+[[call]]
+fn = "checked_narrow(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["256"]
+reverts = { any = true }
+
+[[call]]
+fn = "checked_narrow(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["381"]
+returns = { u8 = "125" }
+
+[[call]]
+fn = "checked_signed(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["115792089237316195423570985008687907853269984665640564039457584007913129639935"]
+reverts = { any = true }
+
+[[call]]
+fn = "checked_signed(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125"]
+returns = { i256 = "125" }
+
+[[call]]
+fn = "checked_wide(uint8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25"]
+reverts = { any = true }
+
+[[call]]
+fn = "checked_wide(uint8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125"]
+returns = { u256 = "125" }
+
+[[call]]
+fn = "arms(uint256,bool)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25", "true"]
+reverts = { any = true }
+
+[[call]]
+fn = "arms(uint256,bool)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125", "true"]
+returns = { u256 = "125" }
+
+[[call]]
+fn = "arms(uint256,bool)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25", "false"]
+reverts = { any = true }
+
+[[call]]
+fn = "arms(uint256,bool)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125", "false"]
+returns = { u256 = "125" }
+
+[[call]]
+fn = "join(uint256,bool)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25", "true"]
+reverts = { any = true }
+
+[[call]]
+fn = "join(uint256,bool)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125", "true"]
+returns = { u256 = "125" }
+
+[[call]]
+fn = "join(uint256,bool)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["25", "false"]
+reverts = { any = true }
+
+[[call]]
+fn = "join(uint256,bool)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125", "false"]
+returns = { u256 = "125" }
+
+[[call]]
+fn = "rebind(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125", "25"]
+reverts = { any = true }
+
+[[call]]
+fn = "rebind(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["125", "175"]
+returns = { u256 = "175" }
+
+[[call]]
+fn = "iterations()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+reverts = { any = true }

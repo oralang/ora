@@ -1,0 +1,14 @@
+error RejectedValue(value: u256);
+contract ErrorStorage {
+    storage var value: u256;
+    fn select(x: u256) -> !u256 | RejectedValue {
+        value = x;
+        if (x == 0) { return RejectedValue(x); }
+        return x;
+    }
+    pub fn run(input: u256) -> !u256 | RejectedValue {
+        var i: u256 = 0;
+        while (i < 1) invariant i <= 1 { let selected: u256 = try select(input); i = i +% 1; }
+        return i;
+    }
+}

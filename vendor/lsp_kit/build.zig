@@ -2,10 +2,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
-    comptime if (builtin.zig_version.major != 0 or builtin.zig_version.minor < 15 or builtin.zig_version.minor > 16 or builtin.zig_version.pre != null or builtin.zig_version.build != null) {
+    comptime if (builtin.zig_version.major != 0 or builtin.zig_version.minor != 17 or builtin.zig_version.pre != null or builtin.zig_version.build != null) {
         @compileError(std.fmt.comptimePrint(
             \\Your Zig version does not meet the build requirement:
-            \\  required Zig version: 0.15.x or 0.16.x
+            \\  required Zig version: 0.17.x (stable)
             \\  actual   Zig version: {[current_version]s}
             \\
         , .{
@@ -111,11 +111,17 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(hello_client_exe);
 
     const run_hello_client = b.addRunArtifact(hello_client_exe);
-    if (b.args) |args| {
-        run_hello_client.addArgs(args);
-        if (args.len == 1) {
-            run_hello_client.addArtifactArg(hello_server_exe);
+    if (comptime @hasField(std.Build, "args")) {
+        if (b.args) |args| {
+            run_hello_client.addArgs(args);
+            if (args.len == 1) {
+                run_hello_client.addArtifactArg(hello_server_exe);
+            }
         }
+    } else {
+        // 0.17 resolves passthrough arguments at execution time. Supply the
+        // server path explicitly when running this standalone example.
+        run_hello_client.addPassthruArgs();
     }
 
     const run_hello_client_step = b.step("run-hello-client", "Run the hello-client example");
@@ -159,7 +165,7 @@ pub fn build(b: *std.Build) void {
 
     // ----------------------------- Code Coverage -----------------------------
 
-    const kcov_bin = b.findProgram(&.{"kcov"}, &.{}) catch "kcov";
+    const kcov_bin = b.findProgram(.{ .names = &.{"kcov"} }) orelse "kcov";
 
     const kcov_merge = std.Build.Step.Run.create(b, "kcov merge coverage");
     kcov_merge.rename_step_with_output_arg = false;

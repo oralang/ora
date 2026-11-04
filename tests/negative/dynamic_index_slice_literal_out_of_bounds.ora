@@ -1,0 +1,5 @@
+contract DynamicIndexSliceLiteralOutOfBounds {
+    pub fn read() -> u256 {
+        return @cast(slice[u256], [1, 2])[2];
+    }
+}

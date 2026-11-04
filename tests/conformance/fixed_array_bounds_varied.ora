@@ -1,0 +1,35 @@
+contract FixedArrayBoundsVaried {
+    storage var head: u256;
+    storage var samples: [u256; 3];
+    storage var tail: u256;
+
+    pub fn init() {
+        head = 11;
+        samples[0] = 5;
+        samples[2] = 9;
+        tail = 777;
+    }
+
+    pub fn write_sample(index: u256, value: u256)
+        requires index < 3
+    {
+        samples[index] = value;
+    }
+
+    pub fn read_sample(index: u256) -> u256
+        requires index < 3
+    {
+        return samples[index];
+    }
+
+    pub fn read_local(index: u256) -> u256
+        requires index < 2
+    {
+        let pair: [u256; 2] = [17, 29];
+        return pair[index];
+    }
+
+    pub fn read_tail() -> u256 {
+        return tail;
+    }
+}

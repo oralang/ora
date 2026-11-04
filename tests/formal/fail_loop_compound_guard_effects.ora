@@ -1,0 +1,28 @@
+// Guard reads and disjunction remain outside the conjunction-only repair.
+contract LoopCompoundGuardEffects {
+    storage observed: u256;
+
+    pub fn storageRight(limit: u256) -> u256
+    requires limit <= 6
+    {
+        var i: u256 = 0;
+        while (i < limit && observed > 0)
+        invariant i <= limit
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+
+    pub fn disjunction(limit: u256) -> u256
+    requires limit <= 6
+    {
+        var i: u256 = 0;
+        while (i < limit || i < 6)
+        invariant i <= 6
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+}

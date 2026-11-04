@@ -1,0 +1,11 @@
+contract AdapterLeaf {
+    fn yes(input: u256) -> bool { return true; }
+
+    pub fn run(input: u256) -> u256 {
+        var i: u256 = 0;
+        while (i < 1) invariant i <= 1 {
+            if (yes(input)) { i = 1; } else { i = 1; }
+        }
+        return i;
+    }
+}

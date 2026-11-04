@@ -1,0 +1,16 @@
+contract MappingStoragePreheaderCertificate {
+    storage var values: map<u256, u256>;
+
+    pub fn preserve(write_key: u256, observed_key: u256, value: u256)
+        requires(write_key != observed_key)
+        modifies values[write_key]
+    {
+        values[write_key] = value;
+        var i: u256 = 0;
+        while (i < 1)
+            invariant values[observed_key] == old(values[observed_key])
+        {
+            i = i;
+        }
+    }
+}

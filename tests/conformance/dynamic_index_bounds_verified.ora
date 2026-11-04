@@ -1,0 +1,13 @@
+contract DynamicIndexBoundsVerified {
+    pub fn read_byte(value: bytes, index: u256) -> u8
+        requires index < value.len
+    {
+        return value[index];
+    }
+
+    pub fn read_text(value: string, index: u256) -> u8
+        requires index < value.len
+    {
+        return value[index];
+    }
+}

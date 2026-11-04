@@ -1,0 +1,14 @@
+contract FailLoopWitnessContradiction {
+    pub fn run(limit: u256) -> u256
+    requires limit >= 2
+    requires limit <= 1
+    {
+        var i: u256 = 0;
+        while (i < limit)
+        invariant i <= limit
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+}

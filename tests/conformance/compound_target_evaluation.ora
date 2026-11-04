@@ -1,0 +1,31 @@
+struct Pair { left: u256; right: u256; }
+bitfield Bits : u256 { left: u8; right: u8; signed: i8; }
+contract CompoundTargets {
+    storage var calls: u256;
+    storage var values: [u256; 2];
+    storage var balances: map<u256, u256>;
+    storage var nested: map<u256, map<u256, u256>>;
+    storage var pair: Pair;
+    storage var bits: Bits;
+    fn next() -> u256 { let n = calls; calls = calls +% 1; return n; }
+    fn changeSibling() -> u256 { pair.right = 77; return 1; }
+    fn changeSignedBits() -> i8 { bits.right = 77; return 2; }
+    fn changeBits() -> u8 { bits.right = 77; return 1; }
+    fn changeElement() -> u256 { values[1] = 77; return 1; }
+    pub fn local_compound() -> u256 { calls = 0; var data: [u256; 2] = [10, 20]; data[next()] += 1; assert(data[0] == 11 && data[1] == 20, "compound target state"); return calls; }
+    pub fn local_cached() -> u256 { calls = 0; var data: [u256; 2] = [10, 20]; let k = next(); data[k] = data[k] + 1; assert(data[0] == 11 && data[1] == 20, "compound target state"); return calls; }
+    pub fn storage_compound() -> u256 { calls = 0; values[0] = 10; values[1] = 20; values[next()] += 1; assert(values[0] == 11 && values[1] == 20, "compound target state"); return calls; }
+    pub fn storage_cached() -> u256 { calls = 0; values[0] = 10; values[1] = 20; let k = next(); values[k] = values[k] + 1; assert(values[0] == 11 && values[1] == 20, "compound target state"); return calls; }
+    pub fn map_compound() -> u256 { calls = 0; balances[0] = 10; balances[1] = 20; balances[next()] += 1; assert(balances[0] == 11 && balances[1] == 20, "compound target state"); return calls; }
+    pub fn map_cached() -> u256 { calls = 0; balances[0] = 10; balances[1] = 20; let k = next(); balances[k] = balances[k] + 1; assert(balances[0] == 11 && balances[1] == 20, "compound target state"); return calls; }
+    pub fn nested_map_compound() -> u256 { calls = 0; nested[0][1] = 10; nested[0][0] = 20; nested[1][0] = 30; nested[next()][next()] += 1; assert(nested[0][1] == 11 && nested[0][0] == 20 && nested[1][0] == 30, "compound target state"); return calls; }
+    pub fn nested_map_cached() -> u256 { calls = 0; nested[0][1] = 10; nested[0][0] = 20; nested[1][0] = 30; let k = next(); let j = next(); nested[k][j] = nested[k][j] + 1; assert(nested[0][1] == 11 && nested[0][0] == 20 && nested[1][0] == 30, "compound target state"); return calls; }
+    pub fn storage_rhs_compound() -> u256 { calls = 0; values[0] = 10; values[1] = 20; values[next()] += changeElement(); assert(values[0] == 11 && values[1] == 77, "compound target state"); return calls; }
+    pub fn storage_rhs_cached() -> u256 { calls = 0; values[0] = 10; values[1] = 20; let k = next(); values[k] = values[k] + changeElement(); assert(values[0] == 11 && values[1] == 77, "compound target state"); return calls; }
+    pub fn field_rhs_compound() -> u256 { calls = 0; pair = Pair { left: 10, right: 20 }; pair.left += changeSibling(); assert(pair.left == 11 && pair.right == 77, "compound target state"); return calls; }
+    pub fn field_rhs_cached() -> u256 { calls = 0; pair = Pair { left: 10, right: 20 };  pair.left = pair.left + changeSibling(); assert(pair.left == 11 && pair.right == 77, "compound target state"); return calls; }
+    pub fn bitfield_rhs_compound() -> u256 { calls = 0; bits.left = 10; bits.right = 20; bits.left += changeBits(); assert(bits.left == 11 && bits.right == 77, "compound target state"); return calls; }
+    pub fn bitfield_rhs_cached() -> u256 { calls = 0; bits.left = 10; bits.right = 20;  bits.left = bits.left + changeBits(); assert(bits.left == 11 && bits.right == 77, "compound target state"); return calls; }
+    pub fn signed_bitfield_compound() -> u256 { calls = 0; bits.signed = -10; bits.right = 20; bits.signed += changeSignedBits(); assert(bits.signed == -8 && bits.right == 77, "signed bitfield target state"); return calls; }
+    pub fn signed_bitfield_cached() -> u256 { calls = 0; bits.signed = -10; bits.right = 20; bits.signed = bits.signed + changeSignedBits(); assert(bits.signed == -8 && bits.right == 77, "signed bitfield target state"); return calls; }
+}

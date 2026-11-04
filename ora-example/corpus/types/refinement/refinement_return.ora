@@ -1,3 +1,7 @@
+comptime const std = @import("std");
+
+// Refined getters require valid stored values; call the checked setters first.
+// These entry checks do not assume or prove a storage lifecycle invariant.
 // Function returning refinement types
 
 contract RefinementReturn {
@@ -6,19 +10,27 @@ contract RefinementReturn {
     storage var rangeVal: InRange<u256, 10, 200>;
     storage var addr: NonZeroAddress;
 
-    pub fn returnMinValue() -> MinValue<u256, 1> {
+    pub fn returnMinValue() -> MinValue<u256, 1>
+        requires(minVal >= 1)
+    {
         return minVal;
     }
 
-    pub fn returnMaxValue() -> MaxValue<u256, 500> {
+    pub fn returnMaxValue() -> MaxValue<u256, 500>
+        requires(maxVal <= 500)
+    {
         return maxVal;
     }
 
-    pub fn returnInRange() -> InRange<u256, 10, 200> {
+    pub fn returnInRange() -> InRange<u256, 10, 200>
+        requires(rangeVal >= 10 and rangeVal <= 200)
+    {
         return rangeVal;
     }
 
-    pub fn returnNonZero() -> NonZeroAddress {
+    pub fn returnNonZero() -> NonZeroAddress
+        requires(addr != std.constants.ZERO_ADDRESS)
+    {
         return addr;
     }
 

@@ -69,8 +69,8 @@ pub const DispatchPolicy = enum {
 pub var dispatch_policy: DispatchPolicy = .balanced;
 
 pub fn parsePolicyName(name: []const u8) ?DispatchPolicy {
-    inline for (@typeInfo(DispatchPolicy).@"enum".fields) |field| {
-        if (std.mem.eql(u8, name, field.name)) return @field(DispatchPolicy, field.name);
+    inline for (@typeInfo(DispatchPolicy).@"enum".field_names) |field| {
+        if (std.mem.eql(u8, name, field)) return @field(DispatchPolicy, field);
     }
     return null;
 }
@@ -216,7 +216,7 @@ fn traceMultiplicativeSearch(
     var candidate_index: u32 = 0;
     while (candidate_index < multiplicative_search_budget) : (candidate_index += 1) {
         const constant = multiplicativeCandidate(candidate_index);
-        var occupied = [_]?usize{null} ** dense_max_table_slots;
+        var occupied = @as([dense_max_table_slots]?usize, @splat(null));
         var collision: ?MultiplicativeCollisionWitness = null;
         for (cases, 0..) |case, case_index| {
             const selector = parseU32Selector(case.value).?;
@@ -627,7 +627,7 @@ fn denseMultiplicativePlan(cases: []const ir.SwitchCase, table_slots: usize) ?De
     var candidate_index: u32 = 0;
     while (candidate_index < multiplicative_search_budget) : (candidate_index += 1) {
         const constant = multiplicativeCandidate(candidate_index);
-        var occupied = [_]bool{false} ** dense_max_table_slots;
+        var occupied = @as([dense_max_table_slots]bool, @splat(false));
         var collision_free = true;
         for (cases) |case| {
             const selector = parseU32Selector(case.value).?;
@@ -658,7 +658,7 @@ fn analyzeSparsePlan(cases: []const ir.SwitchCase, bucket_bits: u8, bucket_shift
 
     const bucket_count = @as(usize, 1) << @as(std.math.Log2Int(usize), @intCast(bucket_bits));
 
-    var counts = [_]usize{0} ** 256;
+    var counts = @as([256]usize, @splat(0));
     for (cases) |case| {
         const selector = parseU32Selector(case.value).?;
         counts[bucketIndex(selector, bucket_bits, bucket_shift)] += 1;
@@ -706,7 +706,7 @@ fn denseBitWindowPlan(cases: []const ir.SwitchCase, index_bits: u8, index_shift:
 
     const table_slots = @as(usize, 1) << @as(std.math.Log2Int(usize), @intCast(index_bits));
 
-    var occupied = [_]bool{false} ** 256;
+    var occupied = @as([256]bool, @splat(false));
     for (cases) |case| {
         const selector = parseU32Selector(case.value).?;
         const index = bucketIndex(selector, index_bits, index_shift);
@@ -1100,12 +1100,12 @@ test "switch routing keeps sparse as the large-switch strategy" {
 }
 
 test "switch routing strategy fact table covers planner variants" {
-    const plan_fields = @typeInfo(Plan).@"union".fields;
+    const plan_fields = @typeInfo(Plan).@"union".field_names;
     try std.testing.expectEqual(plan_fields.len, dispatcher_strategy_facts.len);
     inline for (plan_fields) |field| {
         var found = false;
         for (dispatcher_strategy_facts) |fact| {
-            if (std.mem.eql(u8, fact.name, field.name)) {
+            if (std.mem.eql(u8, fact.name, field)) {
                 found = true;
                 break;
             }

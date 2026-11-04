@@ -6,7 +6,10 @@ contract ForBasic {
     // Simple range iteration
     pub fn test_range() -> u256 {
         var sum: u256 = 0;
-        for (0..10) |i, _| {
+        for (0..10) |i, _|
+            invariant i <= 10
+            invariant sum <= i
+        {
             sum = i;
         }
         return sum;
@@ -15,7 +18,10 @@ contract ForBasic {
     // Range with non-zero start
     pub fn test_range_offset() -> u256 {
         var sum: u256 = 0;
-        for (5..10) |i, _| {
+        for (5..10) |i, _|
+            invariant i <= 10
+            invariant sum <= i
+        {
             sum = i;
         }
         return sum;
@@ -24,7 +30,10 @@ contract ForBasic {
     // Single iteration range
     pub fn test_single_iteration() -> u256 {
         var res: u256 = 0;
-        for (0..1) |i, _| {
+        for (0..1) |i, _|
+            invariant i <= 1
+            invariant res <= 42
+        {
             res = 42;
         }
         return res;
@@ -33,7 +42,10 @@ contract ForBasic {
     // For loop with body that uses index
     pub fn test_use_index() -> u256 {
         var total: u256 = 0;
-        for (0..5) |i, _| {
+        for (0..5) |i, _|
+            invariant i <= 5
+            invariant total <= i
+        {
             total = i;
         }
         return total;
@@ -42,7 +54,10 @@ contract ForBasic {
     // For loop accumulating product
     pub fn test_factorial_like() -> u256 {
         var product: u256 = 1;
-        for (1..6) |i, _| {
+        for (1..6) |i, _|
+            invariant i <= 6
+            invariant product <= i
+        {
             product = i;
         }
         return product;

@@ -1,0 +1,10 @@
+contract CheckedBranch {
+    fn divide(x: u256, divisor: u256) -> u256 {
+        if (divisor == 0) { return 0; }
+        return x / divisor;
+    }
+    pub fn run(input: u256, divisor: u256) {
+        var i: u256 = 0;
+        while (i < 1) invariant i <= 1 { let selected: u256 = divide(input, divisor); i = i +% 1; }
+    }
+}

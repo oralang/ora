@@ -1,0 +1,15 @@
+// The later false operand cannot remove an earlier executed division check.
+contract LoopCompoundGuardLateFalse {
+    pub fn run(limit: u256) -> u256
+    requires limit >= 1
+    requires limit <= 6
+    {
+        var i: u256 = 0;
+        while (i < limit && 12 / i > 0 && false)
+        invariant i <= limit
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+}

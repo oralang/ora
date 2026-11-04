@@ -124,11 +124,11 @@ pub fn run(
                                 .method_not_found,
                                 .invalid_params,
                                 .internal_error,
-                                @enumFromInt(@intFromEnum(types.ErrorCodes.ServerNotInitialized)),
-                                @enumFromInt(@intFromEnum(types.LSPErrorCodes.RequestFailed)),
-                                @enumFromInt(@intFromEnum(types.LSPErrorCodes.ServerCancelled)),
-                                @enumFromInt(@intFromEnum(types.LSPErrorCodes.ContentModified)),
-                                @enumFromInt(@intFromEnum(types.LSPErrorCodes.RequestCancelled)),
+                                @fromBackingInt(@intCast(@backingInt(types.ErrorCodes.ServerNotInitialized))),
+                                @fromBackingInt(@intCast(@backingInt(types.LSPErrorCodes.RequestFailed))),
+                                @fromBackingInt(@intCast(@backingInt(types.LSPErrorCodes.ServerCancelled))),
+                                @fromBackingInt(@intCast(@backingInt(types.LSPErrorCodes.ContentModified))),
+                                @fromBackingInt(@intCast(@backingInt(types.LSPErrorCodes.RequestCancelled))),
                             },
                         ) |zig_err, new_code| {
                             if (err == zig_err) {
@@ -614,8 +614,8 @@ fn MessageType(comptime Handler: type) type {
         var methods: []const [:0]const u8 = &.{};
 
         for (std.meta.declarations(Handler)) |decl| {
-            if (isMethod(decl.name)) {
-                methods = methods ++ [1][:0]const u8{decl.name};
+            if (isMethod(decl)) {
+                methods = methods ++ [1][:0]const u8{decl};
             }
         }
 
@@ -633,7 +633,7 @@ fn MessageType(comptime Handler: type) type {
 
         var union_field_names: [methods.len + 1][]const u8 = undefined;
         var union_field_types: [methods.len + 1]type = undefined;
-        var union_field_attrs: [methods.len + 1]std.builtin.Type.UnionField.Attributes = undefined;
+        var union_field_attrs: [methods.len + 1]std.builtin.Type.Union.FieldAttributes = undefined;
         for (
             union_field_names[0 .. union_field_names.len - 1],
             union_field_types[0 .. union_field_types.len - 1],
@@ -694,12 +694,12 @@ fn callHandler(
         else => comptime unreachable,
     };
 
-    if (fn_info.params.len >= 1) switch (fn_info.params[0].type.?) {
+    if (fn_info.param_types.len >= 1) switch (fn_info.param_types[0].?) {
         Handler, *Handler, *const Handler => {},
         else => return @call(.auto, func, args),
     } else return @call(.auto, func, args);
 
-    return switch (fn_info.params[0].type.?) {
+    return switch (fn_info.param_types[0].?) {
         Handler => @call(.auto, func, .{handler_ptr.*} ++ args),
         *Handler, *const Handler => @call(.auto, func, .{handler_ptr} ++ args),
         else => comptime unreachable,

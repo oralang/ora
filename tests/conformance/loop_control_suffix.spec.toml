@@ -1,0 +1,32 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "forBreakSkipsSuffix(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [4]
+returns = { u256 = 4 }
+
+[[call]]
+fn = "forContinueSkipsSuffix(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [2, 4]
+returns = { u256 = 4 }
+
+[[call]]
+fn = "whileBreakSkipsSuffix(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [4, 10]
+returns = { u256 = 6 }
+
+[[call]]
+fn = "whileContinueSkipsSuffix(uint256,uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [2, 5, 6]
+returns = { u256 = 8 }

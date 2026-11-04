@@ -35,11 +35,129 @@ def loopTotalityRows : List (String × String × Bool × String × Bool) := [
   ("missing_body_safety", "missing_body_safety", false, "loop_body_safety_missing", false),
   ("unsupported_kind", "unsupported_kind", false, "loop_kind_unsupported", false),
   ("unregistered_integer_variable", "unregistered_integer_variable", false, "loop_variable_not_registered_integer", false),
-  ("bad_update_target", "bad_update_target", false, "loop_update_target_not_loop_variable", false),
+  ("bad_update_target", "bad_update_target", false, "loop_state_binding_foreign", false),
   ("unsupported_formula", "unsupported_formula", false, "loop_formula_unsupported", false),
   ("identity_collision", "identity_collision", false, "loop_identity_missing", false),
   ("query_owner_mismatch", "query_owner_mismatch", false, "loop_summary_query_mismatch", true),
   ("query_id_mismatch", "query_id_mismatch", false, "loop_summary_query_mismatch", true)
 ]
+
+def loopTimelineEventTags : List String := ["path_assumption", "safety_checkpoint", "storage_read", "indexed_region_read", "storage_write", "summary_dependency", "call"]
+
+def loopStorageProjectionTags : List String := ["field", "fixed_index", "mapping_key"]
+
+def loopTimelineValidationRows : List (String × String) := [
+  ("supported", ""),
+  ("child_results", ""),
+  ("child_results_empty", ""),
+  ("child_results_type", "loop_call_binding_invalid"),
+  ("child_results_parameter", "loop_storage_read_identity_duplicate"),
+  ("child_results_previous", "loop_storage_read_identity_duplicate"),
+  ("child_results_duplicate", "loop_storage_read_identity_duplicate"),
+  ("child_results_index", "loop_call_binding_invalid"),
+  ("timeline_missing", "loop_timeline_missing"),
+  ("event_order_invalid", "loop_timeline_event_order_invalid"),
+  ("event_identity_missing", "loop_timeline_event_identity_missing"),
+  ("event_identity_duplicate", "loop_timeline_event_identity_duplicate"),
+  ("path_missing", "loop_timeline_path_missing"),
+  ("storage_root_missing", "loop_storage_root_missing"),
+  ("storage_projection_invalid", "loop_storage_projection_invalid"),
+  ("storage_type_invalid", "loop_storage_type_invalid"),
+  ("read_identity_duplicate", "loop_storage_read_identity_duplicate"),
+  ("read_identity_foreign", "loop_storage_read_identity_foreign"),
+  ("read_identity_forward", "loop_storage_read_identity_forward"),
+  ("child_footprint_missing", "loop_storage_child_footprint_missing"),
+  ("dependency_order_invalid", "loop_summary_dependency_order_invalid"),
+  ("dependency_target_unsupported", "loop_summary_dependency_target_unsupported"),
+  ("body_safety_missing", "loop_body_safety_missing")
+]
+
+def callTimelineValidationRows : List (String × String) := [
+  ("supported", ""),
+  ("result_duplicate", "loop_storage_read_identity_duplicate"),
+  ("result_alias_parameter", "loop_storage_read_identity_duplicate"),
+  ("result_forward", "loop_storage_read_identity_forward"),
+  ("result_foreign", "loop_storage_read_identity_foreign"),
+  ("result_index", "loop_call_binding_invalid"),
+  ("argument_type", "loop_call_binding_invalid"),
+  ("result_type", "loop_call_binding_invalid"),
+  ("empty_digest", "loop_call_digest_missing"),
+  ("two_results", ""),
+  ("void_result", "")]
+
+def loopPreheaderValidationRows : List (String × String) := [
+  ("supported", ""),
+  ("read_identity_forward", "loop_storage_read_identity_forward"),
+  ("dependency_unsupported", "loop_preheader_storage_relation_unsupported")
+]
+
+def loopFixedIndexBoundsRows : List (String × String) := [
+  ("supported", ""),
+  ("extent_invalid", "loop_fixed_index_extent_invalid"),
+  ("checkpoint_missing", "loop_fixed_index_bounds_checkpoint_missing"),
+  ("checkpoint_late", "loop_fixed_index_bounds_checkpoint_missing"),
+  ("checkpoint_wrong_shape", "loop_fixed_index_bounds_formula_shape_mismatch"),
+  ("checkpoint_wrong_index", "loop_fixed_index_bounds_index_identity_mismatch"),
+  ("checkpoint_wrong_type", "loop_fixed_index_bounds_type_mismatch"),
+  ("checkpoint_inconsistent", "loop_fixed_index_bounds_extent_literal_mismatch"),
+  ("checkpoint_noncanonical_literal", "loop_fixed_index_bounds_extent_literal_mismatch")
+]
+
+def loopIndexedRegionValidationRows : List (String × String) := [
+  ("supported", ""),
+  ("read_missing_shape_valid", ""),
+  ("read_duplicated", "loop_timeline_event_identity_duplicate"),
+  ("read_order_invalid", "loop_timeline_event_order_invalid"),
+  ("checkpoint_missing", "loop_indexed_region_checkpoint_missing"),
+  ("checkpoint_after_read", "loop_indexed_region_checkpoint_after_read"),
+  ("checkpoint_wrong_event", "loop_indexed_region_checkpoint_invalid"),
+  ("checkpoint_not_dynamic", "loop_indexed_region_checkpoint_invalid"),
+  ("owner_changed_shape_valid", ""),
+  ("index_changed_shape_valid", ""),
+  ("region_changed_shape_valid", ""),
+  ("element_type_changed_shape_valid", ""),
+  ("element_type_invalid", "loop_storage_type_invalid"),
+  ("read_identity_duplicate", "loop_storage_read_identity_duplicate"),
+  ("read_identity_cross_domain", "loop_storage_read_identity_duplicate"),
+  ("index_read_foreign", "loop_storage_read_identity_foreign"),
+  ("index_read_forward", "loop_storage_read_identity_forward")
+]
+
+def loopHeaderFactValidationRows : List (String × Bool × Bool) := [
+  ("supported", true, true),
+  ("row_id_invalid", false, false),
+  ("row_order_invalid", false, false),
+  ("identity_missing", false, false),
+  ("identity_duplicate", false, false),
+  ("source_unresolved", false, false),
+  ("block_mismatch", false, false),
+  ("source_not_earlier", false, false),
+  ("target_mismatch", false, false),
+  ("value_identity_duplicate", false, false),
+  ("value_type_missing", false, false),
+  ("assumption_missing", false, false),
+  ("assumption_unexpected", false, false),
+  ("unmatched_assumption", true, false),
+  ("extra_assumption", true, false),
+  ("formula_mismatch", true, false),
+  ("owner_mismatch", true, false)
+]
+
+def loopPrefixSafetyRows : List (List Bool × Bool) := [
+  ([], false),
+  ([false], false),
+  ([true], false),
+  ([false, false], false),
+  ([true, false], true),
+  ([false, true], false),
+  ([true, true], false),
+  ([false, false, false], false),
+  ([true, false, false], true),
+  ([false, true, false], true),
+  ([true, true, false], true),
+  ([false, false, true], false),
+  ([true, false, true], true),
+  ([false, true, true], false),
+  ([true, true, true], false)]
 
 end Ora.Generated

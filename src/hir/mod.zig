@@ -387,6 +387,11 @@ const Lowerer = struct {
     active_type_bindings: []const GenericTypeBinding = &.{},
     active_inline_known_args: []const InlineKnownArgBinding = &.{},
     active_impl_contract_scope: ?ast.ItemId = null,
+    // Destination contract while lowering a module-level function cloned into a
+    // contract body. Keeps the clone's transitive calls scoped to the same
+    // contract so their callees are reachable from its symbol table. Distinct
+    // from active_impl_contract_scope, which drives impl-method semantics.
+    effective_clone_contract_scope: ?ast.ItemId = null,
     active_impl_self_type: ?sema.Type = null,
     current_statement_id: ?ast.StmtId = null,
     current_synthetic_index: ?u32 = null,
@@ -589,14 +594,31 @@ const Lowerer = struct {
     }
 
     pub fn substitutedType(self: *const Lowerer, name: []const u8) ?sema.Type {
-        for (self.active_type_bindings) |binding| {
-            if (!std.mem.eql(u8, binding.name, name)) continue;
-            switch (binding.value) {
-                .ty => |ty| return ty,
-                .integer => {},
+        var current_name = name;
+        var followed_binding = false;
+        var steps: usize = 0;
+        while (steps < self.active_type_bindings.len) : (steps += 1) {
+            var matched_type: ?sema.Type = null;
+            for (self.active_type_bindings) |binding| {
+                if (!std.mem.eql(u8, binding.name, current_name)) continue;
+                matched_type = switch (binding.value) {
+                    .ty => |ty| ty,
+                    .integer => return if (followed_binding) .{ .unknown = {} } else null,
+                };
+                break;
             }
+            const substituted = matched_type orelse return if (followed_binding)
+                .{ .named = .{ .name = current_name } }
+            else
+                null;
+            followed_binding = true;
+            if (substituted != .named) return substituted;
+            current_name = substituted.named.name;
         }
-        return null;
+        // A type-substitution chain may visit at most one entry per active
+        // binding. Reaching the bound means the chain is cyclic; preserve the
+        // fail-closed HIR fallback instead of recursing in lowerSemaType.
+        return if (followed_binding) .{ .unknown = {} } else null;
     }
 
     pub fn substitutedInteger(self: *const Lowerer, name: []const u8) ?[]const u8 {
@@ -1610,6 +1632,14 @@ const ContractLowerer = struct {
 };
 
 const FunctionLowerer = struct {
+    pub const CheckedRefinement = struct {
+        value: mlir.MlirValue,
+        refinement: sema.RefinementType,
+        block: mlir.MlirBlock,
+        guard: mlir.MlirOperation,
+        previous: ?*const CheckedRefinement,
+    };
+
     const DeferredReturnKind = enum {
         none,
         ora_yield,
@@ -1637,6 +1667,8 @@ const FunctionLowerer = struct {
     block: mlir.MlirBlock,
     locals: hir_locals.LocalEnv,
     return_type: ?mlir.MlirType,
+    semantic_return_type: ?sema.Type = null,
+    checked_refinements: ?*const CheckedRefinement = null,
     current_return_value: ?mlir.MlirValue = null,
     deferred_return_flag: ?mlir.MlirValue = null,
     deferred_return_value_slot: ?mlir.MlirValue = null,
@@ -1673,6 +1705,7 @@ const FunctionLowerer = struct {
     pub const convertValueForFlow = FunctionCore.convertValueForFlow;
     pub const convertValueForFlowWithSignedness = FunctionCore.convertValueForFlowWithSignedness;
     pub const convertValueForSemaFlow = FunctionCore.convertValueForSemaFlow;
+    pub const convertValueForCheckedFlow = FunctionCore.convertValueForCheckedFlow;
     pub const lowerCheckedPower = FunctionCore.lowerCheckedPower;
     pub const lowerPowerWithOverflow = FunctionCore.lowerPowerWithOverflow;
     pub const createBitfieldFieldExtract = FunctionCore.createBitfieldFieldExtract;
@@ -1681,6 +1714,7 @@ const FunctionLowerer = struct {
     pub const filterCarriedLocals = FunctionCore.filterCarriedLocals;
     pub const buildCarriedResultTypes = FunctionCore.buildCarriedResultTypes;
     pub const materializeCarriedLocalValue = FunctionCore.materializeCarriedLocalValue;
+    pub const attachLoopControlManifest = FunctionCore.attachLoopControlManifest;
     pub const evalKnownIntExpr = FunctionCore.evalKnownIntExpr;
     pub const evalKnownBoolExpr = FunctionCore.evalKnownBoolExpr;
     pub const evalKnownExprValue = FunctionCore.evalKnownExprValue;
@@ -1689,12 +1723,16 @@ const FunctionLowerer = struct {
     pub const writeBackCarriedLocals = FunctionCore.writeBackCarriedLocals;
     pub const annotateCarriedLocalResults = FunctionCore.annotateCarriedLocalResults;
     pub const emitCheckedShiftAmountAssert = FunctionCore.emitCheckedShiftAmountAssert;
+    pub const emitCheckedDivRemSafetyAsserts = FunctionCore.emitCheckedDivRemSafetyAsserts;
+    pub const emitFixedArrayBoundsAssert = FunctionCore.emitFixedArrayBoundsAssert;
+    pub const emitDynamicIndexBoundsAssert = FunctionCore.emitDynamicIndexBoundsAssert;
     pub const emitOverflowAssert = FunctionCore.emitOverflowAssert;
 
     pub const lowerIfStmt = ControlFlow.lowerIfStmt;
     pub const lowerLabeledBlockStmt = ControlFlow.lowerLabeledBlockStmt;
     pub const lowerTryStmt = ControlFlow.lowerTryStmt;
     pub const lowerWhileStmt = ControlFlow.lowerWhileStmt;
+    pub const simulateUnrolledBody = ControlFlow.simulateUnrolledBody;
     pub const lowerSwitchStmt = ControlFlow.lowerSwitchStmt;
     pub const buildSwitchPatternData = ControlFlow.buildSwitchPatternData;
     pub const buildSwitchExprPatternData = ControlFlow.buildSwitchExprPatternData;
@@ -1708,6 +1746,7 @@ const FunctionLowerer = struct {
     pub const lowerNameExpr = ExprLowering.lowerNameExpr;
     pub const lowerUnary = ExprLowering.lowerUnary;
     pub const lowerBinary = ExprLowering.lowerBinary;
+    pub const annotateIntegerBinary = ExprLowering.annotateIntegerBinary;
     pub const maybeEmitCheckedBinaryOverflowAssert = ExprLowering.maybeEmitCheckedBinaryOverflowAssert;
     pub const createCompareOp = ExprLowering.createCompareOp;
     pub const lowerCall = ExprLowering.lowerCall;

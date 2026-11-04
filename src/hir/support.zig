@@ -15,9 +15,19 @@ const RefinementArg = ora_types.RefinementArg;
 pub const LoopContext = struct {
     parent: ?*const LoopContext,
     label: ?[]const u8 = null,
+    source_statement_id: u32,
     break_flag: mlir.MlirValue,
     continue_flag: mlir.MlirValue = std.mem.zeroes(mlir.MlirValue),
+    induction_value: mlir.MlirValue = std.mem.zeroes(mlir.MlirValue),
     carried_locals: []const ast.PatternId,
+    control_manifest: *std.ArrayList(LoopControlManifestEntry),
+};
+
+pub const LoopControlKind = enum { break_loop, continue_loop, function_return, error_return };
+
+pub const LoopControlManifestEntry = struct {
+    source_statement_id: u32,
+    kind: LoopControlKind,
 };
 
 pub const UnrolledLoopSignal = enum {

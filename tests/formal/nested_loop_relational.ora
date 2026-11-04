@@ -1,0 +1,23 @@
+contract NestedLoopRelational {
+    pub fn run() -> u256 {
+        var outer: u256 = 0;
+        var total: u256 = 0;
+
+        while (outer < 2)
+            invariant outer <= 2
+            invariant total <= 3
+        {
+            var inner: u256 = 0;
+            while (inner < 3)
+                invariant inner <= 3
+            {
+                inner = inner + 1;
+            }
+
+            total = inner;
+            outer = outer + 1;
+        }
+
+        return total;
+    }
+}

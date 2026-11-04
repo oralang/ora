@@ -131,13 +131,61 @@ pub const Encoder = struct {
         }
     };
 
-    const CallSlotState = struct {
+    pub const CallSlotState = struct {
         name: []const u8,
         pre: z3.Z3_ast,
         sort: z3.Z3_sort,
         is_write: bool,
         post: ?z3.Z3_ast = null,
     };
+
+    pub const CertifiedCallEvidence = struct { source_op_id: usize, function_id: u32, digest: [32]u8 };
+    pub const CertifiedCallRelation = struct { ready: z3.Z3_ast, joint: z3.Z3_ast, evidence: CertifiedCallEvidence };
+    pub const CertifiedCallProvider = struct {
+        data: *anyopaque,
+        function_ops: []const usize,
+        instantiate: *const fn (*anyopaque, *Encoder, mlir.MlirOperation, usize, []const z3.Z3_ast, []CallSlotState, []?z3.Z3_ast) anyerror!CertifiedCallRelation,
+    };
+
+    pub fn certifiedCallee(self: *Encoder, op: mlir.MlirOperation) EncodeError!?usize {
+        const provider = self.certified_calls orelse return null;
+        const callee = try self.getOpaqueCalleeKey(op);
+        defer self.allocator.free(callee);
+        const function = self.function_ops.get(callee) orelse return null;
+        for (provider.function_ops, 0..) |id, index| if (id == @intFromPtr(function.ptr)) return index;
+        return null;
+    }
+
+    pub fn certifiedOutcome(self: *Encoder, op: mlir.MlirOperation, error_id: ?u32, values: []const z3.Z3_ast) !?z3.Z3_ast {
+        if (mlir.oraOperationGetNumResults(op) == 0) return if (error_id == null and values.len == 0) null else error.UnsupportedOperation;
+        const ty = mlir.oraValueGetType(mlir.oraOperationGetResult(op, 0));
+        const success = mlir.oraErrorUnionTypeGetSuccessType(ty);
+        if (mlir.oraTypeIsNull(success)) {
+            if (error_id != null or values.len != 1 or !z3.Z3_is_eq_sort(self.context.ctx, z3.Z3_get_sort(self.context.ctx, values[0]), try self.encodeMLIRType(ty))) return error.UnsupportedOperation;
+            return values[0];
+        }
+        const union_sort = try self.getErrorUnionSort(ty, success);
+        if (error_id) |id| {
+            for (union_sort.error_variants) |variant| {
+                const name = errorVariantSymbolName(variant) orelse return error.UnsupportedOperation;
+                if (self.lookupErrorDeclId(op, name) != id) continue;
+                const payload = if (try self.getProductSort(variant.payload_type)) |product| blk: {
+                    if (values.len != z3.Z3_get_arity(self.context.ctx, product.ctor)) return error.UnsupportedOperation;
+                    for (values, 0..) |value, index| if (!z3.Z3_is_eq_sort(self.context.ctx, z3.Z3_get_sort(self.context.ctx, value), z3.Z3_get_domain(self.context.ctx, product.ctor, @intCast(index)))) return error.UnsupportedOperation;
+                    break :blk z3.Z3_mk_app(self.context.ctx, product.ctor, @intCast(values.len), values.ptr);
+                } else if (values.len == 0 and try self.errorPayloadFieldCount(variant.payload_type) == 0)
+                    try self.encodeUnsignedToSort(id, variant.payload_sort)
+                else
+                    return error.UnsupportedOperation;
+                return z3.Z3_mk_app(self.context.ctx, variant.ctor, 1, &[_]z3.Z3_ast{payload});
+            }
+        } else {
+            const payload = if (values.len == 1) values[0] else if (values.len == 0 and mlir.oraTypeIsANone(success)) try self.encodeUnsignedToSort(0, union_sort.ok_sort) else return error.UnsupportedOperation;
+            if (!z3.Z3_is_eq_sort(self.context.ctx, z3.Z3_get_sort(self.context.ctx, payload), union_sort.ok_sort)) return error.UnsupportedOperation;
+            return z3.Z3_mk_app(self.context.ctx, union_sort.ok_ctor, 1, &[_]z3.Z3_ast{payload});
+        }
+        return error.UnsupportedOperation;
+    }
 
     const EffectPathSegments = struct {
         root: []const u8,
@@ -171,8 +219,9 @@ pub const Encoder = struct {
     const max_computed_storage_erase_smt_words = 1024;
 
     const TensorDimKey = struct {
-        source_value_id: u64,
-        dim_value_id: u64,
+        source_identity: u64,
+        dim_identity: u256,
+        dim_is_constant: bool,
         is_old: bool,
     };
 
@@ -271,6 +320,10 @@ pub const Encoder = struct {
         }
     };
 
+    certified_calls: ?CertifiedCallProvider = null,
+    certified_invocation: u32 = 0,
+    certified_evidence: std.ArrayList(CertifiedCallEvidence) = .empty,
+    obligation_prefix: ?z3.Z3_ast = null,
     context: *Context,
     allocator: std.mem.Allocator,
     verify_calls: bool,
@@ -286,6 +339,12 @@ pub const Encoder = struct {
     value_map_old: std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
     /// Explicit MLIR value bindings (used for call summary argument substitution).
     value_bindings: std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
+    /// Deterministic display ordinals for otherwise unnamed MLIR values.
+    value_symbol_ids: std.AutoHashMap(u64, u64),
+    /// Deterministic display ordinals for operations that own symbolic state.
+    operation_symbol_ids: std.AutoHashMap(u64, u64),
+    next_value_symbol_id: u64,
+    next_operation_symbol_id: u64,
     /// Map from global storage name to Z3 AST (for consistent storage symbols)
     global_map: std.StringHashMap(z3.Z3_ast),
     /// Map from global storage name to Z3 AST (for old() storage symbols)
@@ -372,6 +431,10 @@ pub const Encoder = struct {
             .value_map = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .value_map_old = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .value_bindings = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
+            .value_symbol_ids = std.AutoHashMap(u64, u64).init(allocator),
+            .operation_symbol_ids = std.AutoHashMap(u64, u64).init(allocator),
+            .next_value_symbol_id = 0,
+            .next_operation_symbol_id = 0,
             .global_map = std.StringHashMap(z3.Z3_ast).init(allocator),
             .global_old_map = std.StringHashMap(z3.Z3_ast).init(allocator),
             .global_entry_map = std.StringHashMap(z3.Z3_ast).init(allocator),
@@ -566,7 +629,7 @@ pub const Encoder = struct {
     }
 
     fn allocPersistentMessage(self: *Encoder, message: []const u8) ![]const u8 {
-        const copy = try self.allocator.dupeZ(u8, message);
+        const copy = try self.allocator.dupeSentinel(u8, message, 0);
         try self.string_storage.append(self.allocator, copy[0 .. message.len + 1]);
         return copy[0..message.len];
     }
@@ -2321,6 +2384,10 @@ pub const Encoder = struct {
         self.value_map.clearRetainingCapacity();
         self.value_map_old.clearRetainingCapacity();
         self.value_bindings.clearRetainingCapacity();
+        self.value_symbol_ids.clearRetainingCapacity();
+        self.operation_symbol_ids.clearRetainingCapacity();
+        self.next_value_symbol_id = 0;
+        self.next_operation_symbol_id = 0;
         self.materialized_calls.clearRetainingCapacity();
         for (self.inline_function_stack.items) |fn_name| {
             self.allocator.free(fn_name);
@@ -2335,6 +2402,7 @@ pub const Encoder = struct {
     }
 
     pub fn deinit(self: *Encoder) void {
+        self.certified_evidence.deinit(self.allocator);
         var it = self.global_map.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -2440,6 +2508,17 @@ pub const Encoder = struct {
         self.value_map.deinit();
         self.value_map_old.deinit();
         self.value_bindings.deinit();
+        self.value_symbol_ids.deinit();
+        self.operation_symbol_ids.deinit();
+    }
+
+    pub fn stableOperationSymbolId(self: *Encoder, op: mlir.MlirOperation) EncodeError!u64 {
+        const entry = try self.operation_symbol_ids.getOrPut(@intFromPtr(op.ptr));
+        if (!entry.found_existing) {
+            entry.value_ptr.* = self.next_operation_symbol_id;
+            self.next_operation_symbol_id += 1;
+        }
+        return entry.value_ptr.*;
     }
 
     pub fn registerFunctionOperation(self: *Encoder, func_op: mlir.MlirOperation) !void {
@@ -3098,7 +3177,7 @@ pub const Encoder = struct {
             // format as decimal string for Z3_mk_numeral
             const value_str = try std.fmt.allocPrint(self.allocator, "{d}", .{narrowed});
             defer self.allocator.free(value_str);
-            const value_z = try self.allocator.dupeZ(u8, value_str);
+            const value_z = try self.allocator.dupeSentinel(u8, value_str, 0);
             defer self.allocator.free(value_z);
             return z3.Z3_mk_numeral(self.context.ctx, value_z.ptr, sort);
         }
@@ -3115,7 +3194,7 @@ pub const Encoder = struct {
 
     /// Create Z3 variable (uninterpreted constant) from name and sort
     pub fn mkVariable(self: *Encoder, name: []const u8, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
-        const name_copy = try self.allocator.dupeZ(u8, name);
+        const name_copy = try self.allocator.dupeSentinel(u8, name, 0);
         errdefer self.allocator.free(name_copy);
         try self.string_storage.append(self.allocator, name_copy[0 .. name.len + 1]);
 
@@ -3180,7 +3259,7 @@ pub const Encoder = struct {
     }
 
     fn mkSymbol(self: *Encoder, name: []const u8) EncodeError!z3.Z3_symbol {
-        const name_copy = try self.allocator.dupeZ(u8, name);
+        const name_copy = try self.allocator.dupeSentinel(u8, name, 0);
         errdefer self.allocator.free(name_copy);
         try self.string_storage.append(self.allocator, name_copy[0 .. name.len + 1]);
         return z3.Z3_mk_string_symbol(self.context.ctx, name_copy);
@@ -3230,7 +3309,7 @@ pub const Encoder = struct {
     fn encodeUnsignedToSort(self: *Encoder, value: u64, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
         const value_str = try std.fmt.allocPrint(self.allocator, "{d}", .{value});
         defer self.allocator.free(value_str);
-        const value_z = try self.allocator.dupeZ(u8, value_str);
+        const value_z = try self.allocator.dupeSentinel(u8, value_str, 0);
         defer self.allocator.free(value_z);
         return z3.Z3_mk_numeral(self.context.ctx, value_z.ptr, sort);
     }
@@ -3238,7 +3317,7 @@ pub const Encoder = struct {
     fn encodeU256NumeralToSort(self: *Encoder, value: u256, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
         const value_str = try std.fmt.allocPrint(self.allocator, "{d}", .{value});
         defer self.allocator.free(value_str);
-        const value_z = try self.allocator.dupeZ(u8, value_str);
+        const value_z = try self.allocator.dupeSentinel(u8, value_str, 0);
         defer self.allocator.free(value_z);
         return z3.Z3_mk_numeral(self.context.ctx, value_z.ptr, sort);
     }
@@ -3249,10 +3328,11 @@ pub const Encoder = struct {
         }
 
         const mode_tag = if (key.is_old) "old" else "cur";
+        const dim_tag = if (key.dim_is_constant) "axis" else "value";
         const name = try std.fmt.allocPrint(
             self.allocator,
-            "shape_dim_{d}_{d}_{s}",
-            .{ key.source_value_id, key.dim_value_id, mode_tag },
+            "shape_dim_{d}_{s}_{d}_{s}",
+            .{ key.source_identity, dim_tag, key.dim_identity, mode_tag },
         );
         defer self.allocator.free(name);
         const dim_ast = try self.mkVariable(name, result_sort);
@@ -3271,12 +3351,20 @@ pub const Encoder = struct {
         if (num_operands < 1) return error.InvalidOperandCount;
 
         const source_value = mlir.oraOperationGetOperand(mlir_op, 0);
-        var dim_value_id: u64 = 0;
+        var dim_identity: u256 = 0;
+        var dim_is_constant = false;
         var dim_index: ?u256 = null;
         if (num_operands >= 2) {
             const dim_value = mlir.oraOperationGetOperand(mlir_op, 1);
-            dim_value_id = @intFromPtr(dim_value.ptr);
             dim_index = self.getValueConstUnsigned(dim_value, 64);
+            if (dim_index) |index| {
+                // Axis constants denote the same dimension even when lowering
+                // materializes distinct constant operations at each read.
+                dim_identity = index;
+                dim_is_constant = true;
+            } else {
+                dim_identity = try self.valueSymbolId(dim_value);
+            }
         }
 
         const source_type = mlir.oraValueGetType(source_value);
@@ -3295,8 +3383,9 @@ pub const Encoder = struct {
         }
 
         const key = TensorDimKey{
-            .source_value_id = @intFromPtr(source_value.ptr),
-            .dim_value_id = dim_value_id,
+            .source_identity = try self.valueSymbolId(source_value),
+            .dim_identity = dim_identity,
+            .dim_is_constant = dim_is_constant,
             .is_old = mode == .Old,
         };
         return try self.getOrCreateShapedDimSymbol(key, result_sort);
@@ -3374,8 +3463,17 @@ pub const Encoder = struct {
             }
         else
             null;
+        // Loop replay captures the prefix at the checkpoint, including inside
+        // a branch; a later call's absent return cannot erase this obligation.
+        var staged = guarded_obligation;
+        if (self.obligation_prefix) |prefix| {
+            var condition = prefix;
+            for (self.branch_merge_constraints.items) |record| condition = self.encodeAnd(&.{ condition, record.ast });
+            for (self.pending_constraints.items) |record| condition = self.encodeAnd(&.{ condition, record.ast });
+            staged = self.encodeImplies(condition, staged);
+        }
         self.pending_obligations.append(self.allocator, .{
-            .ast = guarded_obligation,
+            .ast = staged,
             .imported_callee_name = stored_callee_name,
             .imported_source_fact_id = imported_source_fact_id,
             .source_kind = source_kind,
@@ -3402,7 +3500,7 @@ pub const Encoder = struct {
         self.addObligationWithSource(obligation, imported_callee_name, imported_source_fact_id, .imported_callee_ensures);
     }
 
-    fn addCalleePrecondition(
+    pub fn addCalleePrecondition(
         self: *Encoder,
         obligation: z3.Z3_ast,
         callee_name: []const u8,
@@ -3514,6 +3612,24 @@ pub const Encoder = struct {
         errdefer self.allocator.free(entry_key);
         try self.global_entry_map.put(entry_key, ast);
         return ast;
+    }
+
+    /// Called only at a fresh function entry by the authenticated lifecycle
+    /// provider. Never constrain a post-write value or infer a carrier width.
+    pub fn lifecycleEntry(self: *Encoder, name: []const u8, ty: mlir.MlirType, width: u16, minimum: u256, maximum: u256) !struct { value: z3.Z3_ast, fact: z3.Z3_ast } {
+        if (self.global_map.contains(name) or self.global_entry_map.contains(name)) return error.LifecycleEntryAlreadyBound;
+        const sort = try self.encodeMLIRType(ty);
+        if (width == 0 or width > 256 or z3.Z3_get_sort_kind(self.context.ctx, sort) != z3.Z3_BV_SORT or
+            z3.Z3_get_bv_sort_size(self.context.ctx, sort) != width) return error.LifecycleEntrySortMismatch;
+        if (minimum > maximum or (width < 256 and maximum >> @intCast(width) != 0)) return error.LifecycleEntryBoundsMismatch;
+        const value = try self.getOrCreateGlobal(name, sort);
+        if (self.global_entry_map.get(name) != value) return error.LifecycleEntryIdentityMismatch;
+        const low = try self.encodeU256NumeralToSort(minimum, sort);
+        const high = try self.encodeU256NumeralToSort(maximum, sort);
+        var bounds = [_]z3.Z3_ast{ z3.Z3_mk_bvuge(self.context.ctx, value, low), z3.Z3_mk_bvule(self.context.ctx, value, high) };
+        const fact = z3.Z3_mk_and(self.context.ctx, bounds.len, &bounds);
+        try self.context.checkNoError();
+        return .{ .value = value, .fact = fact };
     }
 
     fn getOrCreateEnv(self: *Encoder, name: []const u8, sort: z3.Z3_sort) EncodeError!z3.Z3_ast {
@@ -4612,10 +4728,11 @@ pub const Encoder = struct {
         const fallback_id = self.degraded_coercion_fallback_id;
         self.degraded_coercion_fallback_id +%= 1;
         var name_buf: [96]u8 = undefined;
-        const fallback_name = std.fmt.bufPrintZ(
+        const fallback_name = std.mem.printSentinel(
             &name_buf,
             "ora_degraded_coercion_fallback_{d}",
             .{fallback_id},
+            0,
         ) catch "ora_degraded_coercion_fallback_overflow";
         return z3.Z3_mk_const(
             self.context.ctx,
@@ -4938,7 +5055,7 @@ pub const Encoder = struct {
         if (try self.resolveCalleeName(mlir_op)) |callee| {
             defer self.allocator.free(callee);
             if (self.function_ops.get(callee)) |func_op| {
-                if (!self.functionMayWriteTrackedState(func_op)) return;
+                if (try self.certifiedCallee(mlir_op) == null and !self.functionMayWriteTrackedState(func_op)) return;
             }
         }
         const operands = try self.encodeOperationOperandsWithMode(mlir_op, .Current);
@@ -4968,6 +5085,11 @@ pub const Encoder = struct {
             return try self.encodeComputedStorageRangeEraseOp(mlir_op, mode);
         }
 
+        // This total identity needs no value summary; producer safety remains independent.
+        if (std.mem.eql(u8, op_name, "arith.cmpi") and self.isUnsignedZeroLowerBound(mlir_op)) {
+            return z3.Z3_mk_true(self.context.ctx);
+        }
+
         // get number of operands
         const num_operands = mlir.oraOperationGetNumOperands(mlir_op);
 
@@ -4988,6 +5110,28 @@ pub const Encoder = struct {
             }
             return err;
         };
+    }
+
+    fn isUnsignedZeroLowerBound(self: *Encoder, op: mlir.MlirOperation) bool {
+        if (mlir.oraOperationGetNumOperands(op) != 2 or mlir.oraOperationGetNumResults(op) != 1) return false;
+        const predicate = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate("predicate", 9));
+        if (mlir.oraAttributeIsNull(predicate) or mlir.oraIntegerAttrGetValueSInt(predicate) != 9) return false;
+        const lhs = mlir.oraOperationGetOperand(op, 0);
+        const rhs = mlir.oraOperationGetOperand(op, 1);
+        const ty = mlir.oraValueGetType(lhs);
+        if (!mlir.oraTypeIsAInteger(ty) or !mlir.oraTypeEqual(ty, mlir.oraValueGetType(rhs))) return false;
+        const width = mlir.oraIntegerTypeGetWidth(ty);
+        if (width < 1 or width > 256) return false;
+        const result_ty = mlir.oraValueGetType(mlir.oraOperationGetResult(op, 0));
+        if (!mlir.oraTypeIsAInteger(result_ty) or mlir.oraIntegerTypeGetWidth(result_ty) != 1) return false;
+        if (!mlir.oraValueIsAOpResult(rhs)) return false;
+        const literal = mlir.oraOpResultGetOwner(rhs);
+        if (!self.operationNameEq(literal, "arith.constant") or mlir.oraOperationGetNumOperands(literal) != 0) return false;
+        const value = mlir.oraOperationGetAttributeByName(literal, mlir.oraStringRefCreate("value", 5));
+        if (mlir.oraAttributeIsNull(value)) return false;
+        const text = mlir.oraIntegerAttrGetValueString(value);
+        defer if (text.data != null) @import("mlir_c_api").freeStringRef(text);
+        return text.data != null and std.mem.eql(u8, text.data[0..text.length], "0");
     }
 
     /// Encode an MLIR value to Z3 AST (with caching)
@@ -5039,7 +5183,7 @@ pub const Encoder = struct {
         // if no defining operation, create a fresh variable
         const value_type = mlir.oraValueGetType(mlir_value);
         const sort = try self.encodeMLIRTypeForSymbol(value_type);
-        const var_name = try self.resolveValueName(mlir_value, value_id);
+        const var_name = try self.resolveValueName(mlir_value);
         defer self.allocator.free(var_name);
         const encoded = try self.mkVariable(var_name, sort);
         try self.addBlockArgumentConstraints(mlir_value, encoded, mode);
@@ -5441,8 +5585,8 @@ pub const Encoder = struct {
     /// Try to resolve a human-readable name for an MLIR value.
     /// For function parameters (block arguments of func ops), extracts the
     /// parameter name from the enclosing function's printed form.
-    /// Falls back to "v_{pointer_id}".
-    fn resolveValueName(self: *Encoder, value: mlir.MlirValue, value_id: u64) ![]u8 {
+    /// Falls back to a deterministic encounter ordinal.
+    fn resolveValueName(self: *Encoder, value: mlir.MlirValue) ![]u8 {
         if (mlir.mlirValueIsABlockArgument(value)) {
             const owner_block = mlir.mlirBlockArgumentGetOwner(value);
             if (!mlir.oraBlockIsNull(owner_block)) {
@@ -5464,7 +5608,16 @@ pub const Encoder = struct {
                 }
             }
         }
-        return std.fmt.allocPrint(self.allocator, "v_{d}", .{value_id});
+        return std.fmt.allocPrint(self.allocator, "v_{d}", .{try self.valueSymbolId(value)});
+    }
+
+    fn valueSymbolId(self: *Encoder, value: mlir.MlirValue) !u64 {
+        const entry = try self.value_symbol_ids.getOrPut(@intFromPtr(value.ptr));
+        if (!entry.found_existing) {
+            entry.value_ptr.* = self.next_value_symbol_id;
+            self.next_value_symbol_id += 1;
+        }
+        return entry.value_ptr.*;
     }
 
     /// Extract the parameter name at a given index from a func op's sym_name and
@@ -7713,7 +7866,7 @@ pub const Encoder = struct {
             return z3.Z3_mk_app(self.context.ctx, variant.ctor, 1, &[_]z3.Z3_ast{err_val});
         }
 
-        const result_sort = try self.encodeMLIRType(result_type);
+        const result_sort = try self.errorVariantPayloadSort(result_type);
         const maybe_product = self.getProductSort(result_type) catch |err| switch (err) {
             error.UnsupportedOperation => null,
             else => return err,
@@ -7952,6 +8105,10 @@ pub const Encoder = struct {
         if (mode == .Current) {
             if (self.value_map.get(result_id)) |cached| {
                 return cached;
+            }
+            if (try self.certifiedCallee(mlir_op) != null) {
+                try self.materializeCallSummaryCurrent(mlir_op, operands);
+                return self.value_map.get(result_id) orelse error.UnsupportedOperation;
             }
             if (self.function_ops.get(callee)) |func_op| {
                 if (try self.tryInlinePureCallResult(mlir_op, callee, func_op, operands, result_index, mode)) |inlined| {
@@ -14567,9 +14724,10 @@ pub const Encoder = struct {
         defer self.allocator.free(callee);
         const func_op = self.function_ops.get(callee);
         const num_results: usize = @intCast(mlir.oraOperationGetNumResults(mlir_op));
+        const certified_index = try self.certifiedCallee(mlir_op);
 
         if (func_op) |fop| {
-            if (num_results == 0 and try self.materializeInlineVoidFunctionState(mlir_op, callee, fop, operands)) {
+            if (certified_index == null and num_results == 0 and try self.materializeInlineVoidFunctionState(mlir_op, callee, fop, operands)) {
                 try self.materialized_calls.put(call_id, {});
                 return;
             }
@@ -14670,7 +14828,17 @@ pub const Encoder = struct {
         defer self.allocator.free(result_exprs);
         for (0..num_results) |i| result_exprs[i] = null;
 
-        if (func_op) |fop| {
+        if (certified_index) |index| {
+            const provider = self.certified_calls.?;
+            const relation = provider.instantiate(provider.data, self, mlir_op, index, operands, slots.items, result_exprs) catch |err| {
+                self.noteSoundnessLossAtOp(.inexact_call_summary, mlir_op, @errorName(err));
+                return error.UnsupportedOperation;
+            };
+            self.addObligation(relation.ready);
+            // A missing return must not make a failed prefix precondition UNSAT.
+            self.addConstraintWithSource(self.encodeImplies(relation.ready, relation.joint), .binding, "certified call joint relation");
+            try self.certified_evidence.append(self.allocator, relation.evidence);
+        } else if (func_op) |fop| {
             var summarized = false;
             if (!self.functionMayWriteTrackedState(fop) and slots.items.len == 0 and num_results > 0) {
                 for (0..num_results) |i| {
@@ -14701,6 +14869,7 @@ pub const Encoder = struct {
             }
             const result_id = @intFromPtr(result_value.ptr);
             try self.value_map.put(result_id, encoded);
+            if (certified_index != null) try self.bindValue(result_value, encoded);
         }
 
         if (self.verify_state) {
@@ -15707,6 +15876,13 @@ pub const Encoder = struct {
         return value.data[0..value.length];
     }
 
+    fn getBoolAttr(_: *Encoder, op: mlir.MlirOperation, name: []const u8) ?bool {
+        const attr_name_ref = mlir.oraStringRefCreate(name.ptr, name.len);
+        const attr = mlir.oraOperationGetAttributeByName(op, attr_name_ref);
+        if (mlir.oraAttributeIsNull(attr)) return null;
+        return mlir.oraBoolAttrGetValue(attr);
+    }
+
     fn sourceFactIdForSummaryOp(op: mlir.MlirOperation) ?u32 {
         const name = "ora.source_fact_id";
         const attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate(name.ptr, name.len));
@@ -16697,7 +16873,8 @@ pub const Encoder = struct {
             std.mem.eql(u8, value, "true")
         else
             false;
-        if (!guard_internal) {
+        const source_safety_asserted = self.getBoolAttr(mlir_op, "ora.arithmetic_safety_asserted") orelse false;
+        if (!guard_internal and !source_safety_asserted) {
             // For arith.* ops, only emit div-by-zero obligations here.
             // Overflow obligations for add/sub/mul are emitted by ora.assert ops
             // that the MLIR lowering places alongside checked arithmetic.

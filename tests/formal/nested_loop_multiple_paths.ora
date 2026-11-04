@@ -1,0 +1,33 @@
+contract NestedLoopMultiplePaths {
+    pub fn run() -> u256 {
+        var outer: u256 = 0;
+        var total: u256 = 0;
+
+        while (outer < 2)
+            invariant outer <= 2
+            invariant total <= 3
+        {
+            if (outer == 0) {
+                var left: u256 = 0;
+                while (left < 2)
+                    invariant left <= 2
+                {
+                    left = left + 1;
+                }
+                total = left;
+            } else {
+                var right: u256 = 0;
+                while (right < 3)
+                    invariant right <= 3
+                {
+                    right = right + 1;
+                }
+                total = right;
+            }
+
+            outer = outer + 1;
+        }
+
+        return total;
+    }
+}

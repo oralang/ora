@@ -371,19 +371,27 @@ test "compiler storage layout manifest matches SIR slot usage" {
         "sstore",
     });
     try expectOrderedNeedles(write_fn, &.{
-        "slot_history",
-        "mul",
-        "add slot_history",
+        " = lt v2 c4",
+        "=>",
+        "revert",
+        " = mul v2 0x1",
+        " = add 0x4",
         "sstore",
     });
+    try testing.expect(!std.mem.containsAtLeast(u8, write_fn, 1, "slot_after_history = const"));
+    try testing.expect(std.mem.containsAtLeast(u8, write_fn, 1, "sstore 0x8"));
 
     const read_fn = try functionSlice(rendered, "read");
     try expectOrderedNeedles(read_fn, &.{
-        "slot_history",
-        "mul",
-        "add 0x4",
+        " = lt v1 0x4",
+        "=>",
+        "revert",
+        " = mul v1 0x1",
+        " = add 0x4",
         "sload",
     });
+    try testing.expect(!std.mem.containsAtLeast(u8, read_fn, 1, "slot_after_history = const"));
+    try testing.expect(std.mem.containsAtLeast(u8, read_fn, 1, "sload 0x8"));
 }
 
 test "compiler does not store nested map handles back to parent slots" {
@@ -625,12 +633,12 @@ test "OraToSIR lowers lock and guard to matching transient key shapes" {
 
     const write_total = try functionSlice(rendered, "write_total");
     try expectOrderedNeedles(write_total, &.{
-        "slot_total = const 0x0",
         lock_prefix,
         "tload",
         "revert",
         "sstore 0x0",
     });
+    try testing.expect(!std.mem.containsAtLeast(u8, write_total, 1, "slot_total = const"));
 
     const touch_history = try functionSlice(rendered, "touch_history");
     try expectOrderedNeedles(touch_history, &.{

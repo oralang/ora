@@ -1,0 +1,5 @@
+contract KeccakBadArity {
+    pub fn hash() -> u256 {
+        return @keccak256();
+    }
+}

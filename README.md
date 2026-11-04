@@ -79,7 +79,7 @@ For the public verifier boundary, see
 
 ## Installation
 
-**Prerequisites:** Zig 0.15.x, CMake, Git, Z3, MLIR
+**Prerequisites:** Zig 0.17.x (stable), CMake, Git, Z3, MLIR
 
 ```bash
 git clone https://github.com/oralang/Ora.git

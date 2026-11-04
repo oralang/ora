@@ -6,7 +6,7 @@
 
 const std = @import("std");
 
-pub const index_schema_version: u32 = 2;
+pub const index_schema_version: u32 = 3;
 
 pub const ArtifactId = enum {
     smt_report_markdown,
@@ -19,6 +19,7 @@ pub const ArtifactId = enum {
     source_accounting_report,
     formal_artifact_index,
     loop_induction_report,
+    storage_lifecycle_report,
 };
 
 pub const ArtifactKind = enum {
@@ -36,6 +37,7 @@ pub const ArtifactOwner = enum {
     dispatcher_kernel,
     source_accounting_kernel,
     compiler,
+    lifecycle_kernel,
 };
 
 pub const StagingDestination = enum {
@@ -58,7 +60,7 @@ pub const ArtifactDefinition = struct {
 /// Stable artifact order. Do not reorder without a schema/migration review.
 pub const artifacts = [_]ArtifactDefinition{
     .{ .id = .smt_report_markdown, .suffix = ".smt.report.md", .kind = .report, .owner = .z3_userland, .retain_on_failure = true },
-    .{ .id = .smt_report_json, .suffix = ".smt.report.json", .kind = .report, .owner = .z3_userland, .schema_version = 1, .retain_on_failure = true },
+    .{ .id = .smt_report_json, .suffix = ".smt.report.json", .kind = .report, .owner = .z3_userland, .schema_version = 2, .retain_on_failure = true },
     .{ .id = .guard_proof_sidecar, .suffix = ".proof.json", .kind = .proof_sidecar, .owner = .z3_userland, .schema_version = 1, .retain_on_failure = false },
     .{ .id = .lean_obligations_source, .suffix = ".lean.obligations.lean", .kind = .proof_source, .owner = .lean_userland, .retain_on_failure = true },
     .{ .id = .lean_proof_certificate, .suffix = ".lean.proof.json", .kind = .certificate, .owner = .lean_userland, .schema_version = 1, .retain_on_failure = false, .integrity_bound = true },
@@ -67,6 +69,7 @@ pub const artifacts = [_]ArtifactDefinition{
     .{ .id = .source_accounting_report, .suffix = ".formal.accounting.json", .kind = .report, .owner = .source_accounting_kernel, .schema_version = 1, .retain_on_failure = true, .integrity_bound = true },
     .{ .id = .formal_artifact_index, .suffix = ".formal.artifacts.json", .kind = .index, .owner = .compiler, .schema_version = index_schema_version, .optional = false, .retain_on_failure = true, .include_in_index = false },
     .{ .id = .loop_induction_report, .suffix = ".formal.loops.json", .kind = .report, .owner = .compiler, .schema_version = 1, .retain_on_failure = true },
+    .{ .id = .storage_lifecycle_report, .suffix = ".formal.lifecycle.json", .kind = .report, .owner = .lifecycle_kernel, .schema_version = 1, .retain_on_failure = true, .integrity_bound = true },
 };
 
 pub const suffixes: [artifacts.len][]const u8 = blk: {
@@ -87,6 +90,7 @@ pub fn definition(id: ArtifactId) *const ArtifactDefinition {
         .source_accounting_report => &artifacts[7],
         .formal_artifact_index => &artifacts[8],
         .loop_induction_report => &artifacts[9],
+        .storage_lifecycle_report => &artifacts[10],
     };
 }
 
@@ -99,6 +103,7 @@ pub const GateId = enum {
     lean_userland,
     dispatcher_kernel,
     source_accounting_kernel,
+    lifecycle_kernel,
 };
 
 pub const GateDomain = enum {
@@ -111,6 +116,7 @@ pub const GatePhase = enum {
     proof_artifact,
     sir_backend_binding,
     source_accounting,
+    storage_lifecycle,
 };
 
 pub const BlockingPolicy = enum {
@@ -132,6 +138,7 @@ pub const gates = [_]GateDefinition{
     .{ .id = .lean_userland, .domain = .userland, .phase = .proof_artifact, .blocking_policy = .blocking_when_requested },
     .{ .id = .dispatcher_kernel, .domain = .compiler_kernel, .phase = .sir_backend_binding, .blocking_policy = .blocking_when_requested },
     .{ .id = .source_accounting_kernel, .domain = .compiler_kernel, .phase = .source_accounting, .blocking_policy = .always_blocking },
+    .{ .id = .lifecycle_kernel, .domain = .compiler_kernel, .phase = .storage_lifecycle, .blocking_policy = .blocking_when_requested },
 };
 
 pub const GateStatus = enum {
@@ -147,6 +154,7 @@ pub const GateStatuses = struct {
     lean_userland: GateStatus = .not_requested,
     dispatcher_kernel: GateStatus = .not_requested,
     source_accounting_kernel: GateStatus = .not_run,
+    lifecycle_kernel: GateStatus = .not_requested,
 
     pub fn get(self: GateStatuses, id: GateId) GateStatus {
         return switch (id) {
@@ -154,11 +162,13 @@ pub const GateStatuses = struct {
             .lean_userland => self.lean_userland,
             .dispatcher_kernel => self.dispatcher_kernel,
             .source_accounting_kernel => self.source_accounting_kernel,
+            .lifecycle_kernel => self.lifecycle_kernel,
         };
     }
 };
 
 pub fn validateSourceAccountingArming(statuses: GateStatuses, authorization: FinalAuthorization) !void {
+    if (authorization == .allowed and statuses.lifecycle_kernel != .not_requested and statuses.lifecycle_kernel != .accepted) return error.LifecycleGateNotAccepted;
     if (authorization == .allowed and statuses.source_accounting_kernel != .accepted) {
         return error.SourceAccountingGateNotAccepted;
     }
@@ -297,6 +307,7 @@ fn artifactOwnedByGate(artifact: ArtifactDefinition, gate: GateId) bool {
         .lean_userland => artifact.owner == .lean_userland,
         .dispatcher_kernel => artifact.owner == .dispatcher_kernel,
         .source_accounting_kernel => artifact.owner == .source_accounting_kernel,
+        .lifecycle_kernel => artifact.owner == .lifecycle_kernel,
     };
 }
 
@@ -349,7 +360,7 @@ fn writeJsonString(writer: anytype, value: []const u8) !void {
 }
 
 test "artifact catalog covers every artifact id exactly once" {
-    try std.testing.expectEqual(std.meta.fields(ArtifactId).len, artifacts.len);
+    try std.testing.expectEqual(@typeInfo(ArtifactId).@"enum".field_names.len, artifacts.len);
     for (artifacts, 0..) |artifact, index| {
         try std.testing.expectEqual(artifact.id, definition(artifact.id).id);
         try std.testing.expectEqualStrings(artifact.suffix, suffixes[index]);
@@ -472,8 +483,8 @@ test "source-accounting report descriptor is failure-retained and integrity-boun
 }
 
 test "source-accounting schema migration is armed" {
-    try std.testing.expectEqual(@as(u32, 2), index_schema_version);
-    try std.testing.expectEqual(@as(usize, 4), gates.len);
+    try std.testing.expectEqual(@as(u32, 3), index_schema_version);
+    try std.testing.expectEqual(@as(usize, 5), gates.len);
     try std.testing.expectEqual(GateId.source_accounting_kernel, gates[3].id);
     try std.testing.expectEqual(BlockingPolicy.always_blocking, gates[3].blocking_policy);
     try std.testing.expectError(
@@ -499,14 +510,15 @@ test "source-accounting schema migration is armed" {
     defer std.testing.allocator.free(migrated);
     try std.testing.expectEqualStrings(
         \\{
-        \\  "schema_version": 2,
+        \\  "schema_version": 3,
         \\  "source": "migration.ora",
         \\  "final_artifact_authorization": "allowed",
         \\  "gates": [
         \\    {"id": "z3_userland", "domain": "userland", "phase": "smt_verification", "status": "not_requested", "blocking_policy": "fallback_allowed", "produced_artifacts": []},
         \\    {"id": "lean_userland", "domain": "userland", "phase": "proof_artifact", "status": "not_requested", "blocking_policy": "blocking_when_requested", "produced_artifacts": []},
         \\    {"id": "dispatcher_kernel", "domain": "compiler_kernel", "phase": "sir_backend_binding", "status": "not_requested", "blocking_policy": "blocking_when_requested", "produced_artifacts": []},
-        \\    {"id": "source_accounting_kernel", "domain": "compiler_kernel", "phase": "source_accounting", "status": "accepted", "blocking_policy": "always_blocking", "produced_artifacts": []}
+        \\    {"id": "source_accounting_kernel", "domain": "compiler_kernel", "phase": "source_accounting", "status": "accepted", "blocking_policy": "always_blocking", "produced_artifacts": []},
+        \\    {"id": "lifecycle_kernel", "domain": "compiler_kernel", "phase": "storage_lifecycle", "status": "not_requested", "blocking_policy": "blocking_when_requested", "produced_artifacts": []}
         \\  ],
         \\  "artifacts": [  ]
         \\}

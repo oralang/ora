@@ -13,7 +13,6 @@
 // CHECK-LABEL:     bb0 {
 // CHECK: a_length = calldataload selector_offset_0
 // CHECK: v[[OFFSET_WORD:[0-9]+]] = const 0x20
-// CHECK: v[[SELECTOR_BYTES:[0-9]+]] = const 0x4
 // CHECK: v[[OFFSET_OK:[0-9]+]] = eq a_length v[[OFFSET_WORD]]
 // CHECK: => v[[OFFSET_OK]] ? @bb1 : @abi_decode_revert_11
 

@@ -1,0 +1,19 @@
+// Generic no-call case: the early error return creates private prefix slots.
+error IterationStopped;
+
+contract LoopHeaderControlSlots {
+    pub fn run(limit: u256, stop: u256) -> !u256 | IterationStopped
+    requires limit <= 6
+    {
+        var i: u256 = 0;
+        while (i < limit)
+        invariant i <= limit
+        {
+            if (i == stop) {
+                return IterationStopped();
+            }
+            i = i + 1;
+        }
+        return i;
+    }
+}

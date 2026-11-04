@@ -3,6 +3,7 @@ const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
 const ora_types = @import("ora_types");
+const type_builtin = ora_types.builtin;
 const integer_constants = ora_types.integer_constants;
 const refinements = ora_types.refinement_semantics;
 const type_descriptors = @import("../sema/type_descriptors.zig");
@@ -35,6 +36,8 @@ const LocalIdList = hir_locals.LocalIdList;
 const LocalIdSet = hir_locals.LocalIdSet;
 const BlockContext = support.BlockContext;
 const LoopContext = support.LoopContext;
+const LoopControlKind = support.LoopControlKind;
+const LoopControlManifestEntry = support.LoopControlManifestEntry;
 const SwitchContext = support.SwitchContext;
 const UnrolledLoopContext = support.UnrolledLoopContext;
 const UnrolledLoopSignal = support.UnrolledLoopSignal;
@@ -56,10 +59,17 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 value: mlir.MlirValue,
             };
 
+            const IndexEntry = struct {
+                pattern_id: ast.PatternId,
+                index: mlir.MlirValue,
+            };
+
             entries: std.ArrayList(Entry) = .empty,
+            indexes: std.ArrayList(IndexEntry) = .empty,
 
             fn deinit(self: *PatternValueCache, allocator: std.mem.Allocator) void {
                 self.entries.deinit(allocator);
+                self.indexes.deinit(allocator);
             }
 
             fn get(self: *const PatternValueCache, pattern_id: ast.PatternId) ?mlir.MlirValue {
@@ -75,6 +85,25 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     .pattern_id = pattern_id,
                     .value = value,
                 });
+            }
+
+            fn getIndex(self: *const PatternValueCache, pattern_id: ast.PatternId) ?mlir.MlirValue {
+                for (self.indexes.items) |entry| {
+                    if (entry.pattern_id.index() == pattern_id.index()) return entry.index;
+                }
+                return null;
+            }
+
+            fn putIndex(self: *PatternValueCache, allocator: std.mem.Allocator, pattern_id: ast.PatternId, index: mlir.MlirValue) !void {
+                if (self.getIndex(pattern_id) != null) return;
+                try self.indexes.append(allocator, .{
+                    .pattern_id = pattern_id,
+                    .index = index,
+                });
+            }
+
+            fn clearValues(self: *PatternValueCache) void {
+                self.entries.clearRetainingCapacity();
             }
         };
 
@@ -737,6 +766,17 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             appendOp(self.block, op);
+            // Only an emitted check creates evidence. Immutable tails are safe
+            // when branch lowerers copy self; no child can update its parent.
+            const checked = try self.parent.allocator.create(FunctionLowerer.CheckedRefinement);
+            checked.* = .{
+                .value = @This().refinementValueIdentity(value),
+                .refinement = refinement,
+                .block = self.block,
+                .guard = op,
+                .previous = self.checked_refinements,
+            };
+            self.checked_refinements = checked;
         }
 
         fn runtimeCheckProvidesForRefinement(self: *FunctionLowerer, name: []const u8, refinement: RefinementType) !?[]const u8 {
@@ -856,6 +896,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn createTypedIntegerConstant(self: *FunctionLowerer, ty: mlir.MlirType, value: u256, loc: mlir.MlirLocation) anyerror!mlir.MlirValue {
+            if (mlir.oraTypeIsNull(ty)) return error.InvalidIntegerConstantType;
             const attr = if (value <= std.math.maxInt(i64))
                 mlir.oraIntegerAttrCreateI64FromType(ty, @intCast(value))
             else blk: {
@@ -863,6 +904,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const decimal_text = std.fmt.bufPrint(&decimal_buf, "{}", .{value}) catch return error.MlirOperationCreationFailed;
                 break :blk mlir.oraIntegerAttrGetFromString(ty, strRef(decimal_text));
             };
+            if (mlir.oraAttributeIsNull(attr)) return error.InvalidIntegerConstantAttribute;
             const op = mlir.oraArithConstantOpCreate(self.parent.context, loc, ty, attr);
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, op);
@@ -986,10 +1028,67 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (self.return_type) |return_type| {
                     const success_type = mlir.oraErrorUnionTypeGetSuccessType(return_type);
                     const target_type = if (mlir.oraTypeIsNull(success_type)) return_type else success_type;
-                    return try self.lowerExprForFlowTarget(expr_id, target_type, locals);
+                    const value = try self.lowerExprForFlowTarget(expr_id, target_type, locals);
+                    const semantic_return = self.semantic_return_type orelse return error.MlirOperationCreationFailed;
+                    const semantic_payload = switch (semantic_return) {
+                        .error_union => |error_union| error_union.payload_type.*,
+                        else => semantic_return,
+                    };
+                    const semantic_target = if (semantic_payload == .named)
+                        self.parent.substitutedType(semantic_payload.named.name) orelse semantic_payload
+                    else
+                        semantic_payload;
+                    if (!mlir.oraTypeIsNull(mlir.oraErrorUnionTypeGetSuccessType(mlir.oraValueGetType(value))) and
+                        (semantic_target == .refinement or !mlir.oraTypeIsNull(mlir.oraRefinementTypeGetBaseType(target_type))))
+                    {
+                        try @This().checkErrorUnionReturnRefinement(self, value, return_type, target_type, semantic_target, support.exprRange(self.parent.file, expr_id));
+                        return value;
+                    }
+                    return try @This().convertValueForCheckedFlow(self, value, target_type, semantic_target, support.exprRange(self.parent.file, expr_id));
                 }
             }
             return try self.lowerExpr(expr_id, locals);
+        }
+
+        fn checkErrorUnionReturnRefinement(
+            self: *FunctionLowerer,
+            value: mlir.MlirValue,
+            return_type: mlir.MlirType,
+            payload_type: mlir.MlirType,
+            semantic_payload: sema.Type,
+            range: source.TextRange,
+        ) anyerror!void {
+            const value_type = mlir.oraValueGetType(value);
+            const actual_payload = mlir.oraErrorUnionTypeGetSuccessType(value_type);
+            if (mlir.oraTypeIsNull(actual_payload)) return error.InvalidRefinedErrorUnionPayload;
+            const refinement_base = mlir.oraRefinementTypeGetBaseType(actual_payload);
+            const base_type = if (mlir.oraTypeIsNull(refinement_base)) actual_payload else refinement_base;
+            // Type equality binds the representation, never discharges R.
+            if (!mlir.oraTypeEqual(value_type, return_type) or !mlir.oraTypeEqual(actual_payload, payload_type) or
+                !(mlir.oraTypeIsAInteger(base_type) or mlir.oraTypeIsAddressType(base_type)))
+                return error.InvalidRefinedErrorUnionPayload;
+
+            const loc = self.parent.location(range);
+            const is_error = mlir.oraErrorIsErrorOpCreate(self.parent.context, loc, value);
+            if (mlir.oraOperationIsNull(is_error)) return error.MlirOperationCreationFailed;
+            const tag = appendValueOp(self.block, is_error);
+            const branch = mlir.oraScfIfOpCreate(self.parent.context, loc, tag, null, 0, true);
+            if (mlir.oraOperationIsNull(branch)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, branch);
+            const err_block = mlir.oraScfIfOpGetThenBlock(branch);
+            const ok_block = mlir.oraScfIfOpGetElseBlock(branch);
+            if (mlir.oraBlockIsNull(err_block) or mlir.oraBlockIsNull(ok_block)) return error.MlirOperationCreationFailed;
+
+            // RefinementErrorUnion.checkedReturn?: only Ok may read/check T.
+            // The Err arm never reads a payload; both arms retain the original value.
+            const unwrap = mlir.oraErrorUnwrapOpCreate(self.parent.context, loc, value, actual_payload);
+            if (mlir.oraOperationIsNull(unwrap)) return error.MlirOperationCreationFailed;
+            const payload = appendValueOp(ok_block, unwrap);
+            var ok_lowerer = self.*;
+            ok_lowerer.block = ok_block;
+            _ = try @This().convertValueForCheckedFlow(&ok_lowerer, payload, payload_type, semantic_payload, range);
+            if (!support.blockEndsWithTerminator(err_block)) try appendScfYieldValues(self.parent.context, err_block, loc, &.{});
+            if (!support.blockEndsWithTerminator(ok_block)) try appendScfYieldValues(self.parent.context, ok_block, loc, &.{});
         }
 
         fn voidValue(self: *FunctionLowerer, range: source.TextRange) anyerror!mlir.MlirValue {
@@ -1157,8 +1256,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             while (index < statements.len) : (index += 1) {
                 const statement_id = statements[index];
                 if (self.loop_context) |loop_context| {
-                    if (loop_context.continue_flag.ptr != null and self.current_scf_carried_locals == null and seen_loop_control and !analysis.stmtContainsLoopControl(self.parent.file, statement_id)) {
-                        return try @This().lowerBodySuffixGuardedOnLoopContinue(self, statements[index..], locals, loop_context);
+                    if (loop_context.continue_flag.ptr != null and seen_loop_control) {
+                        return try @This().lowerBodySuffixGuardedOnLoopControl(self, statements[index..], locals, loop_context);
                     } else if (self.deferred_return_flag != null and self.deferred_return_kind != .none and seen_potential_return) {
                         return try @This().lowerBodySuffixGuardedOnDeferredReturn(self, statements[index..], locals);
                     } else {
@@ -1257,7 +1356,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return terminated;
         }
 
-        fn lowerBodySuffixGuardedOnLoopContinue(
+        fn lowerBodySuffixGuardedOnLoopControl(
             self: *FunctionLowerer,
             statements: []const ast.StmtId,
             locals: *LocalEnv,
@@ -1271,8 +1370,22 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (mlir.oraOperationIsNull(load)) return error.MlirOperationCreationFailed;
                 break :blk load;
             });
+            const break_value = appendValueOp(self.block, blk: {
+                const load = mlir.oraMemrefLoadOpCreate(self.parent.context, loc, loop_context.break_flag, null, 0, boolType(self.parent.context));
+                if (mlir.oraOperationIsNull(load)) return error.MlirOperationCreationFailed;
+                break :blk load;
+            });
             const false_value = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
-            const should_run = self.createCompareOp(loc, "eq", continue_value, false_value);
+            const continue_clear = self.createCompareOp(loc, "eq", continue_value, false_value);
+            if (mlir.oraOperationIsNull(continue_clear)) return error.MlirOperationCreationFailed;
+            const break_clear = self.createCompareOp(loc, "eq", break_value, false_value);
+            if (mlir.oraOperationIsNull(break_clear)) return error.MlirOperationCreationFailed;
+            const should_run = mlir.oraArithAndIOpCreate(
+                self.parent.context,
+                loc,
+                appendValueOp(self.block, continue_clear),
+                appendValueOp(self.block, break_clear),
+            );
             if (mlir.oraOperationIsNull(should_run)) return error.MlirOperationCreationFailed;
 
             const result_types = if (loop_context.carried_locals.len == 0)
@@ -1289,6 +1402,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 true,
             );
             if (mlir.oraOperationIsNull(if_op)) return error.MlirOperationCreationFailed;
+            mlir.oraOperationSetAttributeByName(
+                if_op,
+                strRef("ora.loop_control_runtime_guard"),
+                namedBoolAttr(self.parent.context, "ora.loop_control_runtime_guard", true).attribute,
+            );
             appendOp(self.block, if_op);
 
             const then_block = mlir.oraScfIfOpGetThenBlock(if_op);
@@ -1349,6 +1467,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 true,
             );
             if (mlir.oraOperationIsNull(if_op)) return error.MlirOperationCreationFailed;
+            mlir.oraOperationSetAttributeByName(
+                if_op,
+                strRef("ora.loop_control_runtime_guard"),
+                namedBoolAttr(self.parent.context, "ora.loop_control_runtime_guard", true).attribute,
+            );
             appendOp(self.block, if_op);
 
             const then_block = mlir.oraScfIfOpGetThenBlock(if_op);
@@ -1525,8 +1648,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             }
                             return true;
                         }
+                        var return_control_kind: LoopControlKind = .function_return;
                         if (ret.value) |expr_id| {
                             const is_error_return = @This().returnExprIsErrorShaped(self, expr_id);
+                            if (is_error_return) return_control_kind = .error_return;
                             const raw_value = try @This().lowerReturnExprValue(self, expr_id, is_error_return, locals);
                             const ok_result = if (is_error_return) null else try @This().successResultValueForPostcondition(self, raw_value, ret.range);
                             const value = if (is_error_return)
@@ -1549,6 +1674,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         const set_flag = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, true_value, return_flag, null, 0);
                         if (mlir.oraOperationIsNull(set_flag)) return error.MlirOperationCreationFailed;
                         appendOp(self.block, set_flag);
+                        if (self.loop_context) |loop_context| {
+                            try @This().appendLoopControlMarker(
+                                self,
+                                statement_id,
+                                ret.range,
+                                locals,
+                                loop_context,
+                                return_control_kind,
+                            );
+                        }
                         try self.appendDeferredReturnTerminator(ret.range, locals);
                         return true;
                     }
@@ -1617,6 +1752,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithAddIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            FunctionLowerer.annotateIntegerBinary(self, op, .add, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range));
                             const value = appendValueOp(self.block, op);
                             try FunctionLowerer.maybeEmitCheckedBinaryOverflowAssert(self, .add, lhs, rhs, value, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range), assign.range);
                             break :blk value;
@@ -1626,6 +1762,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraAddWrappingOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs, mlir.oraValueGetType(lhs));
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            FunctionLowerer.annotateIntegerBinary(self, op, .wrapping_add, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range));
                             break :blk appendValueOp(self.block, op);
                         },
                         .bit_and_assign => blk: {
@@ -1640,6 +1777,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithSubIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            FunctionLowerer.annotateIntegerBinary(self, op, .sub, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range));
                             const value = appendValueOp(self.block, op);
                             try FunctionLowerer.maybeEmitCheckedBinaryOverflowAssert(self, .sub, lhs, rhs, value, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range), assign.range);
                             break :blk value;
@@ -1649,6 +1787,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraSubWrappingOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs, mlir.oraValueGetType(lhs));
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            FunctionLowerer.annotateIntegerBinary(self, op, .wrapping_sub, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range));
                             break :blk appendValueOp(self.block, op);
                         },
                         .bit_or_assign => blk: {
@@ -1663,6 +1802,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithMulIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            FunctionLowerer.annotateIntegerBinary(self, op, .mul, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range));
                             const value = appendValueOp(self.block, op);
                             try FunctionLowerer.maybeEmitCheckedBinaryOverflowAssert(self, .mul, lhs, rhs, value, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range), assign.range);
                             break :blk value;
@@ -1672,6 +1812,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraMulWrappingOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs, mlir.oraValueGetType(lhs));
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            FunctionLowerer.annotateIntegerBinary(self, op, .wrapping_mul, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range));
                             break :blk appendValueOp(self.block, op);
                         },
                         .bit_xor_assign => blk: {
@@ -1687,6 +1828,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             try @This().emitCheckedShiftAmountAssert(self, lhs, rhs, assign.range);
                             const op = mlir.oraArithShlIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            FunctionLowerer.annotateIntegerBinary(self, op, .shl, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range));
                             break :blk appendValueOp(self.block, op);
                         },
                         .shr_assign => blk: {
@@ -1698,6 +1840,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             else
                                 mlir.oraArithShrUIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            FunctionLowerer.annotateIntegerBinary(self, op, .shr, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range));
                             break :blk appendValueOp(self.block, op);
                         },
                         .pow_assign => blk: {
@@ -1708,24 +1851,33 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         .div_assign => blk: {
                             const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
-                            const op = if (try @This().patternIntegerSignedness(self, assign.target, locals, assign.range))
+                            const is_signed = try @This().patternIntegerSignedness(self, assign.target, locals, assign.range);
+                            try @This().emitCheckedDivRemSafetyAsserts(self, true, is_signed, lhs, rhs, assign.range);
+                            const op = if (is_signed)
                                 mlir.oraArithDivSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs)
                             else
                                 mlir.oraArithDivUIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            FunctionLowerer.annotateIntegerBinary(self, op, .div, is_signed);
                             break :blk appendValueOp(self.block, op);
                         },
                         .mod_assign => blk: {
                             const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
-                            const op = if (try @This().patternIntegerSignedness(self, assign.target, locals, assign.range))
+                            const is_signed = try @This().patternIntegerSignedness(self, assign.target, locals, assign.range);
+                            try @This().emitCheckedDivRemSafetyAsserts(self, false, is_signed, lhs, rhs, assign.range);
+                            const op = if (is_signed)
                                 mlir.oraArithRemSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs)
                             else
                                 mlir.oraArithRemUIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                            FunctionLowerer.annotateIntegerBinary(self, op, .mod, is_signed);
                             break :blk appendValueOp(self.block, op);
                         },
                     };
+                    // Keep captured indexes, but reload containers after RHS effects so
+                    // an aggregate field update cannot overwrite a changed sibling.
+                    if (assignment_cache) |cache| cache.clearValues();
                     try @This().storePatternWithCache(self, assign.target, value, locals, assignment_cache);
                     if (target_local_id) |local_id| {
                         if (known_int) |integer| {
@@ -1936,6 +2088,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             self.deferred_return_carried_locals
                         else
                             loop_context.carried_locals;
+                        try @This().appendLoopControlMarker(
+                            self,
+                            statement_id,
+                            jump.range,
+                            locals,
+                            loop_context,
+                            .break_loop,
+                        );
                         try self.appendScfYieldFromLocals(self.block, jump.range, locals, carried_locals);
                         return true;
                     }
@@ -2065,6 +2225,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             self.deferred_return_carried_locals
                         else
                             loop_context.carried_locals;
+                        try @This().appendLoopControlMarker(
+                            self,
+                            statement_id,
+                            jump.range,
+                            locals,
+                            loop_context,
+                            .continue_loop,
+                        );
                         try self.appendScfYieldFromLocals(self.block, jump.range, locals, carried_locals);
                         return true;
                     }
@@ -2479,7 +2647,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const range = patternRange(self.parent.file, pattern_id);
                     const target_type = try @This().lowerPatternType(self, pattern_id) orelse
                         self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
-                    const converted = try @This().convertValueForFlow(self, value, target_type, range);
+                    const converted = try @This().convertValueForCheckedFlow(self, value, target_type, self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
                     @This().annotatePatternValue(self, pattern_id, converted);
                     try locals.bindPattern(self.parent.file, pattern_id, converted);
                 },
@@ -2624,6 +2792,92 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return appendValueOp(self.block, op);
         }
 
+        // Source conversions need semantic predicates even when an earlier pure
+        // wrapper already gave the value the target MLIR type. Check once here,
+        // before binding/storing or exposing the successful return to ensures.
+        pub fn convertValueForCheckedFlow(
+            self: *FunctionLowerer,
+            value: mlir.MlirValue,
+            target_type: mlir.MlirType,
+            target_sema_type: sema.Type,
+            range: source.TextRange,
+        ) anyerror!mlir.MlirValue {
+            const semantic_target = if (target_sema_type == .named)
+                self.parent.substitutedType(target_sema_type.named.name) orelse target_sema_type
+            else
+                target_sema_type;
+            if (semantic_target != .refinement and
+                mlir.oraTypeIsNull(mlir.oraRefinementTypeGetBaseType(target_type)))
+                return @This().convertValueForFlow(self, value, target_type, range);
+            if (semantic_target != .refinement or
+                !mlir.oraTypeEqual(self.parent.lowerSemaType(semantic_target, range), target_type))
+            {
+                try self.parent.emitLoweringError(range, "refinement conversion requires an exact semantic target", .{});
+                return error.MlirOperationCreationFailed;
+            }
+            return @This().convertValueForSemaFlow(self, value, semantic_target, range);
+        }
+
+        fn refinementValueIdentity(value: mlir.MlirValue) mlir.MlirValue {
+            var current = value;
+            while (mlir.oraValueIsAOpResult(current)) {
+                const op = mlir.oraOpResultGetOwner(current);
+                if (mlir.oraOperationGetNumOperands(op) != 1 or mlir.oraOperationGetNumResults(op) != 1) break;
+                const name = mlir.oraOperationGetName(op);
+                defer @import("mlir_c_api").freeStringRef(name);
+                if (name.data == null) break;
+                const text = name.data[0..name.length];
+                if (!std.mem.eql(u8, text, "ora.base_to_refinement") and
+                    !std.mem.eql(u8, text, "ora.refinement_to_base")) break;
+                const operand = mlir.oraOperationGetOperand(op, 0);
+                const from = mlir.oraValueGetType(operand);
+                const to = mlir.oraValueGetType(current);
+                const from_base = mlir.oraRefinementTypeGetBaseType(from);
+                const to_base = mlir.oraRefinementTypeGetBaseType(to);
+                if (!mlir.oraTypeEqual(
+                    if (mlir.oraTypeIsNull(from_base)) from else from_base,
+                    if (mlir.oraTypeIsNull(to_base)) to else to_base,
+                )) break;
+                current = operand;
+            }
+            return current;
+        }
+
+        fn sameCheckedRefinement(lhs: RefinementType, rhs: RefinementType) bool {
+            if (!std.mem.eql(u8, lhs.name, rhs.name) or lhs.args.len != rhs.args.len) return false;
+            // Unresolved bases never gain trust from their MLIR representation.
+            switch (lhs.base_type.*) {
+                .integer => |integer| {
+                    if (rhs.base_type.* != .integer or integer.bits != rhs.base_type.integer.bits or
+                        integer.signed != rhs.base_type.integer.signed) return false;
+                },
+                .address => if (rhs.base_type.* != .address) return false,
+                else => return false,
+            }
+            for (lhs.args, rhs.args) |a, b| switch (a) {
+                .Type => if (b != .Type) return false, // Concrete type is base_type above.
+                .Integer => |integer| {
+                    if (b != .Integer or !std.mem.eql(u8, integer.text, b.Integer.text)) return false;
+                },
+            };
+            return true;
+        }
+
+        fn hasCheckedRefinement(self: *FunctionLowerer, value: mlir.MlirValue, refinement: RefinementType) bool {
+            const identity = @This().refinementValueIdentity(value);
+            var cursor = self.checked_refinements;
+            while (cursor) |checked| : (cursor = checked.previous) {
+                if (checked.block.ptr != self.block.ptr or !mlir.mlirValueEqual(checked.value, identity) or
+                    !@This().sameCheckedRefinement(checked.refinement, refinement)) continue;
+                // Only an earlier guard still present in this block can be reused.
+                var op = mlir.oraBlockGetFirstOperation(self.block);
+                while (!mlir.oraOperationIsNull(op)) : (op = mlir.oraOperationGetNextInBlock(op)) {
+                    if (op.ptr == checked.guard.ptr) return true;
+                }
+            }
+            return false;
+        }
+
         pub fn convertValueForSemaFlow(
             self: *FunctionLowerer,
             value: mlir.MlirValue,
@@ -2631,9 +2885,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             range: source.TextRange,
         ) anyerror!mlir.MlirValue {
             const target_type = self.parent.lowerSemaType(target_sema_type, range);
-            const value_type = mlir.oraValueGetType(value);
             const converted = try @This().convertValueForFlow(self, value, target_type, range);
-            if (target_sema_type.kind() == .refinement and !mlir.oraTypeEqual(value_type, target_type)) {
+            // Types/wrappers (including refinement-typed storage) prove nothing.
+            // Reuse only the exact predicate checked on this value in this block.
+            if (target_sema_type.kind() == .refinement and
+                !@This().hasCheckedRefinement(self, converted, target_sema_type.refinement))
+            {
                 try @This().insertRefinementGuard(self, converted, target_sema_type.refinement, range, "aggregate", "refinement_conversion");
             }
             return converted;
@@ -2909,12 +3166,208 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             try @This().emitSafetyAssert(self, amount_in_range, "checked shift amount out of range", range);
         }
 
+        pub fn emitCheckedDivRemSafetyAsserts(
+            self: *FunctionLowerer,
+            is_division: bool,
+            is_signed: bool,
+            lhs: mlir.MlirValue,
+            rhs: mlir.MlirValue,
+            range: source.TextRange,
+        ) anyerror!void {
+            const value_ty = mlir.oraValueGetType(lhs);
+            if (!mlir.oraTypeIsAInteger(value_ty) or !mlir.oraTypeEqual(value_ty, mlir.oraValueGetType(rhs))) {
+                return error.MlirOperationCreationFailed;
+            }
+
+            const loc = self.parent.location(range);
+            const zero = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, value_ty, 0));
+            const divisor_non_zero_op = self.createCompareOp(loc, "ne", rhs, zero);
+            if (mlir.oraOperationIsNull(divisor_non_zero_op)) return error.MlirOperationCreationFailed;
+            const divisor_non_zero = appendValueOp(self.block, divisor_non_zero_op);
+            try @This().emitSafetyAssert(
+                self,
+                divisor_non_zero,
+                if (is_division) "checked division by zero" else "checked remainder by zero",
+                range,
+            );
+
+            // Checked signed division and remainder both reject MIN / -1.
+            if (!is_signed) return;
+
+            const bit_width = mlir.oraIntegerTypeGetWidth(value_ty);
+            if (bit_width == 0) return error.MlirOperationCreationFailed;
+            const one = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, value_ty, 1));
+            const shift = appendValueOp(self.block, createIntegerConstant(
+                self.parent.context,
+                loc,
+                value_ty,
+                @intCast(bit_width - 1),
+            ));
+            const min_op = mlir.oraArithShlIOpCreate(self.parent.context, loc, one, shift);
+            if (mlir.oraOperationIsNull(min_op)) return error.MlirOperationCreationFailed;
+            mlir.oraOperationSetAttributeByName(
+                min_op,
+                strRef("ora.integer_signed"),
+                mlir.oraBoolAttrCreate(self.parent.context, true),
+            );
+            const min_int = appendValueOp(self.block, min_op);
+            const neg_one = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, value_ty, -1));
+            const lhs_is_min = appendValueOp(self.block, self.createCompareOp(loc, "eq", lhs, min_int));
+            const rhs_is_neg_one = appendValueOp(self.block, self.createCompareOp(loc, "eq", rhs, neg_one));
+            const special_case_op = mlir.oraArithAndIOpCreate(
+                self.parent.context,
+                loc,
+                lhs_is_min,
+                rhs_is_neg_one,
+            );
+            if (mlir.oraOperationIsNull(special_case_op)) return error.MlirOperationCreationFailed;
+            const special_case = appendValueOp(self.block, special_case_op);
+            try @This().emitOverflowAssert(self, special_case, if (is_division) "checked division overflow" else "checked remainder overflow", range);
+        }
+
         fn emitSafetyAssert(self: *FunctionLowerer, condition: mlir.MlirValue, message: []const u8, range: source.TextRange) anyerror!void {
             const loc = self.parent.location(range);
             const assert_op = mlir.oraAssertOpCreate(self.parent.context, loc, condition, strRef(message));
             if (mlir.oraOperationIsNull(assert_op)) return error.MlirOperationCreationFailed;
+            mlir.oraOperationSetAttributeByName(
+                assert_op,
+                strRef("ora.verification_context"),
+                mlir.oraStringAttrCreate(self.parent.context, strRef("arithmetic_safety")),
+            );
             try @This().attachAssertMessageSelector(self, assert_op, message);
             appendOp(self.block, assert_op);
+        }
+
+        pub fn emitFixedArrayBoundsAssert(
+            self: *FunctionLowerer,
+            semantic_base_type: sema.Type,
+            base: mlir.MlirValue,
+            index: mlir.MlirValue,
+            range: source.TextRange,
+        ) anyerror!void {
+            const array = switch (semantic_base_type) {
+                .array => |array| array,
+                else => return,
+            };
+            const lowered_base_type = mlir.oraValueGetType(base);
+            if (!mlir.oraTypeIsAMemRef(lowered_base_type) or
+                mlir.oraShapedTypeGetRank(lowered_base_type) != 1 or
+                !mlir.oraShapedTypeHasStaticShape(lowered_base_type))
+            {
+                try self.parent.emitLoweringError(
+                    range,
+                    "fixed-array value must have one statically resolved dimension before bounds-check lowering",
+                    .{},
+                );
+                return error.MlirOperationCreationFailed;
+            }
+            const lowered_extent = mlir.oraShapedTypeGetDimSize(lowered_base_type, 0);
+            if (lowered_extent < 0) {
+                try self.parent.emitLoweringError(
+                    range,
+                    "fixed-array extent must be resolved before bounds-check lowering",
+                    .{},
+                );
+                return error.MlirOperationCreationFailed;
+            }
+            const extent: u64 = if (array.len) |semantic_extent| blk: {
+                if (semantic_extent != @as(u64, @intCast(lowered_extent))) {
+                    try self.parent.emitLoweringError(
+                        range,
+                        "fixed-array semantic extent {d} disagrees with lowered extent {d}",
+                        .{ semantic_extent, lowered_extent },
+                    );
+                    return error.MlirOperationCreationFailed;
+                }
+                break :blk semantic_extent;
+            } else @intCast(lowered_extent);
+            const index_type = reprIntegerType(self.parent.context);
+            if (!mlir.oraTypeEqual(mlir.oraValueGetType(index), index_type)) {
+                try self.parent.emitLoweringError(
+                    range,
+                    "fixed-array index must use the canonical u256 representation before bounds-check lowering",
+                    .{},
+                );
+                return error.MlirOperationCreationFailed;
+            }
+            const loc = self.parent.location(range);
+            const extent_value = appendValueOp(
+                self.block,
+                createIntegerConstant(self.parent.context, loc, index_type, @intCast(extent)),
+            );
+            const in_bounds_op = self.createCompareOp(loc, "ult", index, extent_value);
+            if (mlir.oraOperationIsNull(in_bounds_op)) return error.MlirOperationCreationFailed;
+            const in_bounds = appendValueOp(self.block, in_bounds_op);
+            try @This().emitSafetyAssert(self, in_bounds, "fixed-array index out of bounds", range);
+        }
+
+        pub fn emitDynamicIndexBoundsAssert(
+            self: *FunctionLowerer,
+            semantic_base_type: sema.Type,
+            base: mlir.MlirValue,
+            index: mlir.MlirValue,
+            range: source.TextRange,
+        ) anyerror!void {
+            const index_type = reprIntegerType(self.parent.context);
+            if (!mlir.oraTypeEqual(mlir.oraValueGetType(index), index_type)) {
+                try self.parent.emitLoweringError(
+                    range,
+                    "dynamic index must use the canonical u256 representation before bounds-check lowering",
+                    .{},
+                );
+                return error.MlirOperationCreationFailed;
+            }
+
+            const loc = self.parent.location(range);
+            const length = switch (semantic_base_type.kind()) {
+                .slice => blk: {
+                    const lowered_base_type = mlir.oraValueGetType(base);
+                    if (!mlir.oraTypeIsAMemRef(lowered_base_type) or mlir.oraShapedTypeGetRank(lowered_base_type) != 1) {
+                        try self.parent.emitLoweringError(
+                            range,
+                            "dynamic slice value must have one resolved dimension before bounds-check lowering",
+                            .{},
+                        );
+                        return error.MlirOperationCreationFailed;
+                    }
+                    const mlir_index_type = mlir.oraIndexTypeCreate(self.parent.context);
+                    const dimension = appendValueOp(
+                        self.block,
+                        createIntegerConstant(self.parent.context, loc, mlir_index_type, 0),
+                    );
+                    const dim_op = mlir.oraMemrefDimOpCreate(self.parent.context, loc, base, dimension);
+                    if (mlir.oraOperationIsNull(dim_op)) return error.MlirOperationCreationFailed;
+                    const dim_value = appendValueOp(self.block, dim_op);
+                    const cast_op = mlir.oraArithIndexCastUIOpCreate(
+                        self.parent.context,
+                        loc,
+                        dim_value,
+                        index_type,
+                    );
+                    if (mlir.oraOperationIsNull(cast_op)) return error.MlirOperationCreationFailed;
+                    break :blk appendValueOp(self.block, cast_op);
+                },
+                .bytes, .string => blk: {
+                    const length_op = mlir.oraLengthOpCreate(self.parent.context, loc, base, index_type);
+                    if (mlir.oraOperationIsNull(length_op)) return error.MlirOperationCreationFailed;
+                    break :blk appendValueOp(self.block, length_op);
+                },
+                // Static arrays are checked immediately before this call by
+                // emitFixedArrayBoundsAssert.
+                .array => return,
+                else => {
+                    try self.parent.emitLoweringError(
+                        range,
+                        "indexed value type has no bounds-check lowering owner",
+                        .{},
+                    );
+                    return error.MlirOperationCreationFailed;
+                },
+            };
+            const in_bounds_op = self.createCompareOp(loc, "ult", index, length);
+            if (mlir.oraOperationIsNull(in_bounds_op)) return error.MlirOperationCreationFailed;
+            const in_bounds = appendValueOp(self.block, in_bounds_op);
+            try @This().emitSafetyAssert(self, in_bounds, "dynamic index out of bounds", range);
         }
 
         pub fn emitOverflowAssert(self: *FunctionLowerer, overflow_flag: mlir.MlirValue, message: []const u8, range: source.TextRange) anyerror!void {
@@ -2941,7 +3394,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Name => |name| {
                     if (locals.lookupName(name.name)) |local_id| {
                         const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[local_id.index()].type, name.range);
-                        const converted = try @This().convertValueForFlow(self, value, target_type, name.range);
+                        const converted = try @This().convertValueForCheckedFlow(self, value, target_type, self.parent.typecheck.pattern_types[local_id.index()].type, name.range);
                         @This().annotateLocalValue(self, local_id, converted);
                         try locals.setValue(local_id, converted);
                         return;
@@ -2951,7 +3404,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         if (item == .Field) {
                             const field = item.Field;
                             const target_type = self.parent.lowerSemaType(self.parent.typecheck.item_types[item_id.index()], name.range);
-                            const converted = try @This().convertValueForFlow(self, value, target_type, name.range);
+                            const converted = try @This().convertValueForCheckedFlow(self, value, target_type, self.parent.typecheck.item_types[item_id.index()], name.range);
                             const loc = self.parent.location(name.range);
                             const op = switch (field.storage_class) {
                                 .storage => blk: {
@@ -2993,7 +3446,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                     const base_value = try @This().lowerPatternValueWithCache(self, field.base, locals, cache);
                     const target_type = self.parent.lowerSemaType(@This().patternType(self, pattern_id, locals), field.range);
-                    const converted = try @This().convertValueForFlow(self, value, target_type, field.range);
+                    const converted = try @This().convertValueForCheckedFlow(self, value, target_type, @This().patternType(self, pattern_id, locals), field.range);
                     const op = mlir.oraStructFieldUpdateOpCreate(
                         self.parent.context,
                         self.parent.location(field.range),
@@ -3007,16 +3460,29 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     return;
                 },
                 .Index => |index| {
+                    const semantic_base_type = @This().patternType(self, index.base, locals);
+                    const cached_index = if (cache) |pattern_cache| pattern_cache.getIndex(pattern_id) else null;
+                    const reload_storage_base = cached_index != null and
+                        @This().patternIsStorageBacked(self, index.base, locals);
+                    if (reload_storage_base) cache.?.clearValues();
                     const base_value = try @This().lowerPatternValueWithCache(self, index.base, locals, cache);
                     const base_type = mlir.oraValueGetType(base_value);
                     const target_type = self.parent.lowerSemaType(@This().patternType(self, pattern_id, locals), index.range);
-                    const converted = try @This().convertValueForFlow(self, value, target_type, index.range);
+                    const converted = try @This().convertValueForCheckedFlow(self, value, target_type, @This().patternType(self, pattern_id, locals), index.range);
                     if (mlir.oraTypeIsAMemRef(base_type)) {
-                        const key_value = try self.lowerExprForFlowTarget(index.index, reprIntegerType(self.parent.context), locals);
+                        const key_value = cached_index orelse try self.lowerExprForFlowTarget(index.index, reprIntegerType(self.parent.context), locals);
                         if (@This().guardedStorageRootNameForPattern(self, index.base)) |root_name| {
                             try @This().maybeEmitGuardedIndexedStorageWrite(self, root_name, key_value, index.range);
                         }
                         const index_value = try @This().convertIndexToIndexType(self, key_value, index.range);
+                        try @This().emitFixedArrayBoundsAssert(self, semantic_base_type, base_value, key_value, index.range);
+                        // Memory-backed compound targets may reuse the read-side check:
+                        // their local sequence value is unreachable by a callee. A
+                        // storage-backed target reloads its descriptor above and checks
+                        // the current length again immediately before the store.
+                        if (cached_index == null or reload_storage_base) {
+                            try @This().emitDynamicIndexBoundsAssert(self, semantic_base_type, base_value, key_value, index.range);
+                        }
                         const op = mlir.oraMemrefStoreOpCreate(
                             self.parent.context,
                             self.parent.location(index.range),
@@ -3032,7 +3498,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const map_value_type = mlir.oraMapTypeGetValueType(base_type);
                     if (map_value_type.ptr != null) {
                         const map_key_type = mlir.oraMapTypeGetKeyType(base_type);
-                        const key_value = if (!mlir.oraTypeIsNull(map_key_type))
+                        const key_value = cached_index orelse if (!mlir.oraTypeIsNull(map_key_type))
                             try self.lowerExprForFlowTarget(index.index, map_key_type, locals)
                         else
                             try self.lowerExpr(index.index, locals);
@@ -3108,6 +3574,22 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Field => null,
                 .Index => |index| @This().guardedStorageRootNameForPattern(self, index.base),
                 .StructDestructure, .Error => null,
+            };
+        }
+
+        fn patternIsStorageBacked(self: *FunctionLowerer, pattern_id: ast.PatternId, locals: *LocalEnv) bool {
+            return switch (self.parent.file.pattern(pattern_id).*) {
+                .Name => |name| blk: {
+                    if (locals.lookupName(name.name) != null) break :blk false;
+                    const item_id = self.parent.item_index.lookup(name.name) orelse break :blk false;
+                    break :blk switch (self.parent.file.item(item_id).*) {
+                        .Field => |field| field.storage_class == .storage,
+                        else => false,
+                    };
+                },
+                .Field => |field| @This().patternIsStorageBacked(self, field.base, locals),
+                .Index => |index| @This().patternIsStorageBacked(self, index.base, locals),
+                .StructDestructure, .Error => false,
             };
         }
 
@@ -3344,10 +3826,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     return error.UnknownAssignmentTarget;
                 },
                 .Index => |index| blk: {
+                    const semantic_base_type = @This().patternType(self, index.base, locals);
                     const base_value = try @This().lowerPatternValueWithCache(self, index.base, locals, cache);
                     if (mlir.oraTypeIsAMemRef(mlir.oraValueGetType(base_value))) {
-                        const key_value = try self.lowerExprForFlowTarget(index.index, reprIntegerType(self.parent.context), locals);
+                        const key_value = if (cache) |pattern_cache|
+                            pattern_cache.getIndex(pattern_id) orelse
+                                try self.lowerExprForFlowTarget(index.index, reprIntegerType(self.parent.context), locals)
+                        else
+                            try self.lowerExprForFlowTarget(index.index, reprIntegerType(self.parent.context), locals);
                         const index_value = try @This().convertIndexToIndexType(self, key_value, index.range);
+                        try @This().emitFixedArrayBoundsAssert(self, semantic_base_type, base_value, key_value, index.range);
+                        try @This().emitDynamicIndexBoundsAssert(self, semantic_base_type, base_value, key_value, index.range);
+                        if (cache) |pattern_cache| {
+                            try pattern_cache.putIndex(self.parent.allocator, pattern_id, key_value);
+                        }
                         const result_type = self.parent.lowerSemaType(@This().patternType(self, pattern_id, locals), index.range);
                         const op = mlir.oraMemrefLoadOpCreate(
                             self.parent.context,
@@ -3366,10 +3858,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         break :blk2 self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, index.range);
                     };
                     const map_key_type = mlir.oraMapTypeGetKeyType(mlir.oraValueGetType(base_value));
-                    const key_value = if (!mlir.oraTypeIsNull(map_key_type))
+                    const key_value = if (cache) |pattern_cache|
+                        pattern_cache.getIndex(pattern_id) orelse if (!mlir.oraTypeIsNull(map_key_type))
+                            try self.lowerExprForFlowTarget(index.index, map_key_type, locals)
+                        else
+                            try self.lowerExpr(index.index, locals)
+                    else if (!mlir.oraTypeIsNull(map_key_type))
                         try self.lowerExprForFlowTarget(index.index, map_key_type, locals)
                     else
                         try self.lowerExpr(index.index, locals);
+                    if (cache) |pattern_cache| {
+                        try pattern_cache.putIndex(self.parent.allocator, pattern_id, key_value);
+                    }
                     const converted_key = if (!mlir.oraTypeIsNull(map_key_type))
                         try @This().convertValueForFlow(self, key_value, map_key_type, index.range)
                     else
@@ -3381,7 +3881,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Field => |field| blk: {
                     const base_type = @This().patternType(self, field.base, locals);
                     if (@This().isBitfieldLikeType(self, base_type)) {
-                        const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, field.range);
+                        const result_type = self.parent.lowerSemaType(@This().patternType(self, pattern_id, locals), field.range);
                         break :blk try @This().createBitfieldFieldExtract(self, try @This().lowerPatternValueWithCache(self, field.base, locals, cache), base_type, field.name, result_type, field.range);
                     }
                     const base_value = try @This().lowerPatternValueWithCache(self, field.base, locals, cache);
@@ -3417,6 +3917,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 .Field => |field| blk: {
                     const base_type = @This().patternType(self, field.base, locals);
+                    if (@This().isBitfieldLikeType(self, base_type)) {
+                        const type_name = base_type.name() orelse break :blk self.parent.typecheck.pattern_types[pattern_id.index()].type;
+                        const resolved = (self.parent.resolveBitfieldField(type_name, field.name) catch null) orelse
+                            break :blk self.parent.typecheck.pattern_types[pattern_id.index()].type;
+                        break :blk resolved.field_type orelse
+                            (type_descriptors.descriptorFromTypeExpr(self.parent.allocator, self.parent.file, self.parent.item_index, resolved.field.type_expr) catch
+                                self.parent.typecheck.pattern_types[pattern_id.index()].type);
+                    }
                     if (base_type.kind() == .anonymous_struct) {
                         if (base_type.anonymous_struct.fieldByName(field.name)) |struct_field| break :blk struct_field.ty;
                     }
@@ -3561,6 +4069,24 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 appendOp(self.block, clear_break);
                 break :blk flag;
             } else std.mem.zeroes(mlir.MlirValue);
+            const continue_flag = if (has_loop_control) blk: {
+                const continue_flag_alloc = mlir.oraMemrefAllocaOpCreate(
+                    self.parent.context,
+                    loc,
+                    support.memRefType(self.parent.context, boolType(self.parent.context)),
+                );
+                if (mlir.oraOperationIsNull(continue_flag_alloc)) return error.MlirOperationCreationFailed;
+                const flag = appendValueOp(self.block, continue_flag_alloc);
+
+                const continue_flag_zero = appendValueOp(
+                    self.block,
+                    createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0),
+                );
+                const clear_continue = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, continue_flag_zero, flag, null, 0);
+                if (mlir.oraOperationIsNull(clear_continue)) return error.MlirOperationCreationFailed;
+                appendOp(self.block, clear_continue);
+                break :blk flag;
+            } else std.mem.zeroes(mlir.MlirValue);
 
             var carried_locals: LocalIdList = .empty;
             var carried_seen = LocalIdSet.init(self.parent.allocator);
@@ -3607,6 +4133,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             };
             const step = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, index_type, 1));
 
+            // Ora source `for` induction and index bindings are u256.  SCF
+            // lowers the carrier to MLIR `index`, so retain the source-owned
+            // semantic identity explicitly for formal projection.
+            const induction_type_id = type_builtin.lookupBuiltinById(.u256).comptime_type_id;
+
             const for_op = mlir.oraScfForOpCreate(
                 self.parent.context,
                 loc,
@@ -3615,14 +4146,32 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 step,
                 if (init_operands.items.len == 0) null else init_operands.items.ptr,
                 init_operands.items.len,
-                false,
+                true,
             );
             if (mlir.oraOperationIsNull(for_op)) return error.MlirOperationCreationFailed;
+            mlir.oraOperationSetAttributeByName(
+                for_op,
+                strRef("ora.induction_compiler_type_id"),
+                mlir.oraIntegerAttrCreateI64FromType(
+                    reprIntegerType(self.parent.context),
+                    @intCast(induction_type_id),
+                ),
+            );
             appendOp(self.block, for_op);
 
             const body_block = mlir.oraScfForOpGetBodyBlock(for_op);
             if (mlir.oraBlockIsNull(body_block)) return error.MlirOperationCreationFailed;
             clearKnownTerminator(body_block);
+
+            if (has_loop_control) {
+                const continue_flag_zero = appendValueOp(
+                    body_block,
+                    createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0),
+                );
+                const clear_continue = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, continue_flag_zero, continue_flag, null, 0);
+                if (mlir.oraOperationIsNull(clear_continue)) return error.MlirOperationCreationFailed;
+                appendOp(body_block, clear_continue);
+            }
 
             const induction_var = mlir.oraBlockGetArgument(body_block, 0);
             const current_value_op = mlir.oraArithIndexCastUIOpCreate(
@@ -3637,6 +4186,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             const item_value = if (is_range_iterable) current_value else blk: {
                 const item_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[for_stmt.item_pattern.index()].type, for_stmt.range);
+                // Array iteration uses scf.for's [0, static extent) induction value, so this load is in bounds by construction.
                 const item_load = mlir.oraMemrefLoadOpCreate(
                     self.parent.context,
                     loc,
@@ -3669,13 +4219,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             var body_lowerer = self.*;
             body_lowerer.block = body_block;
+            var control_manifest: std.ArrayList(LoopControlManifestEntry) = .empty;
             var loop_context = LoopContext{
                 .parent = self.loop_context,
                 .label = for_stmt.label,
+                .source_statement_id = @intCast(statement_id.index()),
                 .break_flag = break_flag,
+                .continue_flag = continue_flag,
+                .induction_value = current_value,
                 .carried_locals = carried_locals.items,
+                .control_manifest = &control_manifest,
             };
-            if (has_loop_control) {
+            if (has_loop_control or has_return) {
                 body_lowerer.loop_context = &loop_context;
             }
             var body_locals = try self.cloneLocals(locals);
@@ -3742,6 +4297,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     true,
                 );
                 if (mlir.oraOperationIsNull(if_op)) return error.MlirOperationCreationFailed;
+                if (has_execution_guard) {
+                    mlir.oraOperationSetAttributeByName(
+                        if_op,
+                        strRef("ora.loop_control_runtime_guard"),
+                        namedBoolAttr(self.parent.context, "ora.loop_control_runtime_guard", true).attribute,
+                    );
+                }
                 appendOp(body_block, if_op);
 
                 const then_block = mlir.oraScfIfOpGetThenBlock(if_op);
@@ -3780,6 +4342,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (!support.blockEndsWithTerminator(body_block)) {
                 try body_lowerer.appendScfYieldFromLocals(body_block, for_stmt.range, &body_locals, carried_locals.items);
             }
+            try @This().attachLoopControlManifest(self, for_op, control_manifest.items);
             try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, for_op);
             @This().annotateCarriedLocalResults(self, carried_locals.items, for_op);
             if (has_return and self.deferred_return_flag != null) {
@@ -3811,10 +4374,45 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn lowerUnrolledFiniteForStmt(self: *FunctionLowerer, for_stmt: ast.ForStmt, locals: *LocalEnv) anyerror!?bool {
             if (for_stmt.invariants.len != 0) return null;
+            // The unrolled-loop signal is compile-time control, so only
+            // structurally guardable break/continue sites may enter this path.
+            // The branch lowerer separately requires every such guard to have
+            // a known value for the current synthetic iteration.
+            if (bodyContainsLoopControl(self.parent.file, for_stmt.body) and
+                !@This().bodyLoopControlHasStaticGuardShape(self.parent.file, for_stmt.body, for_stmt.label)) return null;
 
             const finite_range = @This().finiteForRange(self, for_stmt, locals) orelse return null;
             if (finite_range.trip_count > runtime_loop_unroll_limit) return null;
+            if (finite_range.trip_count == 0) return false;
             if (self.unroll_multiplier > runtime_total_unroll_budget / finite_range.trip_count) return null;
+
+            if (bodyContainsLoopControl(self.parent.file, for_stmt.body)) {
+                var simulated_locals = try locals.clone();
+                try simulated_locals.bindPatternWithoutValue(self.parent.file, for_stmt.item_pattern);
+                if (for_stmt.index_pattern) |index_pattern| {
+                    try simulated_locals.bindPatternWithoutValue(self.parent.file, index_pattern);
+                }
+
+                var simulated_iteration: u64 = 0;
+                var simulated_current = finite_range.start;
+                while (simulated_iteration < finite_range.trip_count) : (simulated_iteration += 1) {
+                    try simulated_locals.setPatternKnownInt(self.parent.file, for_stmt.item_pattern, simulated_current);
+                    if (for_stmt.index_pattern) |index_pattern| {
+                        try simulated_locals.setPatternKnownInt(self.parent.file, index_pattern, @intCast(simulated_iteration));
+                    }
+                    const signal = try FunctionLowerer.simulateUnrolledBody(
+                        self,
+                        for_stmt.body,
+                        &simulated_locals,
+                        for_stmt.label,
+                    ) orelse return null;
+                    switch (signal) {
+                        .none, .continue_loop => {},
+                        .break_loop => break,
+                    }
+                    simulated_current += 1;
+                }
+            }
 
             var unrolled_loop_context = UnrolledLoopContext{
                 .parent = self.unrolled_loop_context,
@@ -3866,6 +4464,36 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             return false;
+        }
+
+        fn bodyLoopControlHasStaticGuardShape(
+            file: *const ast.AstFile,
+            body_id: ast.BodyId,
+            loop_label: ?[]const u8,
+        ) bool {
+            const body = file.body(body_id).*;
+            for (body.statements) |statement_id| {
+                if (!@This().statementLoopControlHasStaticGuardShape(file, statement_id, loop_label)) return false;
+            }
+            return true;
+        }
+
+        fn statementLoopControlHasStaticGuardShape(
+            file: *const ast.AstFile,
+            statement_id: ast.StmtId,
+            loop_label: ?[]const u8,
+        ) bool {
+            return switch (file.statement(statement_id).*) {
+                .Break, .Continue => |jump| if (jump.label) |target|
+                    loop_label != null and std.mem.eql(u8, target, loop_label.?)
+                else
+                    true,
+                .If => |if_stmt| @This().bodyLoopControlHasStaticGuardShape(file, if_stmt.then_body, loop_label) and
+                    (if_stmt.else_body == null or @This().bodyLoopControlHasStaticGuardShape(file, if_stmt.else_body.?, loop_label)),
+                .Block => |block_stmt| @This().bodyLoopControlHasStaticGuardShape(file, block_stmt.body, loop_label),
+                .LabeledBlock => |block_stmt| @This().bodyLoopControlHasStaticGuardShape(file, block_stmt.body, loop_label),
+                else => !analysis.stmtContainsLoopControl(file, statement_id),
+            };
         }
 
         const FiniteForRange = struct {
@@ -4198,9 +4826,87 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return appendValueOp(self.block, op);
         }
 
+        fn appendLoopControlMarker(
+            self: *FunctionLowerer,
+            statement_id: ast.StmtId,
+            range: source.TextRange,
+            locals: *const LocalEnv,
+            loop_context: *const LoopContext,
+            kind: LoopControlKind,
+        ) anyerror!void {
+            var state: std.ArrayList(mlir.MlirValue) = .empty;
+            if (loop_context.induction_value.ptr != null) {
+                try state.append(self.parent.allocator, loop_context.induction_value);
+            }
+            for (loop_context.carried_locals) |local_id| {
+                try state.append(
+                    self.parent.allocator,
+                    try self.materializeCarriedLocalValue(locals, local_id),
+                );
+            }
+
+            const op = mlir.oraLoopControlOpCreate(
+                self.parent.context,
+                self.parent.location(range),
+                strRef(switch (kind) {
+                    .break_loop => "break",
+                    .continue_loop => "continue",
+                    .function_return => "function_return",
+                    .error_return => "error_return",
+                }),
+                loop_context.source_statement_id,
+                @intCast(statement_id.index()),
+                if (state.items.len == 0) null else state.items.ptr,
+                state.items.len,
+            );
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, op);
+            try loop_context.control_manifest.append(self.parent.allocator, .{
+                .source_statement_id = @intCast(statement_id.index()),
+                .kind = kind,
+            });
+        }
+
+        pub fn attachLoopControlManifest(
+            self: *FunctionLowerer,
+            loop_op: mlir.MlirOperation,
+            entries: []const LoopControlManifestEntry,
+        ) !void {
+            const attrs = try self.parent.allocator.alloc(mlir.MlirAttribute, entries.len);
+            for (entries, attrs) |entry, *attr| {
+                const value = try std.fmt.allocPrint(
+                    self.parent.allocator,
+                    "{s}:{d}",
+                    .{
+                        switch (entry.kind) {
+                            .break_loop => "break",
+                            .continue_loop => "continue",
+                            .function_return => "function_return",
+                            .error_return => "error_return",
+                        },
+                        entry.source_statement_id,
+                    },
+                );
+                attr.* = mlir.oraStringAttrCreate(self.parent.context, strRef(value));
+            }
+            mlir.oraOperationSetAttributeByName(
+                loop_op,
+                strRef("ora.loop_control_manifest"),
+                mlir.oraArrayAttrCreate(
+                    self.parent.context,
+                    @intCast(attrs.len),
+                    if (attrs.len == 0) null else attrs.ptr,
+                ),
+            );
+        }
+
         fn lowerPatternType(self: *FunctionLowerer, pattern_id: ast.PatternId) anyerror!?mlir.MlirType {
             const sema_type = self.parent.typecheck.pattern_types[pattern_id.index()].type;
             if (sema_type.kind() == .unknown) return null;
+            // A resolved refinement descriptor retains bounds that an alias name
+            // alone cannot carry through the declared MLIR type-expression path.
+            if (sema_type.kind() == .refinement)
+                return self.parent.lowerSemaType(sema_type, patternRange(self.parent.file, pattern_id));
             if (sema_type.kind() != .anonymous_struct) {
                 if (@This().declaredTypeExprForPattern(self, pattern_id)) |type_expr| {
                     return self.parent.lowerTypeExpr(type_expr);

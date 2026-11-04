@@ -88,6 +88,16 @@ pub fn collectPackageFoldExpansions(
     const_eval: anytype,
     starts: IdStarts,
 ) !Result {
+    return collectPackageFoldExpansionsForRoots(allocator, package, const_eval, starts, &.{});
+}
+
+pub fn collectPackageFoldExpansionsForRoots(
+    allocator: std.mem.Allocator,
+    package: anytype,
+    const_eval: anytype,
+    starts: IdStarts,
+    inactive_runtime_owners: []const []const u8,
+) !Result {
     var result: Result = .{
         .arena = std.heap.ArenaAllocator.init(allocator),
         .expansions = &.{},
@@ -249,6 +259,17 @@ pub fn collectPackageFoldExpansions(
                 ) orelse return error.UnknownComptimeFoldBoundaryTemplate;
                 const boundary_template = package.template(boundary_template_id) orelse
                     return error.UnknownComptimeFoldBoundaryTemplate;
+                // Only this validated, childless speculative root can be inactive.
+                const inactive = for (inactive_runtime_owners) |owner| {
+                    if (std.mem.eql(u8, owner, root_runtime_owner)) break true;
+                } else false;
+                const has_child = for (const_eval.formal_folds) |child| {
+                    if (child.parent_invocation_id == formal_fold.invocation_id) break true;
+                } else false;
+                if (inactive and formal_fold.parent_invocation_id == null and call_chain.len == 1 and !has_child) {
+                    invocation_expansions.items[invocation_expansions.items.len - 1].nearest_expansion_id = null;
+                    continue;
+                }
                 const replacement_id = next_expansion_id;
                 next_expansion_id = addId(accounting.ExpansionId, next_expansion_id) catch
                     return error.SourceAccountingExpansionIdOverflow;

@@ -113,8 +113,8 @@ test "refinement registry classifies runtime and compile-time-only refinements" 
 }
 
 test "every refinement kind has a registry entry" {
-    inline for (std.meta.fields(Kind)) |field| {
-        const kind: Kind = @enumFromInt(field.value);
+    inline for (@typeInfo(Kind).@"enum".field_names) |field| {
+        const kind: Kind = @fromBackingInt(@intCast(@backingInt(@field(Kind, field))));
         try std.testing.expect(entryForKind(kind) != null);
     }
 }

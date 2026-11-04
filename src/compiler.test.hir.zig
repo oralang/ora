@@ -1837,26 +1837,49 @@ test "compiler lowers real HIR for loops with break and continue" {
 
 test "compiler lowers integer range for loops with break and continue" {
     const source_text =
-        \\pub fn run() {
+        \\pub fn run() -> u256 {
+        \\    var total: u256 = 0;
         \\    for (0..20) |i, _| {
         \\        if (i > 10) {
         \\            break;
         \\        }
+        \\        total = total + i;
         \\    }
         \\    for (0..10) |i, _| {
         \\        if (i % 2 == 0) {
         \\            continue;
         \\        }
+        \\        total = total + i;
         \\    }
+        \\    return total;
         \\}
     ;
 
-    const hir_text = try renderHirTextForSource(source_text);
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "scf.for"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.if"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 4, "memref.alloca"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "arith.andi"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "\"ora.loop_control\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "kind = \"break\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "kind = \"continue\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "source_control_id = "));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "target_loop_source_id = "));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.loop_control_manifest = [\"break:"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.loop_control_manifest = [\"continue:"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.induction_compiler_type_id = 6"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, ": (i256, i256) -> ()"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
+
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    const sir_text = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(sir_text);
+    try testing.expect(!std.mem.containsAtLeast(u8, sir_text, 1, "ora.loop_control"));
 }
 
 test "compiler preserves signed integer range loop item type" {
@@ -2062,6 +2085,134 @@ test "compiler lowers checked shifts with source-owned range asserts" {
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, hir_text, "ora.assert %"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shli"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shrui"));
+}
+
+test "compiler lowers every source fixed-array access through the shared bounds assert" {
+    const source_text =
+        \\contract FixedArrayBounds {
+        \\    storage var values: [u256; 4];
+        \\    pub fn read(index: u256) -> u256 {
+        \\        return values[index];
+        \\    }
+        \\    pub fn write(index: u256, value: u256) {
+        \\        values[index] = value;
+        \\    }
+        \\    pub fn add(index: u256, value: u256) {
+        \\        values[index] +%= value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expectEqual(@as(usize, 4), std.mem.count(u8, hir_text, "fixed-array index out of bounds"));
+    try testing.expectEqual(@as(usize, 4), std.mem.count(u8, hir_text, "arith.cmpi ult"));
+
+    var cursor: usize = 0;
+    for (0..4) |_| {
+        const assertion = std.mem.indexOfPos(u8, hir_text, cursor, "fixed-array index out of bounds") orelse
+            return error.TestUnexpectedResult;
+        const next_load = std.mem.indexOfPos(u8, hir_text, assertion, "memref.load");
+        const next_store = std.mem.indexOfPos(u8, hir_text, assertion, "memref.store");
+        const access = if (next_load) |load|
+            if (next_store) |store| @min(load, store) else load
+        else
+            next_store orelse return error.TestUnexpectedResult;
+        const following_assertion = std.mem.indexOfPos(u8, hir_text, assertion + 1, "fixed-array index out of bounds");
+        if (following_assertion) |next| try testing.expect(access < next);
+        cursor = access + 1;
+    }
+}
+
+test "compiler lowers every source dynamic index through the shared bounds assert" {
+    const source_text =
+        \\contract DynamicIndexBounds {
+        \\    storage var values: slice[u256];
+        \\    storage var rows: slice[slice[u256]];
+        \\    storage var blob: bytes;
+        \\    storage var text: string;
+        \\    pub fn readSlice(index: u256) -> u256 { return values[index]; }
+        \\    pub fn readParameter(input: slice[u256], index: u256) -> u256 { return input[index]; }
+        \\    pub fn writeSlice(index: u256, value: u256) { values[index] = value; }
+        \\    pub fn addSlice(index: u256, value: u256) { values[index] +%= value; }
+        \\    pub fn writeMemory(input: slice[u256], index: u256, value: u256) -> u256 {
+        \\        memory var copy: slice[u256] = input;
+        \\        copy[index] = value;
+        \\        copy[index] +%= 1;
+        \\        return copy[index];
+        \\    }
+        \\    pub fn readNested(outer: u256, inner: u256) -> u256 { return rows[outer][inner]; }
+        \\    pub fn readByte(index: u256) -> u8 { return blob[index]; }
+        \\    pub fn readChar(index: u256) -> u8 { return text[index]; }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expectEqual(@as(usize, 12), std.mem.count(u8, hir_text, "dynamic index out of bounds"));
+    try testing.expectEqual(@as(usize, 10), std.mem.count(u8, hir_text, "memref.dim"));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, hir_text, "ora.length"));
+
+    const add_start = std.mem.indexOf(u8, hir_text, "func.func @addSlice") orelse return error.TestUnexpectedResult;
+    const add_end = std.mem.indexOfPos(u8, hir_text, add_start, "func.func @writeMemory") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, hir_text[add_start..add_end], "dynamic index out of bounds"));
+
+    const memory_start = add_end;
+    const memory_end = std.mem.indexOfPos(u8, hir_text, memory_start, "func.func @readNested") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, hir_text[memory_start..memory_end], "dynamic index out of bounds"));
+
+    var cursor: usize = 0;
+    for (0..12) |_| {
+        const assertion = std.mem.indexOfPos(u8, hir_text, cursor, "dynamic index out of bounds") orelse
+            return error.TestUnexpectedResult;
+        var access: ?usize = null;
+        for ([_][]const u8{ "memref.load", "memref.store", "ora.byte_at" }) |needle| {
+            if (std.mem.indexOfPos(u8, hir_text, assertion, needle)) |candidate| {
+                access = if (access) |current| @min(current, candidate) else candidate;
+            }
+        }
+        const first_access = access orelse return error.TestUnexpectedResult;
+        if (std.mem.indexOfPos(u8, hir_text, assertion + 1, "dynamic index out of bounds")) |next| {
+            try testing.expect(first_access < next);
+        }
+        cursor = first_access + 1;
+    }
+}
+
+test "compiler lowers dynamic index bounds assertion through SIR" {
+    const source_text =
+        \\contract DynamicIndexSirBounds {
+        \\    storage var values: slice[u256];
+        \\    pub fn read(index: u256) -> u256 { return values[index]; }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const sir_text = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(sir_text);
+    const compare = std.mem.indexOf(u8, sir_text, " = lt ") orelse return error.TestUnexpectedResult;
+    const branch = std.mem.indexOfPos(u8, sir_text, compare, " ? @") orelse return error.TestUnexpectedResult;
+    const selector = std.mem.indexOfPos(u8, sir_text, branch, "0xDD8BFC7C") orelse return error.TestUnexpectedResult;
+    const revert = std.mem.indexOfPos(u8, sir_text, selector, "revert ") orelse return error.TestUnexpectedResult;
+    const access = std.mem.indexOfPos(u8, sir_text, revert, "sload ") orelse return error.TestUnexpectedResult;
+    try testing.expect(compare < branch and branch < selector and selector < revert and revert < access);
 }
 
 test "compiler lowers wrapping power through ora.power" {
@@ -2341,7 +2492,7 @@ test "compiler lowers checked arithmetic compound assignment" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.muli"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.divui"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.remui"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.assert"));
+    try testing.expect(std.mem.count(u8, hir_text, "ora.assert") >= 5);
 }
 
 test "compiler lowers array literals through memref allocation and stores" {
@@ -2595,6 +2746,7 @@ test "compiler lowers imported fixed size data wrapper with concrete array lengt
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "@std.storage.fixed_size_data.load__3"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref<3xi256>"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.storage.word_load"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "fixed-array index out of bounds"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.lowering_error"));
 }
 

@@ -1,0 +1,21 @@
+contract NestedWitnessExtraAssumption {
+    pub fn run(limit: u256, other: u256) -> u256
+    requires limit >= 1
+    requires limit <= 4
+    requires other != 0
+    {
+        var outer: u256 = 0;
+        while (outer < limit)
+        invariant outer <= limit
+        {
+            var inner: u256 = 0;
+            while (inner < 2)
+            invariant inner <= 2
+            {
+                inner = inner + 1;
+            }
+            outer = outer + 1;
+        }
+        return outer;
+    }
+}

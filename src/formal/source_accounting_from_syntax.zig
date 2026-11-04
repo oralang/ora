@@ -274,7 +274,7 @@ fn isExpressionNode(kind: anytype) bool {
 fn lessCandidateForOrdinal(_: void, lhs: Candidate, rhs: Candidate) bool {
     const owner_order = std.mem.order(u8, lhs.owner, rhs.owner);
     if (owner_order != .eq) return owner_order == .lt;
-    if (lhs.kind != rhs.kind) return @intFromEnum(lhs.kind) < @intFromEnum(rhs.kind);
+    if (lhs.kind != rhs.kind) return @backingInt(lhs.kind) < @backingInt(rhs.kind);
     if (lhs.range_start != rhs.range_start) return lhs.range_start < rhs.range_start;
     return lhs.range_end < rhs.range_end;
 }
@@ -285,14 +285,14 @@ fn lessCandidateCanonical(path: []const u8, lhs: Candidate, rhs: Candidate) bool
     if (owner_order != .eq) return owner_order == .lt;
     if (lhs.range_start != rhs.range_start) return lhs.range_start < rhs.range_start;
     if (lhs.range_end != rhs.range_end) return lhs.range_end < rhs.range_end;
-    if (lhs.kind != rhs.kind) return @intFromEnum(lhs.kind) < @intFromEnum(rhs.kind);
+    if (lhs.kind != rhs.kind) return @backingInt(lhs.kind) < @backingInt(rhs.kind);
     return lhs.ordinal < rhs.ordinal;
 }
 
 test "formal keyword classification and lexer vocabulary are pinned" {
     // Adding any token forces review of the formal-keyword classifier instead
     // of allowing a new proof keyword to enter through `else` unnoticed.
-    try std.testing.expectEqual(@as(usize, 146), std.meta.fields(lexer.TokenType).len);
+    try std.testing.expectEqual(@as(usize, 146), @typeInfo(lexer.TokenType).@"enum".field_names.len);
     try std.testing.expectEqual(FormalTokenClass{ .source_site = .requires }, classifyFormalToken(.Requires));
     try std.testing.expectEqual(FormalTokenClass{ .source_site = .loop_invariant }, classifyFormalToken(.Invariant));
     try std.testing.expectEqual(FormalTokenClass.reserved_termination_measure, std.meta.activeTag(classifyFormalToken(.Decreases)));

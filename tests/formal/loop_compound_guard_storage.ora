@@ -1,0 +1,16 @@
+// The checked right operand runs before the branch that selects the store.
+contract LoopCompoundGuardStorage {
+    storage var values: [u256; 6];
+
+    pub fn fill(limit: u256)
+    requires limit <= 6
+    {
+        var i: u256 = 0;
+        while (i < limit && i + 1 <= limit)
+        invariant i <= limit
+        {
+            values[i] = i;
+            i = i + 1;
+        }
+    }
+}

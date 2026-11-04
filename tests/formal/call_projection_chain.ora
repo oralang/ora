@@ -1,0 +1,8 @@
+contract Chain {
+    fn leaf(x: u256) -> u256 { return x; }
+    fn middle(x: u256) -> u256 { return leaf(x); }
+    pub fn run(input: u256) {
+        var i: u256 = 0;
+        while (i < 1) invariant i <= 1 { let selected: u256 = middle(input); i = i +% 1; }
+    }
+}

@@ -26,7 +26,8 @@ def obligationTotalityRows :
         Option (String × String × List String × List (String × String)) ×
         Option (String × String × List String × List (String × String)) ×
         Option Nat × String)) :=
-  [("bool_literal_formula", [("bool_lit", true, "", "", "", 0, 0, none, [], ("", "none", [], []))], [], true, true, "formula", 0, ("write_covered_by_modifies", [], [], []), ("move", "", none, none, none, "amount_non_negative")),
+  [("invocation_caller_without_context_refuses", [("invocation_caller", false, "", "compiler:14", "", 1, 0, none, [], ("", "none", [], []))], [], false, false, "formula", 0, ("write_covered_by_modifies", [], [], []), ("move", "", none, none, none, "amount_non_negative")),
+   ("bool_literal_formula", [("bool_lit", true, "", "", "", 0, 0, none, [], ("", "none", [], []))], [], true, true, "formula", 0, ("write_covered_by_modifies", [], [], []), ("move", "", none, none, none, "amount_non_negative")),
    ("assumption_bool_literal_formula", [("bool_lit", true, "", "", "", 0, 0, none, [], ("", "none", [], []))], [(10, "requires", some 0)], true, true, "formula", 0, ("write_covered_by_modifies", [], [], []), ("move", "", none, none, none, "amount_non_negative")),
    ("assumption_null_formula_is_unsupported", [("bool_lit", true, "", "", "", 0, 0, none, [], ("", "none", [], []))], [(10, "requires", none)], false, false, "formula", 0, ("write_covered_by_modifies", [], [], []), ("move", "", none, none, none, "amount_non_negative")),
    ("bool_free_variable_formula", [("free_var", false, "", "compiler:13", "flag", 0, 1, none, [], ("", "none", [], []))], [], true, true, "formula", 0, ("write_covered_by_modifies", [], [], []), ("move", "", none, none, none, "amount_non_negative")),

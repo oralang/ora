@@ -9,19 +9,24 @@ const canonical_encode = @import("canonical_encode.zig");
 
 pub const CheckStatus = canonical_types.CheckStatus;
 pub const QueryHash = canonical_types.QueryHash;
+pub const LoopQueryCheck = canonical_types.LoopQueryCheck;
 pub const CanonicalSupport = canonical_types.CanonicalSupport;
 pub const CanonicalUnsupportedReason = canonical_types.CanonicalUnsupportedReason;
 pub const CanonicalPromotionShape = canonical_types.CanonicalPromotionShape;
 pub const CanonicalPromotionPolicy = canonical_types.CanonicalPromotionPolicy;
 pub const canonical_promotion_table = canonical_types.canonical_promotion_table;
 pub const EncodeError = canonical_types.EncodeError;
+pub const encodeErrorReason = canonical_types.encodeErrorReason;
 
 pub const Adapter = canonical_encode.Adapter;
+pub const NativeCalls = canonical_encode.NativeCalls;
 
 pub const queryCanonicalSupport = canonical_support.queryCanonicalSupport;
 pub const queryCanonicalPromotionShape = canonical_support.queryCanonicalPromotionShape;
 pub const queryCanonicalRequiredModePromoted = canonical_support.queryCanonicalRequiredModePromoted;
 pub const queryCanonicalCrosscheckRequiredByPolicy = canonical_support.queryCanonicalCrosscheckRequiredByPolicy;
+pub const queryIsCanonicalLoopQuery = canonical_support.queryIsCanonicalLoopQuery;
+pub const queryCanonicalMeasurementRequired = canonical_support.queryCanonicalMeasurementRequired;
 
 comptime {
     _ = canonical_types;

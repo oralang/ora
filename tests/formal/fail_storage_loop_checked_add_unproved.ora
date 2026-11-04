@@ -1,0 +1,15 @@
+contract StorageLoopCheckedAddUnproved {
+    storage var counter: u256;
+
+    pub fn run() {
+        var i: u256 = 0;
+        var value: u256 = 0;
+        while (i < 4)
+            invariant i <= 4
+        {
+            counter = value;
+            value = value + 1;
+            i = i +% 1;
+        }
+    }
+}

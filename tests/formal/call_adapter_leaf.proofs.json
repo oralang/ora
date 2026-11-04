@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "proofs": [
+    {
+      "query_id": 8,
+      "obligation_ids": [],
+      "assumption_ids": [],
+      "module_name": "G9cSuppliedLeaf",
+      "theorem_name": "G9cSuppliedLeaf.loopAuthorization",
+      "path": "tests/formal/call_adapter_leaf.lean",
+      "content_sha256": null,
+      "inline_source": true
+    },
+    {
+      "query_id": 11,
+      "obligation_ids": [],
+      "assumption_ids": [],
+      "module_name": "G9cSuppliedLeaf",
+      "theorem_name": "G9cSuppliedLeaf.custody",
+      "path": "tests/formal/call_adapter_leaf.lean",
+      "content_sha256": null,
+      "inline_source": true
+    },
+    {
+      "query_id": 13,
+      "obligation_ids": [],
+      "assumption_ids": [],
+      "module_name": "G9cSuppliedLeaf",
+      "theorem_name": "G9cSuppliedLeaf.leafCustody",
+      "path": "tests/formal/call_adapter_leaf.lean",
+      "content_sha256": null,
+      "inline_source": true
+    }
+  ]
+}

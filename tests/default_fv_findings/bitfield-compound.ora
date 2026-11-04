@@ -1,0 +1,2 @@
+bitfield Bits : u256 { left: u8; right: u8; }
+contract Probe { storage var bits: Bits; fn changeBits() -> u8 { bits.right = 77; return 1; } pub fn run() { bits.left = 10; bits.right = 20; bits.left += changeBits(); } }

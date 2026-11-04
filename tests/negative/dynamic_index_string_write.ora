@@ -1,0 +1,7 @@
+contract DynamicIndexStringWrite {
+    storage var data: string;
+
+    pub fn write(index: u256, value: u8) {
+        data[index] = value;
+    }
+}

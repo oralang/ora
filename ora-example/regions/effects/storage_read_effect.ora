@@ -36,7 +36,9 @@ contract StorageReadEffect {
 
     // Storage read in loop records read effect per iteration
     pub fn testStorageReadInLoop() {
-        for (0..10) |_, _| {
+        for (0..10) |i, _|
+            invariant i <= 10
+        {
             let value: u256 = counter; // Read effect per iteration
         }
     }

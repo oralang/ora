@@ -1,0 +1,15 @@
+contract WrongForwardedKey {
+    storage m: map<u256, u256>;
+
+    fn leaf(k: u256) -> u256 modifies m[k] {
+        m[k] = 1;
+        return 0;
+    }
+
+    pub fn relay(a: u256, b: u256) -> u256
+        requires a != b
+        modifies m[a]
+    {
+        return leaf(b);
+    }
+}

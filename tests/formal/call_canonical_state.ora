@@ -1,0 +1,39 @@
+contract CallCanonicalState {
+    storage var value: u256;
+    storage var stable: u256;
+    fn take(x: u256) -> u256 requires x <= 2 {
+        let previous: u256 = value;
+        value = x;
+        return previous;
+    }
+    pub fn sequential() -> u256 {
+        var i: u256 = 0;
+        while (i < 1) invariant i <= 1 { i = i +% 1; }
+        value = 0;
+        let captured: u256 = value;
+        let first: u256 = take(1);
+        let second: u256 = take(2);
+        assert(first == 0, "first invocation entry");
+        assert(second == 1, "second invocation entry");
+        assert(captured == 0, "caller read retained");
+        assert(value == 2, "joint final store");
+        return second;
+    }
+    fn mutate(stop: u256) -> u256 {
+        var i: u256 = 0;
+        while (i < 2) invariant i <= 2 {
+            value = i;
+            if (i == stop) { return i; }
+            i = i +% 1;
+        }
+        return i;
+    }
+    pub fn loopRun(stop: u256) -> u256 {
+        stable = 7;
+        let selected: u256 = mutate(stop);
+        assert(stable == 7, "operation derived frame");
+        assert(selected <= 2, "exported invariant");
+        if (selected < 2) { assert(value == selected, "same returning exit"); }
+        return selected;
+    }
+}

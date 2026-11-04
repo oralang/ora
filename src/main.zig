@@ -25,6 +25,7 @@ const runtime_checks = @import("mlir/runtime_checks.zig");
 const formal_obligation = @import("formal/obligation.zig");
 const formal_obligation_dump = @import("formal/obligation_dump.zig");
 const formal_obligation_from_mlir = @import("formal/obligation_from_mlir.zig");
+const FormalNativeCalls = @import("formal/obligation_to_z3.zig").NativeCalls;
 const formal_obligation_from_z3 = @import("formal/obligation_from_z3.zig");
 const formal_canonical_z3_measure = @import("formal/canonical_z3_measure.zig");
 const formal_kernel_registry = @import("formal/kernel/registry.zig");
@@ -33,6 +34,8 @@ const formal_source_accounting = @import("formal/shared/source_accounting.zig");
 const formal_source_accounting_from_z3 = @import("formal/source_accounting_from_z3.zig");
 const formal_source_accounting_pipeline = @import("formal/source_accounting_pipeline.zig");
 const formal_userland_coordinator = @import("formal/userland/coordinator.zig");
+const formal_lifecycle_check = @import("formal/storage_lifecycle_check.zig");
+const formal_lifecycle_consume = @import("formal/storage_lifecycle_consume.zig");
 const Metrics = lib.metrics.Metrics;
 const allocation_stats = lib.lsp.allocation_stats;
 const ManagedArrayList = std.array_list.Managed;
@@ -1173,6 +1176,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     if (direct_emit_verification_failed) {
+        discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
         exitCli(1);
     }
 
@@ -2033,7 +2037,7 @@ fn encodeAbiWordLocal(type_name: []const u8, value_text: []const u8, out_word: [
         const text = if (std.mem.startsWith(u8, value_text, "0x")) value_text[2..] else value_text;
         if (text.len > 40) return error.InvalidAddress;
         if (text.len % 2 != 0) return error.InvalidAddress;
-        var buf: [20]u8 = [_]u8{0} ** 20;
+        var buf: [20]u8 = @as([20]u8, @splat(0));
         const start = 20 - text.len / 2;
         _ = try std.fmt.hexToBytes(buf[start..], text);
         @memcpy(out_word[12..32], &buf);
@@ -2547,14 +2551,14 @@ fn printUsage(io: std.Io) !void {
     try stdout.print("  --mlir-debug=<list>    - MLIR diagnostics: statistics (other pass debug options reserved)\n", .{});
     try stdout.print("  --mlir-run-sir-framework-canonicalizer - Compatibility flag; SIR framework canonicalizer/DCE now runs by default\n", .{});
     try stdout.print("\nAnalysis Options:\n", .{});
-    try stdout.print("  --verify               - Run Z3 verification on MLIR annotations (default)\n", .{});
+    try stdout.print("  --verify               - Run Z3 and required Lean verification (default)\n", .{});
     try stdout.print("  --verify=basic|full    - Verification mode (default: full)\n", .{});
-    try stdout.print("  --no-verify            - Disable Z3 verification (emit mode only)\n", .{});
+    try stdout.print("  --no-verify            - Disable verification; retain runtime checks (emit mode only)\n", .{});
     try stdout.print("  --verify-stats         - Print Z3 query stats summary\n", .{});
     try stdout.print("  --explain              - Enable unsat-core explain mode for SMT verification\n", .{});
     try stdout.print("  --z3-proofs            - Emit raw Z3 proof objects in SMT reports/debug output (slower)\n", .{});
     try stdout.print("  --keep-proved-checks   - Keep SMT-proved guards/requires/ensures/invariants as runtime checks (falsification harness)\n", .{});
-    try stdout.print("  --lean-proofs[=mode]   - Run Lean gates; userland is the contract-level mode (default)\n", .{});
+    try stdout.print("  --lean-proofs[=mode]   - Run explicit userland Lean gates; required loop proofs run by default\n", .{});
     try stdout.print("                           kernel/both are rejected by the contract CLI; use zig build check-formal-sync\n", .{});
     try stdout.print("                           Legacy: --lean-proofs <proofs.json> supplies external proof rows\n", .{});
     try stdout.print("  --measure-canonical-z3 - Emit canonical-vs-live SMT hash measurement JSON\n", .{});
@@ -2720,7 +2724,7 @@ fn printVerificationDiagnostics(stdout: anytype, diagnostics: []const z3_verific
         diagnostics.len,
         if (diagnostics.len != 1) @as([]const u8, "s") else "",
     });
-    try stdout.print("{s}\n", .{"=" ** 70});
+    try stdout.print("{s}\n", .{&@as([70]u8, @splat('='))});
 
     for (diagnostics, 0..) |diag, idx| {
         const parsed = parseGuardId(diag.guard_id);
@@ -2761,7 +2765,7 @@ fn printVerificationDiagnostics(stdout: anytype, diagnostics: []const z3_verific
         }
     }
 
-    try stdout.print("\n{s}\n", .{"-" ** 70});
+    try stdout.print("\n{s}\n", .{&@as([70]u8, @splat('-'))});
     // Print raw guard IDs for debugging.
     try stdout.print("debug: raw guard IDs:\n", .{});
     for (diagnostics) |diag| {
@@ -2826,7 +2830,7 @@ fn printVerificationErrors(stdout: anytype, errors: []const z3_verification.Veri
             if (errors.len != 1) @as([]const u8, "s") else "",
         });
     }
-    try stdout.print("{s}\n", .{"=" ** 70});
+    try stdout.print("{s}\n", .{&@as([70]u8, @splat('='))});
 
     for (errors, 0..) |err, idx| {
         try stdout.print("\n  {d}. {s}\n", .{ idx + 1, err.message });
@@ -4715,8 +4719,10 @@ fn runCompilerMlirEmit(
     var formal = try formal_obligation_from_mlir.collect(allocator, lowering.module.raw_module, .{});
     defer formal.deinit();
     const formal_output_dir = formalArtifactOutputDir(mlir_options);
-    try writeLoopInductionReport(allocator, file_path, formal_output_dir, formal.set);
-    try printLoopInductionSummary(stdout, formal.set);
+    if (mlir_options.verify_z3) {
+        try writeLoopInductionReport(allocator, file_path, formal_output_dir, formal.set);
+        try printLoopInductionSummary(stdout, formal.set);
+    }
     const const_eval = try compilation.db.constEval(compilation.root_module_id);
     var source_accounting_result = formal_source_accounting_pipeline.run(
         allocator,
@@ -5012,7 +5018,7 @@ fn runMlirEmitAdvanced(
     const cfg_mode_is_ora = if (mlir_options.emit_cfg_mode) |mode| std.ascii.eqlIgnoreCase(mode, "ora") else false;
     const cfg_mode_is_sir = if (mlir_options.emit_cfg_mode) |mode| std.ascii.eqlIgnoreCase(mode, "sir") else false;
     const cfg_mode_is_sir_diff = if (mlir_options.emit_cfg_mode) |mode| std.ascii.eqlIgnoreCase(mode, "sir-diff") else false;
-    const needs_userland_lean_gate = mlir_options.lean_proofs_mode.includesUserland();
+    const needs_userland_lean_gate = mlir_options.verify_z3 and mlir_options.lean_proofs_mode.includesUserland();
     if (mlir_options.lean_proofs_mode.includesKernel()) {
         try stdout.print("error: --lean-proofs=kernel/both is not wired into contract compilation yet; run `zig build check-formal-sync` for compiler-kernel Lean checks.\n", .{});
         try stdout.flush();
@@ -5046,6 +5052,11 @@ fn runMlirEmitAdvanced(
     var formal_result_for_smt_report: ?formal_obligation_from_mlir.CollectResult = null;
     var source_prepared_query_manifest: ?z3_verification.PreparedQueryManifest = null;
     var z3_formal_query_bindings: []const z3_verification.FormalQueryBinding = &.{};
+    var lifecycle_verifier: ?z3_verification.VerificationPass = null;
+    var lifecycle_session: ?formal_lifecycle_check.Session = null;
+    var lifecycle_consumer: ?formal_lifecycle_consume.Consumer = null;
+    defer if (lifecycle_verifier) |*verifier| verifier.deinit();
+    defer if (lifecycle_session) |*session| session.deinit();
     defer {
         if (verification_result_opt) |*vr| vr.deinit();
         if (pending_smt_report) |*report| report.deinit(mlir_allocator);
@@ -5062,18 +5073,27 @@ fn runMlirEmitAdvanced(
 
     // Source accounting consumes this pre-optimization manifest in every
     // compilation mode, even when verification is explicitly disabled.
-    formal_result_for_smt_report = try formal_obligation_from_mlir.collect(allocator, final_module, .{});
+    formal_result_for_smt_report = try formal_obligation_from_mlir.collect(allocator, final_module, .{ .project_calls = needs_external_lean_proof_gate });
+    if (needs_external_lean_proof_gate and formal_result_for_smt_report.?.set.hasBlockingDiagnostic()) {
+        try formal_userland_coordinator.printBlockingDiagnostics(stdout, formal_result_for_smt_report.?.set);
+        try stdout.flush();
+        return error.VerificationFailed;
+    }
+    var native_calls: FormalNativeCalls = .{ .set = formal_result_for_smt_report.?.set, .function_ops = formal_result_for_smt_report.?.function_ops, .source_fact_bindings = formal_result_for_smt_report.?.source_fact_bindings };
     const formal_output_dir = formalArtifactOutputDir(mlir_options);
     const formal_display_dir = mlir_options.artifact_display_dir orelse formal_output_dir;
-    try writeLoopInductionReport(
-        allocator,
-        file_path,
-        formal_output_dir,
-        formal_result_for_smt_report.?.set,
-    );
-    try printLoopInductionSummary(stdout, formal_result_for_smt_report.?.set);
+    if (mlir_options.verify_z3) {
+        try writeLoopInductionReport(
+            allocator,
+            file_path,
+            formal_output_dir,
+            formal_result_for_smt_report.?.set,
+        );
+        try printLoopInductionSummary(stdout, formal_result_for_smt_report.?.set);
+    }
     const has_mandatory_loop_lean_gate = mlir_options.verify_z3 and
-        formal_result_for_smt_report.?.set.hasLeanCertificateRequirements();
+        (formal_result_for_smt_report.?.set.loop_summaries.len != 0 or
+            formal_result_for_smt_report.?.set.hasLeanCertificateRequirements());
     if (has_mandatory_loop_lean_gate) {
         needs_lean_proof_gate = true;
         needs_automatic_lean_proof_gate = !needs_external_lean_proof_gate;
@@ -5082,8 +5102,8 @@ fn runMlirEmitAdvanced(
     std.debug.assert(needs_lean_proof_gate == (needs_external_lean_proof_gate or needs_automatic_lean_proof_gate));
 
     if (mlir_options.verify_z3) {
-        var verifier = try z3_verification.VerificationPass.initWithProofs(mlir_allocator, mlir_options.z3_proofs);
-        defer verifier.deinit();
+        lifecycle_verifier = try z3_verification.VerificationPass.initWithProofs(mlir_allocator, mlir_options.z3_proofs);
+        const verifier = &lifecycle_verifier.?;
 
         if (mlir_options.verify_mode) |mode| {
             if (std.ascii.eqlIgnoreCase(mode, "full")) {
@@ -5103,6 +5123,28 @@ fn runMlirEmitAdvanced(
         // prepared GuardViolate rows can authorize erasure fail-closed.
         z3_formal_query_bindings = try z3FormalQueryBindingsFromFormal(allocator, formal_result_for_smt_report.?.query_bindings);
         verifier.setFormalQueryBindings(z3_formal_query_bindings);
+        if (native_calls.function_ops.len != 0) verifier.setCertifiedCalls(native_calls.provider());
+
+        // No query consumer means no request for lifecycle assistance. The
+        // ordinary verification path still decides such files independently.
+        if (z3_formal_query_bindings.len != 0) {
+            lifecycle_session = formal_lifecycle_consume.prepare(mlir_allocator, final_module, verifier, mlir_options.process_environ, stdout) catch |err| {
+                try stdout.print("error: storage lifecycle proof gate failed: {s}\n", .{@errorName(err)});
+                try stdout.flush();
+                formal_gate_statuses.lifecycle_kernel = .rejected;
+                markUnrunFormalGatesSkipped(&formal_gate_statuses);
+                try writeFormalArtifactIndex(allocator, file_path, mlir_options, formal_gate_statuses, .blocked);
+                return error.VerificationFailed;
+            };
+            if (lifecycle_session) |*session| {
+                lifecycle_consumer = .{ .session = session };
+                verifier.lifecycle = lifecycle_consumer.?.provider();
+                needs_lean_proof_gate = true;
+                needs_automatic_lean_proof_gate = !needs_external_lean_proof_gate;
+                formal_gate_statuses.lean_userland = .not_run;
+                formal_gate_statuses.lifecycle_kernel = .not_run;
+            }
+        }
 
         // Capture the verifier's actual matched prepared-query identities for
         // the source-accounting gate. Formal pre-verifier rows alone carry no
@@ -5113,6 +5155,9 @@ fn runMlirEmitAdvanced(
             // degraded, so leave it unavailable and let verification report
             // the named failure instead of leaking an internal error trace.
             error.VerificationEncodingDegraded => null,
+            // The native verifier owns this named refusal and its failed report.
+            // An absent manifest never grants source-accounting authority.
+            error.UnbootstrappedContractInvariant => null,
             else => return err,
         };
 
@@ -5162,7 +5207,27 @@ fn runMlirEmitAdvanced(
     var prepared_source_identity: ?formal_source_accounting_from_z3.PreparedIdentity = null;
     defer if (prepared_source_identity) |*identity| identity.deinit(allocator);
     if (source_prepared_query_manifest) |manifest| {
-        prepared_source_identity = try formal_source_accounting_from_z3.collectPreparedIdentity(allocator, manifest.source_accounting_rows);
+        var identity = try formal_source_accounting_from_z3.collectPreparedIdentity(
+            allocator,
+            manifest.source_accounting_rows,
+        );
+        errdefer identity.deinit(allocator);
+        if (manifest.inactive_runtime_owners) |rows| {
+            const owners = try allocator.alloc(formal_source_accounting_from_z3.InactiveRuntimeOwner, rows.len);
+            identity.inactive_runtime_owners = owners;
+            for (rows, owners) |row, *owner| owner.* = .{
+                .source_op_id = row.source_op_id,
+                .module_path = row.module_path,
+                .owner_key = row.owner_key,
+            };
+        }
+        try formal_source_accounting_from_z3.includeCanonicalLoopPostQueries(
+            allocator,
+            &identity,
+            manifest.source_accounting_rows.len,
+            formal_result_for_smt_report.?.set,
+        );
+        prepared_source_identity = identity;
     }
     if (!mlir_options.verify_z3 or prepared_source_identity != null) {
         const accounting_mode = try sourceAccountingMode(mlir_options);
@@ -5259,6 +5324,9 @@ fn runMlirEmitAdvanced(
                 .artifact_display_dir = formal_display_dir,
                 .process_environ = mlir_options.process_environ,
                 .suppress_artifact_logs = mlir_options.suppress_artifact_logs,
+                .module = final_module,
+                .lifecycle = if (lifecycle_consumer) |*consumer| consumer else null,
+                .lifecycle_checks_retained = lifecycle_session != null,
             },
             stdout,
         ) catch |err| blk: {
@@ -5271,6 +5339,7 @@ fn runMlirEmitAdvanced(
             lean_artifact_gate_allowed = result.artifact_emission_authorized;
             formal_gate_statuses.lean_userland = if (result.artifact_emission_authorized) .accepted else .rejected;
         }
+        if (lifecycle_session != null) formal_gate_statuses.lifecycle_kernel = if (lean_artifact_gate_allowed) .accepted else .rejected;
     }
 
     if (lean_artifact_gate_failed) verification_failed = true;
@@ -5278,7 +5347,7 @@ fn runMlirEmitAdvanced(
         try stdout.writeAll("error: Lean userland obligation proof gate rejected the contract\n");
         verification_failed = true;
     }
-    if (needs_automatic_lean_proof_gate and !lean_artifact_gate_allowed) {
+    if (needs_lean_proof_gate and !lean_artifact_gate_allowed) {
         if (pending_smt_report) |*report| {
             formal_userland_coordinator.emitUnknownRecipe(
                 allocator,
@@ -5298,6 +5367,12 @@ fn runMlirEmitAdvanced(
         }
     }
     if (verification_result_opt) |*verification_result| {
+        // A Lean result cannot substitute for independent native success on
+        // an assisted compilation, including report-level failures.
+        if (lifecycle_session != null and (!verification_result.success or verification_report_blocked_artifacts)) {
+            formal_gate_statuses.lifecycle_kernel = .rejected;
+            verification_failed = true;
+        }
         const needs_unknown_recipe = !verification_result.success and hasUnknownVerificationError(verification_result);
         if (!verification_result.success and !lean_artifact_gate_allowed) {
             try printVerificationErrors(stdout, verification_result.errors.items);
@@ -5445,7 +5520,7 @@ fn runMlirEmitAdvanced(
         const refinement_guards = compiler.refinement_guards;
         if (verification_result_opt) |*vr| {
             refinement_guards.cleanupRefinementGuardsWithOptions(mlir_allocator, ctx, final_module, &vr.proven_guard_ids, .{
-                .keep_proved_checks = mlir_options.keep_proved_checks,
+                .keep_proved_checks = mlir_options.keep_proved_checks or lifecycle_session != null,
             });
         } else {
             var empty_guards = std.StringHashMap(void).init(mlir_allocator);
@@ -5456,7 +5531,7 @@ fn runMlirEmitAdvanced(
         }
     }
 
-    if (!mlir_options.keep_proved_checks) {
+    if (!mlir_options.keep_proved_checks and lifecycle_session == null) {
         if (verification_result_opt) |*vr| {
             if (vr.success) {
                 // Resource runtime-check erasure is intentionally tied only to
@@ -6273,6 +6348,7 @@ fn writeLeanDispatcherProofCertificate(
 }
 
 fn markUnrunFormalGatesSkipped(statuses: *formal_artifact_catalog.GateStatuses) void {
+    if (statuses.lifecycle_kernel == .not_run) statuses.lifecycle_kernel = .skipped;
     if (statuses.z3_userland == .not_run) statuses.z3_userland = .skipped;
     if (statuses.lean_userland == .not_run) statuses.lean_userland = .skipped;
     if (statuses.dispatcher_kernel == .not_run) statuses.dispatcher_kernel = .skipped;

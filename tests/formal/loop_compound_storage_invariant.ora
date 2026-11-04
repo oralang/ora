@@ -1,0 +1,19 @@
+contract CompoundStorageInvariant {
+    storage var values: [u256; 4];
+    invariant bytes(values[0] <= 255 && values[1] <= 255 &&
+                    values[2] <= 255 && values[3] <= 255);
+
+    pub fn preserve(limit: u256) -> u256
+    requires limit <= 4
+    {
+        var i: u256 = 0;
+        while (i < limit)
+        invariant i <= limit
+        invariant(values[0] <= 255 && values[1] <= 255 &&
+                  values[2] <= 255 && values[3] <= 255)
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+}

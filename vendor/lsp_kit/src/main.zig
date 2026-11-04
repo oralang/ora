@@ -25,7 +25,7 @@ pub fn main(init: std.process.Init) !void {
     const source = try aw.toOwnedSliceSentinel(0);
     defer gpa.free(source);
 
-    var zig_tree: std.zig.Ast = try .parse(gpa, source, .zig);
+    var zig_tree: std.zig.Ast = try .parse(gpa, source, .{ .mode = .zig });
     defer zig_tree.deinit(gpa);
 
     const cwd = std.Io.Dir.cwd();

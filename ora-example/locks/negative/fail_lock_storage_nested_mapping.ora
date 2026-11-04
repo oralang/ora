@@ -3,10 +3,8 @@
 contract FailLockStorageNestedMapping {
     storage allowances: map<address, map<address, u256>>;
     pub fn bad(owner: address, spender: address, amount: u256) {
-        @
-        lock(allowances[owner][spender]);
+        @lock(allowances[owner][spender]);
         allowances[owner][spender] = amount;
-        @
-        unlock(allowances[owner][spender]);
+        @unlock(allowances[owner][spender]);
     }
 }

@@ -1899,8 +1899,15 @@ test "OraToSIR keeps narrow signed arithmetic in u256 carrier" {
     defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
     const rendered = module_text_ref.data[0..module_text_ref.length];
 
-    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.sdiv"));
-    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.bitcast"));
+    const sdiv_start = std.mem.indexOf(u8, rendered, "sir.sdiv ") orelse return error.TestUnexpectedResult;
+    const sdiv_end = std.mem.indexOfScalarPos(u8, rendered, sdiv_start, '\n') orelse rendered.len;
+    const sdiv_line = rendered[sdiv_start..sdiv_end];
+    try testing.expect(std.mem.containsAtLeast(u8, sdiv_line, 1, ": !sir.u256, "));
+    try testing.expect(std.mem.containsAtLeast(u8, sdiv_line, 1, ": !sir.u256 : !sir.u256 loc("));
+    // Checked-division assertions may bitcast their boolean conditions, but
+    // the narrow signed arithmetic operands remain in the u256 SIR carrier.
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.bitcast %arg0"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.bitcast %arg1"));
 }
 
 test "OraToSIR preserves explicit narrow integer truncation mask" {

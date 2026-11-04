@@ -1,0 +1,9 @@
+contract PrefixStorageFact {
+    storage var saved: u256;
+    fn touch(value: u256) -> u256 { saved = value; return value; }
+    pub fn run(limit: u256) requires saved <= 4 {
+        let bound: u256 = touch(limit);
+        var i: u256 = 0;
+        while (i < bound) invariant i <= bound { i = i +% 1; }
+    }
+}

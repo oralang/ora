@@ -31,6 +31,26 @@ value = 0
 args = []
 returns = { u256 = 500 }
 
+# The body occupies slots 1–4 and tail is the adjacent slot 5. Before the
+# fixed-array bounds check, index 4 silently overwrote tail.
+[[call]]
+fn = "set_body(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [4, 777]
+reverts = { data = "0x771372b2" }
+
+[[call.storage]]
+slot = 5
+value = 99
+
+[[call]]
+fn = "get_tail()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 99 }
+
 [[call]]
 fn = "set_body(uint256,uint256)"
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"

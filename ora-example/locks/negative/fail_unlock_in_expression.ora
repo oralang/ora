@@ -2,8 +2,7 @@
 contract FailUnlockInExpression {
     storage var balances: map<address, u256>;
     pub fn bad(user: address) -> bool {
-        @
-        lock(balances[user]);
+        @lock(balances[user]);
         return @unlock(balances[user]);
     }
 }

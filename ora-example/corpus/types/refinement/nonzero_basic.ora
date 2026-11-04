@@ -1,3 +1,5 @@
+// Refined getters require valid stored values; call the checked setters first.
+// These entry checks do not assume or prove a storage lifecycle invariant.
 // NonZeroAddress — parameter, comparison, storage
 
 comptime const std = @import("std");
@@ -9,7 +11,9 @@ contract NonZeroBasic {
         owner = addr;
     }
 
-    pub fn getOwner() -> NonZeroAddress {
+    pub fn getOwner() -> NonZeroAddress
+        requires(owner != std.constants.ZERO_ADDRESS)
+    {
         return owner;
     }
 
@@ -17,7 +21,9 @@ contract NonZeroBasic {
         admin = addr;
     }
 
-    pub fn getAdmin() -> NonZeroAddress {
+    pub fn getAdmin() -> NonZeroAddress
+        requires(admin != std.constants.ZERO_ADDRESS)
+    {
         return admin;
     }
 

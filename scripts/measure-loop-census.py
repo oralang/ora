@@ -62,6 +62,26 @@ def expected_noncompile_reason(source_name: str) -> str | None:
     return None
 
 
+def abnormal_process_failure(returncode: int) -> dict | None:
+    """Describe abnormal child termination as a measurement failure.
+
+    >>> abnormal_process_failure(-signal.SIGABRT)
+    {'measurement_failed': True, 'failure': 'census_tool_signal:SIGABRT'}
+    >>> abnormal_process_failure(1) is None
+    True
+    """
+    if returncode >= 0:
+        return None
+    try:
+        signal_name = signal.Signals(-returncode).name
+    except ValueError:
+        signal_name = str(-returncode)
+    return {
+        "measurement_failed": True,
+        "failure": f"census_tool_signal:{signal_name}",
+    }
+
+
 def run_source(tool: Path, source: Path, timeout: int) -> dict:
     try:
         proc = subprocess.run(
@@ -83,20 +103,9 @@ def run_source(tool: Path, source: Path, timeout: int) -> dict:
             "failure": f"census_tool_error:{exc}",
         }
     if proc.returncode != 0:
-        if proc.returncode < 0:
-            try:
-                signal_name = signal.Signals(-proc.returncode).name
-            except ValueError:
-                signal_name = str(-proc.returncode)
-            return {
-                "schema": "ora.loop_census.file.v2",
-                "schema_version": 2,
-                "source_file": str(source.resolve()),
-                "compiling": False,
-                "first_diagnostic": f"compiler_process_signal:{signal_name}",
-                "measurement_errors": [],
-                "loops": [],
-            }
+        abnormal = abnormal_process_failure(proc.returncode)
+        if abnormal is not None:
+            return abnormal
         return {
             "measurement_failed": True,
             "failure": f"census_tool_exit_{proc.returncode}",
@@ -212,7 +221,7 @@ def empty_stratum() -> dict:
             "lean_certificate_required_loops": 0,
             "lean_certificate_excluded_loops": 0,
             "lean_certificate_required_basis_points": 0,
-            "lean_exclusion_reasons": {},
+            "production_exclusion_reasons": {},
             "loop_queries_in_scalar_fragment_basis_points": 0,
             "invariant_loops_in_scalar_fragment_basis_points": 0,
             "loop_queries_in_shape_scalar_fragment_basis_points": 0,
@@ -222,8 +231,8 @@ def empty_stratum() -> dict:
             "shape_scalar_fragment_query_counts": {kind: 0 for kind in QUERY_KINDS},
             "loop_form_histogram": {},
             "invariant_count_histogram": {},
-            "exclusion_reasons": {},
-            "shape_exclusion_reasons": {},
+            "source_shape_exclusion_reasons": {},
+            "source_shape_structural_exclusion_reasons": {},
         },
         "expected_failures": [],
         "failures": [],
@@ -241,6 +250,40 @@ def basis_points(numerator: int, denominator: int) -> int:
     if denominator == 0:
         return 0
     return (numerator * 10_000) // denominator
+
+
+def summarize_production_rows(rows: list[dict]) -> tuple[int, int, Counter[str]]:
+    """Derive every production total from the production rows themselves.
+
+    >>> summarize_production_rows([
+    ...   {"status": "lean_certificate_required", "certificate_required": True, "excluded_by": []},
+    ...   {"status": "excluded", "certificate_required": False, "excluded_by": ["reason_a", "reason_b"]},
+    ...   {"status": "excluded", "certificate_required": False, "excluded_by": ["reason_a"]},
+    ... ])
+    (1, 2, Counter({'reason_a': 2, 'reason_b': 1}))
+    >>> summarize_production_rows([
+    ...   {"status": "lean_certificate_required", "certificate_required": False, "excluded_by": []},
+    ... ])
+    Traceback (most recent call last):
+      ...
+    ValueError: invalid production loop classification
+    """
+    required = 0
+    excluded = 0
+    reasons: Counter[str] = Counter()
+    for row in rows:
+        status = row.get("status")
+        certificate_required = row.get("certificate_required")
+        if status == "lean_certificate_required" and certificate_required is True:
+            required += 1
+        elif status == "excluded" and certificate_required is False:
+            excluded += 1
+            reasons.update(row.get("excluded_by", []))
+        else:
+            raise ValueError("invalid production loop classification")
+    if required + excluded != len(rows):
+        raise ValueError("production loop classification count mismatch")
+    return required, excluded, reasons
 
 
 def finalize_stratum(data: dict) -> None:
@@ -275,9 +318,8 @@ def finalize_stratum(data: dict) -> None:
     summary = data["summary"]
     form_histogram: Counter[str] = Counter()
     invariant_histogram: Counter[str] = Counter()
-    exclusions: Counter[str] = Counter()
-    shape_exclusions: Counter[str] = Counter()
-    lean_exclusions: Counter[str] = Counter()
+    source_shape_exclusions: Counter[str] = Counter()
+    source_shape_structural_exclusions: Counter[str] = Counter()
     files_with_loops: set[str] = set()
     files_with_invariants: set[str] = set()
 
@@ -287,13 +329,16 @@ def finalize_stratum(data: dict) -> None:
         invariant_histogram[str(loop["invariant_count"])] += 1
         if loop["has_invariants"]:
             files_with_invariants.add(loop["file"])
-        for reason in loop["excluded_by"]:
-            exclusions[reason] += 1
-        for reason in loop["shape_excluded_by"]:
-            shape_exclusions[reason] += 1
-    for loop in data["production_loop_classifications"]:
-        for reason in loop["excluded_by"]:
-            lean_exclusions[reason] += 1
+        for reason in loop["source_shape_excluded_by"]:
+            source_shape_exclusions[reason] += 1
+        for reason in loop["source_shape_structural_excluded_by"]:
+            source_shape_structural_exclusions[reason] += 1
+    required, excluded, production_exclusions = summarize_production_rows(
+        data["production_loop_classifications"]
+    )
+    summary["production_loop_summaries"] = len(data["production_loop_classifications"])
+    summary["lean_certificate_required_loops"] = required
+    summary["lean_certificate_excluded_loops"] = excluded
 
     summary["files_with_loops"] = len(files_with_loops)
     summary["files_with_invariants"] = len(files_with_invariants)
@@ -314,12 +359,25 @@ def finalize_stratum(data: dict) -> None:
     )
     summary["loop_form_histogram"] = dict(sorted(form_histogram.items()))
     summary["invariant_count_histogram"] = dict(sorted(invariant_histogram.items(), key=lambda item: int(item[0])))
-    summary["exclusion_reasons"] = dict(sorted(exclusions.items(), key=lambda item: (-item[1], item[0])))
-    summary["shape_exclusion_reasons"] = dict(sorted(shape_exclusions.items(), key=lambda item: (-item[1], item[0])))
-    summary["lean_exclusion_reasons"] = dict(sorted(lean_exclusions.items(), key=lambda item: (-item[1], item[0])))
+    summary["source_shape_exclusion_reasons"] = dict(
+        sorted(source_shape_exclusions.items(), key=lambda item: (-item[1], item[0]))
+    )
+    summary["source_shape_structural_exclusion_reasons"] = dict(
+        sorted(source_shape_structural_exclusions.items(), key=lambda item: (-item[1], item[0]))
+    )
+    summary["production_exclusion_reasons"] = dict(
+        sorted(production_exclusions.items(), key=lambda item: (-item[1], item[0]))
+    )
 
 
 def add_file(data: dict, source_name: str, result: dict, activation: dict | None) -> None:
+    """Add one result without allowing path conventions to hide tool failure.
+
+    >>> data = empty_stratum()
+    >>> add_file(data, "ora-example/negative/fail_probe.ora", {"measurement_failed": True, "failure": "census_tool_signal:SIGABRT"}, None)
+    >>> (data["summary"]["files_unmeasured"], data["summary"]["files_expected_noncompiling"], data["tool_failures"][0]["failure"])
+    (1, 0, 'census_tool_signal:SIGABRT')
+    """
     summary = data["summary"]
     summary["files_total"] += 1
     if result.get("measurement_failed", False):
@@ -359,7 +417,18 @@ def add_file(data: dict, source_name: str, result: dict, activation: dict | None
             report_total = int(activation_report.get("total", -1))
             required = int(activation_report.get("certificate_required", -1))
             excluded = int(activation_report.get("excluded", -1))
-            if report_total != len(production_loops) or required + excluded != report_total:
+            try:
+                row_required, row_excluded, _ = summarize_production_rows(production_loops)
+                rows_valid = True
+            except ValueError:
+                row_required, row_excluded, rows_valid = -1, -1, False
+            if (
+                report_total != len(production_loops)
+                or required + excluded != report_total
+                or not rows_valid
+                or required != row_required
+                or excluded != row_excluded
+            ):
                 summary["production_activation_files_failed"] += 1
                 summary["production_activation_files_measured"] -= 1
                 data["production_activation_failures"].append(
@@ -384,9 +453,6 @@ def add_file(data: dict, source_name: str, result: dict, activation: dict | None
                             "report_absent": bool(activation.get("report_absent", False)),
                         }
                     )
-                summary["production_loop_summaries"] += report_total
-                summary["lean_certificate_required_loops"] += required
-                summary["lean_certificate_excluded_loops"] += excluded
                 for raw_row in production_loops:
                     row = dict(raw_row)
                     source = dict(row.get("source", {}))
@@ -496,11 +562,14 @@ def print_summary(report: dict) -> None:
         print("  loop forms")
         for name, count in summary["loop_form_histogram"].items():
             print(f"    {name:<35} {count}")
-        print("  ranked exclusions")
-        for name, count in summary["exclusion_reasons"].items():
+        print("  ranked source-shape exclusions")
+        for name, count in summary["source_shape_exclusion_reasons"].items():
             print(f"    {name:<55} {count}")
-        print("  ranked production Lean exclusions")
-        for name, count in summary["lean_exclusion_reasons"].items():
+        print("  ranked source-shape structural exclusions")
+        for name, count in summary["source_shape_structural_exclusion_reasons"].items():
+            print(f"    {name:<55} {count}")
+        print("  ranked production exclusions")
+        for name, count in summary["production_exclusion_reasons"].items():
             print(f"    {name:<55} {count}")
         if report["strata"][stratum]["expected_failures"]:
             print("  expected-noncompiling fixtures")

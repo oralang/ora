@@ -39,12 +39,12 @@ pub const HandlingNamespace = enum(u4) {
 
 pub fn namespacedEvidenceId(namespace: EvidenceNamespace, producer_id: u32) !EvidenceId {
     if (producer_id > 0x0fff_ffff) return error.SourceAccountingProducerIdOverflow;
-    return (@as(u32, @intFromEnum(namespace)) << 28) | producer_id;
+    return (@as(u32, @backingInt(namespace)) << 28) | producer_id;
 }
 
 pub fn namespacedHandlingId(namespace: HandlingNamespace, producer_id: u32) !HandlingId {
     if (producer_id > 0x0fff_ffff) return error.SourceAccountingHandlingIdOverflow;
-    return (@as(u32, @intFromEnum(namespace)) << 28) | producer_id;
+    return (@as(u32, @backingInt(namespace)) << 28) | producer_id;
 }
 
 pub const CompilationMode = enum(u8) {
@@ -491,8 +491,8 @@ test "handling namespaces cannot alias producer ids" {
 
 test "required role vocabulary is closed and nonempty" {
     const std = @import("std");
-    inline for (std.meta.fields(SourceFactKind)) |field| {
-        const kind: SourceFactKind = @enumFromInt(field.value);
+    inline for (@typeInfo(SourceFactKind).@"enum".field_names) |field| {
+        const kind: SourceFactKind = @fromBackingInt(@intCast(@backingInt(@field(SourceFactKind, field))));
         try std.testing.expect(requiredRoles(kind).len != 0);
         for (requiredRoles(kind), 0..) |role, index| {
             try std.testing.expect(roleRequired(kind, role));
@@ -503,18 +503,18 @@ test "required role vocabulary is closed and nonempty" {
 
 test "activation-scoped roles conserve the complete role vocabulary" {
     const std = @import("std");
-    inline for (std.meta.fields(SourceFactKind)) |field| {
-        const kind: SourceFactKind = @enumFromInt(field.value);
+    inline for (@typeInfo(SourceFactKind).@"enum".field_names) |field| {
+        const kind: SourceFactKind = @fromBackingInt(@intCast(@backingInt(@field(SourceFactKind, field))));
         for (requiredRoles(kind)) |required| {
             var found = false;
-            inline for (std.meta.fields(TemplateActivation)) |activation_field| {
-                const activation: TemplateActivation = @enumFromInt(activation_field.value);
+            inline for (@typeInfo(TemplateActivation).@"enum".field_names) |activation_field| {
+                const activation: TemplateActivation = @fromBackingInt(@intCast(@backingInt(@field(TemplateActivation, activation_field))));
                 for (templateRoles(kind, activation)) |role| found = found or role == required;
             }
             try std.testing.expect(found);
         }
-        inline for (std.meta.fields(TemplateActivation)) |activation_field| {
-            const activation: TemplateActivation = @enumFromInt(activation_field.value);
+        inline for (@typeInfo(TemplateActivation).@"enum".field_names) |activation_field| {
+            const activation: TemplateActivation = @fromBackingInt(@intCast(@backingInt(@field(TemplateActivation, activation_field))));
             for (templateRoles(kind, activation)) |role| try std.testing.expect(roleRequired(kind, role));
         }
     }

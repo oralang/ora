@@ -31,6 +31,24 @@ const containsKeyedEffectSlot = h.containsKeyedEffectSlot;
 const nthDescendantNodeOfKind = h.nthDescendantNodeOfKind;
 const nthDescendantNodeOfKindInner = h.nthDescendantNodeOfKindInner;
 
+test "compiler diagnoses comparisons with zero and parameterized refinement arguments" {
+    const cases = [_]struct { source: []const u8, display: []const u8 }{
+        .{ .source = "pub fn f(x: NonZeroAddress) -> bool { return x != 0x0; }", .display = "NonZeroAddress<address>" },
+        .{ .source = "pub fn f(x: Exact<u256>) -> bool { return x != true; }", .display = "Exact<u256>" },
+        .{ .source = "pub fn f(x: MinValue<u256, 10>) -> bool { return x != true; }", .display = "MinValue<u256, 10>" },
+        .{ .source = "pub fn f(x: InRange<u256, 10, 20>) -> bool { return x != true; }", .display = "InRange<u256, 10, 20>" },
+    };
+    for (cases) |case| {
+        var compilation = try compileText(case.source);
+        defer compilation.deinit();
+        const root = compilation.db.sources.module(compilation.root_module_id);
+        const file = try compilation.db.astFile(root.file_id);
+        const checked = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = file.root_items[0] });
+        try testing.expect(diagnosticMessagesContain(&checked.diagnostics, "invalid binary operator"));
+        try testing.expect(diagnosticMessagesContain(&checked.diagnostics, case.display));
+    }
+}
+
 test "compiler parses tuple dot access as index expressions" {
     const source_text =
         \\contract TupleDot {

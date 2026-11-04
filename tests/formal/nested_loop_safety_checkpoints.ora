@@ -1,0 +1,32 @@
+contract NestedLoopSafetyCheckpoints {
+    pub fn run() -> u256 {
+        var outer: u256 = 0;
+        var total: u256 = 0;
+
+        while (outer < 1)
+            invariant outer <= 1
+            invariant total <= 6
+        {
+            total = total + 1;
+
+            var first: u256 = 0;
+            while (first < 1)
+                invariant first <= 1
+            {
+                first = first + 1;
+            }
+            total = total + first;
+
+            var second: u256 = 0;
+            while (second < 1)
+                invariant second <= 1
+            {
+                second = second + 1;
+            }
+            total = total + second;
+            outer = outer + 1;
+        }
+
+        return total;
+    }
+}

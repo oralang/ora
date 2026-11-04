@@ -1,0 +1,19 @@
+contract NestedStorageLoopAuto {
+    storage var counter: u256;
+
+    pub fn fill() {
+        var outer: u256 = 0;
+        while (outer < 2)
+            invariant outer <= 2
+        {
+            var inner: u256 = 0;
+            while (inner < 2)
+                invariant inner <= 2
+            {
+                counter = inner;
+                inner = inner +% 1;
+            }
+            outer = outer +% 1;
+        }
+    }
+}

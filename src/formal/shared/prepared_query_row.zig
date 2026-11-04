@@ -25,6 +25,28 @@ pub const BoundaryRole = enum(u8) {
     assumption_context,
 };
 
+/// Derived entry facts, never source requires or contract invariants. The
+/// envelope binds the complete slot set; partial claim installation is forbidden.
+pub const LifecycleDependency = struct {
+    inputs_sha256: [32]u8,
+    module_sha256: [32]u8,
+    function_vc_sha256: [32]u8,
+    function_id: u32,
+    function_ordinal: u32,
+    owner_ordinal: u32,
+    claim_count: u32,
+};
+
+pub const LifecycleQueryUse = struct {
+    dependency: LifecycleDependency,
+    query_index: u32,
+    kind: enum { base, obligation, guard_satisfy, guard_violate },
+    formal_query_id: ?u32,
+    accounting_query_id: ?u32,
+    smtlib_hash: u64,
+    constraint_count: u32,
+};
+
 pub const Row = struct {
     kind: QueryKind,
     function_name: []const u8,

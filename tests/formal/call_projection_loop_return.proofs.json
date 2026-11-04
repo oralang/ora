@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "proofs": [
+    {
+      "query_id": 11,
+      "obligation_ids": [],
+      "assumption_ids": [],
+      "module_name": "G9cSuppliedReturn",
+      "theorem_name": "G9cSuppliedReturn.loopAuthorization",
+      "path": "tests/formal/call_projection_loop_return.lean",
+      "content_sha256": null,
+      "inline_source": true
+    },
+    {
+      "query_id": 14,
+      "obligation_ids": [],
+      "assumption_ids": [],
+      "module_name": "G9cSuppliedReturn",
+      "theorem_name": "G9cSuppliedReturn.custody",
+      "path": "tests/formal/call_projection_loop_return.lean",
+      "content_sha256": null,
+      "inline_source": true
+    },
+    {
+      "query_id": 16,
+      "obligation_ids": [],
+      "assumption_ids": [],
+      "module_name": "G9cSuppliedReturn",
+      "theorem_name": "G9cSuppliedReturn.callerCustody",
+      "path": "tests/formal/call_projection_loop_return.lean",
+      "content_sha256": null,
+      "inline_source": true
+    }
+  ]
+}

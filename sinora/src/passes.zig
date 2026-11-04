@@ -564,15 +564,15 @@ test "optimization string parses and runs passes in order" {
 }
 
 test "optimization pass fact table covers CLI parser vocabulary" {
-    const fields = @typeInfo(OptimizationPass).@"enum".fields;
+    const fields = @typeInfo(OptimizationPass).@"enum".field_names;
     try std.testing.expectEqual(fields.len, optimization_pass_facts.len);
     inline for (fields) |field| {
-        const pass: OptimizationPass = @enumFromInt(field.value);
+        const pass: OptimizationPass = @fromBackingInt(@intCast(@backingInt(@field(OptimizationPass, field))));
         var found = false;
         for (optimization_pass_facts) |fact| {
             if (fact.pass == pass) {
                 try std.testing.expectEqual(pass, OptimizationPass.fromChar(fact.cli_code) orelse return error.TestUnexpectedResult);
-                try std.testing.expectEqualStrings(field.name, fact.name);
+                try std.testing.expectEqualStrings(field, fact.name);
                 found = true;
                 break;
             }

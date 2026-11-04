@@ -1,0 +1,13 @@
+contract FixedStorageLoopAuto {
+    storage var values: [u256; 4];
+
+    pub fn fill() {
+        var i: u256 = 0;
+        while (i < 4)
+            invariant i <= 4
+        {
+            values[i] = i;
+            i = i +% 1;
+        }
+    }
+}

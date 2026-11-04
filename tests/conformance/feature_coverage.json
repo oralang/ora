@@ -498,6 +498,15 @@
       ]
     },
     {
+      "id": "storage.fixed_array_bounds_varied",
+      "area": "storage",
+      "behavior": "Checked fixed-array boundaries across persistent and local arrays with distinct extents",
+      "specs": [
+        "tests/conformance/fixed_array_bounds_varied.spec.toml",
+        "tests/conformance/fixed_array_bounds_verified.spec.toml"
+      ]
+    },
+    {
       "id": "storage.bitfield",
       "area": "storage",
       "behavior": "Packed bitfield read/modify/write within one slot",
@@ -527,6 +536,15 @@
       "behavior": "Storage dynamic array push/index with length slot + keccak data root",
       "specs": [
         "tests/conformance/storage_dynamic_array.spec.toml"
+      ]
+    },
+    {
+      "id": "storage.dynamic_index_bounds",
+      "area": "storage",
+      "behavior": "Runtime bounds enforcement for dynamic bytes, strings, and non-u256 slices in verified and no-verify builds",
+      "specs": [
+        "tests/conformance/dynamic_bytes_string_bounds.spec.toml",
+        "tests/conformance/dynamic_index_bounds_verified.spec.toml"
       ]
     },
     {
@@ -650,6 +668,23 @@
       ]
     },
     {
+      "id": "crypto.runtime_keccak256",
+      "area": "crypto",
+      "behavior": "@keccak256 hashes runtime string and bytes payloads with EVM Keccak-256 semantics across empty and multiword inputs",
+      "specs": [
+        "tests/conformance/runtime_keccak.spec.toml"
+      ]
+    },
+    {
+      "id": "crypto.keccak256_arguments_fail_closed",
+      "area": "crypto",
+      "behavior": "@keccak256 rejects invalid arity and non-string/bytes input types",
+      "negative_specs": [
+        "tests/negative/keccak_bad_arity.ora",
+        "tests/negative/keccak_wrong_type.ora"
+      ]
+    },
+    {
       "id": "arithmetic.wrapping_ops",
       "area": "arithmetic",
       "behavior": "Wrapping add/sub/mul match u256 reference semantics",
@@ -714,9 +749,10 @@
     {
       "id": "control_flow.runtime_loop",
       "area": "control_flow",
-      "behavior": "Runtime-bound loop over slice executes correct iteration count",
+      "behavior": "Runtime loops execute correct iteration counts and suppress every remaining body statement after break or continue in while and for forms",
       "specs": [
-        "tests/conformance/properties.zig#sum_slice"
+        "tests/conformance/properties.zig#sum_slice",
+        "tests/conformance/loop_control_suffix.spec.toml"
       ]
     },
     {
@@ -740,7 +776,8 @@
       "area": "refinements",
       "behavior": "MinValue/InRange refinement params: in-range args execute, violating args REVERT at the boundary guard",
       "specs": [
-        "tests/conformance/refinement_guard_revert.spec.toml"
+        "tests/conformance/refinement_guard_revert.spec.toml",
+        "tests/conformance/storage_lifecycle_retained_checks.spec.toml"
       ]
     },
     {
@@ -947,6 +984,70 @@
       "behavior": "Staking: stake, getStake/getTotalStaked, unstake, claimRewards \u2014 gas benchmark + execution coverage",
       "specs": [
         "tests/conformance/app_staking.spec.toml"
+      ]
+    },
+    {
+      "id": "arithmetic.compound_checked_and_wrapping",
+      "area": "arithmetic",
+      "behavior": "Ordinary and compound arithmetic retain matching checked-revert, wrapping, shift, and narrow-overflow behavior",
+      "specs": [
+        "tests/conformance/compound_arithmetic.spec.toml"
+      ]
+    },
+    {
+      "id": "arithmetic.compound_power",
+      "area": "arithmetic",
+      "behavior": "Compound exponentiation agrees with ordinary exponentiation and its checked overflow boundary",
+      "specs": [
+        "tests/conformance/compound_power.spec.toml"
+      ]
+    },
+    {
+      "id": "assignment.compound_target_evaluation",
+      "area": "assignment",
+      "behavior": "Compound targets evaluate keys once and preserve RHS sibling updates",
+      "specs": [
+        "tests/conformance/compound_target_evaluation.spec.toml"
+      ]
+    },
+    {
+      "id": "assignment.compound_target_regions",
+      "area": "assignment",
+      "behavior": "Compound targets preserve single evaluation across memory, nested fields, and transient storage",
+      "specs": [
+        "tests/conformance/compound_target_regions.spec.toml"
+      ]
+    },
+    {
+      "id": "arithmetic.multiply_guard_orientation",
+      "area": "arithmetic",
+      "behavior": "Literal multiplication guards retain overflow reverts and left-to-right single evaluation",
+      "specs": [
+        "tests/conformance/mul_guard_orientation.spec.toml"
+      ]
+    },
+    {
+      "id": "dispatcher.public_address_result",
+      "area": "dispatcher_abi",
+      "behavior": "Internal public address results are decoded before nonzero refinement checks",
+      "specs": [
+        "tests/conformance/public_address_call.spec.toml"
+      ]
+    },
+    {
+      "id": "dispatcher.public_scalar_result",
+      "area": "dispatcher_abi",
+      "behavior": "Internal public integer and Boolean results are decoded and refined payloads checked",
+      "specs": [
+        "tests/conformance/public_scalar_call.spec.toml"
+      ]
+    },
+    {
+      "id": "refinement.conversion_boundaries",
+      "area": "refinements",
+      "behavior": "Refinement conversions enforce bounds across locals, aggregates, storage, calls, and returns",
+      "specs": [
+        "tests/conformance/refinement_conversions.spec.toml"
       ]
     }
   ]

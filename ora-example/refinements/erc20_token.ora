@@ -58,13 +58,14 @@ contract ERC20Token {
     )
         requires(std.msg.sender() != std.constants.ZERO_ADDRESS)
         requires(initial_supply >= 1)
+        requires(initial_supply <= 1_000_000_000)
         requires(token_decimals <= 18)
         requires(fee_rate <= 10000)
         requires(burn_rate_bps <= 10000)
         requires(minimum_transfer >= 1)
     {
         // Refined types ensure:
-        // - initial_supply >= 1 (prevents zero supply)
+        // - 1 <= initial_supply <= 1_000_000_000 (valid capped supply)
         // - token_decimals in [0, 18] (standard range)
         // - fee_rate in [0, 10000] (0-100%)
         // - burn_rate_bps in [0, 10000] (0-100%)
@@ -217,6 +218,7 @@ contract ERC20Token {
     /// Burn tokens (reduces total supply)
     pub fn burn(amount: MinValue<u256, 1>) -> !u256 | InsufficientBalance
         requires(amount >= 1)
+        requires(total_supply <= 1_000_000_000)
     {
         const sender_balance = getBalance(std.msg.sender());
         
@@ -240,8 +242,13 @@ contract ERC20Token {
             return InsufficientBalance(total_supply, actual_burn);
         }
         
+        const remaining_supply = total_supply - actual_burn;
+        // Make the already-required supply bound explicit at the conversion.
+        if (remaining_supply > 1_000_000_000) {
+            return InsufficientBalance(total_supply, actual_burn);
+        }
         setBalance(std.msg.sender(), sender_balance - actual_burn);
-        total_supply = total_supply - actual_burn; // Type-safe subtraction
+        total_supply = remaining_supply;
         
         return total_supply;
     }
@@ -270,12 +277,17 @@ contract ERC20Token {
 
         if (burn_rate_value > 0) {
             const scaled_amount: u256 = amount / 10000;
-            if (scaled_amount > std.constants.U256_MAX / burn_rate_value) {
+            if (scaled_amount > std.constants.U256_MAX / 10000) {
                 return amount;
             }
-            const burn_fee: u256 = scaled_amount * burn_rate_value;
-            if (amount > burn_fee) {
-                return amount -% burn_fee;
+            // Compute the complementary rate directly. For q = amount / 10000,
+            // amount - q * rate = q * (10000 - rate) + amount % 10000.
+            // The existing rate bound makes the u16 conversion exact, and both
+            // wrapping operations equal their mathematical results (no overflow).
+            const remaining_rate: u16 = @truncate(u16, 10000 - burn_rate_value);
+            const remaining: u256 = scaled_amount *% @cast(u256, remaining_rate) +% (amount % 10000);
+            if (remaining > 0) {
+                return remaining;
             }
             return 1; // Minimum burn amount
         }
@@ -325,25 +337,36 @@ contract ERC20Token {
     
     // ============================================================================
     // View Functions
+    // Explicit entry contracts: storage lifecycle proofs are not inferred.
     // ============================================================================
     
-    pub fn getTotalSupply() -> MaxValue<u256, 1_000_000_000> {
+    pub fn getTotalSupply() -> MaxValue<u256, 1_000_000_000>
+        requires(total_supply <= 1_000_000_000)
+    {
         return total_supply;
     }
     
-    pub fn getDecimals() -> InRange<u8, 0, 18> {
+    pub fn getDecimals() -> InRange<u8, 0, 18>
+        requires(decimals <= 18)
+    {
         return decimals;
     }
     
-    pub fn getTransferFeeRate() -> BasisPoints<u256> {
+    pub fn getTransferFeeRate() -> BasisPoints<u256>
+        requires(transfer_fee_rate <= 10000)
+    {
         return transfer_fee_rate;
     }
     
-    pub fn getBurnRate() -> BasisPoints<u256> {
+    pub fn getBurnRate() -> BasisPoints<u256>
+        requires(burn_rate <= 10000)
+    {
         return burn_rate;
     }
     
-    pub fn getMinTransfer() -> MinValue<u256, 1> {
+    pub fn getMinTransfer() -> MinValue<u256, 1>
+        requires(min_transfer >= 1)
+    {
         return min_transfer;
     }
     

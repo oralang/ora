@@ -16,9 +16,9 @@ pub fn UnionParser(comptime T: type) type {
         }
 
         pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) std.json.ParseFromValueError!T {
-            inline for (std.meta.fields(T)) |field| {
-                if (std.json.parseFromValueLeaky(field.type, allocator, source, options)) |result| {
-                    return @unionInit(T, field.name, result);
+            inline for (@typeInfo(T).@"union".field_names) |field| {
+                if (std.json.parseFromValueLeaky(@FieldType(T, field), allocator, source, options)) |result| {
+                    return @unionInit(T, field, result);
                 } else |_| {}
             }
             return error.UnexpectedToken;
@@ -115,13 +115,13 @@ pub fn EnumCustomStringValues(comptime T: type, comptime contains_empty_enum: bo
 
         const kvs = build_kvs: {
             const KV = struct { []const u8, T };
-            const fields = std.meta.fields(T);
+            const fields = @typeInfo(T).@"union".field_names;
             var kvs_array: [fields.len - 1]KV = undefined;
             for (fields[0 .. fields.len - 1], &kvs_array) |field, *kv| {
-                if (contains_empty_enum and std.mem.eql(u8, field.name, "empty")) {
+                if (contains_empty_enum and std.mem.eql(u8, field, "empty")) {
                     kv.* = .{ "", T.empty };
                 } else {
-                    kv.* = .{ field.name, @field(T, field.name) };
+                    kv.* = .{ field, @field(T, field) };
                 }
             }
             break :build_kvs kvs_array;
@@ -293,7 +293,7 @@ test EnumCustomStringValues {
 pub fn EnumStringifyAsInt(comptime T: type) type {
     return struct {
         pub fn jsonStringify(self: T, stream: anytype) @TypeOf(stream.*).Error!void {
-            try stream.write(@intFromEnum(self));
+            try stream.write(@backingInt(self));
         }
     };
 }
@@ -334,7 +334,7 @@ test EnumStringifyAsInt {
         try std.testing.expectFmt("0", "{f}", .{std.json.fmt(E.foo, .{})});
         try std.testing.expectFmt("3", "{f}", .{std.json.fmt(E.bar, .{})});
         try std.testing.expectFmt("4", "{f}", .{std.json.fmt(E.baz, .{})});
-        try std.testing.expectFmt("7", "{f}", .{std.json.fmt(@as(E, @enumFromInt(7)), .{})});
+        try std.testing.expectFmt("7", "{f}", .{std.json.fmt(@as(E, @fromBackingInt(@intCast(7))), .{})});
     }
 }
 

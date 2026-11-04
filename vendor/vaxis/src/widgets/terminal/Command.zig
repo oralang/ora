@@ -25,7 +25,7 @@ pub fn spawn(self: *Command, allocator: std.mem.Allocator) !void {
     const arena = arena_allocator.allocator();
 
     const argv_buf = try arena.allocSentinel(?[*:0]const u8, self.argv.len, null);
-    for (self.argv, 0..) |arg, i| argv_buf[i] = (try arena.dupeZ(u8, arg)).ptr;
+    for (self.argv, 0..) |arg, i| argv_buf[i] = (try arena.dupeSentinel(u8, arg, 0)).ptr;
 
     const envp = try createEnvironFromMap(arena, self.env_map);
 

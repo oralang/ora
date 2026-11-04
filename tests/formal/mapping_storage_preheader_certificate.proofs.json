@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "proofs": [
+    {
+      "query_id": 11,
+      "obligation_ids": [],
+      "assumption_ids": [3],
+      "module_name": "Ora.UserProof.MappingStoragePreheader",
+      "theorem_name": "Ora.UserProof.MappingStoragePreheader.discharge_q11",
+      "path": "tests/formal/mapping_storage_preheader_certificate.lean",
+      "content_sha256": null,
+      "inline_source": true
+    },
+    {
+      "query_id": 2,
+      "obligation_ids": [1],
+      "assumption_ids": [],
+      "module_name": "Ora.UserProof.MappingStoragePreheader",
+      "theorem_name": "Ora.UserProof.MappingStoragePreheader.discharge_q2",
+      "path": "tests/formal/mapping_storage_preheader_certificate.lean",
+      "content_sha256": null,
+      "inline_source": true
+    },
+    {
+      "query_id": 13,
+      "obligation_ids": [12],
+      "assumption_ids": [3],
+      "module_name": "Ora.UserProof.MappingStoragePreheader",
+      "theorem_name": "Ora.UserProof.MappingStoragePreheader.discharge_q13",
+      "path": "tests/formal/mapping_storage_preheader_certificate.lean",
+      "content_sha256": null,
+      "inline_source": true
+    }
+  ]
+}

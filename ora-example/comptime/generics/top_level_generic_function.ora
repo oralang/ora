@@ -1,0 +1,14 @@
+fn id(comptime T: type, x: T) -> T {
+    return x;
+}
+
+fn use_id(x: u256) -> u256 {
+    // A top-level helper can instantiate a top-level generic function.
+    return id(u256, x);
+}
+
+contract TopLevelGenericFunction {
+    pub fn roundtrip(x: u256) -> u256 {
+        return use_id(x);
+    }
+}

@@ -9,7 +9,9 @@ import re
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 FORMAL_ROOT = ROOT / "formal" / "Ora"
-TRANSIENT_TEST_MODULE_DIRS = frozenset({"B6StorageFixture", "ProofCheckScratch"})
+TRANSIENT_TEST_MODULE_DIRS = frozenset(
+    {"B6StorageFixture", "ProofCheckFixture", "ProofCheckScratch"}
+)
 
 LEAN_IDENT = r"[A-Za-z_][A-Za-z0-9_'?!]*"
 LEAN_DOTTED_IDENT = rf"{LEAN_IDENT}(?:\.{LEAN_IDENT})*"

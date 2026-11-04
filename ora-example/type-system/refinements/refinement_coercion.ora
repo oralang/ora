@@ -1,12 +1,17 @@
+comptime const std = @import("std");
+
 // ============================================================================
 // Type System Test: Refinement Type Coercion
 // ============================================================================
-// Tests refinement type coercions and conversions
+// Tests verified refinement conversions with explicit input contracts.
+// Entry guards reject out-of-contract inputs; conversion checks remain.
 // ============================================================================
 
 contract RefinementCoercion {
     // Coercion: Base type to refinement (requires guard)
-    pub fn testBaseToRefinement(value: u256) {
+    pub fn testBaseToRefinement(value: u256)
+        requires(value >= 100)
+    {
         // Requires runtime guard
         let min_value: MinValue<u256, 100> = value; // Guard inserted
     }
@@ -19,36 +24,42 @@ contract RefinementCoercion {
     // Coercion: More restrictive to less restrictive (subtyping)
     pub fn testRestrictiveToLessRestrictive() {
         let strict: MinValue<u256, 200> = 300;
-        let loose: MinValue<u256, 100> = strict; // No guard needed (subtyping)
+        let loose: MinValue<u256, 100> = strict; // Safe widening; verification proves the target predicate
     }
 
     // Coercion: Less restrictive to more restrictive (requires guard)
-    pub fn testLessRestrictiveToMoreRestrictive(value: MinValue<u256, 100>) {
+    pub fn testLessRestrictiveToMoreRestrictive(value: MinValue<u256, 100>)
+        requires(value >= 200)
+    {
         // Requires guard: value >= 200
-        // This will insert a runtime guard since value >= 100 doesn't guarantee value >= 200
+        // The stronger entry contract justifies the conversion; the parameter type alone cannot.
         let strict: MinValue<u256, 200> = value; // Guard inserted at runtime
     }
 
     // Coercion: NonZeroAddress to address (subtyping)
     pub fn testNonZeroToAddress(addr: NonZeroAddress) {
-        let address_val: address = addr; // No guard needed (subtyping)
+        let address_val: address = addr; // Safe widening; verification proves the target predicate
     }
 
     // Coercion: Address to NonZeroAddress (requires guard)
-    pub fn testAddressToNonZero(addr: address) {
+    pub fn testAddressToNonZero(addr: address)
+        requires(addr != std.constants.ZERO_ADDRESS)
+    {
         let nonzero: NonZeroAddress = addr; // Guard inserted
     }
 
     // Coercion: InRange narrowing (requires guard)
-    pub fn testInRangeNarrowing(value: InRange<u256, 0, 1000>) {
+    pub fn testInRangeNarrowing(value: InRange<u256, 0, 1000>)
+        requires(value >= 100 and value <= 200)
+    {
         // Requires guard: value >= 100 && value <= 200
-        // This will insert runtime guards since value in [0,1000] doesn't guarantee value in [100,200]
+        // The narrower entry contract supplies both required bounds.
         let narrow: InRange<u256, 100, 200> = value; // Guard inserted at runtime
     }
 
     // Coercion: InRange widening (no guard needed)
     pub fn testInRangeWidening(value: InRange<u256, 100, 200>) {
-        let wide: InRange<u256, 0, 1000> = value; // No guard needed (subtyping)
+        let wide: InRange<u256, 0, 1000> = value; // Safe widening; verification proves the target predicate
     }
 }
 

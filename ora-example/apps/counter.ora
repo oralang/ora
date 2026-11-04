@@ -9,7 +9,7 @@ contract Counter {
     }
 
     pub fn increment()
-        requires(counter < std.constants.U256_MAX)
+    requires counter < std.constants.U256_MAX
     {
         counter += 1;
     }

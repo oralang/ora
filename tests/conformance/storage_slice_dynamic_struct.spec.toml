@@ -100,6 +100,20 @@ args = [1, 2]
 returns = { u256 = 24 }
 
 [[call]]
+fn = "get_value(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [2, 0]
+reverts = { data = "0xdd8bfc7c" }
+
+[[call]]
+fn = "get_value(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1, 3]
+reverts = { data = "0xdd8bfc7c" }
+
+[[call]]
 fn = "get_tail(uint256)"
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0

@@ -18,7 +18,6 @@
 // CHECK: mload256
 
 // CHECK-LABEL: fn write_pair:
-// CHECK: [[PAIR_ONE:[A-Za-z0-9_]+]] = const 0x1
 // CHECK: [[PAIR_ZERO:[A-Za-z0-9_]+]] = const 0x0
 // CHECK: [[PAIR_BASE:v[0-9]+]] = icall @dataSlot v0
 // CHECK: [[PAIR_FIRST:v[0-9]+]] = add [[PAIR_BASE]] [[PAIR_ZERO]]
@@ -35,7 +34,6 @@
 // CHECK-LABEL: fn clear_pair:
 // CHECK: [[CLEAR_ONE:[A-Za-z0-9_]+]] = const 0x1
 // CHECK: [[CLEAR_ZERO:[A-Za-z0-9_]+]] = const 0x0
-// CHECK: [[CLEAR_COUNT:[A-Za-z0-9_]+]] = const 0x2
 // CHECK: [[CLEAR_BASE:v[0-9]+]] = icall @dataSlot v0
 // CHECK: [[CLEAR_MAX:v[0-9]+]] = add [[CLEAR_BASE]] [[CLEAR_ONE]]
 // CHECK: [[CLEAR_WRAP:v[0-9]+]] = lt [[CLEAR_MAX]] [[CLEAR_BASE]]

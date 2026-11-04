@@ -60,11 +60,9 @@ test "compiler converts aggregate ADT payload matches through compiler-managed p
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn sum:"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "entry v0 v1"));
     // Both Pair and Named payloads are 2-tuples dereferenced through the handle:
-    // mload256 v1 (lhs/code) plus mload256 (v1+0x20) (rhs/amount). With CSE
-    // enabled, the 0x20 offset can be shared across both variants.
+    // mload256 v1 (lhs/code) plus mload256 (v1+0x20) (rhs/amount).
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 4, "mload256"));
-    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "const 0x20"));
-    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "= add v1 "));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "= add v1 0x20"));
     try expectNoResidualOraRuntimeOps(rendered);
 }
 

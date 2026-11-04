@@ -1,0 +1,16 @@
+// The header is supported; automatic non-vacuity still needs a nonzero witness.
+// Keep both assumptions intact until the separately reviewed witness repair.
+contract LoopHeaderRefinementPositiveMinimum {
+    pub fn run(limit: InRange<u256, 1, 4>) -> u256
+        requires limit >= 1
+        requires limit <= 4
+    {
+        var i: u256 = 0;
+        while (i < limit)
+            invariant i <= limit
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+}

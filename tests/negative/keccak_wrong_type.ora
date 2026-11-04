@@ -1,0 +1,5 @@
+contract KeccakWrongType {
+    pub fn hash(value: u256) -> u256 {
+        return @keccak256(value);
+    }
+}

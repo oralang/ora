@@ -1,3 +1,5 @@
+// Refined getters require valid stored values; call the checked setters first.
+// These entry checks do not assume or prove a storage lifecycle invariant.
 // MinValue<u8, 1> — refinement on smaller width type
 
 contract MinValueU8 {
@@ -7,7 +9,9 @@ contract MinValueU8 {
         minByte = val;
     }
 
-    pub fn getMin() -> MinValue<u8, 1> {
+    pub fn getMin() -> MinValue<u8, 1>
+        requires(minByte >= 1)
+    {
         return minByte;
     }
 

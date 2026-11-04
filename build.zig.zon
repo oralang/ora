@@ -28,7 +28,7 @@
 
     // Tracks the earliest Zig version that the package considers to be a
     // supported use case.
-    .minimum_zig_version = "0.15.0",
+    .minimum_zig_version = "0.17.0",
 
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
@@ -42,10 +42,12 @@
     },
     .paths = .{
         "build.zig",
+        "build_tasks.zig",
         "build.zig.zon",
         "lib/evm/Cargo.toml",
         "lib/evm/Cargo.lock",
         "lib/evm/build.zig",
+        "lib/evm/c_bindings.zig",
         "lib/evm/build.zig.zon",
         "lib/evm/src",
         "lib/evm/vendor/c-kzg-4844",

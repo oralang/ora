@@ -1,0 +1,5 @@
+contract DynamicIndexCalldataWrite {
+    pub fn write(values: slice[u256], index: u256, value: u256) {
+        values[index] = value;
+    }
+}

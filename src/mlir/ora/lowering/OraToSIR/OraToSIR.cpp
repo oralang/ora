@@ -1455,6 +1455,7 @@ public:
         patterns.add<ConvertAssumeOp>(typeConverter, ctx);
         patterns.add<ConvertDecreasesOp>(typeConverter, ctx);
         patterns.add<ConvertIncreasesOp>(typeConverter, ctx);
+        patterns.add<ConvertLoopControlOp>(typeConverter, ctx);
         patterns.add<ConvertHavocOp>(typeConverter, ctx);
         patterns.add<ConvertQuantifiedOp>(typeConverter, ctx);
 
@@ -2943,6 +2944,42 @@ namespace mlir
                 bool changed = true;
 
                 DBG("Running Ora inlining pass...");
+
+                // Check only edges that this pass expands, before cloning any body.
+                // Shared callees are harmless; reaching the starting function is a cycle.
+                bool hasInlineCycle = false;
+                module.walk([&](mlir::func::FuncOp root)
+                            {
+                    SmallVector<mlir::func::FuncOp> pending{root};
+                    llvm::SmallPtrSet<Operation *, 16> visited;
+                    while (!pending.empty() && !hasInlineCycle)
+                    {
+                        auto current = pending.pop_back_val();
+                        auto attr = current->getAttrOfType<BoolAttr>("ora.inline");
+                        if (!attr || !attr.getValue() || !visited.insert(current.getOperation()).second)
+                            continue;
+                        current.walk([&](mlir::func::CallOp call)
+                                     {
+                            if (call->getParentOfType<mlir::func::FuncOp>() != current)
+                                return;
+                            auto callee = SymbolTable::lookupNearestSymbolFrom<mlir::func::FuncOp>(
+                                call.getOperation(), call.getCalleeAttr());
+                            if (callee == root)
+                            {
+                                call.emitError("recursive_inline_cycle: cannot inline recursive call to '")
+                                    << root.getName() << "'";
+                                hasInlineCycle = true;
+                            }
+                            else if (callee)
+                            {
+                                pending.push_back(callee);
+                            } });
+                    } });
+                if (hasInlineCycle)
+                {
+                    signalPassFailure();
+                    return;
+                }
 
                 // Iterate until no more inlining opportunities
                 while (changed)

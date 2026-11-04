@@ -1,0 +1,7 @@
+contract DynamicIndexBytesWrite {
+    storage var data: bytes;
+
+    pub fn write(index: u256, value: u8) {
+        data[index] = value;
+    }
+}

@@ -11,7 +11,7 @@ on:
 
 env:
   # Use the latest stable Zig version
-  ZIG_VERSION: 0.16.0
+  ZIG_VERSION: 0.17.0
   # Pin LLVM/MLIR revision to keep CI deterministic and API-compatible.
   LLVM_REPO_URL: https://github.com/llvm/llvm-project.git
   LLVM_COMMIT: ee8c14be14deabace692ab51f5d5d432b0a83d58
@@ -346,7 +346,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        zig-version: [0.16.0]
+        zig-version: [0.17.0]
     
     steps:
       - name: Checkout code

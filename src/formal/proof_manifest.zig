@@ -17,6 +17,7 @@ pub const ProofRow = struct {
     theorem_name: []const u8,
     path: ?[]const u8 = null,
     content_sha256: ?[]const u8 = null,
+    inline_source: bool = false,
 };
 
 pub const ParseResult = struct {
@@ -42,6 +43,7 @@ const ProofRowJson = struct {
     theorem_name: []const u8,
     path: ?[]const u8 = null,
     content_sha256: ?[]const u8 = null,
+    inline_source: bool = false,
 };
 
 pub fn parseProofManifestJson(
@@ -68,6 +70,7 @@ pub fn parseProofManifestJson(
             .theorem_name = row.theorem_name,
             .path = row.path,
             .content_sha256 = row.content_sha256,
+            .inline_source = row.inline_source,
         };
     }
 
@@ -89,7 +92,8 @@ test "parse proof manifest json" {
         \\      "module_name": "Ora.UserProofs",
         \\      "theorem_name": "Ora.UserProofs.transfer",
         \\      "path": "formal/Ora/UserProofs.lean",
-        \\      "content_sha256": null
+        \\      "content_sha256": null,
+        \\      "inline_source": true
         \\    }
         \\  ]
         \\}
@@ -106,6 +110,7 @@ test "parse proof manifest json" {
     try std.testing.expectEqualStrings("Ora.UserProofs.transfer", parsed.rows[0].theorem_name);
     try std.testing.expectEqualStrings("formal/Ora/UserProofs.lean", parsed.rows[0].path.?);
     try std.testing.expect(parsed.rows[0].content_sha256 == null);
+    try std.testing.expect(parsed.rows[0].inline_source);
 }
 
 test "proof manifest schema version is required" {

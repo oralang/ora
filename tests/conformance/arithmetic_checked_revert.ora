@@ -24,6 +24,22 @@ contract ArithmeticCheckedRevert {
         return a / b;
     }
 
+    pub fn checked_div(a: u256, b: u256) -> u256 {
+        return a / b;
+    }
+
+    pub fn checked_rem(a: u256, b: u256) -> u256 {
+        return a % b;
+    }
+
+    pub fn checked_signed_div(a: i8, b: i8) -> i8 {
+        return a / b;
+    }
+
+    pub fn checked_signed_rem(a: i8, b: i8) -> i8 {
+        return a % b;
+    }
+
     fn private_div(a: u256, b: u256) -> u256
         requires b != 0
     {

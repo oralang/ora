@@ -1,0 +1,18 @@
+contract BranchStorageLoopAuto {
+    storage var low: u256;
+    storage var high: u256;
+
+    pub fn fill() {
+        var i: u256 = 0;
+        while (i < 4)
+            invariant i <= 4
+        {
+            if (i < 2) {
+                low = i;
+            } else {
+                high = i;
+            }
+            i = i +% 1;
+        }
+    }
+}

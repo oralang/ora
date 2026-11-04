@@ -53,7 +53,11 @@ pub const PreparedIdentityView = struct {
     queries: []const PreparedQueryIdentity,
     boundary_queries: []const PreparedBoundaryQueryIdentity = &.{},
     runtime_function_names: []const []const u8,
+    inactive_runtime_owners: ?[]const InactiveRuntimeOwner = null,
 };
+
+/// Structural producer identities, independent of queries and solver outcomes.
+pub const InactiveRuntimeOwner = struct { source_op_id: usize, module_path: []const u8, owner_key: []const u8 };
 
 pub const PreparedIdentity = struct {
     query_storage: []PreparedQueryIdentity,
@@ -62,11 +66,14 @@ pub const PreparedIdentity = struct {
     queries: []const PreparedQueryIdentity,
     boundary_queries: []const PreparedBoundaryQueryIdentity,
     runtime_function_names: []const []const u8,
+    // Row strings borrow the prepared manifest, which must outlive this identity.
+    inactive_runtime_owners: ?[]const InactiveRuntimeOwner = null,
 
     pub fn deinit(self: *PreparedIdentity, allocator: std.mem.Allocator) void {
         allocator.free(self.query_storage);
         allocator.free(self.boundary_query_storage);
         allocator.free(self.function_storage);
+        if (self.inactive_runtime_owners) |rows| allocator.free(rows);
         self.* = undefined;
     }
 
@@ -75,6 +82,7 @@ pub const PreparedIdentity = struct {
             .queries = self.queries,
             .boundary_queries = self.boundary_queries,
             .runtime_function_names = self.runtime_function_names,
+            .inactive_runtime_owners = self.inactive_runtime_owners,
         };
     }
 };
@@ -146,6 +154,70 @@ pub fn collectPreparedIdentity(allocator: std.mem.Allocator, rows: []const prepa
         .boundary_queries = boundary_query_storage,
         .runtime_function_names = function_storage[0..unique_function_count],
     };
+}
+
+/// Add compiler-owned canonical LoopVC post queries to the accounting
+/// producer inventory. This records that the source fact has a real canonical
+/// query; it does not record a solver result or grant artifact authority.
+/// Canonical Z3 evaluation and Lean certificate checking remain separate,
+/// mandatory downstream gates.
+pub fn includeCanonicalLoopPostQueries(
+    allocator: std.mem.Allocator,
+    identity: *PreparedIdentity,
+    prepared_row_count: usize,
+    set: obligation.ObligationSet,
+) !void {
+    var additional_count: usize = 0;
+    for (set.queries) |query| {
+        if (!isSourceOwnedCanonicalLoopPost(query)) continue;
+        if (preparedIdentityContainsFormalQuery(identity.queries, query.id)) continue;
+        additional_count += 1;
+    }
+    if (additional_count == 0) return;
+
+    const combined = try allocator.alloc(PreparedQueryIdentity, identity.queries.len + additional_count);
+    errdefer allocator.free(combined);
+    @memcpy(combined[0..identity.queries.len], identity.queries);
+
+    var write_index = identity.queries.len;
+    var canonical_ordinal: usize = 0;
+    for (set.queries) |query| {
+        if (!isSourceOwnedCanonicalLoopPost(query)) continue;
+        if (preparedIdentityContainsFormalQuery(identity.queries, query.id)) continue;
+        canonical_ordinal += 1;
+        const producer_value = std.math.add(usize, prepared_row_count, canonical_ordinal) catch
+            return error.SourceAccountingPreparedQueryProducerIdOverflow;
+        const producer_id = std.math.cast(u32, producer_value) orelse
+            return error.SourceAccountingPreparedQueryProducerIdOverflow;
+        combined[write_index] = .{
+            .producer_id = producer_id,
+            .formal_query_id = query.id,
+            .kind = .loop_invariant_post,
+        };
+        write_index += 1;
+    }
+
+    allocator.free(identity.query_storage);
+    identity.query_storage = combined;
+    identity.queries = combined;
+}
+
+fn isSourceOwnedCanonicalLoopPost(query: obligation.VerificationQuery) bool {
+    return query.kind == .loop_invariant_post and
+        query.backend == .z3 and
+        query.artifact_policy == .blocks_verified_artifacts and
+        query.loop_vc_sha256 != null and
+        query.loop_summary_id != null and
+        query.loop_edge_id != null and
+        query.obligation_ids.len != 0;
+}
+
+fn preparedIdentityContainsFormalQuery(
+    rows: []const PreparedQueryIdentity,
+    query_id: obligation.Id,
+) bool {
+    for (rows) |row| if (row.formal_query_id == query_id) return true;
+    return false;
 }
 
 pub fn bindPreparedQueries(
@@ -448,7 +520,7 @@ fn queryKind(kind: obligation.VerificationQueryKind) accounting.QueryKind {
         .base, .obligation => .obligation,
         // This compiler-owned Lean target has no prepared Z3 producer and
         // therefore must never authorize a source-formal use.
-        .loop_induction => .other,
+        .loop_base, .loop_induction => .other,
         .loop_invariant_step => .loop_invariant_step,
         .loop_body_safety => .loop_body_safety,
         .loop_invariant_post => .loop_invariant_post,
@@ -526,8 +598,8 @@ fn containsId(ids: []const obligation.Id, id: obligation.Id) bool {
 }
 
 test "prepared query kind mapping is exhaustive" {
-    inline for (std.meta.fields(obligation.VerificationQueryKind)) |field| {
-        const kind: obligation.VerificationQueryKind = @enumFromInt(field.value);
+    inline for (@typeInfo(obligation.VerificationQueryKind).@"enum".field_names) |field| {
+        const kind: obligation.VerificationQueryKind = @fromBackingInt(@intCast(@backingInt(@field(obligation.VerificationQueryKind, field))));
         _ = queryKind(kind);
     }
 }
@@ -550,6 +622,45 @@ test "prepared verifier identity preserves row order and repeated formal identit
     try std.testing.expectEqual(accounting.QueryKind.loop_invariant_step, identity.queries[1].kind);
     try std.testing.expectEqual(@as(usize, 1), identity.runtime_function_names.len);
     try std.testing.expectEqualStrings("run", identity.runtime_function_names[0]);
+}
+
+test "canonical LoopVC post queries extend accounting identity without solver authority" {
+    const rows = [_]prepared_query.Row{
+        .{ .kind = .obligation, .function_name = "run", .match_status = .matched, .query_id = 7 },
+        .{ .kind = .obligation, .function_name = "run" },
+        .{ .kind = .obligation, .function_name = "run" },
+    };
+    var identity = try collectPreparedIdentity(std.testing.allocator, &rows);
+    defer identity.deinit(std.testing.allocator);
+
+    const obligation_ids = [_]obligation.Id{11};
+    const digest = @as([32]u8, @splat(0xa5));
+    const queries = [_]obligation.VerificationQuery{.{
+        .id = 9,
+        .owner = .{ .function = .{ .name = "run" } },
+        .source = .generated(),
+        .phase = .report,
+        .origin = .source,
+        .backend = .z3,
+        .kind = .loop_invariant_post,
+        .logical_role = .ensures,
+        .obligation_ids = &obligation_ids,
+        .loop_summary_id = 3,
+        .loop_edge_id = 1,
+        .loop_vc_sha256 = digest,
+    }};
+    try includeCanonicalLoopPostQueries(
+        std.testing.allocator,
+        &identity,
+        rows.len,
+        .{ .queries = &queries },
+    );
+
+    try std.testing.expectEqual(@as(usize, 2), identity.queries.len);
+    try std.testing.expectEqual(@as(u32, 1), identity.queries[0].producer_id);
+    try std.testing.expectEqual(@as(u32, 4), identity.queries[1].producer_id);
+    try std.testing.expectEqual(@as(obligation.Id, 9), identity.queries[1].formal_query_id);
+    try std.testing.expectEqual(accounting.QueryKind.loop_invariant_post, identity.queries[1].kind);
 }
 
 test "prepared verifier identity preserves symbolic call-boundary identity" {

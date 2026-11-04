@@ -1,0 +1,12 @@
+contract C {
+ pub fn run(n: u256) -> u256 requires n <= 100 {
+  var sum: u256 = 0;
+  var i: u256 = 1;
+  while (i <= n)
+   invariant(i >= 1)
+   invariant(i <= n + 1)
+   invariant(sum <= 100 * (i - 1))
+  { sum = sum + i; i = i + 1; }
+  return sum;
+ }
+}

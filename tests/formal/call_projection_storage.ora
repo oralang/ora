@@ -1,0 +1,8 @@
+contract Storage {
+    storage var value: u256;
+    fn touch(x: u256) -> u256 { let previous: u256 = value; value = x; return previous; }
+    pub fn run() {
+        var i: u256 = 0;
+        while (i < 1) invariant i <= 1 { let previous: u256 = touch(i); i = i +% 1; }
+    }
+}

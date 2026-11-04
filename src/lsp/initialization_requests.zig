@@ -62,7 +62,7 @@ pub fn initialize(
         },
     };
 
-    if (@import("builtin").mode == .Debug) {
+    if (@import("builtin").mode == .debug) {
         lsp.basic_server.validateServerCapabilities(@TypeOf(server.*), capabilities);
     }
 

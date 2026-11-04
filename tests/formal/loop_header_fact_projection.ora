@@ -1,0 +1,91 @@
+contract LoopHeaderFactProjection {
+    storage var observed: u256;
+
+    pub fn fromRequires(limit: u256) -> u256
+    requires limit <= 4
+    {
+        var i: u256 = 0;
+        while (i < limit)
+        invariant i <= limit
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+
+    pub fn fromFallthrough(limit: u256) -> u256 {
+        if (limit > 4) {
+            return 0;
+        }
+        var i: u256 = 0;
+        while (i < limit)
+        invariant i <= 4
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+
+    pub fn acrossEarlierLoop(limit: u256) -> u256
+    requires limit <= 4
+    {
+        var first: u256 = 0;
+        while (first < 1)
+        invariant first <= 1
+        {
+            first = first + 1;
+        }
+
+        var second: u256 = 0;
+        while (second < limit)
+        invariant second <= limit
+        {
+            second = second + 1;
+        }
+        return second;
+    }
+
+    pub fn fromDynamicLength(values: slice[u256]) -> u256 {
+        if (values.len > 4) {
+            return 0;
+        }
+        var i: u256 = 0;
+        while (i < values.len)
+        invariant i <= 4
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+
+    pub fn storageDerivedFact(limit: u256) -> u256 {
+        if (observed > limit) {
+            return 0;
+        }
+        var i: u256 = 0;
+        while (i < limit)
+        invariant i <= limit
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+
+    fn identity(value: u256) -> u256 {
+        return value;
+    }
+
+    pub fn callBetweenFactAndLoop(limit: u256) -> u256 {
+        if (limit > 4) {
+            return 0;
+        }
+        let bound: u256 = identity(limit);
+        var i: u256 = 0;
+        while (i < bound)
+        invariant i <= 4
+        {
+            i = i + 1;
+        }
+        return i;
+    }
+}

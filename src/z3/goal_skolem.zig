@@ -27,10 +27,11 @@ pub fn nameZ(
         if (required > name_buffer_len) @compileError("goal skolem name buffer cannot hold the maximum generated name");
     }
     const binder_name = sanitizeBinderName(binder_buffer[0..], raw_binder_name);
-    return std.fmt.bufPrintZ(
+    return std.mem.printSentinel(
         out[0..],
         "$ora.goal.skolem.{s}.{d}",
         .{ binder_name, depth },
+        0,
     ) catch unreachable;
 }
 

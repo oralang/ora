@@ -1,0 +1,32 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "read_byte(bytes,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x010203", 2]
+returns = { u8 = 3 }
+
+[[call]]
+fn = "read_byte(bytes,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x010203", 3]
+reverts = { any = true }
+
+[[call]]
+fn = "read_text(string,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["ora", 2]
+returns = { u8 = 97 }
+
+[[call]]
+fn = "read_text(string,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["ora", 3]
+reverts = { any = true }

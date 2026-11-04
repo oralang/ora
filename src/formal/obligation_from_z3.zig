@@ -9,6 +9,7 @@ const std = @import("std");
 const z3_verification = @import("ora_z3_verification");
 const obligation = @import("obligation.zig");
 const obligation_to_z3 = @import("obligation_to_z3.zig");
+const obligation_to_lean = @import("obligation_to_lean.zig");
 
 pub const CollectResult = struct {
     arena: std.heap.ArenaAllocator,
@@ -95,7 +96,16 @@ pub fn overlayPreparedQueryResults(
     for (base.queries) |query| {
         var match_index: ?usize = null;
         var duplicate = false;
+        // Base is a compatibility source for guards without an explicit row,
+        // never a competing proof selected by its result or position.
+        const explicit_guard_satisfy = query.kind == .guard_satisfy and blk: {
+            for (rows) |row| {
+                if (row.kind == .GuardSatisfy and queryMatchesPreparedRow(query, row)) break :blk true;
+            }
+            break :blk false;
+        };
         for (rows, 0..) |row, index| {
+            if (explicit_guard_satisfy and queryMatchesSourceGuardSatisfyRow(query, row)) continue;
             if (row_matched[index] and !queryCanSharePreparedRow(query, row)) continue;
             if (!queryMatchesPreparedRow(query, row)) continue;
             if (match_index != null) {
@@ -150,11 +160,45 @@ pub fn overlayPreparedQueryResults(
         // A clean proved row cannot be opened by a Lean proof and has already
         // been discharged by the SMT gate. Vacuity/caveat flags are still
         // artifact blockers, so those rows must remain visible.
-        if (unmatchedCleanUnsatRow(row)) continue;
+        if (row.lifecycle_dependency == null and row.lifecycle_use == null and unmatchedCleanUnsatRow(row)) continue;
         try appendUnmatchedRowDiagnostic(arena_allocator, &diagnostics, row);
     }
 
+    try applyCanonicalLoopQueryResults(
+        arena_allocator,
+        base,
+        queries.items,
+        &diagnostics,
+        &canonical_context,
+    );
+
     var merged = base;
+    var lifecycle_uses: std.ArrayList(@import("ora_prepared_query_row").LifecycleQueryUse) = .empty;
+    for (rows) |row| if (row.lifecycle_use) |use| {
+        try lifecycle_uses.append(arena_allocator, use);
+    } else if (row.lifecycle_dependency != null) return error.MissingLifecycleUse;
+    merged.lifecycle_uses = lifecycle_uses.items;
+    if (base.function_summaries.len != 0) {
+        const functions = try arena_allocator.dupe(obligation.FunctionSummaryRow, base.function_summaries);
+        var next: obligation.Id = 1;
+        for (queries.items) |query| next = @max(next, query.id + 1);
+        if (canonical_context == null) canonical_context = try z3_verification.Z3Context.init(arena_allocator);
+        var adapter = obligation_to_z3.Adapter.init(&canonical_context.?, arena_allocator, base);
+        for (functions) |*function| {
+            const digest = try obligation_to_lean.functionVcSha256(base, function.id);
+            const checked = try adapter.checkFunctionSafety(function.id, digest, next);
+            var safety = checked.query;
+            safety.function_summary_id = function.id;
+            safety.function_vc_sha256 = digest;
+            try queries.append(arena_allocator, safety);
+            function.query_ids.safety = try arena_allocator.dupe(obligation.Id, &.{next});
+            next += 1;
+            function.query_ids.certificate = next;
+            try queries.append(arena_allocator, .{ .id = next, .owner = function.owner, .source = function.source, .phase = .report, .origin = function.origin, .kind = .obligation, .assumption_ids = function.assumption_ids, .proof_requirement = .lean_certificate, .function_summary_id = function.id, .function_vc_sha256 = digest });
+            next += 1;
+        }
+        merged.function_summaries = functions;
+    }
     merged.queries = try queries.toOwnedSlice(arena_allocator);
     merged.diagnostics = try diagnostics.toOwnedSlice(arena_allocator);
 
@@ -171,6 +215,7 @@ fn queryRequiresPreparedRow(set: obligation.ObligationSet, query: obligation.Ver
     // Step/Safety/Post checks remain ordinary verifier rows, but the aggregate
     // certificate target deliberately has no synthetic Z3 counterpart.
     if (query.kind == .loop_induction) return false;
+    if (query.loop_vc_sha256 != null) return false;
     if (query.obligation_ids.len == 0) return true;
 
     for (query.obligation_ids) |id| {
@@ -178,6 +223,108 @@ fn queryRequiresPreparedRow(set: obligation.ObligationSet, query: obligation.Ver
         if (item.kind != .effect_frame) return true;
     }
     return false;
+}
+
+fn applyCanonicalLoopQueryResults(
+    allocator: std.mem.Allocator,
+    set: obligation.ObligationSet,
+    queries: []obligation.VerificationQuery,
+    diagnostics: *std.ArrayList(obligation.ObligationDiagnostic),
+    canonical_context: *?z3_verification.Z3Context,
+) !void {
+    for (queries) |*query| {
+        if (!isCanonicalLoopZ3Query(query.*)) continue;
+        const summary_id = query.loop_summary_id orelse unreachable;
+        const expected_digest = obligation_to_lean.loopVcSha256(set, summary_id) catch |err| {
+            try appendCanonicalLoopDiagnostic(allocator, diagnostics, query.*, @errorName(err));
+            continue;
+        };
+        if (query.loop_vc_sha256 == null or !std.mem.eql(
+            u8,
+            &query.loop_vc_sha256.?,
+            &expected_digest,
+        )) {
+            try appendCanonicalLoopDiagnostic(allocator, diagnostics, query.*, "loop_vc_sha256_mismatch");
+            continue;
+        }
+        if (canonical_context.* == null) {
+            canonical_context.* = try z3_verification.Z3Context.init(allocator);
+        }
+        var adapter = obligation_to_z3.Adapter.init(&canonical_context.*.?, allocator, set);
+        const checked = adapter.checkLoopQueryForRow(query.*) catch |err| {
+            try appendCanonicalLoopDiagnostic(
+                allocator,
+                diagnostics,
+                query.*,
+                obligation_to_z3.encodeErrorReason(err),
+            );
+            continue;
+        };
+        query.constraint_count = checked.query_hash.constraint_count;
+        query.smtlib_hash = checked.query_hash.smtlib_hash;
+        query.result = .{ .status = switch (checked.status) {
+            .proved => .proved,
+            .disproved => .failed,
+            .unknown => .unknown,
+        } };
+    }
+}
+
+fn isCanonicalLoopZ3Query(query: obligation.VerificationQuery) bool {
+    if (query.artifact_policy == .diagnostic_only or query.backend != .z3) return false;
+    if (query.loop_summary_id == null) return false;
+    return switch (query.kind) {
+        .loop_base, .loop_invariant_step, .loop_body_safety, .loop_invariant_post => true,
+        else => false,
+    };
+}
+
+fn appendCanonicalLoopDiagnostic(
+    allocator: std.mem.Allocator,
+    diagnostics: *std.ArrayList(obligation.ObligationDiagnostic),
+    query: obligation.VerificationQuery,
+    reason: []const u8,
+) !void {
+    const message = try std.fmt.allocPrint(
+        allocator,
+        "canonical LoopVC Z3 query id={d} could not be checked: {s}",
+        .{ query.id, reason },
+    );
+    try diagnostics.append(allocator, .{
+        .kind = .canonical_z3_unavailable,
+        .source = query.source,
+        .message = message,
+        .blocks_artifacts = true,
+    });
+}
+
+test "canonical LoopVC diagnostic names an untouched storage root" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var diagnostics: std.ArrayList(obligation.ObligationDiagnostic) = .empty;
+    defer diagnostics.deinit(arena.allocator());
+    const query: obligation.VerificationQuery = .{
+        .id = 7,
+        .owner = .{ .function = .{ .name = "untouchedRoot" } },
+        .source = .generated(),
+        .phase = .ora_mlir,
+        .origin = .source,
+        .kind = .loop_body_safety,
+    };
+    try appendCanonicalLoopDiagnostic(
+        arena.allocator(),
+        &diagnostics,
+        query,
+        obligation_to_z3.encodeErrorReason(error.LoopStorageRootUntouched),
+    );
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+    try std.testing.expect(std.mem.containsAtLeast(
+        u8,
+        diagnostics.items[0].message,
+        1,
+        "loop_storage_root_untouched",
+    ));
+    try std.testing.expect(diagnostics.items[0].blocks_artifacts);
 }
 
 fn appendCanonicalSmtCrosscheckDiagnostic(
@@ -265,6 +412,7 @@ fn optionalFile(allocator: std.mem.Allocator, file: []const u8) !?[]const u8 {
 }
 
 fn applyRowMetadata(query: *obligation.VerificationQuery, row: z3_verification.PreparedQueryManifestRow) void {
+    query.lifecycle_use = row.lifecycle_use;
     query.backend = .z3;
     query.fragment = queryFragment(row.fragment);
     query.solver_logic = querySolverLogic(row.solver_logic);
@@ -335,11 +483,11 @@ fn logicalRole(kind: ?z3_verification.AnnotationKind) ?obligation.LogicalRole {
 }
 
 test "formal logical role labels stay in lockstep with the obligation vocabulary" {
-    inline for (std.meta.fields(z3_verification.AnnotationKind)) |field| {
-        const kind: z3_verification.AnnotationKind = @enumFromInt(field.value);
+    inline for (@typeInfo(z3_verification.AnnotationKind).@"enum".field_names) |field| {
+        const kind: z3_verification.AnnotationKind = @fromBackingInt(@intCast(@backingInt(@field(z3_verification.AnnotationKind, field))));
         if (z3_verification.formalLogicalRoleLabel(kind)) |label| {
             if (std.meta.stringToEnum(obligation.LogicalRole, label) == null) {
-                std.debug.print("annotation kind {s} produces label '{s}' with no obligation.LogicalRole member\n", .{ field.name, label });
+                std.debug.print("annotation kind {s} produces label '{s}' with no obligation.LogicalRole member\n", .{ field, label });
                 return error.LogicalRoleVocabularyDrift;
             }
         }
@@ -347,6 +495,9 @@ test "formal logical role labels stay in lockstep with the obligation vocabulary
 }
 
 fn queryMatchesPreparedRow(query: obligation.VerificationQuery, row: z3_verification.PreparedQueryManifestRow) bool {
+    // Canonical LoopVC queries are built directly from the backend-neutral VC
+    // below. Legacy verifier rows cannot satisfy or duplicate that authority.
+    if (query.loop_vc_sha256 != null) return false;
     if (row.formal_query_id) |id| {
         return query.id == id and
             obligation.equalIdSlices(query.assumption_ids, row.formal_assumption_ids) and
@@ -626,6 +777,82 @@ test "guard violate rows remain outside proof target formal identity" {
     };
 
     try std.testing.expect(queryMatchesPreparedRow(query, row));
+}
+
+test "refinement header guard matching preserves explicit authority and Base compatibility" {
+    const query: obligation.VerificationQuery = .{
+        .id = 1,
+        .owner = .{ .function = .{ .name = "bounded" } },
+        .source = .{ .file = "bounds.ora", .line = 3, .column = 5 },
+        .phase = .ora_mlir,
+        .origin = .source,
+        .kind = .guard_satisfy,
+        .guard_id = "guard:bounds.ora:3:5:InRange:limit",
+    };
+    const set: obligation.ObligationSet = .{ .queries = &.{query} };
+    const base: z3_verification.PreparedQueryManifestRow = .{
+        .kind = .Base,
+        .function_name = "bounded",
+        .file = "bounds.ora",
+        .line = 3,
+        .column = 5,
+        .smtlib_hash = 11,
+        .result_status = .sat,
+    };
+    const explicit: z3_verification.PreparedQueryManifestRow = .{
+        .kind = .GuardSatisfy,
+        .function_name = "bounded",
+        .file = "bounds.ora",
+        .line = 3,
+        .column = 5,
+        .guard_id = query.guard_id,
+        .smtlib_hash = 22,
+        .result_status = .sat,
+    };
+
+    // Explicit results win in either order, including when Base is SAT but
+    // the explicit guard did not succeed. No status-dependent fallback.
+    const Case = struct {
+        status: z3_verification.QueryResultStatus,
+        decision: obligation.ArtifactDecision,
+    };
+    for ([_]Case{
+        .{ .status = .sat, .decision = .allowed },
+        .{ .status = .unknown, .decision = .{ .blocked = .unknown_query } },
+        .{ .status = .unsat, .decision = .{ .blocked = .failed_query } },
+    }) |case| {
+        var row = explicit;
+        row.result_status = case.status;
+        for ([_]bool{ false, true }) |reverse| {
+            const rows = if (reverse) [_]z3_verification.PreparedQueryManifestRow{ row, base } else .{ base, row };
+            var overlay = try overlayPreparedQueryResults(std.testing.allocator, set, &rows);
+            defer overlay.deinit();
+            try std.testing.expect(!overlay.set.hasBlockingDiagnostic());
+            try std.testing.expectEqual(@as(?u64, 22), overlay.set.queries[0].smtlib_hash);
+            try std.testing.expectEqualDeep(case.decision, overlay.set.artifactDecision());
+        }
+    }
+
+    var compatibility = try overlayPreparedQueryResults(std.testing.allocator, set, &.{base});
+    defer compatibility.deinit();
+    try std.testing.expect(!compatibility.set.hasBlockingDiagnostic());
+    try std.testing.expectEqual(@as(?u64, 11), compatibility.set.queries[0].smtlib_hash);
+    try std.testing.expectEqualDeep(obligation.ArtifactDecision.allowed, compatibility.set.artifactDecision());
+
+    // Duplicate exact rows still reject, as do duplicate compatibility rows
+    // when no explicit row exists. The precedence rule cannot hide ambiguity.
+    for ([_][]const z3_verification.PreparedQueryManifestRow{
+        &.{ base, explicit, explicit },
+        &.{ base, base },
+    }) |rows| {
+        var duplicate = try overlayPreparedQueryResults(std.testing.allocator, set, rows);
+        defer duplicate.deinit();
+        try std.testing.expectEqualDeep(
+            obligation.ArtifactDecision{ .blocked = .blocking_diagnostic },
+            duplicate.set.artifactDecision(),
+        );
+        try std.testing.expect(std.mem.indexOf(u8, duplicate.set.diagnostics[0].message, "multiple SMT prepared-query rows") != null);
+    }
 }
 
 test "canonical SMT hash crosscheck accepts matching supported formula row" {

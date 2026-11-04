@@ -75,14 +75,14 @@ comptime {
     // Keep the LSP-facing state list in lockstep with the language enum —
     // a state added to one but not the other must not compile.
     const CallHint = @import("ast/nodes.zig").CallHint;
-    const fields = @typeInfo(CallHint).@"enum".fields;
+    const fields = @typeInfo(CallHint).@"enum".field_names;
     if (call_hint_states.len != fields.len) @compileError("call_hint_states must cover every ast.nodes.CallHint state");
     for (fields) |field| {
         var found = false;
         for (call_hint_states) |state| {
-            if (std.mem.eql(u8, state.name, field.name)) found = true;
+            if (std.mem.eql(u8, state.name, field)) found = true;
         }
-        if (!found) @compileError("call_hint_states missing CallHint state: " ++ field.name);
+        if (!found) @compileError("call_hint_states missing CallHint state: " ++ field);
     }
 }
 
@@ -165,7 +165,7 @@ pub fn entryForKind(kind: Kind) Entry {
 
 comptime {
     @setEvalBranchQuota(5000);
-    if (entries.len != @typeInfo(Kind).@"enum".fields.len) {
+    if (entries.len != @typeInfo(Kind).@"enum".field_names.len) {
         @compileError("builtin function registry must cover every BuiltinKind");
     }
     for (entries, 0..) |entry, index| {

@@ -1,0 +1,11 @@
+contract Leaf {
+    fn identity(x: u256) -> u256 { return x; }
+    pub fn run(input: u256) -> u256 {
+        var i: u256 = 0;
+        while (i < 1) invariant i <= 1 {
+            let next: u256 = identity(input);
+            if (next == 0) { i = i +% 1; } else { i = 1; }
+        }
+        return i;
+    }
+}

@@ -99,4 +99,28 @@ theorem unsupported_effect_frame_relation_fails_closed
       { relation := .lockCoversWrite, declared := declared, actual := actual }) = none := by
   rfl
 
+/-- A checked witness for stronger assumptions establishes original nonvacuity. -/
+theorem strengthened_sat_implies_original {State : Type} (assumptions pin : State → Prop)
+    (witness : ∃ state, assumptions state ∧ pin state) :
+    ∃ state, assumptions state := by
+  obtain ⟨state, h, _⟩ := witness
+  exact ⟨state, h⟩
+
+/-- Failure to find the pinned witness gives no contradictory-assumptions verdict. -/
+theorem pinned_unsat_does_not_establish_original_unsat :
+    ¬ (∀ (assumptions pin : Bool → Prop),
+      (¬ ∃ state, assumptions state ∧ pin state) → ¬ ∃ state, assumptions state) := by
+  intro h
+  exact h (fun _ => True) (fun _ => False) (by simp) ⟨true, trivial⟩
+
+/-- The counterexample search must remain unpinned. -/
+theorem pinned_safety_does_not_establish_original_safety :
+    ¬ (∀ (assumptions pin safe : Bool → Prop),
+      (∀ state, assumptions state → pin state → safe state) →
+      ∀ state, assumptions state → safe state) := by
+  intro h
+  have bad := h (fun _ => True) (fun state => state = false)
+    (fun state => state = false) (fun _ _ hp => hp) true trivial
+  cases bad
+
 end Ora.Obligation

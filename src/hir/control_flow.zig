@@ -67,6 +67,24 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn lowerIfStmt(self: *FunctionLowerer, if_stmt: ast.IfStmt, locals: *LocalEnv) anyerror!bool {
+            const controls_unrolled_loop = self.unrolled_loop_context != null and
+                (bodyContainsLoopControl(self.parent.file, if_stmt.then_body) or
+                    (if_stmt.else_body != null and bodyContainsLoopControl(self.parent.file, if_stmt.else_body.?)));
+            if (controls_unrolled_loop) {
+                if (self.evalKnownBoolExpr(if_stmt.condition, locals)) |take_then| {
+                    if (take_then) return self.lowerBody(if_stmt.then_body, locals);
+                    if (if_stmt.else_body) |else_body| return self.lowerBody(else_body, locals);
+                    return false;
+                }
+                try self.parent.emitLoweringError(
+                    if_stmt.range,
+                    "cannot unroll loop control whose branch condition is not statically known",
+                    .{},
+                );
+                try self.appendUnsupportedControlPlaceholder("ora.if_placeholder", if_stmt.range);
+                return true;
+            }
+
             if (self.parent.const_eval.values[if_stmt.condition.index()]) |value| {
                 switch (value) {
                     .boolean => |take_then| {
@@ -600,7 +618,19 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const break_flag_clear = appendValueOp(before_block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
                 const loop_enabled = before_lowerer.createCompareOp(loc, "eq", break_flag_value, break_flag_clear);
                 if (mlir.oraOperationIsNull(loop_enabled)) return error.MlirOperationCreationFailed;
-                condition = appendValueOp(before_block, mlir.oraArithAndIOpCreate(self.parent.context, loc, appendValueOp(before_block, loop_enabled), condition));
+                const guarded_condition = mlir.oraArithAndIOpCreate(
+                    self.parent.context,
+                    loc,
+                    appendValueOp(before_block, loop_enabled),
+                    condition,
+                );
+                if (mlir.oraOperationIsNull(guarded_condition)) return error.MlirOperationCreationFailed;
+                mlir.oraOperationSetAttributeByName(
+                    guarded_condition,
+                    strRef("ora.loop_source_guard_operand"),
+                    mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.parent.context), 1),
+                );
+                condition = appendValueOp(before_block, guarded_condition);
             }
             if (has_return) {
                 const return_flag = self.deferred_return_flag.?;
@@ -612,7 +642,19 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const return_flag_clear = appendValueOp(before_block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0));
                 const return_enabled = before_lowerer.createCompareOp(loc, "eq", return_flag_value, return_flag_clear);
                 if (mlir.oraOperationIsNull(return_enabled)) return error.MlirOperationCreationFailed;
-                condition = appendValueOp(before_block, mlir.oraArithAndIOpCreate(self.parent.context, loc, appendValueOp(before_block, return_enabled), condition));
+                const guarded_condition = mlir.oraArithAndIOpCreate(
+                    self.parent.context,
+                    loc,
+                    appendValueOp(before_block, return_enabled),
+                    condition,
+                );
+                if (mlir.oraOperationIsNull(guarded_condition)) return error.MlirOperationCreationFailed;
+                mlir.oraOperationSetAttributeByName(
+                    guarded_condition,
+                    strRef("ora.loop_source_guard_operand"),
+                    mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.parent.context), 1),
+                );
+                condition = appendValueOp(before_block, guarded_condition);
             }
 
             var condition_values: std.ArrayList(mlir.MlirValue) = .empty;
@@ -637,12 +679,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 body_lowerer.deferred_return_kind = .scf_yield;
                 body_lowerer.deferred_return_carried_locals = carried_locals.items;
             }
+            var control_manifest: std.ArrayList(support.LoopControlManifestEntry) = .empty;
             var loop_context = LoopContext{
                 .parent = self.loop_context,
                 .label = while_stmt.label,
+                .source_statement_id = @intCast(statement_id.index()),
                 .break_flag = break_flag,
                 .continue_flag = continue_flag,
                 .carried_locals = carried_locals.items,
+                .control_manifest = &control_manifest,
             };
             body_lowerer.loop_context = &loop_context;
             var body_locals = try self.cloneLocals(locals);
@@ -660,6 +705,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (!blockEndsWithTerminator(after_block)) {
                 try body_lowerer.appendScfYieldFromLocals(after_block, while_stmt.range, &body_locals, carried_locals.items);
             }
+
+            try self.attachLoopControlManifest(while_op, control_manifest.items);
 
             try FunctionLowerer.writeBackCarriedLocals(locals, carried_locals.items, while_op);
             FunctionLowerer.annotateCarriedLocalResults(self, carried_locals.items, while_op);
@@ -679,7 +726,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const condition = FunctionLowerer.evalKnownBoolExpr(self, while_stmt.condition, &simulated_locals) orelse return null;
                 if (!condition) break;
                 if (trip_count >= runtime_loop_unroll_limit) return null;
-                const signal = try @This().simulateUnrolledWhileBody(self, while_stmt.body, &simulated_locals, while_stmt.label) orelse return null;
+                const signal = try @This().simulateUnrolledBody(self, while_stmt.body, &simulated_locals, while_stmt.label) orelse return null;
                 trip_count += 1;
                 switch (signal) {
                     .none, .continue_loop => {},
@@ -721,7 +768,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return false;
         }
 
-        fn simulateUnrolledWhileBody(
+        pub fn simulateUnrolledBody(
             self: *FunctionLowerer,
             body_id: ast.BodyId,
             locals: *LocalEnv,
@@ -729,7 +776,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         ) anyerror!?UnrolledLoopSignal {
             const body = self.parent.file.body(body_id).*;
             for (body.statements) |statement_id| {
-                const signal = try @This().simulateUnrolledWhileStmt(self, statement_id, locals, loop_label) orelse return null;
+                const signal = try @This().simulateUnrolledStmt(self, statement_id, locals, loop_label) orelse return null;
                 switch (signal) {
                     .none => {},
                     .continue_loop, .break_loop => return signal,
@@ -738,7 +785,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return .none;
         }
 
-        fn simulateUnrolledWhileStmt(
+        fn simulateUnrolledStmt(
             self: *FunctionLowerer,
             statement_id: ast.StmtId,
             locals: *LocalEnv,
@@ -788,10 +835,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .If => |if_stmt| blk: {
                     const condition = FunctionLowerer.evalKnownBoolExpr(self, if_stmt.condition, locals) orelse break :blk null;
                     if (condition) {
-                        break :blk try @This().simulateUnrolledWhileBody(self, if_stmt.then_body, locals, loop_label);
+                        break :blk try @This().simulateUnrolledBody(self, if_stmt.then_body, locals, loop_label);
                     }
                     if (if_stmt.else_body) |else_body| {
-                        break :blk try @This().simulateUnrolledWhileBody(self, else_body, locals, loop_label);
+                        break :blk try @This().simulateUnrolledBody(self, else_body, locals, loop_label);
                     }
                     break :blk .none;
                 },
@@ -804,7 +851,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         const condition = FunctionLowerer.evalKnownBoolExpr(self, nested_while.condition, locals) orelse break :blk null;
                         if (!condition) break;
                         if (trip_count >= runtime_loop_unroll_limit) break :blk null;
-                        const signal = try @This().simulateUnrolledWhileBody(self, nested_while.body, locals, nested_while.label) orelse break :blk null;
+                        const signal = try @This().simulateUnrolledBody(self, nested_while.body, locals, nested_while.label) orelse break :blk null;
                         trip_count += 1;
                         switch (signal) {
                             .none, .continue_loop => {},
@@ -825,7 +872,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                     break :blk null;
                 },
-                .Block => |block_stmt| try @This().simulateUnrolledWhileBody(self, block_stmt.body, locals, loop_label),
+                .Block => |block_stmt| try @This().simulateUnrolledBody(self, block_stmt.body, locals, loop_label),
                 .Expr => |expr_stmt| blk: {
                     _ = FunctionLowerer.evalKnownExprValue(self, expr_stmt.expr, locals) orelse break :blk null;
                     break :blk .none;

@@ -1,0 +1,23 @@
+contract NestedLoopDependencySafetyUnsafe {
+    pub fn run() -> u256 {
+        var outer: u256 = 0;
+        var total: u256 = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
+
+        while (outer < 1)
+            invariant outer <= 1
+            invariant total == 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+        {
+            var inner: u256 = 0;
+            while (inner < 1)
+                invariant inner <= 1
+            {
+                inner = inner + 1;
+            }
+
+            total = total + inner;
+            outer = outer + 1;
+        }
+
+        return total;
+    }
+}

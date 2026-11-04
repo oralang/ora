@@ -5,7 +5,7 @@
 //===----------------------------------------------------------------------===//
 //
 // This file provides Zig bindings to the Z3 SMT solver C API.
-// It uses `@cImport` to directly import Z3 headers, enabling formal
+// It uses build-time C translation to import Z3 headers, enabling formal
 // verification capabilities in the Ora compiler.
 //
 // Z3 is used for:
@@ -18,7 +18,7 @@
 
 /// Z3 C API bindings
 ///
-/// This uses Zig's `@cImport` to directly include Z3 headers.
+/// The build translates z3.h and supplies the resulting module.
 /// Z3 must be installed on the system or built from vendor/z3.
 ///
 /// Installation:
@@ -27,9 +27,7 @@
 /// - Windows: Download from https://github.com/Z3Prover/z3/releases
 ///
 /// Build will automatically detect Z3 and link against it.
-pub const c = @cImport({
-    @cInclude("z3.h");
-});
+pub const c = @import("z3_bindings");
 
 // Re-export commonly used Z3 types for convenience
 pub const Z3_context = c.Z3_context;
@@ -151,6 +149,7 @@ pub const Z3_get_quantifier_num_bound = c.Z3_get_quantifier_num_bound;
 pub const Z3_get_quantifier_bound_name = c.Z3_get_quantifier_bound_name;
 pub const Z3_get_quantifier_bound_sort = c.Z3_get_quantifier_bound_sort;
 pub const Z3_substitute_vars = c.Z3_substitute_vars;
+pub const Z3_substitute = c.Z3_substitute;
 pub const Z3_get_pattern_num_terms = c.Z3_get_pattern_num_terms;
 pub const Z3_get_pattern = c.Z3_get_pattern;
 pub const Z3_ast_vector_inc_ref = c.Z3_ast_vector_inc_ref;
@@ -206,6 +205,7 @@ pub const Z3_mk_ge = c.Z3_mk_ge;
 
 // Sort queries
 pub const Z3_get_sort = c.Z3_get_sort;
+pub const Z3_is_eq_sort = c.Z3_is_eq_sort;
 pub const Z3_get_sort_kind = c.Z3_get_sort_kind;
 pub const Z3_get_bv_sort_size = c.Z3_get_bv_sort_size;
 pub const Z3_get_array_sort_domain = c.Z3_get_array_sort_domain;

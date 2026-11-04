@@ -3011,6 +3011,83 @@ test "complex SMT app probes match between sequential and parallel verification"
     }
 }
 
+test "generic holds M verifies the whole modular fixture and caller preconditions" {
+    const source = try std.Io.Dir.cwd().readFileAlloc(std.Io.Threaded.global_single_threaded.io(), "ora-example/comptime/generics/generic_fn_control_flow_clone.ora", testing.allocator, .limited(16 * 1024));
+    defer testing.allocator.free(source);
+    const Mutation = enum { intact, missing_helper_bound, unmet, zero, mixed };
+    for (std.meta.tags(Mutation)) |mutation| {
+        errdefer std.debug.print("M mutation={s}\n", .{@tagName(mutation)});
+        const text = switch (mutation) {
+            .intact => try testing.allocator.dupe(u8, source),
+            .missing_helper_bound => try std.mem.replaceOwned(u8, testing.allocator, source, "        requires(modulus > @cast(T, 0))\n", ""),
+            .unmet => try std.mem.replaceOwned(u8, testing.allocator, source, "        requires(modulus > 0)\n", ""),
+            .zero => try std.mem.replaceOwned(u8, testing.allocator, source, "bounded_remainder(u256, value, modulus)", "bounded_remainder(u256, value, 0)"),
+            .mixed => try std.mem.replaceOwned(u8, testing.allocator, source, "\n}\n", "\n    pub fn unsafe(value: u256, modulus: u256) -> u256 { return bounded_remainder(u256, value, modulus); }\n}\n"),
+        };
+        defer testing.allocator.free(text);
+        if (mutation != .intact) try testing.expect(!std.mem.eql(u8, source, text));
+        var compilation = try compileText(text);
+        defer compilation.deinit();
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir.diagnostics.isEmpty());
+        try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(hir.module.raw_module)));
+        var pass = try z3_verification.VerificationPass.init(testing.allocator);
+        defer pass.deinit();
+        pass.setVerifyMode(.Full);
+        // No function filter: the helper and every caller must be checked.
+        var verified = try pass.runVerificationPassPreparedSequential(hir.module.raw_module);
+        defer verified.deinit();
+        try testing.expectEqual(mutation == .intact, verified.success);
+        try testing.expect(!pass.encoder.isDegraded());
+        var report = try pass.buildSmtReport(hir.module.raw_module, "test.ora", &verified);
+        defer report.deinit(testing.allocator);
+        const rows = (report.query_manifest orelse return error.TestUnexpectedResult).rows;
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, report.json, .{});
+        defer parsed.deinit();
+        const queries = parsed.value.object.get("queries").?.array.items;
+        try testing.expectEqual(rows.len, queries.len);
+        if (mutation == .intact) try testing.expectEqual(@as(usize, 6), rows.len);
+        var helper_checks: usize = 0;
+        var caller_checks: usize = 0;
+        var failures: usize = 0;
+        for (rows, queries, 0..) |row, query, index| {
+            try testing.expectEqual(@as(i64, @intCast(index + 1)), query.object.get("id").?.integer);
+            try testing.expect(row.smtlib_hash != 0);
+            try testing.expect(!row.vacuous and !row.vacuity_unknown and !row.verified_with_caveats);
+            try testing.expect(row.result_status != null and row.result_status.? != .unknown);
+            if (row.kind == .Base) {
+                try testing.expectEqual(z3_verification.QueryResultStatus.sat, row.result_status.?);
+                continue;
+            }
+            try testing.expectEqual(z3_verification.QueryKind.Obligation, row.kind);
+            const helper = std.mem.eql(u8, row.function_name, "bounded_remainder__u256");
+            const failing = if (helper) mutation == .missing_helper_bound else (mutation == .unmet or mutation == .zero) and std.mem.eql(u8, row.function_name, "rem_u256") or
+                mutation == .mixed and std.mem.eql(u8, row.function_name, "unsafe");
+            try testing.expectEqual(if (failing) z3_verification.QueryResultStatus.sat else .unsat, row.result_status.?);
+            if (failing) failures += 1;
+            if (helper) {
+                helper_checks += 1;
+                try testing.expectEqual(z3_verification.AnnotationKind.ContractInvariant, row.obligation_kind.?);
+                try testing.expectEqual(@as(u64, if (mutation == .missing_helper_bound) 0xd5558f07f11188f else 0x4b6af1841eb3da2a), row.smtlib_hash);
+            } else {
+                caller_checks += 1;
+                try testing.expectEqual(z3_verification.AnnotationKind.CalleePrecondition, row.obligation_kind.?);
+            }
+        }
+        try testing.expectEqual(@as(usize, 1), helper_checks);
+        try testing.expectEqual(@as(usize, if (mutation == .missing_helper_bound) 0 else if (mutation == .mixed) 3 else 2), caller_checks);
+        try testing.expectEqual(@as(usize, if (mutation == .intact) 0 else 1), failures);
+        if (mutation == .intact) {
+            const owners = [_][]const u8{ "bounded_remainder__u256", "rem_u256", "rem_u256_alt" };
+            const hashes = [_]u64{ 0x4b6af1841eb3da2a, 0x404089c0121375a1, 0xa88cb852e9350628 };
+            for (owners, hashes, 0..) |owner, hash, i| {
+                try testing.expectEqualStrings(owner, rows[i * 2 + 1].function_name);
+                try testing.expectEqual(hash, rows[i * 2 + 1].smtlib_hash);
+            }
+        }
+    }
+}
+
 test "SMT release matrix probes match between sequential and parallel verification" {
     const probes = [_]struct { path: []const u8, function_name: []const u8 }{
         .{ .path = "ora-example/smt/guards/exact_proven.ora", .function_name = "provenExactDivisionReturn" },

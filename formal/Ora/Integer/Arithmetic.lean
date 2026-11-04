@@ -29,7 +29,7 @@ two integers merely because their underlying bit patterns happen to agree.
 structure Value where
   shape : IntegerShape
   bits : Carrier shape
-  deriving Repr
+  deriving Repr, DecidableEq
 
 def Value.ofNat (shape : IntegerShape) (value : Nat) : Value :=
   { shape, bits := BitVec.ofNat shape.bits value }
@@ -148,6 +148,85 @@ def wrappingResult
       else
         lhs >>> rhs.toNat
 
+-- Restore a widened addition before observing its source-width overflow.
+theorem maskBit (n i : Nat) : Nat.testBit (2^n - 1) i = decide (i < n) := by
+  induction n generalizing i with
+  | zero => simp only [Nat.pow_zero, Nat.sub_self, Nat.zero_testBit, Nat.not_lt_zero, decide_false]
+  | succ n ih =>
+    have pos : 0 < 2^n := Nat.two_pow_pos n
+    cases i with
+    | zero =>
+      simp only [Nat.testBit_zero, Nat.pow_succ]
+      have hmod : (2^n * 2 - 1) % 2 = 1 := by omega
+      simp only [hmod, decide_true, Nat.zero_lt_succ]
+    | succ i =>
+      rw [Nat.testBit_succ]
+      have hdiv : (2^(n+1)-1) / 2 = 2^n-1 := by rw [Nat.pow_succ]; omega
+      rw [hdiv, ih]
+      simp only [Nat.succ_lt_succ_iff]
+
+theorem lowMaskIsWidth (word : BitVec 256) (n : Nat) :
+    word.toNat &&& (2^n-1) = (word.setWidth n).toNat := by
+  simp only [BitVec.toNat_setWidth]
+  apply Nat.eq_of_testBit_eq
+  intro i
+  simp only [Nat.testBit_and, Nat.testBit_mod_two_pow, maskBit]
+  exact Bool.and_comm _ _
+
+theorem truncateWideAdd (n : Nat) (h : n ≤ 256) (a b : BitVec n) :
+    (a.setWidth 256 + b.setWidth 256).setWidth n = a + b := by
+  rw [BitVec.setWidth_add _ _ h]
+  simp only [BitVec.setWidth_setWidth_of_le _ h, BitVec.setWidth_eq]
+
+theorem maskedWideAdd (n : Nat) (h : n ≤ 256) (a b : BitVec n) :
+    (a.setWidth 256 + b.setWidth 256).toNat &&& (2^n - 1) = (a+b).toNat := by
+  rw [lowMaskIsWidth, truncateWideAdd n h]
+
+theorem wrappedUnsignedAddOverflow {n : Nat} (a b : BitVec n) :
+    (a+b).toNat < a.toNat ↔ 2^n ≤ a.toNat + b.toNat := by
+  have ha := a.isLt
+  have hb := b.isLt
+  simp only [BitVec.toNat_add]
+  cases Nat.lt_or_ge (a.toNat+b.toNat) (2^n) with
+  | inl h =>
+    rw [Nat.mod_eq_of_lt h]
+    constructor <;> intro hbad <;> omega
+  | inr h =>
+    rw [Nat.mod_eq_sub_mod h]
+    rw [Nat.mod_eq_of_lt (by omega)]
+    constructor <;> intro hbound <;> omega
+
+-- Checked unsigned multiplication guard; divisor orientation does not change overflow.
+-- The nonzero factor masks either EVM or SMT division-by-zero totalization.
+theorem unsignedMulOverflow_iff (M a b : Nat) :
+    (b ≠ 0 ∧ M / b < a) ↔ M < a * b := by
+  by_cases hb : b = 0
+  · simp [hb]
+  · simp [hb, Nat.div_lt_iff_lt_mul (Nat.pos_of_ne_zero hb)]
+
+theorem unsignedMulOverflow_comm (M a b : Nat) :
+    (b ≠ 0 ∧ M / b < a) ↔ (a ≠ 0 ∧ M / a < b) := by
+  rw [unsignedMulOverflow_iff, unsignedMulOverflow_iff, Nat.mul_comm a b]
+
+theorem unsignedMulOverflow_bits {w : Nat} (a b : BitVec w) :
+    ((b != 0#w) && (BitVec.allOnes w / b).ult a) =
+      decide (2 ^ w - 1 < a.toNat * b.toNat) := by
+  apply Bool.eq_iff_iff.mpr
+  simp only [Bool.and_eq_true, bne_iff_ne, BitVec.toNat_ne,
+    BitVec.toNat_ofNat, Nat.zero_mod, BitVec.ult, decide_eq_true_eq,
+    BitVec.toNat_udiv, BitVec.toNat_allOnes]
+  exact unsignedMulOverflow_iff _ _ _
+
+theorem unsignedMulOverflow_bits_comm {w : Nat} (a b : BitVec w) :
+    ((b != 0#w) && (BitVec.allOnes w / b).ult a) =
+      ((a != 0#w) && (BitVec.allOnes w / a).ult b) := by
+  rw [unsignedMulOverflow_bits, unsignedMulOverflow_bits, Nat.mul_comm a.toNat b.toNat]
+
+theorem unsignedMulOverflow_zero_quotient_irrelevant {w : Nat} (a b onZero : BitVec w) :
+    ((b != 0#w) && (if b = 0#w then onZero else BitVec.allOnes w / b).ult a) =
+      ((b != 0#w) && (BitVec.allOnes w / b).ult a) := by
+  by_cases hb : b = 0#w <;> simp [hb]
+
 def unsignedLt {shape : IntegerShape} (lhs rhs : Carrier shape) : Prop :=
   lhs.toNat < rhs.toNat
 
@@ -155,22 +234,34 @@ def unsignedLe {shape : IntegerShape} (lhs rhs : Carrier shape) : Prop :=
   lhs.toNat ≤ rhs.toNat
 
 def signedLt {shape : IntegerShape} (lhs rhs : Carrier shape) : Prop :=
-  mathematicalValue lhs < mathematicalValue rhs
+  lhs.slt rhs = true
 
 def signedLe {shape : IntegerShape} (lhs rhs : Carrier shape) : Prop :=
-  mathematicalValue lhs ≤ mathematicalValue rhs
+  lhs.sle rhs = true
+
+theorem signedLt_iff_toInt_lt
+    {shape : IntegerShape}
+    (lhs rhs : Carrier shape) :
+    signedLt lhs rhs ↔ lhs.toInt < rhs.toInt := by
+  simp [signedLt, BitVec.slt]
+
+theorem signedLe_iff_toInt_le
+    {shape : IntegerShape}
+    (lhs rhs : Carrier shape) :
+    signedLe lhs rhs ↔ lhs.toInt ≤ rhs.toInt := by
+  simp [signedLe, BitVec.sle]
 
 @[simp] theorem unsignedLe_refl
     {shape : IntegerShape}
     (value : Carrier shape) :
-    unsignedLe value value := by
-  exact Nat.le_refl _
+    unsignedLe value value :=
+  Nat.le_refl _
 
 @[simp] theorem signedLe_refl
     {shape : IntegerShape}
     (value : Carrier shape) :
     signedLe value value := by
-  exact Int.le_refl _
+  simp [signedLe, BitVec.sle]
 
 def lt (shape : IntegerShape) (lhs rhs : Carrier shape) : Prop :=
   match shape with
@@ -308,8 +399,8 @@ def Value.relation? (shape : IntegerShape)
     Value.binary? (.unsigned .w256) op
       { shape := .unsigned .w256, bits := lhs }
       { shape := .unsigned .w256, bits := rhs } =
-      some { shape := .unsigned .w256, bits := op lhs rhs } := by
-  exact Value.binary_sameShape (.unsigned .w256) op lhs rhs
+      some { shape := .unsigned .w256, bits := op lhs rhs } :=
+  Value.binary_sameShape (.unsigned .w256) op lhs rhs
 
 @[simp] theorem Value.relation_u256
     (relation : Carrier (.unsigned .w256) → Carrier (.unsigned .w256) → Prop)
@@ -317,8 +408,8 @@ def Value.relation? (shape : IntegerShape)
     Value.relation? (.unsigned .w256) relation
       { shape := .unsigned .w256, bits := lhs }
       { shape := .unsigned .w256, bits := rhs } =
-      some (relation lhs rhs) := by
-  exact Value.relation_sameShape (.unsigned .w256) relation lhs rhs
+      some (relation lhs rhs) :=
+  Value.relation_sameShape (.unsigned .w256) relation lhs rhs
 
 def checkedSafe
     (shape : IntegerShape)
@@ -362,12 +453,282 @@ theorem checkedResult_eq_none_iff
       ¬ checkedSafe shape op lhs rhs := by
   simp [checkedResult]
 
+theorem bmod_eq_self_of_signed_bounds
+    (value : Int)
+    (half : Nat)
+    (hHalf : 0 < half)
+    (hLower : -((half : Nat) : Int) ≤ value)
+    (hUpper : value < (half : Nat)) :
+    Int.bmod value (2 * half) = value := by
+  rw [Int.bmod_def]
+  have hModulus : (0 : Int) < 2 * half := by omega
+  by_cases hNonnegative : 0 ≤ value
+  · rw [Int.emod_eq_of_lt hNonnegative (by omega)]
+    split <;> omega
+  · have hMod : value % (2 * half : Nat) = value + 2 * half := by
+      rw [← Int.add_emod_self]
+      exact Int.emod_eq_of_lt (by omega) (by omega)
+    rw [hMod]
+    split <;> omega
+
+theorem signed_add_toInt_eq_of_representable
+    (width : Ora.Types.SIntWidth)
+    (lhs rhs : Carrier (.signed width))
+    (hSafe : representable (.signed width) (lhs.toInt + rhs.toInt)) :
+    (lhs + rhs).toInt = lhs.toInt + rhs.toInt := by
+  rw [BitVec.toInt_add]
+  have hWidthPositive : 0 < sintBits width := by
+    cases width <;> decide
+  have hModulus :
+      2 ^ (IntegerShape.signed width).bits =
+        2 * 2 ^ (sintBits width - 1) := by
+    simp only [IntegerShape.bits]
+    rw [← Nat.two_pow_pred_mul_two hWidthPositive, Nat.mul_comm]
+  rw [hModulus]
+  apply bmod_eq_self_of_signed_bounds
+      (lhs.toInt + rhs.toInt) (2 ^ (sintBits width - 1))
+  · exact Nat.two_pow_pos _
+  · simp only [representable, IntegerShape.isSigned, if_true,
+      signedLowerBound, signedUpperBound, IntegerShape.bits] at hSafe
+    exact_mod_cast hSafe.1
+  · simp only [representable, IntegerShape.isSigned, if_true,
+      signedLowerBound, signedUpperBound, IntegerShape.bits] at hSafe
+    exact_mod_cast hSafe.2
+
+theorem toInt_nonnegative_iff_msb_false
+    {width : Nat}
+    (hWidth : 0 < width)
+    (value : BitVec width) :
+    0 ≤ value.toInt ↔ value.msb = false := by
+  have hValue := value.isLt
+  have hPow : 2 ^ width = 2 * 2 ^ (width - 1) := by
+    rw [← Nat.two_pow_pred_mul_two hWidth, Nat.mul_comm]
+  rw [BitVec.toInt_eq_toNat_cond, BitVec.msb_eq_decide]
+  split
+  · constructor
+    · intro _
+      apply decide_eq_false
+      omega
+    · intro _
+      exact Int.ofNat_zero_le _
+  · constructor
+    · intro hNonnegative
+      apply decide_eq_false
+      omega
+    · intro hDecision
+      have hBelow := of_decide_eq_false hDecision
+      omega
+
+theorem signed_add_overflow_bit_nonnegative_of_checkedSafe
+    (width : Ora.Types.SIntWidth)
+    (lhs rhs : Carrier (.signed width)) :
+    checkedSafe (.signed width) .add lhs rhs →
+    ¬ signedLt
+      (bitAndResult (.signed width)
+        (bitXorResult (.signed width)
+          (wrappingResult (.signed width) .add lhs rhs) lhs)
+        (bitXorResult (.signed width)
+          (wrappingResult (.signed width) .add lhs rhs) rhs))
+      (BitVec.ofNat (sintBits width) 0) := by
+  intro hSafe
+  have hRepresentable :
+      representable (.signed width) (lhs.toInt + rhs.toInt) := by
+    exact hSafe
+  have hExact := signed_add_toInt_eq_of_representable width lhs rhs hRepresentable
+  rw [signedLt_iff_toInt_lt]
+  rw [show (BitVec.ofNat (sintBits width) 0).toInt = 0 by
+    cases width <;> decide]
+  simp only [Int.not_lt]
+  have hWidth : 0 < sintBits width := by cases width <;> decide
+  apply (toInt_nonnegative_iff_msb_false hWidth _).mpr
+  simp only [bitAndResult, bitXorResult, wrappingResult, BitVec.msb_and,
+    BitVec.msb_xor]
+  have hLhsSign := toInt_nonnegative_iff_msb_false hWidth lhs
+  have hRhsSign := toInt_nonnegative_iff_msb_false hWidth rhs
+  have hResultSign := toInt_nonnegative_iff_msb_false hWidth (lhs + rhs)
+  rw [hExact] at hResultSign
+  cases hLhs : lhs.msb <;>
+    cases hRhs : rhs.msb <;>
+    cases hResult : (lhs + rhs).msb <;>
+    simp only [hLhs, hRhs, hResult, Bool.false_xor, Bool.xor_false,
+      Bool.true_xor, Bool.xor_true, Bool.false_and, Bool.true_and] <;>
+    simp [hLhs] at hLhsSign <;>
+    simp [hRhs] at hRhsSign <;>
+    simp [hResult] at hResultSign <;>
+    first | decide | omega
+
+theorem toInt_lt_signedUpperBound
+    (width : Ora.Types.SIntWidth)
+    (value : Carrier (.signed width)) :
+    value.toInt < signedUpperBound (sintBits width) := by
+  cases width <;>
+    rw [BitVec.toInt_eq_toNat_cond] <;>
+    split <;>
+    simp only [signedUpperBound, IntegerShape.bits, sintBits] at * <;>
+    have hValue := value.isLt <;>
+    omega
+
+/-- A nonnegative signed addend is safe when the emitted arithmetic facts bound
+the exact result by another value of the same signed type.  The `signedLt`
+hypothesis identifies that formula-owned bound; the proof does not recognize a
+particular increment or literal. -/
+theorem signed_add_checkedSafe_of_nonnegative_bounded_result
+    (width : Ora.Types.SIntWidth)
+    (lhs rhs bound : Carrier (.signed width))
+    (hRhs : 0 ≤ rhs.toInt)
+    (hLt : signedLt lhs bound)
+    (hResultBound : lhs.toInt + rhs.toInt ≤ bound.toInt) :
+    checkedSafe (.signed width) .add lhs rhs := by
+  simp only [checkedSafe, representable, IntegerShape.isSigned, if_true,
+    exactArithmeticResult, mathematicalValue, IntegerShape.bits]
+  constructor
+  · have hLower := BitVec.toInt_intMin_le lhs
+    change (BitVec.intMin (sintBits width)).toInt ≤ lhs.toInt at hLower
+    have hMin : (BitVec.intMin (sintBits width)).toInt =
+        signedLowerBound (sintBits width) := by
+      have hWidth : 0 < sintBits width := by cases width <;> decide
+      simp only [BitVec.toInt_intMin, signedLowerBound]
+      rw [Nat.two_pow_pred_mod_two_pow hWidth]
+      congr 1
+      exact_mod_cast rfl
+    rw [hMin] at hLower
+    omega
+  · have hUpper := toInt_lt_signedUpperBound width bound
+    rw [signedLt_iff_toInt_lt] at hLt
+    omega
+
+/-- Under checked-add safety, the wrapped carrier denotes the exact signed
+sum.  This is the generic bridge used when a formula requires an order fact
+about the emitted next-state expression. -/
+theorem signed_add_le_of_checkedSafe
+    (width : Ora.Types.SIntWidth)
+    (lhs rhs bound : Carrier (.signed width))
+    (hSafe : checkedSafe (.signed width) .add lhs rhs)
+    (hLe : lhs.toInt + rhs.toInt ≤ bound.toInt) :
+    signedLe (wrappingResult (.signed width) .add lhs rhs) bound := by
+  rw [signedLe_iff_toInt_le]
+  simp only [wrappingResult]
+  rw [signed_add_toInt_eq_of_representable width lhs rhs hSafe]
+  exact hLe
+
+theorem signed_add_one_checkedSafe_of_lt
+    (width : Ora.Types.SIntWidth)
+    (value bound : Carrier (.signed width))
+    (h : signedLt value bound) :
+    checkedSafe (.signed width) .add value
+      (BitVec.ofNat (sintBits width) 1) := by
+  rw [signedLt_iff_toInt_lt] at h
+  have hLower := BitVec.toInt_intMin_le value
+  have hUpper := toInt_lt_signedUpperBound width bound
+  simp only [checkedSafe, representable, IntegerShape.isSigned, if_true,
+    exactArithmeticResult, mathematicalValue, IntegerShape.bits]
+  have hOne : (BitVec.ofNat (sintBits width) 1).toInt = 1 := by
+    cases width <;> decide
+  rw [hOne]
+  constructor
+  · change (BitVec.intMin (sintBits width)).toInt ≤ value.toInt at hLower
+    have hMin : (BitVec.intMin (sintBits width)).toInt =
+        signedLowerBound (sintBits width) := by
+      have hWidth : 0 < sintBits width := by cases width <;> decide
+      simp only [BitVec.toInt_intMin, signedLowerBound]
+      rw [Nat.two_pow_pred_mod_two_pow hWidth]
+      congr 1
+      exact_mod_cast rfl
+    rw [hMin] at hLower
+    omega
+  · omega
+
 theorem wrapping_add_toNat
     (shape : IntegerShape)
     (lhs rhs : Carrier shape) :
     (wrappingResult shape .add lhs rhs).toNat =
       (lhs.toNat + rhs.toNat) % 2 ^ shape.bits := by
   simp [wrappingResult]
+
+theorem wrapping_add_one_le_of_unsigned_lt
+    (shape : IntegerShape)
+    (value bound : Carrier shape)
+    (hBound : unsignedLt value bound) :
+    unsignedLe
+      (wrappingResult shape .add value (BitVec.ofNat shape.bits 1))
+      bound := by
+  cases shape with
+  | unsigned width =>
+      cases width <;> simp [unsignedLt, unsignedLe, wrappingResult] at * <;> omega
+  | signed width =>
+      cases width <;> simp [unsignedLt, unsignedLe, wrappingResult] at * <;> omega
+
+theorem wrapping_add_one_not_lt_self_of_unsigned_lt
+    (shape : IntegerShape)
+    (value bound : Carrier shape)
+    (hBound : unsignedLt value bound) :
+    ¬ unsignedLt
+      (wrappingResult shape .add value (BitVec.ofNat shape.bits 1))
+      value := by
+  cases shape with
+  | unsigned width =>
+      cases width <;> simp [unsignedLt, wrappingResult] at * <;> omega
+  | signed width =>
+      cases width <;> simp [unsignedLt, wrappingResult] at * <;> omega
+
+theorem wrapping_add_one_not_lt_self_of_room
+    (shape : IntegerShape)
+    (value : Carrier shape)
+    (hRoom : value.toNat + 1 < 2 ^ shape.bits) :
+    ¬ unsignedLt
+      (wrappingResult shape .add value (BitVec.ofNat shape.bits 1))
+      value := by
+  cases shape with
+  | unsigned width =>
+      cases width <;> simp [unsignedLt, wrappingResult] at * <;> omega
+  | signed width =>
+      cases width <;> simp [unsignedLt, wrappingResult] at * <;> omega
+
+/--
+Adding one to a signed integer strictly below another signed value preserves
+the corresponding non-strict bound. The proof is uniform over Ora's complete
+registered signed-width universe; it is not a loop-specific fact.
+-/
+theorem signed_add_one_le_of_lt
+    (width : Ora.Types.SIntWidth)
+    (value bound : Carrier (.signed width))
+    (h : signedLt value bound) :
+    signedLe
+      (wrappingResult (.signed width) .add value
+        (BitVec.ofNat (sintBits width) 1))
+      bound := by
+  have hSafe := signed_add_one_checkedSafe_of_lt width value bound h
+  have hExact := signed_add_toInt_eq_of_representable width value
+    (BitVec.ofNat (sintBits width) 1) hSafe
+  rw [signedLt_iff_toInt_lt] at h
+  rw [signedLe_iff_toInt_le]
+  simp only [wrappingResult]
+  rw [hExact]
+  cases width <;> simp at * <;> omega
+
+/--
+The source-owned signed-add overflow predicate is false when adding one below
+a strictly greater signed bound. This connects the shared arithmetic fact to
+the explicit runtime safety formula without giving proof-driven erasure any
+authority.
+-/
+theorem signed_add_one_guard_safe_of_lt
+    (width : Ora.Types.SIntWidth)
+    (value bound : Carrier (.signed width))
+    (h : signedLt value bound) :
+    ¬ signedLt
+      (bitAndResult (.signed width)
+        (bitXorResult (.signed width)
+          (wrappingResult (.signed width) .add value
+            (BitVec.ofNat (sintBits width) 1))
+          value)
+        (bitXorResult (.signed width)
+          (wrappingResult (.signed width) .add value
+            (BitVec.ofNat (sintBits width) 1))
+          (BitVec.ofNat (sintBits width) 1)))
+      (BitVec.ofNat (sintBits width) 0) := by
+  apply signed_add_overflow_bit_nonnegative_of_checkedSafe
+  exact signed_add_one_checkedSafe_of_lt width value bound h
 
 theorem wrapping_sub_toNat
     (shape : IntegerShape)
@@ -516,5 +877,16 @@ theorem checked_i8_add_accepts_representable :
     checkedResult (.signed .w8) .add (BitVec.ofInt 8 (-5)) (BitVec.ofNat 8 3) =
       some (BitVec.ofInt 8 (-2)) := by
   decide
+
+/-- Unsigned zero is an exact total lower bound, independently of a value's producer. -/
+theorem unsigned_zero_lower_bound (width : Nat) (value : BitVec width) :
+    (0 : BitVec width) ≤ value := by
+  change (0 : BitVec width).toNat ≤ value.toNat
+  simp
+
+/-- The rewrite supplies a genuine value-level proposition, not a loop result. -/
+theorem unsigned_zero_predicate (width : Nat) (value : BitVec width) :
+    decide ((0 : BitVec width) ≤ value) = true := by
+  exact decide_eq_true (unsigned_zero_lower_bound width value)
 
 end Ora.Integer

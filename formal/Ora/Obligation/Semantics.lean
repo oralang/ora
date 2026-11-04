@@ -24,7 +24,7 @@ namespace Ora.Obligation
 inductive Value where
   | bool : Bool → Value
   | integer : Ora.Integer.Value → Value
-  deriving Repr
+  deriving Repr, DecidableEq
 
 inductive PlaceBindingKey where
   | stable : PlaceRef → PlaceBindingKey
@@ -34,11 +34,24 @@ inductive PlaceBindingKey where
 structure Env where
   freeBindings : List (FreeVarId × Value) := []
   placeValue : PlaceBindingKey → Value := fun _ => .bool false
+  indexedRegionValue : FreeVarId → Ora.Integer.Value → Ora.Spec.IntegerShape →
+      Ora.Obligation.Value :=
+    fun (_ : FreeVarId) (_ : Ora.Integer.Value) (_ : Ora.Spec.IntegerShape) =>
+      Value.bool false
   /-- Bound variables use De Bruijn order: head is index `0`. -/
   boundBindings : List Value := []
   result : Option Value := none
+  /-- Separate, exact-width invocation namespace; ordinary environments lack it. -/
+  invocationCaller : Option (Nat × BitVec 160) := none
 
 def Env.empty : Env := {}
+
+def Env.callerValue? (env : Env) (owner : Nat) (ty : TyRef) : Option Value := do
+  let (capturedOwner, caller) ← env.invocationCaller
+  -- The nominal address id is shared with Storage.Address; no u160 fallback.
+  if owner > 0 && capturedOwner == owner && ty == .compilerTypeId 14 then
+    some (.integer {shape := .unsigned .w160, bits := caller})
+  else none
 
 def lookupFreeBinding (bindings : List (FreeVarId × Value)) (id : FreeVarId) :
     Option Value :=
@@ -354,6 +367,7 @@ def denoteValue? (manifest : Manifest) (env : Env) : Nat → TermId → Option V
           | some (.placeRead place) => env.lookupEntryPlace place
           | _ => none
       | some .result => env.result
+      | some (.invocationCaller owner ty) => env.callerValue? owner ty
       | some (.placeRead place) => env.lookupPlace place
       | some (.binary binary) =>
           let binaryInteger? (op : Ora.Integer.BinaryOp) :=
@@ -638,6 +652,8 @@ def placeDefinitelyDisjoint (lhs rhs : PlaceRef) : Bool :=
     true
   else if lhs.fields != rhs.fields then
     false
+  else if lhs.projectionDomain != rhs.projectionDomain then
+    false
   else
     placeKeyListsDefinitelyDisjoint lhs.keys rhs.keys
 
@@ -680,6 +696,8 @@ def keyEvidencePathMatches
   else if read.root != write.root then
     false
   else if read.fields != write.fields then
+    false
+  else if read.projectionDomain != write.projectionDomain then
     false
   else if read.keys.length != write.keys.length then
     false

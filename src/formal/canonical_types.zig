@@ -35,6 +35,11 @@ pub const QueryHash = struct {
     smtlib_hash: u64,
 };
 
+pub const LoopQueryCheck = struct {
+    status: CheckStatus,
+    query_hash: QueryHash,
+};
+
 pub const CanonicalSupport = union(enum) {
     supported,
     unsupported: CanonicalUnsupportedReason,
@@ -114,8 +119,16 @@ pub const EncodeError = std.mem.Allocator.Error || error{
     ExpectedBitVector,
     ExpectedBool,
     InvalidCharacter,
+    InvalidDependency,
+    InvalidFunctionShape,
+    FunctionVCQuantified,
+    FunctionVCDependencyUnsupported,
+    FunctionVCProjectionIncomplete,
+    FunctionVCVariableOutOfScope,
+    InvalidCallSignature,
     InvalidRefinementArity,
     InvalidTermReference,
+    InvalidTimelineReadReference,
     MissingFormula,
     MissingType,
     Overflow,
@@ -138,9 +151,20 @@ pub const EncodeError = std.mem.Allocator.Error || error{
     UnsupportedType,
     BoundVariableOutOfScope,
     MissingCanonicalQueryState,
+    InvalidLoopQuery,
+    LoopStorageRootUntouched,
+    UnknownLoopSummary,
+    UnknownLoopEdge,
     UnsupportedBoundVariableType,
     Z3ApiError,
 };
+
+pub fn encodeErrorReason(err: EncodeError) []const u8 {
+    return switch (err) {
+        error.LoopStorageRootUntouched => "loop_storage_root_untouched",
+        else => @errorName(err),
+    };
+}
 
 pub const CanonicalPlaceSymbolKind = enum(u8) {
     global,

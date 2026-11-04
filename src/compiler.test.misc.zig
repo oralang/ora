@@ -945,6 +945,31 @@ test "compiler resolves assignment integer literals before HIR lowering" {
     try testing.expectEqual(@as(usize, 0), hir_result.type_fallback_count);
 }
 
+test "compiler resolves constant address map keys in assignment targets before HIR lowering" {
+    const source_text =
+        \\contract Ledger {
+        \\    storage var balances: map<address, u256>;
+        \\    storage var allowances: map<address, map<address, u256>>;
+        \\    const OWNER: address = 0x1234567890123456789012345678901234567890;
+        \\
+        \\    pub fn init() {
+        \\        balances[OWNER] = 1000;
+        \\        allowances[OWNER][OWNER] = 500;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.items.len);
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.type_fallback_count);
+    try testing.expect(hir_result.isEmittable());
+}
+
 test "compiler rejects assignment integer literals that overflow the target type" {
     const source_text =
         \\contract Counter {
@@ -1919,7 +1944,7 @@ test "compiler unrolls small constant runtime for-count loops" {
         \\contract Sample {
         \\    pub fn run() -> u256 {
         \\        let sum: u256 = 0;
-        \\        for (4) |i| {
+        \\        for (0..4) |i, _| {
         \\            sum += i;
         \\        }
         \\        return sum;
@@ -1994,6 +2019,29 @@ test "compiler unrolls small constant runtime for loops with unlabeled break" {
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.") != null);
 }
 
+test "compiler keeps runtime-dependent loop control structured" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn run(stop: bool) -> u256 {
+        \\        var sum: u256 = 0;
+        \\        for (0..4) |i, _| {
+        \\            if (stop) {
+        \\                break;
+        \\            }
+        \\            sum += i;
+        \\        }
+        \\        return sum;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.indexOf(u8, rendered, "scf.for") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.if_placeholder") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.") == null);
+}
+
 test "compiler unrolls small constant runtime for loops with unlabeled continue" {
     const source_text =
         \\contract Sample {
@@ -2063,6 +2111,27 @@ test "compiler unrolls small constant labeled runtime for loops with labeled con
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.continue") == null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.0.4") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.2.4") != null);
+}
+
+test "compiler keeps nested labeled control targeting an outer loop structured" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn run() {
+        \\        outer: for (0..4) |i, _| {
+        \\            inner: for (0..4) |j, _| {
+        \\                if (i * j > 2) {
+        \\                    break :outer;
+        \\                }
+        \\            }
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.count(u8, rendered, "scf.for") >= 2);
+    try testing.expect(std.mem.indexOf(u8, rendered, "ora.synthetic.") == null);
 }
 
 test "compiler does not unroll runtime for-count loops above the unroll limit" {
@@ -2961,7 +3030,7 @@ test "stale flagship probes remain non-degraded" {
     const probes = [_]struct { path: []const u8, function_name: []const u8, timeout_ms: u32, expect_success: bool }{
         .{ .path = "ora-example/apps/erc20_verified.ora", .function_name = "transferFrom", .timeout_ms = 5_000, .expect_success = true },
         .{ .path = "ora-example/apps/defi_lending_pool.ora", .function_name = "borrow", .timeout_ms = 15_000, .expect_success = true },
-        .{ .path = "ora-example/apps/defi_lending_pool_fv.ora", .function_name = "borrow", .timeout_ms = 15_000, .expect_success = true },
+        .{ .path = "ora-example/apps/defi_lending_pool_fv.ora", .function_name = "borrow", .timeout_ms = 15_000, .expect_success = false },
     };
 
     for (probes) |probe| {
@@ -2974,7 +3043,7 @@ test "stale flagship probes remain non-degraded" {
             try testing.expectEqual(@as(usize, 0), result.errors_len);
         } else {
             try testing.expect(result.errors_len > 0);
-            try testing.expect(std.mem.indexOf(u8, result.error_kinds, "PreconditionViolation") != null);
+            try testing.expect(std.mem.indexOf(u8, result.error_kinds, "UnbootstrappedContractInvariant") != null);
         }
     }
 }

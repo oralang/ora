@@ -149,6 +149,37 @@ test "compiler rejects conflicting inferred generic type arguments" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "could not infer generic type arguments"));
 }
 
+test "compiler rejects nested generic type parameter arguments without recursive HIR lowering" {
+    const source_text =
+        \\contract Test {
+        \\    fn id(comptime T: type, x: T) -> T {
+        \\        return x;
+        \\    }
+        \\
+        \\    fn passthrough(comptime T: type, x: T) -> T {
+        \\        return id(T, x);
+        \\    }
+        \\
+        \\    pub fn run(x: u256) -> u256 {
+        \\        return passthrough(u256, x);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 1), typecheck.diagnostics.items.items.len);
+    try testing.expect(diagnosticMessagesContain(
+        &typecheck.diagnostics,
+        "generic type parameter 'T' cannot be used as an explicit nested generic type argument",
+    ));
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.type_fallback_count > 0);
+}
+
 test "compiler rejects bounded generic calls for types without impl" {
     const source_text =
         \\trait Marker {
@@ -608,6 +639,152 @@ test "compiler skips generic bitfield and enum templates in HIR" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @concrete"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.bitfield_decl"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.enum.decl"));
+}
+
+test "generic holds T scopes transitive clones and restores module context" {
+    const variants = [_]struct { leaf: []const u8, call: []const u8, symbol: []const u8, relay_prefix: []const u8 }{
+        .{ .leaf = "fn leaf(comptime T: type, x: T) -> T { return x; }", .call = "leaf(u256, x)", .symbol = "leaf__u256", .relay_prefix = "" },
+        .{ .leaf = "fn leaf(x: u256) -> u256 { return x; }", .call = "leaf(x)", .symbol = "leaf", .relay_prefix = "" },
+        .{ .leaf = "fn leaf(x: u256) -> u256 { return x; }", .call = "leaf(x)", .symbol = "leaf", .relay_prefix = "inline " },
+    };
+    for (variants) |variant| {
+        const source = try std.fmt.allocPrint(testing.allocator,
+            \\{s}
+            \\{s}fn relay(x: u256) -> u256 {{ return {s}; }}
+            \\contract A {{ pub fn run_a(x: u256) -> u256 {{ return relay(x); }} }}
+            \\fn after(x: u256) -> u256 {{ return {s}; }}
+            \\contract B {{ pub fn run_b(x: u256) -> u256 {{ return relay(x); }} }}
+        , .{ variant.leaf, variant.relay_prefix, variant.call, variant.call });
+        defer testing.allocator.free(source);
+        var compilation = try compileText(source);
+        defer compilation.deinit();
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir.diagnostics.isEmpty());
+        try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(hir.module.raw_module)));
+        const text = try hir.renderText(testing.allocator);
+        defer testing.allocator.free(text);
+        for ([_][]const u8{ "A", "B" }) |owner| {
+            const relay_name = try std.fmt.allocPrint(testing.allocator, "func.func @{s}.relay(", .{owner});
+            defer testing.allocator.free(relay_name);
+            const start = std.mem.indexOf(u8, text, relay_name) orelse return error.TestUnexpectedResult;
+            const end = start + (std.mem.indexOf(u8, text[start..], "\n    }") orelse return error.TestUnexpectedResult);
+            const relay = text[start..end];
+            const call = try std.fmt.allocPrint(testing.allocator, "call @{s}.{s}(", .{ owner, variant.symbol });
+            defer testing.allocator.free(call);
+            try testing.expect(std.mem.indexOf(u8, relay, call) != null);
+            // The destination is not the source declaration's owner.
+            try testing.expect(std.mem.indexOf(u8, relay, "ora.source_owner_key = \"module/function:relay\"") != null);
+            try testing.expect(std.mem.indexOf(u8, relay, "ora.source_template_activation = \"runtime_body\"") != null);
+            const leaf_name = try std.fmt.allocPrint(testing.allocator, "func.func @{s}.{s}(", .{ owner, variant.symbol });
+            defer testing.allocator.free(leaf_name);
+            const leaf_start = std.mem.indexOf(u8, text, leaf_name) orelse return error.TestUnexpectedResult;
+            const leaf_end = leaf_start + (std.mem.indexOfScalar(u8, text[leaf_start..], '\n') orelse return error.TestUnexpectedResult);
+            const leaf_header = text[leaf_start..leaf_end];
+            try testing.expect(std.mem.indexOf(u8, leaf_header, "ora.source_owner_key = \"module/function:leaf\"") != null);
+            if (std.mem.eql(u8, variant.symbol, "leaf__u256")) {
+                try testing.expect(std.mem.indexOf(u8, leaf_header, "ora.source_specialization_bindings = [\"generic:T=u256\"]") != null);
+            }
+        }
+        const start = std.mem.indexOf(u8, text, "  func.func @after(") orelse return error.TestUnexpectedResult;
+        const end = start + (std.mem.indexOf(u8, text[start..], "\n  }") orelse return error.TestUnexpectedResult);
+        const call = try std.fmt.allocPrint(testing.allocator, "call @{s}(", .{variant.symbol});
+        defer testing.allocator.free(call);
+        try testing.expect(std.mem.indexOf(u8, text[start..end], call) != null);
+        try testing.expect(std.mem.indexOf(u8, text[start..end], "call @A.") == null);
+        try testing.expect(std.mem.indexOf(u8, text[start..end], "call @B.") == null);
+    }
+}
+
+test "generic holds T reserves recursive clones once per destination" {
+    const variants = [_]struct { declarations: []const u8, entry: []const u8, symbols: []const []const u8 }{
+        .{
+            .declarations = "fn recur(n: u256) -> u256 { if (n == 0) { return 0; } return recur(n - 1); }",
+            .entry = "recur(n)",
+            .symbols = &.{"recur"},
+        },
+        .{
+            .declarations = "fn recur(comptime T: type, n: u256) -> u256 { if (n == 0) { return 0; } return recur(u256, n - 1); }",
+            .entry = "recur(u256, n)",
+            .symbols = &.{"recur__u256"},
+        },
+        .{
+            .declarations = "fn left(n: u256) -> u256 { if (n == 0) { return 0; } return right(n - 1); }\n" ++
+                "fn right(n: u256) -> u256 { if (n == 0) { return 1; } return left(n - 1); }",
+            .entry = "left(n)",
+            .symbols = &.{ "left", "right" },
+        },
+        .{
+            .declarations = "fn left(comptime T: type, n: u256) -> u256 { if (n == 0) { return 0; } return right(u256, n - 1); }\n" ++
+                "fn right(comptime T: type, n: u256) -> u256 { if (n == 0) { return 1; } return left(u256, n - 1); }",
+            .entry = "left(u256, n)",
+            .symbols = &.{ "left__u256", "right__u256" },
+        },
+    };
+    for (variants) |variant| {
+        const source = try std.fmt.allocPrint(testing.allocator,
+            \\{s}
+            \\contract A {{ pub fn run_a(n: u256) -> u256 {{ return {s}; }} }}
+            \\fn after(n: u256) -> u256 {{ return {s}; }}
+            \\contract B {{ pub fn run_b(n: u256) -> u256 {{ return {s}; }} }}
+        , .{ variant.declarations, variant.entry, variant.entry, variant.entry });
+        defer testing.allocator.free(source);
+        var compilation = try compileText(source);
+        defer compilation.deinit();
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir.diagnostics.isEmpty());
+        try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(hir.module.raw_module)));
+        const text = try hir.renderText(testing.allocator);
+        defer testing.allocator.free(text);
+        for ([_][]const u8{ "A.", "B.", "" }) |scope| {
+            for (variant.symbols, 0..) |symbol, index| {
+                const header = try std.fmt.allocPrint(testing.allocator, "func.func @{s}{s}(", .{ scope, symbol });
+                defer testing.allocator.free(header);
+                try testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, header));
+                const start = std.mem.indexOf(u8, text, header).?;
+                const end = start + (std.mem.indexOf(u8, text[start..], if (scope.len == 0) "\n  }" else "\n    }") orelse return error.TestUnexpectedResult);
+                const target = variant.symbols[(index + 1) % variant.symbols.len];
+                const call = try std.fmt.allocPrint(testing.allocator, "call @{s}{s}(", .{ scope, target });
+                defer testing.allocator.free(call);
+                try testing.expectEqual(@as(usize, 1), std.mem.count(u8, text[start..end], call));
+            }
+        }
+    }
+}
+
+test "generic holds T retains top-level source-inline recursion rejection" {
+    try expectDiagnosticProbeContains(
+        \\inline fn recur(n: u256) -> u256 { return recur(n); }
+        \\contract C { pub fn run(n: u256) -> u256 { return recur(n); } }
+    , .typecheck, "inline functions must not be recursive");
+    try expectDiagnosticProbeContains(
+        \\inline fn left(n: u256) -> u256 { return right(n); }
+        \\inline fn right(n: u256) -> u256 { return left(n); }
+        \\contract C { pub fn run(n: u256) -> u256 { return left(n); } }
+    , .typecheck, "inline functions must not be recursive");
+}
+
+test "generic holds T retains checks and exact specialization errors" {
+    const safe =
+        \\fn leaf(comptime T: type, x: T, d: T) -> T requires(d > @cast(T, 0)) { return x / d; }
+        \\fn relay(x: u256, d: u256) -> u256 requires(d > 0) { return leaf(u256, x, d); }
+        \\contract Check { pub fn run(x: u256, d: u256) -> u256 requires(d > 0) { return relay(x, d); } }
+    ;
+    var accepted = try verifyTextWithoutDegradation(safe, null);
+    defer accepted.deinit(testing.allocator);
+    try testing.expect(accepted.success and !accepted.degraded);
+    const unsafe = try std.mem.replaceOwned(u8, testing.allocator, safe, " requires(d > 0)", "");
+    defer testing.allocator.free(unsafe);
+    var rejected = try verifyTextWithoutDegradation(unsafe, null);
+    defer rejected.deinit(testing.allocator);
+    try testing.expect(!rejected.success and !rejected.degraded);
+    try testing.expect(rejected.errors_len > 0);
+    try testing.expect(std.mem.indexOf(u8, rejected.error_kinds, "PreconditionViolation") != null);
+    const wrong_type = try std.mem.replaceOwned(u8, testing.allocator, safe, "leaf(u256, x, d)", "leaf(bool, x, d)");
+    defer testing.allocator.free(wrong_type);
+    var compilation = try compileText(wrong_type);
+    defer compilation.deinit();
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "expected argument type 'bool', found 'u256'"));
 }
 
 test "compiler monomorphizes generic contract function calls in HIR" {
@@ -1605,10 +1782,44 @@ test "compiler lowers wide explicit values on instantiated generic enum declarat
 
     const hir_text = try renderHirTextForSource(source_text);
     defer testing.allocator.free(hir_text);
+    errdefer std.debug.print("wide generic enum HIR:\n{s}\n", .{hir_text});
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Choice__u256\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.variant_values = [-1 : i256]"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.variant_values = [0 : i256]"));
+}
+
+test "compiler retains instantiated generic enum declarations across consteval refresh" {
+    const source_text =
+        \\enum Number(comptime T: type) : u256 {
+        \\    value = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+        \\}
+        \\enum Label(comptime T: type) : string { value = "retained enum label" }
+        \\enum Bytes(comptime T: type) : bytes { value = hex"deadbeef" }
+        \\pub fn consume(number: Number<u256>, label: Label<u256>, raw: Bytes<u256>) {}
+    ;
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    // Check both after the tainted result was cleared by typeCheck and after
+    // it has been re-evaluated. Neither query order may change retained data.
+    for (0..2) |pass| {
+        if (pass != 0) _ = try compilation.db.constEval(compilation.root_module_id);
+        const number = typecheck.instantiatedEnumByName("Number__u256") orelse return error.TestUnexpectedResult;
+        const integer = number.variants[0].explicit_value orelse return error.TestUnexpectedResult;
+        try testing.expect(integer == .integer);
+        try testing.expectEqual(std.math.maxInt(u256), try integer.integer.toInt(u256));
+        const label = typecheck.instantiatedEnumByName("Label__u256") orelse return error.TestUnexpectedResult;
+        const string = label.variants[0].explicit_value orelse return error.TestUnexpectedResult;
+        try testing.expect(string == .string);
+        try testing.expectEqualStrings("retained enum label", string.string);
+        const raw = typecheck.instantiatedEnumByName("Bytes__u256") orelse return error.TestUnexpectedResult;
+        const bytes = raw.variants[0].explicit_value orelse return error.TestUnexpectedResult;
+        try testing.expect(bytes == .bytes);
+        try testing.expectEqualStrings("deadbeef", bytes.bytes);
+    }
 }
 
 test "compiler monomorphizes generic bitfield types on type use" {
@@ -2774,6 +2985,67 @@ test "compiler const eval executes comptime while loops" {
     try testing.expectEqual(@as(i128, 3), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(i128));
 }
 
+test "compiler comptime assignment execution reads the current loop state" {
+    const cases = .{
+        .{
+            "pub fn run() -> u256 { var total: u256 = 0; comptime while (total < 5) { total = total + 1; } return total; }",
+            5,
+        },
+        .{
+            "pub fn run() -> u256 { return comptime { var total = 0; while (total < 5) { total = total + 1; } total; }; }",
+            5,
+        },
+        .{
+            "pub fn run() -> u256 { return comptime { var total = 0; for (3) |i| { total = total + 1; } total; }; }",
+            3,
+        },
+        .{
+            "pub fn run() -> u256 { return comptime { var values = [0, 0, 0]; for (3) |i| { values[i + 0] = i + 1; } values[0] * 100 + values[1] * 10 + values[2]; }; }",
+            123,
+        },
+        .{
+            "pub fn run() -> u256 { var total: u256 = 0; comptime while (total < 5) { total += 1; } return total; }",
+            5,
+        },
+        .{
+            "pub fn run() -> u256 { var total: u256 = 0; comptime while (total < 5) { var next = total + 1; total = next; } return total; }",
+            5,
+        },
+        .{
+            "pub fn run() -> u256 { return comptime { var total = 0; while (total < 5) { var next = total + 1; total = next; } total; }; }",
+            5,
+        },
+        .{
+            "pub fn run() -> u256 { return comptime { var total = 0; for (3) |i| { var next = total + 1; total = next; } total; }; }",
+            3,
+        },
+    };
+    inline for (cases) |case| {
+        var compilation = try compileText(case[0]);
+        defer compilation.deinit();
+        const module = compilation.db.sources.module(compilation.root_module_id);
+        const ast_file = try compilation.db.astFile(module.file_id);
+        const function = ast_file.item(ast_file.root_items[0]).Function;
+        const body = ast_file.body(function.body);
+        const ret = ast_file.statement(body.statements[body.statements.len - 1]).Return;
+        var evaluated = try compiler.comptime_eval.constEval(testing.allocator, ast_file, .{
+            .config = .{ .max_loop_iterations = 8 },
+        });
+        defer evaluated.deinit();
+        try testing.expect(evaluated.diagnostics.isEmpty());
+        try testing.expectEqual(@as(i128, case[1]), try evaluated.values[ret.value.?.index()].?.integer.toInt(i128));
+
+        const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir.diagnostics.isEmpty());
+        try testing.expect(mlir.oraCanonicalizeOraMLIR(hir.context, hir.module.raw_module));
+        const text = try hir.renderText(testing.allocator);
+        defer testing.allocator.free(text);
+        errdefer std.debug.print("comptime source: {s}\n{s}\n", .{ case[0], text });
+        try testing.expect(std.mem.indexOf(u8, text, "scf.while") == null);
+        try testing.expect(std.mem.indexOf(u8, text, std.fmt.comptimePrint("ora.return %c{d}_i256 : i256", .{case[1]})) != null);
+    }
+}
+
 test "compiler const eval executes comptime integer for loops" {
     const source_text =
         \\pub fn sum() -> u256 {
@@ -2860,6 +3132,62 @@ test "compiler raw const eval leaves recursive comptime call unresolved under lo
     defer consteval.deinit();
 
     try testing.expect(consteval.diagnostics.items.items.len >= 1);
+}
+
+test "compiler const eval runtime conjunction does not exhaust a later constant budget" {
+    for ([_]bool{ false, true }) |grouped| {
+        var source_text: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer source_text.deinit();
+        try source_text.writer.writeAll("pub fn bounded(x: u256) -> bool { return ");
+        if (grouped) for (0..24) |_| try source_text.writer.writeByte('(');
+        for (0..24) |index| {
+            if (index != 0) try source_text.writer.writeAll(" && ");
+            try source_text.writer.print("x <= {d}", .{100 + index});
+            if (grouped) try source_text.writer.writeByte(')');
+        }
+        try source_text.writer.writeAll("; }\ncomptime const SENTINEL: u256 = 7;\n");
+        var compilation = try compileText(source_text.written());
+        defer compilation.deinit();
+        const module = compilation.db.sources.module(compilation.root_module_id);
+        const file = try compilation.db.astFile(module.file_id);
+        var evaluated = try compiler.comptime_eval.constEval(testing.allocator, file, .{
+            .config = .{ .max_steps = 1000 },
+        });
+        defer evaluated.deinit();
+        try testing.expect(evaluated.diagnostics.isEmpty());
+        const sentinel = file.item(file.root_items[1]).Constant;
+        try testing.expectEqual(@as(i128, 7), try evaluated.values[sentinel.value.index()].?.integer.toInt(i128));
+        const function = file.item(file.root_items[0]).Function;
+        const returned = file.statement(file.body(function.body).statements[0]).Return.value.?;
+        try testing.expect(evaluated.values[returned.index()] == null);
+    }
+}
+
+test "compiler const eval runtime storage shift retains its typed operands" {
+    var compilation = try compileText(
+        \\contract Bits {
+        \\    storage var keys: u256;
+        \\    pub fn shift(key: u256) requires(key < 256) {
+        \\        keys = keys | (@cast(u256, 1) << key);
+        \\    }
+        \\}
+    );
+    defer compilation.deinit();
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const file = try compilation.db.astFile(module.file_id);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+    for (file.expressions) |expression| {
+        if (expression != .Binary or expression.Binary.op != .shl) continue;
+        const shift = expression.Binary;
+        try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.exprType(shift.lhs).kind());
+        try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.exprType(shift.rhs).kind());
+    }
+    const hir = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir.diagnostics.isEmpty());
+    const hir_text = try hir.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "checked shift amount out of range"));
 }
 
 test "compiler const eval reports explicit step-limit diagnostics" {
@@ -4898,6 +5226,147 @@ test "compiler rejects non-boolean loop invariants during semantic analysis" {
     defer compilation.deinit();
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "loop invariant condition must be 'bool', found 'integer'"));
+}
+
+test "result alias C3 creates no speculative calls or cached results" {
+    for ([_][]const u8{
+        "contract A { storage var n: u256; pub fn get() -> u256 ensures get() == n { return n; } }",
+        "contract B { pub fn get() -> u256 ensures (get()) == 1 { return 1; } }",
+    }) |source_text| {
+        var compilation = try compileText(source_text);
+        defer compilation.deinit();
+        const evaluated = try compilation.db.constEval(compilation.root_module_id);
+        try testing.expect(evaluated.diagnostics.isEmpty());
+        try testing.expectEqual(@as(usize, 0), evaluated.formal_folds.len);
+        const file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+        var aliases: usize = 0;
+        for (file.expressions, 0..) |expr, index| if (expr == .Call) {
+            aliases += 1;
+            try testing.expect(evaluated.values[index] == null);
+        };
+        try testing.expectEqual(@as(usize, 1), aliases);
+    }
+}
+
+test "result alias C3 restores nested results and records real folds" {
+    const source_text =
+        \\fn inner() -> u256 ensures inner() == 1 { return 1; }
+        \\fn outer() -> u256 ensures inner() == 1 && outer() == 2 { return 2; }
+        \\pub fn run() -> u256 { return comptime { outer(); }; }
+    ;
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+    const evaluated = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(evaluated.diagnostics.isEmpty());
+    var outer_count: usize = 0;
+    var inner_count: usize = 0;
+    for (evaluated.formal_folds) |fold| {
+        try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.committed, fold.disposition);
+        if (std.mem.endsWith(u8, fold.callee_owner_key, "/function:outer")) outer_count += 1 else if (std.mem.endsWith(u8, fold.callee_owner_key, "/function:inner")) inner_count += 1 else return error.TestUnexpectedResult;
+        var predicates: usize = 0;
+        for (fold.events) |event| if (event.kind == .predicate_check) {
+            predicates += 1;
+            try testing.expect(event.predicate_value orelse return error.TestUnexpectedResult);
+        };
+        try testing.expectEqual(@as(usize, 1), predicates);
+    }
+    try testing.expectEqual(@as(usize, 1), outer_count);
+    try testing.expect(inner_count > 0);
+    const file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+    const function = file.item(file.root_items[2]).Function;
+    const ret = file.statement(file.body(function.body).statements[0]).Return;
+    try testing.expectEqual(@as(u64, 2), try evaluated.values[ret.value.?.index()].?.integer.toInt(u64));
+}
+
+test "result alias C3 carries concrete results through CtValue dispatch" {
+    for ([_][]const u8{ "accept(get())", "switch (get()) { 1 => true, else => false }" }) |predicate| {
+        for ([_]u8{ 1, 2 }) |returned| {
+            const source_text = try std.fmt.allocPrint(testing.allocator,
+                \\fn accept(value: u256) -> bool requires value > 0 {{ return value == 1; }}
+                \\fn get() -> u256 ensures {s} {{ return {d}; }}
+                \\pub fn run() -> u256 {{ return comptime {{ get(); }}; }}
+            , .{ predicate, returned });
+            defer testing.allocator.free(source_text);
+            var compilation = try compileText(source_text);
+            defer compilation.deinit();
+            const evaluated = try compilation.db.constEval(compilation.root_module_id);
+            if (returned == 1) {
+                try testing.expect(evaluated.diagnostics.isEmpty());
+            } else {
+                try testing.expect(diagnosticMessagesContain(&evaluated.diagnostics, "compile-time formal predicate is false: ensures"));
+            }
+            var getter_folds: usize = 0;
+            for (evaluated.formal_folds) |fold| {
+                if (!std.mem.endsWith(u8, fold.callee_owner_key, "/function:get")) continue;
+                getter_folds += 1;
+                try testing.expectEqual(if (returned == 1) compiler.sema.ComptimeFoldDisposition.committed else .rejected, fold.disposition);
+            }
+            try testing.expect(getter_folds > 0);
+        }
+    }
+}
+
+test "result alias C3 retains real call failures and error restoration" {
+    for ([_][]const u8{
+        "contract C { fn helper() -> u256 requires false { return 1; } pub fn get() -> u256 ensures helper() == 1 && get() == 2 { return 2; } }",
+        "contract C { fn helper() -> u256 { return get(); } pub fn get() -> u256 requires false ensures helper() == 1 { return 1; } }",
+        "contract C { fn get() -> u256 requires false ensures get() == 1 { return 1; } pub fn run() -> u256 { return get(); } }",
+        "contract C { pub fn get(x: u256) -> u256 requires x > 0 ensures get(0) == result { return x; } }",
+    }) |source_text| {
+        var compilation = try compileText(source_text);
+        defer compilation.deinit();
+        const evaluated = try compilation.db.constEval(compilation.root_module_id);
+        try testing.expect(diagnosticMessagesContain(&evaluated.diagnostics, "compile-time formal predicate is false: requires"));
+        var rejected: usize = 0;
+        for (evaluated.formal_folds) |fold| if (fold.disposition == .rejected) {
+            rejected += 1;
+        };
+        try testing.expect(rejected > 0);
+    }
+    for ([_][]const u8{ "result", "wrong()" }) |result_spelling| {
+        const source_text = try std.fmt.allocPrint(testing.allocator,
+            \\fn wrong() -> u256 ensures {s} != 1 {{ return 1; }}
+            \\pub fn run() -> u256 {{ return comptime {{ wrong(); }}; }}
+        , .{result_spelling});
+        defer testing.allocator.free(source_text);
+        var false_alias = try compileText(source_text);
+        defer false_alias.deinit();
+        const evaluated = try false_alias.db.constEval(false_alias.root_module_id);
+        try testing.expect(diagnosticMessagesContain(&evaluated.diagnostics, "compile-time formal predicate is false: ensures"));
+        // Both spellings retain the evaluator's three rejected execution attempts.
+        try testing.expectEqual(@as(usize, 3), evaluated.formal_folds.len);
+        for (evaluated.formal_folds) |fold| {
+            try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.rejected, fold.disposition);
+            try testing.expect(std.mem.endsWith(u8, fold.callee_owner_key, "/function:wrong"));
+        }
+    }
+}
+
+test "result alias C3 does not substitute an imported same-name function" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "dep.ora",
+        .data = "pub fn get() -> u256 requires false { return 1; }",
+    });
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "main.ora",
+        .data =
+        \\comptime const dep = @import("./dep.ora");
+        \\pub fn get() -> u256 ensures dep.get() == 1 { return 1; }
+        ,
+    });
+    const root_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/main.ora", .{tmp.sub_path});
+    defer testing.allocator.free(root_path);
+    var compilation = try compilePackage(root_path);
+    defer compilation.deinit();
+    const evaluated = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&evaluated.diagnostics, "compile-time formal predicate is false: requires"));
+    try testing.expect(evaluated.formal_folds.len > 0);
+    for (evaluated.formal_folds) |fold| {
+        try testing.expect(fold.callee_module_id != compilation.root_module_id);
+        try testing.expectEqual(compiler.sema.ComptimeFoldDisposition.rejected, fold.disposition);
+    }
 }
 
 test "compiler commits a fold only after every loop invariant checkpoint is true" {

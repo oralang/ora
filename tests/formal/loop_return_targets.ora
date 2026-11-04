@@ -1,0 +1,34 @@
+error EarlyFailure();
+
+contract LoopReturnTargets {
+    pub fn success(limit: u256) -> u256
+        ensures result <= limit
+    {
+        var i: u256 = 0;
+        while (i < limit)
+            invariant i <= limit
+        {
+            if (i == 2) {
+                return i;
+            }
+            i = i +% 1;
+        }
+        return i;
+    }
+
+    pub fn failure(limit: u256) -> !u256 | EarlyFailure
+        ensures_ok result <= limit
+        ensures_err true
+    {
+        var i: u256 = 0;
+        while (i < limit)
+            invariant i <= limit
+        {
+            if (i == 2) {
+                return EarlyFailure();
+            }
+            i = i +% 1;
+        }
+        return i;
+    }
+}

@@ -147,7 +147,7 @@ fn executeEcrecover(
 ) PrecompileError!PrecompileResult {
     if (gas_limit < ECRECOVER_GAS) return error.OutOfGas;
 
-    var padded_input = [_]u8{0} ** 128;
+    var padded_input = @as([128]u8, @splat(0));
     const copy_len = @min(input.len, padded_input.len);
     @memcpy(padded_input[0..copy_len], input[0..copy_len]);
 
@@ -310,7 +310,7 @@ fn executeEcAdd(
 ) PrecompileError!PrecompileResult {
     if (gas_limit < ECADD_GAS) return error.OutOfGas;
 
-    var padded_input = [_]u8{0} ** 128;
+    var padded_input = @as([128]u8, @splat(0));
     const copy_len = @min(input.len, padded_input.len);
     @memcpy(padded_input[0..copy_len], input[0..copy_len]);
 
@@ -330,7 +330,7 @@ fn executeEcMul(
 ) PrecompileError!PrecompileResult {
     if (gas_limit < ECMUL_GAS) return error.OutOfGas;
 
-    var padded_input = [_]u8{0} ** 96;
+    var padded_input = @as([96]u8, @splat(0));
     const copy_len = @min(input.len, padded_input.len);
     @memcpy(padded_input[0..copy_len], input[0..copy_len]);
 
@@ -627,7 +627,7 @@ test "ecrecover precompile executes through Ora facade with local body" {
 test "ecrecover precompile returns zero address for invalid signatures" {
     const testing = std.testing;
 
-    var input = [_]u8{0} ** 128;
+    var input = @as([128]u8, @splat(0));
     const result = try execute(
         testing.allocator,
         ECRECOVER_ADDRESS,
@@ -720,7 +720,7 @@ test "ecrecover precompile pads short input and truncates long input" {
         try testing.expectEqual(@as(u8, 0), byte);
     }
 
-    var long_input = [_]u8{0} ** 160;
+    var long_input = @as([160]u8, @splat(0));
     const valid_input = ecrecoverPrivateKeyOneFixture();
     @memcpy(long_input[0..128], &valid_input);
     @memset(long_input[128..], 0xff);
@@ -816,7 +816,7 @@ test "ripemd160 precompile executes through Ora facade with local body" {
 test "modexp precompile executes through Ora facade with local body" {
     const testing = std.testing;
 
-    var input = [_]u8{0} ** 99;
+    var input = @as([99]u8, @splat(0));
     input[31] = 1;
     input[63] = 1;
     input[95] = 1;
@@ -979,7 +979,7 @@ test "ecpairing precompile executes through Ora facade with local body" {
 
 test "ecpairing precompile treats all-infinity pair as success" {
     const testing = std.testing;
-    const input = [_]u8{0} ** 192;
+    const input = @as([192]u8, @splat(0));
     const gas_cost = ECPAIRING_BASE_GAS + ECPAIRING_PER_PAIR_GAS;
 
     const result = try execute(
@@ -999,13 +999,13 @@ test "ecpairing precompile treats all-infinity pair as success" {
 test "ecpairing precompile rejects bad length and enforces gas" {
     const testing = std.testing;
 
-    const bad_length = [_]u8{0} ** 191;
+    const bad_length = @as([191]u8, @splat(0));
     try testing.expectError(
         error.InvalidInput,
         execute(testing.allocator, ECPAIRING_ADDRESS, &bad_length, 1_000_000, .OSAKA),
     );
 
-    const input = [_]u8{0} ** 192;
+    const input = @as([192]u8, @splat(0));
     const gas_cost = ECPAIRING_BASE_GAS + ECPAIRING_PER_PAIR_GAS;
     try testing.expectError(
         error.OutOfGas,
@@ -1015,7 +1015,7 @@ test "ecpairing precompile rejects bad length and enforces gas" {
 
 test "point evaluation precompile executes through Ora facade with local body" {
     const testing = std.testing;
-    var input = [_]u8{0} ** point_evaluation.INPUT_SIZE;
+    var input = @as([point_evaluation.INPUT_SIZE]u8, @splat(0));
     input[96] = 0xc0;
     input[144] = 0xc0;
     std.crypto.hash.sha2.Sha256.hash(input[96..144], input[0..32], .{});
@@ -1039,14 +1039,14 @@ test "point evaluation precompile executes through Ora facade with local body" {
 
 test "point evaluation precompile rejects bad length and enforces gas" {
     const testing = std.testing;
-    const input = [_]u8{0} ** point_evaluation.INPUT_SIZE;
+    const input = @as([point_evaluation.INPUT_SIZE]u8, @splat(0));
 
     try testing.expectError(
         error.OutOfGas,
         execute(testing.allocator, POINT_EVALUATION_ADDRESS, &input, point_evaluation.GAS - 1, .OSAKA),
     );
 
-    const bad_length = [_]u8{0} ** (point_evaluation.INPUT_SIZE - 1);
+    const bad_length = @as([(point_evaluation.INPUT_SIZE - 1)]u8, @splat(0));
     try testing.expectError(
         error.InvalidInput,
         execute(testing.allocator, POINT_EVALUATION_ADDRESS, &bad_length, point_evaluation.GAS, .OSAKA),
@@ -1056,19 +1056,19 @@ test "point evaluation precompile rejects bad length and enforces gas" {
 test "BLS precompiles execute through Ora facade with local body" {
     const testing = std.testing;
 
-    const g1_add_input = [_]u8{0} ** 256;
+    const g1_add_input = @as([256]u8, @splat(0));
     const g1_add = try execute(testing.allocator, BLS12_G1ADD_ADDRESS, &g1_add_input, BLS_G1ADD_GAS, .OSAKA);
     defer g1_add.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 128), g1_add.output.len);
     try testing.expectEqual(@as(u64, BLS_G1ADD_GAS), g1_add.gas_used);
-    try testing.expectEqualSlices(u8, &([_]u8{0} ** 128), g1_add.output);
+    try testing.expectEqualSlices(u8, &(@as([128]u8, @splat(0))), g1_add.output);
 
-    const g2_add_input = [_]u8{0} ** 512;
+    const g2_add_input = @as([512]u8, @splat(0));
     const g2_add = try execute(testing.allocator, BLS12_G2ADD_ADDRESS, &g2_add_input, BLS_G2ADD_GAS, .OSAKA);
     defer g2_add.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 256), g2_add.output.len);
     try testing.expectEqual(@as(u64, BLS_G2ADD_GAS), g2_add.gas_used);
-    try testing.expectEqualSlices(u8, &([_]u8{0} ** 256), g2_add.output);
+    try testing.expectEqualSlices(u8, &(@as([256]u8, @splat(0))), g2_add.output);
 
     const pairing = try execute(testing.allocator, BLS12_PAIRING_ADDRESS, "", BLS_PAIRING_BASE_GAS, .OSAKA);
     defer pairing.deinit(testing.allocator);
@@ -1079,33 +1079,33 @@ test "BLS precompiles execute through Ora facade with local body" {
 test "BLS MSM and map precompiles validate gas and shape locally" {
     const testing = std.testing;
 
-    const g1_msm_input = [_]u8{0} ** 160;
+    const g1_msm_input = @as([160]u8, @splat(0));
     const g1_msm_gas = (BLS_G1MSM_BASE_GAS * msmDiscount(1)) / 1000;
     const g1_msm = try execute(testing.allocator, BLS12_G1MSM_ADDRESS, &g1_msm_input, g1_msm_gas, .OSAKA);
     defer g1_msm.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 128), g1_msm.output.len);
     try testing.expectEqual(@as(u64, g1_msm_gas), g1_msm.gas_used);
-    try testing.expectEqualSlices(u8, &([_]u8{0} ** 128), g1_msm.output);
+    try testing.expectEqualSlices(u8, &(@as([128]u8, @splat(0))), g1_msm.output);
 
-    const g2_msm_input = [_]u8{0} ** 288;
+    const g2_msm_input = @as([288]u8, @splat(0));
     const g2_msm_gas = (BLS_G2MSM_BASE_GAS * msmDiscount(1)) / 1000;
     const g2_msm = try execute(testing.allocator, BLS12_G2MSM_ADDRESS, &g2_msm_input, g2_msm_gas, .OSAKA);
     defer g2_msm.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 256), g2_msm.output.len);
     try testing.expectEqual(@as(u64, g2_msm_gas), g2_msm.gas_used);
-    try testing.expectEqualSlices(u8, &([_]u8{0} ** 256), g2_msm.output);
+    try testing.expectEqualSlices(u8, &(@as([256]u8, @splat(0))), g2_msm.output);
 
     try testing.expectError(
         error.InvalidInput,
         execute(testing.allocator, BLS12_G1MSM_ADDRESS, "", BLS_G1MSM_BASE_GAS, .OSAKA),
     );
 
-    const fp_input = [_]u8{0} ** 64;
+    const fp_input = @as([64]u8, @splat(0));
     const g1_map = try execute(testing.allocator, BLS12_MAP_FP_TO_G1_ADDRESS, &fp_input, BLS_MAP_FP_TO_G1_GAS, .OSAKA);
     defer g1_map.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 128), g1_map.output.len);
 
-    const fp2_input = [_]u8{0} ** 128;
+    const fp2_input = @as([128]u8, @splat(0));
     const g2_map = try execute(testing.allocator, BLS12_MAP_FP2_TO_G2_ADDRESS, &fp2_input, BLS_MAP_FP2_TO_G2_GAS, .OSAKA);
     defer g2_map.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 256), g2_map.output.len);
@@ -1113,7 +1113,7 @@ test "BLS MSM and map precompiles validate gas and shape locally" {
 
 test "BLS precompiles reject noncanonical EIP-2537 field words" {
     const testing = std.testing;
-    var input = [_]u8{0} ** 256;
+    var input = @as([256]u8, @splat(0));
     input[0] = 1;
 
     try testing.expectError(
@@ -1125,7 +1125,7 @@ test "BLS precompiles reject noncanonical EIP-2537 field words" {
 test "blake2f precompile executes through Ora facade with local body" {
     const testing = std.testing;
 
-    var input = [_]u8{0} ** 213;
+    var input = @as([213]u8, @splat(0));
     std.mem.writeInt(u32, input[0..][0..4], 12, .big);
     input[212] = 1;
 
@@ -1154,7 +1154,7 @@ fn hexFixture(comptime byte_len: usize, comptime hex: []const u8) [byte_len]u8 {
 }
 
 fn ecrecoverPrivateKeyOneFixture() [128]u8 {
-    var input = [_]u8{0} ** 128;
+    var input = @as([128]u8, @splat(0));
     const hash = [_]u8{
         0x47, 0x17, 0x32, 0x85, 0xa8, 0xd7, 0x34, 0x1e,
         0x5e, 0x97, 0x2f, 0xc6, 0x77, 0x28, 0x63, 0x84,

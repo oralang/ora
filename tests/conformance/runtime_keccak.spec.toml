@@ -1,0 +1,63 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+# Empty input pins EVM Keccak-256 padding (not standardized SHA3-256).
+[[call]]
+fn = "hash_bytes(bytes)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x"]
+returns = { u256 = "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470" }
+
+[[call]]
+fn = "hash_bytes(bytes)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x00"]
+returns = { u256 = "0xbc36789e7a1e281436464229828f817d6612f7b477d66591ff96a9e064bcc98a" }
+
+# Exercise both sides of the EVM's 32-byte word boundary.
+[[call]]
+fn = "hash_bytes(bytes)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e"]
+returns = { u256 = "0x3e50547cf72e8583ee91462f9d99fe624f53282f78e1a5ec2347b1d0123d0d9b" }
+
+[[call]]
+fn = "hash_bytes(bytes)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"]
+returns = { u256 = "0x8ae1aa597fa146ebd3aa2ceddf360668dea5e526567e92b0321816a4e895bd2d" }
+
+[[call]]
+fn = "hash_bytes(bytes)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"]
+returns = { u256 = "0xf08683775f4a25dfef721c487073fb77026d45ac57e423424290e47af9fd2835" }
+
+[[call]]
+fn = "hash_bytes(bytes)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"]
+returns = { u256 = "0x002030bde3d4cf89919649775cd71875c4d0ab1708a380e03fefc3a28aa24831" }
+
+# String and bytes share byte-for-byte runtime hashing semantics.
+[[call]]
+fn = "hash_string(string)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [""]
+returns = { u256 = "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470" }
+
+[[call]]
+fn = "hash_string(string)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["abc"]
+returns = { u256 = "0x4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45" }

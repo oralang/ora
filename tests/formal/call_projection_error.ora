@@ -1,0 +1,12 @@
+error Rejected(value: u256);
+contract Fallible {
+    fn select(x: u256) -> !u256 | Rejected {
+        if (x == 0) { return Rejected(x); }
+        return x;
+    }
+    pub fn run() -> !u256 | Rejected {
+        var i: u256 = 0;
+        while (i < 1) invariant i <= 1 { let selected: u256 = try select(i); i = i +% 1; }
+        return i;
+    }
+}
