@@ -14,7 +14,6 @@ SKIP_SUBMODULES=0
 SKIP_BUILD=0
 NO_LLVM_BOOTSTRAP=0
 
-MIN_ZIG_VERSION="0.15.0"
 LLVM_REPO_URL="https://github.com/llvm/llvm-project.git"
 LLVM_COMMIT="ee8c14be14deabace692ab51f5d5d432b0a83d58"
 
@@ -112,28 +111,6 @@ parse_args() {
   esac
 }
 
-version_ge() {
-  # Returns 0 when $1 >= $2
-  local IFS=.
-  local -a lhs rhs
-  local i
-  lhs=($1)
-  rhs=($2)
-
-  for ((i=${#lhs[@]}; i<3; i++)); do lhs[i]=0; done
-  for ((i=${#rhs[@]}; i<3; i++)); do rhs[i]=0; done
-
-  for i in 0 1 2; do
-    if ((10#${lhs[i]} > 10#${rhs[i]})); then
-      return 0
-    fi
-    if ((10#${lhs[i]} < 10#${rhs[i]})); then
-      return 1
-    fi
-  done
-  return 0
-}
-
 platform_detect() {
   case "$(uname -s)" in
     Darwin) PLATFORM="macos" ;;
@@ -158,8 +135,8 @@ check_zig() {
   zig_ver="$(zig version)"
   log_info "zig version: $zig_ver"
 
-  if ! version_ge "$zig_ver" "$MIN_ZIG_VERSION"; then
-    die "Zig $MIN_ZIG_VERSION+ required (found $zig_ver)"
+  if [[ ! "$zig_ver" =~ ^0\.17\.(0|[1-9][0-9]*)$ ]]; then
+    die "Stable Zig 0.17.x required (found $zig_ver)"
   fi
 
   log_ok "Zig version is compatible"

@@ -12,7 +12,7 @@ Set up the Ora development environment and run the current compiler.
 
 ## Prerequisites
 
-- Zig 0.15.x
+- Zig 0.17.x (stable)
 - CMake
 - Git
 - Z3

@@ -2,11 +2,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
-    const ora_dev = comptime std.mem.eql(u8, builtin.zig_version_string, "0.17.0-dev.2131+d08989840");
-    comptime if (!ora_dev and (builtin.zig_version.major != 0 or builtin.zig_version.minor < 15 or builtin.zig_version.minor > 16 or builtin.zig_version.pre != null or builtin.zig_version.build != null)) {
+    comptime if (builtin.zig_version.major != 0 or builtin.zig_version.minor != 17 or builtin.zig_version.pre != null or builtin.zig_version.build != null) {
         @compileError(std.fmt.comptimePrint(
             \\Your Zig version does not meet the build requirement:
-            \\  required Zig version: 0.15.x, 0.16.x, or Ora's pinned 0.17.0-dev.2131+d08989840
+            \\  required Zig version: 0.17.x (stable)
             \\  actual   Zig version: {[current_version]s}
             \\
         , .{
@@ -166,10 +165,7 @@ pub fn build(b: *std.Build) void {
 
     // ----------------------------- Code Coverage -----------------------------
 
-    const kcov_bin = if (ora_dev)
-        b.findProgram(.{ .names = &.{"kcov"} }) orelse "kcov"
-    else
-        b.findProgram(&.{"kcov"}, &.{}) catch "kcov";
+    const kcov_bin = b.findProgram(.{ .names = &.{"kcov"} }) orelse "kcov";
 
     const kcov_merge = std.Build.Step.Run.create(b, "kcov merge coverage");
     kcov_merge.rename_step_with_output_arg = false;

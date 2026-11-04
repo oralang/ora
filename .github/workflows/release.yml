@@ -28,7 +28,7 @@ on:
         default: stable
 
 env:
-  ZIG_VERSION: 0.15.2
+  ZIG_VERSION: 0.17.0
   LLVM_REPO_URL: https://github.com/llvm/llvm-project.git
   LLVM_COMMIT: ee8c14be14deabace692ab51f5d5d432b0a83d58
 

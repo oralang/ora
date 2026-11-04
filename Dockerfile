@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ARG UBUNTU_VERSION=24.04
-ARG ZIG_VERSION=0.15.2
+ARG ZIG_VERSION=0.17.0
 ARG BUILD_JOBS=1
 ARG LLVM_REPO=https://github.com/llvm/llvm-project.git
 ARG LLVM_REF=ee8c14be14deabace692ab51f5d5d432b0a83d58
